@@ -15,29 +15,9 @@ structures such as rooms, storeys, and houses.
 
 ## Project Status
 
-Talos3D is maintained on a time-permits basis by Appverket LLC.
-
-- Development happens when maintainer time and interest allow.
-- There is no promise of issue response time, roadmap delivery, or continued
-  active development.
-- The repository may remain public even if the project slows down, pauses, or
-  stops.
-
-See [GOVERNANCE.md](./GOVERNANCE.md) and [SUPPORT.md](./SUPPORT.md) for the
-operating boundaries.
-
-## What Open Source Means Here
-
-Talos3D is open source in the literal sense: the repository is public, the
-code is licensed for reuse, and other people can study it, build on it, and
-fork it.
-
-It is not a promise of:
-
-- a support contract
-- roadmap execution on demand
-- review of every issue or pull request
-- perpetual active development by the original maintainer
+Talos3D is maintained on a time-permits basis by Appverket LLC. See
+[GOVERNANCE.md](./GOVERNANCE.md) and [SUPPORT.md](./SUPPORT.md) for operating
+boundaries and expectations.
 
 The intended operating model is:
 
