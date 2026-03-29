@@ -75,7 +75,7 @@ A new feature should usually land as one of:
 - a core-platform improvement
 - a modeling capability
 - a domain capability
-- a setup-level composition/default
+- a workbench-level composition/default
 
 When in doubt, prefer explicit capability boundaries over hidden cross-module
 coupling.

@@ -10,7 +10,7 @@ use talos3d_capability_api::{
     prelude::{
         AssemblyTypeDescriptor, CapabilityDescriptor, CapabilityDistribution,
         CapabilityRegistryAppExt, DefaultsContributor, DefaultsRegistryAppExt,
-        RelationTypeDescriptor, SetupDescriptor,
+        RelationTypeDescriptor, WorkbenchDescriptor,
     },
     toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
     tools::ActiveTool,
@@ -46,8 +46,8 @@ impl DefaultsContributor for ArchitecturalDefaultsContributor {
 
 impl Plugin for ArchitecturalPlugin {
     fn build(&self, app: &mut App) {
-        app.register_setup(
-            SetupDescriptor::new("architectural", "Architectural")
+        app.register_workbench(
+            WorkbenchDescriptor::new("architectural", "Architectural")
                 .with_description("Architectural design with walls, openings, and BIM")
                 .with_capabilities(["modeling", "architectural"]),
         )

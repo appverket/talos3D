@@ -2,8 +2,8 @@ pub mod prelude {
     pub use crate::capabilities::{
         AssemblyTypeDescriptor, CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity,
         CapabilityRegistryAppExt, DefaultsContributor, DefaultsRegistryAppExt, GeneratedFaceRef,
-        RelationTypeDescriptor, RequireSetup, SetupDescriptor, TerrainProvider,
-        TerrainProviderRegistryAppExt, CAPABILITY_API_VERSION,
+        RelationTypeDescriptor, RequireWorkbench, TerrainProvider,
+        TerrainProviderRegistryAppExt, WorkbenchDescriptor, CAPABILITY_API_VERSION,
     };
     pub use crate::commands::{
         activate_tool_command, CommandCategory, CommandDescriptor, CommandRegistryAppExt,
@@ -21,7 +21,8 @@ pub mod capabilities {
         AssemblyTypeDescriptor, CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity,
         CapabilityRegistryAppExt, DefaultsContributor, DefaultsRegistryAppExt, FaceHitCandidate,
         FaceId, GeneratedFaceRef, HitCandidate, ModelSummaryAccumulator, RelationTypeDescriptor,
-        RequireSetup, SetupDescriptor, SnapPoint, TerrainProvider, TerrainProviderRegistryAppExt,
+        RequireWorkbench, SnapPoint, TerrainProvider, TerrainProviderRegistryAppExt,
+        WorkbenchDescriptor,
         CAPABILITY_API_VERSION,
     };
 }
@@ -52,5 +53,5 @@ pub mod tools {
 }
 
 pub mod modeling {
-    pub use talos3d_core::plugins::modeling::ModelingSetup;
+    pub use talos3d_core::plugins::modeling::ModelingWorkbench;
 }
