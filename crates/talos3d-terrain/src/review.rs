@@ -1,0 +1,186 @@
+use bevy::prelude::*;
+use bevy_egui::{egui, EguiContexts};
+use talos3d_core::{
+    authored_entity::AuthoredEntity,
+    plugins::{
+        camera::focus_orbit_camera_on_bounds, commands::CreateEntityCommand, tools::Preview,
+        ui::StatusBarData,
+    },
+};
+
+use crate::{
+    components::{NeedsTerrainMesh, TerrainSurface},
+    snapshots::TerrainSurfaceSnapshot,
+};
+
+const REVIEW_TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(160, 168, 182);
+
+pub struct TerrainReviewPlugin;
+
+impl Plugin for TerrainReviewPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<TerrainGenerationReviewState>()
+            .add_systems(
+                Update,
+                (sync_terrain_preview_entity, draw_terrain_review_window),
+            );
+    }
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct TerrainGenerationReviewState {
+    pub curve_count: usize,
+    pub preview_surface: Option<TerrainSurfaceSnapshot>,
+    pub preview_entity: Option<Entity>,
+    pub frame_requested: bool,
+}
+
+fn sync_terrain_preview_entity(world: &mut World) {
+    let (preview_surface, preview_entity) = {
+        let review = world.resource::<TerrainGenerationReviewState>();
+        (review.preview_surface.clone(), review.preview_entity)
+    };
+
+    let Some(snapshot) = preview_surface else {
+        cleanup_preview_entity(world, preview_entity);
+        world
+            .resource_mut::<TerrainGenerationReviewState>()
+            .preview_entity = None;
+        return;
+    };
+
+    let next_entity = if let Some(entity) = preview_entity {
+        if world.entities().contains(entity) {
+            world.entity_mut(entity).insert((
+                snapshot.surface.clone(),
+                NeedsTerrainMesh,
+                Visibility::Visible,
+            ));
+            entity
+        } else {
+            spawn_preview_entity(world, &snapshot.surface)
+        }
+    } else {
+        spawn_preview_entity(world, &snapshot.surface)
+    };
+
+    let frame_requested = world
+        .resource::<TerrainGenerationReviewState>()
+        .frame_requested;
+    if frame_requested {
+        if let Some(bounds) = snapshot.bounds() {
+            let _ = focus_orbit_camera_on_bounds(world, bounds);
+        }
+        world
+            .resource_mut::<TerrainGenerationReviewState>()
+            .frame_requested = false;
+    }
+
+    world
+        .resource_mut::<TerrainGenerationReviewState>()
+        .preview_entity = Some(next_entity);
+}
+
+fn spawn_preview_entity(world: &mut World, surface: &TerrainSurface) -> Entity {
+    world
+        .spawn((
+            Preview,
+            Name::new("terrain-preview"),
+            surface.clone(),
+            NeedsTerrainMesh,
+        ))
+        .id()
+}
+
+fn draw_terrain_review_window(
+    mut contexts: EguiContexts,
+    mut review: ResMut<TerrainGenerationReviewState>,
+    mut create_entities: ResMut<Messages<CreateEntityCommand>>,
+    mut status_bar_data: ResMut<StatusBarData>,
+) {
+    let curve_count = review.curve_count;
+    let Some(snapshot) = review.preview_surface.as_mut() else {
+        return;
+    };
+
+    let mut cancel_requested = false;
+    let mut commit_requested = false;
+
+    egui::Window::new("Generate Terrain")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(360.0)
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 360.0))
+        .show(contexts.ctx_mut().unwrap(), |ui| {
+            ui.label(format!("{} source curves selected", curve_count));
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.text_edit_singleline(&mut snapshot.surface.name);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Datum");
+                ui.add(egui::DragValue::new(&mut snapshot.surface.datum_elevation).speed(0.1));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Contour");
+                ui.add(egui::DragValue::new(&mut snapshot.surface.contour_interval).speed(0.1).range(0.1..=100.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Max area");
+                ui.add(egui::DragValue::new(&mut snapshot.surface.max_triangle_area).speed(0.5).range(0.1..=100_000.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Min angle");
+                ui.add(egui::DragValue::new(&mut snapshot.surface.minimum_angle).speed(0.5).range(0.1..=89.0));
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Preview is clipped to the selected-curve bounds until an explicit boundary editor is added.",
+                )
+                .small()
+                .color(REVIEW_TEXT_MUTED),
+            );
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    cancel_requested = true;
+                }
+                if ui.button("Generate").clicked() {
+                    commit_requested = true;
+                }
+            });
+        });
+
+    if cancel_requested {
+        review.preview_surface = None;
+        status_bar_data.set_feedback("Terrain generation cancelled".to_string(), 2.0);
+        return;
+    }
+
+    if commit_requested {
+        create_entities.write(CreateEntityCommand {
+            snapshot: snapshot.clone().into(),
+        });
+        review.preview_surface = None;
+        status_bar_data.set_feedback("Terrain surface queued".to_string(), 2.0);
+    }
+}
+
+fn cleanup_preview_entity(world: &mut World, preview_entity: Option<Entity>) {
+    let Some(preview_entity) = preview_entity else {
+        return;
+    };
+    if !world.entities().contains(preview_entity) {
+        return;
+    }
+    let mesh_id = world
+        .get_entity(preview_entity)
+        .ok()
+        .and_then(|entity_ref| entity_ref.get::<Mesh3d>().map(|mesh| mesh.id()));
+    if let Some(mesh_id) = mesh_id {
+        world.resource_mut::<Assets<Mesh>>().remove(mesh_id);
+    }
+    let _ = world.despawn(preview_entity);
+}

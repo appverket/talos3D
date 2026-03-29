@@ -1,0 +1,17 @@
+site_name: Talos3D
+site_description: AI-first 3D platform documentation
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Product: PRODUCT.md
+  - MCP Model API: MCP_MODEL_API.md
+  - Developer Onboarding: DEVELOPER_ONBOARDING.md
+  - Core Principles: CORE_PRINCIPLES.md
+  - Platform Architecture: PLATFORM_ARCHITECTURE.md
+  - Extension Architecture: EXTENSION_ARCHITECTURE.md
+  - Capability Plugin API: CAPABILITY_PLUGIN_API.md
+  - System Architecture: SYSTEM_ARCHITECTURE.md
+  - Domain Model: DOMAIN_MODEL.md
+  - User Manual: USER_MANUAL.md
+  - Glossary: GLOSSARY.md
