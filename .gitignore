@@ -1,0 +1,12 @@
+/target
+talos3d_project.json
+.DS_Store
+/tmp/
+.claude/
+*.lock
+!Cargo.lock
+tools/dwg/
+private/
+
+# Fiberplane local issue tracking
+.fp/

@@ -1,0 +1,7 @@
+[package]
+name = "talos3d-capability-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+talos3d-core = { path = "../talos3d-core" }

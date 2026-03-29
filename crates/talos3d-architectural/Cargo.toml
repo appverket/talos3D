@@ -1,0 +1,32 @@
+[package]
+name = "talos3d-architectural"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+perf-stats = ["talos3d-core/perf-stats"]
+
+[dependencies]
+bevy = { version = "0.18", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+    "mesh_picking",
+    "bevy_pbr",
+    "bevy_picking",
+    "bevy_render",
+    "bevy_scene",
+    "bevy_state",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_text",
+    "bevy_ui",
+    "tonemapping_luts",
+    "webgpu",
+    "default_font",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+talos3d-capability-api = { path = "../talos3d-capability-api" }
+talos3d-core = { path = "../talos3d-core" }
