@@ -76,10 +76,10 @@ Start with [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md).
 Talos3D already includes:
 
 - a Rust + Bevy core platform
-- a modeling setup with primitives, transforms, groups, face editing, and
+- a modeling capability with primitives, transforms, groups, face editing, and
   profile-based solids
-- an architectural setup with walls, openings, BIM metadata, and wall-opening
-  rules
+- an architectural capability with walls, openings, BIM metadata, and
+  wall-opening rules
 - an MCP-backed model API
 - first steps toward higher-order semantic structure through authored
   assemblies, typed relations, vocabulary descriptors, and model API tools
@@ -95,17 +95,17 @@ Core Platform
 Capability Modules
   -> modeling, architecture, terrain, analysis, import/export, future domains
 
-Setups
-  -> curated bundles of capabilities and UI defaults for a workflow
+Workbenches
+  -> curated workflows built from capabilities
 ```
 
-The important boundary is capability, not setup. A capability can be:
+The important boundary is capability, not workbench. A capability can be:
 
 - open-source and community maintained
 - a first-party reference extension
 - a paid or private add-on distributed separately
 
-The architectural setup in this repository should be read as a reference
+The architectural capability in this repository should be read as a reference
 extension that demonstrates how a domain package composes on top of the public
 platform.
 

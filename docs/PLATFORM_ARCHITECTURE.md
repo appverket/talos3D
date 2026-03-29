@@ -52,16 +52,16 @@ A capability can contribute:
 A capability is the unit that should be buildable, packageable, and explainable
 to third parties.
 
-## Setups
+## Workbenches
 
-A setup bundles capabilities into a workflow:
+A workbench presents a curated workflow built from capabilities:
 
-- modeling setup
-- architectural setup
-- terrain setup
-- future naval/mechanical/manufacturing setups
+- modeling workbench
+- architectural workbench
+- terrain workbench
+- future naval/mechanical/manufacturing workbenches
 
-Setups may be open-source, curated by a community, or sold as commercial
+Workbenches may be open-source, curated by a community, or sold as commercial
 bundles. That only works if capabilities remain the real architectural unit.
 
 ## Public Product Boundary
@@ -73,8 +73,8 @@ Talos3D should be open-source as a platform. The architecture should support:
 - private enterprise capability packs
 - premium first-party or third-party add-ons
 
-The architectural setup currently in-tree is the reference example of a domain
-extension, not a special architectural tier.
+The architectural capability currently in-tree is the reference example of a
+domain extension, not a special architectural tier.
 
 The platform is publishable as a source-level Rust extension system before
 dynamic plugin loading exists. The practical bar is a stable SDK crate,

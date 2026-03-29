@@ -12,7 +12,7 @@ The current system should be understood in six layers:
 3. authored model and definition graph
 4. evaluated body layer
 5. render and interaction artifacts
-6. capability and setup composition
+6. capability and workbench composition
 
 ## 1. Platform Runtime
 
@@ -76,11 +76,11 @@ Derived artifacts include:
 
 These are replaceable and must not become the authored truth.
 
-## 6. Capability And Setup Composition
+## 6. Capability And Workbench Composition
 
 The in-repo system currently demonstrates:
 
-- `talos3d-core` as the shared platform plus modeling setup
+- `talos3d-core` as the shared platform plus modeling workbench
 - `talos3d-architectural` as a reference domain extension
 - `talos3d-terrain` as another reference extension path
 

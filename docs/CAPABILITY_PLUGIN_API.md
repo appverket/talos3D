@@ -70,7 +70,7 @@ fail fast if:
 - it targets the wrong capability API version
 - it depends on a missing capability
 - it conflicts with another registered capability
-- a setup references a capability that was not registered
+- a workbench references a capability that was not registered
 
 ### Authored model registration
 
@@ -111,7 +111,7 @@ use talos3d_capability_api::prelude::*;
 The SDK currently re-exports the stable extension-facing pieces needed by
 capability crates:
 
-- capability and setup descriptors
+- capability and workbench descriptors
 - registry extension traits
 - command descriptors and command registration
 - toolbar registration
@@ -124,12 +124,12 @@ capability crates:
 This is a source-level Rust capability API. Dynamic loading is not required for
 the API to be publishable.
 
-## Setup Packaging
+## Workbench Packaging
 
-Setups are workflow bundles over capabilities, not privileged application
-tiers.
+Workbenches are curated user-facing workflows built from capabilities, not
+privileged application tiers.
 
-`SetupDescriptor` currently carries:
+`WorkbenchDescriptor` currently carries:
 
 - `id`
 - `name`
@@ -138,14 +138,14 @@ tiers.
 - `optional_capability_ids`
 - `description`
 
-This lets a public or private setup declare:
+This lets a public or private workbench declare:
 
 - the required capability pack
 - optional companion capability packs
 - the user-facing workflow bundle name
 
-The important architectural rule is that setups compose capabilities; they do
-not bypass capability boundaries.
+The important architectural rule is that workbenches compose capabilities; they
+do not bypass capability boundaries.
 
 ## Compatibility Goal
 

@@ -41,9 +41,10 @@ A stable semantic face identifier exposed above raw topology indices.
 The principle that editing affordances should come from authored semantics and
 invariants rather than inferred rendered topology.
 
-## Setup
+## Workbench
 
-A curated bundle of capabilities plus workflow/UI defaults.
+A curated user-facing workflow built from capabilities, with presentation
+defaults and tool/panel composition.
 
 ## Topology Intent
 

@@ -43,7 +43,7 @@ src/
 
 crates/talos3d-core/
   core platform
-  modeling setup
+  modeling workbench
   command/history substrate
   model API / MCP server
 
