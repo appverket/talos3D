@@ -18,7 +18,8 @@ pub mod triangulate;
 
 use crate::{
     capability_registry::{
-        CapabilityDescriptor, CapabilityDistribution, CapabilityRegistryAppExt, SetupDescriptor,
+        CapabilityDescriptor, CapabilityDistribution, CapabilityRegistryAppExt,
+        WorkbenchDescriptor,
     },
     importers::{dxf::DxfImporter, obj::ObjImporter},
     plugins::{
@@ -47,15 +48,15 @@ use serde_json::Value;
 pub struct ModelingPlugin;
 
 #[derive(Resource, Default)]
-pub struct ModelingSetup;
+pub struct ModelingWorkbench;
 
 impl Plugin for ModelingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ModelingSetup>()
+        app.init_resource::<ModelingWorkbench>()
             .init_resource::<GroupEditContext>()
             .init_resource::<csg::CsgParentMap>()
-            .register_setup(
-                SetupDescriptor::new("modeling", "Modeling")
+            .register_workbench(
+                WorkbenchDescriptor::new("modeling", "Modeling")
                     .with_description("Foundational geometric modeling capabilities")
                     .with_capabilities(["modeling"]),
             )

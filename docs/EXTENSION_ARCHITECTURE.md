@@ -8,8 +8,8 @@ platform.
 ## Extension Hierarchy
 
 ```text
-Setup
-  -> bundles capabilities and presentation defaults
+Workbench
+  -> curated workflow built from capabilities
 
 Capability
   -> primary extension, packaging, and product unit

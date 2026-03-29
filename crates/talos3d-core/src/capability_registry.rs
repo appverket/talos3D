@@ -340,12 +340,12 @@ impl CapabilityDescriptor {
     }
 }
 
-/// Metadata for a setup: a curated bundle of capabilities plus UI defaults.
+/// Metadata for a workbench: a curated user-facing workflow built from capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetupDescriptor {
+pub struct WorkbenchDescriptor {
     pub id: String,
     pub name: String,
-    #[serde(default = "default_setup_version")]
+    #[serde(default = "default_workbench_version")]
     pub version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -354,11 +354,11 @@ pub struct SetupDescriptor {
     pub optional_capability_ids: Vec<String>,
 }
 
-fn default_setup_version() -> u32 {
+fn default_workbench_version() -> u32 {
     1
 }
 
-impl SetupDescriptor {
+impl WorkbenchDescriptor {
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -398,7 +398,7 @@ impl SetupDescriptor {
 pub struct CapabilityRegistry {
     capabilities: Vec<CapabilityDescriptor>,
     capability_index: HashMap<String, usize>,
-    setups: Vec<SetupDescriptor>,
+    workbenches: Vec<WorkbenchDescriptor>,
     ordered_factories: Vec<Arc<dyn AuthoredEntityFactory>>,
     factories_by_type: HashMap<&'static str, Arc<dyn AuthoredEntityFactory>>,
     assembly_type_descriptors: Vec<AssemblyTypeDescriptor>,
@@ -431,21 +431,23 @@ impl CapabilityRegistry {
         serde_json::to_value(&self.capabilities).unwrap_or_default()
     }
 
-    pub fn register_setup(&mut self, descriptor: SetupDescriptor) {
+    pub fn register_workbench(&mut self, descriptor: WorkbenchDescriptor) {
         assert!(
-            self.setups.iter().all(|setup| setup.id != descriptor.id),
-            "Setup '{}' was registered more than once",
+            self.workbenches
+                .iter()
+                .all(|wb| wb.id != descriptor.id),
+            "Workbench '{}' was registered more than once",
             descriptor.id
         );
-        self.setups.push(descriptor);
+        self.workbenches.push(descriptor);
     }
 
-    pub fn setups(&self) -> &[SetupDescriptor] {
-        &self.setups
+    pub fn workbenches(&self) -> &[WorkbenchDescriptor] {
+        &self.workbenches
     }
 
-    pub fn export_setups(&self) -> Value {
-        serde_json::to_value(&self.setups).unwrap_or_default()
+    pub fn export_workbenches(&self) -> Value {
+        serde_json::to_value(&self.workbenches).unwrap_or_default()
     }
 
     pub fn validate_dependencies(&self) -> Vec<String> {
@@ -474,12 +476,12 @@ impl CapabilityRegistry {
                 }
             }
         }
-        for setup in &self.setups {
-            for capability_id in &setup.capability_ids {
+        for workbench in &self.workbenches {
+            for capability_id in &workbench.capability_ids {
                 if !self.capability_index.contains_key(capability_id) {
                     errors.push(format!(
-                        "Setup '{}' references capability '{}', which is not registered",
-                        setup.id, capability_id
+                        "Workbench '{}' references capability '{}', which is not registered",
+                        workbench.id, capability_id
                     ));
                 }
             }
@@ -564,7 +566,7 @@ fn validate_capability_dependencies(registry: Res<CapabilityRegistry>) {
 pub trait CapabilityRegistryAppExt {
     fn register_capability(&mut self, descriptor: CapabilityDescriptor) -> &mut Self;
 
-    fn register_setup(&mut self, descriptor: SetupDescriptor) -> &mut Self;
+    fn register_workbench(&mut self, descriptor: WorkbenchDescriptor) -> &mut Self;
 
     fn register_authored_entity_factory<F>(&mut self, factory: F) -> &mut Self
     where
@@ -597,14 +599,14 @@ impl CapabilityRegistryAppExt for App {
         self
     }
 
-    fn register_setup(&mut self, descriptor: SetupDescriptor) -> &mut Self {
+    fn register_workbench(&mut self, descriptor: WorkbenchDescriptor) -> &mut Self {
         if !self.world().contains_resource::<CapabilityRegistry>() {
             self.init_resource::<CapabilityRegistry>();
         }
 
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
-            .register_setup(descriptor);
+            .register_workbench(descriptor);
         self
     }
 
@@ -737,11 +739,11 @@ impl TerrainProviderRegistryAppExt for App {
     }
 }
 
-pub struct RequireSetup<T> {
+pub struct RequireWorkbench<T> {
     _marker: PhantomData<T>,
 }
 
-impl<T> RequireSetup<T> {
+impl<T> RequireWorkbench<T> {
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
@@ -749,20 +751,20 @@ impl<T> RequireSetup<T> {
     }
 }
 
-impl<T> Default for RequireSetup<T> {
+impl<T> Default for RequireWorkbench<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Plugin for RequireSetup<T>
+impl<T> Plugin for RequireWorkbench<T>
 where
     T: Resource,
 {
     fn build(&self, app: &mut App) {
         assert!(
             app.world().contains_resource::<T>(),
-            "Required setup resource '{}' is missing",
+            "Required workbench resource '{}' is missing",
             std::any::type_name::<T>()
         );
     }

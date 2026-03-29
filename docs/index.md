@@ -60,8 +60,8 @@ The architecture supports:
 - private enterprise capability packs
 - commercial add-ons built against the same registries and contracts
 
-The architectural setup in this repository is the canonical example of how a
-domain extension can compose on top of the shared platform.
+The architectural capability in this repository is the canonical example of how
+a domain extension can compose on top of the shared platform.
 
 That public positioning should be read as an ecosystem model, not a promise
 that Appverket LLC will build or support every part of that ecosystem itself.
