@@ -1,0 +1,84 @@
+{
+  "layers": [
+    "0",
+    "HOJD_TEXT",
+    "HOJDKURVA_TEXT",
+    "GRANS_TEXT",
+    "Fastighetsgrans_subtyper",
+    "HYDROGRAFI_STRAND_FORLANGNING",
+    "HYDROGRAFI_STRAND",
+    "Gränspunkter",
+    "MARKANORDNING_BET_LINJE",
+    "VAG_KANT",
+    "MARKANORDNING_BET_PUNKT",
+    "MARKANORDNING_PUNKT",
+    "MARK_SYMBOL_FALT",
+    "MARK_SYMBOL_BERG",
+    "MARK_LINJE_KARR",
+    "MARK_LINJE_BERG",
+    "MARKANORDNING_LINJE",
+    "HYDROGRAFI_ANLAGGNING_LINJE",
+    "HOJDKURVA_HALV",
+    "HOJDKURVA",
+    "BYGGNAD_BET_TAK",
+    "BYGGNAD_TAK",
+    "ALTAN_LINJE",
+    "Text",
+    "NK_P_UPPLYTX3",
+    "Noname0",
+    "RAM",
+    "NK_P_UPPLYTX5",
+    "NK_PRICKMARK",
+    "BYGGNAD_LIV",
+    "BYGGNAD_BET_LIV",
+    "BYGGNAD_SKARMTAK_TAK",
+    "NK_UP",
+    "LM.al_Fastigh_begrlin",
+    "GRANS_LINJE",
+    "LM_strandskydd",
+    "HYDROGRAFI_DIKE_LINJE",
+    "NK_EGENSKAPSGR",
+    "NK_ANVANDNINGGR"
+  ],
+  "blocks": [
+    "granspkt1",
+    "granspkt2",
+    "granspkt5",
+    "Trapppil",
+    "Grindstolpe_streck",
+    "KARR",
+    "berg_i_dagen",
+    "Osteraker logga",
+    "NBK A3 L v7"
+  ],
+  "model_entity_counts": {
+    "lines": 0,
+    "arcs": 0,
+    "circles": 4,
+    "polylines": 330,
+    "faces": 0,
+    "inserts": 17,
+    "unknown": 0
+  },
+  "block_entity_counts": {
+    "lines": 0,
+    "arcs": 0,
+    "circles": 3,
+    "polylines": 9,
+    "faces": 0,
+    "inserts": 0,
+    "unknown": 0
+  },
+  "model_bounds": {
+    "min": {
+      "x": 0.0,
+      "y": 0.0,
+      "z": -0.1276249999646097
+    },
+    "max": {
+      "x": 190548.2390436323,
+      "y": 6602729.642250001,
+      "z": 11.52399999997579
+    }
+  }
+}
