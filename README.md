@@ -1,4 +1,4 @@
-# Talos3D
+<h1><img src="./docs/assets/talos3d-logo.svg" alt="Talos3D logo" width="36" /> Talos3D Core</h1>
 
 Talos3D is a 3D platform for authored geometry, AI-assisted design workflows,
 and capability-based extensibility.
