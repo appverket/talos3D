@@ -1,9 +1,15 @@
+use std::collections::HashMap;
+
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{overlay_text as perf_overlay_text, PerfStats};
 use crate::plugins::{
+    camera::{
+        focal_length_range_mm, CameraControlsState, CameraProjectionMode, CameraViewPreset,
+        CAMERA_TOOLBAR_ID,
+    },
     command_registry::{
         ordered_menu_categories, queue_command_invocation_resource, CommandDescriptor,
         CommandRegistry, IconRegistry, PendingCommandInvocations,
@@ -23,8 +29,8 @@ use crate::plugins::{
     },
     selection::Selected,
     toolbar::{
-        apply_toolbar_layout_change, set_toolbar_visibility, ToolbarDescriptor, ToolbarDock,
-        ToolbarLayoutState, ToolbarRegistry,
+        apply_toolbar_float, redock_toolbar, set_toolbar_visibility, FloatingToolbarStates,
+        ToolbarDescriptor, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
     },
     tools::ActiveTool,
     transform::TransformState,
@@ -43,6 +49,8 @@ const TOOLBAR_GRIP_DOT_SIZE: f32 = 2.0;
 const TOOLBAR_SIDE_WIDTH: f32 = TOOLBAR_BUTTON_SIZE + 16.0;
 const DOCK_TARGET_SIZE: f32 = 56.0;
 const PROPERTY_PANEL_WIDTH: f32 = 240.0;
+const CAMERA_LENS_SLIDER_WIDTH: f32 = 140.0;
+const CAMERA_VERTICAL_SLIDER_HEIGHT: f32 = 120.0;
 #[cfg(feature = "perf-stats")]
 const PERF_OVERLAY_WIDTH: f32 = 168.0;
 
@@ -76,24 +84,41 @@ pub struct EguiWantsInput {
     pub keyboard: bool,
 }
 
+/// Describes exactly where a dragged toolbar should land.
+#[derive(Debug, Clone, PartialEq)]
+struct InsertionTarget {
+    dock: ToolbarDock,
+    /// Row/column band index within the dock.
+    row: u32,
+    /// When true a new band is created at `row`, shifting existing bands down.
+    new_row: bool,
+    /// ID of the toolbar to insert after; `None` means prepend to the row.
+    insert_after: Option<String>,
+}
+
 #[derive(Resource, Default, Debug, Clone)]
 struct ToolbarDragState {
     active: Option<ActiveToolbarDrag>,
+    /// Toolbar frame rects captured during the current frame's render pass.
+    /// Cleared at the start of every frame in `draw_egui_chrome`.
+    toolbar_rects: HashMap<String, egui::Rect>,
 }
 
 #[derive(Debug, Clone)]
 struct ActiveToolbarDrag {
     toolbar_id: String,
     original_dock: ToolbarDock,
-    target_dock: Option<ToolbarDock>,
+    target: Option<InsertionTarget>,
 }
 
 struct ToolbarRenderContext<'a, 'w, 's> {
     contexts: &'a mut EguiContexts<'w, 's>,
+    camera_controls: &'a mut CameraControlsState,
     command_registry: &'a CommandRegistry,
     icon_registry: &'a IconRegistry,
     toolbar_registry: &'a ToolbarRegistry,
     toolbar_layout_state: &'a mut ToolbarLayoutState,
+    floating_states: &'a mut FloatingToolbarStates,
     doc_props: &'a mut DocumentProperties,
     pending_command_invocations: &'a mut PendingCommandInvocations,
     drag_state: &'a mut ToolbarDragState,
@@ -103,10 +128,12 @@ struct ToolbarRenderContext<'a, 'w, 's> {
 
 #[derive(SystemParam)]
 struct ChromeData<'w, 's> {
+    camera_controls: ResMut<'w, CameraControlsState>,
     command_registry: Res<'w, CommandRegistry>,
     icon_registry: Res<'w, IconRegistry>,
     toolbar_registry: Res<'w, ToolbarRegistry>,
     toolbar_layout_state: ResMut<'w, ToolbarLayoutState>,
+    floating_states: ResMut<'w, FloatingToolbarStates>,
     pending_command_invocations: ResMut<'w, PendingCommandInvocations>,
     apply_entity_changes: ResMut<'w, Messages<ApplyEntityChangesCommand>>,
     status_bar_data: ResMut<'w, StatusBarData>,
@@ -201,100 +228,82 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             });
     }
 
-    let top_toolbars = ordered_toolbars_for_dock(
-        &data.toolbar_registry,
-        &data.toolbar_layout_state,
+    // Clear stale frame rects before the toolbar render pass populates them.
+    data.drag_state.toolbar_rects.clear();
+
+    // Collect all toolbar rows up-front (owned) so the immutable borrows on
+    // `toolbar_registry` and `toolbar_layout_state` are released before the
+    // render loop takes a mutable borrow on `toolbar_layout_state`.
+    let all_rows: Vec<(ToolbarDock, Vec<Vec<ToolbarDescriptor>>)> = [
         ToolbarDock::Top,
-    )
-    .into_iter()
-    .cloned()
-    .collect::<Vec<_>>();
-    for descriptor in top_toolbars {
-        let mut render = ToolbarRenderContext {
-            contexts: &mut contexts,
-            command_registry: &data.command_registry,
-            icon_registry: &data.icon_registry,
-            toolbar_registry: &data.toolbar_registry,
-            toolbar_layout_state: &mut data.toolbar_layout_state,
-            doc_props: &mut data.doc_props,
-            pending_command_invocations: &mut data.pending_command_invocations,
-            drag_state: &mut data.drag_state,
-            selection_count,
-            current_tool: &current_tool,
-        };
-        draw_toolbar_panel(&ctx, &mut render, &descriptor, ToolbarDock::Top);
-    }
-
-    let left_toolbars = ordered_toolbars_for_dock(
-        &data.toolbar_registry,
-        &data.toolbar_layout_state,
         ToolbarDock::Left,
-    )
-    .into_iter()
-    .cloned()
-    .collect::<Vec<_>>();
-    for descriptor in left_toolbars {
-        let mut render = ToolbarRenderContext {
-            contexts: &mut contexts,
-            command_registry: &data.command_registry,
-            icon_registry: &data.icon_registry,
-            toolbar_registry: &data.toolbar_registry,
-            toolbar_layout_state: &mut data.toolbar_layout_state,
-            doc_props: &mut data.doc_props,
-            pending_command_invocations: &mut data.pending_command_invocations,
-            drag_state: &mut data.drag_state,
-            selection_count,
-            current_tool: &current_tool,
-        };
-        draw_toolbar_panel(&ctx, &mut render, &descriptor, ToolbarDock::Left);
-    }
-
-    let right_toolbars = ordered_toolbars_for_dock(
-        &data.toolbar_registry,
-        &data.toolbar_layout_state,
         ToolbarDock::Right,
-    )
-    .into_iter()
-    .cloned()
-    .collect::<Vec<_>>();
-    for descriptor in right_toolbars {
-        let mut render = ToolbarRenderContext {
-            contexts: &mut contexts,
-            command_registry: &data.command_registry,
-            icon_registry: &data.icon_registry,
-            toolbar_registry: &data.toolbar_registry,
-            toolbar_layout_state: &mut data.toolbar_layout_state,
-            doc_props: &mut data.doc_props,
-            pending_command_invocations: &mut data.pending_command_invocations,
-            drag_state: &mut data.drag_state,
-            selection_count,
-            current_tool: &current_tool,
-        };
-        draw_toolbar_panel(&ctx, &mut render, &descriptor, ToolbarDock::Right);
+        ToolbarDock::Bottom,
+    ]
+    .iter()
+    .map(|&dock| {
+        let rows = toolbars_by_row(&data.toolbar_registry, &data.toolbar_layout_state, dock)
+            .into_iter()
+            .map(|row| row.into_iter().cloned().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        (dock, rows)
+    })
+    .collect();
+
+    for (dock, rows) in all_rows {
+        for (row_idx, row_descriptors) in rows.iter().enumerate() {
+            let descriptor_refs: Vec<&ToolbarDescriptor> = row_descriptors.iter().collect();
+            let mut render = ToolbarRenderContext {
+                contexts: &mut contexts,
+                camera_controls: &mut data.camera_controls,
+                command_registry: &data.command_registry,
+                icon_registry: &data.icon_registry,
+                toolbar_registry: &data.toolbar_registry,
+                toolbar_layout_state: &mut data.toolbar_layout_state,
+                floating_states: &mut data.floating_states,
+                doc_props: &mut data.doc_props,
+                pending_command_invocations: &mut data.pending_command_invocations,
+                drag_state: &mut data.drag_state,
+                selection_count,
+                current_tool: &current_tool,
+            };
+            draw_toolbar_row(&ctx, &mut render, &descriptor_refs, dock, row_idx as u32);
+        }
     }
 
-    let bottom_toolbars = ordered_toolbars_for_dock(
-        &data.toolbar_registry,
-        &data.toolbar_layout_state,
-        ToolbarDock::Bottom,
-    )
-    .into_iter()
-    .cloned()
-    .collect::<Vec<_>>();
-    for descriptor in bottom_toolbars {
+    // Render floating toolbars as egui::Window instances.
+    {
+        let floating_descriptors: Vec<ToolbarDescriptor> = data
+            .toolbar_registry
+            .toolbars()
+            .filter(|d| {
+                data.toolbar_layout_state
+                    .entries
+                    .get(&d.id)
+                    .map(|e| e.dock == ToolbarDock::Floating && e.visible)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
         let mut render = ToolbarRenderContext {
             contexts: &mut contexts,
+            camera_controls: &mut data.camera_controls,
             command_registry: &data.command_registry,
             icon_registry: &data.icon_registry,
             toolbar_registry: &data.toolbar_registry,
             toolbar_layout_state: &mut data.toolbar_layout_state,
+            floating_states: &mut data.floating_states,
             doc_props: &mut data.doc_props,
             pending_command_invocations: &mut data.pending_command_invocations,
             drag_state: &mut data.drag_state,
             selection_count,
             current_tool: &current_tool,
         };
-        draw_toolbar_panel(&ctx, &mut render, &descriptor, ToolbarDock::Bottom);
+
+        for descriptor in &floating_descriptors {
+            draw_floating_toolbar(&ctx, &mut render, descriptor);
+        }
     }
 
     draw_property_panel(&ctx, &mut data);
@@ -302,16 +311,40 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     draw_imported_layers_window(&ctx, &mut data);
     draw_import_progress_window(&ctx, &data);
 
-    draw_dock_targets(&ctx, &data.drag_state);
+    // Compute the insertion target before rendering indicators, using a split
+    // borrow to avoid a conflict between the immutable `drag_state` read inside
+    // `compute_insertion_target` and the mutable write below.
+    let new_target = if let Some(active_drag) = data.drag_state.active.as_ref() {
+        let dragging_id = active_drag.toolbar_id.clone();
+        ctx.pointer_hover_pos().and_then(|cursor| {
+            compute_insertion_target(
+                &ctx,
+                cursor,
+                &dragging_id,
+                &data.drag_state,
+                &data.toolbar_layout_state,
+                &data.toolbar_registry,
+            )
+        })
+    } else {
+        None
+    };
     if let Some(active_drag) = data.drag_state.active.as_mut() {
-        active_drag.target_dock = ctx
-            .pointer_hover_pos()
-            .and_then(|pos| dock_target_for_position(&ctx, pos));
+        active_drag.target = new_target;
     }
+
+    draw_dock_targets(
+        &ctx,
+        &data.drag_state,
+        &data.toolbar_registry,
+        &data.toolbar_layout_state,
+    );
+    draw_drag_ghost(&ctx, &data.drag_state, &data.toolbar_registry);
     complete_toolbar_drag(
         &ctx,
         &mut data.drag_state,
         &mut data.toolbar_layout_state,
+        &mut data.floating_states,
         &mut data.doc_props,
     );
 
@@ -1067,120 +1100,633 @@ fn draw_perf_overlay(ctx: &egui::Context, available: egui::Rect, perf_stats: &Pe
         });
 }
 
-fn draw_toolbar_panel(
+/// Returns the content size that the ghost and landing slot share.
+///
+/// This is the inner content area (grip + button placeholders) before any
+/// Frame margin/stroke is applied. Both `draw_drag_ghost` and `draw_landing_slot`
+/// use this so the two shapes match visually.
+fn ghost_content_size(button_count: usize, horizontal: bool) -> egui::Vec2 {
+    let cap = if horizontal { 12 } else { 8 };
+    let buttons = button_count.min(cap) as f32 * TOOLBAR_BUTTON_SIZE;
+    // Add the ghost Frame's own overhead (inner_margin=4 each side → 8, stroke=2 each side → 4).
+    let frame_overhead = 12.0;
+    if horizontal {
+        egui::vec2(
+            TOOLBAR_GRIP_SIZE + buttons + frame_overhead,
+            TOOLBAR_BUTTON_SIZE,
+        )
+    } else {
+        egui::vec2(
+            TOOLBAR_BUTTON_SIZE,
+            TOOLBAR_GRIP_SIZE + buttons + frame_overhead,
+        )
+    }
+}
+
+fn camera_toolbar_content_size(horizontal: bool) -> egui::Vec2 {
+    if horizontal {
+        egui::vec2(420.0, TOOLBAR_BUTTON_SIZE)
+    } else {
+        egui::vec2(
+            TOOLBAR_BUTTON_SIZE,
+            TOOLBAR_GRIP_SIZE + 6.0 * TOOLBAR_BUTTON_SIZE + CAMERA_VERTICAL_SLIDER_HEIGHT + 32.0,
+        )
+    }
+}
+
+fn toolbar_content_size(descriptor: &ToolbarDescriptor, horizontal: bool) -> egui::Vec2 {
+    if descriptor.id == CAMERA_TOOLBAR_ID {
+        camera_toolbar_content_size(horizontal)
+    } else {
+        let btn = descriptor
+            .sections
+            .iter()
+            .map(|section| section.command_ids.len())
+            .sum::<usize>();
+        ghost_content_size(btn, horizontal)
+    }
+}
+
+/// Draws a ghost-sized landing slot at the current position in `ui`.
+///
+/// The slot has the same dimensions as the drag ghost so the user can see
+/// exactly where and how big the toolbar will appear when dropped.
+fn draw_landing_slot(ui: &mut egui::Ui, size: egui::Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius::same(4),
+        CHROME_ACCENT.gamma_multiply(0.12),
+    );
+    // Draw a 2 px accent border using four line segments (avoids rect_stroke API variance).
+    let r = rect.shrink(1.0);
+    let s = egui::Stroke::new(2.0, CHROME_ACCENT);
+    ui.painter().line_segment([r.left_top(), r.right_top()], s);
+    ui.painter()
+        .line_segment([r.right_top(), r.right_bottom()], s);
+    ui.painter()
+        .line_segment([r.right_bottom(), r.left_bottom()], s);
+    ui.painter()
+        .line_segment([r.left_bottom(), r.left_top()], s);
+}
+
+/// Draws all toolbars in a single row/column band as one egui panel.
+///
+/// Each toolbar within the row is rendered as a visually bounded `Frame` box.
+/// For Top/Bottom docks the toolbars are laid out left-to-right; for Left/Right
+/// they are stacked top-to-bottom.
+///
+/// When a drag targets this row the function inserts a ghost-sized landing slot
+/// at the insertion point and omits the dragged toolbar from its original
+/// position (replacing it with the slot for same-row reorders, or a dimmed
+/// placeholder for cross-row drags).
+fn draw_toolbar_row(
     ctx: &egui::Context,
     render: &mut ToolbarRenderContext<'_, '_, '_>,
-    descriptor: &ToolbarDescriptor,
+    descriptors: &[&ToolbarDescriptor],
     dock: ToolbarDock,
+    row_idx: u32,
 ) {
-    let panel_id = format!("toolbar.{}.{}", dock.as_str(), descriptor.id);
-    let render_contents = |ui: &mut egui::Ui| {
-        let layout = if matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom) {
+    let panel_id = format!("toolbar_row.{}.{}", dock.as_str(), row_idx);
+    let horizontal = matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom);
+
+    // Pre-extract everything we need from `render` before the closure captures it,
+    // so the closure only needs one mutable borrow of `render` at a time.
+    let dragged_id: Option<String> = render
+        .drag_state
+        .active
+        .as_ref()
+        .map(|d| d.toolbar_id.clone());
+    let insertion_target: Option<InsertionTarget> = render
+        .drag_state
+        .active
+        .as_ref()
+        .and_then(|d| d.target.clone());
+
+    let is_target_row = insertion_target
+        .as_ref()
+        .map(|t| !t.new_row && t.dock == dock && t.row == row_idx)
+        .unwrap_or(false);
+
+    // Compute the landing slot size once (matches ghost dimensions).
+    let slot_size: Option<egui::Vec2> = if is_target_row {
+        dragged_id
+            .as_deref()
+            .and_then(|id| render.toolbar_registry.toolbars().find(|d| d.id == id))
+            .map(|desc| {
+                let slot_horizontal = insertion_target
+                    .as_ref()
+                    .map(|t| matches!(t.dock, ToolbarDock::Top | ToolbarDock::Bottom))
+                    .unwrap_or(horizontal);
+                toolbar_content_size(desc, slot_horizontal)
+            })
+    } else {
+        None
+    };
+
+    let insert_after_id: Option<String> = insertion_target
+        .as_ref()
+        .and_then(|t| t.insert_after.clone());
+
+    let render_row = |ui: &mut egui::Ui| {
+        let row_layout = if horizontal {
             egui::Layout::left_to_right(egui::Align::Center)
         } else {
             egui::Layout::top_down(egui::Align::Center)
         };
 
-        ui.with_layout(layout, |ui| {
-            let grip = draw_toolbar_grip(ui, dock);
-            if grip.drag_started() {
-                render.drag_state.active = Some(ActiveToolbarDrag {
-                    toolbar_id: descriptor.id.clone(),
-                    original_dock: dock,
-                    target_dock: Some(dock),
-                });
+        ui.with_layout(row_layout, |ui| {
+            // Counts items placed so far; used to decide when to draw separators.
+            let mut placed = 0usize;
+
+            // Prepend slot (insert_after == None means "before the first toolbar").
+            if is_target_row && insert_after_id.is_none() {
+                if let Some(size) = slot_size {
+                    draw_landing_slot(ui, size);
+                    placed += 1;
+                }
             }
 
-            for (section_index, section) in descriptor.sections.iter().enumerate() {
-                let available_commands = section
-                    .command_ids
-                    .iter()
-                    .filter_map(|command_id| render.command_registry.get(command_id))
-                    .collect::<Vec<_>>();
-                if available_commands.is_empty() {
+            for descriptor in descriptors {
+                let is_this_dragged = dragged_id.as_deref() == Some(descriptor.id.as_str());
+                // For same-row reorders the slot replaces the toolbar entirely.
+                if is_this_dragged && is_target_row {
                     continue;
                 }
-                if section_index > 0 {
+
+                if placed > 0 {
                     ui.separator();
                 }
 
-                let section_layout = if matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom) {
-                    egui::Layout::left_to_right(egui::Align::Center)
+                let frame_stroke = if is_this_dragged {
+                    // Cross-row drag: faint placeholder in the source row.
+                    egui::Stroke::new(1.0, CHROME_MUTED.gamma_multiply(0.3))
                 } else {
-                    egui::Layout::top_down(egui::Align::Center)
+                    egui::Stroke::new(1.0, CHROME_HOVER)
                 };
-                ui.with_layout(section_layout, |ui| {
-                    for command in available_commands {
-                        let active = command.activates_tool.as_deref() == Some(render.current_tool);
-                        let image = toolbar_image(render.contexts, render.icon_registry, command);
-                        let mut button = if let Some(img) = image {
-                            egui::Button::image(img)
-                        } else {
-                            egui::Button::new(toolbar_button_fallback_text(command))
-                        };
-                        button = button
-                            .min_size(egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE))
-                            .fill(if active { CHROME_ACCENT } else { CHROME_BG });
-                        let enabled = !command.requires_selection || render.selection_count > 0;
-                        let response = ui.add_enabled(enabled, button);
-                        // Workaround: egui's hovered()/clicked() flags are
-                        // broken for toolbar buttons (contains_pointer=true
-                        // but hovered=false). Detect hover and click manually
-                        // from contains_pointer + raw pointer state.
-                        let ptr_over = enabled && response.contains_pointer();
-                        if ptr_over {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            egui::Tooltip::always_open(
-                                ui.ctx().clone(),
-                                response.layer_id,
-                                response.id.with("tip"),
-                                egui::PopupAnchor::Pointer,
-                            )
-                            .gap(12.0)
-                            .show(|ui| {
-                                ui.label(&command.label);
-                            });
-                        }
-                        if ptr_over && ui.ctx().input(|i| i.pointer.primary_released()) {
-                            queue_command_invocation_resource(
-                                render.pending_command_invocations,
-                                command.id.clone(),
-                                serde_json::json!({}),
-                            );
-                        }
-                    }
+
+                let frame_response = egui::Frame::new()
+                    .stroke(frame_stroke)
+                    .corner_radius(egui::CornerRadius::same(3))
+                    .inner_margin(egui::Margin::same(2))
+                    .show(ui, |ui| {
+                        draw_toolbar_content(ui, render, descriptor, dock);
+                    });
+                // Record rect for insertion-target computation next frame.
+                render
+                    .drag_state
+                    .toolbar_rects
+                    .insert(descriptor.id.clone(), frame_response.response.rect);
+                frame_response.response.context_menu(|ui| {
+                    draw_toolbar_visibility_menu(
+                        ui,
+                        render.toolbar_registry,
+                        render.toolbar_layout_state,
+                        render.doc_props,
+                    );
                 });
+                placed += 1;
+
+                // Append/insert slot after this toolbar if it is the insert_after target.
+                if is_target_row && insert_after_id.as_deref() == Some(descriptor.id.as_str()) {
+                    if let Some(size) = slot_size {
+                        ui.separator();
+                        draw_landing_slot(ui, size);
+                        placed += 1;
+                    }
+                }
             }
         });
     };
 
-    let panel_response = match dock {
-        ToolbarDock::Top => egui::TopBottomPanel::top(panel_id)
-            .resizable(false)
-            .show(ctx, render_contents),
-        ToolbarDock::Bottom => egui::TopBottomPanel::bottom(panel_id)
-            .resizable(false)
-            .show(ctx, render_contents),
-        ToolbarDock::Left => egui::SidePanel::left(panel_id)
-            .resizable(false)
-            .default_width(TOOLBAR_SIDE_WIDTH)
-            .width_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH)
-            .show(ctx, render_contents),
-        ToolbarDock::Right => egui::SidePanel::right(panel_id)
-            .resizable(false)
-            .default_width(TOOLBAR_SIDE_WIDTH)
-            .width_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH)
-            .show(ctx, render_contents),
+    match dock {
+        ToolbarDock::Top => {
+            egui::TopBottomPanel::top(panel_id)
+                .resizable(false)
+                .show(ctx, render_row);
+        }
+        ToolbarDock::Bottom => {
+            egui::TopBottomPanel::bottom(panel_id)
+                .resizable(false)
+                .show(ctx, render_row);
+        }
+        ToolbarDock::Left => {
+            egui::SidePanel::left(panel_id)
+                .resizable(false)
+                .default_width(TOOLBAR_SIDE_WIDTH)
+                .width_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH)
+                .show(ctx, render_row);
+        }
+        ToolbarDock::Right => {
+            egui::SidePanel::right(panel_id)
+                .resizable(false)
+                .default_width(TOOLBAR_SIDE_WIDTH)
+                .width_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH)
+                .show(ctx, render_row);
+        }
+        ToolbarDock::Floating => {
+            // Floating toolbars are rendered by draw_floating_toolbar, not here.
+        }
+    }
+}
+
+/// Draws a single toolbar's grip and buttons into the given `ui`.
+///
+/// Does not create any panel — intended to be called within `draw_toolbar_row`.
+fn draw_toolbar_content(
+    ui: &mut egui::Ui,
+    render: &mut ToolbarRenderContext<'_, '_, '_>,
+    descriptor: &ToolbarDescriptor,
+    dock: ToolbarDock,
+) {
+    let horizontal = matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom);
+    let is_dragging = render
+        .drag_state
+        .active
+        .as_ref()
+        .map(|d| d.toolbar_id == descriptor.id)
+        .unwrap_or(false);
+
+    if is_dragging {
+        let size = toolbar_content_size(descriptor, horizontal);
+        if horizontal {
+            ui.allocate_space(size);
+        } else {
+            ui.allocate_space(egui::vec2(TOOLBAR_SIDE_WIDTH - 8.0, size.y));
+        }
+        return;
+    }
+
+    if descriptor.id == CAMERA_TOOLBAR_ID {
+        draw_camera_toolbar_content(ui, render, dock, horizontal, descriptor);
+        return;
+    }
+
+    let content_layout = if horizontal {
+        egui::Layout::left_to_right(egui::Align::Center)
+    } else {
+        egui::Layout::top_down(egui::Align::Center)
     };
 
-    panel_response.response.context_menu(|ui| {
-        draw_toolbar_visibility_menu(
-            ui,
-            render.toolbar_registry,
-            render.toolbar_layout_state,
-            render.doc_props,
-        );
+    ui.with_layout(content_layout, |ui| {
+        let grip = draw_toolbar_grip(ui, dock);
+        if grip.drag_started() {
+            render.drag_state.active = Some(ActiveToolbarDrag {
+                toolbar_id: descriptor.id.clone(),
+                original_dock: dock,
+                target: None,
+            });
+        }
+
+        for (section_index, section) in descriptor.sections.iter().enumerate() {
+            let available_commands = section
+                .command_ids
+                .iter()
+                .filter_map(|command_id| render.command_registry.get(command_id))
+                .collect::<Vec<_>>();
+            if available_commands.is_empty() {
+                continue;
+            }
+            if section_index > 0 {
+                ui.separator();
+            }
+
+            let section_layout = if matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom) {
+                egui::Layout::left_to_right(egui::Align::Center)
+            } else {
+                egui::Layout::top_down(egui::Align::Center)
+            };
+            ui.with_layout(section_layout, |ui| {
+                for command in available_commands {
+                    let active = command.activates_tool.as_deref() == Some(render.current_tool);
+                    let image = toolbar_image(render.contexts, render.icon_registry, command);
+                    let mut button = if let Some(img) = image {
+                        egui::Button::image(img)
+                    } else {
+                        egui::Button::new(toolbar_button_fallback_text(command))
+                    };
+                    button = button
+                        .min_size(egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE))
+                        .fill(if active { CHROME_ACCENT } else { CHROME_BG });
+                    let enabled = !command.requires_selection || render.selection_count > 0;
+                    let response = ui.add_enabled(enabled, button);
+                    // Workaround: egui's hovered()/clicked() flags are
+                    // broken for toolbar buttons (contains_pointer=true
+                    // but hovered=false). Detect hover and click manually
+                    // from contains_pointer + raw pointer state.
+                    let ptr_over = enabled && response.contains_pointer();
+                    if ptr_over {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        egui::Tooltip::always_open(
+                            ui.ctx().clone(),
+                            response.layer_id,
+                            response.id.with("tip"),
+                            egui::PopupAnchor::Pointer,
+                        )
+                        .gap(12.0)
+                        .show(|ui| {
+                            ui.label(&command.label);
+                        });
+                    }
+                    if ptr_over && ui.ctx().input(|i| i.pointer.primary_released()) {
+                        queue_command_invocation_resource(
+                            render.pending_command_invocations,
+                            command.id.clone(),
+                            serde_json::json!({}),
+                        );
+                    }
+                }
+            });
+        }
     });
+}
+
+fn draw_camera_toolbar_content(
+    ui: &mut egui::Ui,
+    render: &mut ToolbarRenderContext<'_, '_, '_>,
+    dock: ToolbarDock,
+    horizontal: bool,
+    descriptor: &ToolbarDescriptor,
+) {
+    let content_layout = if horizontal {
+        egui::Layout::left_to_right(egui::Align::Center)
+    } else {
+        egui::Layout::top_down(egui::Align::Center)
+    };
+
+    ui.with_layout(content_layout, |ui| {
+        let grip = draw_toolbar_grip(ui, dock);
+        if grip.drag_started() {
+            render.drag_state.active = Some(ActiveToolbarDrag {
+                toolbar_id: descriptor.id.clone(),
+                original_dock: dock,
+                target: None,
+            });
+        }
+
+        draw_camera_toolbar_controls(ui, &mut *render.camera_controls, horizontal);
+    });
+}
+
+fn draw_camera_toolbar_controls(
+    ui: &mut egui::Ui,
+    controls: &mut CameraControlsState,
+    horizontal: bool,
+) {
+    let focal_range = focal_length_range_mm();
+
+    if horizontal {
+        ui.separator();
+        ui.horizontal(|ui| {
+            projection_mode_button(
+                ui,
+                controls,
+                CameraProjectionMode::Perspective,
+                "Perspective",
+                egui::vec2(96.0, TOOLBAR_BUTTON_SIZE),
+            );
+            if projection_mode_button(
+                ui,
+                controls,
+                CameraProjectionMode::Isometric,
+                "Isometric",
+                egui::vec2(88.0, TOOLBAR_BUTTON_SIZE),
+            ) {
+                controls.pending_view_preset = Some(CameraViewPreset::Isometric);
+            }
+        });
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            for (label, preset) in [
+                ("Top", CameraViewPreset::Top),
+                ("Left", CameraViewPreset::Left),
+                ("Right", CameraViewPreset::Right),
+                ("Bottom", CameraViewPreset::Bottom),
+            ] {
+                if ui
+                    .add_sized(
+                        egui::vec2(TOOLBAR_BUTTON_SIZE + 8.0, TOOLBAR_BUTTON_SIZE),
+                        egui::Button::new(label),
+                    )
+                    .clicked()
+                {
+                    controls.pending_view_preset = Some(preset);
+                }
+            }
+        });
+
+        ui.separator();
+        ui.label(format!("Lens {:.0} mm", controls.focal_length_mm));
+        let slider = egui::Slider::new(&mut controls.focal_length_mm, focal_range)
+            .show_value(false)
+            .clamping(egui::SliderClamping::Always);
+        ui.add_enabled_ui(
+            controls.projection_mode == CameraProjectionMode::Perspective,
+            |ui| {
+                ui.add_sized(egui::vec2(CAMERA_LENS_SLIDER_WIDTH, 0.0), slider);
+            },
+        );
+    } else {
+        ui.separator();
+        for (label, mode) in [
+            ("P", CameraProjectionMode::Perspective),
+            ("I", CameraProjectionMode::Isometric),
+        ] {
+            let clicked = projection_mode_button(
+                ui,
+                controls,
+                mode,
+                label,
+                egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE),
+            );
+            if clicked && mode == CameraProjectionMode::Isometric {
+                controls.pending_view_preset = Some(CameraViewPreset::Isometric);
+            }
+        }
+
+        ui.separator();
+        for (label, preset) in [
+            ("T", CameraViewPreset::Top),
+            ("L", CameraViewPreset::Left),
+            ("R", CameraViewPreset::Right),
+            ("B", CameraViewPreset::Bottom),
+        ] {
+            if ui
+                .add_sized(
+                    egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE),
+                    egui::Button::new(label),
+                )
+                .clicked()
+            {
+                controls.pending_view_preset = Some(preset);
+            }
+        }
+
+        ui.separator();
+        ui.label(format!("{:.0} mm", controls.focal_length_mm));
+        let slider = egui::Slider::new(&mut controls.focal_length_mm, focal_range)
+            .vertical()
+            .show_value(false)
+            .clamping(egui::SliderClamping::Always);
+        ui.add_enabled_ui(
+            controls.projection_mode == CameraProjectionMode::Perspective,
+            |ui| {
+                ui.add_sized(
+                    egui::vec2(TOOLBAR_BUTTON_SIZE, CAMERA_VERTICAL_SLIDER_HEIGHT),
+                    slider,
+                );
+            },
+        );
+    }
+}
+
+fn projection_mode_button(
+    ui: &mut egui::Ui,
+    controls: &mut CameraControlsState,
+    mode: CameraProjectionMode,
+    label: &str,
+    size: egui::Vec2,
+) -> bool {
+    let selected = controls.projection_mode == mode;
+    let response = ui.add_sized(
+        size,
+        egui::Button::new(label).fill(if selected { CHROME_ACCENT } else { CHROME_BG }),
+    );
+    if response.clicked() {
+        controls.projection_mode = mode;
+        return true;
+    }
+    false
+}
+
+fn draw_floating_toolbar(
+    ctx: &egui::Context,
+    render: &mut ToolbarRenderContext<'_, '_, '_>,
+    descriptor: &ToolbarDescriptor,
+) {
+    let is_dragging = render
+        .drag_state
+        .active
+        .as_ref()
+        .map(|d| d.toolbar_id == descriptor.id)
+        .unwrap_or(false);
+    if is_dragging {
+        return;
+    }
+
+    let floating_entry = render.floating_states.entries.get(&descriptor.id).cloned();
+    let minimized = floating_entry
+        .as_ref()
+        .map(|e| e.minimized)
+        .unwrap_or(false);
+    let pos = floating_entry
+        .as_ref()
+        .map(|e| egui::pos2(e.position[0], e.position[1]))
+        .unwrap_or_else(|| egui::pos2(100.0, 100.0));
+
+    let window_id = egui::Id::new(format!("floating_toolbar_{}", descriptor.id));
+
+    egui::Window::new(&descriptor.label)
+        .id(window_id)
+        .current_pos(pos)
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .movable(false)
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let grip = draw_toolbar_grip(ui, ToolbarDock::Floating);
+
+                if grip.double_clicked() {
+                    if let Some(entry) = render.floating_states.entries.get_mut(&descriptor.id) {
+                        entry.minimized = !entry.minimized;
+                    }
+                }
+
+                // Grip drag: move the floating window, or initiate re-dock.
+                if grip.dragged() {
+                    let delta = grip.drag_delta();
+                    if let Some(entry) = render.floating_states.entries.get_mut(&descriptor.id) {
+                        entry.position[0] += delta.x;
+                        entry.position[1] += delta.y;
+                    }
+                    // Check if we're near a dock edge — if so, start a re-dock drag.
+                    if let Some(cursor) = ctx.pointer_hover_pos() {
+                        if dock_target_for_position(ctx, cursor).is_some()
+                            && render.drag_state.active.is_none()
+                        {
+                            render.drag_state.active = Some(ActiveToolbarDrag {
+                                toolbar_id: descriptor.id.clone(),
+                                original_dock: ToolbarDock::Floating,
+                                target: None,
+                            });
+                        }
+                    }
+                }
+
+                if minimized {
+                    ui.label(
+                        egui::RichText::new(&descriptor.label)
+                            .color(CHROME_MUTED)
+                            .small(),
+                    );
+                } else if descriptor.id == CAMERA_TOOLBAR_ID {
+                    draw_camera_toolbar_controls(ui, &mut *render.camera_controls, true);
+                } else {
+                    for (section_index, section) in descriptor.sections.iter().enumerate() {
+                        let available_commands = section
+                            .command_ids
+                            .iter()
+                            .filter_map(|command_id| render.command_registry.get(command_id))
+                            .collect::<Vec<_>>();
+                        if available_commands.is_empty() {
+                            continue;
+                        }
+                        if section_index > 0 {
+                            ui.separator();
+                        }
+                        for command in available_commands {
+                            let active =
+                                command.activates_tool.as_deref() == Some(render.current_tool);
+                            let image =
+                                toolbar_image(render.contexts, render.icon_registry, command);
+                            let mut button = if let Some(img) = image {
+                                egui::Button::image(img)
+                            } else {
+                                egui::Button::new(toolbar_button_fallback_text(command))
+                            };
+                            button = button
+                                .min_size(egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE))
+                                .fill(if active { CHROME_ACCENT } else { CHROME_BG });
+                            let enabled = !command.requires_selection || render.selection_count > 0;
+                            let response = ui.add_enabled(enabled, button);
+                            let ptr_over = enabled && response.contains_pointer();
+                            if ptr_over {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                egui::Tooltip::always_open(
+                                    ui.ctx().clone(),
+                                    response.layer_id,
+                                    response.id.with("tip"),
+                                    egui::PopupAnchor::Pointer,
+                                )
+                                .gap(12.0)
+                                .show(|ui| {
+                                    ui.label(&command.label);
+                                });
+                            }
+                            if ptr_over && ui.ctx().input(|i| i.pointer.primary_released()) {
+                                queue_command_invocation_resource(
+                                    render.pending_command_invocations,
+                                    command.id.clone(),
+                                    serde_json::json!({}),
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        });
 }
 
 fn draw_toolbar_visibility_menu(
@@ -1228,6 +1774,11 @@ fn draw_toolbar_grip(ui: &mut egui::Ui, dock: ToolbarDock) -> egui::Response {
     );
     if response.contains_pointer() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        let tip = if dock == ToolbarDock::Floating {
+            "Drag to dock \u{2022} Double-click to minimize"
+        } else {
+            "Drag toolbar to another edge"
+        };
         egui::Tooltip::always_open(
             ui.ctx().clone(),
             response.layer_id,
@@ -1236,7 +1787,7 @@ fn draw_toolbar_grip(ui: &mut egui::Ui, dock: ToolbarDock) -> egui::Response {
         )
         .gap(12.0)
         .show(|ui| {
-            ui.label("Drag toolbar to another edge");
+            ui.label(tip);
         });
     }
 
@@ -1246,7 +1797,10 @@ fn draw_toolbar_grip(ui: &mut egui::Ui, dock: ToolbarDock) -> egui::Response {
     } else {
         CHROME_MUTED
     };
-    let offsets: &[[egui::Vec2; 3]; 2] = if matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom) {
+    let offsets: &[[egui::Vec2; 3]; 2] = if matches!(
+        dock,
+        ToolbarDock::Top | ToolbarDock::Bottom | ToolbarDock::Floating
+    ) {
         &[
             [
                 egui::vec2(5.0, 5.0),
@@ -1287,26 +1841,45 @@ fn draw_toolbar_grip(ui: &mut egui::Ui, dock: ToolbarDock) -> egui::Response {
     response
 }
 
-fn ordered_toolbars_for_dock<'a>(
+/// Returns toolbars for `dock` grouped into rows.
+///
+/// The outer `Vec` is indexed by row (row 0 first). Each inner `Vec` is the
+/// list of toolbar descriptors within that row, sorted by `order`.
+fn toolbars_by_row<'a>(
     registry: &'a ToolbarRegistry,
     layout_state: &'a ToolbarLayoutState,
     dock: ToolbarDock,
-) -> Vec<&'a ToolbarDescriptor> {
-    let mut descriptors = registry
+) -> Vec<Vec<&'a ToolbarDescriptor>> {
+    // Collect (row, order, descriptor) for all visible toolbars in this dock.
+    let mut entries: Vec<(u32, u32, &'a ToolbarDescriptor)> = registry
         .toolbars()
         .filter_map(|descriptor| {
             let entry = layout_state.entries.get(&descriptor.id)?;
             if !entry.visible || entry.dock != dock {
                 return None;
             }
-            Some((entry.order, descriptor))
+            Some((entry.row, entry.order, descriptor))
         })
-        .collect::<Vec<_>>();
-    descriptors.sort_by_key(|(order, descriptor)| (*order, descriptor.label.clone()));
-    descriptors
-        .into_iter()
-        .map(|(_, descriptor)| descriptor)
-        .collect()
+        .collect();
+
+    if entries.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort by row then order then label for stable ordering.
+    entries.sort_by_key(|(row, order, descriptor)| (*row, *order, descriptor.label.clone()));
+
+    // Determine the max row index so we can build a dense Vec.
+    let max_row = entries.iter().map(|(row, _, _)| *row).max().unwrap_or(0);
+    let mut rows: Vec<Vec<&'a ToolbarDescriptor>> = (0..=max_row).map(|_| Vec::new()).collect();
+
+    for (row, _, descriptor) in entries {
+        rows[row as usize].push(descriptor);
+    }
+
+    // Drop empty rows that may have been created in the middle of a sparse range.
+    rows.retain(|row| !row.is_empty());
+    rows
 }
 
 fn toolbar_image<'a>(
@@ -1366,59 +1939,586 @@ fn dock_target_for_position(ctx: &egui::Context, position: egui::Pos2) -> Option
     .map(|(dock, _, _)| dock)
 }
 
-fn draw_dock_targets(ctx: &egui::Context, drag_state: &ToolbarDragState) {
+/// Computes the precise insertion target for a toolbar being dragged.
+///
+/// Returns `None` when the cursor is not within any dock's hot zone.
+fn compute_insertion_target(
+    ctx: &egui::Context,
+    cursor: egui::Pos2,
+    dragging_id: &str,
+    drag_state: &ToolbarDragState,
+    layout_state: &ToolbarLayoutState,
+    registry: &ToolbarRegistry,
+) -> Option<InsertionTarget> {
+    // Determine the target dock.
+    //
+    // Naive edge-proximity (dock_target_for_position) fails in the top-left / top-right
+    // corners: the cursor can be within DOCK_TARGET_SIZE of both the Top and Left edges,
+    // and Left "wins" because X < Y at those positions — even though the user is clearly
+    // hovering within the Top toolbar row (same Y band).
+    //
+    // Fix: first check whether the cursor falls inside any existing dock's "full-span
+    // strip" (the union of that dock's toolbar rects extended to the full screen width or
+    // height). Toolbar bands are narrow and specific, so containment is an unambiguous
+    // signal of intent. Only fall back to edge proximity when no band matches (e.g. the
+    // cursor is in empty space between the toolbar and the screen edge, or the dock is
+    // empty).
+    let screen = ctx.viewport_rect();
+    let dock = {
+        // Check docks in priority order (Top/Bottom before Left/Right so horizontal bands
+        // win over vertical bands in corner overlap situations).
+        let band_dock = [
+            ToolbarDock::Top,
+            ToolbarDock::Bottom,
+            ToolbarDock::Left,
+            ToolbarDock::Right,
+        ]
+        .into_iter()
+        .find_map(|candidate| {
+            let horiz = matches!(candidate, ToolbarDock::Top | ToolbarDock::Bottom);
+            // Union of all non-dragged toolbar rects in this dock.
+            let band: egui::Rect = drag_state
+                .toolbar_rects
+                .iter()
+                .filter_map(|(id, rect)| {
+                    if id.as_str() == dragging_id {
+                        return None;
+                    }
+                    layout_state
+                        .entries
+                        .get(id)
+                        .filter(|e| e.dock == candidate && e.visible)
+                        .map(|_| *rect)
+                })
+                .reduce(|a, b| a.union(b))?;
+
+            // Extend the band to the full screen width (horizontal) or height (vertical).
+            // This covers the "before first toolbar" prepend region where the cursor is
+            // outside the toolbar rects but in the same perpendicular slice.
+            let extended = if horiz {
+                egui::Rect::from_min_max(
+                    egui::pos2(screen.min.x, band.min.y),
+                    egui::pos2(screen.max.x, band.max.y),
+                )
+            } else {
+                egui::Rect::from_min_max(
+                    egui::pos2(band.min.x, screen.min.y),
+                    egui::pos2(band.max.x, screen.max.y),
+                )
+            };
+
+            if extended.contains(cursor) {
+                Some(candidate)
+            } else {
+                None
+            }
+        });
+
+        band_dock.or_else(|| dock_target_for_position(ctx, cursor))?
+    };
+    let horizontal = matches!(dock, ToolbarDock::Top | ToolbarDock::Bottom);
+
+    // Collect all visible toolbar entries in this dock excluding the dragged one.
+    // Each entry: (row, order, toolbar_id, rect_option).
+    let mut entries: Vec<(u32, u32, String, Option<egui::Rect>)> = registry
+        .toolbars()
+        .filter_map(|desc| {
+            if desc.id == dragging_id {
+                return None;
+            }
+            let entry = layout_state.entries.get(&desc.id)?;
+            if !entry.visible || entry.dock != dock {
+                return None;
+            }
+            let rect = drag_state.toolbar_rects.get(&desc.id).copied();
+            Some((entry.row, entry.order, desc.id.clone(), rect))
+        })
+        .collect();
+
+    entries.sort_by_key(|(row, order, _, _)| (*row, *order));
+
+    // Group by row index. Compute the band rect (union of all rects in row).
+    // rows: Vec<(row_idx, Vec<(order, id, rect_option)>)>
+    let mut rows: Vec<(u32, Vec<(u32, String, Option<egui::Rect>)>)> = {
+        let mut map: std::collections::BTreeMap<u32, Vec<(u32, String, Option<egui::Rect>)>> =
+            std::collections::BTreeMap::new();
+        for (row, order, id, rect) in entries {
+            map.entry(row).or_default().push((order, id, rect));
+        }
+        map.into_iter().collect()
+    };
+    // Sort toolbars within each row by order.
+    for (_, row_items) in &mut rows {
+        row_items.sort_by_key(|(order, _, _)| *order);
+    }
+
+    // Helper: union rect from a row's toolbar rects.
+    let band_rect = |row_items: &[(u32, String, Option<egui::Rect>)]| -> Option<egui::Rect> {
+        row_items
+            .iter()
+            .filter_map(|(_, _, r)| *r)
+            .reduce(|acc, r| acc.union(r))
+    };
+
+    // Compute per-row band rects and the perpendicular coordinate of their midpoint.
+    // For horizontal docks: perp = y (top-to-bottom). For vertical: perp = x.
+    let perp_coord = |rect: egui::Rect| -> f32 {
+        if horizontal {
+            rect.center().y
+        } else {
+            rect.center().x
+        }
+    };
+    let perp_cursor = if horizontal { cursor.y } else { cursor.x };
+
+    // Find which row band the cursor falls into, or the gap between two bands.
+    //
+    // Strategy:
+    // 1. For each existing row with a known rect, test if `perp_cursor` is inside.
+    // 2. If it is, use that row.
+    // 3. If it falls between two bands, propose a new row between them.
+    // 4. If it's before the first band, propose row 0 (shifting existing rows down).
+    // 5. If the dock is empty, use row 0.
+
+    if rows.is_empty() {
+        // Dock has no other toolbars: row 0, new row (only item), prepend.
+        return Some(InsertionTarget {
+            dock,
+            row: 0,
+            new_row: false, // nothing to shift
+            insert_after: None,
+        });
+    }
+
+    // Build a list of (row_idx, band_rect) for rows that have a known rect.
+    let banded: Vec<(u32, egui::Rect)> = rows
+        .iter()
+        .filter_map(|(row_idx, items)| band_rect(items).map(|r| (*row_idx, r)))
+        .collect();
+
+    // Determine which row (or gap) the cursor is in.
+    let (target_row_idx, is_new_row) = if banded.is_empty() {
+        // No rects yet (first frame of a new drag) — fall back to first existing row.
+        (rows[0].0, false)
+    } else {
+        // Check if cursor is inside any band.
+        let hit_band = banded.iter().find(|(_, r)| {
+            if horizontal {
+                cursor.y >= r.min.y && cursor.y <= r.max.y
+            } else {
+                cursor.x >= r.min.x && cursor.x <= r.max.x
+            }
+        });
+
+        if let Some((row_idx, _)) = hit_band {
+            (*row_idx, false)
+        } else {
+            // Find the gap. Sort banded by perp midpoint.
+            let mut sorted_bands = banded.clone();
+            sorted_bands.sort_by(|(_, a), (_, b)| perp_coord(*a).total_cmp(&perp_coord(*b)));
+
+            if perp_cursor < perp_coord(sorted_bands[0].1) {
+                // Before the first band: insert new row before it.
+                (sorted_bands[0].0, true)
+            } else if perp_cursor > perp_coord(*sorted_bands.last().map(|(_, r)| r).unwrap()) {
+                // After the last band: append new row after the last existing row.
+                let last_row = rows.iter().map(|(r, _)| *r).max().unwrap_or(0);
+                (last_row + 1, false) // not shifting — just a new row after the end
+            } else {
+                // Between two bands: find the gap.
+                let gap_pos = sorted_bands
+                    .windows(2)
+                    .position(|pair| {
+                        perp_cursor > perp_coord(pair[0].1) && perp_cursor < perp_coord(pair[1].1)
+                    })
+                    .unwrap_or(0);
+                // Insert new row between pair[gap_pos] and pair[gap_pos+1].
+                // The new row index = pair[gap_pos+1].row, shifting that row down.
+                (sorted_bands[gap_pos + 1].0, true)
+            }
+        }
+    };
+
+    // Now find the insertion point within the target row.
+    let row_items: &[(u32, String, Option<egui::Rect>)] = rows
+        .iter()
+        .find(|(r, _)| *r == target_row_idx)
+        .map(|(_, items)| items.as_slice())
+        .unwrap_or(&[]);
+
+    let insert_after = if row_items.is_empty() {
+        None
+    } else if horizontal {
+        // Find the first toolbar whose rect midpoint x is to the right of cursor.
+        let insert_before_id = row_items
+            .iter()
+            .find(|(_, _, rect)| rect.map(|r| cursor.x < r.center().x).unwrap_or(false));
+        match insert_before_id {
+            None => {
+                // Cursor is past all midpoints: append after the last toolbar.
+                row_items.last().map(|(_, id, _)| id.clone())
+            }
+            Some((_, id, _)) => {
+                // Insert before this toolbar = insert after the one before it.
+                let pos = row_items.iter().position(|(_, i, _)| i == id).unwrap_or(0);
+                if pos == 0 {
+                    None // prepend
+                } else {
+                    row_items.get(pos - 1).map(|(_, id, _)| id.clone())
+                }
+            }
+        }
+    } else {
+        // Vertical: same logic but with y.
+        let insert_before_id = row_items
+            .iter()
+            .find(|(_, _, rect)| rect.map(|r| cursor.y < r.center().y).unwrap_or(false));
+        match insert_before_id {
+            None => row_items.last().map(|(_, id, _)| id.clone()),
+            Some((_, id, _)) => {
+                let pos = row_items.iter().position(|(_, i, _)| i == id).unwrap_or(0);
+                if pos == 0 {
+                    None
+                } else {
+                    row_items.get(pos - 1).map(|(_, id, _)| id.clone())
+                }
+            }
+        }
+    };
+
+    Some(InsertionTarget {
+        dock,
+        row: target_row_idx,
+        new_row: is_new_row,
+        insert_after,
+    })
+}
+
+/// Draws the landing slot indicator for cases that `draw_toolbar_row` cannot
+/// handle inline:
+/// - Inserting into a new row (between existing rows) — slot painted over the gap
+/// - Dropping onto an empty dock — slot painted at the dock edge
+///
+/// For normal within-row insertions the slot is already rendered by
+/// `draw_toolbar_row` using `draw_landing_slot`; this function is a no-op.
+fn draw_dock_targets(
+    ctx: &egui::Context,
+    drag_state: &ToolbarDragState,
+    toolbar_registry: &ToolbarRegistry,
+    layout_state: &ToolbarLayoutState,
+) {
     let Some(active_drag) = drag_state.active.as_ref() else {
         return;
     };
+    let Some(target) = active_drag.target.as_ref() else {
+        return;
+    };
+
+    let horizontal = matches!(target.dock, ToolbarDock::Top | ToolbarDock::Bottom);
+
+    // Ghost/slot size based on the dragged toolbar.
+    let Some(desc) = toolbar_registry
+        .toolbars()
+        .find(|d| d.id == active_drag.toolbar_id)
+    else {
+        return;
+    };
+    let size = toolbar_content_size(desc, horizontal);
+
+    // Check whether the target dock has other visible toolbars.
+    // If it does and this is not a new-row drop, draw_toolbar_row already shows
+    // the slot inline — nothing to do here.
+    let dock_has_others = toolbar_registry.toolbars().any(|d| {
+        d.id != active_drag.toolbar_id
+            && layout_state
+                .entries
+                .get(&d.id)
+                .map(|e| e.visible && e.dock == target.dock)
+                .unwrap_or(false)
+    });
+    if dock_has_others && !target.new_row {
+        return;
+    }
 
     let screen = ctx.viewport_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("toolbar_dock_targets"),
+        egui::Id::new("toolbar_dock_slot"),
     ));
-    for (dock, rect) in [
-        (
-            ToolbarDock::Top,
-            egui::Rect::from_min_max(
-                screen.min,
-                egui::pos2(screen.max.x, screen.min.y + DOCK_TARGET_SIZE),
-            ),
-        ),
-        (
-            ToolbarDock::Bottom,
-            egui::Rect::from_min_max(
-                egui::pos2(screen.min.x, screen.max.y - DOCK_TARGET_SIZE),
-                screen.max,
-            ),
-        ),
-        (
-            ToolbarDock::Left,
-            egui::Rect::from_min_max(
-                screen.min,
-                egui::pos2(screen.min.x + DOCK_TARGET_SIZE, screen.max.y),
-            ),
-        ),
-        (
-            ToolbarDock::Right,
-            egui::Rect::from_min_max(
-                egui::pos2(screen.max.x - DOCK_TARGET_SIZE, screen.min.y),
-                screen.max,
-            ),
-        ),
-    ] {
-        let color = if active_drag.target_dock == Some(dock) {
-            CHROME_ACCENT
+
+    // Position the slot.
+    let slot_rect = if target.new_row {
+        // Find the screen rect of the row being shifted (target.row).
+        let shifted_band: Option<egui::Rect> = toolbar_registry
+            .toolbars()
+            .filter_map(|d| {
+                if d.id == active_drag.toolbar_id {
+                    return None;
+                }
+                let entry = layout_state.entries.get(&d.id)?;
+                if entry.visible && entry.dock == target.dock && entry.row == target.row {
+                    drag_state.toolbar_rects.get(&d.id).copied()
+                } else {
+                    None
+                }
+            })
+            .reduce(|a, b| a.union(b));
+
+        if horizontal {
+            let y = shifted_band
+                .map(|r| r.min.y - 4.0)
+                .unwrap_or(screen.min.y + 4.0);
+            egui::Rect::from_min_size(egui::pos2(screen.min.x + 8.0, y - size.y), size)
         } else {
-            CHROME_HOVER
-        };
-        painter.rect_filled(rect, 0.0, color.gamma_multiply(0.5));
-    }
+            let x = shifted_band
+                .map(|r| r.min.x - 4.0)
+                .unwrap_or(screen.min.x + 4.0);
+            egui::Rect::from_min_size(egui::pos2(x - size.x, screen.min.y + 8.0), size)
+        }
+    } else {
+        // Empty dock: anchor the slot at the dock edge.
+        if horizontal {
+            let y = match target.dock {
+                ToolbarDock::Top => screen.min.y + 4.0,
+                _ => screen.max.y - size.y - 4.0,
+            };
+            egui::Rect::from_min_size(egui::pos2(screen.min.x + 8.0, y), size)
+        } else {
+            let x = match target.dock {
+                ToolbarDock::Left => screen.min.x + 4.0,
+                _ => screen.max.x - size.x - 4.0,
+            };
+            egui::Rect::from_min_size(egui::pos2(x, screen.min.y + 8.0), size)
+        }
+    };
+
+    // Draw with the same style as draw_landing_slot.
+    painter.rect_filled(
+        slot_rect,
+        egui::CornerRadius::same(4),
+        CHROME_ACCENT.gamma_multiply(0.12),
+    );
+    let r = slot_rect.shrink(1.0);
+    let s = egui::Stroke::new(2.0, CHROME_ACCENT);
+    painter.line_segment([r.left_top(), r.right_top()], s);
+    painter.line_segment([r.right_top(), r.right_bottom()], s);
+    painter.line_segment([r.right_bottom(), r.left_bottom()], s);
+    painter.line_segment([r.left_bottom(), r.left_top()], s);
+}
+
+fn draw_drag_ghost(
+    ctx: &egui::Context,
+    drag_state: &ToolbarDragState,
+    toolbar_registry: &ToolbarRegistry,
+) {
+    let Some(active_drag) = drag_state.active.as_ref() else {
+        return;
+    };
+    let Some(cursor_pos) = ctx.pointer_hover_pos() else {
+        return;
+    };
+    let Some(descriptor) = toolbar_registry
+        .toolbars()
+        .find(|d| d.id == active_drag.toolbar_id)
+    else {
+        return;
+    };
+
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+
+    // Ghost orientation follows the hovered dock zone; falls back to the
+    // toolbar's current dock so it stays in its native orientation mid-air.
+    // Floating toolbars default to horizontal.
+    let display_dock = active_drag
+        .target
+        .as_ref()
+        .map(|t| t.dock)
+        .unwrap_or(active_drag.original_dock);
+    let horizontal = matches!(
+        display_dock,
+        ToolbarDock::Top | ToolbarDock::Bottom | ToolbarDock::Floating
+    );
+
+    egui::Area::new(egui::Id::new("toolbar_drag_ghost"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(cursor_pos + egui::vec2(12.0, 12.0))
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(CHROME_BG)
+                .stroke(egui::Stroke::new(2.0, CHROME_ACCENT))
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::same(4))
+                .show(ui, |ui| {
+                    // The grip dot offsets match draw_toolbar_grip: two columns of
+                    // three dots for horizontal toolbars, two rows of three for vertical.
+                    let dot_offsets: [[egui::Vec2; 3]; 2] = if horizontal {
+                        [
+                            [
+                                egui::vec2(5.0, 5.0),
+                                egui::vec2(5.0, 9.0),
+                                egui::vec2(5.0, 13.0),
+                            ],
+                            [
+                                egui::vec2(10.0, 5.0),
+                                egui::vec2(10.0, 9.0),
+                                egui::vec2(10.0, 13.0),
+                            ],
+                        ]
+                    } else {
+                        [
+                            [
+                                egui::vec2(5.0, 5.0),
+                                egui::vec2(9.0, 5.0),
+                                egui::vec2(13.0, 5.0),
+                            ],
+                            [
+                                egui::vec2(5.0, 10.0),
+                                egui::vec2(9.0, 10.0),
+                                egui::vec2(13.0, 10.0),
+                            ],
+                        ]
+                    };
+
+                    let paint_grip = |ui: &mut egui::Ui| {
+                        let (grip_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(TOOLBAR_GRIP_SIZE, TOOLBAR_GRIP_SIZE),
+                            egui::Sense::hover(),
+                        );
+                        let painter = ui.painter();
+                        for group in &dot_offsets {
+                            for offset in group {
+                                painter.rect_filled(
+                                    egui::Rect::from_center_size(
+                                        grip_rect.min + *offset,
+                                        egui::vec2(TOOLBAR_GRIP_DOT_SIZE, TOOLBAR_GRIP_DOT_SIZE),
+                                    ),
+                                    1.0,
+                                    CHROME_MUTED,
+                                );
+                            }
+                        }
+                    };
+
+                    let paint_buttons = |ui: &mut egui::Ui, count: usize| {
+                        for _ in 0..count {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(TOOLBAR_BUTTON_SIZE, TOOLBAR_BUTTON_SIZE),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(
+                                rect.shrink(4.0),
+                                egui::CornerRadius::same(3),
+                                CHROME_HOVER,
+                            );
+                        }
+                    };
+
+                    if descriptor.id == CAMERA_TOOLBAR_ID {
+                        let (rect, _) = ui.allocate_exact_size(
+                            camera_toolbar_content_size(horizontal),
+                            egui::Sense::hover(),
+                        );
+                        let painter = ui.painter();
+                        let grip_rect = egui::Rect::from_min_size(
+                            rect.min,
+                            egui::vec2(TOOLBAR_GRIP_SIZE, TOOLBAR_GRIP_SIZE),
+                        );
+                        for group in &dot_offsets {
+                            for offset in group {
+                                painter.rect_filled(
+                                    egui::Rect::from_center_size(
+                                        grip_rect.min + *offset,
+                                        egui::vec2(TOOLBAR_GRIP_DOT_SIZE, TOOLBAR_GRIP_DOT_SIZE),
+                                    ),
+                                    1.0,
+                                    CHROME_MUTED,
+                                );
+                            }
+                        }
+                        if horizontal {
+                            let button_x = grip_rect.max.x + 12.0;
+                            for index in 0..6 {
+                                let x = button_x + index as f32 * (TOOLBAR_BUTTON_SIZE * 0.9);
+                                let y = rect.center().y - TOOLBAR_BUTTON_SIZE * 0.5 + 1.0;
+                                let button = egui::Rect::from_min_size(
+                                    egui::pos2(x, y),
+                                    egui::vec2(
+                                        TOOLBAR_BUTTON_SIZE - 4.0,
+                                        TOOLBAR_BUTTON_SIZE - 4.0,
+                                    ),
+                                );
+                                painter.rect_filled(
+                                    button,
+                                    egui::CornerRadius::same(3),
+                                    CHROME_HOVER,
+                                );
+                            }
+                            let slider = egui::Rect::from_min_size(
+                                egui::pos2(
+                                    rect.max.x - CAMERA_LENS_SLIDER_WIDTH - 16.0,
+                                    rect.center().y - 4.0,
+                                ),
+                                egui::vec2(CAMERA_LENS_SLIDER_WIDTH, 8.0),
+                            );
+                            painter.rect_filled(slider, egui::CornerRadius::same(4), CHROME_HOVER);
+                        } else {
+                            let x = rect.center().x - (TOOLBAR_BUTTON_SIZE - 4.0) * 0.5;
+                            for index in 0..6 {
+                                let y = grip_rect.max.y
+                                    + 8.0
+                                    + index as f32 * (TOOLBAR_BUTTON_SIZE * 0.85);
+                                let button = egui::Rect::from_min_size(
+                                    egui::pos2(x, y),
+                                    egui::vec2(
+                                        TOOLBAR_BUTTON_SIZE - 4.0,
+                                        TOOLBAR_BUTTON_SIZE - 4.0,
+                                    ),
+                                );
+                                painter.rect_filled(
+                                    button,
+                                    egui::CornerRadius::same(3),
+                                    CHROME_HOVER,
+                                );
+                            }
+                            let slider = egui::Rect::from_min_size(
+                                egui::pos2(
+                                    rect.center().x - 4.0,
+                                    rect.max.y - CAMERA_VERTICAL_SLIDER_HEIGHT - 12.0,
+                                ),
+                                egui::vec2(8.0, CAMERA_VERTICAL_SLIDER_HEIGHT),
+                            );
+                            painter.rect_filled(slider, egui::CornerRadius::same(4), CHROME_HOVER);
+                        }
+                    } else if horizontal {
+                        let button_count: usize = descriptor
+                            .sections
+                            .iter()
+                            .map(|section| section.command_ids.len())
+                            .sum();
+                        ui.horizontal(|ui| {
+                            paint_grip(ui);
+                            paint_buttons(ui, button_count.min(12));
+                        });
+                    } else {
+                        let button_count: usize = descriptor
+                            .sections
+                            .iter()
+                            .map(|section| section.command_ids.len())
+                            .sum();
+                        ui.vertical(|ui| {
+                            paint_grip(ui);
+                            paint_buttons(ui, button_count.min(8));
+                        });
+                    }
+                });
+        });
 }
 
 fn complete_toolbar_drag(
     ctx: &egui::Context,
     drag_state: &mut ToolbarDragState,
     toolbar_layout_state: &mut ToolbarLayoutState,
+    floating_states: &mut FloatingToolbarStates,
     doc_props: &mut DocumentProperties,
 ) {
     let Some(active_drag) = drag_state.active.as_ref() else {
@@ -1429,18 +2529,33 @@ fn complete_toolbar_drag(
     }
 
     let toolbar_id = active_drag.toolbar_id.clone();
-    let original_dock = active_drag.original_dock;
-    let target_dock = active_drag.target_dock;
+    let target = active_drag.target.clone();
     drag_state.active = None;
 
-    let Some(target_dock) = target_dock else {
+    let Some(target) = target else {
+        // No dock target — tear off into a floating window.
+        if let Some(cursor) = ctx.pointer_hover_pos() {
+            apply_toolbar_float(
+                toolbar_layout_state,
+                floating_states,
+                doc_props,
+                &toolbar_id,
+                [cursor.x, cursor.y],
+            );
+        }
         return;
     };
-    if target_dock == original_dock {
-        return;
-    }
-
-    apply_toolbar_layout_change(toolbar_layout_state, doc_props, &toolbar_id, target_dock);
+    // Apply even when dock is unchanged — handles same-row reordering.
+    redock_toolbar(
+        toolbar_layout_state,
+        floating_states,
+        doc_props,
+        &toolbar_id,
+        target.dock,
+        target.row,
+        target.new_row,
+        target.insert_after.as_deref(),
+    );
 }
 
 fn apply_chrome_visuals(ctx: &egui::Context) {
