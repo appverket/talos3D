@@ -433,9 +433,7 @@ impl CapabilityRegistry {
 
     pub fn register_workbench(&mut self, descriptor: WorkbenchDescriptor) {
         assert!(
-            self.workbenches
-                .iter()
-                .all(|wb| wb.id != descriptor.id),
+            self.workbenches.iter().all(|wb| wb.id != descriptor.id),
             "Workbench '{}' was registered more than once",
             descriptor.id
         );

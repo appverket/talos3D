@@ -9,8 +9,8 @@ pub mod terrain_provider;
 use bevy::prelude::*;
 use talos3d_capability_api::{
     capabilities::{
-        CapabilityDescriptor, CapabilityDistribution, CapabilityRegistryAppExt,
-        RequireWorkbench, TerrainProviderRegistryAppExt, WorkbenchDescriptor,
+        CapabilityDescriptor, CapabilityDistribution, CapabilityRegistryAppExt, RequireWorkbench,
+        TerrainProviderRegistryAppExt, WorkbenchDescriptor,
     },
     modeling::ModelingWorkbench,
 };

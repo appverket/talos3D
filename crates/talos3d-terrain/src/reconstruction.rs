@@ -224,7 +224,11 @@ pub fn sample_interior_support_points(
 
 pub fn estimate_terrain_boundary(curves: &[ElevationCurve], spacing: f32) -> Vec<Vec2> {
     let spacing = spacing.max(REPAIR_EPSILON);
-    let dilation_amount = if curves.len() >= 10 { spacing * 1.5 } else { 0.0 };
+    let dilation_amount = if curves.len() >= 10 {
+        spacing * 1.5
+    } else {
+        0.0
+    };
     let all_samples = dedupe_vec2(
         &curves
             .iter()
@@ -249,7 +253,8 @@ pub fn estimate_terrain_boundary(curves: &[ElevationCurve], spacing: f32) -> Vec
         && terminus_samples.len() >= 6
         && terminus_samples_cover_model(&terminus_samples, &all_samples)
     {
-        let terminus_boundary = estimate_boundary_from_samples(&terminus_samples, spacing * 2.0, None);
+        let terminus_boundary =
+            estimate_boundary_from_samples(&terminus_samples, spacing * 2.0, None);
         if terminus_boundary.len() >= 3 {
             return dilate_boundary(&terminus_boundary, dilation_amount);
         }
@@ -540,8 +545,7 @@ fn point_in_polygon_2d(point: Vec2, polygon: &[Vec2]) -> bool {
         let next = polygon[(index + 1) % polygon.len()];
         let denominator = next.y - current.y;
         let intersects = (current.y > point.y) != (next.y > point.y)
-            && point.x
-                < (next.x - current.x) * (point.y - current.y) / denominator + current.x;
+            && point.x < (next.x - current.x) * (point.y - current.y) / denominator + current.x;
         if intersects {
             inside = !inside;
         }
@@ -726,8 +730,11 @@ fn join_score(
     }
 
     let lateral_limit = settings.join_tolerance.max(REPAIR_EPSILON) * MAX_BRIDGE_LATERAL_FACTOR;
-    let left_lateral_error =
-        line_deviation(left_end_point, left_direction.unwrap_or(gap_direction), right_start_point);
+    let left_lateral_error = line_deviation(
+        left_end_point,
+        left_direction.unwrap_or(gap_direction),
+        right_start_point,
+    );
     let right_lateral_error = line_deviation(
         right_start_point,
         right_direction.unwrap_or(gap_direction),
@@ -778,7 +785,8 @@ fn candidate_is_mutual_best(
         .get(&left_endpoint)
         .zip(best_per_endpoint.get(&right_endpoint))
         .is_some_and(|(left_best, right_best)| {
-            same_join_endpoints(*left_best, candidate) && same_join_endpoints(*right_best, candidate)
+            same_join_endpoints(*left_best, candidate)
+                && same_join_endpoints(*right_best, candidate)
         })
 }
 
@@ -1028,7 +1036,9 @@ mod tests {
         );
 
         assert_eq!(repaired.len(), 2);
-        assert!(repaired.iter().any(|curve| curve.source_fragment_count == 2));
+        assert!(repaired
+            .iter()
+            .any(|curve| curve.source_fragment_count == 2));
     }
 
     #[test]
@@ -1089,7 +1099,11 @@ mod tests {
 
         assert!(!support_points.is_empty());
         assert!(support_points.iter().all(|point| {
-            point.x > 0.0 && point.x < 12.0 && point.z > 0.0 && point.z < 12.0 && point.y.is_finite()
+            point.x > 0.0
+                && point.x < 12.0
+                && point.z > 0.0
+                && point.z < 12.0
+                && point.y.is_finite()
         }));
     }
 
