@@ -2,8 +2,8 @@ pub mod prelude {
     pub use crate::capabilities::{
         AssemblyTypeDescriptor, CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity,
         CapabilityRegistryAppExt, DefaultsContributor, DefaultsRegistryAppExt, GeneratedFaceRef,
-        RelationTypeDescriptor, RequireWorkbench, TerrainProvider,
-        TerrainProviderRegistryAppExt, WorkbenchDescriptor, CAPABILITY_API_VERSION,
+        RelationTypeDescriptor, RequireWorkbench, TerrainProvider, TerrainProviderRegistryAppExt,
+        WorkbenchDescriptor, CAPABILITY_API_VERSION,
     };
     pub use crate::commands::{
         activate_tool_command, CommandCategory, CommandDescriptor, CommandRegistryAppExt,
@@ -22,8 +22,7 @@ pub mod capabilities {
         CapabilityRegistryAppExt, DefaultsContributor, DefaultsRegistryAppExt, FaceHitCandidate,
         FaceId, GeneratedFaceRef, HitCandidate, ModelSummaryAccumulator, RelationTypeDescriptor,
         RequireWorkbench, SnapPoint, TerrainProvider, TerrainProviderRegistryAppExt,
-        WorkbenchDescriptor,
-        CAPABILITY_API_VERSION,
+        WorkbenchDescriptor, CAPABILITY_API_VERSION,
     };
 }
 

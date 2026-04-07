@@ -533,8 +533,7 @@ fn selected_contour_inputs(
         }
 
         if let Some(curve) = entity_ref.get::<ElevationCurve>() {
-            let Some(curve_type) =
-                classify_selected_layer(&curve.source_layer, &requested_layers)
+            let Some(curve_type) = classify_selected_layer(&curve.source_layer, &requested_layers)
             else {
                 rejected_layers.insert(curve.source_layer.clone());
                 continue;
