@@ -13,6 +13,7 @@ use crate::{
         history::{History, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         layers::LayerRegistry,
+        modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
         property_edit::PropertyEditState,
         selection::Selected,
         tools::{ActiveTool, Preview},
@@ -59,6 +60,10 @@ struct ProjectFile {
     document_properties: Option<DocumentProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layers: Option<LayerRegistry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    definitions: Option<DefinitionRegistry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    definition_libraries: Option<DefinitionLibraryRegistry>,
     entities: Vec<PersistedEntityRecord>,
 }
 
@@ -186,6 +191,8 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(props);
     world.insert_resource(OpaquePersistedEntities::default());
     world.insert_resource(LayerRegistry::default());
+    world.insert_resource(DefinitionRegistry::default());
+    world.insert_resource(DefinitionLibraryRegistry::default());
     world.resource_mut::<ElementIdAllocator>().set_next(1);
     world.resource_mut::<History>().clear();
     world.resource_mut::<PendingCommandQueue>().clear();
@@ -267,12 +274,26 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     } else {
         None
     };
+    let definition_registry = world.resource::<DefinitionRegistry>().clone();
+    let definitions = if definition_registry.list().is_empty() {
+        None
+    } else {
+        Some(definition_registry)
+    };
+    let definition_library_registry = world.resource::<DefinitionLibraryRegistry>().clone();
+    let definition_libraries = if definition_library_registry.list().is_empty() {
+        None
+    } else {
+        Some(definition_library_registry)
+    };
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
         next_element_id: world.resource::<ElementIdAllocator>().next_value(),
         document_properties: Some(doc_props),
         layers,
+        definitions,
+        definition_libraries,
         entities,
     })
 }
@@ -299,6 +320,8 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     };
     world.insert_resource(doc_props);
     world.insert_resource(project.layers.unwrap_or_default());
+    world.insert_resource(project.definitions.unwrap_or_default());
+    world.insert_resource(project.definition_libraries.unwrap_or_default());
 
     let registry = world.resource::<CapabilityRegistry>();
     let mut recognized = Vec::new();
