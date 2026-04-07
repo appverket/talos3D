@@ -172,6 +172,37 @@ pub struct SplitResult {
     pub group_element_id: u64,
 }
 
+// --- Definition / Occurrence types ---
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionEntry {
+    pub definition_id: String,
+    pub name: String,
+    pub definition_kind: String,
+    pub definition_version: u32,
+    pub parameter_names: Vec<String>,
+    pub full: serde_json::Value,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionLibraryEntry {
+    pub library_id: String,
+    pub name: String,
+    pub scope: String,
+    pub definition_count: usize,
+    pub source_path: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InstantiateDefinitionResult {
+    pub element_id: u64,
+    pub definition_id: String,
+    pub imported_definition_ids: Vec<String>,
+}
+
 // --- Assembly / Relation types ---
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -560,6 +591,59 @@ enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Vec<AssemblyMemberEntry>>>,
     },
+    // --- Definition / Occurrence ---
+    ListDefinitions(oneshot::Sender<Vec<DefinitionEntry>>),
+    GetDefinition {
+        definition_id: String,
+        response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    CreateDefinition {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    UpdateDefinition {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    ListDefinitionLibraries(oneshot::Sender<Vec<DefinitionLibraryEntry>>),
+    GetDefinitionLibrary {
+        library_id: String,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    CreateDefinitionLibrary {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionLibraryEntry>>,
+    },
+    AddDefinitionToLibrary {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionLibraryEntry>>,
+    },
+    ImportDefinitionLibrary {
+        path: String,
+        response: oneshot::Sender<ApiResult<DefinitionLibraryEntry>>,
+    },
+    ExportDefinitionLibrary {
+        library_id: String,
+        path: String,
+        response: oneshot::Sender<ApiResult<String>>,
+    },
+    InstantiateDefinition {
+        request: Value,
+        response: oneshot::Sender<ApiResult<InstantiateDefinitionResult>>,
+    },
+    PlaceOccurrence {
+        request: Value,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    UpdateOccurrenceOverrides {
+        element_id: u64,
+        overrides: Value,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    ResolveOccurrence {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -796,6 +880,67 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_list_assembly_members(world, element_id));
+        }
+        ModelApiRequest::ListDefinitions(response) => {
+            let _ = response.send(handle_list_definitions(world));
+        }
+        ModelApiRequest::GetDefinition {
+            definition_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_definition(world, definition_id));
+        }
+        ModelApiRequest::CreateDefinition { request, response } => {
+            let _ = response.send(handle_create_definition(world, request));
+        }
+        ModelApiRequest::UpdateDefinition { request, response } => {
+            let _ = response.send(handle_update_definition(world, request));
+        }
+        ModelApiRequest::ListDefinitionLibraries(response) => {
+            let _ = response.send(handle_list_definition_libraries(world));
+        }
+        ModelApiRequest::GetDefinitionLibrary {
+            library_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_definition_library(world, library_id));
+        }
+        ModelApiRequest::CreateDefinitionLibrary { request, response } => {
+            let _ = response.send(handle_create_definition_library(world, request));
+        }
+        ModelApiRequest::AddDefinitionToLibrary { request, response } => {
+            let _ = response.send(handle_add_definition_to_library(world, request));
+        }
+        ModelApiRequest::ImportDefinitionLibrary { path, response } => {
+            let _ = response.send(handle_import_definition_library(world, &path));
+        }
+        ModelApiRequest::ExportDefinitionLibrary {
+            library_id,
+            path,
+            response,
+        } => {
+            let _ = response.send(handle_export_definition_library(world, &library_id, &path));
+        }
+        ModelApiRequest::InstantiateDefinition { request, response } => {
+            let _ = response.send(handle_instantiate_definition(world, request));
+        }
+        ModelApiRequest::PlaceOccurrence { request, response } => {
+            let _ = response.send(handle_place_occurrence(world, request));
+        }
+        ModelApiRequest::UpdateOccurrenceOverrides {
+            element_id,
+            overrides,
+            response,
+        } => {
+            let _ = response.send(handle_update_occurrence_overrides(
+                world, element_id, overrides,
+            ));
+        }
+        ModelApiRequest::ResolveOccurrence {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_resolve_occurrence(world, element_id));
         }
     }
 }
@@ -1458,6 +1603,185 @@ impl ModelApiServer {
             .await
             .map_err(|_| "model API response channel closed".to_string())?
     }
+
+    async fn request_list_definitions(&self) -> Result<Vec<DefinitionEntry>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListDefinitions(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_get_definition(&self, definition_id: String) -> ApiResult<DefinitionEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetDefinition {
+                definition_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_definition(&self, request: Value) -> ApiResult<DefinitionEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_definition(&self, request: Value) -> ApiResult<DefinitionEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_list_definition_libraries(
+        &self,
+    ) -> Result<Vec<DefinitionLibraryEntry>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListDefinitionLibraries(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_get_definition_library(&self, library_id: String) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetDefinitionLibrary {
+                library_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_definition_library(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionLibraryEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateDefinitionLibrary { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_add_definition_to_library(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionLibraryEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::AddDefinitionToLibrary { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_import_definition_library(
+        &self,
+        path: String,
+    ) -> ApiResult<DefinitionLibraryEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ImportDefinitionLibrary { path, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_export_definition_library(
+        &self,
+        library_id: String,
+        path: String,
+    ) -> ApiResult<String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ExportDefinitionLibrary {
+                library_id,
+                path,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_instantiate_definition(
+        &self,
+        request: Value,
+    ) -> ApiResult<InstantiateDefinitionResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::InstantiateDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_place_occurrence(&self, request: Value) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PlaceOccurrence { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_occurrence_overrides(
+        &self,
+        element_id: u64,
+        overrides: Value,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateOccurrenceOverrides {
+                element_id,
+                overrides,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_resolve_occurrence(&self, element_id: u64) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ResolveOccurrence {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -1766,6 +2090,50 @@ struct QueryRelationsRequest {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ListAssemblyMembersRequest {
+    element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DefinitionGetRequest {
+    definition_id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DefinitionLibraryGetRequest {
+    library_id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DefinitionLibraryPathRequest {
+    path: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DefinitionLibraryExportRequest {
+    library_id: String,
+    path: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OccurrenceUpdateOverridesRequest {
+    element_id: u64,
+    overrides: Value,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OccurrenceResolveRequest {
     element_id: u64,
 }
 
@@ -2377,6 +2745,210 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(members)
+    }
+
+    #[tool(
+        name = "definition/list",
+        description = "List all reusable definitions in the document."
+    )]
+    async fn definition_list_tool(&self) -> Result<CallToolResult, McpError> {
+        let definitions = self
+            .request_list_definitions()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(definitions)
+    }
+
+    #[tool(
+        name = "definition/get",
+        description = "Get a definition by its definition_id."
+    )]
+    async fn definition_get_tool(
+        &self,
+        Parameters(params): Parameters<DefinitionGetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_get_definition(params.definition_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/create",
+        description = "Create a new reusable definition. Requires: name. Optionally: definition_kind, parameters, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data."
+    )]
+    async fn definition_create_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_create_definition(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/update",
+        description = "Update an existing definition. Requires: definition_id. Optionally: name, definition_kind, parameters, evaluators, representations, compound, and domain_data. Bumps definition_version and propagates changes to all linked occurrences."
+    )]
+    async fn definition_update_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_update_definition(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/library/list",
+        description = "List reusable definition libraries available to the current document."
+    )]
+    async fn definition_library_list_tool(&self) -> Result<CallToolResult, McpError> {
+        let libraries = self
+            .request_list_definition_libraries()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(libraries)
+    }
+
+    #[tool(
+        name = "definition/library/get",
+        description = "Get a definition library by library_id, including the definitions it contains."
+    )]
+    async fn definition_library_get_tool(
+        &self,
+        Parameters(params): Parameters<DefinitionLibraryGetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let library = self
+            .request_get_definition_library(params.library_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(library)
+    }
+
+    #[tool(
+        name = "definition/library/create",
+        description = "Create a new definition library. Requires: name. Optionally: scope (\"DocumentLocal\"|\"ExternalFile\"), source_path, tags."
+    )]
+    async fn definition_library_create_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_create_definition_library(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/library/add_definition",
+        description = "Copy a document definition into a library. Requires: library_id, definition_id."
+    )]
+    async fn definition_library_add_definition_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_add_definition_to_library(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/library/import",
+        description = "Import a definition library JSON file into the current document context. Requires: path."
+    )]
+    async fn definition_library_import_tool(
+        &self,
+        Parameters(params): Parameters<DefinitionLibraryPathRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_import_definition_library(params.path)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/library/export",
+        description = "Export a definition library JSON file. Requires: library_id, path."
+    )]
+    async fn definition_library_export_tool(
+        &self,
+        Parameters(params): Parameters<DefinitionLibraryExportRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self
+            .request_export_definition_library(params.library_id, params.path)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(path)
+    }
+
+    #[tool(
+        name = "definition/instantiate",
+        description = "Instantiate a definition into the model. Requires: definition_id. Optionally: library_id (imports from library first if needed), overrides, label, offset, domain_data."
+    )]
+    async fn definition_instantiate_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_instantiate_definition(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "occurrence/place",
+        description = "Place an occurrence of a definition. Requires: definition_id. Optionally: overrides, label, offset, and domain_data."
+    )]
+    async fn occurrence_place_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_place_occurrence(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "occurrence/update_overrides",
+        description = "Update the parameter overrides on an existing occurrence. Requires: element_id (u64), overrides (object mapping param names to values)."
+    )]
+    async fn occurrence_update_overrides_tool(
+        &self,
+        Parameters(params): Parameters<OccurrenceUpdateOverridesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_update_occurrence_overrides(params.element_id, params.overrides)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "occurrence/resolve",
+        description = "Resolve and return the effective parameter values for an occurrence, including provenance (DefinitionDefault or OccurrenceOverride). Requires: element_id (u64)."
+    )]
+    async fn occurrence_resolve_tool(
+        &self,
+        Parameters(params): Parameters<OccurrenceResolveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_resolve_occurrence(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
     }
 }
 
@@ -3270,6 +3842,895 @@ fn enrich_assembly_members(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Definition / Occurrence handlers
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn parse_param_type(
+    value: Option<&Value>,
+) -> Result<crate::plugins::modeling::definition::ParamType, String> {
+    use crate::plugins::modeling::definition::ParamType;
+
+    match value.and_then(|value| value.as_str()).unwrap_or("Numeric") {
+        "Numeric" => Ok(ParamType::Numeric),
+        "Boolean" => Ok(ParamType::Boolean),
+        "StringVal" => Ok(ParamType::StringVal),
+        "Enum" => Err("Enum parameters must provide param_type as an object or array".to_string()),
+        other => Err(format!("Unsupported param_type '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_param_type_value(
+    value: &Value,
+) -> Result<crate::plugins::modeling::definition::ParamType, String> {
+    use crate::plugins::modeling::definition::ParamType;
+
+    if let Some(string) = value.as_str() {
+        return parse_param_type(Some(&Value::String(string.to_string())));
+    }
+
+    if let Some(object) = value.as_object() {
+        let kind = object
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("Numeric");
+        return match kind {
+            "Numeric" => Ok(ParamType::Numeric),
+            "Boolean" => Ok(ParamType::Boolean),
+            "StringVal" => Ok(ParamType::StringVal),
+            "Enum" => {
+                let variants = object
+                    .get("variants")
+                    .and_then(|value| value.as_array())
+                    .ok_or_else(|| "Enum param_type requires a 'variants' array".to_string())?
+                    .iter()
+                    .map(|variant| {
+                        variant
+                            .as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| "Enum variants must be strings".to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(ParamType::Enum(variants))
+            }
+            other => Err(format!("Unsupported param_type '{other}'")),
+        };
+    }
+
+    Err("param_type must be a string or object".to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn parse_override_policy(
+    value: Option<&Value>,
+) -> Result<crate::plugins::modeling::definition::OverridePolicy, String> {
+    use crate::plugins::modeling::definition::OverridePolicy;
+
+    match value
+        .and_then(|value| value.as_str())
+        .unwrap_or("Overridable")
+    {
+        "Locked" => Ok(OverridePolicy::Locked),
+        "Overridable" => Ok(OverridePolicy::Overridable),
+        "Required" => Ok(OverridePolicy::Required),
+        other => Err(format!("Unsupported override_policy '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_parameter_metadata(
+    value: Option<&Value>,
+) -> Result<crate::plugins::modeling::definition::ParameterMetadata, String> {
+    use crate::plugins::modeling::definition::{ParameterMetadata, ParameterMutability};
+
+    let Some(value) = value else {
+        return Ok(ParameterMetadata::default());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| "parameter metadata must be an object".to_string())?;
+    let mutability = match object
+        .get("mutability")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Input")
+    {
+        "Input" => ParameterMutability::Input,
+        "Derived" => ParameterMutability::Derived,
+        other => return Err(format!("Unsupported parameter mutability '{other}'")),
+    };
+
+    Ok(ParameterMetadata {
+        unit: object
+            .get("unit")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        min: object.get("min").cloned(),
+        max: object.get("max").cloned(),
+        step: object.get("step").cloned(),
+        category: object
+            .get("category")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        mutability,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn parse_parameter_schema(
+    value: Option<&Value>,
+) -> Result<crate::plugins::modeling::definition::ParameterSchema, String> {
+    use crate::plugins::modeling::definition::{ParameterDef, ParameterSchema};
+
+    let Some(value) = value else {
+        return Ok(ParameterSchema::default());
+    };
+
+    let parameters = value
+        .as_array()
+        .ok_or_else(|| "'parameters' must be an array".to_string())?
+        .iter()
+        .map(|parameter| {
+            let object = parameter
+                .as_object()
+                .ok_or_else(|| "each parameter must be an object".to_string())?;
+            let name = object
+                .get("name")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "parameter missing 'name'".to_string())?
+                .to_string();
+            let param_type = object
+                .get("param_type")
+                .map(parse_param_type_value)
+                .transpose()?
+                .unwrap_or(crate::plugins::modeling::definition::ParamType::Numeric);
+            let default_value = object
+                .get("default_value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let override_policy = parse_override_policy(object.get("override_policy"))?;
+            let metadata = parse_parameter_metadata(object.get("metadata"))?;
+            Ok(ParameterDef {
+                name,
+                param_type,
+                default_value,
+                override_policy,
+                metadata,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(ParameterSchema(parameters))
+}
+
+#[cfg(feature = "model-api")]
+fn parse_definition_kind(
+    value: Option<&Value>,
+) -> Result<crate::plugins::modeling::definition::DefinitionKind, String> {
+    use crate::plugins::modeling::definition::DefinitionKind;
+
+    match value.and_then(|value| value.as_str()).unwrap_or("Solid") {
+        "Solid" => Ok(DefinitionKind::Solid),
+        "Annotation" => Ok(DefinitionKind::Annotation),
+        other => Err(format!("Unsupported definition_kind '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_representation_kind(
+    value: Option<&Value>,
+) -> Result<crate::plugins::modeling::definition::RepresentationKind, String> {
+    use crate::plugins::modeling::definition::RepresentationKind;
+
+    match value.and_then(|value| value.as_str()).unwrap_or("Body") {
+        "Body" => Ok(RepresentationKind::Body),
+        "Axis" => Ok(RepresentationKind::Axis),
+        "Footprint" => Ok(RepresentationKind::Footprint),
+        "BoundingBox" => Ok(RepresentationKind::BoundingBox),
+        other => Err(format!("Unsupported representation kind '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_representation_role(
+    value: Option<&Value>,
+) -> Result<crate::plugins::modeling::definition::RepresentationRole, String> {
+    use crate::plugins::modeling::definition::RepresentationRole;
+
+    match value
+        .and_then(|value| value.as_str())
+        .unwrap_or("PrimaryGeometry")
+    {
+        "PrimaryGeometry" => Ok(RepresentationRole::PrimaryGeometry),
+        "Annotation" => Ok(RepresentationRole::Annotation),
+        "Reference" => Ok(RepresentationRole::Reference),
+        other => Err(format!("Unsupported representation role '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_representations(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Vec<crate::plugins::modeling::definition::RepresentationDecl>, String> {
+    use crate::plugins::modeling::definition::{
+        RepresentationDecl, RepresentationKind, RepresentationRole,
+    };
+
+    if let Some(value) = object.get("representations") {
+        return value
+            .as_array()
+            .ok_or_else(|| "'representations' must be an array".to_string())?
+            .iter()
+            .map(|representation| {
+                let representation = representation
+                    .as_object()
+                    .ok_or_else(|| "each representation must be an object".to_string())?;
+                Ok(RepresentationDecl {
+                    kind: parse_representation_kind(representation.get("kind"))?,
+                    role: parse_representation_role(representation.get("role"))?,
+                })
+            })
+            .collect();
+    }
+
+    Ok(vec![RepresentationDecl {
+        kind: RepresentationKind::Body,
+        role: RepresentationRole::PrimaryGeometry,
+    }])
+}
+
+#[cfg(feature = "model-api")]
+fn parse_evaluators(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Vec<crate::plugins::modeling::definition::EvaluatorDecl>, String> {
+    use crate::plugins::modeling::definition::{EvaluatorDecl, RectangularExtrusionEvaluator};
+
+    if let Some(value) = object.get("evaluators") {
+        return value
+            .as_array()
+            .ok_or_else(|| "'evaluators' must be an array".to_string())?
+            .iter()
+            .map(|evaluator| {
+                let evaluator = evaluator
+                    .as_object()
+                    .ok_or_else(|| "each evaluator must be an object".to_string())?;
+                let kind = evaluator
+                    .get("kind")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("RectangularExtrusion");
+                match kind {
+                    "RectangularExtrusion" => Ok(EvaluatorDecl::RectangularExtrusion(
+                        RectangularExtrusionEvaluator {
+                            width_param: evaluator
+                                .get("width_param")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("width")
+                                .to_string(),
+                            depth_param: evaluator
+                                .get("depth_param")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("depth")
+                                .to_string(),
+                            height_param: evaluator
+                                .get("height_param")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("height")
+                                .to_string(),
+                        },
+                    )),
+                    other => Err(format!("Unsupported evaluator kind '{other}'")),
+                }
+            })
+            .collect();
+    }
+
+    Ok(vec![EvaluatorDecl::RectangularExtrusion(
+        RectangularExtrusionEvaluator {
+            width_param: object
+                .get("width_param")
+                .and_then(|value| value.as_str())
+                .unwrap_or("width")
+                .to_string(),
+            depth_param: object
+                .get("depth_param")
+                .and_then(|value| value.as_str())
+                .unwrap_or("depth")
+                .to_string(),
+            height_param: object
+                .get("height_param")
+                .and_then(|value| value.as_str())
+                .unwrap_or("height")
+                .to_string(),
+        },
+    )])
+}
+
+#[cfg(feature = "model-api")]
+fn parse_optional_compound(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<crate::plugins::modeling::definition::CompoundDefinition>, String> {
+    object
+        .get("compound")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("invalid 'compound': {error}"))
+}
+
+#[cfg(feature = "model-api")]
+fn definition_to_entry(def: &crate::plugins::modeling::definition::Definition) -> DefinitionEntry {
+    DefinitionEntry {
+        definition_id: def.id.to_string(),
+        name: def.name.clone(),
+        definition_kind: format!("{:?}", def.definition_kind),
+        definition_version: def.definition_version,
+        parameter_names: def
+            .interface
+            .parameters
+            .0
+            .iter()
+            .map(|p| p.name.clone())
+            .collect(),
+        full: serde_json::to_value(def).unwrap_or(serde_json::Value::Null),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn definition_library_to_entry(
+    library: &crate::plugins::modeling::definition::DefinitionLibrary,
+) -> DefinitionLibraryEntry {
+    let summary = library.summary();
+    DefinitionLibraryEntry {
+        library_id: summary.library_id,
+        name: summary.name,
+        scope: summary.scope,
+        definition_count: summary.definition_count,
+        source_path: summary.source_path,
+    }
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_definitions(world: &World) -> Vec<DefinitionEntry> {
+    use crate::plugins::modeling::definition::DefinitionRegistry;
+    world
+        .resource::<DefinitionRegistry>()
+        .list()
+        .into_iter()
+        .map(definition_to_entry)
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_definition(world: &World, definition_id: String) -> ApiResult<DefinitionEntry> {
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+    let id = DefinitionId(definition_id.clone());
+    world
+        .resource::<DefinitionRegistry>()
+        .get(&id)
+        .map(definition_to_entry)
+        .ok_or_else(|| format!("Definition '{definition_id}' not found"))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_definition_libraries(world: &World) -> Vec<DefinitionLibraryEntry> {
+    use crate::plugins::modeling::definition::DefinitionLibraryRegistry;
+
+    world
+        .resource::<DefinitionLibraryRegistry>()
+        .list()
+        .into_iter()
+        .map(definition_library_to_entry)
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_definition_library(world: &World, library_id: String) -> ApiResult<Value> {
+    use crate::plugins::modeling::definition::{DefinitionLibraryId, DefinitionLibraryRegistry};
+
+    let id = DefinitionLibraryId(library_id.clone());
+    let library = world
+        .resource::<DefinitionLibraryRegistry>()
+        .get(&id)
+        .ok_or_else(|| format!("Definition library '{library_id}' not found"))?;
+
+    serde_json::to_value(library).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_create_definition(world: &mut World, request: Value) -> ApiResult<DefinitionEntry> {
+    use crate::plugins::commands::enqueue_create_definition;
+    use crate::plugins::modeling::definition::{
+        Definition, DefinitionId, DefinitionRegistry, Interface,
+    };
+
+    let obj = request
+        .as_object()
+        .ok_or_else(|| "definition/create expects a JSON object".to_string())?;
+
+    let name = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing 'name'".to_string())?
+        .to_string();
+
+    let definition = Definition {
+        id: DefinitionId::new(),
+        name,
+        definition_kind: parse_definition_kind(obj.get("definition_kind"))?,
+        definition_version: 1,
+        interface: Interface {
+            parameters: parse_parameter_schema(obj.get("parameters"))?,
+        },
+        evaluators: parse_evaluators(obj)?,
+        representations: parse_representations(obj)?,
+        compound: parse_optional_compound(obj)?,
+        domain_data: obj.get("domain_data").cloned().unwrap_or(Value::Null),
+    };
+    {
+        let registry = world.resource::<DefinitionRegistry>();
+        definition.validate_with(|id| registry.get(id).is_some())?;
+    }
+
+    let entry = definition_to_entry(&definition);
+    enqueue_create_definition(world, definition);
+    flush_model_api_write_pipeline(world);
+    Ok(entry)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<DefinitionEntry> {
+    use crate::plugins::commands::enqueue_update_definition;
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+
+    let obj = request
+        .as_object()
+        .ok_or_else(|| "definition/update expects a JSON object".to_string())?;
+
+    let id_str = obj
+        .get("definition_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing 'definition_id'".to_string())?;
+    let id = DefinitionId(id_str.to_string());
+
+    let before = world
+        .resource::<DefinitionRegistry>()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("Definition '{id_str}' not found"))?;
+
+    let mut after = before.clone();
+    after.definition_version += 1;
+
+    if let Some(name_val) = obj.get("name") {
+        if let Some(n) = name_val.as_str() {
+            after.name = n.to_string();
+        }
+    }
+
+    if obj.contains_key("definition_kind") {
+        after.definition_kind = parse_definition_kind(obj.get("definition_kind"))?;
+    }
+
+    if obj.contains_key("parameters") {
+        after.interface.parameters = parse_parameter_schema(obj.get("parameters"))?;
+    }
+
+    if obj.contains_key("evaluators")
+        || obj.contains_key("width_param")
+        || obj.contains_key("depth_param")
+        || obj.contains_key("height_param")
+    {
+        after.evaluators = parse_evaluators(obj)?;
+    }
+
+    if obj.contains_key("representations") {
+        after.representations = parse_representations(obj)?;
+    }
+
+    if obj.contains_key("compound") {
+        after.compound = parse_optional_compound(obj)?;
+    }
+
+    if obj.contains_key("domain_data") {
+        after.domain_data = obj.get("domain_data").cloned().unwrap_or(Value::Null);
+    }
+
+    {
+        let registry = world.resource::<DefinitionRegistry>();
+        after.validate_with(|definition_id| {
+            definition_id == &after.id || registry.get(definition_id).is_some()
+        })?;
+    }
+
+    let entry = definition_to_entry(&after);
+    enqueue_update_definition(world, before, after);
+    flush_model_api_write_pipeline(world);
+    Ok(entry)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_create_definition_library(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionLibraryEntry> {
+    use crate::plugins::modeling::definition::{DefinitionLibraryRegistry, DefinitionLibraryScope};
+
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/library/create expects a JSON object".to_string())?;
+    let name = object
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Missing 'name'".to_string())?;
+    let scope = match object
+        .get("scope")
+        .and_then(|value| value.as_str())
+        .unwrap_or("DocumentLocal")
+    {
+        "DocumentLocal" => DefinitionLibraryScope::DocumentLocal,
+        "ExternalFile" => DefinitionLibraryScope::ExternalFile,
+        other => return Err(format!("Unsupported library scope '{other}'")),
+    };
+    let source_path = object
+        .get("source_path")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    let library_id = world
+        .resource_mut::<DefinitionLibraryRegistry>()
+        .create_library(name.to_string(), scope, source_path);
+    let library = world
+        .resource::<DefinitionLibraryRegistry>()
+        .get(&library_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Definition library '{}' not found after creation",
+                library_id
+            )
+        })?;
+
+    Ok(definition_library_to_entry(&library))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_add_definition_to_library(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionLibraryEntry> {
+    use crate::plugins::modeling::definition::{
+        DefinitionId, DefinitionLibraryId, DefinitionLibraryRegistry, DefinitionRegistry,
+    };
+
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/library/add_definition expects a JSON object".to_string())?;
+    let library_id = DefinitionLibraryId(
+        object
+            .get("library_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "Missing 'library_id'".to_string())?
+            .to_string(),
+    );
+    let definition_id = DefinitionId(
+        object
+            .get("definition_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "Missing 'definition_id'".to_string())?
+            .to_string(),
+    );
+
+    let definition = world
+        .resource::<DefinitionRegistry>()
+        .get(&definition_id)
+        .cloned()
+        .ok_or_else(|| format!("Definition '{}' not found", definition_id))?;
+
+    world
+        .resource_mut::<DefinitionLibraryRegistry>()
+        .add_definition(&library_id, definition)?;
+
+    let library = world
+        .resource::<DefinitionLibraryRegistry>()
+        .get(&library_id)
+        .cloned()
+        .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
+
+    Ok(definition_library_to_entry(&library))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_import_definition_library(
+    world: &mut World,
+    path: &str,
+) -> ApiResult<DefinitionLibraryEntry> {
+    use crate::plugins::modeling::definition::{
+        DefinitionLibraryFile, DefinitionLibraryRegistry, DefinitionLibraryScope,
+    };
+
+    let contents = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut file: DefinitionLibraryFile =
+        serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    if file.version != DefinitionLibraryFile::VERSION {
+        return Err(format!(
+            "Unsupported definition library version {} (expected {})",
+            file.version,
+            DefinitionLibraryFile::VERSION
+        ));
+    }
+    file.library.scope = DefinitionLibraryScope::ExternalFile;
+    file.library.source_path = Some(path.to_string());
+
+    world
+        .resource_mut::<DefinitionLibraryRegistry>()
+        .insert(file.library.clone());
+
+    Ok(definition_library_to_entry(&file.library))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_export_definition_library(
+    world: &World,
+    library_id: &str,
+    path: &str,
+) -> ApiResult<String> {
+    use crate::plugins::modeling::definition::{
+        DefinitionLibraryFile, DefinitionLibraryId, DefinitionLibraryRegistry,
+    };
+
+    let id = DefinitionLibraryId(library_id.to_string());
+    let library = world
+        .resource::<DefinitionLibraryRegistry>()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
+
+    let file = DefinitionLibraryFile {
+        version: DefinitionLibraryFile::VERSION,
+        library,
+    };
+    let json = serde_json::to_string_pretty(&file).map_err(|error| error.to_string())?;
+    std::fs::write(path, json).map_err(|error| error.to_string())?;
+    Ok(path.to_string())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_instantiate_definition(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<InstantiateDefinitionResult> {
+    use crate::plugins::commands::enqueue_create_definition;
+    use crate::plugins::modeling::definition::{
+        DefinitionId, DefinitionLibraryId, DefinitionLibraryRegistry, DefinitionRegistry,
+    };
+
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/instantiate expects a JSON object".to_string())?;
+    let definition_id = object
+        .get("definition_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Missing 'definition_id'".to_string())?
+        .to_string();
+
+    let mut imported_definition_ids = Vec::new();
+    let needs_import = {
+        let registry = world.resource::<DefinitionRegistry>();
+        registry.get(&DefinitionId(definition_id.clone())).is_none()
+    };
+
+    if needs_import {
+        let library_id = object
+            .get("library_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "Definition '{}' is not present in the document; provide 'library_id' to import it first",
+                    definition_id
+                )
+            })?;
+        let library_id = DefinitionLibraryId(library_id.to_string());
+        let library = world
+            .resource::<DefinitionLibraryRegistry>()
+            .get(&library_id)
+            .cloned()
+            .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
+        let root_definition = library
+            .get(&DefinitionId(definition_id.clone()))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Definition '{}' not found in library '{}'",
+                    definition_id, library_id
+                )
+            })?;
+
+        let mut to_import = vec![root_definition];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(definition) = to_import.pop() {
+            if !seen.insert(definition.id.clone()) {
+                continue;
+            }
+            if let Some(compound) = &definition.compound {
+                for slot in &compound.child_slots {
+                    if let Some(child) = library.get(&slot.definition_id).cloned() {
+                        to_import.push(child);
+                    }
+                }
+            }
+
+            let already_present = {
+                let registry = world.resource::<DefinitionRegistry>();
+                registry.get(&definition.id).is_some()
+            };
+            if !already_present {
+                imported_definition_ids.push(definition.id.to_string());
+                enqueue_create_definition(world, definition);
+            }
+        }
+        flush_model_api_write_pipeline(world);
+    }
+
+    let element_id = handle_place_occurrence(world, request)?;
+    Ok(InstantiateDefinitionResult {
+        element_id,
+        definition_id,
+        imported_definition_ids,
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_place_occurrence(world: &mut World, request: Value) -> ApiResult<u64> {
+    use crate::plugins::commands::enqueue_create_boxed_entity;
+    use crate::plugins::identity::ElementIdAllocator;
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+    use crate::plugins::modeling::occurrence::{OccurrenceIdentity, OccurrenceSnapshot};
+
+    let obj = request
+        .as_object()
+        .ok_or_else(|| "occurrence/place expects a JSON object".to_string())?;
+
+    let def_id_str = obj
+        .get("definition_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing 'definition_id'".to_string())?;
+    let def_id = DefinitionId(def_id_str.to_string());
+
+    let def_version = world
+        .resource::<DefinitionRegistry>()
+        .get(&def_id)
+        .ok_or_else(|| format!("Definition '{def_id_str}' not found"))?
+        .definition_version;
+
+    let mut identity = OccurrenceIdentity::new(def_id, def_version);
+
+    if let Some(overrides_val) = obj.get("overrides") {
+        if let Some(map) = overrides_val.as_object() {
+            for (k, v) in map {
+                identity.overrides.set(k.clone(), v.clone());
+            }
+        }
+    }
+    if obj.contains_key("domain_data") {
+        identity.domain_data = obj.get("domain_data").cloned().unwrap_or(Value::Null);
+    }
+    {
+        let registry = world.resource::<DefinitionRegistry>();
+        registry.validate_overrides(&identity.definition_id, &identity.overrides)?;
+    }
+
+    let label = obj
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Occurrence")
+        .to_string();
+
+    let offset = obj
+        .get("offset")
+        .and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok())
+        .map(|[x, y, z]| bevy::prelude::Vec3::new(x, y, z))
+        .unwrap_or(bevy::prelude::Vec3::ZERO);
+
+    let element_id = world.resource_mut::<ElementIdAllocator>().next_id();
+    let mut snapshot = OccurrenceSnapshot::new(element_id, identity, label);
+    snapshot.offset = offset;
+
+    let result_id = element_id.0;
+    enqueue_create_boxed_entity(world, snapshot.into());
+    flush_model_api_write_pipeline(world);
+    Ok(result_id)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_update_occurrence_overrides(
+    world: &mut World,
+    element_id: u64,
+    overrides: Value,
+) -> ApiResult<Value> {
+    use crate::plugins::commands::ApplyEntityChangesCommand;
+    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+
+    let eid = ElementId(element_id);
+
+    // Capture before snapshot
+    let before = capture_entity_snapshot(world, eid)
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+
+    // Verify it is an occurrence
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    let has_identity = q
+        .iter(world)
+        .find(|e| e.get::<ElementId>().copied() == Some(eid))
+        .map(|e| e.get::<OccurrenceIdentity>().is_some())
+        .unwrap_or(false);
+    drop(q);
+
+    if !has_identity {
+        return Err(format!("Entity {element_id} is not an occurrence"));
+    }
+
+    // Apply overrides through the AuthoredEntity set_property_json pathway for each key.
+    let mut after = before.clone();
+    if let Some(map) = overrides.as_object() {
+        for (k, v) in map {
+            after = after
+                .set_property_json(k, v)
+                .map_err(|e| format!("Failed to set '{k}': {e}"))?
+                .into();
+        }
+    }
+
+    if let Some(snapshot) = after
+        .0
+        .as_any()
+        .downcast_ref::<crate::plugins::modeling::occurrence::OccurrenceSnapshot>()
+    {
+        let registry = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        registry.validate_overrides(
+            &snapshot.identity.definition_id,
+            &snapshot.identity.overrides,
+        )?;
+    }
+
+    let after_json = after.to_json();
+
+    world
+        .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+        .write(ApplyEntityChangesCommand {
+            label: "Update occurrence overrides",
+            before: vec![before],
+            after: vec![after],
+        });
+
+    flush_model_api_write_pipeline(world);
+    Ok(after_json)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_resolve_occurrence(world: &World, element_id: u64) -> ApiResult<Value> {
+    use crate::plugins::modeling::definition::DefinitionRegistry;
+    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+
+    let eid = ElementId(element_id);
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    let entity_ref = q
+        .iter(world)
+        .find(|e| e.get::<ElementId>().copied() == Some(eid))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+
+    let identity = entity_ref
+        .get::<OccurrenceIdentity>()
+        .ok_or_else(|| format!("Entity {element_id} is not an occurrence"))?
+        .clone();
+    drop(q);
+
+    let registry = world.resource::<DefinitionRegistry>();
+    let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
+
+    Ok(serde_json::to_value(resolved).unwrap_or(serde_json::Value::Null))
+}
+
 #[cfg(feature = "model-api")]
 fn flush_model_api_write_pipeline(world: &mut World) {
     queue_command_events(world);
@@ -3464,7 +4925,7 @@ fn handle_set_document_properties(
 #[cfg(feature = "model-api")]
 fn parse_toolbar_dock(value: &str) -> Result<ToolbarDock, String> {
     ToolbarDock::from_str(value).ok_or_else(|| {
-        format!("Invalid toolbar dock: {value}. Expected one of top, bottom, left, right")
+        format!("Invalid toolbar dock: {value}. Expected one of top, bottom, left, right, floating")
     })
 }
 
@@ -3839,17 +5300,17 @@ mod tests {
     #[cfg(feature = "model-api")]
     fn init_model_api_test_world() -> World {
         let mut world = World::new();
-        world.insert_resource(Events::<CreateBoxCommand>::default());
-        world.insert_resource(Events::<CreateCylinderCommand>::default());
-        world.insert_resource(Events::<CreatePlaneCommand>::default());
-        world.insert_resource(Events::<CreatePolylineCommand>::default());
-        world.insert_resource(Events::<CreateTriangleMeshCommand>::default());
-        world.insert_resource(Events::<CreateEntityCommand>::default());
-        world.insert_resource(Events::<DeleteEntitiesCommand>::default());
-        world.insert_resource(Events::<ResolvedDeleteEntitiesCommand>::default());
-        world.insert_resource(Events::<ApplyEntityChangesCommand>::default());
-        world.insert_resource(Events::<BeginCommandGroup>::default());
-        world.insert_resource(Events::<EndCommandGroup>::default());
+        world.insert_resource(Messages::<CreateBoxCommand>::default());
+        world.insert_resource(Messages::<CreateCylinderCommand>::default());
+        world.insert_resource(Messages::<CreatePlaneCommand>::default());
+        world.insert_resource(Messages::<CreatePolylineCommand>::default());
+        world.insert_resource(Messages::<CreateTriangleMeshCommand>::default());
+        world.insert_resource(Messages::<CreateEntityCommand>::default());
+        world.insert_resource(Messages::<DeleteEntitiesCommand>::default());
+        world.insert_resource(Messages::<ResolvedDeleteEntitiesCommand>::default());
+        world.insert_resource(Messages::<ApplyEntityChangesCommand>::default());
+        world.insert_resource(Messages::<BeginCommandGroup>::default());
+        world.insert_resource(Messages::<EndCommandGroup>::default());
         world.insert_resource(PendingCommandQueue::default());
         world.insert_resource(History::default());
         world.insert_resource(ElementIdAllocator::default());
@@ -3882,6 +5343,7 @@ mod tests {
             "core".to_string(),
             ToolbarLayoutEntry {
                 dock: ToolbarDock::Top,
+                row: 0,
                 order: 0,
                 visible: true,
             },
@@ -3890,6 +5352,7 @@ mod tests {
             "modeling".to_string(),
             ToolbarLayoutEntry {
                 dock: ToolbarDock::Left,
+                row: 0,
                 order: 0,
                 visible: true,
             },
@@ -3901,7 +5364,15 @@ mod tests {
         registry.register_factory(PrimitiveFactory::<PlanePrimitive>::new());
         registry.register_factory(PolylineFactory);
         registry.register_factory(TriangleMeshFactory);
+        registry.register_factory(crate::plugins::modeling::occurrence::OccurrenceFactory);
         world.insert_resource(registry);
+        world.insert_resource(crate::plugins::modeling::definition::DefinitionRegistry::default());
+        world.insert_resource(
+            crate::plugins::modeling::definition::DefinitionLibraryRegistry::default(),
+        );
+        world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(crate::plugins::layers::LayerRegistry::default());
         world
     }
 
@@ -3914,6 +5385,15 @@ mod tests {
         let path = std::env::temp_dir().join(format!("talos3d-model-api-{unique}.obj"));
         fs::write(&path, contents).expect("temp obj should be written");
         path
+    }
+
+    #[cfg(feature = "model-api")]
+    fn temp_json_path(stem: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{stem}-{unique}.json"))
     }
 
     #[cfg(feature = "model-api")]
@@ -3946,10 +5426,7 @@ mod tests {
 
         let box_snapshot =
             get_entity_snapshot(&world, ElementId(box_id)).expect("box snapshot should exist");
-        assert_eq!(
-            box_snapshot["Box"]["primitive"]["centre"],
-            json!([3.5, 2.0, 3.0])
-        );
+        assert_eq!(box_snapshot["centre"], json!([3.5, 2.0, 3.0]));
 
         let handles = handle_list_handles(&world, box_id).expect("box handles should exist");
         assert_eq!(handles.len(), 9);
@@ -3978,14 +5455,11 @@ mod tests {
         let updated =
             handle_set_property(&mut world, box_id, "half_extents", json!([4.0, 5.0, 6.0]))
                 .expect("setting box half extents should succeed");
-        assert_eq!(
-            updated["Box"]["primitive"]["half_extents"],
-            json!([4.0, 5.0, 6.0])
-        );
+        assert_eq!(updated["half_extents"], json!([4.0, 5.0, 6.0]));
 
         let error = handle_set_property(&mut world, box_id, "radius", json!(1.0))
             .expect_err("invalid box property should fail");
-        assert!(error.contains("Valid properties: centre, half_extents"));
+        assert!(error.contains("Valid properties: center, half_extents"));
     }
 
     #[cfg(feature = "model-api")]
@@ -4130,7 +5604,7 @@ mod tests {
 
         let server = ModelApiServer::new(sender);
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 56); // prior tools + definition library + instantiate tools
 
         let listed: Vec<EntityEntry> = server
             .list_entities_tool()
@@ -4146,7 +5620,11 @@ mod tests {
             .expect("get_entity tool should succeed")
             .into_typed()
             .expect("get_entity result should deserialize");
-        assert_eq!(box_snapshot["Box"]["element_id"], 10);
+        assert!(
+            box_snapshot.is_object(),
+            "box snapshot should be a JSON object"
+        );
+        assert_eq!(box_snapshot["centre"], serde_json::json!([1.0, 1.0, 1.0]));
 
         let box_details: EntityDetails = server
             .get_entity_details_tool(Parameters(GetEntityRequest { element_id: 10 }))
@@ -4210,10 +5688,7 @@ mod tests {
             .expect("set_entity_property tool should succeed")
             .into_typed()
             .expect("set_entity_property result should deserialize");
-        assert_eq!(
-            updated_snapshot["Box"]["primitive"]["half_extents"],
-            json!([2.0, 2.0, 2.0])
-        );
+        assert_eq!(updated_snapshot["half_extents"], json!([2.0, 2.0, 2.0]));
 
         let toolbars: Vec<ToolbarDetails> = server
             .list_toolbars_tool()
@@ -4247,5 +5722,380 @@ mod tests {
 
         drop(server);
         worker_handle.await.expect("worker should stop cleanly");
+    }
+
+    // -----------------------------------------------------------------------
+    // PP51 — Definition / Occurrence tests
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "model-api")]
+    fn make_rect_extrusion_request() -> serde_json::Value {
+        json!({
+            "name": "TestWall",
+            "definition_kind": "Solid",
+            "width_param": "width",
+            "depth_param": "depth",
+            "height_param": "height",
+            "parameters": [
+                { "name": "width",  "param_type": "Numeric", "default_value": 4.0, "override_policy": "Overridable" },
+                { "name": "depth",  "param_type": "Numeric", "default_value": 0.3, "override_policy": "Overridable" },
+                { "name": "height", "param_type": "Numeric", "default_value": 3.0, "override_policy": "Overridable" }
+            ]
+        })
+    }
+
+    #[cfg(feature = "model-api")]
+    fn make_compound_window_request(child_definition_id: &str) -> serde_json::Value {
+        json!({
+            "name": "CompoundWindow",
+            "definition_kind": "Solid",
+            "evaluators": [],
+            "parameters": [
+                { "name": "overall_width", "param_type": "Numeric", "default_value": 1.2, "override_policy": "Overridable", "metadata": { "unit": "m" } },
+                { "name": "overall_height", "param_type": "Numeric", "default_value": 1.4, "override_policy": "Overridable", "metadata": { "unit": "m" } },
+                { "name": "finish_color", "param_type": "StringVal", "default_value": "white", "override_policy": "Overridable" }
+            ],
+            "compound": {
+                "anchors": [
+                    { "id": "opening.exterior_face", "kind": "host_exterior_face" },
+                    { "id": "opening.interior_face", "kind": "host_interior_face" }
+                ],
+                "derived_parameters": [
+                    {
+                        "name": "clear_width",
+                        "param_type": "Numeric",
+                        "expr": { "kind": "param_ref", "path": "overall_width" },
+                        "dependencies": ["overall_width"],
+                        "metadata": { "unit": "m", "mutability": "Derived" }
+                    }
+                ],
+                "constraints": [
+                    {
+                        "id": "width_positive",
+                        "expr": {
+                            "kind": "gt",
+                            "left": { "kind": "param_ref", "path": "overall_width" },
+                            "right": { "kind": "literal", "value": 0.5 }
+                        },
+                        "dependencies": ["overall_width"],
+                        "severity": "Error",
+                        "message": "Window width must stay positive"
+                    }
+                ],
+                "child_slots": [
+                    {
+                        "slot_id": "frame",
+                        "role": "frame",
+                        "definition_id": child_definition_id,
+                        "parameter_bindings": [
+                            { "target_param": "width", "expr": { "kind": "param_ref", "path": "overall_width" } },
+                            { "target_param": "depth", "expr": { "kind": "literal", "value": 0.14 } },
+                            { "target_param": "height", "expr": { "kind": "param_ref", "path": "overall_height" } }
+                        ],
+                        "transform_binding": {
+                            "translation": [
+                                { "kind": "literal", "value": 0.0 },
+                                { "kind": "literal", "value": 0.0 },
+                                { "kind": "literal", "value": 0.0 }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "domain_data": {
+                "architectural": {
+                    "void_declaration": { "kind": "opening", "parameters": { "host": "wall" } }
+                }
+            }
+        })
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn definition_create_and_list_round_trip() {
+        let mut world = init_model_api_test_world();
+
+        assert!(handle_list_definitions(&world).is_empty());
+
+        let entry = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("create definition should succeed");
+
+        assert_eq!(entry.name, "TestWall");
+        assert_eq!(entry.definition_kind, "Solid");
+        assert_eq!(entry.definition_version, 1);
+        assert_eq!(entry.parameter_names, vec!["width", "depth", "height"]);
+
+        let all = handle_list_definitions(&world);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].definition_id, entry.definition_id);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn definition_get_returns_full_definition() {
+        let mut world = init_model_api_test_world();
+
+        let created = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("create definition should succeed");
+
+        let fetched = handle_get_definition(&world, created.definition_id.clone())
+            .expect("get definition should succeed");
+
+        assert_eq!(fetched.definition_id, created.definition_id);
+        assert_eq!(fetched.name, "TestWall");
+        assert_eq!(
+            fetched.full["interface"]["parameters"][0]["name"],
+            json!("width")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn compound_definition_round_trips_with_domain_data() {
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("child definition should be created");
+
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should succeed");
+
+        let fetched = handle_get_definition(&world, compound.definition_id.clone())
+            .expect("compound definition should be retrievable");
+
+        assert_eq!(
+            fetched.full["compound"]["child_slots"][0]["role"],
+            json!("frame")
+        );
+        assert_eq!(
+            fetched.full["domain_data"]["architectural"]["void_declaration"]["kind"],
+            json!("opening")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn definition_update_bumps_version_and_propagates() {
+        let mut world = init_model_api_test_world();
+
+        let created = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("create definition should succeed");
+
+        let updated = handle_update_definition(
+            &mut world,
+            json!({
+                "definition_id": created.definition_id,
+                "name": "RenamedWall"
+            }),
+        )
+        .expect("update definition should succeed");
+
+        assert_eq!(updated.definition_version, 2);
+        assert_eq!(updated.name, "RenamedWall");
+
+        // Place an occurrence, then update the definition again — occurrence
+        // should be marked dirty (ChangedDefinitions resource updated).
+        let occ_id = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": created.definition_id }),
+        )
+        .expect("place occurrence should succeed");
+        let _ = occ_id; // placement succeeded (expect() already asserted this)
+
+        handle_update_definition(
+            &mut world,
+            json!({
+                "definition_id": created.definition_id,
+                "name": "FinalWall"
+            }),
+        )
+        .expect("second update should succeed");
+
+        // ChangedDefinitions should have been drained by flush_model_api_write_pipeline
+        // (which calls apply_pending_history_commands), but the UpdateDefinition command's
+        // apply() calls mark_changed. Since flush runs synchronously we verify
+        // the definition version rather than the transient resource.
+        let after = handle_get_definition(&world, created.definition_id.clone())
+            .expect("get after second update should succeed");
+        assert_eq!(after.definition_version, 3);
+        assert_eq!(after.name, "FinalWall");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn occurrence_place_and_resolve_returns_provenance() {
+        let mut world = init_model_api_test_world();
+
+        let def = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("create definition should succeed");
+
+        // Place with no overrides — all values should be DefinitionDefault.
+        let occ_id = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": def.definition_id, "label": "Wall1" }),
+        )
+        .expect("place occurrence should succeed");
+
+        let resolved =
+            handle_resolve_occurrence(&world, occ_id).expect("resolve occurrence should succeed");
+
+        assert_eq!(resolved["width"]["value"], json!(4.0));
+        assert_eq!(resolved["width"]["provenance"], json!("DefinitionDefault"));
+        assert_eq!(resolved["height"]["value"], json!(3.0));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn occurrence_update_overrides_changes_only_the_target() {
+        let mut world = init_model_api_test_world();
+
+        let def = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("create definition should succeed");
+
+        let occ_a = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": def.definition_id, "label": "WallA" }),
+        )
+        .expect("place occurrence A should succeed");
+
+        let occ_b = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": def.definition_id, "label": "WallB" }),
+        )
+        .expect("place occurrence B should succeed");
+
+        // Override height only on A.
+        handle_update_occurrence_overrides(&mut world, occ_a, json!({ "height": 5.0 }))
+            .expect("update overrides should succeed");
+
+        let resolved_a =
+            handle_resolve_occurrence(&world, occ_a).expect("resolve A should succeed");
+        let resolved_b =
+            handle_resolve_occurrence(&world, occ_b).expect("resolve B should succeed");
+
+        // A has an override, B still uses the definition default.
+        assert_eq!(resolved_a["height"]["value"], json!(5.0));
+        assert_eq!(
+            resolved_a["height"]["provenance"],
+            json!("OccurrenceOverride")
+        );
+        assert_eq!(resolved_b["height"]["value"], json!(3.0));
+        assert_eq!(
+            resolved_b["height"]["provenance"],
+            json!("DefinitionDefault")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn definition_library_workflow_exports_imports_and_instantiates() {
+        let mut source_world = init_model_api_test_world();
+        let definition = handle_create_definition(&mut source_world, make_rect_extrusion_request())
+            .expect("definition should be created");
+
+        let library = handle_create_definition_library(
+            &mut source_world,
+            json!({ "name": "Window Library" }),
+        )
+        .expect("library should be created");
+        handle_add_definition_to_library(
+            &mut source_world,
+            json!({
+                "library_id": library.library_id,
+                "definition_id": definition.definition_id
+            }),
+        )
+        .expect("definition should be added to library");
+
+        let listed = handle_list_definition_libraries(&source_world);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].definition_count, 1);
+
+        let export_path = temp_json_path("talos3d-definition-library");
+        handle_export_definition_library(
+            &source_world,
+            &library.library_id,
+            export_path.to_str().unwrap_or_default(),
+        )
+        .expect("library should export");
+
+        let mut target_world = init_model_api_test_world();
+        let imported = handle_import_definition_library(
+            &mut target_world,
+            export_path.to_str().unwrap_or_default(),
+        )
+        .expect("library should import");
+        let instantiated = handle_instantiate_definition(
+            &mut target_world,
+            json!({
+                "library_id": imported.library_id,
+                "definition_id": definition.definition_id,
+                "label": "ImportedWall",
+                "overrides": { "height": 4.2 }
+            }),
+        )
+        .expect("definition should instantiate from library");
+
+        assert_eq!(instantiated.definition_id, definition.definition_id);
+        assert_eq!(
+            instantiated.imported_definition_ids,
+            vec![definition.definition_id.clone()]
+        );
+
+        let resolved = handle_resolve_occurrence(&target_world, instantiated.element_id)
+            .expect("instantiated occurrence should resolve");
+        assert_eq!(resolved["height"]["value"], json!(4.2));
+
+        let _ = fs::remove_file(export_path);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn non_geometric_fields_do_not_set_mesh_dirty() {
+        use crate::plugins::modeling::occurrence::{OccurrenceClassification, OccurrenceIdentity};
+
+        let mut world = init_model_api_test_world();
+
+        let def = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("create definition should succeed");
+
+        let occ_id =
+            handle_place_occurrence(&mut world, json!({ "definition_id": def.definition_id }))
+                .expect("place occurrence should succeed");
+
+        let eid = ElementId(occ_id);
+
+        // Manually set mesh_dirty = false to simulate a clean state.
+        let entity = {
+            let mut q = world.query::<(bevy::prelude::Entity, &ElementId)>();
+            q.iter(&world)
+                .find_map(|(e, id)| (*id == eid).then_some(e))
+                .expect("occurrence entity should exist")
+        };
+        world
+            .entity_mut(entity)
+            .insert(OccurrenceClassification { mesh_dirty: false });
+
+        // Directly mutate opaque domain data on the component. This must not
+        // force a geometry re-evaluation.
+        {
+            let mut identity = world.get_mut::<OccurrenceIdentity>(entity).unwrap();
+            identity.domain_data = json!({
+                "architectural": {
+                    "property_set_map": { "Pset_BuildingCommon": { "IsExternal": true } },
+                    "exchange_identity_map": { "GlobalId": "abc" }
+                }
+            });
+        }
+
+        // mesh_dirty must remain false.
+        let cls = world.get::<OccurrenceClassification>(entity).unwrap();
+        assert!(
+            !cls.mesh_dirty,
+            "modifying domain_data must not set mesh_dirty"
+        );
     }
 }

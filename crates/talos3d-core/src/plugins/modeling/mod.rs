@@ -2,11 +2,13 @@ pub mod assembly;
 pub mod bsp_csg;
 pub mod composite_solid;
 pub mod csg;
+pub mod definition;
 pub mod editable_mesh;
 pub mod generic_factory;
 pub mod generic_snapshot;
 pub mod group;
 pub mod mesh_generation;
+pub mod occurrence;
 pub mod primitive_trait;
 pub mod primitives;
 pub mod profile;
@@ -18,8 +20,7 @@ pub mod triangulate;
 
 use crate::{
     capability_registry::{
-        CapabilityDescriptor, CapabilityDistribution, CapabilityRegistryAppExt,
-        WorkbenchDescriptor,
+        CapabilityDescriptor, CapabilityDistribution, CapabilityRegistryAppExt, WorkbenchDescriptor,
     },
     importers::{dxf::DxfImporter, obj::ObjImporter},
     plugins::{
@@ -30,8 +31,13 @@ use crate::{
         import::ImportRegistryAppExt,
         modeling::{
             csg::CsgFactory,
+            definition::{DefinitionLibraryRegistry, DefinitionRegistry},
             generic_factory::PrimitiveFactory,
             group::{GroupEditContext, GroupFactory},
+            occurrence::{
+                evaluate_occurrences, propagate_definition_changes_with_commands,
+                ChangedDefinitions, OccurrenceFactory,
+            },
             primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive},
             profile::{ProfileExtrusion, ProfileRevolve, ProfileSweep},
             profile_feature::FaceProfileFeatureFactory,
@@ -55,6 +61,9 @@ impl Plugin for ModelingPlugin {
         app.init_resource::<ModelingWorkbench>()
             .init_resource::<GroupEditContext>()
             .init_resource::<csg::CsgParentMap>()
+            .init_resource::<DefinitionRegistry>()
+            .init_resource::<DefinitionLibraryRegistry>()
+            .init_resource::<ChangedDefinitions>()
             .register_workbench(
                 WorkbenchDescriptor::new("modeling", "Modeling")
                     .with_description("Foundational geometric modeling capabilities")
@@ -77,6 +86,7 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(EditableMeshFactory)
             .register_authored_entity_factory(CsgFactory)
             .register_authored_entity_factory(FaceProfileFeatureFactory)
+            .register_authored_entity_factory(OccurrenceFactory)
             .register_authored_entity_factory(assembly::AssemblyFactory)
             .register_authored_entity_factory(assembly::RelationFactory)
             .register_format_importer(ObjImporter)
@@ -326,10 +336,12 @@ impl Plugin for ModelingPlugin {
             .add_systems(
                 Update,
                 (
+                    propagate_definition_changes_with_commands,
                     csg::propagate_operand_changes,
                     csg::evaluate_csg_nodes,
                     profile_feature::propagate_feature_parent_changes,
                     profile_feature::evaluate_face_profile_features,
+                    evaluate_occurrences,
                 )
                     .chain()
                     .in_set(mesh_generation::EvaluationSet::Evaluate),

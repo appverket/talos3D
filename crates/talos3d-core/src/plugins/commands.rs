@@ -9,8 +9,10 @@ use crate::{
         history::{EditorCommand, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         modeling::{
+            definition::{Definition, DefinitionRegistry},
             generic_snapshot::PrimitiveSnapshot,
             mesh_generation::NeedsMesh,
+            occurrence::ChangedDefinitions,
             primitives::{
                 BoxPrimitive, CylinderPrimitive, PlanePrimitive, Polyline, ShapeRotation,
                 TriangleMesh,
@@ -621,6 +623,75 @@ pub fn find_entity_by_element_id(world: &mut World, element_id: ElementId) -> Op
     query
         .iter(world)
         .find_map(|(entity, current_id)| (*current_id == element_id).then_some(entity))
+}
+
+// ---------------------------------------------------------------------------
+// Definition history commands
+// ---------------------------------------------------------------------------
+
+struct CreateDefinitionHistoryCommand {
+    definition: Definition,
+}
+
+impl EditorCommand for CreateDefinitionHistoryCommand {
+    fn label(&self) -> &'static str {
+        "Create definition"
+    }
+
+    fn apply(&mut self, world: &mut World) {
+        world
+            .resource_mut::<DefinitionRegistry>()
+            .insert(self.definition.clone());
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        world
+            .resource_mut::<DefinitionRegistry>()
+            .remove(&self.definition.id);
+    }
+}
+
+struct UpdateDefinitionHistoryCommand {
+    before: Definition,
+    after: Definition,
+}
+
+impl EditorCommand for UpdateDefinitionHistoryCommand {
+    fn label(&self) -> &'static str {
+        "Update definition"
+    }
+
+    fn apply(&mut self, world: &mut World) {
+        world
+            .resource_mut::<DefinitionRegistry>()
+            .insert(self.after.clone());
+        world
+            .resource_mut::<ChangedDefinitions>()
+            .mark_changed(self.after.id.clone());
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        world
+            .resource_mut::<DefinitionRegistry>()
+            .insert(self.before.clone());
+        world
+            .resource_mut::<ChangedDefinitions>()
+            .mark_changed(self.before.id.clone());
+    }
+}
+
+/// Enqueue a create-definition command in the undo history.
+pub fn enqueue_create_definition(world: &mut World, definition: Definition) {
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .push_command(Box::new(CreateDefinitionHistoryCommand { definition }));
+}
+
+/// Enqueue an update-definition command (one undo step for all N occurrences).
+pub fn enqueue_update_definition(world: &mut World, before: Definition, after: Definition) {
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .push_command(Box::new(UpdateDefinitionHistoryCommand { before, after }));
 }
 
 #[cfg(test)]
