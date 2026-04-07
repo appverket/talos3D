@@ -60,6 +60,12 @@ constraints.
 | Middle-drag | Pan |
 | Scroll | Zoom |
 
+The camera toolbar provides:
+
+- preset views for `Top`, `Left`, `Right`, and `Bottom`
+- a `Perspective` / `Isometric` mode switch
+- a focal length control for the perspective lens
+
 ## Status Bar
 
 The status bar reports:
