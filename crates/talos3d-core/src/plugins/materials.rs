@@ -5,7 +5,13 @@
 /// that keep Bevy's `StandardMaterial` handles in sync with the registry.
 use std::collections::BTreeMap;
 
-use bevy::{math::Affine2, prelude::*};
+use base64::prelude::*;
+use bevy::{
+    asset::RenderAssetUsages,
+    image::{CompressedImageFormats, ImageSampler, ImageType},
+    math::Affine2,
+    prelude::*,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -30,6 +36,61 @@ impl MaterialAlphaMode {
             Self::Blend => AlphaMode::Blend,
             Self::Premultiplied => AlphaMode::Premultiplied,
             Self::Add => AlphaMode::Add,
+        }
+    }
+}
+
+// ─── TextureRef ──────────────────────────────────────────────────────────────
+
+/// A reference to a texture, either embedded in the project file or pointing to
+/// a bundled app asset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TextureRef {
+    /// User-uploaded texture embedded as base64 in the project file.
+    /// `mime` is e.g. `"image/png"`, `"image/jpeg"`.
+    Embedded { data: String, mime: String },
+    /// Path to a bundled app asset, resolved via Bevy's `AssetServer`.
+    AssetPath(String),
+}
+
+impl TextureRef {
+    /// Load as a Bevy `Image` handle.  Embedded textures are decoded and inserted
+    /// directly into `images`; asset paths go through the asset server.
+    pub fn load(
+        &self,
+        asset_server: &AssetServer,
+        images: &mut Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        match self {
+            TextureRef::AssetPath(path) => Some(asset_server.load(path.clone())),
+            TextureRef::Embedded { data, mime } => {
+                let bytes = BASE64_STANDARD.decode(data).ok()?;
+                let image_type = match mime.as_str() {
+                    "image/png" => ImageType::MimeType("image/png"),
+                    "image/jpeg" | "image/jpg" => ImageType::MimeType("image/jpeg"),
+                    "image/webp" => ImageType::MimeType("image/webp"),
+                    _ => ImageType::MimeType("image/png"),
+                };
+                let image = Image::from_buffer(
+                    &bytes,
+                    image_type,
+                    CompressedImageFormats::NONE,
+                    true,
+                    ImageSampler::default(),
+                    RenderAssetUsages::RENDER_WORLD,
+                )
+                .ok()?;
+                Some(images.add(image))
+            }
+        }
+    }
+
+    /// Returns a short display label (filename or `"<embedded>"`).
+    pub fn label(&self) -> &str {
+        match self {
+            TextureRef::AssetPath(p) => p.split('/').last().unwrap_or(p),
+            TextureRef::Embedded { .. } => "<embedded>",
         }
     }
 }
@@ -60,12 +121,12 @@ pub struct MaterialDef {
     /// Threshold used when `alpha_mode == Mask`.
     pub alpha_cutoff: f32,
 
-    // --- Textures (absolute or project-relative paths) ---
-    pub base_color_texture: Option<String>,
-    pub normal_map_texture: Option<String>,
-    pub metallic_roughness_texture: Option<String>,
-    pub emissive_texture: Option<String>,
-    pub occlusion_texture: Option<String>,
+    // --- Textures ---
+    pub base_color_texture: Option<TextureRef>,
+    pub normal_map_texture: Option<TextureRef>,
+    pub metallic_roughness_texture: Option<TextureRef>,
+    pub emissive_texture: Option<TextureRef>,
+    pub occlusion_texture: Option<TextureRef>,
 
     // --- UV tiling / transform ---
     /// Multiply UV coords by this scale (creates tiling).  `[1,1]` = no tiling.
@@ -110,9 +171,16 @@ impl MaterialDef {
         }
     }
 
-    /// Build a Bevy `StandardMaterial` from this definition (textures loaded
-    /// via `AssetServer`).
-    pub fn to_standard_material(&self, asset_server: &AssetServer) -> StandardMaterial {
+    /// Build a Bevy `StandardMaterial` from this definition.
+    ///
+    /// `images` is required so that embedded textures can be decoded and
+    /// inserted directly into the asset store without going through the file
+    /// system.
+    pub fn to_standard_material(
+        &self,
+        asset_server: &AssetServer,
+        images: &mut Assets<Image>,
+    ) -> StandardMaterial {
         let [r, g, b, a] = self.base_color;
         let [er, eg, eb] = self.emissive;
 
@@ -130,28 +198,28 @@ impl MaterialDef {
             base_color: Color::srgba(r, g, b, a),
             base_color_texture: self
                 .base_color_texture
-                .as_deref()
-                .map(|path| asset_server.load(path.to_string())),
+                .as_ref()
+                .and_then(|t| t.load(asset_server, images)),
             emissive: LinearRgba::new(er, eg, eb, self.emissive_exposure_weight),
             emissive_texture: self
                 .emissive_texture
-                .as_deref()
-                .map(|path| asset_server.load(path.to_string())),
+                .as_ref()
+                .and_then(|t| t.load(asset_server, images)),
             perceptual_roughness: self.perceptual_roughness,
             metallic: self.metallic,
             metallic_roughness_texture: self
                 .metallic_roughness_texture
-                .as_deref()
-                .map(|path| asset_server.load(path.to_string())),
+                .as_ref()
+                .and_then(|t| t.load(asset_server, images)),
             reflectance: self.reflectance,
             normal_map_texture: self
                 .normal_map_texture
-                .as_deref()
-                .map(|path| asset_server.load(path.to_string())),
+                .as_ref()
+                .and_then(|t| t.load(asset_server, images)),
             occlusion_texture: self
                 .occlusion_texture
-                .as_deref()
-                .map(|path| asset_server.load(path.to_string())),
+                .as_ref()
+                .and_then(|t| t.load(asset_server, images)),
             alpha_mode: self.alpha_mode.to_bevy(self.alpha_cutoff),
             double_sided: self.double_sided,
             cull_mode: if self.double_sided {
@@ -405,6 +473,7 @@ fn rebuild_changed_material_handles(
     registry: Res<MaterialRegistry>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
+    _images: ResMut<Assets<Image>>,
 ) {
     if !registry.is_changed() {
         return;
@@ -442,6 +511,7 @@ fn apply_material_assignments(
     registry: Res<MaterialRegistry>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     changed_query: Query<(Entity, &MaterialAssignment), Changed<MaterialAssignment>>,
     all_query: Query<(Entity, &MaterialAssignment)>,
@@ -463,7 +533,9 @@ fn apply_material_assignments(
         let handle = cache
             .0
             .entry(assignment.material_id.clone())
-            .or_insert_with(|| std_materials.add(def.to_standard_material(&asset_server)))
+            .or_insert_with(|| {
+                std_materials.add(def.to_standard_material(&asset_server, &mut images))
+            })
             .clone();
         commands
             .entity(entity)

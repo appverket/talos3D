@@ -43,3 +43,4 @@ dxf = "0.6"
 cadio-dwg = { path = "../cadio-dwg" }
 cadio-ir = { path = "../cadio-ir" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
