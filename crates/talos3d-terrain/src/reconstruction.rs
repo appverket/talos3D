@@ -12,7 +12,9 @@ const MAX_ALPHA_RADIUS_FACTOR: f32 = 8.0;
 const RELAXED_ALPHA_RADIUS_FACTOR: f32 = 20.0;
 const MAX_BRIDGE_LENGTH_FACTOR: f32 = 6.0;
 const MIN_BRIDGE_DIRECTION_DOT: f32 = 0.5;
-const MAX_BRIDGE_LATERAL_FACTOR: f32 = 1.25;
+const MAX_BRIDGE_LATERAL_FACTOR: f32 = 2.5;
+const TERMINUS_LINK_DISTANCE_FACTOR: f32 = 8.0;
+const TERMINUS_MIN_ALIGNMENT_DOT: f32 = 0.65;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContourRepairSettings {
@@ -66,6 +68,19 @@ enum EndpointKind {
 struct FragmentEndpoint {
     fragment_index: usize,
     endpoint: EndpointKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpenContourEndpoint {
+    point: Vec3,
+    tangent: Vec3,
+    elevation: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerminusLinkCandidate {
+    target_index: usize,
+    score: f32,
 }
 
 pub fn repair_elevation_curves(
@@ -222,6 +237,76 @@ pub fn sample_interior_support_points(
     samples
 }
 
+pub fn sample_terminus_support_points(curves: &[ElevationCurve], spacing: f32) -> Vec<Vec3> {
+    let spacing = spacing.max(REPAIR_EPSILON);
+    let endpoints = open_contour_endpoints(curves, spacing);
+    if endpoints.len() < 2 {
+        return Vec::new();
+    }
+
+    let contour_interval = inferred_contour_interval(curves).unwrap_or(spacing);
+    let max_elevation_delta = (contour_interval * 2.1).max(REPAIR_EPSILON);
+    let mut best_lower = vec![None; endpoints.len()];
+    let mut best_higher = vec![None; endpoints.len()];
+
+    for source_index in 0..endpoints.len() {
+        for target_index in 0..endpoints.len() {
+            if source_index == target_index {
+                continue;
+            }
+            let source = endpoints[source_index];
+            let target = endpoints[target_index];
+            let elevation_delta = target.elevation - source.elevation;
+            if elevation_delta.abs() <= REPAIR_EPSILON
+                || elevation_delta.abs() > max_elevation_delta
+            {
+                continue;
+            }
+            let Some(score) = terminus_link_score(source, target, spacing, contour_interval) else {
+                continue;
+            };
+            let candidate = TerminusLinkCandidate {
+                target_index,
+                score,
+            };
+            if elevation_delta > 0.0 {
+                update_best_terminus_candidate(&mut best_higher[source_index], candidate);
+            } else {
+                update_best_terminus_candidate(&mut best_lower[source_index], candidate);
+            }
+        }
+    }
+
+    let mut accepted_links = BTreeSet::new();
+    for source_index in 0..endpoints.len() {
+        if let Some(candidate) = best_higher[source_index] {
+            if best_lower[candidate.target_index]
+                .is_some_and(|reverse| reverse.target_index == source_index)
+            {
+                accepted_links.insert(ordered_edge(source_index, candidate.target_index));
+            }
+        }
+    }
+
+    let mut support_points = Vec::new();
+    for (left_index, right_index) in accepted_links {
+        let left = endpoints[left_index].point;
+        let right = endpoints[right_index].point;
+        let distance = left.distance(right);
+        if distance <= spacing {
+            support_points.push(left.lerp(right, 0.5));
+            continue;
+        }
+
+        let subdivisions = (distance / spacing).ceil() as usize;
+        for step in 1..subdivisions {
+            let t = step as f32 / subdivisions as f32;
+            support_points.push(left.lerp(right, t));
+        }
+    }
+    normalize_points(&support_points)
+}
+
 pub fn estimate_terrain_boundary(curves: &[ElevationCurve], spacing: f32) -> Vec<Vec2> {
     let spacing = spacing.max(REPAIR_EPSILON);
     let dilation_amount = if curves.len() >= 10 {
@@ -229,13 +314,17 @@ pub fn estimate_terrain_boundary(curves: &[ElevationCurve], spacing: f32) -> Vec
     } else {
         0.0
     };
-    let all_samples = dedupe_vec2(
-        &curves
-            .iter()
-            .flat_map(|curve| sample_curve_points(&curve.points, spacing))
-            .map(|point| Vec2::new(point.x, point.z))
-            .collect::<Vec<_>>(),
+    let mut all_samples = curves
+        .iter()
+        .flat_map(|curve| sample_curve_points(&curve.points, spacing))
+        .map(|point| Vec2::new(point.x, point.z))
+        .collect::<Vec<_>>();
+    all_samples.extend(
+        sample_terminus_support_points(curves, spacing)
+            .into_iter()
+            .map(|point| point.xz()),
     );
+    let all_samples = dedupe_vec2(&all_samples);
     let boundary = estimate_boundary_from_samples(&all_samples, spacing, None);
     if should_fallback_to_terminus_boundary(&boundary, curves.len()) {
         let relaxed_boundary = estimate_boundary_from_samples(
@@ -312,6 +401,87 @@ fn terminus_samples_cover_model(terminus_samples: &[Vec2], all_samples: &[Vec2])
     let terminus_extent = (terminus_max - terminus_min).max(Vec2::splat(REPAIR_EPSILON));
     let all_extent = (all_max - all_min).max(Vec2::splat(REPAIR_EPSILON));
     terminus_extent.x >= all_extent.x * 0.7 && terminus_extent.y >= all_extent.y * 0.7
+}
+
+fn terminus_link_score(
+    source: OpenContourEndpoint,
+    target: OpenContourEndpoint,
+    spacing: f32,
+    contour_interval: f32,
+) -> Option<f32> {
+    let distance = source.point.distance(target.point);
+    let max_distance = (spacing * TERMINUS_LINK_DISTANCE_FACTOR).max(spacing * 2.0);
+    if distance > max_distance {
+        return None;
+    }
+
+    let alignment = source.tangent.dot(target.tangent).abs();
+    if alignment < TERMINUS_MIN_ALIGNMENT_DOT {
+        return None;
+    }
+
+    let elevation_delta = (target.elevation - source.elevation).abs();
+    let score = distance
+        + (1.0 - alignment) * spacing * 4.0
+        + (elevation_delta - contour_interval).abs() * spacing * 2.0;
+    Some(score)
+}
+
+fn update_best_terminus_candidate(
+    slot: &mut Option<TerminusLinkCandidate>,
+    candidate: TerminusLinkCandidate,
+) {
+    if slot.is_none_or(|current| candidate.score < current.score) {
+        *slot = Some(candidate);
+    }
+}
+
+fn inferred_contour_interval(curves: &[ElevationCurve]) -> Option<f32> {
+    let mut elevations = curves
+        .iter()
+        .map(|curve| curve.elevation)
+        .collect::<Vec<_>>();
+    elevations.sort_by(|left, right| left.total_cmp(right));
+    elevations.dedup_by(|left, right| (*left - *right).abs() <= REPAIR_EPSILON);
+    let mut deltas = elevations
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .filter(|delta| *delta > REPAIR_EPSILON)
+        .collect::<Vec<_>>();
+    deltas.sort_by(|left, right| left.total_cmp(right));
+    deltas.get(deltas.len() / 2).copied()
+}
+
+fn open_contour_endpoints(curves: &[ElevationCurve], spacing: f32) -> Vec<OpenContourEndpoint> {
+    let mut endpoints = Vec::new();
+    let closure_tolerance = spacing.max(REPAIR_EPSILON) * 2.0;
+    for curve in curves {
+        let points = normalize_points(&curve.points);
+        if points.len() < 2 {
+            continue;
+        }
+        let first = points[0];
+        let last = *points.last().unwrap_or(&first);
+        if first.distance(last) <= closure_tolerance {
+            continue;
+        }
+
+        if let Some(tangent) = terminal_direction(&points, false) {
+            endpoints.push(OpenContourEndpoint {
+                point: first,
+                tangent,
+                elevation: curve.elevation,
+            });
+        }
+        if let Some(tangent) = terminal_direction(&points, true) {
+            endpoints.push(OpenContourEndpoint {
+                point: last,
+                tangent,
+                elevation: curve.elevation,
+            });
+        }
+    }
+    endpoints
 }
 
 fn planar_bounds_2d(points: &[Vec2]) -> Option<(Vec2, Vec2)> {
@@ -895,12 +1065,17 @@ fn terminal_direction(points: &[Vec3], at_end: bool) -> Option<Vec3> {
     if points.len() < 2 {
         return None;
     }
-    let (start, end) = if at_end {
-        (points[points.len() - 2], points[points.len() - 1])
+    let segment_count = points.len().saturating_sub(1).min(4);
+    let slice = if at_end {
+        &points[points.len().saturating_sub(segment_count + 1)..]
     } else {
-        (points[0], points[1])
+        &points[..segment_count + 1]
     };
-    let direction = (end - start).normalize_or_zero();
+    let direction = slice
+        .windows(2)
+        .map(|segment| (segment[1] - segment[0]).normalize_or_zero())
+        .fold(Vec3::ZERO, |sum, segment| sum + segment)
+        .normalize_or_zero();
     (direction.length_squared() > REPAIR_EPSILON).then_some(direction)
 }
 
@@ -1025,6 +1200,40 @@ mod tests {
     }
 
     #[test]
+    fn repairs_gap_when_endpoint_has_local_kink() {
+        let repaired = repair_elevation_curves(
+            &[
+                curve(
+                    &[
+                        [0.0, 10.0, 0.0],
+                        [2.0, 10.0, 0.0],
+                        [4.0, 10.0, -1.0],
+                        [6.0, 10.0, -2.0],
+                    ],
+                    10.0,
+                ),
+                curve(
+                    &[
+                        [10.0, 10.0, -5.0],
+                        [10.5, 10.0, -5.0],
+                        [12.0, 10.0, -5.5],
+                        [14.0, 10.0, -6.0],
+                    ],
+                    10.0,
+                ),
+            ],
+            ContourRepairSettings {
+                join_tolerance: 2.5,
+                min_alignment_dot: 0.35,
+            },
+        );
+
+        assert_eq!(repaired.len(), 1);
+        assert_eq!(repaired[0].source_fragment_count, 2);
+        assert_eq!(repaired[0].inserted_bridge_count, 1);
+    }
+
+    #[test]
     fn does_not_join_crossing_candidates_that_are_not_mutual_best() {
         let repaired = repair_elevation_curves(
             &[
@@ -1105,6 +1314,21 @@ mod tests {
                 && point.z < 12.0
                 && point.y.is_finite()
         }));
+    }
+
+    #[test]
+    fn samples_support_points_between_adjacent_open_contour_termini() {
+        let curves = vec![
+            curve(&[[0.0, 0.0, 0.0], [8.0, 0.0, 0.0]], 0.0),
+            curve(&[[0.0, 0.5, 2.0], [8.0, 0.5, 2.0]], 0.5),
+            curve(&[[0.0, 1.0, 4.0], [8.0, 1.0, 4.0]], 1.0),
+        ];
+
+        let support_points = sample_terminus_support_points(&curves, 1.0);
+
+        assert!(support_points
+            .iter()
+            .any(|point| { (point.x - 8.0).abs() <= 0.1 && point.z > 0.0 && point.z < 4.0 }));
     }
 
     #[test]
