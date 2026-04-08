@@ -15,7 +15,7 @@ use crate::{
             occurrence::ChangedDefinitions,
             primitives::{
                 BoxPrimitive, CylinderPrimitive, PlanePrimitive, Polyline, ShapeRotation,
-                TriangleMesh,
+                SpherePrimitive, TriangleMesh,
             },
             snapshots::{PolylineSnapshot, TriangleMeshSnapshot},
         },
@@ -28,6 +28,7 @@ impl Plugin for CommandPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<CreateBoxCommand>()
             .add_message::<CreateCylinderCommand>()
+            .add_message::<CreateSphereCommand>()
             .add_message::<CreatePlaneCommand>()
             .add_message::<CreatePolylineCommand>()
             .add_message::<CreateTriangleMeshCommand>()
@@ -44,6 +45,7 @@ impl Plugin for CommandPlugin {
                     queue_create_entity_commands,
                     queue_create_box_commands,
                     queue_create_cylinder_commands,
+                    queue_create_sphere_commands,
                     queue_create_plane_commands,
                     queue_create_polyline_commands,
                     queue_create_triangle_mesh_commands,
@@ -68,6 +70,12 @@ pub struct CreateCylinderCommand {
     pub centre: Vec3,
     pub radius: f32,
     pub height: f32,
+}
+
+#[derive(Message, Debug, Clone)]
+pub struct CreateSphereCommand {
+    pub centre: Vec3,
+    pub radius: f32,
 }
 
 #[derive(Message, Debug, Clone)]
@@ -131,6 +139,7 @@ impl EditorCommand for CreateEntityHistoryCommand {
             "opening" => "Create opening",
             "box" => "Create box",
             "cylinder" => "Create cylinder",
+            "sphere" => "Create sphere",
             "plane" => "Create plane",
             "profile_extrusion" => "Create profile extrusion",
             "face_profile_feature" => "Create profile feature",
@@ -242,6 +251,16 @@ fn queue_create_cylinder_commands(world: &mut World) {
         .collect();
     for command in commands {
         enqueue_create_cylinder(world, command);
+    }
+}
+
+fn queue_create_sphere_commands(world: &mut World) {
+    let commands: Vec<CreateSphereCommand> = world
+        .resource_mut::<Messages<CreateSphereCommand>>()
+        .drain()
+        .collect();
+    for command in commands {
+        enqueue_create_sphere(world, command);
     }
 }
 
@@ -431,6 +450,7 @@ pub(crate) fn queue_command_events(world: &mut World) {
     queue_create_entity_commands(world);
     queue_create_box_commands(world);
     queue_create_cylinder_commands(world);
+    queue_create_sphere_commands(world);
     queue_create_plane_commands(world);
     queue_create_polyline_commands(world);
     queue_create_triangle_mesh_commands(world);
@@ -469,6 +489,23 @@ pub(crate) fn enqueue_create_cylinder(
                 centre: command.centre,
                 radius: command.radius,
                 height: command.height,
+            },
+            rotation: ShapeRotation::default(),
+        }
+        .into(),
+    );
+    element_id
+}
+
+pub(crate) fn enqueue_create_sphere(world: &mut World, command: CreateSphereCommand) -> ElementId {
+    let element_id = world.resource_mut::<ElementIdAllocator>().next_id();
+    enqueue_create_boxed_entity(
+        world,
+        PrimitiveSnapshot {
+            element_id,
+            primitive: SpherePrimitive {
+                centre: command.centre,
+                radius: command.radius,
             },
             rotation: ShapeRotation::default(),
         }

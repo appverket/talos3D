@@ -11,7 +11,7 @@ use talos3d_core::{
     plugins::{
         commands::{
             ApplyEntityChangesCommand, BeginCommandGroup, CreateBoxCommand, CreateCylinderCommand,
-            CreateEntityCommand, CreatePlaneCommand, CreatePolylineCommand,
+            CreateEntityCommand, CreatePlaneCommand, CreatePolylineCommand, CreateSphereCommand,
             CreateTriangleMeshCommand, DeleteEntitiesCommand, EndCommandGroup,
             ResolvedDeleteEntitiesCommand,
         },
@@ -29,6 +29,7 @@ fn init_architectural_test_world() -> World {
     let mut world = World::new();
     world.insert_resource(Messages::<CreateBoxCommand>::default());
     world.insert_resource(Messages::<CreateCylinderCommand>::default());
+    world.insert_resource(Messages::<CreateSphereCommand>::default());
     world.insert_resource(Messages::<CreatePlaneCommand>::default());
     world.insert_resource(Messages::<CreatePolylineCommand>::default());
     world.insert_resource(Messages::<CreateTriangleMeshCommand>::default());

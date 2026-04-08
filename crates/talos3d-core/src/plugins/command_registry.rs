@@ -611,6 +611,7 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.ungroup", "ungroup"),
         ("icon.create_box", "create_box"),
         ("icon.create_cylinder", "create_cylinder"),
+        ("icon.create_sphere", "create_sphere"),
         ("icon.create_plane", "create_plane"),
         ("icon.create_polyline", "create_polyline"),
     ];

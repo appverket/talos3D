@@ -2,7 +2,9 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation};
+use super::primitives::{
+    BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation, SpherePrimitive,
+};
 
 /// Sentinel value for "no linked half-edge/face" (boundary).
 const NONE: u32 = u32::MAX;
@@ -180,6 +182,84 @@ impl EditableMesh {
 
         let face_verts: [[u32; 4]; 1] = [[0, 1, 2, 3]];
         build_mesh_from_quads(&vertices, &face_verts)
+    }
+
+    /// Create from a sphere primitive using a UV-sphere approximation.
+    pub fn from_sphere(
+        primitive: &SpherePrimitive,
+        rotation: &ShapeRotation,
+        sectors: u32,
+        stacks: u32,
+    ) -> Self {
+        let sectors = sectors.max(3);
+        let stacks = stacks.max(3);
+        let ring_count = stacks - 1;
+        let c = primitive.centre;
+        let r = rotation.0;
+        let radius = primitive.radius;
+
+        let mut vertices = Vec::with_capacity((2 + ring_count * sectors) as usize);
+        vertices.push(c + r * Vec3::Y * radius);
+
+        for stack in 1..stacks {
+            let phi = std::f32::consts::PI * stack as f32 / stacks as f32;
+            let y = radius * phi.cos();
+            let ring_radius = radius * phi.sin();
+            for sector in 0..sectors {
+                let theta = std::f32::consts::TAU * sector as f32 / sectors as f32;
+                let local = Vec3::new(ring_radius * theta.cos(), y, ring_radius * theta.sin());
+                vertices.push(c + r * local);
+            }
+        }
+
+        let bottom_index = vertices.len() as u32;
+        vertices.push(c - r * Vec3::Y * radius);
+
+        let ring_vertex = |ring: u32, sector: u32| -> u32 { 1 + ring * sectors + sector % sectors };
+        let mut face_vertex_lists = Vec::new();
+        let mut push_face = |mut face: Vec<u32>| {
+            if face.len() >= 3 {
+                let v0 = vertices[face[0] as usize];
+                let v1 = vertices[face[1] as usize];
+                let v2 = vertices[face[2] as usize];
+                let normal = (v1 - v0).cross(v2 - v0);
+                let centroid = face
+                    .iter()
+                    .map(|index| vertices[*index as usize])
+                    .sum::<Vec3>()
+                    / face.len() as f32;
+                if normal.dot(centroid - primitive.centre) < 0.0 {
+                    face.reverse();
+                }
+            }
+            face_vertex_lists.push(face);
+        };
+
+        for sector in 0..sectors {
+            push_face(vec![0, ring_vertex(0, sector), ring_vertex(0, sector + 1)]);
+        }
+
+        for ring in 0..ring_count - 1 {
+            for sector in 0..sectors {
+                push_face(vec![
+                    ring_vertex(ring, sector),
+                    ring_vertex(ring + 1, sector),
+                    ring_vertex(ring + 1, sector + 1),
+                    ring_vertex(ring, sector + 1),
+                ]);
+            }
+        }
+
+        let last_ring = ring_count - 1;
+        for sector in 0..sectors {
+            push_face(vec![
+                bottom_index,
+                ring_vertex(last_ring, sector + 1),
+                ring_vertex(last_ring, sector),
+            ]);
+        }
+
+        build_mesh_from_polygons(&vertices, &face_vertex_lists)
     }
 
     /// Number of logical edges (half_edges / 2, approximately).
@@ -709,6 +789,19 @@ mod tests {
         // 1 bottom cap + 1 top cap + 8 side quads = 10 faces
         assert_eq!(mesh.faces.len(), 10);
         // Closed mesh: V=16, E=24 (8 bottom + 8 top + 8 side), F=10 → 16-24+10=2
+        assert!(mesh.validate_euler());
+    }
+
+    #[test]
+    fn sphere_mesh_topology() {
+        let primitive = SpherePrimitive {
+            centre: Vec3::ZERO,
+            radius: 1.0,
+        };
+        let mesh = EditableMesh::from_sphere(&primitive, &ShapeRotation::default(), 8, 6);
+
+        assert_eq!(mesh.vertices.len(), 42);
+        assert_eq!(mesh.faces.len(), 48);
         assert!(mesh.validate_euler());
     }
 
