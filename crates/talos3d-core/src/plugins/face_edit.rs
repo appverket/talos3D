@@ -33,10 +33,6 @@ use crate::{
         ui::StatusBarData,
     },
 };
-
-#[cfg(feature = "perf-stats")]
-use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
-
 const FACE_HIGHLIGHT_EDGE: Color = Color::srgba(0.3, 0.7, 1.0, 0.8);
 const FACE_SELECTED_EDGE: Color = Color::srgb(0.2, 1.0, 0.4);
 const FACE_NORMAL_LENGTH: f32 = 0.5;
@@ -717,7 +713,7 @@ fn active_camera(world: &World) -> Option<(Camera, GlobalTransform)> {
         .iter(world)
         .find(|(camera, _)| camera.is_active)
         .or_else(|| camera_query.iter(world).next())
-        .map(|(camera, transform)| (camera.clone(), transform.clone()))
+        .map(|(camera, transform)| (camera.clone(), *transform))
 }
 
 fn viewport_cursor_position(world: &World, camera: &Camera) -> Option<Vec2> {
@@ -1022,7 +1018,7 @@ fn handle_face_drawing_start(
 
 /// Handle clicks and key presses while in face drawing mode.
 fn handle_face_drawing_input(world: &mut World) {
-    let egui = world.resource::<EguiWantsInput>().clone();
+    let egui = *world.resource::<EguiWantsInput>();
     let keys = world.resource::<ButtonInput<KeyCode>>().clone();
     let mouse = world.resource::<ButtonInput<MouseButton>>().clone();
 

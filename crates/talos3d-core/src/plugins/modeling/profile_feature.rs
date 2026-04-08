@@ -1087,7 +1087,7 @@ mod tests {
         let face_centroid = Vec3::new(1.0, 0.0, 0.0);
         let face_normal = Vec3::X;
         let plane = DrawingPlane::from_face(face_centroid, face_normal);
-        let world_points = vec![
+        let world_points = [
             Vec3::new(1.0, -0.3, -0.3),
             Vec3::new(1.0, -0.3, 0.3),
             Vec3::new(1.0, 0.3, 0.3),

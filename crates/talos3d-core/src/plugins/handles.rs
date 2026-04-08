@@ -37,6 +37,7 @@ const HANDLE_HOVER_BRIGHTNESS: f32 = 1.25;
 const PIVOT_COLOR: Color = Color::srgb(0.96, 0.35, 0.8);
 const ROTATE_RING_COLOR: Color = Color::srgb(0.42, 0.95, 0.58);
 const ROTATE_RING_SEGMENTS: usize = 24;
+const MOVE_HANDLE_HINT: &str = "Move: drag a corner or control point · snaps to nearby markers";
 
 pub struct HandlesPlugin;
 
@@ -81,6 +82,25 @@ impl Plugin for HandlesPlugin {
                 ),
             );
     }
+}
+
+pub fn arm_move_handles(world: &mut World) -> Result<(), String> {
+    if !world.resource::<InputOwnership>().is_idle() {
+        return Err("Input is owned by another system".to_string());
+    }
+
+    let has_selection = {
+        let mut query = world.query_filtered::<Entity, With<Selected>>();
+        query.iter(world).next().is_some()
+    };
+    if !has_selection {
+        return Err("No selection to transform".to_string());
+    }
+
+    world.resource_mut::<HandleContext>().display_mode = HandleDisplayMode::Move;
+    clear_pending_handle_press(world);
+    world.resource_mut::<StatusBarData>().hint = MOVE_HANDLE_HINT.to_string();
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -414,7 +434,6 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
         }
     }
 
-    let initial_cursor = current_cursor_world(world);
     let start_result = match pending.handle.interaction.clone() {
         HandleInteraction::Transform {
             mode,
@@ -425,7 +444,11 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
             mode,
             TransformStartOptions {
                 axis,
-                initial_cursor,
+                initial_cursor: transform_handle_initial_cursor(
+                    mode,
+                    pending.handle.position,
+                    Some(cursor_world),
+                ),
                 pivot_override,
                 confirm_on_release: true,
             },
@@ -438,7 +461,11 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
                     world,
                     TransformMode::Moving,
                     TransformStartOptions {
-                        initial_cursor,
+                        initial_cursor: transform_handle_initial_cursor(
+                            TransformMode::Moving,
+                            pending.handle.position,
+                            Some(cursor_world),
+                        ),
                         confirm_on_release: true,
                         ..default()
                     },
@@ -451,7 +478,7 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
                     world,
                     TransformMode::Rotating,
                     TransformStartOptions {
-                        initial_cursor,
+                        initial_cursor: Some(cursor_world),
                         confirm_on_release: true,
                         ..default()
                     },
@@ -464,7 +491,11 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
                     world,
                     TransformMode::Scaling,
                     TransformStartOptions {
-                        initial_cursor,
+                        initial_cursor: transform_handle_initial_cursor(
+                            TransformMode::Scaling,
+                            pending.handle.position,
+                            Some(cursor_world),
+                        ),
                         pivot_override: Some(mirrored_pivot(
                             pending.handle.snapshot.center(),
                             pending.handle.position,
@@ -483,6 +514,17 @@ fn begin_handle_drag(world: &mut World, pending: PendingHandlePress) {
 
     if start_result.is_err() {
         world.resource_mut::<PivotPoint>().position = Some(pending.handle.position);
+    }
+}
+
+fn transform_handle_initial_cursor(
+    mode: TransformMode,
+    handle_position: Vec3,
+    fallback_cursor: Option<Vec3>,
+) -> Option<Vec3> {
+    match mode {
+        TransformMode::Moving | TransformMode::Scaling => Some(handle_position),
+        TransformMode::Rotating | TransformMode::Idle => fallback_cursor,
     }
 }
 
@@ -535,6 +577,8 @@ fn update_property_handle_drag(world: &mut World) {
 }
 
 fn update_handle_status(
+    selected_query: Query<Entity, With<Selected>>,
+    handle_context: Res<HandleContext>,
     handle_state: Res<HandleInteractionState>,
     ownership: Res<InputOwnership>,
     mut status_bar_data: ResMut<StatusBarData>,
@@ -557,6 +601,10 @@ fn update_handle_status(
         status_bar_data.command_hint = Some(handle.label.clone());
     } else if status_bar_data.command_hint.is_some() {
         status_bar_data.command_hint = None;
+    } else if !selected_query.is_empty() && handle_context.display_mode == HandleDisplayMode::Move {
+        status_bar_data.hint = MOVE_HANDLE_HINT.to_string();
+    } else if status_bar_data.hint == MOVE_HANDLE_HINT {
+        status_bar_data.hint.clear();
     }
 }
 
@@ -1046,6 +1094,37 @@ fn take_property_handle_drag(world: &mut World) -> Option<PropertyHandleDrag> {
         .resource_mut::<HandleInteractionState>()
         .property_drag
         .take()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_and_scale_handles_use_handle_position_as_anchor() {
+        let handle_position = Vec3::new(1.0, 2.0, 3.0);
+        let fallback = Some(Vec3::new(9.0, 9.0, 9.0));
+
+        assert_eq!(
+            transform_handle_initial_cursor(TransformMode::Moving, handle_position, fallback),
+            Some(handle_position)
+        );
+        assert_eq!(
+            transform_handle_initial_cursor(TransformMode::Scaling, handle_position, fallback),
+            Some(handle_position)
+        );
+    }
+
+    #[test]
+    fn rotate_handles_keep_cursor_based_anchor() {
+        let handle_position = Vec3::new(1.0, 2.0, 3.0);
+        let fallback = Some(Vec3::new(9.0, 9.0, 9.0));
+
+        assert_eq!(
+            transform_handle_initial_cursor(TransformMode::Rotating, handle_position, fallback),
+            fallback
+        );
+    }
 }
 
 fn clear_pending_handle_press(world: &mut World) {

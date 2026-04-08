@@ -588,11 +588,11 @@ impl AuthoredEntityFactory for RelationFactory {
             ) else {
                 continue;
             };
-            if requested_ids.contains(&relation.source) || requested_ids.contains(&relation.target)
+            if (requested_ids.contains(&relation.source)
+                || requested_ids.contains(&relation.target))
+                && !out.contains(element_id)
             {
-                if !out.contains(element_id) {
-                    out.push(*element_id);
-                }
+                out.push(*element_id);
             }
         }
     }

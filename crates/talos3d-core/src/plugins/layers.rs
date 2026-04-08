@@ -119,11 +119,11 @@ impl LayerRegistry {
     }
 
     pub fn is_visible(&self, name: &str) -> bool {
-        self.layers.get(name).map_or(true, |l| l.visible)
+        self.layers.get(name).is_none_or(|l| l.visible)
     }
 
     pub fn is_locked(&self, name: &str) -> bool {
-        self.layers.get(name).map_or(false, |l| l.locked)
+        self.layers.get(name).is_some_and(|l| l.locked)
     }
 }
 

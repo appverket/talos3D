@@ -31,7 +31,9 @@ Talos3D includes a structured Model Context Protocol surface for AI agents and
 automation clients.
 
 - Run it with `cargo run --features model-api`
-- Connect over HTTP at `http://127.0.0.1:24842/mcp`
+- Connect over HTTP at `http://127.0.0.1:<port>/mcp`
+- For parallel agent sessions, launch with a unique instance id and port:
+  `cargo run --features model-api -- --instance-id codex --model-api-port 24842`
 - Use the same command surface the UI uses for inspection and edits
 - Discover capability vocabulary and inspect or create semantic assemblies and
   relations through the same public interface

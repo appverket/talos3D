@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bevy::{ecs::world::EntityRef, prelude::*};
+use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "model-api")]
 use serde_json::Value;
@@ -23,6 +23,7 @@ use crate::plugins::{
     history::{apply_pending_history_commands, HistorySet},
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
+    materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
     persistence::{load_project_from_path, save_project_to_path},
     selection::Selected,
     toolbar::{
@@ -33,8 +34,12 @@ use crate::plugins::{
 
 #[cfg(feature = "model-api")]
 use std::{
+    env, fs,
+    net::TcpListener as StdTcpListener,
+    path::{Path, PathBuf},
     sync::{mpsc, Mutex},
     thread,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "model-api")]
@@ -52,6 +57,8 @@ use rmcp::transport::streamable_http_server::{
 
 #[cfg(feature = "model-api")]
 use tokio::sync::oneshot;
+#[cfg(feature = "model-api")]
+use tokio::time::{sleep, Duration};
 
 #[cfg(feature = "model-api")]
 pub struct ModelApiPlugin;
@@ -59,11 +66,35 @@ pub struct ModelApiPlugin;
 #[cfg(feature = "model-api")]
 impl Plugin for ModelApiPlugin {
     fn build(&self, app: &mut App) {
+        let (runtime_info, http_listener) = match resolve_model_api_runtime() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("failed to configure model API runtime: {error}");
+                return;
+            }
+        };
         let (sender, receiver) = mpsc::channel();
         app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
+        app.insert_resource(runtime_info.clone());
         app.add_systems(Update, poll_model_api_requests.before(HistorySet::Queue));
-        spawn_model_api_server(sender);
+        app.add_systems(Startup, annotate_window_title_with_model_api_instance);
+        spawn_model_api_server(sender, runtime_info, http_listener);
     }
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Resource, Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelApiRuntimeInfo {
+    pub instance_id: String,
+    pub app_name: String,
+    pub pid: u32,
+    pub http_host: String,
+    pub http_port: u16,
+    pub http_url: String,
+    pub registry_path: String,
+    pub started_at_unix_ms: u128,
+    pub requested_port: Option<u16>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -133,6 +164,36 @@ pub struct ToolbarDetails {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InstanceInfo {
+    pub instance_id: String,
+    pub app_name: String,
+    pub pid: u32,
+    pub http_host: String,
+    pub http_port: u16,
+    pub http_url: String,
+    pub registry_path: String,
+    pub started_at_unix_ms: u128,
+    pub requested_port: Option<u16>,
+}
+
+impl From<&ModelApiRuntimeInfo> for InstanceInfo {
+    fn from(value: &ModelApiRuntimeInfo) -> Self {
+        Self {
+            instance_id: value.instance_id.clone(),
+            app_name: value.app_name.clone(),
+            pid: value.pid,
+            http_host: value.http_host.clone(),
+            http_port: value.http_port,
+            http_url: value.http_url.clone(),
+            registry_path: value.registry_path.clone(),
+            started_at_unix_ms: value.started_at_unix_ms,
+            requested_port: value.requested_port,
+        }
+    }
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EditingContextInfo {
     pub is_root: bool,
     pub stack: Vec<EditingContextEntry>,
@@ -173,6 +234,106 @@ pub struct SplitResult {
     pub group_element_id: u64,
 }
 
+// --- Material types ---
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MaterialInfo {
+    pub id: String,
+    pub name: String,
+    pub base_color: [f32; 4],
+    pub perceptual_roughness: f32,
+    pub metallic: f32,
+    pub reflectance: f32,
+    pub emissive: [f32; 3],
+    pub alpha_mode: String,
+    pub double_sided: bool,
+    pub uv_scale: [f32; 2],
+    pub uv_rotation_deg: f32,
+    pub base_color_texture: Option<String>,
+    pub normal_map_texture: Option<String>,
+    pub metallic_roughness_texture: Option<String>,
+    pub emissive_texture: Option<String>,
+}
+
+impl MaterialInfo {
+    fn from_def(def: &MaterialDef) -> Self {
+        Self {
+            id: def.id.clone(),
+            name: def.name.clone(),
+            base_color: def.base_color,
+            perceptual_roughness: def.perceptual_roughness,
+            metallic: def.metallic,
+            reflectance: def.reflectance,
+            emissive: def.emissive,
+            alpha_mode: format!("{:?}", def.alpha_mode),
+            double_sided: def.double_sided,
+            uv_scale: def.uv_scale,
+            uv_rotation_deg: def.uv_rotation.to_degrees(),
+            base_color_texture: def.base_color_texture.clone(),
+            normal_map_texture: def.normal_map_texture.clone(),
+            metallic_roughness_texture: def.metallic_roughness_texture.clone(),
+            emissive_texture: def.emissive_texture.clone(),
+        }
+    }
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateMaterialRequest {
+    pub name: String,
+    #[serde(default = "default_base_color")]
+    pub base_color: [f32; 4],
+    #[serde(default = "default_roughness")]
+    pub perceptual_roughness: f32,
+    #[serde(default)]
+    pub metallic: f32,
+    #[serde(default = "default_reflectance")]
+    pub reflectance: f32,
+    #[serde(default)]
+    pub emissive: [f32; 3],
+    #[serde(default = "default_alpha_mode")]
+    pub alpha_mode: String,
+    #[serde(default = "default_alpha_cutoff")]
+    pub alpha_cutoff: f32,
+    #[serde(default)]
+    pub double_sided: bool,
+    #[serde(default = "default_uv_scale")]
+    pub uv_scale: [f32; 2],
+    #[serde(default)]
+    pub uv_rotation_deg: f32,
+    pub base_color_texture: Option<String>,
+    pub normal_map_texture: Option<String>,
+    pub metallic_roughness_texture: Option<String>,
+    pub emissive_texture: Option<String>,
+}
+
+fn default_base_color() -> [f32; 4] {
+    [0.78, 0.82, 0.88, 1.0]
+}
+fn default_roughness() -> f32 {
+    0.85
+}
+fn default_reflectance() -> f32 {
+    0.5
+}
+fn default_alpha_mode() -> String {
+    "opaque".to_string()
+}
+fn default_alpha_cutoff() -> f32 {
+    0.5
+}
+fn default_uv_scale() -> [f32; 2] {
+    [1.0, 1.0]
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyMaterialRequest {
+    pub material_id: String,
+    pub element_ids: Vec<u64>,
+}
+
 // --- Definition / Occurrence types ---
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -205,6 +366,61 @@ pub struct InstantiateDefinitionResult {
     pub imported_definition_ids: Vec<String>,
     #[serde(default)]
     pub relation_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionDraftEntry {
+    pub draft_id: String,
+    pub source_definition_id: Option<String>,
+    pub source_library_id: Option<String>,
+    pub definition_id: String,
+    pub name: String,
+    pub definition_version: u32,
+    pub dirty: bool,
+    pub full: Value,
+    pub effective_full: Value,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionValidationResult {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub effective_full: Option<Value>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionCompileEdge {
+    pub from: String,
+    pub to: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionCompileResult {
+    pub target_id: String,
+    pub effective_full: Value,
+    pub nodes: Vec<String>,
+    pub edges: Vec<DefinitionCompileEdge>,
+    pub child_slot_count: usize,
+    pub derived_parameter_count: usize,
+    pub constraint_count: usize,
+    pub anchor_count: usize,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionExplainResult {
+    pub target_id: String,
+    pub raw_full: Value,
+    pub effective_full: Value,
+    pub local_parameter_names: Vec<String>,
+    pub inherited_parameter_names: Vec<String>,
+    pub local_child_slot_ids: Vec<String>,
+    pub inherited_child_slot_ids: Vec<String>,
+    pub compile: DefinitionCompileResult,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -478,6 +694,7 @@ struct ModelApiReceiver(Mutex<mpsc::Receiver<ModelApiRequest>>);
 
 #[cfg(feature = "model-api")]
 enum ModelApiRequest {
+    GetInstanceInfo(oneshot::Sender<InstanceInfo>),
     ListEntities(oneshot::Sender<Vec<EntityEntry>>),
     GetEntity {
         element_id: u64,
@@ -567,6 +784,33 @@ enum ModelApiRequest {
         name: String,
         response: oneshot::Sender<ApiResult<Vec<LayerInfo>>>,
     },
+    // --- Materials ---
+    ListMaterials(oneshot::Sender<Vec<MaterialInfo>>),
+    GetMaterial {
+        id: String,
+        response: oneshot::Sender<ApiResult<MaterialInfo>>,
+    },
+    CreateMaterial {
+        request: CreateMaterialRequest,
+        response: oneshot::Sender<ApiResult<MaterialInfo>>,
+    },
+    UpdateMaterial {
+        id: String,
+        request: CreateMaterialRequest,
+        response: oneshot::Sender<ApiResult<MaterialInfo>>,
+    },
+    DeleteMaterial {
+        id: String,
+        response: oneshot::Sender<ApiResult<String>>,
+    },
+    ApplyMaterial {
+        request: ApplyMaterialRequest,
+        response: oneshot::Sender<ApiResult<Vec<u64>>>,
+    },
+    RemoveMaterial {
+        element_ids: Vec<u64>,
+        response: oneshot::Sender<ApiResult<Vec<u64>>>,
+    },
     // --- Selection ---
     GetSelection(oneshot::Sender<Vec<u64>>),
     SetSelection {
@@ -634,6 +878,43 @@ enum ModelApiRequest {
     UpdateDefinition {
         request: Value,
         response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    ListDefinitionDrafts(oneshot::Sender<Vec<DefinitionDraftEntry>>),
+    GetDefinitionDraft {
+        draft_id: String,
+        response: oneshot::Sender<ApiResult<DefinitionDraftEntry>>,
+    },
+    OpenDefinitionDraft {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionDraftEntry>>,
+    },
+    CreateDefinitionDraft {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionDraftEntry>>,
+    },
+    DeriveDefinitionDraft {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionDraftEntry>>,
+    },
+    PatchDefinitionDraft {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionDraftEntry>>,
+    },
+    PublishDefinitionDraft {
+        draft_id: String,
+        response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    ValidateDefinition {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionValidationResult>>,
+    },
+    CompileDefinition {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionCompileResult>>,
+    },
+    ExplainDefinition {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionExplainResult>>,
     },
     ListDefinitionLibraries(oneshot::Sender<Vec<DefinitionLibraryEntry>>),
     GetDefinitionLibrary {
@@ -710,6 +991,9 @@ type ApiResult<T> = Result<T, String>;
 #[cfg(feature = "model-api")]
 fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
     match request {
+        ModelApiRequest::GetInstanceInfo(response) => {
+            let _ = response.send(handle_get_instance_info(world));
+        }
         ModelApiRequest::ListEntities(response) => {
             let _ = response.send(list_entities(world));
         }
@@ -846,6 +1130,35 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::CreateLayer { name, response } => {
             let _ = response.send(handle_create_layer(world, &name));
         }
+        // --- Materials ---
+        ModelApiRequest::ListMaterials(response) => {
+            let _ = response.send(handle_list_materials(world));
+        }
+        ModelApiRequest::GetMaterial { id, response } => {
+            let _ = response.send(handle_get_material(world, &id));
+        }
+        ModelApiRequest::CreateMaterial { request, response } => {
+            let _ = response.send(handle_create_material(world, request));
+        }
+        ModelApiRequest::UpdateMaterial {
+            id,
+            request,
+            response,
+        } => {
+            let _ = response.send(handle_update_material(world, &id, request));
+        }
+        ModelApiRequest::DeleteMaterial { id, response } => {
+            let _ = response.send(handle_delete_material(world, &id));
+        }
+        ModelApiRequest::ApplyMaterial { request, response } => {
+            let _ = response.send(handle_apply_material(world, request));
+        }
+        ModelApiRequest::RemoveMaterial {
+            element_ids,
+            response,
+        } => {
+            let _ = response.send(handle_remove_material(world, element_ids));
+        }
         // --- Selection ---
         ModelApiRequest::GetSelection(response) => {
             let _ = response.send(handle_get_selection(world));
@@ -934,6 +1247,36 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::UpdateDefinition { request, response } => {
             let _ = response.send(handle_update_definition(world, request));
         }
+        ModelApiRequest::ListDefinitionDrafts(response) => {
+            let _ = response.send(handle_list_definition_drafts(world));
+        }
+        ModelApiRequest::GetDefinitionDraft { draft_id, response } => {
+            let _ = response.send(handle_get_definition_draft(world, draft_id));
+        }
+        ModelApiRequest::OpenDefinitionDraft { request, response } => {
+            let _ = response.send(handle_open_definition_draft(world, request));
+        }
+        ModelApiRequest::CreateDefinitionDraft { request, response } => {
+            let _ = response.send(handle_create_definition_draft(world, request));
+        }
+        ModelApiRequest::DeriveDefinitionDraft { request, response } => {
+            let _ = response.send(handle_derive_definition_draft(world, request));
+        }
+        ModelApiRequest::PatchDefinitionDraft { request, response } => {
+            let _ = response.send(handle_patch_definition_draft(world, request));
+        }
+        ModelApiRequest::PublishDefinitionDraft { draft_id, response } => {
+            let _ = response.send(handle_publish_definition_draft(world, draft_id));
+        }
+        ModelApiRequest::ValidateDefinition { request, response } => {
+            let _ = response.send(handle_validate_definition(world, request));
+        }
+        ModelApiRequest::CompileDefinition { request, response } => {
+            let _ = response.send(handle_compile_definition(world, request));
+        }
+        ModelApiRequest::ExplainDefinition { request, response } => {
+            let _ = response.send(handle_explain_definition(world, request));
+        }
         ModelApiRequest::ListDefinitionLibraries(response) => {
             let _ = response.send(handle_list_definition_libraries(world));
         }
@@ -992,10 +1335,19 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
     }
 }
 
-const MODEL_API_HTTP_PORT: u16 = 24842;
+const MODEL_API_DEFAULT_HTTP_PORT: u16 = 24842;
+const MODEL_API_DEFAULT_HTTP_HOST: &str = "127.0.0.1";
+const MODEL_API_INSTANCE_ENV: &str = "TALOS3D_INSTANCE_ID";
+const MODEL_API_PORT_ENV: &str = "TALOS3D_MODEL_API_PORT";
+const MODEL_API_REGISTRY_DIR_ENV: &str = "TALOS3D_INSTANCE_REGISTRY_DIR";
+const MODEL_API_DEFAULT_REGISTRY_DIR: &str = "/tmp/talos3d-instances";
 
 #[cfg(feature = "model-api")]
-fn spawn_model_api_server(sender: mpsc::Sender<ModelApiRequest>) {
+fn spawn_model_api_server(
+    sender: mpsc::Sender<ModelApiRequest>,
+    runtime_info: ModelApiRuntimeInfo,
+    http_listener: StdTcpListener,
+) {
     let http_sender = sender.clone();
 
     // Stdio transport (existing)
@@ -1068,15 +1420,18 @@ fn spawn_model_api_server(sender: mpsc::Sender<ModelApiRequest>) {
                     );
 
                 let router = axum::Router::new().nest_service("/mcp", service);
-                let addr = format!("127.0.0.1:{MODEL_API_HTTP_PORT}");
-                let tcp_listener = match tokio::net::TcpListener::bind(&addr).await {
+                let addr = format!("{}:{}", runtime_info.http_host, runtime_info.http_port);
+                let tcp_listener = match tokio::net::TcpListener::from_std(http_listener) {
                     Ok(listener) => listener,
                     Err(error) => {
-                        eprintln!("failed to bind model API HTTP on {addr}: {error}");
+                        eprintln!("failed to adopt model API HTTP listener on {addr}: {error}");
                         return;
                     }
                 };
-                eprintln!("model API HTTP server listening on http://{addr}/mcp");
+                eprintln!(
+                    "talos3d instance {} MCP {} registry {}",
+                    runtime_info.instance_id, runtime_info.http_url, runtime_info.registry_path
+                );
                 if let Err(error) = axum::serve(tcp_listener, router)
                     .with_graceful_shutdown(async move { ct.cancelled_owned().await })
                     .await
@@ -1089,6 +1444,168 @@ fn spawn_model_api_server(sender: mpsc::Sender<ModelApiRequest>) {
     if let Err(error) = spawn_result {
         eprintln!("failed to spawn model API HTTP thread: {error}");
     }
+}
+
+#[cfg(feature = "model-api")]
+fn resolve_model_api_runtime() -> Result<(ModelApiRuntimeInfo, StdTcpListener), String> {
+    let app_name = current_app_name();
+    let pid = std::process::id();
+    let started_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock error: {error}"))?
+        .as_millis();
+    let instance_id = env::var(MODEL_API_INSTANCE_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("{app_name}-{pid}-{started_at_unix_ms}"));
+    let requested_port = env::var(MODEL_API_PORT_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            value.parse::<u16>().map_err(|error| {
+                format!(
+                    "invalid {} value {:?}: {}",
+                    MODEL_API_PORT_ENV, value, error
+                )
+            })
+        })
+        .transpose()?;
+    let registry_dir = env::var(MODEL_API_REGISTRY_DIR_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(MODEL_API_DEFAULT_REGISTRY_DIR));
+
+    let listener = bind_model_api_listener(requested_port)?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure model API HTTP listener: {error}"))?;
+    let http_port = listener
+        .local_addr()
+        .map_err(|error| format!("failed to read model API HTTP listener address: {error}"))?
+        .port();
+    let http_url = format!("http://{MODEL_API_DEFAULT_HTTP_HOST}:{http_port}/mcp");
+    let registry_path = write_instance_registry_manifest(
+        &registry_dir,
+        &instance_id,
+        &app_name,
+        pid,
+        http_port,
+        started_at_unix_ms,
+        requested_port,
+    )?;
+    let runtime_info = ModelApiRuntimeInfo {
+        instance_id,
+        app_name,
+        pid,
+        http_host: MODEL_API_DEFAULT_HTTP_HOST.to_string(),
+        http_port,
+        http_url,
+        registry_path: registry_path.display().to_string(),
+        started_at_unix_ms,
+        requested_port,
+    };
+
+    Ok((runtime_info, listener))
+}
+
+#[cfg(feature = "model-api")]
+fn bind_model_api_listener(requested_port: Option<u16>) -> Result<StdTcpListener, String> {
+    let preferred_port = requested_port.unwrap_or(MODEL_API_DEFAULT_HTTP_PORT);
+    let preferred_addr = format!("{MODEL_API_DEFAULT_HTTP_HOST}:{preferred_port}");
+    match StdTcpListener::bind(&preferred_addr) {
+        Ok(listener) => Ok(listener),
+        Err(error) if requested_port.is_none() && preferred_port == MODEL_API_DEFAULT_HTTP_PORT => {
+            let fallback_addr = format!("{MODEL_API_DEFAULT_HTTP_HOST}:0");
+            let listener = StdTcpListener::bind(&fallback_addr).map_err(|fallback_error| {
+                format!(
+                    "failed to bind model API HTTP on {preferred_addr} ({error}) and fallback {fallback_addr} ({fallback_error})"
+                )
+            })?;
+            eprintln!(
+                "model API default port {} was busy; using auto-assigned port {}",
+                MODEL_API_DEFAULT_HTTP_PORT,
+                listener
+                    .local_addr()
+                    .map_err(|addr_error| format!(
+                        "failed to read fallback listener address: {addr_error}"
+                    ))?
+                    .port()
+            );
+            Ok(listener)
+        }
+        Err(error) => Err(format!(
+            "failed to bind model API HTTP on {preferred_addr}: {error}"
+        )),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn current_app_name() -> String {
+    env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "talos3d".to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn write_instance_registry_manifest(
+    registry_dir: &Path,
+    instance_id: &str,
+    app_name: &str,
+    pid: u32,
+    http_port: u16,
+    started_at_unix_ms: u128,
+    requested_port: Option<u16>,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(registry_dir).map_err(|error| {
+        format!(
+            "failed to create instance registry directory {}: {error}",
+            registry_dir.display()
+        )
+    })?;
+    let registry_path = registry_dir.join(format!("{instance_id}.json"));
+    let manifest = serde_json::json!({
+        "instance_id": instance_id,
+        "app_name": app_name,
+        "pid": pid,
+        "http_host": MODEL_API_DEFAULT_HTTP_HOST,
+        "http_port": http_port,
+        "http_url": format!("http://{MODEL_API_DEFAULT_HTTP_HOST}:{http_port}/mcp"),
+        "registry_path": registry_path.display().to_string(),
+        "started_at_unix_ms": started_at_unix_ms,
+        "requested_port": requested_port
+    });
+    let bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("failed to serialize instance manifest: {error}"))?;
+    fs::write(&registry_path, bytes).map_err(|error| {
+        format!(
+            "failed to write instance manifest {}: {error}",
+            registry_path.display()
+        )
+    })?;
+    Ok(registry_path)
+}
+
+#[cfg(feature = "model-api")]
+fn annotate_window_title_with_model_api_instance(
+    runtime_info: Res<ModelApiRuntimeInfo>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+    if window.title.contains(&runtime_info.instance_id) {
+        return;
+    }
+    window.title = format!(
+        "{} [{} @ {}]",
+        window.title, runtime_info.instance_id, runtime_info.http_port
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -1105,6 +1622,16 @@ impl ModelApiServer {
             sender,
             tool_router: Self::tool_router(),
         }
+    }
+
+    async fn request_get_instance_info(&self) -> Result<InstanceInfo, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetInstanceInfo(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
     }
 
     async fn request_list_entities(&self) -> Result<Vec<EntityEntry>, String> {
@@ -1465,6 +1992,92 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    // --- Materials ---
+
+    async fn request_list_materials(&self) -> Result<Vec<MaterialInfo>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListMaterials(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_get_material(&self, id: String) -> ApiResult<MaterialInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetMaterial { id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_material(
+        &self,
+        request: CreateMaterialRequest,
+    ) -> ApiResult<MaterialInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateMaterial { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_material(
+        &self,
+        id: String,
+        request: CreateMaterialRequest,
+    ) -> ApiResult<MaterialInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateMaterial {
+                id,
+                request,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_delete_material(&self, id: String) -> ApiResult<String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DeleteMaterial { id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_apply_material(&self, request: ApplyMaterialRequest) -> ApiResult<Vec<u64>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ApplyMaterial { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_remove_material(&self, element_ids: Vec<u64>) -> ApiResult<Vec<u64>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::RemoveMaterial {
+                element_ids,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     // --- Selection ---
 
     async fn request_get_selection(&self) -> Result<Vec<u64>, String> {
@@ -1519,9 +2132,12 @@ impl ModelApiServer {
         self.sender
             .send(ModelApiRequest::TakeScreenshot { path, response })
             .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
+        let saved_path = receiver
             .await
-            .map_err(|_| "model API response channel closed".to_string())?
+            .map_err(|_| "model API response channel closed".to_string())??;
+
+        wait_for_screenshot_file(&saved_path).await?;
+        Ok(saved_path)
     }
 
     async fn request_save_project(&self, path: String) -> ApiResult<String> {
@@ -1688,6 +2304,133 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::UpdateDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_list_definition_drafts(&self) -> Result<Vec<DefinitionDraftEntry>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListDefinitionDrafts(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_get_definition_draft(
+        &self,
+        draft_id: String,
+    ) -> ApiResult<DefinitionDraftEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetDefinitionDraft { draft_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_open_definition_draft(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionDraftEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::OpenDefinitionDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_definition_draft(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionDraftEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateDefinitionDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_derive_definition_draft(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionDraftEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DeriveDefinitionDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_patch_definition_draft(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionDraftEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PatchDefinitionDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_publish_definition_draft(
+        &self,
+        draft_id: String,
+    ) -> ApiResult<DefinitionEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PublishDefinitionDraft { draft_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_validate_definition(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionValidationResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ValidateDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_compile_definition(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionCompileResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CompileDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_explain_definition(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionExplainResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ExplainDefinition { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -2027,6 +2770,36 @@ struct CreateLayerRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct GetMaterialRequest {
+    id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UpdateMaterialRequest {
+    id: String,
+    #[serde(flatten)]
+    material: CreateMaterialRequest,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeleteMaterialRequest {
+    id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoveMaterialRequest {
+    element_ids: Vec<u64>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SetSelectionRequest {
     element_ids: Vec<u64>,
 }
@@ -2067,6 +2840,53 @@ struct LoadProjectRequest {
 #[cfg(feature = "model-api")]
 fn default_screenshot_path() -> String {
     "/tmp/talos_screenshot.png".to_string()
+}
+
+#[cfg(feature = "model-api")]
+async fn wait_for_screenshot_file(path: &str) -> Result<(), String> {
+    const ATTEMPTS: usize = 50;
+    const POLL_INTERVAL_MS: u64 = 100;
+
+    for _ in 0..ATTEMPTS {
+        if std::fs::metadata(path)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+
+    Err(format!(
+        "Screenshot was requested but '{path}' was not written within {} ms",
+        ATTEMPTS as u64 * POLL_INTERVAL_MS
+    ))
+}
+
+#[cfg(feature = "model-api")]
+fn save_screenshot_to_disk(
+    path: impl AsRef<std::path::Path>,
+) -> impl FnMut(bevy::prelude::On<bevy::render::view::screenshot::ScreenshotCaptured>) {
+    let path = path.as_ref().to_owned();
+    move |screenshot_captured| {
+        let img = screenshot_captured.image.clone();
+        match img.try_into_dynamic() {
+            Ok(dynamic) => match image::ImageFormat::from_path(&path) {
+                Ok(format) => {
+                    let rgb = dynamic.to_rgb8();
+                    if let Err(error) = rgb.save_with_format(&path, format) {
+                        error!("Cannot save screenshot, IO error: {error}");
+                    }
+                }
+                Err(error) => {
+                    error!("Cannot save screenshot, requested format not recognized: {error}");
+                }
+            },
+            Err(error) => {
+                error!("Cannot save screenshot, screen format cannot be understood: {error}");
+            }
+        }
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -2174,6 +2994,15 @@ struct ListAssemblyMembersRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DefinitionGetRequest {
     definition_id: String,
+    #[serde(default)]
+    library_id: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DefinitionDraftIdRequest {
+    draft_id: String,
 }
 
 #[cfg(feature = "model-api")]
@@ -2216,6 +3045,18 @@ struct OccurrenceResolveRequest {
 #[cfg(feature = "model-api")]
 #[tool_router(router = tool_router)]
 impl ModelApiServer {
+    #[tool(
+        name = "get_instance_info",
+        description = "Get runtime identification for this Talos3D instance, including instance_id, MCP HTTP port, URL, registry manifest path, and pid."
+    )]
+    async fn get_instance_info_tool(&self) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_get_instance_info()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(info)
+    }
+
     #[tool(
         name = "list_entities",
         description = "List all authored entities in the model."
@@ -2617,6 +3458,110 @@ impl ModelApiServer {
         json_tool_result(layers)
     }
 
+    // --- Materials ---
+
+    #[tool(
+        name = "list_materials",
+        description = "List all materials in the project registry. Returns id, name, PBR properties, texture paths, and UV tiling."
+    )]
+    async fn list_materials_tool(&self) -> Result<CallToolResult, McpError> {
+        let materials = self
+            .request_list_materials()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(materials)
+    }
+
+    #[tool(
+        name = "get_material",
+        description = "Get full details for a specific material by id."
+    )]
+    async fn get_material_tool(
+        &self,
+        Parameters(params): Parameters<GetMaterialRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let material = self
+            .request_get_material(params.id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(material)
+    }
+
+    #[tool(
+        name = "create_material",
+        description = "Create a new material in the project registry. Specify PBR properties (base_color as [r,g,b,a], perceptual_roughness, metallic, reflectance, emissive as [r,g,b]), alpha_mode (opaque/blend/mask), UV tiling (uv_scale as [x,y], uv_rotation_deg), and optional texture file paths."
+    )]
+    async fn create_material_tool(
+        &self,
+        Parameters(params): Parameters<CreateMaterialRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let material = self
+            .request_create_material(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(material)
+    }
+
+    #[tool(
+        name = "update_material",
+        description = "Update an existing material's properties. Takes the same fields as create_material plus the material id."
+    )]
+    async fn update_material_tool(
+        &self,
+        Parameters(params): Parameters<UpdateMaterialRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let material = self
+            .request_update_material(params.id, params.material)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(material)
+    }
+
+    #[tool(
+        name = "delete_material",
+        description = "Delete a material from the registry and remove its assignment from all entities."
+    )]
+    async fn delete_material_tool(
+        &self,
+        Parameters(params): Parameters<DeleteMaterialRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = self
+            .request_delete_material(params.id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(id)
+    }
+
+    #[tool(
+        name = "apply_material",
+        description = "Apply a material to one or more entities by element_id. Pass material_id and element_ids array."
+    )]
+    async fn apply_material_tool(
+        &self,
+        Parameters(params): Parameters<ApplyMaterialRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let applied = self
+            .request_apply_material(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(applied)
+    }
+
+    #[tool(
+        name = "remove_material_assignment",
+        description = "Remove the material assignment from entities, reverting them to the default material."
+    )]
+    async fn remove_material_tool(
+        &self,
+        Parameters(params): Parameters<RemoveMaterialRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let removed = self
+            .request_remove_material(params.element_ids)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(removed)
+    }
+
     // --- Selection ---
 
     #[tool(
@@ -2878,6 +3823,153 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/draft/list",
+        description = "List all open definition drafts."
+    )]
+    async fn definition_draft_list_tool(&self) -> Result<CallToolResult, McpError> {
+        let drafts = self
+            .request_list_definition_drafts()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(drafts)
+    }
+
+    #[tool(
+        name = "definition/draft/get",
+        description = "Get a definition draft by draft_id."
+    )]
+    async fn definition_draft_get_tool(
+        &self,
+        Parameters(params): Parameters<DefinitionDraftIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_get_definition_draft(params.draft_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "definition/draft/open",
+        description = "Open an existing definition as a draft for editing. Requires: definition_id. Optionally: library_id."
+    )]
+    async fn definition_draft_open_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_open_definition_draft(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "definition/draft/create",
+        description = "Create a new definition draft. Same payload shape as definition/create, but stored only as an editable draft until published."
+    )]
+    async fn definition_draft_create_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_create_definition_draft(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "definition/draft/derive",
+        description = "Create a derived definition draft from an existing definition. Requires: definition_id. Optionally: library_id and name."
+    )]
+    async fn definition_draft_derive_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_derive_definition_draft(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "definition/draft/patch",
+        description = "Apply one or more patch operations to a definition draft. Requires: draft_id and either patch or patches."
+    )]
+    async fn definition_draft_patch_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_patch_definition_draft(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "definition/draft/publish",
+        description = "Validate and publish a definition draft into the document. Requires: draft_id."
+    )]
+    async fn definition_draft_publish_tool(
+        &self,
+        Parameters(params): Parameters<DefinitionDraftIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_publish_definition_draft(params.draft_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition/validate",
+        description = "Validate either a draft or a published definition. Requires either draft_id or definition_id. Optionally: library_id for library definitions."
+    )]
+    async fn definition_validate_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_validate_definition(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "definition/compile",
+        description = "Compile a dependency summary for either a draft or a published definition. Requires either draft_id or definition_id. Optionally: library_id for library definitions."
+    )]
+    async fn definition_compile_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_compile_definition(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "definition/explain",
+        description = "Explain either a draft or a published definition, including effective inherited shape and dependency summary. Requires either draft_id or definition_id. Optionally: library_id for library definitions."
+    )]
+    async fn definition_explain_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_explain_definition(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
     }
 
     #[tool(
@@ -3204,7 +4296,149 @@ fn handle_create_layer(world: &mut World, name: &str) -> Result<Vec<LayerInfo>, 
     Ok(handle_list_layers(world))
 }
 
+// --- Material Handlers ---
+
+#[cfg(feature = "model-api")]
+fn handle_list_materials(world: &World) -> Vec<MaterialInfo> {
+    world
+        .resource::<MaterialRegistry>()
+        .all()
+        .map(MaterialInfo::from_def)
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_material(world: &World, id: &str) -> Result<MaterialInfo, String> {
+    world
+        .resource::<MaterialRegistry>()
+        .get(id)
+        .map(MaterialInfo::from_def)
+        .ok_or_else(|| format!("Material '{id}' not found"))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_create_material(
+    world: &mut World,
+    req: CreateMaterialRequest,
+) -> Result<MaterialInfo, String> {
+    let def = material_def_from_request(req);
+    let id = def.id.clone();
+    world.resource_mut::<MaterialRegistry>().upsert(def);
+    handle_get_material(world, &id)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_update_material(
+    world: &mut World,
+    id: &str,
+    req: CreateMaterialRequest,
+) -> Result<MaterialInfo, String> {
+    {
+        let mut registry = world.resource_mut::<MaterialRegistry>();
+        let def = registry
+            .get_mut(id)
+            .ok_or_else(|| format!("Material '{id}' not found"))?;
+        apply_request_to_def(req, def);
+    }
+    handle_get_material(world, id)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_delete_material(world: &mut World, id: &str) -> Result<String, String> {
+    // Remove assignment from all entities that reference this material
+    let entities_to_clean: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &MaterialAssignment)>();
+        q.iter(world)
+            .filter(|(_, a)| a.material_id == id)
+            .map(|(e, _)| e)
+            .collect()
+    };
+    for entity in entities_to_clean {
+        world.entity_mut(entity).remove::<MaterialAssignment>();
+    }
+    world
+        .resource_mut::<MaterialRegistry>()
+        .remove(id)
+        .ok_or_else(|| format!("Material '{id}' not found"))?;
+    Ok(id.to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_apply_material(world: &mut World, req: ApplyMaterialRequest) -> Result<Vec<u64>, String> {
+    if !world
+        .resource::<MaterialRegistry>()
+        .contains(&req.material_id)
+    {
+        return Err(format!("Material '{}' not found", req.material_id));
+    }
+    let mut applied = Vec::new();
+    for &eid in &req.element_ids {
+        let entity = find_entity_by_element_id(world, ElementId(eid))
+            .ok_or_else(|| format!("Entity {eid} not found"))?;
+        world
+            .entity_mut(entity)
+            .insert(MaterialAssignment::new(req.material_id.clone()));
+        applied.push(eid);
+    }
+    Ok(applied)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<u64>, String> {
+    let mut removed = Vec::new();
+    for eid in element_ids {
+        let entity = find_entity_by_element_id(world, ElementId(eid))
+            .ok_or_else(|| format!("Entity {eid} not found"))?;
+        world.entity_mut(entity).remove::<MaterialAssignment>();
+        removed.push(eid);
+    }
+    Ok(removed)
+}
+
+#[cfg(feature = "model-api")]
+fn material_def_from_request(req: CreateMaterialRequest) -> MaterialDef {
+    let mut def = MaterialDef::new(req.name.clone());
+    apply_request_to_def(req, &mut def);
+    def
+}
+
+#[cfg(feature = "model-api")]
+fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
+    def.name = req.name;
+    def.base_color = req.base_color;
+    def.perceptual_roughness = req.perceptual_roughness;
+    def.metallic = req.metallic;
+    def.reflectance = req.reflectance;
+    def.emissive = req.emissive;
+    def.alpha_mode = parse_alpha_mode(&req.alpha_mode);
+    def.alpha_cutoff = req.alpha_cutoff;
+    def.double_sided = req.double_sided;
+    def.uv_scale = req.uv_scale;
+    def.uv_rotation = req.uv_rotation_deg.to_radians();
+    def.base_color_texture = req.base_color_texture;
+    def.normal_map_texture = req.normal_map_texture;
+    def.metallic_roughness_texture = req.metallic_roughness_texture;
+    def.emissive_texture = req.emissive_texture;
+}
+
+#[cfg(feature = "model-api")]
+fn parse_alpha_mode(s: &str) -> crate::plugins::materials::MaterialAlphaMode {
+    use crate::plugins::materials::MaterialAlphaMode;
+    match s.to_lowercase().as_str() {
+        "mask" => MaterialAlphaMode::Mask,
+        "blend" => MaterialAlphaMode::Blend,
+        "premultiplied" => MaterialAlphaMode::Premultiplied,
+        "add" => MaterialAlphaMode::Add,
+        _ => MaterialAlphaMode::Opaque,
+    }
+}
+
 // --- Selection Handlers ---
+
+#[cfg(feature = "model-api")]
+fn handle_get_instance_info(world: &World) -> InstanceInfo {
+    InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>())
+}
 
 #[cfg(feature = "model-api")]
 fn handle_get_selection(world: &mut World) -> Vec<u64> {
@@ -3441,15 +4675,23 @@ fn handle_split_box_face(
 
 #[cfg(feature = "model-api")]
 fn handle_take_screenshot(world: &mut World, path: &str) -> Result<String, String> {
-    use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+    use bevy::render::view::screenshot::Screenshot;
     use std::path::PathBuf;
 
     let path_buf = PathBuf::from(path);
     let path_owned = path.to_string();
+    if let Some(parent) = path_buf.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    match std::fs::remove_file(&path_buf) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
     world
         .commands()
         .spawn(Screenshot::primary_window())
-        .observe(save_to_disk(path_buf));
+        .observe(save_screenshot_to_disk(path_buf));
     world.flush();
 
     Ok(path_owned)
@@ -4328,6 +5570,197 @@ fn definition_library_to_entry(
 }
 
 #[cfg(feature = "model-api")]
+fn draft_to_entry(
+    definitions: &crate::plugins::modeling::definition::DefinitionRegistry,
+    libraries: &crate::plugins::modeling::definition::DefinitionLibraryRegistry,
+    draft: &crate::plugins::definition_authoring::DefinitionDraft,
+) -> DefinitionDraftEntry {
+    let effective_full = crate::plugins::definition_authoring::draft_effective_definition(
+        definitions,
+        libraries,
+        draft,
+    )
+    .ok()
+    .and_then(|effective| serde_json::to_value(effective).ok())
+    .unwrap_or(Value::Null);
+
+    DefinitionDraftEntry {
+        draft_id: draft.draft_id.to_string(),
+        source_definition_id: draft.source_definition_id.as_ref().map(ToString::to_string),
+        source_library_id: draft.source_library_id.as_ref().map(ToString::to_string),
+        definition_id: draft.working_copy.id.to_string(),
+        name: draft.working_copy.name.clone(),
+        definition_version: draft.working_copy.definition_version,
+        dirty: draft.dirty,
+        full: serde_json::to_value(&draft.working_copy).unwrap_or(Value::Null),
+        effective_full,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn compile_summary_to_result(
+    effective_full: Value,
+    summary: crate::plugins::definition_authoring::DefinitionCompileSummary,
+) -> DefinitionCompileResult {
+    DefinitionCompileResult {
+        target_id: summary.target_id,
+        effective_full,
+        nodes: summary.nodes,
+        edges: summary
+            .edges
+            .into_iter()
+            .map(|edge| DefinitionCompileEdge {
+                from: edge.from,
+                to: edge.to,
+            })
+            .collect(),
+        child_slot_count: summary.child_slot_count,
+        derived_parameter_count: summary.derived_parameter_count,
+        constraint_count: summary.constraint_count,
+        anchor_count: summary.anchor_count,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn definition_explain_value_to_result(value: Value) -> ApiResult<DefinitionExplainResult> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "definition/explain result must be a JSON object".to_string())?;
+    let raw_full = object.get("raw_full").cloned().unwrap_or(Value::Null);
+    let effective_full = object.get("effective_full").cloned().unwrap_or(Value::Null);
+    let local_parameter_names = serde_json::from_value::<Vec<String>>(
+        object
+            .get("local_parameter_names")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|error| error.to_string())?;
+    let inherited_parameter_names = serde_json::from_value::<Vec<String>>(
+        object
+            .get("inherited_parameter_names")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|error| error.to_string())?;
+    let local_child_slot_ids = serde_json::from_value::<Vec<String>>(
+        object
+            .get("local_child_slot_ids")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|error| error.to_string())?;
+    let inherited_child_slot_ids = serde_json::from_value::<Vec<String>>(
+        object
+            .get("inherited_child_slot_ids")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|error| error.to_string())?;
+    let compile_summary =
+        serde_json::from_value::<crate::plugins::definition_authoring::DefinitionCompileSummary>(
+            object
+                .get("compile")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+        .map_err(|error| error.to_string())?;
+    let compile = compile_summary_to_result(effective_full.clone(), compile_summary);
+
+    Ok(DefinitionExplainResult {
+        target_id: compile.target_id.clone(),
+        raw_full,
+        effective_full,
+        local_parameter_names,
+        inherited_parameter_names,
+        local_child_slot_ids,
+        inherited_child_slot_ids,
+        compile,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn build_definition_from_object(
+    object: &serde_json::Map<String, Value>,
+) -> Result<crate::plugins::modeling::definition::Definition, String> {
+    use crate::plugins::modeling::definition::{Definition, DefinitionId, Interface};
+
+    let name = object
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing 'name'".to_string())?
+        .to_string();
+
+    Ok(Definition {
+        id: DefinitionId::new(),
+        base_definition_id: parse_optional_base_definition_id(object)?,
+        name,
+        definition_kind: parse_definition_kind(object.get("definition_kind"))?,
+        definition_version: 1,
+        interface: Interface {
+            parameters: parse_parameter_schema(object.get("parameters"))?,
+        },
+        evaluators: parse_evaluators(object)?,
+        representations: parse_representations(object)?,
+        compound: parse_optional_compound(object)?,
+        domain_data: object.get("domain_data").cloned().unwrap_or(Value::Null),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn resolve_definition_analysis_target(
+    world: &World,
+    object: &serde_json::Map<String, Value>,
+) -> ApiResult<(
+    crate::plugins::modeling::definition::DefinitionRegistry,
+    crate::plugins::modeling::definition::Definition,
+)> {
+    let definitions = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+    let libraries =
+        world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+
+    if let Some(draft_id) = object.get("draft_id").and_then(Value::as_str) {
+        let drafts =
+            world.resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+        let draft = drafts
+            .get(&crate::plugins::definition_authoring::DefinitionDraftId(
+                draft_id.to_string(),
+            ))
+            .ok_or_else(|| format!("Definition draft '{}' not found", draft_id))?;
+        let preview = crate::plugins::definition_authoring::preview_registry_for_draft(
+            definitions,
+            libraries,
+            draft,
+        )?;
+        Ok((preview, draft.working_copy.clone()))
+    } else {
+        let definition_id = object
+            .get("definition_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Provide either 'draft_id' or 'definition_id'".to_string())?;
+        let library_id = object.get("library_id").and_then(Value::as_str);
+        let (definition, _, _, _) =
+            crate::plugins::definition_authoring::resolve_definition_for_authoring(
+                definitions,
+                libraries,
+                definition_id,
+                library_id,
+            )?;
+        let mut preview = definitions.clone();
+        if let Some(library_id) = library_id {
+            let library = libraries
+                .get(&crate::plugins::modeling::definition::DefinitionLibraryId(
+                    library_id.to_string(),
+                ))
+                .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
+            for library_definition in library.definitions.values() {
+                preview.insert(library_definition.clone());
+            }
+        }
+        Ok((preview, definition))
+    }
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_list_definitions(world: &World) -> Vec<DefinitionEntry> {
     use crate::plugins::modeling::definition::DefinitionRegistry;
     let registry = world.resource::<DefinitionRegistry>();
@@ -4383,34 +5816,13 @@ pub fn handle_get_definition_library(world: &World, library_id: String) -> ApiRe
 #[cfg(feature = "model-api")]
 pub fn handle_create_definition(world: &mut World, request: Value) -> ApiResult<DefinitionEntry> {
     use crate::plugins::commands::enqueue_create_definition;
-    use crate::plugins::modeling::definition::{
-        Definition, DefinitionId, DefinitionRegistry, Interface,
-    };
+    use crate::plugins::modeling::definition::DefinitionRegistry;
 
     let obj = request
         .as_object()
         .ok_or_else(|| "definition/create expects a JSON object".to_string())?;
 
-    let name = obj
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing 'name'".to_string())?
-        .to_string();
-
-    let definition = Definition {
-        id: DefinitionId::new(),
-        base_definition_id: parse_optional_base_definition_id(obj)?,
-        name,
-        definition_kind: parse_definition_kind(obj.get("definition_kind"))?,
-        definition_version: 1,
-        interface: Interface {
-            parameters: parse_parameter_schema(obj.get("parameters"))?,
-        },
-        evaluators: parse_evaluators(obj)?,
-        representations: parse_representations(obj)?,
-        compound: parse_optional_compound(obj)?,
-        domain_data: obj.get("domain_data").cloned().unwrap_or(Value::Null),
-    };
+    let definition = build_definition_from_object(obj)?;
     let entry = {
         let registry = world.resource::<DefinitionRegistry>();
         registry.validate_definition(&definition)?;
@@ -4497,6 +5909,338 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
     enqueue_update_definition(world, before, after);
     flush_model_api_write_pipeline(world);
     Ok(entry)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_definition_drafts(world: &World) -> Vec<DefinitionDraftEntry> {
+    let definitions = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+    let libraries =
+        world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+    let drafts = world.resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+    drafts
+        .list()
+        .into_iter()
+        .map(|draft| draft_to_entry(definitions, libraries, draft))
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_definition_draft(
+    world: &World,
+    draft_id: String,
+) -> ApiResult<DefinitionDraftEntry> {
+    let draft_id = crate::plugins::definition_authoring::DefinitionDraftId(draft_id);
+    let definitions = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+    let libraries =
+        world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+    let drafts = world.resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+    let draft = drafts
+        .get(&draft_id)
+        .ok_or_else(|| format!("Definition draft '{}' not found", draft_id))?;
+    Ok(draft_to_entry(definitions, libraries, draft))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_open_definition_draft(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionDraftEntry> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/draft/open expects a JSON object".to_string())?;
+    let definition_id = object
+        .get("definition_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing 'definition_id'".to_string())?;
+    let library_id = object.get("library_id").and_then(Value::as_str);
+
+    let (definition, source_definition_id, source_library_id, _) = {
+        let definitions =
+            world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        let libraries =
+            world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+        crate::plugins::definition_authoring::resolve_definition_for_authoring(
+            definitions,
+            libraries,
+            definition_id,
+            library_id,
+        )?
+    };
+
+    let draft_id = {
+        let mut drafts =
+            world.resource_mut::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+        drafts.insert(crate::plugins::definition_authoring::DefinitionDraft {
+            draft_id: crate::plugins::definition_authoring::DefinitionDraftId::new(),
+            source_definition_id,
+            source_library_id,
+            working_copy: definition,
+            dirty: false,
+        })
+    };
+
+    handle_get_definition_draft(world, draft_id.to_string())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_create_definition_draft(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionDraftEntry> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/draft/create expects a JSON object".to_string())?;
+    let definition = build_definition_from_object(object)?;
+
+    {
+        let registry = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        let mut preview = registry.clone();
+        preview.insert(definition.clone());
+        let _ = preview.effective_definition(&definition.id);
+    }
+
+    let draft_id = {
+        let mut drafts =
+            world.resource_mut::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+        drafts.insert(crate::plugins::definition_authoring::DefinitionDraft {
+            draft_id: crate::plugins::definition_authoring::DefinitionDraftId::new(),
+            source_definition_id: None,
+            source_library_id: None,
+            working_copy: definition,
+            dirty: true,
+        })
+    };
+
+    handle_get_definition_draft(world, draft_id.to_string())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_derive_definition_draft(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionDraftEntry> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/draft/derive expects a JSON object".to_string())?;
+    let definition_id = object
+        .get("definition_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing 'definition_id'".to_string())?;
+    let library_id = object.get("library_id").and_then(Value::as_str);
+
+    let (base_definition, _, source_library_id, effective_base) = {
+        let definitions =
+            world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        let libraries =
+            world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+        crate::plugins::definition_authoring::resolve_definition_for_authoring(
+            definitions,
+            libraries,
+            definition_id,
+            library_id,
+        )?
+    };
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} Variant", base_definition.name));
+    let definition = crate::plugins::definition_authoring::derive_definition_from_base(
+        &base_definition,
+        &effective_base,
+        name,
+    );
+
+    let draft_id = {
+        let mut drafts =
+            world.resource_mut::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+        drafts.insert(crate::plugins::definition_authoring::DefinitionDraft {
+            draft_id: crate::plugins::definition_authoring::DefinitionDraftId::new(),
+            source_definition_id: None,
+            source_library_id,
+            working_copy: definition,
+            dirty: true,
+        })
+    };
+
+    handle_get_definition_draft(world, draft_id.to_string())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_patch_definition_draft(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionDraftEntry> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/draft/patch expects a JSON object".to_string())?;
+    let draft_id = crate::plugins::definition_authoring::DefinitionDraftId(
+        object
+            .get("draft_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Missing 'draft_id'".to_string())?
+            .to_string(),
+    );
+
+    let patches = if let Some(patches_value) = object.get("patches") {
+        serde_json::from_value::<Vec<crate::plugins::definition_authoring::DefinitionPatch>>(
+            patches_value.clone(),
+        )
+        .map_err(|error| error.to_string())?
+    } else if let Some(patch_value) = object.get("patch") {
+        vec![
+            serde_json::from_value::<crate::plugins::definition_authoring::DefinitionPatch>(
+                patch_value.clone(),
+            )
+            .map_err(|error| error.to_string())?,
+        ]
+    } else {
+        return Err("Provide either 'patch' or 'patches'".to_string());
+    };
+
+    let definitions = world
+        .resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+        .clone();
+    let libraries = world
+        .resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+        .clone();
+    {
+        let mut drafts =
+            world.resource_mut::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+        for patch in patches {
+            crate::plugins::definition_authoring::apply_patch_to_draft(
+                &definitions,
+                &libraries,
+                &mut drafts,
+                &draft_id,
+                patch,
+            )?;
+        }
+    }
+
+    handle_get_definition_draft(world, draft_id.to_string())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_publish_definition_draft(
+    world: &mut World,
+    draft_id: String,
+) -> ApiResult<DefinitionEntry> {
+    let draft_id = crate::plugins::definition_authoring::DefinitionDraftId(draft_id);
+    let definition = crate::plugins::definition_authoring::publish_draft(world, &draft_id)?;
+    let registry = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+    let effective = registry.effective_definition(&definition.id)?;
+    Ok(definition_to_entry(&definition, &effective))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_validate_definition(
+    world: &World,
+    request: Value,
+) -> ApiResult<DefinitionValidationResult> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/validate expects a JSON object".to_string())?;
+    if let Some(draft_id) = object.get("draft_id").and_then(Value::as_str) {
+        let definitions =
+            world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        let libraries =
+            world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+        let drafts =
+            world.resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
+        let draft = drafts
+            .get(&crate::plugins::definition_authoring::DefinitionDraftId(
+                draft_id.to_string(),
+            ))
+            .ok_or_else(|| format!("Definition draft '{}' not found", draft_id))?;
+        match crate::plugins::definition_authoring::validate_draft(definitions, libraries, draft) {
+            Ok(effective) => Ok(DefinitionValidationResult {
+                ok: true,
+                errors: Vec::new(),
+                effective_full: Some(serde_json::to_value(effective).unwrap_or(Value::Null)),
+            }),
+            Err(error) => Ok(DefinitionValidationResult {
+                ok: false,
+                errors: vec![error],
+                effective_full: None,
+            }),
+        }
+    } else {
+        let definition_id = object
+            .get("definition_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Provide either 'draft_id' or 'definition_id'".to_string())?;
+        let library_id = object.get("library_id").and_then(Value::as_str);
+        let definitions =
+            world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        let libraries =
+            world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+        let (definition, _, _, _) =
+            crate::plugins::definition_authoring::resolve_definition_for_authoring(
+                definitions,
+                libraries,
+                definition_id,
+                library_id,
+            )?;
+        let mut preview = definitions.clone();
+        if let Some(library_id) = library_id {
+            let library = libraries
+                .get(&crate::plugins::modeling::definition::DefinitionLibraryId(
+                    library_id.to_string(),
+                ))
+                .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
+            for library_definition in library.definitions.values() {
+                preview.insert(library_definition.clone());
+            }
+        }
+        match preview
+            .validate_definition(&definition)
+            .and_then(|_| preview.effective_definition(&definition.id))
+        {
+            Ok(effective) => Ok(DefinitionValidationResult {
+                ok: true,
+                errors: Vec::new(),
+                effective_full: Some(serde_json::to_value(effective).unwrap_or(Value::Null)),
+            }),
+            Err(error) => Ok(DefinitionValidationResult {
+                ok: false,
+                errors: vec![error],
+                effective_full: None,
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_compile_definition(
+    world: &World,
+    request: Value,
+) -> ApiResult<DefinitionCompileResult> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/compile expects a JSON object".to_string())?;
+    let (preview, definition) = resolve_definition_analysis_target(world, object)?;
+    let effective = preview.effective_definition(&definition.id)?;
+    let summary =
+        crate::plugins::definition_authoring::compile_definition_summary(&preview, &definition)?;
+    Ok(compile_summary_to_result(
+        serde_json::to_value(effective).unwrap_or(Value::Null),
+        summary,
+    ))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_explain_definition(
+    world: &World,
+    request: Value,
+) -> ApiResult<DefinitionExplainResult> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/explain expects a JSON object".to_string())?;
+    let (preview, definition) = resolve_definition_analysis_target(world, object)?;
+    let explained =
+        crate::plugins::definition_authoring::explain_definition(&preview, &definition)?;
+    definition_explain_value_to_result(explained)
 }
 
 #[cfg(feature = "model-api")]
@@ -6068,6 +7812,9 @@ mod tests {
         world.insert_resource(
             crate::plugins::modeling::definition::DefinitionLibraryRegistry::default(),
         );
+        world.insert_resource(
+            crate::plugins::definition_authoring::DefinitionDraftRegistry::default(),
+        );
         world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(crate::plugins::layers::LayerRegistry::default());
@@ -6302,7 +8049,7 @@ mod tests {
 
         let server = ModelApiServer::new(sender);
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 58); // prior tools + definition library + instantiate + hosted + explain tools
+        assert_eq!(tools.len(), 68); // prior tools + definition library + instantiate + hosted + authoring draft tools
 
         let listed: Vec<EntityEntry> = server
             .list_entities_tool()
@@ -6630,6 +8377,106 @@ mod tests {
             handle_resolve_occurrence(&world, occurrence_id).expect("variant should resolve");
         assert_eq!(resolved["height"]["value"], json!(4.5));
         assert_eq!(resolved["finish_color"]["value"], json!("greyline"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn definition_draft_lifecycle_creates_patches_validates_and_publishes() {
+        let mut world = init_model_api_test_world();
+
+        let draft = handle_create_definition_draft(&mut world, make_rect_extrusion_request())
+            .expect("draft should be created");
+        assert!(draft.dirty);
+
+        let patched = handle_patch_definition_draft(
+            &mut world,
+            json!({
+                "draft_id": draft.draft_id,
+                "patches": [
+                    { "op": "set_name", "name": "DraftWall" },
+                    { "op": "set_parameter_default", "name": "height", "default_value": 4.25 }
+                ]
+            }),
+        )
+        .expect("draft should be patched");
+        assert_eq!(patched.name, "DraftWall");
+        assert_eq!(
+            patched.effective_full["interface"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|parameter| parameter["name"] == json!("height"))
+                .unwrap()["default_value"],
+            json!(4.25)
+        );
+
+        let validation =
+            handle_validate_definition(&world, json!({ "draft_id": patched.draft_id }))
+                .expect("draft validation should succeed");
+        assert!(validation.ok);
+
+        let published = handle_publish_definition_draft(&mut world, patched.draft_id.clone())
+            .expect("draft should publish");
+        assert_eq!(published.name, "DraftWall");
+        assert_eq!(
+            published.effective_full["interface"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|parameter| parameter["name"] == json!("height"))
+                .unwrap()["default_value"],
+            json!(4.25)
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn derived_definition_draft_can_be_compiled_and_explained() {
+        let mut world = init_model_api_test_world();
+
+        let base = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("base definition should be created");
+        let draft = handle_derive_definition_draft(
+            &mut world,
+            json!({
+                "definition_id": base.definition_id,
+                "name": "DerivedWall"
+            }),
+        )
+        .expect("derived draft should be created");
+
+        handle_patch_definition_draft(
+            &mut world,
+            json!({
+                "draft_id": draft.draft_id,
+                "patch": { "op": "set_parameter_default", "name": "height", "default_value": 5.0 }
+            }),
+        )
+        .expect("derived draft should accept inherited parameter overrides");
+
+        let compile = handle_compile_definition(&world, json!({ "draft_id": draft.draft_id }))
+            .expect("compile should succeed");
+        assert!(compile.nodes.iter().any(|node| node == "param:height"));
+
+        let explain = handle_explain_definition(&world, json!({ "draft_id": draft.draft_id }))
+            .expect("explain should succeed");
+        assert_eq!(
+            explain.effective_full["interface"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|parameter| parameter["name"] == json!("height"))
+                .unwrap()["default_value"],
+            json!(5.0)
+        );
+        assert!(explain
+            .local_parameter_names
+            .iter()
+            .any(|name| name == "height"));
+        assert!(explain
+            .inherited_parameter_names
+            .iter()
+            .any(|name| name == "width"));
     }
 
     #[cfg(feature = "model-api")]
@@ -7029,6 +8876,11 @@ mod tests {
             relations[0].parameters["opening_element_id"],
             json!(opening_id)
         );
+
+        let details = get_entity_details(&world, ElementId(instantiated.element_id))
+            .expect("hosted occurrence details should resolve");
+        assert_eq!(details.entity_type, "occurrence");
+        assert_eq!(details.label, "HostedWindow");
     }
 
     #[cfg(feature = "model-api")]

@@ -289,8 +289,8 @@ impl Profile2d {
             new_profile.start = self.start + offset;
         } else {
             match &mut new_profile.segments[segment_index - 1] {
-                ProfileSegment::LineTo { to } => *to = *to + offset,
-                ProfileSegment::ArcTo { to, .. } => *to = *to + offset,
+                ProfileSegment::LineTo { to } => *to += offset,
+                ProfileSegment::ArcTo { to, .. } => *to += offset,
             }
         }
 
@@ -299,14 +299,14 @@ impl Profile2d {
             // We also need to move the last explicit segment's endpoint.
             if let Some(last_seg) = new_profile.segments.last_mut() {
                 match last_seg {
-                    ProfileSegment::LineTo { to } => *to = *to + offset,
-                    ProfileSegment::ArcTo { to, .. } => *to = *to + offset,
+                    ProfileSegment::LineTo { to } => *to += offset,
+                    ProfileSegment::ArcTo { to, .. } => *to += offset,
                 }
             }
         } else {
             match &mut new_profile.segments[segment_index] {
-                ProfileSegment::LineTo { to } => *to = *to + offset,
-                ProfileSegment::ArcTo { to, .. } => *to = *to + offset,
+                ProfileSegment::LineTo { to } => *to += offset,
+                ProfileSegment::ArcTo { to, .. } => *to += offset,
             }
         }
 
@@ -1226,8 +1226,8 @@ fn build_sweep_bevy_mesh(sweep: &ProfileSweep) -> Mesh {
         .first()
         .map(|(t, _, _)| -*t)
         .unwrap_or(-Vec3::Z);
-    for i in 0..n_profile {
-        positions.push(local_verts[i]);
+    for vertex in local_verts.iter().take(n_profile) {
+        positions.push(*vertex);
         normals.push([cap_normal.x, cap_normal.y, cap_normal.z]);
     }
     // Fan triangulation (reversed winding for start cap facing backward)
@@ -1630,8 +1630,8 @@ fn build_revolve_bevy_mesh(revolve: &ProfileRevolve) -> Mesh {
     if !full {
         // Start cap
         let cap_base = positions.len() as u32;
-        for i in 0..n_profile {
-            positions.push(local_verts[i]);
+        for vertex in local_verts.iter().take(n_profile) {
+            positions.push(*vertex);
             normals.push([0.0, 0.0, -1.0]); // approximate
         }
         for i in 1..n_profile as u32 - 1 {
@@ -1744,6 +1744,22 @@ fn build_revolve_editable_mesh(revolve: &ProfileRevolve) -> EditableMesh {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+fn extract_positions(mesh: &Mesh) -> Vec<[f32; 3]> {
+    match mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() {
+        bevy::mesh::VertexAttributeValues::Float32x3(v) => v.clone(),
+        _ => panic!("unexpected"),
+    }
+}
+
+#[cfg(test)]
+fn extract_indices(mesh: &Mesh) -> Vec<u32> {
+    match mesh.indices().unwrap() {
+        bevy::mesh::Indices::U32(v) => v.clone(),
+        _ => panic!("unexpected"),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2040,7 +2056,7 @@ mod tests {
                 // 4 profile verts * 2 path stations = 8 base verts
                 // + 4 cap verts * 2 caps + 4 side quads * 4 verts = 32
                 // caps: 4 + 4 = 8, sides: 4 * 4 * 1 segment = 16 → 24 total
-                assert!(v.len() > 0, "mesh should have vertices");
+                assert!(!v.is_empty(), "mesh should have vertices");
             }
             _ => panic!("unexpected attribute type"),
         }
@@ -2405,7 +2421,7 @@ mod tests {
         };
 
         // Should have geometry
-        assert!(positions.len() > 0);
+        assert!(!positions.is_empty());
         assert!(
             idx.len() >= 9,
             "need at least 3 triangles, got {}",
@@ -2438,7 +2454,7 @@ mod tests {
 
         // Simulate 5 clicks on the face forming a pentagon-like shape.
         // World-space points on the +X plane (x=1.0):
-        let world_points = vec![
+        let world_points = [
             Vec3::new(1.0, -0.3, -0.5),
             Vec3::new(1.0, -0.3, 0.5),
             Vec3::new(1.0, 0.5, 0.3),
@@ -2785,7 +2801,7 @@ mod tests {
         let plane = DrawingPlane::from_face(face_centroid, face_normal);
 
         // --- Step 2: Simulate drawing 4 points (square) on the face ---
-        let world_points = vec![
+        let world_points = [
             Vec3::new(1.0, -0.3, -0.3),
             Vec3::new(1.0, -0.3, 0.3),
             Vec3::new(1.0, 0.3, 0.3),
@@ -2914,21 +2930,5 @@ mod tests {
             pushed2.height
         );
         eprintln!("After second push: height={}", pushed2.height);
-    }
-}
-
-#[cfg(test)]
-fn extract_positions(mesh: &Mesh) -> Vec<[f32; 3]> {
-    match mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() {
-        bevy::mesh::VertexAttributeValues::Float32x3(v) => v.clone(),
-        _ => panic!("unexpected"),
-    }
-}
-
-#[cfg(test)]
-fn extract_indices(mesh: &Mesh) -> Vec<u32> {
-    match mesh.indices().unwrap() {
-        bevy::mesh::Indices::U32(v) => v.clone(),
-        _ => panic!("unexpected"),
     }
 }

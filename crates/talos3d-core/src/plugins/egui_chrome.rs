@@ -16,13 +16,20 @@ use crate::plugins::{
     },
     commands::ApplyEntityChangesCommand,
     cursor::{CursorWorldPos, ViewportUiInset},
+    definition_browser::{
+        draw_definitions_window, sync_definition_selection_context, DefinitionSelectionContext,
+        DefinitionsWindowState,
+    },
     document_properties::DocumentProperties,
     import::{
         apply_import_review_to_pending, DocumentImportPlacementState, ImportOriginMode,
         ImportProgressState, ImportReviewState, ImportedLayerPanelState, PendingImportCommit,
     },
+    material_browser::{draw_materials_window, MaterialsWindowState},
+    materials::MaterialRegistry,
     menu_bar::MenuBarState,
-    palette::PaletteState,
+    modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+    palette::{draw_command_palette, PaletteState},
     property_edit::{
         parse_property_value, shared_property_value, PropertyEditState, PropertyPanelData,
         PropertyPanelState,
@@ -75,7 +82,15 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<EguiWantsInput>()
         .init_resource::<ToolbarDragState>()
         .init_resource::<ViewportContextMenu>()
-        .add_systems(Update, draw_egui_chrome.in_set(EguiChromeSystems));
+        .init_resource::<MaterialsWindowState>()
+        .add_systems(
+            Update,
+            (
+                sync_definition_selection_context,
+                draw_egui_chrome.in_set(EguiChromeSystems),
+            )
+                .chain(),
+        );
     }
 }
 
@@ -153,12 +168,20 @@ struct ChromeData<'w, 's> {
     layer_registry: ResMut<'w, crate::plugins::layers::LayerRegistry>,
     layer_state: ResMut<'w, crate::plugins::layers::LayerState>,
     cursor_world_pos: Res<'w, CursorWorldPos>,
+    definitions_window_state: ResMut<'w, DefinitionsWindowState>,
+    definition_selection_context: Res<'w, DefinitionSelectionContext>,
+    materials_window_state: ResMut<'w, MaterialsWindowState>,
+    material_registry: ResMut<'w, MaterialRegistry>,
+    definition_registry: Res<'w, DefinitionRegistry>,
+    definition_library_registry: Res<'w, DefinitionLibraryRegistry>,
+    definition_draft_registry:
+        ResMut<'w, crate::plugins::definition_authoring::DefinitionDraftRegistry>,
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
     property_edit_state: ResMut<'w, PropertyEditState>,
     property_panel_state: ResMut<'w, PropertyPanelState>,
     property_panel_data: Res<'w, PropertyPanelData>,
-    palette_state: Res<'w, PaletteState>,
+    palette_state: ResMut<'w, PaletteState>,
     transform_state: Res<'w, TransformState>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
@@ -325,7 +348,32 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         }
     }
 
+    draw_command_palette(
+        &ctx,
+        &mut data.palette_state,
+        &data.command_registry,
+        &mut data.pending_command_invocations,
+        &mut data.status_bar_data,
+        selection_count,
+    );
     draw_property_panel(&ctx, &mut data);
+    draw_definitions_window(
+        &ctx,
+        &mut data.definitions_window_state,
+        &data.definition_selection_context,
+        &data.definition_registry,
+        &data.definition_library_registry,
+        &mut data.definition_draft_registry,
+        &mut data.pending_command_invocations,
+        &data.cursor_world_pos,
+        &mut data.status_bar_data,
+    );
+    draw_materials_window(
+        &ctx,
+        &mut data.materials_window_state,
+        &mut data.material_registry,
+        &mut data.pending_command_invocations,
+    );
     draw_import_review_window(&ctx, &mut data);
     draw_imported_layers_window(&ctx, &mut data);
     draw_import_progress_window(&ctx, &data);
@@ -403,18 +451,22 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     // Viewport right-click context menu.
     // Detect right-click release without drag, outside any egui area.
     let right_released_in_viewport = ctx.input(|i| {
-        i.pointer
-            .button_released(egui::PointerButton::Secondary)
+        i.pointer.button_released(egui::PointerButton::Secondary)
             && !i.pointer.is_decidedly_dragging()
     }) && !data.egui_wants_input.pointer
-        && !data.keys.pressed(crate::plugins::camera::ORBIT_KEY);
+        && !crate::plugins::camera::orbit_modifier_pressed(&data.keys);
     if right_released_in_viewport {
         if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
             data.viewport_context_menu.open = true;
             data.viewport_context_menu.position = pos;
         }
     }
-    draw_viewport_context_menu(&ctx, &mut data.viewport_context_menu, selection_count, &mut data.pending_command_invocations);
+    draw_viewport_context_menu(
+        &ctx,
+        &mut data.viewport_context_menu,
+        selection_count,
+        &mut data.pending_command_invocations,
+    );
 
     let wants_ptr = ctx.wants_pointer_input();
     let over_area = ctx.is_pointer_over_area();
@@ -1823,8 +1875,8 @@ fn draw_viewport_context_menu(
         });
 
     // Close on click outside or Escape.
-    let clicked_outside = ctx.input(|i| i.pointer.any_click())
-        && !area_response.response.contains_pointer();
+    let clicked_outside =
+        ctx.input(|i| i.pointer.any_click()) && !area_response.response.contains_pointer();
     let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     if clicked_outside || escape {
         menu.open = false;

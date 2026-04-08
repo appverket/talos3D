@@ -1,6 +1,46 @@
 use bevy::prelude::*;
+use bevy_egui::egui;
 
 use crate::plugins::{cursor::CursorWorldPos, document_properties::DocumentProperties};
+
+// ---------------------------------------------------------------------------
+// Tool-window geometry helpers
+// These are shared by all floating panel windows (Definition browser, Materials
+// browser, etc.).  They ensure panels stay within the visible viewport area.
+// ---------------------------------------------------------------------------
+
+const TOOL_WINDOW_MARGIN: f32 = 20.0;
+
+/// Returns the usable viewport rect, shrunk by the standard margin.
+pub(crate) fn tool_window_bounds(ctx: &egui::Context) -> egui::Rect {
+    ctx.content_rect().shrink(TOOL_WINDOW_MARGIN)
+}
+
+/// Clamps `preferred` to fit inside the viewport bounds.
+pub(crate) fn tool_window_max_size(ctx: &egui::Context, preferred: egui::Vec2) -> egui::Vec2 {
+    let bounds = tool_window_bounds(ctx);
+    egui::vec2(
+        preferred.x.min(bounds.width().max(240.0)),
+        preferred.y.min(bounds.height().max(200.0)),
+    )
+}
+
+/// Returns a default `Rect` for a floating tool window, clamped to the viewport.
+pub(crate) fn tool_window_rect(
+    ctx: &egui::Context,
+    default_pos: egui::Pos2,
+    preferred_size: egui::Vec2,
+) -> egui::Rect {
+    let bounds = tool_window_bounds(ctx);
+    let size = tool_window_max_size(ctx, preferred_size);
+    let max_x = (bounds.max.x - size.x).max(bounds.min.x);
+    let max_y = (bounds.max.y - size.y).max(bounds.min.y);
+    let pos = egui::pos2(
+        default_pos.x.clamp(bounds.min.x, max_x),
+        default_pos.y.clamp(bounds.min.y, max_y),
+    );
+    egui::Rect::from_min_size(pos, size)
+}
 
 pub struct UiPlugin;
 

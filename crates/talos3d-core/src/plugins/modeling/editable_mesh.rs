@@ -518,7 +518,7 @@ impl EditableMesh {
         // Fan triangulation (works for convex polygons)
         let mut triangles = Vec::with_capacity(verts.len() - 2);
         for i in 1..verts.len() - 1 {
-            triangles.push([verts[0], verts[i as usize] as u32, verts[i + 1] as u32]);
+            triangles.push([verts[0], verts[i], verts[i + 1]]);
         }
         triangles
     }

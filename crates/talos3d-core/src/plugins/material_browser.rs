@@ -1,0 +1,576 @@
+/// Material browser and editor panel.
+///
+/// Follows the same floating-window pattern as `definition_browser`.
+/// Exposed via `draw_materials_window` which is called from `egui_chrome`.
+use bevy_egui::egui;
+
+use crate::plugins::{
+    command_registry::{queue_command_invocation_resource, PendingCommandInvocations},
+    materials::{MaterialAlphaMode, MaterialDef, MaterialRegistry},
+    ui::{tool_window_max_size, tool_window_rect},
+};
+
+const MATERIALS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(480.0, 560.0);
+const MATERIALS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(340.0, 280.0);
+const MATERIALS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(640.0, 760.0);
+
+// ─── Window state ─────────────────────────────────────────────────────────────
+
+#[derive(bevy::prelude::Resource, Default, Debug, Clone)]
+pub struct MaterialsWindowState {
+    pub visible: bool,
+    pub search: String,
+    pub selected_id: Option<String>,
+    // Inline editor buffers (so we don't mutate the registry on every keypress)
+    pub name_buf: String,
+    pub base_color: [f32; 4],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub reflectance: f32,
+    pub emissive: [f32; 3],
+    pub alpha_mode_idx: usize,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
+    pub uv_scale: [f32; 2],
+    pub uv_rotation_deg: f32,
+    pub base_color_tex_buf: String,
+    pub normal_map_tex_buf: String,
+    pub metallic_roughness_tex_buf: String,
+    pub emissive_tex_buf: String,
+    pub editor_tab: EditorTab,
+    pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum EditorTab {
+    #[default]
+    Properties,
+    Textures,
+}
+
+impl MaterialsWindowState {
+    /// Load editor buffers from a `MaterialDef`.
+    pub fn load_def(&mut self, def: &MaterialDef) {
+        self.name_buf = def.name.clone();
+        self.base_color = def.base_color;
+        self.roughness = def.perceptual_roughness;
+        self.metallic = def.metallic;
+        self.reflectance = def.reflectance;
+        self.emissive = def.emissive;
+        self.alpha_mode_idx = alpha_mode_to_idx(&def.alpha_mode);
+        self.alpha_cutoff = def.alpha_cutoff;
+        self.double_sided = def.double_sided;
+        self.uv_scale = def.uv_scale;
+        self.uv_rotation_deg = def.uv_rotation.to_degrees();
+        self.base_color_tex_buf = def.base_color_texture.clone().unwrap_or_default();
+        self.normal_map_tex_buf = def.normal_map_texture.clone().unwrap_or_default();
+        self.metallic_roughness_tex_buf =
+            def.metallic_roughness_texture.clone().unwrap_or_default();
+        self.emissive_tex_buf = def.emissive_texture.clone().unwrap_or_default();
+        self.dirty = false;
+    }
+
+    /// Write editor buffers back into a `MaterialDef`.
+    pub fn flush_to_def(&self, def: &mut MaterialDef) {
+        def.name = self.name_buf.clone();
+        def.base_color = self.base_color;
+        def.perceptual_roughness = self.roughness;
+        def.metallic = self.metallic;
+        def.reflectance = self.reflectance;
+        def.emissive = self.emissive;
+        def.alpha_mode = idx_to_alpha_mode(self.alpha_mode_idx);
+        def.alpha_cutoff = self.alpha_cutoff;
+        def.double_sided = self.double_sided;
+        def.uv_scale = self.uv_scale;
+        def.uv_rotation = self.uv_rotation_deg.to_radians();
+        def.base_color_texture = non_empty(self.base_color_tex_buf.clone());
+        def.normal_map_texture = non_empty(self.normal_map_tex_buf.clone());
+        def.metallic_roughness_texture = non_empty(self.metallic_roughness_tex_buf.clone());
+        def.emissive_texture = non_empty(self.emissive_tex_buf.clone());
+    }
+}
+
+// ─── Main entry point ─────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_materials_window(
+    ctx: &egui::Context,
+    state: &mut MaterialsWindowState,
+    registry: &mut MaterialRegistry,
+    pending: &mut PendingCommandInvocations,
+) {
+    if !state.visible {
+        return;
+    }
+
+    let default_rect = tool_window_rect(ctx, egui::pos2(24.0, 88.0), MATERIALS_WINDOW_DEFAULT_SIZE);
+    let mut open = state.visible;
+
+    egui::Window::new("Materials")
+        .id(egui::Id::new("materials_browser"))
+        .default_rect(default_rect)
+        .min_size(MATERIALS_WINDOW_MIN_SIZE)
+        .max_size(tool_window_max_size(ctx, MATERIALS_WINDOW_MAX_SIZE))
+        .constrain_to(ctx.content_rect())
+        .open(&mut open)
+        .show(ctx, |ui| {
+            draw_browser_panel(ui, state, registry, pending);
+        });
+
+    state.visible = open;
+}
+
+// ─── Browser panel (left list + right editor) ─────────────────────────────────
+
+fn draw_browser_panel(
+    ui: &mut egui::Ui,
+    state: &mut MaterialsWindowState,
+    registry: &mut MaterialRegistry,
+    pending: &mut PendingCommandInvocations,
+) {
+    ui.horizontal(|ui| {
+        // --- Left: list of materials ---
+        ui.vertical(|ui| {
+            ui.set_min_width(160.0);
+            ui.set_max_width(180.0);
+
+            // Search bar
+            ui.horizontal(|ui| {
+                ui.label("🔍");
+                ui.text_edit_singleline(&mut state.search);
+            });
+            ui.separator();
+
+            // New material button
+            if ui.button("+ New").clicked() {
+                let name = registry.generate_unique_name();
+                let def = registry.create(name);
+                let id = def.id.clone();
+                state.selected_id = Some(id.clone());
+                if let Some(def) = registry.get(&id) {
+                    state.load_def(def);
+                }
+            }
+
+            ui.add_space(4.0);
+
+            // Material list
+            egui::ScrollArea::vertical()
+                .id_salt("mat_list")
+                .show(ui, |ui| {
+                    let search_lower = state.search.to_lowercase();
+                    let ids: Vec<String> = registry
+                        .all()
+                        .filter(|m| {
+                            search_lower.is_empty() || m.name.to_lowercase().contains(&search_lower)
+                        })
+                        .map(|m| m.id.clone())
+                        .collect();
+
+                    let mut delete_id: Option<String> = None;
+
+                    for id in ids {
+                        let Some(def) = registry.get(&id) else {
+                            continue;
+                        };
+                        let selected = state.selected_id.as_deref() == Some(id.as_str());
+
+                        ui.horizontal(|ui| {
+                            // Colour swatch
+                            let [r, g, b, _] = def.base_color;
+                            let swatch = egui::Color32::from_rgb(
+                                (r * 255.0) as u8,
+                                (g * 255.0) as u8,
+                                (b * 255.0) as u8,
+                            );
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                            ui.painter().rect_filled(rect, 2.0, swatch);
+
+                            let label = egui::Button::new(def.name.as_str()).selected(selected);
+                            if ui.add(label).clicked() {
+                                if state.selected_id.as_deref() != Some(id.as_str()) {
+                                    state.selected_id = Some(id.clone());
+                                    if let Some(def) = registry.get(&id) {
+                                        state.load_def(def);
+                                    }
+                                }
+                            }
+                        });
+
+                        if selected {
+                            ui.horizontal(|ui| {
+                                ui.add_space(16.0);
+                                if ui
+                                    .small_button("Apply to selection")
+                                    .on_hover_text("Apply this material to all selected entities")
+                                    .clicked()
+                                {
+                                    queue_command_invocation_resource(
+                                        pending,
+                                        "materials.apply_to_selection".to_string(),
+                                        serde_json::json!({ "material_id": id }),
+                                    );
+                                }
+                                if ui
+                                    .small_button("🗑")
+                                    .on_hover_text("Delete material")
+                                    .clicked()
+                                {
+                                    delete_id = Some(id.clone());
+                                }
+                            });
+                        }
+                    }
+
+                    if let Some(id) = delete_id {
+                        registry.remove(&id);
+                        if state.selected_id.as_deref() == Some(id.as_str()) {
+                            state.selected_id = None;
+                        }
+                    }
+                });
+        });
+
+        ui.separator();
+
+        // --- Right: editor ---
+        ui.vertical(|ui| {
+            ui.set_min_width(240.0);
+
+            if let Some(selected_id) = state.selected_id.clone() {
+                if registry.contains(&selected_id) {
+                    draw_editor(ui, state, registry, &selected_id);
+                } else {
+                    ui.label("(Material removed)");
+                    state.selected_id = None;
+                }
+            } else {
+                ui.add_space(40.0);
+                ui.label(
+                    egui::RichText::new("Select a material to edit it")
+                        .weak()
+                        .italics(),
+                );
+            }
+        });
+    });
+}
+
+// ─── Editor panel ─────────────────────────────────────────────────────────────
+
+fn draw_editor(
+    ui: &mut egui::Ui,
+    state: &mut MaterialsWindowState,
+    registry: &mut MaterialRegistry,
+    id: &str,
+) {
+    // Tab bar
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(state.editor_tab == EditorTab::Properties, "Properties")
+            .clicked()
+        {
+            state.editor_tab = EditorTab::Properties;
+        }
+        if ui
+            .selectable_label(state.editor_tab == EditorTab::Textures, "Textures")
+            .clicked()
+        {
+            state.editor_tab = EditorTab::Textures;
+        }
+    });
+    ui.separator();
+
+    match state.editor_tab {
+        EditorTab::Properties => draw_properties_tab(ui, state),
+        EditorTab::Textures => draw_textures_tab(ui, state),
+    }
+
+    ui.add_space(8.0);
+    ui.separator();
+
+    // Apply / revert
+    ui.horizontal(|ui| {
+        let apply = ui
+            .add_enabled(state.dirty, egui::Button::new("Apply"))
+            .on_hover_text("Save changes to registry");
+        if apply.clicked() {
+            if let Some(def) = registry.get_mut(id) {
+                state.flush_to_def(def);
+                state.dirty = false;
+            }
+        }
+        if ui
+            .button("Revert")
+            .on_hover_text("Discard unsaved changes")
+            .clicked()
+        {
+            if let Some(def) = registry.get(id) {
+                state.load_def(&def.clone());
+            }
+        }
+    });
+}
+
+fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
+    egui::ScrollArea::vertical()
+        .id_salt("mat_props")
+        .show(ui, |ui| {
+            egui::Grid::new("mat_prop_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    // Name
+                    ui.label("Name");
+                    if ui.text_edit_singleline(&mut state.name_buf).changed() {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    // Base colour
+                    ui.label("Base Color");
+                    let [r, g, b, a] = state.base_color;
+                    let mut col = egui::Color32::from_rgba_premultiplied(
+                        (r * 255.0) as u8,
+                        (g * 255.0) as u8,
+                        (b * 255.0) as u8,
+                        (a * 255.0) as u8,
+                    );
+                    if ui.color_edit_button_srgba(&mut col).changed() {
+                        let [cr, cg, cb, ca] = col.to_srgba_unmultiplied();
+                        state.base_color = [
+                            cr as f32 / 255.0,
+                            cg as f32 / 255.0,
+                            cb as f32 / 255.0,
+                            ca as f32 / 255.0,
+                        ];
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    // Roughness
+                    ui.label("Roughness");
+                    if ui
+                        .add(egui::Slider::new(&mut state.roughness, 0.0..=1.0).fixed_decimals(2))
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    // Metallic
+                    ui.label("Metallic");
+                    if ui
+                        .add(egui::Slider::new(&mut state.metallic, 0.0..=1.0).fixed_decimals(2))
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    // Reflectance
+                    ui.label("Reflectance");
+                    if ui
+                        .add(egui::Slider::new(&mut state.reflectance, 0.0..=1.0).fixed_decimals(2))
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    // Emissive
+                    ui.label("Emissive");
+                    let [er, eg, eb] = state.emissive;
+                    let mut ecol = egui::Color32::from_rgb(
+                        (er.clamp(0.0, 1.0) * 255.0) as u8,
+                        (eg.clamp(0.0, 1.0) * 255.0) as u8,
+                        (eb.clamp(0.0, 1.0) * 255.0) as u8,
+                    );
+                    if ui.color_edit_button_srgba(&mut ecol).changed() {
+                        let [cr, cg, cb, _] = ecol.to_srgba_unmultiplied();
+                        state.emissive = [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    // Alpha mode
+                    ui.label("Alpha Mode");
+                    egui::ComboBox::from_id_salt("alpha_mode_combo")
+                        .selected_text(alpha_mode_name(state.alpha_mode_idx))
+                        .show_ui(ui, |ui| {
+                            for (i, name) in ALPHA_MODE_NAMES.iter().enumerate() {
+                                if ui
+                                    .selectable_label(state.alpha_mode_idx == i, *name)
+                                    .clicked()
+                                {
+                                    state.alpha_mode_idx = i;
+                                    state.dirty = true;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
+                    if state.alpha_mode_idx == 1 {
+                        // Mask
+                        ui.label("Alpha Cutoff");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut state.alpha_cutoff, 0.0..=1.0)
+                                    .fixed_decimals(2),
+                            )
+                            .changed()
+                        {
+                            state.dirty = true;
+                        }
+                        ui.end_row();
+                    }
+
+                    // Double-sided
+                    ui.label("Double-sided");
+                    if ui.checkbox(&mut state.double_sided, "").changed() {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    // UV scale
+                    ui.label("UV Tiling (X, Y)");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut state.uv_scale[0])
+                                    .speed(0.05)
+                                    .range(0.01..=100.0)
+                                    .prefix("X:"),
+                            )
+                            .changed()
+                        {
+                            state.dirty = true;
+                        }
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut state.uv_scale[1])
+                                    .speed(0.05)
+                                    .range(0.01..=100.0)
+                                    .prefix("Y:"),
+                            )
+                            .changed()
+                        {
+                            state.dirty = true;
+                        }
+                    });
+                    ui.end_row();
+
+                    // UV rotation
+                    ui.label("UV Rotation (°)");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut state.uv_rotation_deg)
+                                .speed(1.0)
+                                .suffix("°"),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+                });
+        });
+}
+
+fn draw_textures_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
+    egui::ScrollArea::vertical()
+        .id_salt("mat_textures")
+        .show(ui, |ui| {
+            egui::Grid::new("mat_tex_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    texture_row(
+                        ui,
+                        "Base Color",
+                        &mut state.base_color_tex_buf,
+                        &mut state.dirty,
+                    );
+                    texture_row(
+                        ui,
+                        "Normal Map",
+                        &mut state.normal_map_tex_buf,
+                        &mut state.dirty,
+                    );
+                    texture_row(
+                        ui,
+                        "Metallic/Roughness",
+                        &mut state.metallic_roughness_tex_buf,
+                        &mut state.dirty,
+                    );
+                    texture_row(
+                        ui,
+                        "Emissive",
+                        &mut state.emissive_tex_buf,
+                        &mut state.dirty,
+                    );
+                });
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new("Enter absolute or project-relative paths.")
+                    .weak()
+                    .small(),
+            );
+        });
+}
+
+fn texture_row(ui: &mut egui::Ui, label: &str, buf: &mut String, dirty: &mut bool) {
+    ui.label(label);
+    ui.horizontal(|ui| {
+        ui.set_max_width(220.0);
+        if ui
+            .add(egui::TextEdit::singleline(buf).hint_text("(none)"))
+            .changed()
+        {
+            *dirty = true;
+        }
+        // Clear button
+        if !buf.is_empty() && ui.small_button("✕").clicked() {
+            buf.clear();
+            *dirty = true;
+        }
+    });
+    ui.end_row();
+}
+
+// ─── Alpha mode helpers ───────────────────────────────────────────────────────
+
+const ALPHA_MODE_NAMES: &[&str] = &["Opaque", "Mask", "Blend", "Premultiplied", "Add"];
+
+fn alpha_mode_name(idx: usize) -> &'static str {
+    ALPHA_MODE_NAMES.get(idx).copied().unwrap_or("Opaque")
+}
+
+fn alpha_mode_to_idx(mode: &MaterialAlphaMode) -> usize {
+    match mode {
+        MaterialAlphaMode::Opaque => 0,
+        MaterialAlphaMode::Mask => 1,
+        MaterialAlphaMode::Blend => 2,
+        MaterialAlphaMode::Premultiplied => 3,
+        MaterialAlphaMode::Add => 4,
+    }
+}
+
+fn idx_to_alpha_mode(idx: usize) -> MaterialAlphaMode {
+    match idx {
+        1 => MaterialAlphaMode::Mask,
+        2 => MaterialAlphaMode::Blend,
+        3 => MaterialAlphaMode::Premultiplied,
+        4 => MaterialAlphaMode::Add,
+        _ => MaterialAlphaMode::Opaque,
+    }
+}
+
+fn non_empty(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}

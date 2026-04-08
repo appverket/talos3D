@@ -28,6 +28,13 @@ use crate::{
             activate_tool_command, CommandCategory, CommandDescriptor, CommandRegistryAppExt,
             CommandResult,
         },
+        definition_browser::{
+            execute_create_definition_draft, execute_derive_definition_draft,
+            execute_instantiate_definition, execute_open_definition_draft,
+            execute_patch_definition_draft, execute_publish_definition_draft,
+            execute_toggle_definitions_browser, DefinitionSelectionContext, DefinitionsWindowState,
+        },
+        handles::arm_move_handles,
         import::ImportRegistryAppExt,
         modeling::{
             csg::CsgFactory,
@@ -60,6 +67,9 @@ impl Plugin for ModelingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ModelingWorkbench>()
             .init_resource::<GroupEditContext>()
+            .init_resource::<DefinitionsWindowState>()
+            .init_resource::<DefinitionSelectionContext>()
+            .init_resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>()
             .init_resource::<csg::CsgParentMap>()
             .init_resource::<DefinitionRegistry>()
             .init_resource::<DefinitionLibraryRegistry>()
@@ -75,6 +85,7 @@ impl Plugin for ModelingPlugin {
                     .with_distribution(CapabilityDistribution::Bundled),
             )
             .register_authored_entity_factory(GroupFactory)
+            .register_authored_entity_factory(OccurrenceFactory)
             .register_authored_entity_factory(PrimitiveFactory::<BoxPrimitive>::new())
             .register_authored_entity_factory(PrimitiveFactory::<CylinderPrimitive>::new())
             .register_authored_entity_factory(PrimitiveFactory::<PlanePrimitive>::new())
@@ -86,11 +97,139 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(EditableMeshFactory)
             .register_authored_entity_factory(CsgFactory)
             .register_authored_entity_factory(FaceProfileFeatureFactory)
-            .register_authored_entity_factory(OccurrenceFactory)
             .register_authored_entity_factory(assembly::AssemblyFactory)
             .register_authored_entity_factory(assembly::RelationFactory)
             .register_format_importer(ObjImporter)
             .register_format_importer(DxfImporter)
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.toggle_definitions_browser".to_string(),
+                    label: "Definitions".to_string(),
+                    description: "Show or hide the Definitions browser".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: Some("Ctrl/Cmd+Shift+D".to_string()),
+                    icon: None,
+                    hint: Some("Browse document and library definitions".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_toggle_definitions_browser,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.instantiate_definition".to_string(),
+                    label: "Instantiate Definition".to_string(),
+                    description: "Instantiate a definition from the document or a library"
+                        .to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Create an occurrence from a selected definition".to_string()),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_instantiate_definition,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.create_definition_draft".to_string(),
+                    label: "New Definition Draft".to_string(),
+                    description: "Create a new editable definition draft".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Create a new draft definition".to_string()),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_create_definition_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.open_definition_draft".to_string(),
+                    label: "Edit Definition As Draft".to_string(),
+                    description: "Open a definition as an editable draft".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Open the selected definition in the inspector".to_string()),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_open_definition_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.derive_definition_draft".to_string(),
+                    label: "Derive Definition Draft".to_string(),
+                    description: "Create a derived editable definition draft".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some(
+                        "Derive a reusable variant from the selected definition".to_string(),
+                    ),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_derive_definition_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.publish_definition_draft".to_string(),
+                    label: "Publish Definition Draft".to_string(),
+                    description: "Publish a definition draft into the document".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Validate and publish the active draft".to_string()),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_publish_definition_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.patch_definition_draft".to_string(),
+                    label: "Patch Definition Draft".to_string(),
+                    description: "Apply a patch operation to a definition draft".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Apply a draft mutation".to_string()),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_patch_definition_draft,
+            )
             .register_command(
                 CommandDescriptor {
                     id: "modeling.group".to_string(),
@@ -203,12 +342,12 @@ impl Plugin for ModelingPlugin {
                 CommandDescriptor {
                     id: "modeling.move".to_string(),
                     label: "Move".to_string(),
-                    description: "Begin move transform".to_string(),
+                    description: "Arm move handles for the current selection".to_string(),
                     category: CommandCategory::Edit,
                     parameters: Some(serde_json::json!({"type":"object"})),
                     default_shortcut: Some("G".to_string()),
                     icon: Some("icon.move".to_string()),
-                    hint: Some("Begin move transform".to_string()),
+                    hint: Some("Drag a corner or control point to move".to_string()),
                     requires_selection: true,
                     show_in_menu: true,
                     version: 1,
@@ -367,7 +506,8 @@ fn execute_create_polyline(world: &mut World, _: &Value) -> Result<CommandResult
 }
 
 fn execute_begin_move(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    start_transform_or_pend(world, TransformMode::Moving)
+    arm_move_handles(world)?;
+    Ok(CommandResult::empty())
 }
 
 fn execute_begin_rotate(world: &mut World, _: &Value) -> Result<CommandResult, String> {

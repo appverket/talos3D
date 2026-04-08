@@ -2,6 +2,8 @@ pub mod camera;
 pub mod command_registry;
 pub mod commands;
 pub mod cursor;
+pub mod definition_authoring;
+pub mod definition_browser;
 pub mod document_properties;
 pub mod document_state;
 pub mod egui_chrome;
@@ -15,6 +17,8 @@ pub mod import;
 pub mod inference;
 pub mod input_ownership;
 pub mod layers;
+pub mod material_browser;
+pub mod materials;
 pub mod math;
 pub mod menu_bar;
 #[cfg(any(feature = "model-api", test))]

@@ -280,13 +280,13 @@ fn estimate_boundary_from_samples(
             .collect::<Vec<_>>(),
     );
     if triangulation.triangles.is_empty() {
-        return convex_hull(&samples);
+        return convex_hull(samples);
     }
 
     let alpha_radius = alpha_radius_override
-        .unwrap_or_else(|| estimate_alpha_radius(&samples, &triangulation.triangles, spacing));
-    let boundary_edges = alpha_boundary_edges(&samples, &triangulation.triangles, alpha_radius);
-    let loops = trace_boundary_loops(&samples, &boundary_edges);
+        .unwrap_or_else(|| estimate_alpha_radius(samples, &triangulation.triangles, spacing));
+    let boundary_edges = alpha_boundary_edges(samples, &triangulation.triangles, alpha_radius);
+    let loops = trace_boundary_loops(samples, &boundary_edges);
     loops
         .into_iter()
         .max_by(|left, right| {
@@ -846,7 +846,7 @@ fn merge_fragments(
     }
 }
 
-fn close_fragment_if_needed(points: &mut Vec<Vec3>, settings: ContourRepairSettings) {
+fn close_fragment_if_needed(points: &mut [Vec3], settings: ContourRepairSettings) {
     if points.len() < 3 {
         return;
     }

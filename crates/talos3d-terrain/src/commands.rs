@@ -314,22 +314,24 @@ fn execute_prepare_site_surface(
         }
     }
 
-    let allocator = world.resource_mut::<ElementIdAllocator>();
-    let curve_snapshots = repaired_curves
-        .into_iter()
-        .map(|repaired_curve| {
-            let element_id = allocator.next_id();
-            (
-                element_id,
-                ElevationCurveSnapshot {
+    let (curve_snapshots, surface_element_id) = {
+        let allocator = world.resource_mut::<ElementIdAllocator>();
+        let curve_snapshots = repaired_curves
+            .into_iter()
+            .map(|repaired_curve| {
+                let element_id = allocator.next_id();
+                (
                     element_id,
-                    curve: repaired_curve,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    let surface_element_id = allocator.next_id();
-    drop(allocator);
+                    ElevationCurveSnapshot {
+                        element_id,
+                        curve: repaired_curve,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let surface_element_id = allocator.next_id();
+        (curve_snapshots, surface_element_id)
+    };
     let surface_snapshot = TerrainSurfaceSnapshot {
         element_id: surface_element_id,
         surface: TerrainSurface {

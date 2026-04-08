@@ -995,7 +995,7 @@ fn best_exact_offset_vertex_decode(
 #[cfg(test)]
 fn exact_offset_start_candidates(
     objects: &[u8],
-    handle: u64,
+    _handle: u64,
     offset_bits: usize,
     next_offset_bits: Option<usize>,
 ) -> Vec<ModernObjectStart> {
@@ -1891,12 +1891,9 @@ fn attempt_geometry_decode(
         Some("3DFACE") => try_entity(decode_face3d),
         Some("INSERT") => try_entity(decode_insert).or_else(|| try_entity(decode_minsert)),
         Some("MINSERT") => try_entity(decode_minsert).or_else(|| try_entity(decode_insert)),
-        Some("LWPOLYLINE") => {
-            let result = try_entity(decode_lwpolyline)
-                .or_else(|| try_entity(decode_polyline2d))
-                .or_else(|| try_entity(decode_polyline3d));
-            result
-        }
+        Some("LWPOLYLINE") => try_entity(decode_lwpolyline)
+            .or_else(|| try_entity(decode_polyline2d))
+            .or_else(|| try_entity(decode_polyline3d)),
         Some("POLYLINE_2D") => try_entity(decode_polyline2d)
             .or_else(|| try_entity(decode_lwpolyline))
             .or_else(|| try_entity(decode_polyline3d))
@@ -2244,7 +2241,7 @@ fn decode_arc(ctx: &mut ObjectDecodeContext<'_>) -> Option<DecodedEntity> {
                 handle: None,
                 layer: None,
             },
-            center: center,
+            center,
             radius,
             start_angle_degrees: start_angle.to_degrees(),
             end_angle_degrees: end_angle.to_degrees(),
@@ -2286,7 +2283,7 @@ fn decode_circle(ctx: &mut ObjectDecodeContext<'_>) -> Option<DecodedEntity> {
                 handle: None,
                 layer: None,
             },
-            center: center,
+            center,
             radius,
         }),
     })
