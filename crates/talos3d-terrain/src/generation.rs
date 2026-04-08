@@ -150,6 +150,7 @@ pub fn generate_terrain_mesh_cache(
     surface: &TerrainSurface,
     curves: &Query<(&talos3d_core::plugins::identity::ElementId, &ElevationCurve)>,
 ) -> TerrainMeshCache {
+    let effective_spacing = adaptive_sampling_spacing(surface);
     let mut source_points = Vec::new();
     for source_id in &surface.source_curve_ids {
         let Some((_, curve)) = curves
@@ -159,7 +160,7 @@ pub fn generate_terrain_mesh_cache(
             continue;
         };
         source_points.extend(
-            sample_curve_points(&curve.points, surface.drape_sample_spacing)
+            sample_curve_points(&curve.points, effective_spacing)
                 .into_iter()
                 .map(|point| point + surface.offset),
         );
@@ -168,12 +169,12 @@ pub fn generate_terrain_mesh_cache(
     if !surface.boundary.is_empty() && !source_points.is_empty() {
         source_points.extend(sample_boundary_support_points(
             &surface.boundary,
-            surface.drape_sample_spacing,
+            effective_spacing,
             &source_points,
         ));
         source_points.extend(sample_interior_support_points(
             &surface.boundary,
-            (surface.drape_sample_spacing * 3.0).max(surface.drape_sample_spacing),
+            effective_spacing,
             &source_points,
         ));
     }
@@ -225,6 +226,15 @@ pub fn generate_terrain_mesh_cache(
         mesh,
         contour_segments,
     }
+}
+
+fn adaptive_sampling_spacing(surface: &TerrainSurface) -> f32 {
+    let contour_guided_spacing =
+        (surface.contour_interval.max(CONTOUR_EPSILON) * 1.5).max(CONTOUR_EPSILON);
+    surface
+        .drape_sample_spacing
+        .min(contour_guided_spacing)
+        .max(CONTOUR_EPSILON)
 }
 
 pub fn sample_surface_elevation(mesh: &TriangleMesh, x: f32, z: f32) -> Option<f32> {
@@ -577,5 +587,22 @@ mod tests {
         assert_eq!(uvs[0], [0.0, 0.0]);
         assert_eq!(uvs[1], [1.0, 0.0]);
         assert_eq!(uvs[2], [0.0, 1.0]);
+    }
+
+    #[test]
+    fn adaptive_sampling_spacing_tracks_dense_contour_intervals() {
+        let surface = TerrainSurface {
+            name: "Test".to_string(),
+            source_curve_ids: vec![],
+            datum_elevation: 0.0,
+            boundary: vec![],
+            max_triangle_area: 25.0,
+            minimum_angle: 10.0,
+            drape_sample_spacing: 1.5,
+            contour_interval: 0.5,
+            offset: Vec3::ZERO,
+        };
+
+        assert!((adaptive_sampling_spacing(&surface) - 0.75).abs() <= f32::EPSILON);
     }
 }
