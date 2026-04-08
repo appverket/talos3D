@@ -16,6 +16,7 @@ impl Plugin for ToolPlugin {
             .add_systems(OnEnter(ActiveTool::PlaceOpening), enter_opening_tool)
             .add_systems(OnEnter(ActiveTool::PlaceBox), enter_box_tool)
             .add_systems(OnEnter(ActiveTool::PlaceCylinder), enter_cylinder_tool)
+            .add_systems(OnEnter(ActiveTool::PlaceSphere), enter_sphere_tool)
             .add_systems(OnEnter(ActiveTool::PlacePlane), enter_plane_tool)
             .add_systems(OnEnter(ActiveTool::PlacePolyline), enter_polyline_tool);
     }
@@ -29,6 +30,7 @@ pub enum ActiveTool {
     PlaceOpening,
     PlaceBox,
     PlaceCylinder,
+    PlaceSphere,
     PlacePlane,
     PlacePolyline,
 }
@@ -96,6 +98,10 @@ fn enter_box_tool(mut status_bar_data: ResMut<StatusBarData>) {
 
 fn enter_cylinder_tool(mut status_bar_data: ResMut<StatusBarData>) {
     set_tool_status(&mut status_bar_data, "Cylinder", "Click to place centre");
+}
+
+fn enter_sphere_tool(mut status_bar_data: ResMut<StatusBarData>) {
+    set_tool_status(&mut status_bar_data, "Sphere", "Click to place centre");
 }
 
 fn enter_plane_tool(mut status_bar_data: ResMut<StatusBarData>) {

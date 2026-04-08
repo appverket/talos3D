@@ -45,7 +45,7 @@ use crate::{
                 evaluate_occurrences, propagate_definition_changes_with_commands,
                 ChangedDefinitions, OccurrenceFactory,
             },
-            primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive},
+            primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive, SpherePrimitive},
             profile::{ProfileExtrusion, ProfileRevolve, ProfileSweep},
             profile_feature::FaceProfileFeatureFactory,
             snapshots::{EditableMeshFactory, PolylineFactory, TriangleMeshFactory},
@@ -88,6 +88,7 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(OccurrenceFactory)
             .register_authored_entity_factory(PrimitiveFactory::<BoxPrimitive>::new())
             .register_authored_entity_factory(PrimitiveFactory::<CylinderPrimitive>::new())
+            .register_authored_entity_factory(PrimitiveFactory::<SpherePrimitive>::new())
             .register_authored_entity_factory(PrimitiveFactory::<PlanePrimitive>::new())
             .register_authored_entity_factory(PrimitiveFactory::<ProfileExtrusion>::new())
             .register_authored_entity_factory(PrimitiveFactory::<ProfileSweep>::new())
@@ -304,6 +305,24 @@ impl Plugin for ModelingPlugin {
             )
             .register_command(
                 CommandDescriptor {
+                    id: "modeling.create_sphere".to_string(),
+                    label: "Create Sphere".to_string(),
+                    description: "Activate sphere placement".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: Some("icon.create_sphere".to_string()),
+                    hint: Some("Click to place a sphere centre".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: Some("PlaceSphere".to_string()),
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_create_sphere,
+            )
+            .register_command(
+                CommandDescriptor {
                     id: "modeling.create_plane".to_string(),
                     label: "Create Plane".to_string(),
                     description: "Activate plane placement".to_string(),
@@ -403,6 +422,7 @@ impl Plugin for ModelingPlugin {
                         command_ids: vec![
                             "modeling.create_box".to_string(),
                             "modeling.create_cylinder".to_string(),
+                            "modeling.create_sphere".to_string(),
                             "modeling.create_plane".to_string(),
                             "modeling.create_polyline".to_string(),
                         ],
@@ -495,6 +515,10 @@ fn execute_create_box(world: &mut World, _: &Value) -> Result<CommandResult, Str
 
 fn execute_create_cylinder(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     activate_tool_command(world, ActiveTool::PlaceCylinder)
+}
+
+fn execute_create_sphere(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    activate_tool_command(world, ActiveTool::PlaceSphere)
 }
 
 fn execute_create_plane(world: &mut World, _: &Value) -> Result<CommandResult, String> {

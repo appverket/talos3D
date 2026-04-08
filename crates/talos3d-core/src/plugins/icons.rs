@@ -430,6 +430,31 @@ fn draw_create_cylinder(c: &mut Canvas) {
     c.line(cx + rx, 7.0, cx + rx, 17.0);
 }
 
+// Create sphere - simple shaded globe outline
+fn draw_create_sphere(c: &mut Canvas) {
+    c.circle(12.0, 12.0, 9.0);
+    draw_ellipse(c, 12.0, 12.0, 9.0, 4.0, 0.0, TAU);
+    c.line(12.0, 3.0, 12.0, 21.0);
+    draw_ellipse(
+        c,
+        12.0,
+        12.0,
+        5.0,
+        9.0,
+        std::f32::consts::FRAC_PI_2,
+        std::f32::consts::PI,
+    );
+    draw_ellipse(
+        c,
+        12.0,
+        12.0,
+        5.0,
+        9.0,
+        std::f32::consts::FRAC_PI_2 * 3.0,
+        std::f32::consts::PI,
+    );
+}
+
 fn draw_ellipse(c: &mut Canvas, cx: f32, cy: f32, rx: f32, ry: f32, start: f32, sweep: f32) {
     let steps = 32;
     for i in 0..steps {
@@ -517,6 +542,7 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "ungroup" => draw_ungroup(&mut c),
         "create_box" => draw_create_box(&mut c),
         "create_cylinder" => draw_create_cylinder(&mut c),
+        "create_sphere" => draw_create_sphere(&mut c),
         "create_plane" => draw_create_plane(&mut c),
         "create_polyline" => draw_create_polyline(&mut c),
         "wall" => draw_wall(&mut c),

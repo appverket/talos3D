@@ -12,7 +12,9 @@ use crate::{
             bsp_csg::{self, BooleanOp, CsgTriangle},
             csg::{CsgNode, EvaluatedCsg},
             primitive_trait::Primitive,
-            primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation},
+            primitives::{
+                BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation, SpherePrimitive,
+            },
             profile::{ProfileExtrusion, ProfileRevolve, ProfileSweep},
             profile_feature::FaceProfileFeature,
         },
@@ -92,9 +94,8 @@ pub fn geometry_semantics_for_snapshot(
     snapshot: &BoxedEntity,
 ) -> Option<GeometrySemantics> {
     match snapshot.type_name() {
-        "box" | "cylinder" | "profile_extrusion" | "profile_sweep" | "profile_revolve" => {
-            geometry_semantics_for_solid_root(world, snapshot)
-        }
+        "box" | "cylinder" | "sphere" | "profile_extrusion" | "profile_sweep"
+        | "profile_revolve" => geometry_semantics_for_solid_root(world, snapshot),
         "plane" => Some(GeometrySemantics {
             role: GeometryRole::SurfaceBody,
             topology_intent: TopologyIntent::OpenSurface,
@@ -403,6 +404,7 @@ fn primitive_or_evaluated_triangles(
 fn primitive_triangles(entity_ref: &EntityRef) -> Option<Vec<CsgTriangle>> {
     try_primitive_triangles::<BoxPrimitive>(entity_ref)
         .or_else(|| try_primitive_triangles::<CylinderPrimitive>(entity_ref))
+        .or_else(|| try_primitive_triangles::<SpherePrimitive>(entity_ref))
         .or_else(|| try_primitive_triangles::<PlanePrimitive>(entity_ref))
         .or_else(|| try_primitive_triangles::<ProfileExtrusion>(entity_ref))
         .or_else(|| try_primitive_triangles::<ProfileSweep>(entity_ref))

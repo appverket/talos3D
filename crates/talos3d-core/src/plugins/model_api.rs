@@ -7569,7 +7569,7 @@ mod tests {
     #[cfg(feature = "model-api")]
     use crate::importers::obj::ObjImporter;
     #[cfg(feature = "model-api")]
-    use crate::plugins::modeling::primitives::CylinderPrimitive;
+    use crate::plugins::modeling::primitives::{CylinderPrimitive, SpherePrimitive};
     #[cfg(feature = "model-api")]
     use crate::plugins::modeling::snapshots::TriangleMeshFactory;
     use crate::plugins::modeling::{
@@ -7581,7 +7581,7 @@ mod tests {
     use crate::plugins::{
         commands::{
             ApplyEntityChangesCommand, BeginCommandGroup, CreateBoxCommand, CreateCylinderCommand,
-            CreateEntityCommand, CreatePlaneCommand, CreatePolylineCommand,
+            CreateEntityCommand, CreatePlaneCommand, CreatePolylineCommand, CreateSphereCommand,
             CreateTriangleMeshCommand, DeleteEntitiesCommand, EndCommandGroup,
             ResolvedDeleteEntitiesCommand,
         },
@@ -7737,6 +7737,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Messages::<CreateBoxCommand>::default());
         world.insert_resource(Messages::<CreateCylinderCommand>::default());
+        world.insert_resource(Messages::<CreateSphereCommand>::default());
         world.insert_resource(Messages::<CreatePlaneCommand>::default());
         world.insert_resource(Messages::<CreatePolylineCommand>::default());
         world.insert_resource(Messages::<CreateTriangleMeshCommand>::default());
@@ -7803,6 +7804,7 @@ mod tests {
         let mut registry = CapabilityRegistry::default();
         registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
         registry.register_factory(PrimitiveFactory::<CylinderPrimitive>::new());
+        registry.register_factory(PrimitiveFactory::<SpherePrimitive>::new());
         registry.register_factory(PrimitiveFactory::<PlanePrimitive>::new());
         registry.register_factory(PolylineFactory);
         registry.register_factory(TriangleMeshFactory);
@@ -7818,6 +7820,7 @@ mod tests {
         world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(crate::plugins::layers::LayerRegistry::default());
+        world.insert_resource(crate::plugins::materials::MaterialRegistry::default());
         world
     }
 
@@ -7881,6 +7884,33 @@ mod tests {
             handle_delete_entities(&mut world, vec![box_id]).expect("delete should remove the box");
         assert_eq!(deleted_count, 1);
         assert!(get_entity_snapshot(&world, ElementId(box_id)).is_none());
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn write_handlers_create_and_edit_sphere() {
+        let mut world = init_model_api_test_world();
+
+        let sphere_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "sphere",
+                "centre": [0.0, 1.0, 0.0],
+                "radius": 1.25
+            }),
+        )
+        .expect("sphere should be created");
+
+        let details =
+            get_entity_details(&world, ElementId(sphere_id)).expect("sphere details should exist");
+        assert_eq!(details.entity_type, "sphere");
+
+        let updated = handle_set_property(&mut world, sphere_id, "radius", json!(2.5))
+            .expect("setting sphere radius should succeed");
+        assert_eq!(updated["radius"], json!(2.5));
+
+        let summary = model_summary(&world);
+        assert_eq!(summary.entity_counts.get("sphere"), Some(&1));
     }
 
     #[cfg(feature = "model-api")]
@@ -8049,7 +8079,7 @@ mod tests {
 
         let server = ModelApiServer::new(sender);
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 68); // prior tools + definition library + instantiate + hosted + authoring draft tools
+        assert_eq!(tools.len(), 76); // adds sphere support and current definition/model tooling surface
 
         let listed: Vec<EntityEntry> = server
             .list_entities_tool()
