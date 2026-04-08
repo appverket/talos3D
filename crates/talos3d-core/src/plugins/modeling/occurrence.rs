@@ -22,7 +22,11 @@ use crate::{
         commands::{apply_mesh_primitive, despawn_by_element_id},
         identity::ElementId,
         modeling::{
-            definition::{DefinitionId, DefinitionRegistry, DefinitionVersion, OverrideMap},
+            definition::{
+                ChildSlotDef, ConstraintSeverity, Definition, DefinitionId, DefinitionRegistry,
+                DefinitionVersion, EvaluatorDecl, ExprNode, OverrideMap, ParamType,
+            },
+            mesh_generation::NeedsMesh,
             primitives::ShapeRotation,
             profile::{Profile2d, ProfileExtrusion},
         },
@@ -38,6 +42,39 @@ use crate::{
 ///
 /// Domain-specific metadata is stored as opaque JSON so it can round-trip
 /// through serialisation without any schema knowledge at this layer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostedAnchor {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub position: [f32; 3],
+}
+
+impl HostedAnchor {
+    pub fn vec3(&self) -> Vec3 {
+        Vec3::new(self.position[0], self.position[1], self.position[2])
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostedOccurrenceContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_element_id: Option<ElementId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_element_id: Option<ElementId>,
+    #[serde(default)]
+    pub anchors: Vec<HostedAnchor>,
+}
+
+impl HostedOccurrenceContext {
+    pub fn anchor_position(&self, anchor_id: &str) -> Option<Vec3> {
+        self.anchors
+            .iter()
+            .find(|anchor| anchor.id == anchor_id)
+            .map(HostedAnchor::vec3)
+    }
+}
+
 #[derive(Debug, Clone, Component, Serialize, Deserialize)]
 pub struct OccurrenceIdentity {
     /// The definition this occurrence instantiates.
@@ -52,6 +89,9 @@ pub struct OccurrenceIdentity {
     /// dirty-tracking by design.
     #[serde(default)]
     pub domain_data: Value,
+    /// Optional resolved hosting context used for hosted instantiation flows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosting: Option<HostedOccurrenceContext>,
 }
 
 impl OccurrenceIdentity {
@@ -62,6 +102,7 @@ impl OccurrenceIdentity {
             definition_version,
             overrides: OverrideMap::default(),
             domain_data: Value::Null,
+            hosting: None,
         }
     }
 }
@@ -83,6 +124,21 @@ impl Default for OccurrenceClassification {
     fn default() -> Self {
         Self { mesh_dirty: true }
     }
+}
+
+// ---------------------------------------------------------------------------
+// GeneratedOccurrencePart — ECS component
+// ---------------------------------------------------------------------------
+
+/// Transient generated geometry owned by an authored occurrence.
+///
+/// These entities are not persisted; they are rebuilt whenever the root
+/// occurrence is re-evaluated.
+#[derive(Debug, Clone, Component)]
+pub struct GeneratedOccurrencePart {
+    pub owner: ElementId,
+    pub slot_path: String,
+    pub definition_id: DefinitionId,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +236,6 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn center(&self) -> Vec3 {
-        // Placeholder — will be replaced with mesh-bounds centre when available.
         self.offset
     }
 
@@ -206,18 +261,10 @@ impl AuthoredEntity for OccurrenceSnapshot {
         PushPullAffordance::Blocked(PushPullBlockReason::UnsupportedFace)
     }
 
-    /// Returns an empty vec because we have no registry access at this call site.
-    /// Property inspection is handled at the model-API layer where the registry
-    /// is available.
     fn property_fields(&self) -> Vec<PropertyFieldDef> {
         vec![]
     }
 
-    /// Unconditionally update the override map.
-    ///
-    /// Parameter existence is validated at the model-API layer; here we just
-    /// accept the value so that the snapshot remains consistent with what the
-    /// caller sent.
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
         let mut next = self.clone();
         next.identity.overrides.set(property_name, value.clone());
@@ -244,37 +291,25 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
-        // Clone the registry so we release the immutable borrow before mutating
-        // the world below.
         let registry = world.resource::<DefinitionRegistry>().clone();
-
-        let Some(resolved) =
-            registry.resolve_params(&self.identity.definition_id, &self.identity.overrides)
-        else {
-            // Definition not found — nothing to render.
-            return;
+        let transform = Transform {
+            translation: self.offset,
+            rotation: self.rotation,
+            scale: self.scale,
         };
 
-        let Some(extrusion) = build_rectangular_extrusion(
+        if let Err(error) = render_occurrence(
+            world,
             &registry,
-            &self.identity.definition_id,
-            &resolved,
-            self.offset,
-        ) else {
-            return;
-        };
-
-        apply_mesh_primitive(world, self.element_id, extrusion, ShapeRotation::default());
-
-        // Attach occurrence-specific ECS components so the entity is
-        // query-able as an occurrence and can be re-evaluated.
-        if let Some(entity) =
-            crate::plugins::commands::find_entity_by_element_id(world, self.element_id)
-        {
-            world.entity_mut(entity).insert((
-                self.identity.clone(),
-                OccurrenceClassification { mesh_dirty: false },
-            ));
+            self.element_id,
+            &self.identity,
+            transform,
+            Some(&self.label),
+        ) {
+            warn!(
+                "Failed to evaluate occurrence {} from definition '{}': {}",
+                self.element_id.0, self.identity.definition_id, error
+            );
         }
     }
 
@@ -296,12 +331,14 @@ impl AuthoredEntity for OccurrenceSnapshot {
         } else if let Some(entity) =
             crate::plugins::commands::find_entity_by_element_id(world, self.element_id)
         {
-            // Even if shape unchanged, keep identity component current.
-            world.entity_mut(entity).insert(self.identity.clone());
+            world
+                .entity_mut(entity)
+                .insert((self.identity.clone(), Name::new(self.label.clone())));
         }
     }
 
     fn remove_from(&self, world: &mut World) {
+        cleanup_generated_occurrence_parts(world, self.element_id);
         despawn_by_element_id(world, self.element_id);
     }
 
@@ -313,9 +350,7 @@ impl AuthoredEntity for OccurrenceSnapshot {
         })
     }
 
-    fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {
-        // No preview wire-frame at this layer.
-    }
+    fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {}
 
     fn preview_line_count(&self) -> usize {
         0
@@ -355,7 +390,10 @@ impl AuthoredEntityFactory for OccurrenceFactory {
     ) -> Option<BoxedEntity> {
         let element_id = *entity_ref.get::<ElementId>()?;
         let identity = entity_ref.get::<OccurrenceIdentity>()?.clone();
-        // Restore transform components if available.
+        let label = entity_ref
+            .get::<Name>()
+            .map(|name| name.as_str().to_string())
+            .unwrap_or_else(|| "Occurrence".to_string());
         let transform = entity_ref
             .get::<bevy::prelude::Transform>()
             .copied()
@@ -364,7 +402,7 @@ impl AuthoredEntityFactory for OccurrenceFactory {
             OccurrenceSnapshot {
                 element_id,
                 identity,
-                label: "Occurrence".to_string(),
+                label,
                 offset: transform.translation,
                 rotation: transform.rotation,
                 scale: transform.scale,
@@ -447,13 +485,9 @@ pub fn propagate_definition_changes(
     for (identity, mut classification) in &mut query {
         if ids.contains(&identity.definition_id) {
             classification.mesh_dirty = true;
-            // NeedsEval is inserted here; evaluate_occurrences will remove it.
         }
-        let _ = &mut commands; // suppress unused warning — NeedsEval insert happens via entity below
+        let _ = &mut commands;
     }
-
-    // We need entity access to insert NeedsEval; do a second pass.
-    // (Bevy requires Commands for structural changes inside a system.)
 }
 
 /// Full-entity variant that can insert the `NeedsEval` marker.
@@ -475,88 +509,447 @@ pub fn propagate_definition_changes_with_commands(
 }
 
 /// Re-evaluate occurrences that have the `NeedsEval` marker component.
-///
-/// For each such entity this system:
-/// 1. Looks up the `Definition` in the registry.
-/// 2. Resolves parameters (applying occurrence overrides over definition defaults).
-/// 3. Evaluates the first `RectangularExtrusion` evaluator it finds.
-/// 4. Writes the resulting `ProfileExtrusion` back onto the entity.
-/// 5. Removes the `NeedsEval` marker and clears `mesh_dirty`.
-pub fn evaluate_occurrences(
-    registry: Res<DefinitionRegistry>,
-    query: Query<(Entity, &OccurrenceIdentity), With<NeedsEval>>,
-    mut classification_query: Query<&mut OccurrenceClassification>,
-    mut commands: Commands,
-) {
-    use crate::plugins::modeling::mesh_generation::NeedsMesh;
+pub fn evaluate_occurrences(world: &mut World) {
+    let registry = world.resource::<DefinitionRegistry>().clone();
+    let occurrences: Vec<(Entity, ElementId, OccurrenceIdentity, Transform)> = {
+        let mut query = world.query_filtered::<
+            (Entity, &ElementId, &OccurrenceIdentity, Option<&Transform>),
+            With<NeedsEval>,
+        >();
+        query
+            .iter(world)
+            .map(|(entity, element_id, identity, transform)| {
+                (
+                    entity,
+                    *element_id,
+                    identity.clone(),
+                    transform.copied().unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
 
-    for (entity, identity) in &query {
-        let Some(resolved) = registry.resolve_params(&identity.definition_id, &identity.overrides)
-        else {
-            commands.entity(entity).remove::<NeedsEval>();
-            continue;
-        };
-
-        if let Some(extrusion) =
-            build_rectangular_extrusion(&registry, &identity.definition_id, &resolved, Vec3::ZERO)
+    for (entity, element_id, identity, transform) in occurrences {
+        if let Err(error) =
+            render_occurrence(world, &registry, element_id, &identity, transform, None)
         {
-            commands
-                .entity(entity)
-                .insert((extrusion, ShapeRotation::default(), NeedsMesh));
+            warn!(
+                "Failed to re-evaluate occurrence {} from definition '{}': {}",
+                element_id.0, identity.definition_id, error
+            );
+            cleanup_generated_occurrence_parts(world, element_id);
+            clear_occurrence_root_geometry(world, entity);
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert((identity.clone(), transform));
+            }
         }
 
-        commands.entity(entity).remove::<NeedsEval>();
-
-        if let Ok(mut cls) = classification_query.get_mut(entity) {
-            cls.mesh_dirty = false;
+        if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+            entity_mut.remove::<NeedsEval>();
+            if let Some(mut classification) = entity_mut.get_mut::<OccurrenceClassification>() {
+                classification.mesh_dirty = false;
+            } else {
+                entity_mut.insert(OccurrenceClassification { mesh_dirty: false });
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Evaluation helpers
 // ---------------------------------------------------------------------------
 
-/// Attempt to build a `ProfileExtrusion` from resolved parameters by
-/// inspecting the definition's evaluator list for the first
-/// `RectangularExtrusion` evaluator.
-///
-/// Returns `None` if:
-/// - the definition does not exist, or
-/// - no `RectangularExtrusion` evaluator is declared, or
-/// - the required parameters are missing or non-numeric.
-fn build_rectangular_extrusion(
+struct EvaluatedDefinitionState {
+    values: HashMap<String, Value>,
+}
+
+struct CompoundSpawnContext {
+    owner: ElementId,
+    parent_translation: Vec3,
+    parent_rotation: Quat,
+    slot_path: String,
+}
+
+fn render_occurrence(
+    world: &mut World,
     registry: &DefinitionRegistry,
-    id: &DefinitionId,
+    element_id: ElementId,
+    identity: &OccurrenceIdentity,
+    transform: Transform,
+    label: Option<&str>,
+) -> Result<(), String> {
+    let root_entity = ensure_occurrence_root_entity(world, element_id, identity, transform, label);
+    cleanup_generated_occurrence_parts(world, element_id);
+
+    let definition = registry.effective_definition(&identity.definition_id)?;
+    let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
+    let state = evaluate_definition_state(&definition, &resolved)?;
+
+    if let Some(extrusion) =
+        build_rectangular_extrusion_from_values(&definition, &state.values, transform.translation)
+    {
+        apply_mesh_primitive(
+            world,
+            element_id,
+            extrusion,
+            ShapeRotation(transform.rotation),
+        );
+    } else {
+        clear_occurrence_root_geometry(world, root_entity);
+        world.entity_mut(root_entity).insert(transform);
+    }
+
+    if let Some(compound) = &definition.compound {
+        for slot in &compound.child_slots {
+            spawn_compound_slot(
+                world,
+                registry,
+                slot,
+                &state.values,
+                CompoundSpawnContext {
+                    owner: element_id,
+                    parent_translation: transform.translation,
+                    parent_rotation: transform.rotation,
+                    slot_path: slot.slot_id.clone(),
+                },
+            )?;
+        }
+    }
+
+    if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
+        entity_mut.insert((
+            identity.clone(),
+            OccurrenceClassification { mesh_dirty: false },
+            transform,
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_occurrence_root_entity(
+    world: &mut World,
+    element_id: ElementId,
+    identity: &OccurrenceIdentity,
+    transform: Transform,
+    label: Option<&str>,
+) -> Entity {
+    if let Some(entity) = crate::plugins::commands::find_entity_by_element_id(world, element_id) {
+        if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+            entity_mut.insert((
+                identity.clone(),
+                OccurrenceClassification { mesh_dirty: false },
+                transform,
+            ));
+            if let Some(label) = label {
+                entity_mut.insert(Name::new(label.to_string()));
+            }
+        }
+        entity
+    } else {
+        let mut entity = world.spawn((
+            element_id,
+            identity.clone(),
+            OccurrenceClassification { mesh_dirty: false },
+            transform,
+            GlobalTransform::default(),
+        ));
+        entity.insert(Name::new(label.unwrap_or("Occurrence").to_string()));
+        entity.id()
+    }
+}
+
+fn spawn_compound_slot(
+    world: &mut World,
+    registry: &DefinitionRegistry,
+    slot: &ChildSlotDef,
+    parent_values: &HashMap<String, Value>,
+    context: CompoundSpawnContext,
+) -> Result<(), String> {
+    if let Some(expr) = &slot.suppression_expr {
+        if !evaluate_expr_bool(expr, parent_values)? {
+            return Ok(());
+        }
+    }
+
+    let mut child_overrides = OverrideMap::default();
+    for binding in &slot.parameter_bindings {
+        let value = evaluate_expr(&binding.expr, parent_values)?;
+        child_overrides.set(binding.target_param.clone(), value);
+    }
+
+    let child_definition = registry.effective_definition(&slot.definition_id)?;
+    let resolved = registry.resolve_bound_params_checked(&slot.definition_id, &child_overrides)?;
+    let state = evaluate_definition_state(&child_definition, &resolved)?;
+    let local_translation = evaluate_translation(slot, parent_values)?;
+    let world_translation =
+        context.parent_translation + context.parent_rotation * local_translation;
+
+    if let Some(extrusion) =
+        build_rectangular_extrusion_from_values(&child_definition, &state.values, world_translation)
+    {
+        world.spawn((
+            extrusion,
+            ShapeRotation(context.parent_rotation),
+            NeedsMesh,
+            Visibility::Visible,
+            GeneratedOccurrencePart {
+                owner: context.owner,
+                slot_path: context.slot_path.clone(),
+                definition_id: slot.definition_id.clone(),
+            },
+        ));
+    }
+
+    if let Some(compound) = &child_definition.compound {
+        for child_slot in &compound.child_slots {
+            spawn_compound_slot(
+                world,
+                registry,
+                child_slot,
+                &state.values,
+                CompoundSpawnContext {
+                    owner: context.owner,
+                    parent_translation: world_translation,
+                    parent_rotation: context.parent_rotation,
+                    slot_path: format!("{}.{}", context.slot_path, child_slot.slot_id),
+                },
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn evaluate_definition_state(
+    definition: &Definition,
     resolved: &HashMap<String, crate::plugins::modeling::definition::ResolvedParam>,
+) -> Result<EvaluatedDefinitionState, String> {
+    let mut values: HashMap<String, Value> = resolved
+        .iter()
+        .map(|(name, param)| (name.clone(), param.value.clone()))
+        .collect();
+
+    if let Some(compound) = &definition.compound {
+        for derived in &compound.derived_parameters {
+            let value = evaluate_expr(&derived.expr, &values)?;
+            validate_value_against_param_type(
+                &derived.param_type,
+                &value,
+                &format!("derived parameter '{}'", derived.name),
+            )?;
+            values.insert(derived.name.clone(), value);
+        }
+
+        for constraint in &compound.constraints {
+            let passed = evaluate_expr_bool(&constraint.expr, &values)?;
+            if !passed {
+                let message = format!(
+                    "Definition '{}' constraint '{}' failed: {}",
+                    definition.name, constraint.id, constraint.message
+                );
+                match constraint.severity {
+                    ConstraintSeverity::Error => return Err(message),
+                    ConstraintSeverity::Warning => warn!("{message}"),
+                }
+            }
+        }
+    }
+
+    Ok(EvaluatedDefinitionState { values })
+}
+
+fn evaluate_translation(
+    slot: &ChildSlotDef,
+    values: &HashMap<String, Value>,
+) -> Result<Vec3, String> {
+    let Some(translation) = &slot.transform_binding.translation else {
+        return Ok(Vec3::ZERO);
+    };
+    if translation.len() != 3 {
+        return Err(format!(
+            "Child slot '{}' translation must contain exactly 3 expressions",
+            slot.slot_id
+        ));
+    }
+
+    Ok(Vec3::new(
+        evaluate_expr_f32(&translation[0], values)?,
+        evaluate_expr_f32(&translation[1], values)?,
+        evaluate_expr_f32(&translation[2], values)?,
+    ))
+}
+
+fn evaluate_expr(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<Value, String> {
+    match expr {
+        ExprNode::Literal { value } => Ok(value.clone()),
+        ExprNode::ParamRef { path } => lookup_expr_value(path, values),
+        ExprNode::Add { left, right } => Ok(Value::from(
+            evaluate_expr_f64(left, values)? + evaluate_expr_f64(right, values)?,
+        )),
+        ExprNode::Sub { left, right } => Ok(Value::from(
+            evaluate_expr_f64(left, values)? - evaluate_expr_f64(right, values)?,
+        )),
+        ExprNode::Mul { left, right } => Ok(Value::from(
+            evaluate_expr_f64(left, values)? * evaluate_expr_f64(right, values)?,
+        )),
+        ExprNode::Div { left, right } => Ok(Value::from(
+            evaluate_expr_f64(left, values)? / evaluate_expr_f64(right, values)?,
+        )),
+        ExprNode::Min { left, right } => Ok(Value::from(
+            evaluate_expr_f64(left, values)?.min(evaluate_expr_f64(right, values)?),
+        )),
+        ExprNode::Max { left, right } => Ok(Value::from(
+            evaluate_expr_f64(left, values)?.max(evaluate_expr_f64(right, values)?),
+        )),
+        ExprNode::Eq { left, right } => Ok(Value::Bool(
+            evaluate_expr(left, values)? == evaluate_expr(right, values)?,
+        )),
+        ExprNode::Gt { left, right } => Ok(Value::Bool(
+            evaluate_expr_f64(left, values)? > evaluate_expr_f64(right, values)?,
+        )),
+        ExprNode::Lt { left, right } => Ok(Value::Bool(
+            evaluate_expr_f64(left, values)? < evaluate_expr_f64(right, values)?,
+        )),
+        ExprNode::And { nodes } => {
+            for node in nodes {
+                if !evaluate_expr_bool(node, values)? {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            Ok(Value::Bool(true))
+        }
+        ExprNode::IfElse {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            if evaluate_expr_bool(condition, values)? {
+                evaluate_expr(when_true, values)
+            } else {
+                evaluate_expr(when_false, values)
+            }
+        }
+    }
+}
+
+fn evaluate_expr_f64(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<f64, String> {
+    evaluate_expr(expr, values)?
+        .as_f64()
+        .ok_or_else(|| "expression must evaluate to a numeric value".to_string())
+}
+
+fn evaluate_expr_f32(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<f32, String> {
+    Ok(evaluate_expr_f64(expr, values)? as f32)
+}
+
+fn evaluate_expr_bool(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<bool, String> {
+    evaluate_expr(expr, values)?
+        .as_bool()
+        .ok_or_else(|| "expression must evaluate to a boolean value".to_string())
+}
+
+fn lookup_expr_value(path: &str, values: &HashMap<String, Value>) -> Result<Value, String> {
+    if let Some(value) = values.get(path) {
+        return Ok(value.clone());
+    }
+
+    if let Some(last_segment) = path.rsplit('.').next() {
+        if let Some(value) = values.get(last_segment) {
+            return Ok(value.clone());
+        }
+    }
+
+    Err(format!("Expression references unknown parameter '{path}'"))
+}
+
+fn validate_value_against_param_type(
+    param_type: &ParamType,
+    value: &Value,
+    context: &str,
+) -> Result<(), String> {
+    match param_type {
+        ParamType::Numeric if value.is_number() => Ok(()),
+        ParamType::Boolean if value.is_boolean() => Ok(()),
+        ParamType::StringVal if value.is_string() => Ok(()),
+        ParamType::Enum(variants) => {
+            let Some(current) = value.as_str() else {
+                return Err(format!("{context} must resolve to an enum string"));
+            };
+            if variants.iter().any(|variant| variant == current) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{context} must be one of [{}]",
+                    variants.join(", ")
+                ))
+            }
+        }
+        ParamType::Numeric => Err(format!("{context} must resolve to a number")),
+        ParamType::Boolean => Err(format!("{context} must resolve to a boolean")),
+        ParamType::StringVal => Err(format!("{context} must resolve to a string")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Geometry helpers
+// ---------------------------------------------------------------------------
+
+fn build_rectangular_extrusion_from_values(
+    definition: &Definition,
+    values: &HashMap<String, Value>,
     centre: Vec3,
 ) -> Option<ProfileExtrusion> {
-    use crate::plugins::modeling::definition::EvaluatorDecl;
+    let EvaluatorDecl::RectangularExtrusion(evaluator) = definition.evaluators.first()?;
 
-    let def = registry.get(id)?;
-
-    let evaluator = def.evaluators.iter().find_map(|e| match e {
-        EvaluatorDecl::RectangularExtrusion(re) => Some(re),
-    })?;
-
-    let width = resolved
-        .get(&evaluator.width_param)
-        .and_then(|p| p.value.as_f64())
-        .map(|v| v as f32)?;
-
-    let depth = resolved
-        .get(&evaluator.depth_param)
-        .and_then(|p| p.value.as_f64())
-        .map(|v| v as f32)?;
-
-    let height = resolved
-        .get(&evaluator.height_param)
-        .and_then(|p| p.value.as_f64())
-        .map(|v| v as f32)?;
+    let width = values.get(&evaluator.width_param)?.as_f64()? as f32;
+    let depth = values.get(&evaluator.depth_param)?.as_f64()? as f32;
+    let height = values.get(&evaluator.height_param)?.as_f64()? as f32;
 
     Some(ProfileExtrusion {
         centre,
         profile: Profile2d::rectangle(width, depth),
         height,
     })
+}
+
+fn clear_occurrence_root_geometry(world: &mut World, entity: Entity) {
+    remove_entity_mesh_assets(world, entity);
+    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+        entity_mut.remove::<(
+            ProfileExtrusion,
+            ShapeRotation,
+            NeedsMesh,
+            Mesh3d,
+            MeshMaterial3d<StandardMaterial>,
+        )>();
+    }
+}
+
+fn cleanup_generated_occurrence_parts(world: &mut World, owner: ElementId) {
+    let entities: Vec<Entity> = {
+        let mut query = world.query::<(Entity, &GeneratedOccurrencePart)>();
+        query
+            .iter(world)
+            .filter_map(|(entity, generated)| (generated.owner == owner).then_some(entity))
+            .collect()
+    };
+
+    for entity in entities {
+        if world.get_entity(entity).is_ok() {
+            despawn_generated_entity(world, entity);
+        }
+    }
+}
+
+fn despawn_generated_entity(world: &mut World, entity: Entity) {
+    remove_entity_mesh_assets(world, entity);
+    let _ = world.despawn(entity);
+}
+
+fn remove_entity_mesh_assets(world: &mut World, entity: Entity) {
+    let mesh_asset_id = world.get::<Mesh3d>(entity).map(|mesh| mesh.id());
+    if let Some(mesh_asset_id) = mesh_asset_id {
+        world.resource_mut::<Assets<Mesh>>().remove(mesh_asset_id);
+    }
 }

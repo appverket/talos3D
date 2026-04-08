@@ -12,19 +12,10 @@ impl Plugin for DocumentStatePlugin {
     }
 }
 
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, Default)]
 pub struct DocumentState {
     pub current_path: Option<PathBuf>,
     pub dirty: bool,
-}
-
-impl Default for DocumentState {
-    fn default() -> Self {
-        Self {
-            current_path: None,
-            dirty: false,
-        }
-    }
 }
 
 impl DocumentState {

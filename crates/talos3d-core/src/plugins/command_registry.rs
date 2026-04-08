@@ -7,8 +7,8 @@ use serde_json::Value;
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
     camera::focus_orbit_camera_on_bounds, commands::DeleteEntitiesCommand,
-    history::PendingCommandQueue, identity::ElementId, selection::Selected, tools::ActiveTool,
-    transform::PivotPoint,
+    history::PendingCommandQueue, identity::ElementId, palette::PaletteState, selection::Selected,
+    tools::ActiveTool, transform::PivotPoint,
 };
 
 use crate::plugins::icons;
@@ -447,6 +447,28 @@ pub fn register_core_commands(app: &mut App) {
     )
     .register_command(
         CommandDescriptor {
+            id: "core.show_command_palette".to_string(),
+            label: "Show Command Palette".to_string(),
+            description: "Open the command panel.".to_string(),
+            category: CommandCategory::View,
+            parameters: None,
+            default_shortcut: Some(if cfg!(target_os = "macos") {
+                "Cmd+K".to_string()
+            } else {
+                "Ctrl+K".to_string()
+            }),
+            icon: None,
+            hint: Some("Search commands, tools, and categories".to_string()),
+            requires_selection: false,
+            show_in_menu: true,
+            version: 1,
+            activates_tool: None,
+            capability_id: None,
+        },
+        execute_show_command_palette,
+    )
+    .register_command(
+        CommandDescriptor {
             id: "core.set_pivot".to_string(),
             label: "Set Pivot".to_string(),
             description: "Set the active transform pivot to explicit X Y Z coordinates".to_string(),
@@ -748,6 +770,11 @@ fn execute_zoom_to_extents(world: &mut World, _: &Value) -> Result<CommandResult
 
 fn execute_zoom_to_selection(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     frame_camera_for_entities(world, true)
+}
+
+fn execute_show_command_palette(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    world.resource_mut::<PaletteState>().show();
+    Ok(CommandResult::empty())
 }
 
 fn frame_camera_for_entities(

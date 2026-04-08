@@ -3,6 +3,8 @@ use bevy::{
     prelude::*,
     window::{ExitCondition, WindowCloseRequested},
 };
+#[cfg(feature = "model-api")]
+use std::env;
 use talos3d_architectural::ArchitecturalPlugin;
 use talos3d_core::capability_registry::DefaultsRegistry;
 #[cfg(feature = "model-api")]
@@ -26,6 +28,7 @@ use talos3d_core::plugins::{
     inference::InferencePlugin,
     input_ownership::InputOwnershipPlugin,
     layers::LayerPlugin,
+    materials::MaterialPlugin,
     modeling::ModelingPlugin,
     palette::PalettePlugin,
     persistence::PersistencePlugin,
@@ -51,6 +54,9 @@ pub enum AppMode {
 }
 
 fn main() {
+    #[cfg(feature = "model-api")]
+    configure_model_api_launch_from_args();
+
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -76,6 +82,7 @@ fn main() {
     .add_plugins(CommandPlugin)
     .add_plugins(ImportPlugin)
     .add_plugins(LayerPlugin)
+    .add_plugins(MaterialPlugin)
     .add_plugins(ModelingPlugin)
     .add_plugins(ArchitecturalPlugin);
 
@@ -107,6 +114,31 @@ fn main() {
     app.add_plugins(PerfStatsPlugin);
 
     app.run();
+}
+
+#[cfg(feature = "model-api")]
+fn configure_model_api_launch_from_args() {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--instance-id" => {
+                if let Some(value) = args.next() {
+                    env::set_var("TALOS3D_INSTANCE_ID", value);
+                }
+            }
+            "--model-api-port" => {
+                if let Some(value) = args.next() {
+                    env::set_var("TALOS3D_MODEL_API_PORT", value);
+                }
+            }
+            "--instance-registry-dir" => {
+                if let Some(value) = args.next() {
+                    env::set_var("TALOS3D_INSTANCE_REGISTRY_DIR", value);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn init_document_properties(world: &mut World) {

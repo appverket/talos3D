@@ -3,7 +3,11 @@ use std::f32::consts::PI;
 #[cfg(feature = "perf-stats")]
 use std::time::Instant;
 
-use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
+use bevy::{
+    ecs::{system::SystemParam, world::EntityRef},
+    prelude::*,
+    window::PrimaryWindow,
+};
 
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, add_transform_preview_time, PerfStats};
@@ -15,6 +19,7 @@ use crate::{
         commands::{ApplyEntityChangesCommand, CreateEntityCommand},
         cursor::CursorWorldPos,
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
+        handles::arm_move_handles,
         identity::ElementId,
         inference::InferenceEngine,
         input_ownership::{InputOwnership, InputPhase, ModalKind},
@@ -213,7 +218,33 @@ pub struct TransformStartOptions {
 }
 
 fn begin_move(world: &mut World) {
-    begin_transform_shortcut(world, KeyCode::KeyG, TransformMode::Moving);
+    begin_move_shortcut(world, KeyCode::KeyG);
+}
+
+fn begin_move_shortcut(world: &mut World, key: KeyCode) {
+    if !world.resource::<InputOwnership>().is_idle() {
+        return;
+    }
+
+    if world.resource::<FaceEditContext>().is_active() {
+        return;
+    }
+
+    let keys = world.resource::<ButtonInput<KeyCode>>();
+    let key_pressed = keys.just_pressed(key);
+    let has_modifier = keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight)
+        || keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight)
+        || keys.pressed(KeyCode::AltLeft)
+        || keys.pressed(KeyCode::AltRight);
+    if !key_pressed || has_modifier {
+        return;
+    }
+
+    if world.resource::<TransformState>().is_idle() {
+        let _ = arm_move_handles(world);
+    }
 }
 
 fn begin_rotate(world: &mut World) {
@@ -257,7 +288,7 @@ fn begin_transform_shortcut(world: &mut World, key: KeyCode, mode: TransformMode
         return;
     }
 
-    match start_transform_mode(world, mode.clone()) {
+    match start_transform_mode(world, mode) {
         Ok(()) => {}
         Err(_) => {
             // Cursor not over viewport — enter pending state so transform
@@ -312,7 +343,7 @@ pub fn start_transform_mode_with_options(
 }
 
 fn activate_pending_transform(world: &mut World) {
-    let pending_mode = world.resource::<TransformState>().pending_mode.clone();
+    let pending_mode = world.resource::<TransformState>().pending_mode;
     let Some(mode) = pending_mode else {
         return;
     };
@@ -451,7 +482,7 @@ fn update_transform_preview(world: &mut World) {
 
     let push_pull_face = world.resource::<PushPullContext>().active_face.clone();
     let is_push_pull = push_pull_face.is_some();
-    let mode = world.resource::<TransformState>().mode.clone();
+    let mode = world.resource::<TransformState>().mode;
 
     if is_push_pull {
         // Push/pull genuinely deforms geometry (face extrusion) — this cannot
@@ -517,7 +548,7 @@ fn arm_scale_drag_on_mouse_press(world: &mut World) {
     }
 
     let mouse_buttons = world.resource::<ButtonInput<MouseButton>>();
-    if !should_rebase_scale_drag(world.resource::<TransformState>(), &mouse_buttons) {
+    if !should_rebase_scale_drag(world.resource::<TransformState>(), mouse_buttons) {
         return;
     }
 
@@ -541,7 +572,7 @@ fn confirm_transform(world: &mut World) {
     let confirm = {
         let mouse_buttons = world.resource::<ButtonInput<MouseButton>>();
         let keys = world.resource::<ButtonInput<KeyCode>>();
-        should_confirm_transform(world.resource::<TransformState>(), &mouse_buttons, &keys)
+        should_confirm_transform(world.resource::<TransformState>(), mouse_buttons, keys)
     };
     if !confirm {
         return;
@@ -560,7 +591,7 @@ fn confirm_transform(world: &mut World) {
     let label = if world.resource::<PushPullContext>().active_face.is_some() {
         "Push/Pull face"
     } else {
-        transform_label(world.resource::<TransformState>().mode.clone())
+        transform_label(world.resource::<TransformState>().mode)
     };
     let after = preview.after;
 
@@ -576,7 +607,7 @@ fn confirm_transform(world: &mut World) {
 
     // Store last distance for Tab-repeat (distance echo)
     if let Some(display_value) = preview.display_value {
-        let mode = world.resource::<TransformState>().mode.clone();
+        let mode = world.resource::<TransformState>().mode;
         let mut engine = world.resource_mut::<InferenceEngine>();
         engine.last_distance = Some(display_value);
         engine.last_mode = Some(mode);
@@ -832,7 +863,7 @@ fn draw_transform_preview(
         return;
     }
 
-    let mode = world.resource::<TransformState>().mode.clone();
+    let mode = world.resource::<TransformState>().mode;
     let Some(preview) = compute_preview(world) else {
         return;
     };
@@ -1173,7 +1204,7 @@ fn scale_factor(
 fn current_transform_cursor(world: &World) -> Option<Vec3> {
     if world.resource::<PushPullContext>().active_face.is_some() {
         let cursor_world_pos = world.resource::<CursorWorldPos>();
-        if let Some(position) = cursor_world_pos.raw.or(cursor_world_pos.snapped) {
+        if let Some(position) = cursor_world_pos.snapped.or(cursor_world_pos.raw) {
             return Some(position);
         }
     } else {
@@ -1615,35 +1646,40 @@ const PROTRACTOR_SCREEN_FACTOR: f32 = 0.12;
 const PROTRACTOR_TICK_INNER: f32 = 0.9;
 const PROTRACTOR_TICK_INNER_MAJOR: f32 = 0.82;
 
-fn draw_rotation_protractor(
-    transform_state: Res<TransformState>,
-    pivot_point: Res<PivotPoint>,
-    cursor_world_pos: Res<CursorWorldPos>,
-    snap_result: Res<SnapResult>,
-    keys: Res<ButtonInput<KeyCode>>,
-    camera_query: Query<&GlobalTransform, With<Camera>>,
-    mut gizmos: Gizmos,
-    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
-) {
-    if transform_state.mode != TransformMode::Rotating {
+#[derive(SystemParam)]
+struct RotationProtractorContext<'w, 's> {
+    transform_state: Res<'w, TransformState>,
+    pivot_point: Res<'w, PivotPoint>,
+    cursor_world_pos: Res<'w, CursorWorldPos>,
+    snap_result: Res<'w, SnapResult>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    camera_query: Query<'w, 's, &'static GlobalTransform, With<Camera>>,
+    gizmos: Gizmos<'w, 's>,
+    #[cfg(feature = "perf-stats")]
+    perf_stats: ResMut<'w, PerfStats>,
+}
+
+fn draw_rotation_protractor(mut cx: RotationProtractorContext) {
+    if cx.transform_state.mode != TransformMode::Rotating {
         return;
     }
 
-    let Some(center) = effective_pivot(&transform_state, &pivot_point) else {
+    let Some(center) = effective_pivot(&cx.transform_state, &cx.pivot_point) else {
         return;
     };
-    let Some(initial_cursor) = transform_state.initial_cursor else {
+    let Some(initial_cursor) = cx.transform_state.initial_cursor else {
         return;
     };
 
-    let axis = transform_state.axis;
+    let axis = cx.transform_state.axis;
 
     // Project initial offset onto the rotation plane (for angle computation)
     let (initial_2d, _) =
         rotation_plane_project(initial_cursor - center, initial_cursor - center, axis);
 
     // Compute viewport-adaptive radius from camera distance
-    let radius = camera_query
+    let radius = cx
+        .camera_query
         .iter()
         .next()
         .map(|cam_tf| {
@@ -1675,7 +1711,7 @@ fn draw_rotation_protractor(
         let angle = (index as f32 / PROTRACTOR_SEGMENTS as f32) * std::f32::consts::TAU;
         let point = center + protractor_point(angle, radius, axis);
         if let Some(previous) = previous {
-            gizmos.line(previous, point, dim_color);
+            cx.gizmos.line(previous, point, dim_color);
             #[cfg(feature = "perf-stats")]
             {
                 line_count += 1;
@@ -1695,7 +1731,7 @@ fn draw_rotation_protractor(
         };
         let inner = center + protractor_point(angle, radius * inner_factor, axis);
         let outer = center + protractor_point(angle, radius, axis);
-        gizmos.line(inner, outer, dim_color);
+        cx.gizmos.line(inner, outer, dim_color);
         #[cfg(feature = "perf-stats")]
         {
             line_count += 1;
@@ -1705,20 +1741,22 @@ fn draw_rotation_protractor(
     // Draw initial angle radial line
     let start_angle = initial_2d.y.atan2(initial_2d.x);
     let start_point = center + protractor_point(start_angle, radius, axis);
-    gizmos.line(center, start_point, dim_color);
+    cx.gizmos.line(center, start_point, dim_color);
     #[cfg(feature = "perf-stats")]
     {
         line_count += 1;
     }
 
     // Compute current angle from numeric input or cursor position
-    let current_cursor = snap_result
+    let current_cursor = cx
+        .snap_result
         .position
-        .or(snap_result.raw_position)
-        .or(cursor_world_pos.snapped)
-        .or(cursor_world_pos.raw);
+        .or(cx.snap_result.raw_position)
+        .or(cx.cursor_world_pos.snapped)
+        .or(cx.cursor_world_pos.raw);
 
-    let current_angle_opt: Option<f32> = transform_state
+    let current_angle_opt: Option<f32> = cx
+        .transform_state
         .numeric_buffer
         .as_deref()
         .and_then(|buffer| buffer.parse::<f32>().ok())
@@ -1732,7 +1770,7 @@ fn draw_rotation_protractor(
             let mut delta = current_vec.y.atan2(current_vec.x) - start_vec.y.atan2(start_vec.x);
             delta = normalize_angle(delta);
             let snap_rotate =
-                keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+                cx.keys.pressed(KeyCode::ControlLeft) || cx.keys.pressed(KeyCode::ControlRight);
             if snap_rotate {
                 delta = snap_angle(delta, ROTATION_SNAP_INCREMENT_RADIANS);
             }
@@ -1741,7 +1779,7 @@ fn draw_rotation_protractor(
 
     if let Some(current_angle) = current_angle_opt {
         let current_point = center + protractor_point(current_angle, radius, axis);
-        gizmos.line(center, current_point, protractor_color);
+        cx.gizmos.line(center, current_point, protractor_color);
         #[cfg(feature = "perf-stats")]
         {
             line_count += 1;
@@ -1758,7 +1796,7 @@ fn draw_rotation_protractor(
             let angle = start_angle + delta * t;
             let point = center + protractor_point(angle, radius, axis);
             if let Some(prev) = arc_prev {
-                gizmos.line(prev, point, protractor_color);
+                cx.gizmos.line(prev, point, protractor_color);
                 #[cfg(feature = "perf-stats")]
                 {
                     line_count += 1;
@@ -1777,7 +1815,7 @@ fn draw_rotation_protractor(
             _ => AXIS_Y_COLOR,
         };
         let half = radius * 0.3;
-        gizmos.line(
+        cx.gizmos.line(
             center - axis_direction * half,
             center + axis_direction * half,
             axis_color,
@@ -1790,7 +1828,7 @@ fn draw_rotation_protractor(
 
     #[cfg(feature = "perf-stats")]
     if line_count > 0 {
-        add_gizmo_line_count(&mut perf_stats, line_count);
+        add_gizmo_line_count(&mut cx.perf_stats, line_count);
     }
 }
 
@@ -2000,8 +2038,10 @@ mod tests {
 
     #[test]
     fn pending_mode_switches_on_different_key() {
-        let mut state = TransformState::default();
-        state.pending_mode = Some(TransformMode::Rotating);
+        let mut state = TransformState {
+            pending_mode: Some(TransformMode::Rotating),
+            ..Default::default()
+        };
 
         // Switching to Scale should update pending_mode
         state.pending_mode = Some(TransformMode::Scaling);
@@ -2011,8 +2051,10 @@ mod tests {
 
     #[test]
     fn clear_resets_pending_mode() {
-        let mut state = TransformState::default();
-        state.pending_mode = Some(TransformMode::Rotating);
+        let mut state = TransformState {
+            pending_mode: Some(TransformMode::Rotating),
+            ..Default::default()
+        };
         state.clear();
         assert!(state.is_idle());
         assert!(!state.is_pending());

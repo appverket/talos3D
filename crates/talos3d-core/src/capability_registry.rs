@@ -81,7 +81,7 @@ impl FaceId {
     /// Returns the axis index (0=X, 1=Y, 2=Z) and sign (-1 or +1).
     pub fn box_axis_sign(&self) -> (usize, f32) {
         let axis = (self.0 / 2) as usize;
-        let sign = if self.0 % 2 == 0 { -1.0 } else { 1.0 };
+        let sign = if self.0.is_multiple_of(2) { -1.0 } else { 1.0 };
         (axis, sign)
     }
 }
@@ -203,33 +203,23 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum CapabilityMaturity {
     Experimental,
     Preview,
+    #[default]
     Stable,
     Deprecated,
 }
 
-impl Default for CapabilityMaturity {
-    fn default() -> Self {
-        Self::Stable
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum CapabilityDistribution {
+    #[default]
     Bundled,
     ReferenceExtension,
     Community,
     Private,
     Commercial,
-}
-
-impl Default for CapabilityDistribution {
-    fn default() -> Self {
-        Self::Bundled
-    }
 }
 
 fn default_capability_api_version() -> u32 {

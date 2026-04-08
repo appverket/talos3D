@@ -153,16 +153,11 @@ pub enum OverridePolicy {
 // ---------------------------------------------------------------------------
 
 /// Distinguishes direct author inputs from system-computed parameters.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParameterMutability {
+    #[default]
     Input,
     Derived,
-}
-
-impl Default for ParameterMutability {
-    fn default() -> Self {
-        Self::Input
-    }
 }
 
 /// Extended metadata used by agents and UI when authoring parameters.
@@ -453,6 +448,9 @@ pub struct Interface {
 pub struct Definition {
     /// Globally unique identifier.
     pub id: DefinitionId,
+    /// Optional reusable base definition that this definition specializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_definition_id: Option<DefinitionId>,
     /// Human-readable name displayed in the UI.
     pub name: String,
     /// Broad category of what this definition produces.
@@ -560,6 +558,21 @@ impl Definition {
                         ));
                     }
                 }
+            }
+        }
+
+        if self.base_definition_id.as_ref() == Some(&self.id) {
+            return Err(format!(
+                "Definition '{}' cannot inherit from itself",
+                self.name
+            ));
+        }
+        if let Some(base_definition_id) = &self.base_definition_id {
+            if !has_definition(base_definition_id) {
+                return Err(format!(
+                    "Definition '{}' references missing base definition '{}'",
+                    self.name, base_definition_id
+                ));
             }
         }
 
@@ -755,7 +768,12 @@ impl DefinitionRegistry {
 
     /// Validate a definition against the current registry.
     pub fn validate_definition(&self, def: &Definition) -> Result<(), String> {
-        def.validate_with(|id| self.get(id).is_some())
+        def.validate_with(|id| id == &def.id || self.get(id).is_some())?;
+
+        let mut preview = self.clone();
+        preview.insert(def.clone());
+        let _ = preview.effective_definition(&def.id)?;
+        Ok(())
     }
 
     /// Validate occurrence overrides against the target definition.
@@ -764,9 +782,29 @@ impl DefinitionRegistry {
         id: &DefinitionId,
         overrides: &OverrideMap,
     ) -> Result<(), String> {
-        let def = self
-            .get(id)
-            .ok_or_else(|| format!("Definition '{}' not found", id))?;
+        self.validate_param_overrides(id, overrides, false)
+    }
+
+    /// Validate bound parameter values produced by an owning definition.
+    ///
+    /// Internal definition bindings are allowed to drive locked child
+    /// parameters because those values are part of the family definition, not
+    /// user-authored occurrence overrides.
+    pub fn validate_bound_overrides(
+        &self,
+        id: &DefinitionId,
+        overrides: &OverrideMap,
+    ) -> Result<(), String> {
+        self.validate_param_overrides(id, overrides, true)
+    }
+
+    fn validate_param_overrides(
+        &self,
+        id: &DefinitionId,
+        overrides: &OverrideMap,
+        allow_locked: bool,
+    ) -> Result<(), String> {
+        let def = self.effective_definition(id)?;
 
         for (name, value) in &overrides.0 {
             let parameter =
@@ -774,7 +812,7 @@ impl DefinitionRegistry {
                     format!("Definition '{}' has no parameter '{}'", def.name, name)
                 })?;
 
-            if parameter.override_policy == OverridePolicy::Locked {
+            if !allow_locked && parameter.override_policy == OverridePolicy::Locked {
                 return Err(format!(
                     "Parameter '{}' on definition '{}' is locked and cannot be overridden",
                     name, def.name
@@ -794,11 +832,27 @@ impl DefinitionRegistry {
         id: &DefinitionId,
         overrides: &OverrideMap,
     ) -> Result<HashMap<String, ResolvedParam>, String> {
-        let def = self
-            .definitions
-            .get(id)
-            .ok_or_else(|| format!("Definition '{}' not found", id))?;
-        self.validate_overrides(id, overrides)?;
+        self.resolve_params_checked_internal(id, overrides, false)
+    }
+
+    /// Resolve effective parameter values when the inputs come from internal
+    /// definition bindings instead of direct occurrence overrides.
+    pub fn resolve_bound_params_checked(
+        &self,
+        id: &DefinitionId,
+        overrides: &OverrideMap,
+    ) -> Result<HashMap<String, ResolvedParam>, String> {
+        self.resolve_params_checked_internal(id, overrides, true)
+    }
+
+    fn resolve_params_checked_internal(
+        &self,
+        id: &DefinitionId,
+        overrides: &OverrideMap,
+        allow_locked: bool,
+    ) -> Result<HashMap<String, ResolvedParam>, String> {
+        let def = self.effective_definition(id)?;
+        self.validate_param_overrides(id, overrides, allow_locked)?;
 
         let mut resolved = HashMap::new();
         for param_def in &def.interface.parameters.0 {
@@ -837,6 +891,150 @@ impl DefinitionRegistry {
         overrides: &OverrideMap,
     ) -> Option<HashMap<String, ResolvedParam>> {
         self.resolve_params_checked(id, overrides).ok()
+    }
+
+    /// Resolve a definition together with any base-definition ancestry.
+    pub fn effective_definition(&self, id: &DefinitionId) -> Result<Definition, String> {
+        self.effective_definition_internal(id, &mut Vec::new())
+    }
+
+    fn effective_definition_internal(
+        &self,
+        id: &DefinitionId,
+        stack: &mut Vec<DefinitionId>,
+    ) -> Result<Definition, String> {
+        if stack.contains(id) {
+            let mut cycle = stack.iter().map(ToString::to_string).collect::<Vec<_>>();
+            cycle.push(id.to_string());
+            return Err(format!(
+                "Definition inheritance cycle detected: {}",
+                cycle.join(" -> ")
+            ));
+        }
+
+        let definition = self
+            .definitions
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("Definition '{}' not found", id))?;
+        stack.push(id.clone());
+        let effective = if let Some(base_definition_id) = &definition.base_definition_id {
+            let base = self.effective_definition_internal(base_definition_id, stack)?;
+            merge_definition(base, definition)
+        } else {
+            definition
+        };
+        stack.pop();
+        Ok(effective)
+    }
+}
+
+fn merge_definition(base: Definition, child: Definition) -> Definition {
+    let Definition {
+        id,
+        base_definition_id,
+        name,
+        definition_kind,
+        definition_version,
+        interface,
+        evaluators,
+        representations,
+        compound,
+        domain_data,
+    } = child;
+
+    Definition {
+        id,
+        base_definition_id,
+        name,
+        definition_kind,
+        definition_version,
+        interface: Interface {
+            parameters: merge_parameter_schema(base.interface.parameters, interface.parameters),
+        },
+        evaluators: if evaluators.is_empty() {
+            base.evaluators
+        } else {
+            evaluators
+        },
+        representations: if representations.is_empty() {
+            base.representations
+        } else {
+            representations
+        },
+        compound: merge_compound_definition(base.compound, compound),
+        domain_data: merge_json_values(base.domain_data, domain_data),
+    }
+}
+
+fn merge_parameter_schema(base: ParameterSchema, child: ParameterSchema) -> ParameterSchema {
+    let mut merged = base.0;
+    for parameter in child.0 {
+        if let Some(existing) = merged.iter_mut().find(|entry| entry.name == parameter.name) {
+            *existing = parameter;
+        } else {
+            merged.push(parameter);
+        }
+    }
+    ParameterSchema(merged)
+}
+
+fn merge_compound_definition(
+    base: Option<CompoundDefinition>,
+    child: Option<CompoundDefinition>,
+) -> Option<CompoundDefinition> {
+    match (base, child) {
+        (Some(base), Some(child)) => Some(CompoundDefinition {
+            child_slots: merge_named_items(base.child_slots, child.child_slots, |slot| {
+                slot.slot_id.clone()
+            }),
+            anchors: merge_named_items(base.anchors, child.anchors, |anchor| anchor.id.clone()),
+            derived_parameters: merge_named_items(
+                base.derived_parameters,
+                child.derived_parameters,
+                |derived| derived.name.clone(),
+            ),
+            constraints: merge_named_items(base.constraints, child.constraints, |constraint| {
+                constraint.id.clone()
+            }),
+        }),
+        (Some(base), None) => Some(base),
+        (None, Some(child)) => Some(child),
+        (None, None) => None,
+    }
+}
+
+fn merge_named_items<T, F>(base: Vec<T>, child: Vec<T>, key: F) -> Vec<T>
+where
+    F: Fn(&T) -> String,
+{
+    let mut merged = base;
+    for item in child {
+        let item_key = key(&item);
+        if let Some(existing) = merged.iter_mut().find(|entry| key(entry) == item_key) {
+            *existing = item;
+        } else {
+            merged.push(item);
+        }
+    }
+    merged
+}
+
+fn merge_json_values(base: Value, child: Value) -> Value {
+    match (base, child) {
+        (base, Value::Null) => base,
+        (Value::Object(mut base_map), Value::Object(child_map)) => {
+            for (key, value) in child_map {
+                let merged_value = if let Some(existing) = base_map.remove(&key) {
+                    merge_json_values(existing, value)
+                } else {
+                    value
+                };
+                base_map.insert(key, merged_value);
+            }
+            Value::Object(base_map)
+        }
+        (_, child) => child,
     }
 }
 

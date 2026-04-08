@@ -62,8 +62,8 @@ pub fn ear_clip_triangulate(points: &[Vec2]) -> Vec<[u32; 3]> {
     let mut active = n; // number of vertices still in the ring
 
     // Initial ear classification pass.
-    for i in 0..n {
-        is_ear[i] = test_ear(i, points, &prev, &next);
+    for (i, ear) in is_ear.iter_mut().enumerate().take(n) {
+        *ear = test_ear(i, points, &prev, &next);
     }
 
     let mut triangles = Vec::with_capacity(n.saturating_sub(2));

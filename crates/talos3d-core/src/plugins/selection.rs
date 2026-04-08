@@ -11,7 +11,7 @@ use crate::{
     authored_entity::EntityBounds,
     capability_registry::{CapabilityRegistry, HitCandidate},
     plugins::{
-        camera::ORBIT_KEY,
+        camera::orbit_modifier_pressed,
         commands::DeleteEntitiesCommand,
         egui_chrome::EguiWantsInput,
         face_edit::FaceEditContext,
@@ -136,9 +136,7 @@ fn handle_selection_click(world: &mut World) {
         .resource::<ButtonInput<MouseButton>>()
         .just_released(MouseButton::Left);
     let face_editing = world.resource::<FaceEditContext>().is_active();
-    let orbit_held = world
-        .resource::<ButtonInput<KeyCode>>()
-        .pressed(ORBIT_KEY);
+    let orbit_held = orbit_modifier_pressed(world.resource::<ButtonInput<KeyCode>>());
 
     if !ownership.is_idle()
         || egui_ptr
@@ -300,7 +298,7 @@ struct GroupDoubleClickContext<'w, 's> {
 }
 
 fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
-    if !cx.ownership.is_idle() || cx.egui_wants_input.pointer || cx.keys.pressed(ORBIT_KEY) {
+    if !cx.ownership.is_idle() || cx.egui_wants_input.pointer || orbit_modifier_pressed(&cx.keys) {
         return;
     }
 
@@ -578,7 +576,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
     if !cx.ownership.is_idle()
         || cx.egui_wants_input.pointer
         || cx.face_edit_context.is_active()
-        || cx.keys.pressed(ORBIT_KEY)
+        || orbit_modifier_pressed(&cx.keys)
     {
         cx.box_state.drag_start = None;
         cx.box_state.is_dragging = false;
