@@ -432,15 +432,31 @@ fn rebuild_changed_material_handles(
 
 /// Assign the correct `StandardMaterial` handle to every entity that carries a
 /// `MaterialAssignment` and whose assignment has changed.
+///
+/// When the registry itself changes (e.g. a material colour is edited), ALL
+/// entities with a `MaterialAssignment` must be re-patched, not just those
+/// whose component changed — otherwise entities with an unchanged assignment
+/// would keep a now-stale (or removed) handle.
 fn apply_material_assignments(
     mut commands: Commands,
     registry: Res<MaterialRegistry>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     asset_server: Res<AssetServer>,
-    query: Query<(Entity, &MaterialAssignment), Changed<MaterialAssignment>>,
+    changed_query: Query<(Entity, &MaterialAssignment), Changed<MaterialAssignment>>,
+    all_query: Query<(Entity, &MaterialAssignment)>,
 ) {
-    for (entity, assignment) in &query {
+    // Choose the effective iterator: when the registry itself changed we must
+    // visit every assigned entity; otherwise only those with a changed component.
+    let registry_changed = registry.is_changed();
+
+    let iter: Box<dyn Iterator<Item = (Entity, &MaterialAssignment)>> = if registry_changed {
+        Box::new(all_query.iter())
+    } else {
+        Box::new(changed_query.iter())
+    };
+
+    for (entity, assignment) in iter {
         let Some(def) = registry.get(&assignment.material_id) else {
             continue;
         };
