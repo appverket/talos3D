@@ -24,7 +24,7 @@ use crate::{
             mesh_generation::NeedsMesh,
             primitives::{
                 BoxPrimitive, CylinderPrimitive, ElevationMetadata, PlanePrimitive, Polyline,
-                ShapeRotation, TriangleMesh,
+                ShapeRotation, SpherePrimitive, TriangleMesh,
             },
         },
     },
@@ -1278,6 +1278,7 @@ impl AuthoredEntity for EditableMeshSnapshot {
             // Remove parametric components if this was promoted
             entity_mut.remove::<BoxPrimitive>();
             entity_mut.remove::<CylinderPrimitive>();
+            entity_mut.remove::<SpherePrimitive>();
             entity_mut.remove::<PlanePrimitive>();
             entity_mut.remove::<ShapeRotation>();
         } else {
@@ -1399,6 +1400,16 @@ impl AuthoredEntityFactory for EditableMeshFactory {
                         .copied()
                         .unwrap_or_default();
                     EditableMesh::from_cylinder(primitive, &rotation, 24)
+                }
+                "sphere" => {
+                    let primitive = entity_ref
+                        .get::<SpherePrimitive>()
+                        .ok_or("Entity is not a sphere")?;
+                    let rotation = entity_ref
+                        .get::<ShapeRotation>()
+                        .copied()
+                        .unwrap_or_default();
+                    EditableMesh::from_sphere(primitive, &rotation, 24, 12)
                 }
                 "plane" => {
                     let primitive = entity_ref

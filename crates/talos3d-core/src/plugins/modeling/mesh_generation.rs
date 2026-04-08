@@ -11,7 +11,7 @@ use crate::plugins::modeling::{
     primitive_trait::{MeshGenerator, MeshMaterialKind},
     primitives::{
         BoxPrimitive, CylinderPrimitive, ElevationMetadata, PlanePrimitive, Polyline,
-        ShapeRotation, TriangleMesh,
+        ShapeRotation, SpherePrimitive, TriangleMesh,
     },
     profile::{ProfileExtrusion, ProfileRevolve, ProfileSweep},
     profile_feature::EvaluatedFeature,
@@ -99,6 +99,7 @@ impl Plugin for ModelingMeshPlugin {
                 (
                     spawn_primitive_meshes::<BoxPrimitive>,
                     spawn_primitive_meshes::<CylinderPrimitive>,
+                    spawn_primitive_meshes::<SpherePrimitive>,
                     spawn_primitive_meshes::<PlanePrimitive>,
                     spawn_primitive_meshes::<ProfileExtrusion>,
                     spawn_primitive_meshes::<ProfileSweep>,

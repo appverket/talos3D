@@ -28,6 +28,12 @@ pub struct CylinderPrimitive {
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpherePrimitive {
+    pub centre: Vec3,
+    pub radius: f32,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanePrimitive {
     pub corner_a: Vec2,
     pub corner_b: Vec2,
@@ -559,6 +565,188 @@ impl MeshGenerator for CylinderPrimitive {
 }
 
 // ---------------------------------------------------------------------------
+// Primitive impl for SpherePrimitive
+// ---------------------------------------------------------------------------
+
+const SPHERE_OUTLINE_SEGMENTS: usize = 32;
+
+impl Primitive for SpherePrimitive {
+    const TYPE_NAME: &'static str = "sphere";
+
+    fn centre(&self) -> Vec3 {
+        self.centre
+    }
+
+    fn translated(&self, delta: Vec3) -> Self {
+        Self {
+            centre: self.centre + delta,
+            radius: self.radius,
+        }
+    }
+
+    fn rotated(&self, rotation: Quat, current_rotation: Quat) -> (Self, Quat) {
+        (
+            Self {
+                centre: rotation * self.centre,
+                radius: self.radius,
+            },
+            rotation * current_rotation,
+        )
+    }
+
+    fn scaled(&self, factor: Vec3, center: Vec3) -> Self {
+        Self {
+            centre: scale_point_around_center(self.centre, center, factor),
+            radius: self.radius * factor.abs().max_element(),
+        }
+    }
+
+    fn shape_eq(&self, other: &Self) -> bool {
+        self.radius == other.radius
+    }
+
+    fn entity_transform(&self, rotation: Quat) -> Transform {
+        Transform::from_translation(self.centre).with_rotation(rotation)
+    }
+
+    fn bounds(&self, _rotation: Quat) -> Option<EntityBounds> {
+        Some(EntityBounds {
+            min: self.centre - Vec3::splat(self.radius),
+            max: self.centre + Vec3::splat(self.radius),
+        })
+    }
+
+    fn draw_wireframe(&self, gizmos: &mut Gizmos, rotation: Quat, color: Color) {
+        draw_sphere_circle(
+            gizmos,
+            self.centre,
+            rotation,
+            self.radius,
+            |angle, radius| Vec3::new(radius * angle.cos(), radius * angle.sin(), 0.0),
+            color,
+        );
+        draw_sphere_circle(
+            gizmos,
+            self.centre,
+            rotation,
+            self.radius,
+            |angle, radius| Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin()),
+            color,
+        );
+        draw_sphere_circle(
+            gizmos,
+            self.centre,
+            rotation,
+            self.radius,
+            |angle, radius| Vec3::new(0.0, radius * angle.cos(), radius * angle.sin()),
+            color,
+        );
+    }
+
+    fn wireframe_line_count(&self) -> usize {
+        SPHERE_OUTLINE_SEGMENTS * 3
+    }
+
+    fn push_pull(
+        &self,
+        _face_id: FaceId,
+        _distance: f32,
+        _rotation: Quat,
+        _element_id: crate::plugins::identity::ElementId,
+    ) -> Option<PrimitivePushPullResult<Self>> {
+        None
+    }
+
+    fn push_pull_affordance(&self, _face_id: FaceId) -> PushPullAffordance {
+        PushPullAffordance::Blocked(PushPullBlockReason::UnsupportedFace)
+    }
+
+    fn property_fields(&self, _rotation: Quat) -> Vec<PropertyFieldDef> {
+        vec![
+            property_field_with(
+                "center",
+                "center",
+                PropertyValueKind::Vec3,
+                Some(PropertyValue::Vec3(self.centre)),
+                true,
+            ),
+            property_field(
+                "radius",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.radius)),
+            ),
+        ]
+    }
+
+    fn set_property(&self, name: &str, value: &Value) -> Result<Self, String> {
+        let mut prim = self.clone();
+        match name {
+            "centre" | "center" => prim.centre = vec3_from_json(value)?,
+            "radius" => prim.radius = scalar_from_json(value)?,
+            _ => return Err(invalid_property_error("sphere", &["center", "radius"])),
+        }
+        Ok(prim)
+    }
+
+    fn handles(&self, rotation: Quat) -> Vec<HandleInfo> {
+        vec![
+            HandleInfo {
+                id: "centre".to_string(),
+                position: self.centre,
+                kind: HandleKind::Center,
+                label: "Centre".to_string(),
+            },
+            HandleInfo {
+                id: "radius".to_string(),
+                position: self.centre + rotation * Vec3::X * self.radius,
+                kind: HandleKind::Parameter,
+                label: "Radius handle".to_string(),
+            },
+        ]
+    }
+
+    fn drag_handle(&self, handle_id: &str, cursor: Vec3, _rotation: Quat) -> Option<Self> {
+        match handle_id {
+            "radius" => Some(Self {
+                radius: cursor.distance(self.centre).max(0.01),
+                ..self.clone()
+            }),
+            _ => None,
+        }
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "Sphere at ({:.2}, {:.2}, {:.2})",
+            self.centre.x, self.centre.y, self.centre.z
+        )
+    }
+
+    fn to_json(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+
+    fn from_json(value: &Value) -> Result<Self, String> {
+        serde_json::from_value::<Self>(value.clone()).map_err(|e| e.to_string())
+    }
+
+    fn to_editable_mesh(&self, rotation: Quat) -> Option<EditableMesh> {
+        Some(EditableMesh::from_sphere(
+            self,
+            &ShapeRotation(rotation),
+            24,
+            12,
+        ))
+    }
+}
+
+impl MeshGenerator for SpherePrimitive {
+    fn to_bevy_mesh(&self, _rotation: Quat) -> Mesh {
+        Mesh::from(Sphere::new(self.radius))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Primitive impl for PlanePrimitive
 // ---------------------------------------------------------------------------
 
@@ -822,4 +1010,31 @@ fn plane_corner_from_json(value: &Value, fallback_elevation: f32) -> Result<Vec3
         let corner = vec2_from_json(value)?;
         Ok(Vec3::new(corner.x, fallback_elevation, corner.y))
     })
+}
+
+fn draw_sphere_circle(
+    gizmos: &mut Gizmos,
+    centre: Vec3,
+    rotation: Quat,
+    radius: f32,
+    point_at: impl Fn(f32, f32) -> Vec3,
+    color: Color,
+) {
+    let mut previous = None;
+    let mut first = None;
+
+    for index in 0..=SPHERE_OUTLINE_SEGMENTS {
+        let angle = index as f32 / SPHERE_OUTLINE_SEGMENTS as f32 * std::f32::consts::TAU;
+        let point = centre + rotation * point_at(angle, radius);
+        if let Some(prev) = previous {
+            gizmos.line(prev, point, color);
+        } else {
+            first = Some(point);
+        }
+        previous = Some(point);
+    }
+
+    if let (Some(first), Some(last)) = (first, previous) {
+        gizmos.line(last, first, color);
+    }
 }

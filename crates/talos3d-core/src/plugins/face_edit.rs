@@ -14,7 +14,9 @@ use crate::{
         input_ownership::{InputOwnership, InputPhase},
         modeling::{
             csg::{csg_face_hit_test, CsgNode, CsgParentMap},
-            primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation},
+            primitives::{
+                BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation, SpherePrimitive,
+            },
             profile::{Profile2d, ProfileExtrusion, ProfileRevolve, ProfileSegment, ProfileSweep},
             profile_feature::{
                 face_profile_feature_hit_test, feature_face_vertices,
@@ -620,6 +622,7 @@ fn get_face_verts(world: &World, entity: Entity, face_id: FaceId) -> Option<Vec<
         .0;
     let mesh = try_editable_mesh::<BoxPrimitive>(&entity_ref, rotation)
         .or_else(|| try_editable_mesh::<CylinderPrimitive>(&entity_ref, rotation))
+        .or_else(|| try_editable_mesh::<SpherePrimitive>(&entity_ref, rotation))
         .or_else(|| try_editable_mesh::<PlanePrimitive>(&entity_ref, rotation))
         .or_else(|| try_editable_mesh::<ProfileExtrusion>(&entity_ref, rotation))
         .or_else(|| try_editable_mesh::<ProfileSweep>(&entity_ref, rotation))
