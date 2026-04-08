@@ -29,6 +29,7 @@ pub mod palette;
 pub mod perf_stats;
 pub mod persistence;
 pub mod property_edit;
+pub mod render_pipeline;
 pub mod scene_ray;
 pub mod selection;
 pub mod shading;

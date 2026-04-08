@@ -33,6 +33,7 @@ use talos3d_core::plugins::{
     palette::PalettePlugin,
     persistence::PersistencePlugin,
     property_edit::PropertyEditPlugin,
+    render_pipeline::RenderPipelinePlugin,
     selection::SelectionPlugin,
     shading::ShadingPlugin,
     snap::SnapPlugin,
@@ -103,6 +104,7 @@ fn main() {
         .add_plugins(SnapPlugin)
         .add_plugins(PersistencePlugin)
         .add_plugins(UiPlugin)
+        .add_plugins(RenderPipelinePlugin)
         .add_plugins(EguiChromePlugin)
         .add_plugins(ToolbarPlugin)
         .add_plugins(PalettePlugin)
@@ -152,14 +154,14 @@ fn init_document_properties(world: &mut World) {
 fn setup_lighting(mut commands: Commands) {
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(0.9, 0.92, 1.0),
-        brightness: 120.0,
+        brightness: 40.0,
         affects_lightmapped_meshes: true,
     });
 
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(1.0, 0.97, 0.88),
-            illuminance: 12_000.0,
+            illuminance: 8_000.0,
             shadows_enabled: true,
             ..default()
         },
