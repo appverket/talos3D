@@ -9,6 +9,7 @@ use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::identity::{ElementId, ElementIdAllocator};
 use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
+use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
 #[cfg(feature = "model-api")]
 use crate::plugins::{
@@ -183,6 +184,7 @@ pub struct DefinitionEntry {
     pub definition_version: u32,
     pub parameter_names: Vec<String>,
     pub full: serde_json::Value,
+    pub effective_full: serde_json::Value,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -201,6 +203,34 @@ pub struct InstantiateDefinitionResult {
     pub element_id: u64,
     pub definition_id: String,
     pub imported_definition_ids: Vec<String>,
+    #[serde(default)]
+    pub relation_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GeneratedOccurrencePartEntry {
+    pub slot_path: String,
+    pub definition_id: String,
+    pub center: [f32; 3],
+    pub profile_min: [f32; 2],
+    pub profile_max: [f32; 2],
+    pub height: f32,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OccurrenceExplainResult {
+    pub element_id: u64,
+    pub label: String,
+    pub definition_id: String,
+    pub definition_version: u32,
+    pub domain_data: Value,
+    pub hosting: Value,
+    pub transform: Value,
+    pub resolved_parameters: Value,
+    pub anchors: Vec<Value>,
+    pub generated_parts: Vec<GeneratedOccurrencePartEntry>,
 }
 
 // --- Assembly / Relation types ---
@@ -631,6 +661,10 @@ enum ModelApiRequest {
         request: Value,
         response: oneshot::Sender<ApiResult<InstantiateDefinitionResult>>,
     },
+    InstantiateHostedDefinition {
+        request: Value,
+        response: oneshot::Sender<ApiResult<InstantiateDefinitionResult>>,
+    },
     PlaceOccurrence {
         request: Value,
         response: oneshot::Sender<ApiResult<u64>>,
@@ -639,6 +673,10 @@ enum ModelApiRequest {
         element_id: u64,
         overrides: Value,
         response: oneshot::Sender<ApiResult<Value>>,
+    },
+    ExplainOccurrence {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<OccurrenceExplainResult>>,
     },
     ResolveOccurrence {
         element_id: u64,
@@ -924,6 +962,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::InstantiateDefinition { request, response } => {
             let _ = response.send(handle_instantiate_definition(world, request));
         }
+        ModelApiRequest::InstantiateHostedDefinition { request, response } => {
+            let _ = response.send(handle_instantiate_hosted_definition(world, request));
+        }
         ModelApiRequest::PlaceOccurrence { request, response } => {
             let _ = response.send(handle_place_occurrence(world, request));
         }
@@ -935,6 +976,12 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             let _ = response.send(handle_update_occurrence_overrides(
                 world, element_id, overrides,
             ));
+        }
+        ModelApiRequest::ExplainOccurrence {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_explain_occurrence(world, element_id));
         }
         ModelApiRequest::ResolveOccurrence {
             element_id,
@@ -1742,6 +1789,19 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_instantiate_hosted_definition(
+        &self,
+        request: Value,
+    ) -> ApiResult<InstantiateDefinitionResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::InstantiateHostedDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_place_occurrence(&self, request: Value) -> ApiResult<u64> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -1762,6 +1822,22 @@ impl ModelApiServer {
             .send(ModelApiRequest::UpdateOccurrenceOverrides {
                 element_id,
                 overrides,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_explain_occurrence(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<OccurrenceExplainResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ExplainOccurrence {
+                element_id,
                 response,
             })
             .map_err(|_| "model API request channel closed".to_string())?;
@@ -2761,7 +2837,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "definition/get",
-        description = "Get a definition by its definition_id."
+        description = "Get a definition by its definition_id. Returns both the raw stored definition and the effective inherited definition."
     )]
     async fn definition_get_tool(
         &self,
@@ -2776,7 +2852,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "definition/create",
-        description = "Create a new reusable definition. Requires: name. Optionally: definition_kind, parameters, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data."
+        description = "Create a new reusable definition. Requires: name. Optionally: base_definition_id, definition_kind, parameters, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data."
     )]
     async fn definition_create_tool(
         &self,
@@ -2791,7 +2867,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "definition/update",
-        description = "Update an existing definition. Requires: definition_id. Optionally: name, definition_kind, parameters, evaluators, representations, compound, and domain_data. Bumps definition_version and propagates changes to all linked occurrences."
+        description = "Update an existing definition. Requires: definition_id. Optionally: name, base_definition_id, definition_kind, parameters, evaluators, representations, compound, and domain_data. Bumps definition_version and propagates changes to all linked occurrences."
     )]
     async fn definition_update_tool(
         &self,
@@ -2907,6 +2983,21 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "definition/instantiate_hosted",
+        description = "Instantiate a hosted definition into the model. Requires: definition_id and hosting. Optionally: library_id, overrides, label, offset, and domain_data. Hosting may provide host_element_id, opening_element_id, wall_thickness, relation_type, relation_parameters, and anchors keyed by anchor id."
+    )]
+    async fn definition_instantiate_hosted_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_instantiate_hosted_definition(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
         name = "occurrence/place",
         description = "Place an occurrence of a definition. Requires: definition_id. Optionally: overrides, label, offset, and domain_data."
     )]
@@ -2946,6 +3037,21 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_resolve_occurrence(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "occurrence/explain",
+        description = "Explain a placed occurrence for agent inspection. Returns resolved parameters, anchors, and generated compound slot parts. Requires: element_id (u64)."
+    )]
+    async fn occurrence_explain_tool(
+        &self,
+        Parameters(params): Parameters<OccurrenceResolveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_explain_occurrence(params.element_id)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
@@ -3036,13 +3142,14 @@ fn handle_set_layer_visibility(
     name: &str,
     visible: bool,
 ) -> Result<Vec<LayerInfo>, String> {
-    let mut registry = world.resource_mut::<LayerRegistry>();
-    let def = registry
-        .layers
-        .get_mut(name)
-        .ok_or_else(|| format!("Layer '{name}' not found"))?;
-    def.visible = visible;
-    drop(registry);
+    {
+        let mut registry = world.resource_mut::<LayerRegistry>();
+        let def = registry
+            .layers
+            .get_mut(name)
+            .ok_or_else(|| format!("Layer '{name}' not found"))?;
+        def.visible = visible;
+    }
     Ok(handle_list_layers(world))
 }
 
@@ -3052,13 +3159,14 @@ fn handle_set_layer_locked(
     name: &str,
     locked: bool,
 ) -> Result<Vec<LayerInfo>, String> {
-    let mut registry = world.resource_mut::<LayerRegistry>();
-    let def = registry
-        .layers
-        .get_mut(name)
-        .ok_or_else(|| format!("Layer '{name}' not found"))?;
-    def.locked = locked;
-    drop(registry);
+    {
+        let mut registry = world.resource_mut::<LayerRegistry>();
+        let def = registry
+            .layers
+            .get_mut(name)
+            .ok_or_else(|| format!("Layer '{name}' not found"))?;
+        def.locked = locked;
+    }
     Ok(handle_list_layers(world))
 }
 
@@ -3086,12 +3194,13 @@ fn handle_assign_layer(
 
 #[cfg(feature = "model-api")]
 fn handle_create_layer(world: &mut World, name: &str) -> Result<Vec<LayerInfo>, String> {
-    let mut registry = world.resource_mut::<LayerRegistry>();
-    if registry.layers.contains_key(name) {
-        return Err(format!("Layer '{name}' already exists"));
+    {
+        let mut registry = world.resource_mut::<LayerRegistry>();
+        if registry.layers.contains_key(name) {
+            return Err(format!("Layer '{name}' already exists"));
+        }
+        registry.create_layer(name.to_string());
     }
-    registry.create_layer(name.to_string());
-    drop(registry);
     Ok(handle_list_layers(world))
 }
 
@@ -4159,13 +4268,40 @@ fn parse_optional_compound(
 }
 
 #[cfg(feature = "model-api")]
-fn definition_to_entry(def: &crate::plugins::modeling::definition::Definition) -> DefinitionEntry {
+fn parse_optional_base_definition_id(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<crate::plugins::modeling::definition::DefinitionId>, String> {
+    object
+        .get("base_definition_id")
+        .map(|value| {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                value
+                    .as_str()
+                    .map(|id| {
+                        Some(crate::plugins::modeling::definition::DefinitionId(
+                            id.to_string(),
+                        ))
+                    })
+                    .ok_or_else(|| "'base_definition_id' must be a string or null".to_string())
+            }
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
+#[cfg(feature = "model-api")]
+fn definition_to_entry(
+    def: &crate::plugins::modeling::definition::Definition,
+    effective_def: &crate::plugins::modeling::definition::Definition,
+) -> DefinitionEntry {
     DefinitionEntry {
         definition_id: def.id.to_string(),
         name: def.name.clone(),
-        definition_kind: format!("{:?}", def.definition_kind),
+        definition_kind: format!("{:?}", effective_def.definition_kind),
         definition_version: def.definition_version,
-        parameter_names: def
+        parameter_names: effective_def
             .interface
             .parameters
             .0
@@ -4173,6 +4309,7 @@ fn definition_to_entry(def: &crate::plugins::modeling::definition::Definition) -
             .map(|p| p.name.clone())
             .collect(),
         full: serde_json::to_value(def).unwrap_or(serde_json::Value::Null),
+        effective_full: serde_json::to_value(effective_def).unwrap_or(serde_json::Value::Null),
     }
 }
 
@@ -4193,11 +4330,16 @@ fn definition_library_to_entry(
 #[cfg(feature = "model-api")]
 pub fn handle_list_definitions(world: &World) -> Vec<DefinitionEntry> {
     use crate::plugins::modeling::definition::DefinitionRegistry;
-    world
-        .resource::<DefinitionRegistry>()
+    let registry = world.resource::<DefinitionRegistry>();
+    registry
         .list()
         .into_iter()
-        .map(definition_to_entry)
+        .filter_map(|definition| {
+            registry
+                .effective_definition(&definition.id)
+                .ok()
+                .map(|effective| definition_to_entry(definition, &effective))
+        })
         .collect()
 }
 
@@ -4205,11 +4347,12 @@ pub fn handle_list_definitions(world: &World) -> Vec<DefinitionEntry> {
 pub fn handle_get_definition(world: &World, definition_id: String) -> ApiResult<DefinitionEntry> {
     use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
     let id = DefinitionId(definition_id.clone());
-    world
-        .resource::<DefinitionRegistry>()
+    let registry = world.resource::<DefinitionRegistry>();
+    let definition = registry
         .get(&id)
-        .map(definition_to_entry)
-        .ok_or_else(|| format!("Definition '{definition_id}' not found"))
+        .ok_or_else(|| format!("Definition '{definition_id}' not found"))?;
+    let effective = registry.effective_definition(&id)?;
+    Ok(definition_to_entry(definition, &effective))
 }
 
 #[cfg(feature = "model-api")]
@@ -4256,6 +4399,7 @@ pub fn handle_create_definition(world: &mut World, request: Value) -> ApiResult<
 
     let definition = Definition {
         id: DefinitionId::new(),
+        base_definition_id: parse_optional_base_definition_id(obj)?,
         name,
         definition_kind: parse_definition_kind(obj.get("definition_kind"))?,
         definition_version: 1,
@@ -4267,12 +4411,14 @@ pub fn handle_create_definition(world: &mut World, request: Value) -> ApiResult<
         compound: parse_optional_compound(obj)?,
         domain_data: obj.get("domain_data").cloned().unwrap_or(Value::Null),
     };
-    {
+    let entry = {
         let registry = world.resource::<DefinitionRegistry>();
-        definition.validate_with(|id| registry.get(id).is_some())?;
-    }
-
-    let entry = definition_to_entry(&definition);
+        registry.validate_definition(&definition)?;
+        let mut preview = registry.clone();
+        preview.insert(definition.clone());
+        let effective = preview.effective_definition(&definition.id)?;
+        definition_to_entry(&definition, &effective)
+    };
     enqueue_create_definition(world, definition);
     flush_model_api_write_pipeline(world);
     Ok(entry)
@@ -4312,6 +4458,10 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
         after.definition_kind = parse_definition_kind(obj.get("definition_kind"))?;
     }
 
+    if obj.contains_key("base_definition_id") {
+        after.base_definition_id = parse_optional_base_definition_id(obj)?;
+    }
+
     if obj.contains_key("parameters") {
         after.interface.parameters = parse_parameter_schema(obj.get("parameters"))?;
     }
@@ -4336,14 +4486,14 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
         after.domain_data = obj.get("domain_data").cloned().unwrap_or(Value::Null);
     }
 
-    {
+    let entry = {
         let registry = world.resource::<DefinitionRegistry>();
-        after.validate_with(|definition_id| {
-            definition_id == &after.id || registry.get(definition_id).is_some()
-        })?;
-    }
-
-    let entry = definition_to_entry(&after);
+        registry.validate_definition(&after)?;
+        let mut preview = registry.clone();
+        preview.insert(after.clone());
+        let effective = preview.effective_definition(&after.id)?;
+        definition_to_entry(&after, &effective)
+    };
     enqueue_update_definition(world, before, after);
     flush_model_api_write_pipeline(world);
     Ok(entry)
@@ -4421,15 +4571,40 @@ pub fn handle_add_definition_to_library(
             .to_string(),
     );
 
-    let definition = world
-        .resource::<DefinitionRegistry>()
-        .get(&definition_id)
-        .cloned()
-        .ok_or_else(|| format!("Definition '{}' not found", definition_id))?;
+    let definitions_to_add = {
+        let registry = world.resource::<DefinitionRegistry>();
+        let root_definition = registry
+            .get(&definition_id)
+            .cloned()
+            .ok_or_else(|| format!("Definition '{}' not found", definition_id))?;
+        let mut definitions = Vec::new();
+        let mut stack = vec![root_definition];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(definition) = stack.pop() {
+            if !seen.insert(definition.id.clone()) {
+                continue;
+            }
+            if let Some(base_definition_id) = &definition.base_definition_id {
+                if let Some(base_definition) = registry.get(base_definition_id).cloned() {
+                    stack.push(base_definition);
+                }
+            }
+            if let Some(compound) = &definition.compound {
+                for slot in &compound.child_slots {
+                    if let Some(child_definition) = registry.get(&slot.definition_id).cloned() {
+                        stack.push(child_definition);
+                    }
+                }
+            }
+            definitions.push(definition);
+        }
+        definitions
+    };
 
-    world
-        .resource_mut::<DefinitionLibraryRegistry>()
-        .add_definition(&library_id, definition)?;
+    let mut libraries = world.resource_mut::<DefinitionLibraryRegistry>();
+    for definition in definitions_to_add {
+        libraries.add_definition(&library_id, definition)?;
+    }
 
     let library = world
         .resource::<DefinitionLibraryRegistry>()
@@ -4496,18 +4671,15 @@ pub fn handle_export_definition_library(
 }
 
 #[cfg(feature = "model-api")]
-pub fn handle_instantiate_definition(
+fn ensure_definition_available_for_request(
     world: &mut World,
-    request: Value,
-) -> ApiResult<InstantiateDefinitionResult> {
+    object: &serde_json::Map<String, Value>,
+) -> ApiResult<(String, Vec<String>)> {
     use crate::plugins::commands::enqueue_create_definition;
     use crate::plugins::modeling::definition::{
         DefinitionId, DefinitionLibraryId, DefinitionLibraryRegistry, DefinitionRegistry,
     };
 
-    let object = request
-        .as_object()
-        .ok_or_else(|| "definition/instantiate expects a JSON object".to_string())?;
     let definition_id = object
         .get("definition_id")
         .and_then(|value| value.as_str())
@@ -4552,6 +4724,11 @@ pub fn handle_instantiate_definition(
             if !seen.insert(definition.id.clone()) {
                 continue;
             }
+            if let Some(base_definition_id) = &definition.base_definition_id {
+                if let Some(base_definition) = library.get(base_definition_id).cloned() {
+                    to_import.push(base_definition);
+                }
+            }
             if let Some(compound) = &definition.compound {
                 for slot in &compound.child_slots {
                     if let Some(child) = library.get(&slot.definition_id).cloned() {
@@ -4572,11 +4749,421 @@ pub fn handle_instantiate_definition(
         flush_model_api_write_pipeline(world);
     }
 
+    Ok((definition_id, imported_definition_ids))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_instantiate_definition(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<InstantiateDefinitionResult> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/instantiate expects a JSON object".to_string())?;
+    let (definition_id, imported_definition_ids) =
+        ensure_definition_available_for_request(world, object)?;
+
     let element_id = handle_place_occurrence(world, request)?;
     Ok(InstantiateDefinitionResult {
         element_id,
         definition_id,
         imported_definition_ids,
+        relation_ids: Vec::new(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn value_vec3(value: &Value, context: &str) -> Result<Vec3, String> {
+    let [x, y, z] = serde_json::from_value::<[f32; 3]>(value.clone())
+        .map_err(|_| format!("{context} must be a [x, y, z] array"))?;
+    Ok(Vec3::new(x, y, z))
+}
+
+#[cfg(feature = "model-api")]
+fn vec3_value(vector: Vec3) -> Value {
+    serde_json::json!([vector.x, vector.y, vector.z])
+}
+
+#[cfg(feature = "model-api")]
+fn infer_wall_thickness_from_snapshot(snapshot: &BoxedEntity) -> Option<f32> {
+    let bounds = snapshot.bounds()?;
+    let extents = bounds.max - bounds.min;
+    Some(extents.x.min(extents.y).min(extents.z))
+}
+
+#[cfg(feature = "model-api")]
+fn extract_wall_axis_from_snapshot(snapshot: &BoxedEntity) -> Option<Vec3> {
+    if snapshot.type_name() != "wall" {
+        return None;
+    }
+
+    let json = snapshot.to_json();
+    let wall = json.get("Wall")?;
+    let start = value_vec3(
+        &serde_json::json!([
+            wall.get("wall")?.get("start")?.get(0)?.as_f64()? as f32,
+            0.0,
+            wall.get("wall")?.get("start")?.get(1)?.as_f64()? as f32
+        ]),
+        "wall.start",
+    )
+    .ok()?;
+    let end = value_vec3(
+        &serde_json::json!([
+            wall.get("wall")?.get("end")?.get(0)?.as_f64()? as f32,
+            0.0,
+            wall.get("wall")?.get("end")?.get(1)?.as_f64()? as f32
+        ]),
+        "wall.end",
+    )
+    .ok()?;
+    (end - start).try_normalize()
+}
+
+#[cfg(feature = "model-api")]
+fn infer_face_anchors(
+    snapshot: &BoxedEntity,
+    opening_center: Vec3,
+) -> Option<(HostedAnchor, HostedAnchor, f32)> {
+    let thickness = infer_wall_thickness_from_snapshot(snapshot)?;
+    let axis = extract_wall_axis_from_snapshot(snapshot).unwrap_or_else(|| {
+        let bounds = snapshot
+            .bounds()
+            .unwrap_or(crate::authored_entity::EntityBounds {
+                min: opening_center,
+                max: opening_center,
+            });
+        let extents = bounds.max - bounds.min;
+        if extents.x <= extents.y && extents.x <= extents.z {
+            Vec3::X
+        } else if extents.y <= extents.x && extents.y <= extents.z {
+            Vec3::Y
+        } else {
+            Vec3::Z
+        }
+    });
+    let normal = Vec3::new(-axis.z, 0.0, axis.x)
+        .try_normalize()
+        .unwrap_or(Vec3::Z);
+    let half = thickness * 0.5;
+    Some((
+        HostedAnchor {
+            id: "opening.exterior_face".to_string(),
+            kind: Some("host_exterior_face".to_string()),
+            position: (opening_center - normal * half).to_array(),
+        },
+        HostedAnchor {
+            id: "opening.interior_face".to_string(),
+            kind: Some("host_interior_face".to_string()),
+            position: (opening_center + normal * half).to_array(),
+        },
+        thickness,
+    ))
+}
+
+#[cfg(feature = "model-api")]
+fn infer_position_along_wall(snapshot: &BoxedEntity, point: Vec3) -> Option<f64> {
+    if snapshot.type_name() != "wall" {
+        return None;
+    }
+    let json = snapshot.to_json();
+    let wall = json.get("Wall")?.get("wall")?;
+    let start = Vec2::new(
+        wall.get("start")?.get(0)?.as_f64()? as f32,
+        wall.get("start")?.get(1)?.as_f64()? as f32,
+    );
+    let end = Vec2::new(
+        wall.get("end")?.get(0)?.as_f64()? as f32,
+        wall.get("end")?.get(1)?.as_f64()? as f32,
+    );
+    let direction = (end - start).try_normalize()?;
+    let length = start.distance(end);
+    if length <= f32::EPSILON {
+        return None;
+    }
+    Some(((point.xz() - start).dot(direction) / length).clamp(0.0, 1.0) as f64)
+}
+
+#[cfg(feature = "model-api")]
+fn validate_relation_descriptor(
+    world: &World,
+    relation_type: &str,
+    source_type: &str,
+    target_snapshot: &BoxedEntity,
+) -> ApiResult<()> {
+    let descriptor = world
+        .resource::<CapabilityRegistry>()
+        .relation_type_descriptors()
+        .iter()
+        .find(|descriptor| descriptor.relation_type == relation_type)
+        .ok_or_else(|| format!("Unknown relation type '{relation_type}'"))?;
+
+    if !descriptor.valid_source_types.is_empty()
+        && !descriptor
+            .valid_source_types
+            .iter()
+            .any(|allowed| allowed == source_type)
+    {
+        return Err(format!(
+            "Relation '{}' does not allow source type '{}'",
+            relation_type, source_type
+        ));
+    }
+    if !descriptor.valid_target_types.is_empty()
+        && !descriptor
+            .valid_target_types
+            .iter()
+            .any(|allowed| allowed == target_snapshot.type_name())
+    {
+        return Err(format!(
+            "Relation '{}' does not allow target type '{}'",
+            relation_type,
+            target_snapshot.type_name()
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn create_relation_snapshot(
+    world: &mut World,
+    source: ElementId,
+    target: ElementId,
+    relation_type: String,
+    parameters: Value,
+) -> u64 {
+    use crate::plugins::modeling::assembly::{RelationSnapshot, SemanticRelation};
+
+    let relation_id = world.resource_mut::<ElementIdAllocator>().next_id();
+    send_event(
+        world,
+        CreateEntityCommand {
+            snapshot: RelationSnapshot {
+                element_id: relation_id,
+                relation: SemanticRelation {
+                    source,
+                    target,
+                    relation_type,
+                    parameters,
+                },
+            }
+            .into(),
+        },
+    );
+    flush_model_api_write_pipeline(world);
+    relation_id.0
+}
+
+#[cfg(feature = "model-api")]
+fn prepare_hosted_occurrence_request(
+    world: &World,
+    object: &serde_json::Map<String, Value>,
+) -> ApiResult<(Value, Option<String>, Option<ElementId>, Value)> {
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry, OverridePolicy};
+    use crate::plugins::modeling::occurrence::{HostedAnchor, HostedOccurrenceContext};
+
+    let hosting = object
+        .get("hosting")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Hosted instantiation requires a 'hosting' object".to_string())?;
+
+    let host_element_id = hosting
+        .get("host_element_id")
+        .and_then(Value::as_u64)
+        .map(ElementId);
+    let opening_element_id = hosting
+        .get("opening_element_id")
+        .and_then(Value::as_u64)
+        .map(ElementId);
+
+    let mut anchors_by_id: HashMap<String, HostedAnchor> = HashMap::new();
+    if let Some(anchor_object) = hosting.get("anchors").and_then(Value::as_object) {
+        for (id, position) in anchor_object {
+            anchors_by_id.insert(
+                id.clone(),
+                HostedAnchor {
+                    id: id.clone(),
+                    kind: None,
+                    position: serde_json::from_value::<[f32; 3]>(position.clone()).map_err(
+                        |_| format!("hosting.anchors['{id}'] must be a [x, y, z] array"),
+                    )?,
+                },
+            );
+        }
+    }
+
+    if let Some(opening_id) = opening_element_id {
+        let opening_snapshot = capture_entity_snapshot(world, opening_id)
+            .ok_or_else(|| format!("Opening entity {} not found", opening_id.0))?;
+        anchors_by_id
+            .entry("opening.center".to_string())
+            .or_insert_with(|| HostedAnchor {
+                id: "opening.center".to_string(),
+                kind: Some("opening_center".to_string()),
+                position: opening_snapshot.center().to_array(),
+            });
+    }
+
+    let mut inferred_wall_thickness = hosting
+        .get("wall_thickness")
+        .and_then(Value::as_f64)
+        .map(|value| value as f32);
+
+    if let Some(host_id) = host_element_id {
+        let host_snapshot = capture_entity_snapshot(world, host_id)
+            .ok_or_else(|| format!("Host entity {} not found", host_id.0))?;
+        let opening_center = anchors_by_id
+            .get("opening.center")
+            .map(HostedAnchor::vec3)
+            .unwrap_or_else(|| host_snapshot.center());
+        if let Some((exterior, interior, thickness)) =
+            infer_face_anchors(&host_snapshot, opening_center)
+        {
+            anchors_by_id.entry(exterior.id.clone()).or_insert(exterior);
+            anchors_by_id.entry(interior.id.clone()).or_insert(interior);
+            if inferred_wall_thickness.is_none() {
+                inferred_wall_thickness = Some(thickness);
+            }
+        }
+    }
+
+    let local_offset = object
+        .get("offset")
+        .map(|value| value_vec3(value, "offset"))
+        .transpose()?
+        .unwrap_or(Vec3::ZERO);
+    let placement_origin = anchors_by_id
+        .get("opening.center")
+        .map(HostedAnchor::vec3)
+        .or_else(|| {
+            host_element_id
+                .and_then(|host_id| capture_entity_snapshot(world, host_id))
+                .map(|snapshot| snapshot.center())
+        })
+        .ok_or_else(|| {
+            "Hosted instantiation requires either hosting.anchors['opening.center'], opening_element_id, or host_element_id"
+                .to_string()
+        })?;
+
+    let definition_id = object
+        .get("definition_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Missing 'definition_id'".to_string())?;
+    let definition = world
+        .resource::<DefinitionRegistry>()
+        .get(&DefinitionId(definition_id.to_string()))
+        .ok_or_else(|| format!("Definition '{}' not found", definition_id))?;
+
+    let mut overrides = object
+        .get("overrides")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if !overrides.contains_key("wall_thickness") {
+        if let Some(parameter) = definition.interface.parameters.get("wall_thickness") {
+            if parameter.override_policy != OverridePolicy::Locked {
+                if let Some(thickness) = inferred_wall_thickness {
+                    overrides.insert("wall_thickness".to_string(), Value::from(thickness as f64));
+                }
+            }
+        }
+    }
+
+    let mut request_object = object.clone();
+    request_object.insert(
+        "offset".to_string(),
+        vec3_value(placement_origin + local_offset),
+    );
+    if !overrides.is_empty() {
+        request_object.insert("overrides".to_string(), Value::Object(overrides));
+    }
+
+    let hosted_context = HostedOccurrenceContext {
+        host_element_id,
+        opening_element_id,
+        anchors: anchors_by_id.into_values().collect(),
+    };
+    request_object.insert(
+        "hosting".to_string(),
+        serde_json::to_value(&hosted_context).map_err(|error| error.to_string())?,
+    );
+
+    let relation_type = hosting
+        .get("relation_type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| host_element_id.map(|_| "hosted_on".to_string()));
+    let mut relation_parameters = hosting
+        .get("relation_parameters")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    if let (Some(host_id), Some(relation_type)) = (host_element_id, relation_type.as_ref()) {
+        if relation_parameters.is_null() {
+            relation_parameters = Value::Object(Default::default());
+        }
+        if let Some(object) = relation_parameters.as_object_mut() {
+            if let Some(opening_id) = opening_element_id {
+                object
+                    .entry("opening_element_id".to_string())
+                    .or_insert(Value::from(opening_id.0));
+            }
+            if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
+                if let Some(opening_center) = hosted_context.anchor_position("opening.center") {
+                    if let Some(position_along_wall) =
+                        infer_position_along_wall(&host_snapshot, opening_center)
+                    {
+                        object
+                            .entry("position_along_wall".to_string())
+                            .or_insert(Value::from(position_along_wall));
+                    }
+                }
+                validate_relation_descriptor(world, relation_type, "occurrence", &host_snapshot)?;
+            }
+        }
+    }
+
+    Ok((
+        Value::Object(request_object),
+        relation_type,
+        host_element_id,
+        relation_parameters,
+    ))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_instantiate_hosted_definition(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<InstantiateDefinitionResult> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition/instantiate_hosted expects a JSON object".to_string())?;
+    let (definition_id, imported_definition_ids) =
+        ensure_definition_available_for_request(world, object)?;
+    let (hosted_request, relation_type, host_element_id, relation_parameters) =
+        prepare_hosted_occurrence_request(world, object)?;
+
+    let element_id = handle_place_occurrence(world, hosted_request)?;
+
+    let relation_ids =
+        if let (Some(relation_type), Some(host_element_id)) = (relation_type, host_element_id) {
+            vec![create_relation_snapshot(
+                world,
+                ElementId(element_id),
+                host_element_id,
+                relation_type,
+                relation_parameters,
+            )]
+        } else {
+            Vec::new()
+        };
+
+    Ok(InstantiateDefinitionResult {
+        element_id,
+        definition_id,
+        imported_definition_ids,
+        relation_ids,
     })
 }
 
@@ -4585,7 +5172,9 @@ pub fn handle_place_occurrence(world: &mut World, request: Value) -> ApiResult<u
     use crate::plugins::commands::enqueue_create_boxed_entity;
     use crate::plugins::identity::ElementIdAllocator;
     use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
-    use crate::plugins::modeling::occurrence::{OccurrenceIdentity, OccurrenceSnapshot};
+    use crate::plugins::modeling::occurrence::{
+        HostedOccurrenceContext, OccurrenceIdentity, OccurrenceSnapshot,
+    };
 
     let obj = request
         .as_object()
@@ -4614,6 +5203,12 @@ pub fn handle_place_occurrence(world: &mut World, request: Value) -> ApiResult<u
     }
     if obj.contains_key("domain_data") {
         identity.domain_data = obj.get("domain_data").cloned().unwrap_or(Value::Null);
+    }
+    if let Some(hosting) = obj.get("hosting") {
+        identity.hosting = Some(
+            serde_json::from_value::<HostedOccurrenceContext>(hosting.clone())
+                .map_err(|error| format!("Invalid hosting context: {error}"))?,
+        );
     }
     {
         let registry = world.resource::<DefinitionRegistry>();
@@ -4676,8 +5271,7 @@ pub fn handle_update_occurrence_overrides(
         for (k, v) in map {
             after = after
                 .set_property_json(k, v)
-                .map_err(|e| format!("Failed to set '{k}': {e}"))?
-                .into();
+                .map_err(|e| format!("Failed to set '{k}': {e}"))?;
         }
     }
 
@@ -4729,6 +5323,99 @@ pub fn handle_resolve_occurrence(world: &World, element_id: u64) -> ApiResult<Va
     let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
 
     Ok(serde_json::to_value(resolved).unwrap_or(serde_json::Value::Null))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_explain_occurrence(
+    world: &World,
+    element_id: u64,
+) -> ApiResult<OccurrenceExplainResult> {
+    use crate::plugins::modeling::{
+        definition::DefinitionRegistry,
+        occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
+        primitives::ShapeRotation,
+        profile::ProfileExtrusion,
+    };
+
+    let eid = ElementId(element_id);
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    let entity_ref = q
+        .iter(world)
+        .find(|e| e.get::<ElementId>().copied() == Some(eid))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+
+    let identity = entity_ref
+        .get::<OccurrenceIdentity>()
+        .ok_or_else(|| format!("Entity {element_id} is not an occurrence"))?
+        .clone();
+    let transform = entity_ref.get::<Transform>().copied().unwrap_or_default();
+    drop(q);
+
+    let registry = world.resource::<DefinitionRegistry>();
+    let definition = registry
+        .get(&identity.definition_id)
+        .ok_or_else(|| format!("Definition '{}' not found", identity.definition_id))?;
+    let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
+    let anchors = definition
+        .compound
+        .as_ref()
+        .map(|compound| {
+            compound
+                .anchors
+                .iter()
+                .map(|anchor| serde_json::to_value(anchor).unwrap_or(Value::Null))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let label = get_entity_snapshot(world, eid)
+        .and_then(|value| {
+            value
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "Occurrence".to_string());
+
+    let mut generated_query = world
+        .try_query::<(
+            &GeneratedOccurrencePart,
+            &ProfileExtrusion,
+            Option<&ShapeRotation>,
+        )>()
+        .ok_or_else(|| "Failed to create generated part query".to_string())?;
+    let generated_parts = generated_query
+        .iter(world)
+        .filter(|(generated, _, _)| generated.owner == eid)
+        .map(|(generated, extrusion, _rotation)| {
+            let (profile_min, profile_max) = extrusion.profile.bounds_2d();
+            GeneratedOccurrencePartEntry {
+                slot_path: generated.slot_path.clone(),
+                definition_id: generated.definition_id.to_string(),
+                center: [extrusion.centre.x, extrusion.centre.y, extrusion.centre.z],
+                profile_min: [profile_min.x, profile_min.y],
+                profile_max: [profile_max.x, profile_max.y],
+                height: extrusion.height,
+            }
+        })
+        .collect();
+
+    Ok(OccurrenceExplainResult {
+        element_id,
+        label,
+        definition_id: identity.definition_id.to_string(),
+        definition_version: identity.definition_version,
+        domain_data: identity.domain_data.clone(),
+        hosting: serde_json::to_value(&identity.hosting).unwrap_or(Value::Null),
+        transform: serde_json::json!({
+            "translation": [transform.translation.x, transform.translation.y, transform.translation.z],
+            "rotation": [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w],
+            "scale": [transform.scale.x, transform.scale.y, transform.scale.z],
+        }),
+        resolved_parameters: serde_json::to_value(resolved).unwrap_or(Value::Null),
+        anchors,
+        generated_parts,
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -5155,13 +5842,18 @@ mod tests {
             ResolvedDeleteEntitiesCommand,
         },
         document_properties::DocumentProperties,
+        document_state::DocumentState,
         history::{History, PendingCommandQueue},
         identity::ElementIdAllocator,
         import::ImportRegistry,
+        persistence::OpaquePersistedEntities,
+        property_edit::PropertyEditState,
         toolbar::{
             ToolbarDescriptor, ToolbarDock, ToolbarLayoutEntry, ToolbarLayoutState,
             ToolbarRegistry, ToolbarSection,
         },
+        tools::ActiveTool,
+        transform::TransformState,
     };
     use serde_json::json;
     #[cfg(feature = "model-api")]
@@ -5283,11 +5975,10 @@ mod tests {
             details
                 .geometry_semantics
                 .as_ref()
-                .map(|semantics| semantics
+                .and_then(|semantics| semantics
                     .evaluated_body
                     .as_ref()
-                    .and_then(|body| body.volume))
-                .flatten(),
+                    .and_then(|body| body.volume)),
             Some(960.0)
         );
         assert_eq!(details.properties.len(), 2);
@@ -5314,6 +6005,11 @@ mod tests {
         world.insert_resource(PendingCommandQueue::default());
         world.insert_resource(History::default());
         world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(DocumentState::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+        world.insert_resource(PropertyEditState::default());
+        world.insert_resource(TransformState::default());
+        world.insert_resource(NextState::<ActiveTool>::default());
         let mut import_registry = ImportRegistry::default();
         import_registry.register_importer(ObjImporter);
         world.insert_resource(import_registry);
@@ -5323,6 +6019,7 @@ mod tests {
             id: "core".to_string(),
             label: "Core".to_string(),
             default_dock: ToolbarDock::Top,
+            default_visible: true,
             sections: vec![ToolbarSection {
                 label: "Select".to_string(),
                 command_ids: vec!["core.select_tool".to_string()],
@@ -5332,6 +6029,7 @@ mod tests {
             id: "modeling".to_string(),
             label: "Modeling".to_string(),
             default_dock: ToolbarDock::Left,
+            default_visible: true,
             sections: vec![ToolbarSection {
                 label: "Primitives".to_string(),
                 command_ids: vec!["modeling.place_box".to_string()],
@@ -5604,7 +6302,7 @@ mod tests {
 
         let server = ModelApiServer::new(sender);
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 56); // prior tools + definition library + instantiate tools
+        assert_eq!(tools.len(), 58); // prior tools + definition library + instantiate + hosted + explain tools
 
         let listed: Vec<EntityEntry> = server
             .list_entities_tool()
@@ -5753,6 +6451,7 @@ mod tests {
             "parameters": [
                 { "name": "overall_width", "param_type": "Numeric", "default_value": 1.2, "override_policy": "Overridable", "metadata": { "unit": "m" } },
                 { "name": "overall_height", "param_type": "Numeric", "default_value": 1.4, "override_policy": "Overridable", "metadata": { "unit": "m" } },
+                { "name": "wall_thickness", "param_type": "Numeric", "default_value": 0.2, "override_policy": "Overridable", "metadata": { "unit": "m" } },
                 { "name": "finish_color", "param_type": "StringVal", "default_value": "white", "override_policy": "Overridable" }
             ],
             "compound": {
@@ -5811,6 +6510,39 @@ mod tests {
     }
 
     #[cfg(feature = "model-api")]
+    fn make_locked_member_request() -> serde_json::Value {
+        json!({
+            "name": "LockedMember",
+            "definition_kind": "Solid",
+            "width_param": "width",
+            "depth_param": "depth",
+            "height_param": "height",
+            "parameters": [
+                { "name": "width",  "param_type": "Numeric", "default_value": 0.2, "override_policy": "Locked" },
+                { "name": "depth",  "param_type": "Numeric", "default_value": 0.1, "override_policy": "Locked" },
+                { "name": "height", "param_type": "Numeric", "default_value": 0.5, "override_policy": "Locked" }
+            ]
+        })
+    }
+
+    #[cfg(feature = "model-api")]
+    fn make_definition_variant_request(base_definition_id: &str) -> serde_json::Value {
+        json!({
+            "name": "TestWall Greyline",
+            "base_definition_id": base_definition_id,
+            "parameters": [
+                { "name": "height", "param_type": "Numeric", "default_value": 4.5, "override_policy": "Locked" },
+                { "name": "finish_color", "param_type": "StringVal", "default_value": "greyline", "override_policy": "Locked" }
+            ],
+            "domain_data": {
+                "catalog": {
+                    "finish": "greyline"
+                }
+            }
+        })
+    }
+
+    #[cfg(feature = "model-api")]
     #[test]
     fn definition_create_and_list_round_trip() {
         let mut world = init_model_api_test_world();
@@ -5847,6 +6579,57 @@ mod tests {
             fetched.full["interface"]["parameters"][0]["name"],
             json!("width")
         );
+        assert_eq!(
+            fetched.effective_full["interface"]["parameters"][0]["name"],
+            json!("width")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn definition_variants_inherit_effective_shape_and_parameters() {
+        let mut world = init_model_api_test_world();
+
+        let base = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("base definition should be created");
+        let variant = handle_create_definition(
+            &mut world,
+            make_definition_variant_request(&base.definition_id),
+        )
+        .expect("variant definition should be created");
+
+        assert_eq!(
+            variant.full["base_definition_id"],
+            json!(base.definition_id.clone())
+        );
+        assert_eq!(
+            variant.effective_full["interface"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|parameter| parameter["name"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["width", "depth", "height", "finish_color"]
+        );
+        assert_eq!(
+            variant.effective_full["interface"]["parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|parameter| parameter["name"] == json!("height"))
+                .unwrap()["default_value"],
+            json!(4.5)
+        );
+
+        let occurrence_id = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": variant.definition_id, "label": "VariantWall" }),
+        )
+        .expect("variant occurrence should be placed");
+        let resolved =
+            handle_resolve_occurrence(&world, occurrence_id).expect("variant should resolve");
+        assert_eq!(resolved["height"]["value"], json!(4.5));
+        assert_eq!(resolved["finish_color"]["value"], json!("greyline"));
     }
 
     #[cfg(feature = "model-api")]
@@ -5873,6 +6656,104 @@ mod tests {
         assert_eq!(
             fetched.full["domain_data"]["architectural"]["void_declaration"]["kind"],
             json!("opening")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn compound_occurrence_generates_child_slot_geometry() {
+        use crate::plugins::modeling::{
+            occurrence::GeneratedOccurrencePart, profile::ProfileExtrusion,
+        };
+
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+
+        let occurrence_id = handle_place_occurrence(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "overrides": {
+                    "overall_width": 1.8,
+                    "overall_height": 1.6
+                }
+            }),
+        )
+        .expect("compound occurrence should be placed");
+
+        let owner = ElementId(occurrence_id);
+        let generated_parts: Vec<(GeneratedOccurrencePart, ProfileExtrusion)> = world
+            .query::<(&GeneratedOccurrencePart, &ProfileExtrusion)>()
+            .iter(&world)
+            .map(|(generated, extrusion)| (generated.clone(), extrusion.clone()))
+            .collect();
+
+        assert_eq!(generated_parts.len(), 1);
+        assert_eq!(generated_parts[0].0.owner, owner);
+        assert_eq!(generated_parts[0].0.slot_path, "frame");
+        let (min, max) = generated_parts[0].1.profile.bounds_2d();
+        assert_eq!(max.x - min.x, 1.8);
+        assert_eq!(max.y - min.y, 0.14);
+        assert_eq!(generated_parts[0].1.height, 1.6);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn occurrence_explain_reports_generated_parts_and_resolved_values() {
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+
+        let occurrence_id = handle_place_occurrence(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "label": "Window A",
+                "overrides": {
+                    "overall_width": 1.5,
+                    "overall_height": 1.25,
+                    "finish_color": "red"
+                },
+                "domain_data": {
+                    "architectural": {
+                        "host_occurrence": "wall-42"
+                    }
+                }
+            }),
+        )
+        .expect("compound occurrence should be placed");
+
+        let explanation =
+            handle_explain_occurrence(&world, occurrence_id).expect("explain should succeed");
+
+        assert_eq!(explanation.label, "Window A");
+        assert_eq!(explanation.generated_parts.len(), 1);
+        assert_eq!(explanation.generated_parts[0].slot_path, "frame");
+        assert_eq!(
+            explanation.generated_parts[0].definition_id,
+            child.definition_id
+        );
+        assert_eq!(
+            explanation.resolved_parameters["finish_color"]["value"],
+            json!("red")
+        );
+        assert_eq!(explanation.anchors.len(), 2);
+        assert_eq!(
+            explanation.domain_data["architectural"]["host_occurrence"],
+            json!("wall-42")
         );
     }
 
@@ -5993,8 +6874,14 @@ mod tests {
     #[test]
     fn definition_library_workflow_exports_imports_and_instantiates() {
         let mut source_world = init_model_api_test_world();
-        let definition = handle_create_definition(&mut source_world, make_rect_extrusion_request())
-            .expect("definition should be created");
+        let base_definition =
+            handle_create_definition(&mut source_world, make_rect_extrusion_request())
+                .expect("base definition should be created");
+        let definition = handle_create_definition(
+            &mut source_world,
+            make_definition_variant_request(&base_definition.definition_id),
+        )
+        .expect("variant definition should be created");
 
         let library = handle_create_definition_library(
             &mut source_world,
@@ -6012,7 +6899,7 @@ mod tests {
 
         let listed = handle_list_definition_libraries(&source_world);
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].definition_count, 1);
+        assert_eq!(listed[0].definition_count, 2);
 
         let export_path = temp_json_path("talos3d-definition-library");
         handle_export_definition_library(
@@ -6034,22 +6921,171 @@ mod tests {
                 "library_id": imported.library_id,
                 "definition_id": definition.definition_id,
                 "label": "ImportedWall",
-                "overrides": { "height": 4.2 }
+                "overrides": { "width": 4.2 }
             }),
         )
         .expect("definition should instantiate from library");
 
         assert_eq!(instantiated.definition_id, definition.definition_id);
-        assert_eq!(
-            instantiated.imported_definition_ids,
-            vec![definition.definition_id.clone()]
-        );
+        assert_eq!(instantiated.imported_definition_ids.len(), 2);
+        assert!(instantiated
+            .imported_definition_ids
+            .contains(&definition.definition_id));
+        assert!(instantiated
+            .imported_definition_ids
+            .contains(&base_definition.definition_id));
 
         let resolved = handle_resolve_occurrence(&target_world, instantiated.element_id)
             .expect("instantiated occurrence should resolve");
-        assert_eq!(resolved["height"]["value"], json!(4.2));
+        assert_eq!(resolved["width"]["value"], json!(4.2));
+        assert_eq!(resolved["height"]["value"], json!(4.5));
+        assert_eq!(resolved["finish_color"]["value"], json!("greyline"));
 
         let _ = fs::remove_file(export_path);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn hosted_definition_instantiation_derives_anchors_and_relation() {
+        let mut world = init_model_api_test_world();
+        world
+            .resource_mut::<CapabilityRegistry>()
+            .register_relation_type(crate::capability_registry::RelationTypeDescriptor {
+                relation_type: "hosted_on".to_string(),
+                label: "Hosted On".to_string(),
+                description: "Hosted relation for occurrence placement".to_string(),
+                valid_source_types: vec!["occurrence".to_string()],
+                valid_target_types: vec!["box".to_string()],
+                parameter_schema: json!({}),
+                participates_in_dependency_graph: true,
+            });
+
+        let host_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.5, 0.0],
+                "half_extents": [2.0, 1.5, 0.15]
+            }),
+        )
+        .expect("host should be created");
+        let opening_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.2, 0.0],
+                "half_extents": [0.6, 0.8, 0.15]
+            }),
+        )
+        .expect("opening proxy should be created");
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+
+        let instantiated = handle_instantiate_hosted_definition(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "label": "HostedWindow",
+                "hosting": {
+                    "host_element_id": host_id,
+                    "opening_element_id": opening_id
+                }
+            }),
+        )
+        .expect("hosted occurrence should be instantiated");
+
+        assert_eq!(instantiated.relation_ids.len(), 1);
+
+        let resolved = handle_resolve_occurrence(&world, instantiated.element_id)
+            .expect("hosted occurrence should resolve");
+        let wall_thickness = resolved["wall_thickness"]["value"]
+            .as_f64()
+            .expect("wall_thickness should resolve to a number");
+        assert!((wall_thickness - 0.3).abs() < 1e-5);
+
+        let explanation = handle_explain_occurrence(&world, instantiated.element_id)
+            .expect("hosted occurrence explanation should succeed");
+        assert_eq!(explanation.label, "HostedWindow");
+        assert_eq!(explanation.hosting["host_element_id"], json!(host_id));
+        assert_eq!(explanation.hosting["opening_element_id"], json!(opening_id));
+        assert!(explanation.hosting["anchors"]
+            .as_array()
+            .is_some_and(|anchors| anchors.len() >= 3));
+
+        let relations = handle_query_relations(
+            &world,
+            Some(instantiated.element_id),
+            Some(host_id),
+            Some("hosted_on".to_string()),
+        );
+        assert_eq!(relations.len(), 1);
+        assert_eq!(
+            relations[0].parameters["opening_element_id"],
+            json!(opening_id)
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn definition_and_occurrence_round_trip_through_project_persistence() {
+        let mut source_world = init_model_api_test_world();
+        let definition = handle_create_definition(&mut source_world, make_rect_extrusion_request())
+            .expect("definition should be created");
+        let occurrence_id = handle_place_occurrence(
+            &mut source_world,
+            json!({
+                "definition_id": definition.definition_id,
+                "label": "RoundTripWall",
+                "overrides": { "height": 4.5 },
+                "domain_data": {
+                    "architectural": { "exchange_identity_map": { "GlobalId": "rt-1" } }
+                }
+            }),
+        )
+        .expect("occurrence should be created");
+
+        let path = temp_json_path("talos3d-roundtrip-project").with_extension("talos3d");
+        handle_save_project(&mut source_world, path.to_str().unwrap_or_default())
+            .expect("project should save");
+
+        let mut loaded_world = init_model_api_test_world();
+        handle_load_project(&mut loaded_world, path.to_str().unwrap_or_default())
+            .expect("project should load");
+
+        let loaded_definition =
+            handle_get_definition(&loaded_world, definition.definition_id.clone())
+                .expect("definition should load");
+        assert_eq!(loaded_definition.full["name"], json!("TestWall"));
+        assert_eq!(
+            loaded_definition.full["interface"]["parameters"],
+            handle_get_definition(&source_world, definition.definition_id.clone())
+                .expect("source definition should exist")
+                .full["interface"]["parameters"]
+        );
+
+        let resolved = handle_resolve_occurrence(&loaded_world, occurrence_id)
+            .expect("loaded occurrence should resolve");
+        assert_eq!(resolved["height"]["value"], json!(4.5));
+        assert_eq!(
+            resolved["height"]["provenance"],
+            json!("OccurrenceOverride")
+        );
+
+        let explanation = handle_explain_occurrence(&loaded_world, occurrence_id)
+            .expect("loaded occurrence explanation should succeed");
+        assert_eq!(explanation.label, "RoundTripWall");
+        assert_eq!(
+            explanation.domain_data["architectural"]["exchange_identity_map"]["GlobalId"],
+            json!("rt-1")
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[cfg(feature = "model-api")]

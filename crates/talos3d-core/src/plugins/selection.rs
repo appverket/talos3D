@@ -11,6 +11,7 @@ use crate::{
     authored_entity::EntityBounds,
     capability_registry::{CapabilityRegistry, HitCandidate},
     plugins::{
+        camera::ORBIT_KEY,
         commands::DeleteEntitiesCommand,
         egui_chrome::EguiWantsInput,
         face_edit::FaceEditContext,
@@ -40,6 +41,19 @@ const BOX_SELECT_WINDOW_BORDER: Color = Color::srgba(0.3, 0.6, 1.0, 0.8);
 const BOX_SELECT_CROSSING_BORDER: Color = Color::srgba(0.3, 1.0, 0.6, 0.8);
 const BOX_SELECT_DRAG_THRESHOLD: f32 = 5.0;
 const SELECTION_CLICK_SLOP_PX: f32 = 6.0;
+
+type SelectedGroupClickQueryItem = (Entity, &'static ElementId, Has<GroupMembers>, Has<CsgNode>);
+type BoxSelectEntityQueryItem = (
+    Entity,
+    &'static ElementId,
+    &'static GlobalTransform,
+    Option<&'static Visibility>,
+    Option<&'static LayerAssignment>,
+    Has<GroupMembers>,
+    Option<&'static bevy::camera::primitives::Aabb>,
+    Has<GroupEditMuted>,
+);
+type GroupMembershipQueryItem = (Entity, &'static ElementId, &'static GroupMembers);
 
 pub struct SelectionPlugin;
 
@@ -122,6 +136,9 @@ fn handle_selection_click(world: &mut World) {
         .resource::<ButtonInput<MouseButton>>()
         .just_released(MouseButton::Left);
     let face_editing = world.resource::<FaceEditContext>().is_active();
+    let orbit_held = world
+        .resource::<ButtonInput<KeyCode>>()
+        .pressed(ORBIT_KEY);
 
     if !ownership.is_idle()
         || egui_ptr
@@ -129,6 +146,7 @@ fn handle_selection_click(world: &mut World) {
         || box_dragging
         || box_just_completed
         || face_editing
+        || orbit_held
     {
         return;
     }
@@ -159,7 +177,7 @@ fn handle_selection_click(world: &mut World) {
     let hit_entity = selection_hit_entity(world, ray);
 
     // Skip muted entities (outside active group context)
-    let hit_entity = hit_entity.filter(|entity| !world.get::<GroupEditMuted>(*entity).is_some());
+    let hit_entity = hit_entity.filter(|entity| world.get::<GroupEditMuted>(*entity).is_none());
 
     // Redirect member hits to their owning group relative to the active context
     let hit_entity = hit_entity.map(|entity| {
@@ -267,40 +285,44 @@ struct DoubleClickTracker {
 
 const DOUBLE_CLICK_THRESHOLD_SECONDS: f64 = 0.4;
 
-fn handle_group_double_click(
-    mut commands: Commands,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    time: Res<Time<Real>>,
-    mut tracker: ResMut<DoubleClickTracker>,
-    selected_query: Query<(Entity, &ElementId, Has<GroupMembers>, Has<CsgNode>), With<Selected>>,
-    ownership: Res<InputOwnership>,
-    egui_wants_input: Res<EguiWantsInput>,
-    edit_context: Res<GroupEditContext>,
-    mut face_edit_context: ResMut<FaceEditContext>,
-) {
-    if !ownership.is_idle() || egui_wants_input.pointer {
+#[derive(SystemParam)]
+struct GroupDoubleClickContext<'w, 's> {
+    commands: Commands<'w, 's>,
+    mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    time: Res<'w, Time<Real>>,
+    tracker: ResMut<'w, DoubleClickTracker>,
+    selected_query: Query<'w, 's, SelectedGroupClickQueryItem, With<Selected>>,
+    ownership: Res<'w, InputOwnership>,
+    egui_wants_input: Res<'w, EguiWantsInput>,
+    edit_context: Res<'w, GroupEditContext>,
+    face_edit_context: ResMut<'w, FaceEditContext>,
+}
+
+fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
+    if !cx.ownership.is_idle() || cx.egui_wants_input.pointer || cx.keys.pressed(ORBIT_KEY) {
         return;
     }
 
-    if !mouse_buttons.just_pressed(MouseButton::Left) {
+    if !cx.mouse_buttons.just_pressed(MouseButton::Left) {
         return;
     }
 
     // Check if only one entity is selected
-    let selected: Vec<_> = selected_query.iter().collect();
+    let selected: Vec<_> = cx.selected_query.iter().collect();
     if selected.len() != 1 {
-        tracker.last_click_entity = None;
+        cx.tracker.last_click_entity = None;
         return;
     }
 
     let (entity, element_id, is_group, is_csg) = selected[0];
 
-    let now = time.elapsed_secs_f64();
-    let is_double_click = tracker.last_click_entity == Some(entity)
-        && (now - tracker.last_click_time) < DOUBLE_CLICK_THRESHOLD_SECONDS;
+    let now = cx.time.elapsed_secs_f64();
+    let is_double_click = cx.tracker.last_click_entity == Some(entity)
+        && (now - cx.tracker.last_click_time) < DOUBLE_CLICK_THRESHOLD_SECONDS;
 
-    tracker.last_click_time = now;
-    tracker.last_click_entity = Some(entity);
+    cx.tracker.last_click_time = now;
+    cx.tracker.last_click_entity = Some(entity);
 
     if !is_double_click {
         return;
@@ -308,19 +330,19 @@ fn handle_group_double_click(
 
     if is_group {
         // Enter group editing
-        let mut ctx = edit_context.clone();
+        let mut ctx = cx.edit_context.clone();
         ctx.enter(*element_id);
-        commands.insert_resource(ctx);
-        commands.entity(entity).remove::<Selected>();
+        cx.commands.insert_resource(ctx);
+        cx.commands.entity(entity).remove::<Selected>();
     } else if is_csg {
         // Enter face editing mode on the CsgNode — operand faces are
         // surfaced via csg_face_hit_test in update_hovered_face.
-        face_edit_context.enter(entity, *element_id);
-        commands.entity(entity).remove::<Selected>();
+        cx.face_edit_context.enter(entity, *element_id);
+        cx.commands.entity(entity).remove::<Selected>();
     } else {
         // Enter face editing mode for non-group entities
-        face_edit_context.enter(entity, *element_id);
-        commands.entity(entity).remove::<Selected>();
+        cx.face_edit_context.enter(entity, *element_id);
+        cx.commands.entity(entity).remove::<Selected>();
     }
 }
 
@@ -407,7 +429,7 @@ fn draw_selected_outlines(
     mut gizmos: Gizmos,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
-    let active_mode = transform_state.mode.clone();
+    let active_mode = transform_state.mode;
     let is_active_transform = !transform_state.is_idle();
     #[cfg(feature = "perf-stats")]
     let mut line_count = 0usize;
@@ -531,67 +553,65 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d) -> Option<Entity> {
 
 // --- Box Select ---
 
-fn handle_box_select(
-    mut commands: Commands,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    window_query: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut box_state: ResMut<BoxSelectState>,
-    selected_query: Query<Entity, With<Selected>>,
-    ownership: Res<InputOwnership>,
-    egui_wants_input: Res<EguiWantsInput>,
-    handle_state: Res<HandleInteractionState>,
-    face_edit_context: Res<FaceEditContext>,
-    layer_registry: Res<LayerRegistry>,
-    entity_query: Query<(
-        Entity,
-        &ElementId,
-        &GlobalTransform,
-        Option<&Visibility>,
-        Option<&LayerAssignment>,
-        Has<GroupMembers>,
-        Option<&bevy::camera::primitives::Aabb>,
-        Has<GroupEditMuted>,
-    )>,
-    edit_context: Res<GroupEditContext>,
-    group_query: Query<(Entity, &ElementId, &GroupMembers)>,
-) {
-    box_state.just_completed = false;
+#[derive(SystemParam)]
+struct BoxSelectContext<'w, 's> {
+    commands: Commands<'w, 's>,
+    mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
+    box_state: ResMut<'w, BoxSelectState>,
+    selected_query: Query<'w, 's, Entity, With<Selected>>,
+    ownership: Res<'w, InputOwnership>,
+    egui_wants_input: Res<'w, EguiWantsInput>,
+    handle_state: Res<'w, HandleInteractionState>,
+    face_edit_context: Res<'w, FaceEditContext>,
+    layer_registry: Res<'w, LayerRegistry>,
+    entity_query: Query<'w, 's, BoxSelectEntityQueryItem>,
+    edit_context: Res<'w, GroupEditContext>,
+    group_query: Query<'w, 's, GroupMembershipQueryItem>,
+}
 
-    if !ownership.is_idle() || egui_wants_input.pointer || face_edit_context.is_active() {
-        box_state.drag_start = None;
-        box_state.is_dragging = false;
+fn handle_box_select(mut cx: BoxSelectContext) {
+    cx.box_state.just_completed = false;
+
+    if !cx.ownership.is_idle()
+        || cx.egui_wants_input.pointer
+        || cx.face_edit_context.is_active()
+        || cx.keys.pressed(ORBIT_KEY)
+    {
+        cx.box_state.drag_start = None;
+        cx.box_state.is_dragging = false;
         return;
     }
 
-    let Ok(window) = window_query.single() else {
+    let Ok(window) = cx.window_query.single() else {
         return;
     };
     let Some(cursor_position) = window.cursor_position() else {
         return;
     };
 
-    if mouse_buttons.just_pressed(MouseButton::Left) && !handle_state.captures_pointer() {
-        box_state.drag_start = Some(cursor_position);
-        box_state.is_dragging = false;
+    if cx.mouse_buttons.just_pressed(MouseButton::Left) && !cx.handle_state.captures_pointer() {
+        cx.box_state.drag_start = Some(cursor_position);
+        cx.box_state.is_dragging = false;
     }
 
-    if let Some(start) = box_state.drag_start {
-        if mouse_buttons.pressed(MouseButton::Left) {
+    if let Some(start) = cx.box_state.drag_start {
+        if cx.mouse_buttons.pressed(MouseButton::Left) {
             let distance = (cursor_position - start).length();
             if distance > BOX_SELECT_DRAG_THRESHOLD {
-                box_state.is_dragging = true;
+                cx.box_state.is_dragging = true;
             }
         }
 
-        if mouse_buttons.just_released(MouseButton::Left) && box_state.is_dragging {
+        if cx.mouse_buttons.just_released(MouseButton::Left) && cx.box_state.is_dragging {
             let end = cursor_position;
             let is_window_select = end.x >= start.x;
 
-            let Some((camera, camera_transform)) = camera_query.iter().next() else {
-                box_state.drag_start = None;
-                box_state.is_dragging = false;
+            let Some((camera, camera_transform)) = cx.camera_query.iter().next() else {
+                cx.box_state.drag_start = None;
+                cx.box_state.is_dragging = false;
                 return;
             };
 
@@ -604,10 +624,11 @@ fn handle_box_select(
             let rect_min = start.min(end) - viewport_offset;
             let rect_max = start.max(end) - viewport_offset;
 
-            let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+            let additive =
+                cx.keys.pressed(KeyCode::ShiftLeft) || cx.keys.pressed(KeyCode::ShiftRight);
             if !additive {
-                for entity in &selected_query {
-                    commands.entity(entity).remove::<Selected>();
+                for entity in &cx.selected_query {
+                    cx.commands.entity(entity).remove::<Selected>();
                 }
             }
 
@@ -620,7 +641,7 @@ fn handle_box_select(
                 has_group_members,
                 aabb,
                 is_muted,
-            ) in &entity_query
+            ) in &cx.entity_query
             {
                 if visibility.copied() == Some(Visibility::Hidden) {
                     continue;
@@ -633,7 +654,9 @@ fn handle_box_select(
                 let layer_name = layer_assignment
                     .map(|a| a.layer.as_str())
                     .unwrap_or(DEFAULT_LAYER_NAME);
-                if !layer_registry.is_visible(layer_name) || layer_registry.is_locked(layer_name) {
+                if !cx.layer_registry.is_visible(layer_name)
+                    || cx.layer_registry.is_locked(layer_name)
+                {
                     continue;
                 }
 
@@ -655,18 +678,22 @@ fn handle_box_select(
                     rect_max,
                     is_window_select,
                 ) {
-                    let target =
-                        redirect_to_group_query(entity, *element_id, &edit_context, &group_query);
-                    commands.entity(target).insert(Selected);
+                    let target = redirect_to_group_query(
+                        entity,
+                        *element_id,
+                        &cx.edit_context,
+                        &cx.group_query,
+                    );
+                    cx.commands.entity(target).insert(Selected);
                 }
             }
 
-            box_state.drag_start = None;
-            box_state.is_dragging = false;
-            box_state.just_completed = true;
-        } else if !mouse_buttons.pressed(MouseButton::Left) {
-            box_state.drag_start = None;
-            box_state.is_dragging = false;
+            cx.box_state.drag_start = None;
+            cx.box_state.is_dragging = false;
+            cx.box_state.just_completed = true;
+        } else if !cx.mouse_buttons.pressed(MouseButton::Left) {
+            cx.box_state.drag_start = None;
+            cx.box_state.is_dragging = false;
         }
     }
 }
