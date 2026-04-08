@@ -5337,6 +5337,7 @@ name = "talos3d-core"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "bevy",
  "bevy_egui",
  "cadio-dwg",

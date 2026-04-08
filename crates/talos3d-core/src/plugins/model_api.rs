@@ -250,14 +250,39 @@ pub struct MaterialInfo {
     pub double_sided: bool,
     pub uv_scale: [f32; 2],
     pub uv_rotation_deg: f32,
+    /// Base64-encoded image data (no data-URI prefix) or `null`.
     pub base_color_texture: Option<String>,
+    pub base_color_texture_mime: Option<String>,
+    /// Base64-encoded image data (no data-URI prefix) or `null`.
     pub normal_map_texture: Option<String>,
+    pub normal_map_texture_mime: Option<String>,
+    /// Base64-encoded image data (no data-URI prefix) or `null`.
     pub metallic_roughness_texture: Option<String>,
+    pub metallic_roughness_texture_mime: Option<String>,
+    /// Base64-encoded image data (no data-URI prefix) or `null`.
     pub emissive_texture: Option<String>,
+    pub emissive_texture_mime: Option<String>,
 }
 
 impl MaterialInfo {
     fn from_def(def: &MaterialDef) -> Self {
+        use crate::plugins::materials::TextureRef;
+
+        fn tex_data(t: &Option<TextureRef>) -> Option<String> {
+            match t {
+                Some(TextureRef::Embedded { data, .. }) => Some(data.clone()),
+                Some(TextureRef::AssetPath(p)) => Some(p.clone()),
+                None => None,
+            }
+        }
+        fn tex_mime(t: &Option<TextureRef>) -> Option<String> {
+            match t {
+                Some(TextureRef::Embedded { mime, .. }) => Some(mime.clone()),
+                Some(TextureRef::AssetPath(_)) => None,
+                None => None,
+            }
+        }
+
         Self {
             id: def.id.clone(),
             name: def.name.clone(),
@@ -270,10 +295,14 @@ impl MaterialInfo {
             double_sided: def.double_sided,
             uv_scale: def.uv_scale,
             uv_rotation_deg: def.uv_rotation.to_degrees(),
-            base_color_texture: def.base_color_texture.clone(),
-            normal_map_texture: def.normal_map_texture.clone(),
-            metallic_roughness_texture: def.metallic_roughness_texture.clone(),
-            emissive_texture: def.emissive_texture.clone(),
+            base_color_texture: tex_data(&def.base_color_texture),
+            base_color_texture_mime: tex_mime(&def.base_color_texture),
+            normal_map_texture: tex_data(&def.normal_map_texture),
+            normal_map_texture_mime: tex_mime(&def.normal_map_texture),
+            metallic_roughness_texture: tex_data(&def.metallic_roughness_texture),
+            metallic_roughness_texture_mime: tex_mime(&def.metallic_roughness_texture),
+            emissive_texture: tex_data(&def.emissive_texture),
+            emissive_texture_mime: tex_mime(&def.emissive_texture),
         }
     }
 }
@@ -302,10 +331,20 @@ pub struct CreateMaterialRequest {
     pub uv_scale: [f32; 2],
     #[serde(default)]
     pub uv_rotation_deg: f32,
+    /// Base64-encoded image data.  Defaults to `"image/png"` if
+    /// `base_color_texture_mime` is not provided.
     pub base_color_texture: Option<String>,
+    #[serde(default)]
+    pub base_color_texture_mime: Option<String>,
     pub normal_map_texture: Option<String>,
+    #[serde(default)]
+    pub normal_map_texture_mime: Option<String>,
     pub metallic_roughness_texture: Option<String>,
+    #[serde(default)]
+    pub metallic_roughness_texture_mime: Option<String>,
     pub emissive_texture: Option<String>,
+    #[serde(default)]
+    pub emissive_texture_mime: Option<String>,
 }
 
 fn default_base_color() -> [f32; 4] {
@@ -4404,6 +4443,17 @@ fn material_def_from_request(req: CreateMaterialRequest) -> MaterialDef {
 
 #[cfg(feature = "model-api")]
 fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
+    use crate::plugins::materials::TextureRef;
+
+    /// Convert an API texture field (base64 string + optional mime) into a
+    /// `TextureRef::Embedded`.  Returns `None` when `data` is `None`.
+    fn to_texture_ref(data: Option<String>, mime: Option<String>) -> Option<TextureRef> {
+        data.map(|d| TextureRef::Embedded {
+            data: d,
+            mime: mime.unwrap_or_else(|| "image/png".to_string()),
+        })
+    }
+
     def.name = req.name;
     def.base_color = req.base_color;
     def.perceptual_roughness = req.perceptual_roughness;
@@ -4415,10 +4465,13 @@ fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
     def.double_sided = req.double_sided;
     def.uv_scale = req.uv_scale;
     def.uv_rotation = req.uv_rotation_deg.to_radians();
-    def.base_color_texture = req.base_color_texture;
-    def.normal_map_texture = req.normal_map_texture;
-    def.metallic_roughness_texture = req.metallic_roughness_texture;
-    def.emissive_texture = req.emissive_texture;
+    def.base_color_texture = to_texture_ref(req.base_color_texture, req.base_color_texture_mime);
+    def.normal_map_texture = to_texture_ref(req.normal_map_texture, req.normal_map_texture_mime);
+    def.metallic_roughness_texture = to_texture_ref(
+        req.metallic_roughness_texture,
+        req.metallic_roughness_texture_mime,
+    );
+    def.emissive_texture = to_texture_ref(req.emissive_texture, req.emissive_texture_mime);
 }
 
 #[cfg(feature = "model-api")]
