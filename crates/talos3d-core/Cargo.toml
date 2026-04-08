@@ -18,6 +18,7 @@ bevy = { version = "0.18", default-features = false, features = [
     "mesh_picking",
     "bevy_pbr",
     "bevy_picking",
+    "bevy_post_process",
     "bevy_render",
     "bevy_scene",
     "bevy_state",
