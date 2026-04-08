@@ -465,6 +465,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &ctx,
         &mut data.viewport_context_menu,
         selection_count,
+        &mut data.materials_window_state,
         &mut data.pending_command_invocations,
     );
 
@@ -1820,6 +1821,7 @@ fn draw_viewport_context_menu(
     ctx: &egui::Context,
     menu: &mut ViewportContextMenu,
     selection_count: usize,
+    materials_window_state: &mut MaterialsWindowState,
     pending: &mut PendingCommandInvocations,
 ) {
     if !menu.open {
@@ -1861,16 +1863,31 @@ fn draw_viewport_context_menu(
                     }};
                 }
 
-                item!("Select All    Cmd+A", "core.select_all");
-                item!(enabled: has_selection, "Deselect    Esc", "core.deselect");
-                ui.separator();
-                item!(enabled: has_selection, "Delete    Delete", "core.delete");
-                ui.separator();
-                item!(enabled: has_selection, "Group    Cmd+G", "core.group");
-                item!(enabled: has_selection, "Ungroup    Cmd+\u{21e7}G", "core.ungroup");
-                ui.separator();
-                item!("Zoom to Extents    Home", "core.zoom_to_extents");
-                item!(enabled: has_selection, "Zoom to Selection    \u{21e7}Home", "core.zoom_to_selection");
+                if has_selection {
+                    item!("Move    G", "modeling.move");
+                    item!("Rotate    R", "modeling.rotate");
+                    item!("Scale    S", "modeling.scale");
+                    ui.separator();
+                    if ui.button("Materials…    Cmd+\u{21e7}M").clicked() {
+                        materials_window_state.visible = true;
+                        menu.open = false;
+                    }
+                    ui.separator();
+                    item!(
+                        "Zoom to Selection    \u{21e7}Home",
+                        "core.zoom_to_selection"
+                    );
+                    ui.separator();
+                    item!("Group    Cmd+G", "modeling.group");
+                    item!("Ungroup    Cmd+\u{21e7}G", "modeling.ungroup");
+                    ui.separator();
+                    item!("Deselect    Esc", "core.deselect");
+                    item!("Delete    Delete", "core.delete");
+                } else {
+                    item!("Select All    Cmd+A", "core.select_all");
+                    ui.separator();
+                    item!("Zoom to Extents    Home", "core.zoom_to_extents");
+                }
             });
         });
 
