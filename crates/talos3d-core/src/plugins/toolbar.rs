@@ -60,6 +60,7 @@ pub struct ToolbarDescriptor {
     pub id: String,
     pub label: String,
     pub default_dock: ToolbarDock,
+    pub default_visible: bool,
     pub sections: Vec<ToolbarSection>,
 }
 
@@ -181,7 +182,7 @@ pub(crate) fn sync_toolbar_layout_state(
                 dock: descriptor.default_dock,
                 row: 0,
                 order: next_order,
-                visible: true,
+                visible: descriptor.default_visible,
             }
         };
         next_entries.insert(descriptor.id.clone(), entry);
@@ -437,25 +438,29 @@ pub(crate) fn apply_toolbar_float(
     );
 }
 
+pub(crate) struct RedockTarget<'a> {
+    pub dock: ToolbarDock,
+    pub target_row: u32,
+    pub new_row: bool,
+    pub insert_after: Option<&'a str>,
+}
+
 pub(crate) fn redock_toolbar(
     layout_state: &mut ToolbarLayoutState,
     floating_states: &mut FloatingToolbarStates,
     doc_props: &mut DocumentProperties,
     toolbar_id: &str,
-    dock: ToolbarDock,
-    target_row: u32,
-    new_row: bool,
-    insert_after: Option<&str>,
+    target: RedockTarget<'_>,
 ) {
     floating_states.entries.remove(toolbar_id);
     apply_toolbar_layout_precise(
         layout_state,
         doc_props,
         toolbar_id,
-        dock,
-        target_row,
-        new_row,
-        insert_after,
+        target.dock,
+        target.target_row,
+        target.new_row,
+        target.insert_after,
     );
     doc_props.domain_defaults.insert(
         "floating_toolbar_states".to_string(),
@@ -494,6 +499,7 @@ fn register_core_toolbar(app: &mut App) {
         id: "core".to_string(),
         label: "Core".to_string(),
         default_dock: ToolbarDock::Top,
+        default_visible: true,
         sections: vec![file_section, edit_section, select_section],
     });
 }

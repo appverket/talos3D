@@ -123,11 +123,13 @@ impl Plugin for ArchitecturalPlugin {
             relation_type: "hosted_on".into(),
             label: "Hosted On".into(),
             description: "Element is hosted on a parent surface (e.g. opening on wall)".into(),
-            valid_source_types: vec!["opening".into()],
+            valid_source_types: vec!["opening".into(), "occurrence".into()],
             valid_target_types: vec!["wall".into()],
             parameter_schema: serde_json::json!({
                 "properties": {
-                    "position_along_wall": {"type": "number", "minimum": 0, "maximum": 1}
+                    "position_along_wall": {"type": "number", "minimum": 0, "maximum": 1},
+                    "opening_element_id": {"type": "integer"},
+                    "placement_anchor": {"type": "string"}
                 }
             }),
             participates_in_dependency_graph: true,
@@ -200,6 +202,7 @@ impl Plugin for ArchitecturalPlugin {
             id: "architectural".to_string(),
             label: "Architectural".to_string(),
             default_dock: ToolbarDock::Left,
+            default_visible: true,
             sections: vec![ToolbarSection {
                 label: "Walls & Openings".to_string(),
                 command_ids: vec![
