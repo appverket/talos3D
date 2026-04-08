@@ -52,7 +52,8 @@ pub struct RenderPipelinePlugin;
 impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RenderSettings>()
-            .add_systems(Startup, setup_render_pipeline)
+            // PostStartup ensures the camera plugin has already run Startup.
+            .add_systems(PostStartup, setup_render_pipeline)
             .add_systems(Update, sync_render_settings);
     }
 }
@@ -68,6 +69,9 @@ fn setup_render_pipeline(
         warn!("RenderPipelinePlugin: no Camera3d found at startup");
         return;
     };
+
+    // SSAO requires MSAA disabled — set per-camera.
+    commands.entity(camera).insert(Msaa::Off);
 
     // AgX tonemapping — perceptually uniform, great for architectural previews.
     commands.entity(camera).insert(Tonemapping::AgX);
