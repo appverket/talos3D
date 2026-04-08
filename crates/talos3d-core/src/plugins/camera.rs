@@ -17,8 +17,6 @@ use crate::plugins::{
 pub struct CameraPlugin;
 
 pub const CAMERA_TOOLBAR_ID: &str = "camera.controls";
-/// Modifier key that must be held while dragging to orbit the camera.
-pub const ORBIT_KEY: KeyCode = KeyCode::KeyO;
 const DEFAULT_FOCAL_LENGTH_MM: f32 = 50.0;
 const MIN_FOCAL_LENGTH_MM: f32 = 12.0;
 const MAX_FOCAL_LENGTH_MM: f32 = 200.0;
@@ -177,13 +175,13 @@ fn orbit_camera(mut input: OrbitCameraInput) {
         input.trackpad.prev_centroid = None;
     }
 
-    // --- O+drag orbit / Shift+right-drag pan ---
+    // --- Alt/Option+drag orbit / Shift+right-drag pan ---
     // Right-click without drag is reserved for the viewport context menu.
     let shift = input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
-    let o_held = input.keys.pressed(ORBIT_KEY);
+    let orbit_modifier = orbit_modifier_pressed(&input.keys);
     let right_pressed = input.mouse_buttons.pressed(MouseButton::Right);
     let any_mouse_pressed = input.mouse_buttons.pressed(MouseButton::Left) || right_pressed;
-    let orbiting = o_held && any_mouse_pressed;
+    let orbiting = orbit_modifier && any_mouse_pressed;
     let panning = input.mouse_buttons.pressed(MouseButton::Middle) || (right_pressed && shift);
 
     for ev in input.motion.read() {
@@ -213,6 +211,10 @@ fn orbit_camera(mut input: OrbitCameraInput) {
     }
 
     apply_orbit_state(&orbit, &mut transform, &mut projection);
+}
+
+pub fn orbit_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
 }
 
 fn orbit_transform(orbit: &OrbitCamera) -> Transform {

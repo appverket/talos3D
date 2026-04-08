@@ -76,12 +76,12 @@ impl Plane {
         back: &mut Vec<CsgTriangle>,
     ) {
         let mut sides = [PointSide::Coplanar; 3];
-        for i in 0..3 {
-            sides[i] = self.classify_point(tri.vertices[i]);
+        for (i, side) in sides.iter_mut().enumerate() {
+            *side = self.classify_point(tri.vertices[i]);
         }
 
-        let has_front = sides.iter().any(|s| *s == PointSide::Front);
-        let has_back = sides.iter().any(|s| *s == PointSide::Back);
+        let has_front = sides.contains(&PointSide::Front);
+        let has_back = sides.contains(&PointSide::Back);
 
         if !has_front && !has_back {
             // All coplanar — classify by normal alignment
@@ -416,7 +416,7 @@ mod tests {
         // The result should have more triangles than the original box
         // (the cut creates new faces)
         assert!(
-            result.indices.len() > 0,
+            !result.indices.is_empty(),
             "difference should produce triangles"
         );
         assert!(
@@ -444,7 +444,7 @@ mod tests {
         let b = box_triangles(Vec3::new(0.5, 0.0, 0.0), Vec3::splat(1.0));
         let result = boolean(&a, &b, BooleanOp::Intersection);
         assert!(
-            result.indices.len() > 0,
+            !result.indices.is_empty(),
             "intersection of overlapping boxes should produce geometry"
         );
     }

@@ -35,13 +35,41 @@ Start the app with the `model-api` feature:
 cargo run --features model-api
 ```
 
+To run multiple MCP-enabled instances without collisions, provide a unique
+instance id and port:
+
+```bash
+cargo run --features model-api -- --instance-id codex --model-api-port 24842
+cargo run --features model-api -- --instance-id claude --model-api-port 24901
+```
+
+If no port is provided, Talos3D prefers `24842` and automatically falls back to
+an available port when that default is already in use.
+
 When enabled, Talos3D exposes MCP endpoints in two forms:
 
 - stdio transport for local process-based integrations
-- streamable HTTP at `http://127.0.0.1:24842/mcp`
+- streamable HTTP at `http://127.0.0.1:<port>/mcp`
 
 The repository includes a local `.mcp.json` example that points to the HTTP
 endpoint.
+
+## Instance Discovery
+
+Each MCP-enabled instance writes a discovery manifest to:
+
+- `/tmp/talos3d-instances/<instance-id>.json`
+
+The manifest includes:
+
+- `instance_id`
+- `pid`
+- `http_port`
+- `http_url`
+- `registry_path`
+
+After connecting, clients should call `get_instance_info` to confirm they are
+attached to the intended instance.
 
 ## Tool Surface
 
@@ -49,6 +77,7 @@ Current tool categories include:
 
 ### Model inspection
 
+- `get_instance_info`
 - `list_entities`
 - `get_entity`
 - `get_entity_details`

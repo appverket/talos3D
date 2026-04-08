@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::plugins::{
     commands::{CreateEntityCommand, CreatePolylineCommand},
@@ -21,6 +21,33 @@ const CLOSE_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 const MIN_SEGMENT_LENGTH_METRES: f32 = 0.1;
 /// Screen-space close threshold in pixels.
 const CLOSE_THRESHOLD_PIXELS: f32 = 15.0;
+
+#[derive(SystemParam)]
+struct PolylineClickContext<'w, 's> {
+    mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
+    egui_wants_input: Res<'w, EguiWantsInput>,
+    cursor_world_pos: Res<'w, CursorWorldPos>,
+    drawing_plane: Res<'w, DrawingPlane>,
+    camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
+    status_bar_data: ResMut<'w, StatusBarData>,
+    face_context: ResMut<'w, FaceEditContext>,
+    create_polyline: MessageWriter<'w, CreatePolylineCommand>,
+    create_entity: MessageWriter<'w, CreateEntityCommand>,
+    next_active_tool: ResMut<'w, NextState<ActiveTool>>,
+    element_id_allocator: Res<'w, ElementIdAllocator>,
+}
+
+#[derive(SystemParam)]
+struct PolylineFinishContext<'w> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    egui_wants_input: Res<'w, EguiWantsInput>,
+    drawing_plane: Res<'w, DrawingPlane>,
+    face_context: ResMut<'w, FaceEditContext>,
+    create_polyline: MessageWriter<'w, CreatePolylineCommand>,
+    create_entity: MessageWriter<'w, CreateEntityCommand>,
+    next_active_tool: ResMut<'w, NextState<ActiveTool>>,
+    element_id_allocator: Res<'w, ElementIdAllocator>,
+}
 
 pub struct PolylineToolPlugin;
 
@@ -89,51 +116,38 @@ fn close_threshold_world(camera_query: &Query<(&Camera, &GlobalTransform)>, star
     scale.clamp(0.05, 2.0)
 }
 
-fn handle_polyline_clicks(
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    egui_wants_input: Res<EguiWantsInput>,
-    cursor_world_pos: Res<CursorWorldPos>,
-    drawing_plane: Res<DrawingPlane>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut state: ResMut<PolylineToolState>,
-    mut status_bar_data: ResMut<StatusBarData>,
-    mut face_context: ResMut<FaceEditContext>,
-    mut create_polyline: MessageWriter<CreatePolylineCommand>,
-    mut create_entity: MessageWriter<CreateEntityCommand>,
-    mut next_active_tool: ResMut<NextState<ActiveTool>>,
-    element_id_allocator: Res<ElementIdAllocator>,
-) {
-    if egui_wants_input.pointer || !mouse_buttons.just_pressed(MouseButton::Left) {
+fn handle_polyline_clicks(mut cx: PolylineClickContext, mut state: ResMut<PolylineToolState>) {
+    if cx.egui_wants_input.pointer || !cx.mouse_buttons.just_pressed(MouseButton::Left) {
         return;
     }
 
-    let Some(cursor_position) = cursor_world_pos.snapped else {
+    let Some(cursor_position) = cx.cursor_world_pos.snapped else {
         return;
     };
 
     // Check if closing the loop
     if state.points.len() >= 3 {
         let start = state.points[0];
-        let threshold = close_threshold_world(&camera_query, start);
+        let threshold = close_threshold_world(&cx.camera_query, start);
         if cursor_position.distance(start) < threshold {
             state.closed = true;
-            let parent_element_id = face_context.element_id;
+            let parent_element_id = cx.face_context.element_id;
             let new_element_id = finish_shape(
                 &state,
-                &drawing_plane,
+                &cx.drawing_plane,
                 parent_element_id,
-                &mut create_polyline,
-                &mut create_entity,
-                &element_id_allocator,
+                &mut cx.create_polyline,
+                &mut cx.create_entity,
+                &cx.element_id_allocator,
             );
             // Register CSG parent and exit face-edit
             if let Some(_child_id) = new_element_id {
-                face_context.exit();
+                cx.face_context.exit();
             }
             state.points.clear();
             state.closed = false;
-            next_active_tool.set(ActiveTool::Select);
-            status_bar_data.hint.clear();
+            cx.next_active_tool.set(ActiveTool::Select);
+            cx.status_bar_data.hint.clear();
             return;
         }
     }
@@ -147,27 +161,20 @@ fn handle_polyline_clicks(
     if should_add {
         state.points.push(cursor_position);
         if state.points.len() >= 3 {
-            status_bar_data.hint =
+            cx.status_bar_data.hint =
                 "Click to add points \u{00b7} close near start \u{00b7} Enter to finish"
                     .to_string();
         } else {
-            status_bar_data.hint = "Click to add points \u{00b7} Enter to finish".to_string();
+            cx.status_bar_data.hint = "Click to add points \u{00b7} Enter to finish".to_string();
         }
     }
 }
 
-fn finish_polyline_on_enter(
-    keys: Res<ButtonInput<KeyCode>>,
-    egui_wants_input: Res<EguiWantsInput>,
-    mut state: ResMut<PolylineToolState>,
-    drawing_plane: Res<DrawingPlane>,
-    mut face_context: ResMut<FaceEditContext>,
-    mut create_polyline: MessageWriter<CreatePolylineCommand>,
-    mut create_entity: MessageWriter<CreateEntityCommand>,
-    mut next_active_tool: ResMut<NextState<ActiveTool>>,
-    element_id_allocator: Res<ElementIdAllocator>,
-) {
-    if egui_wants_input.keyboard || !keys.just_pressed(KeyCode::Enter) || state.points.len() < 2 {
+fn finish_polyline_on_enter(mut cx: PolylineFinishContext, mut state: ResMut<PolylineToolState>) {
+    if cx.egui_wants_input.keyboard
+        || !cx.keys.just_pressed(KeyCode::Enter)
+        || state.points.len() < 2
+    {
         return;
     }
 
@@ -175,22 +182,22 @@ fn finish_polyline_on_enter(
         state.closed = true;
     }
 
-    let parent_element_id = face_context.element_id;
+    let parent_element_id = cx.face_context.element_id;
 
     let new_element_id = finish_shape(
         &state,
-        &drawing_plane,
+        &cx.drawing_plane,
         parent_element_id,
-        &mut create_polyline,
-        &mut create_entity,
-        &element_id_allocator,
+        &mut cx.create_polyline,
+        &mut cx.create_entity,
+        &cx.element_id_allocator,
     );
     if let Some(_child_id) = new_element_id {
-        face_context.exit();
+        cx.face_context.exit();
     }
     state.points.clear();
     state.closed = false;
-    next_active_tool.set(ActiveTool::Select);
+    cx.next_active_tool.set(ActiveTool::Select);
 }
 
 /// Create the appropriate entity. Returns the ElementId if a ProfileExtrusion

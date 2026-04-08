@@ -905,7 +905,7 @@ fn parse_cad_document_requests(document: &CadDocument) -> Result<Vec<Value>, Str
 /// origin (small values) while model-space survey entities have large
 /// real-world coordinates. Detect and exclude outliers by comparing each
 /// entity's representative point to the median of all entity points.
-fn filter_model_space_entities<'a>(entities: &'a [CadEntity]) -> Vec<&'a CadEntity> {
+fn filter_model_space_entities(entities: &[CadEntity]) -> Vec<&CadEntity> {
     let centers: Vec<(usize, DVec2)> = entities
         .iter()
         .enumerate()

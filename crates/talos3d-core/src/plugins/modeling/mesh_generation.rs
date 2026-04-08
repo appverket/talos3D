@@ -33,6 +33,32 @@ const ELEVATION_BAND_COLORS: &[[f32; 3]] = &[
     [0.92, 0.36, 0.22],
 ];
 
+type PrimitiveMeshQueryItem<'a, P> = (
+    Entity,
+    &'a P,
+    Option<&'a ShapeRotation>,
+    Option<&'a Mesh3d>,
+    Option<&'a MeshMaterial3d<StandardMaterial>>,
+);
+type PolylineDrawQueryItem<'a> = (
+    &'a Polyline,
+    Option<&'a Visibility>,
+    Option<&'a ElevationMetadata>,
+    Has<GroupEditMuted>,
+);
+type EvaluatedCsgQueryItem<'a> = (
+    Entity,
+    &'a EvaluatedCsg,
+    Option<&'a Mesh3d>,
+    Option<&'a MeshMaterial3d<StandardMaterial>>,
+);
+type EvaluatedFeatureQueryItem<'a> = (
+    Entity,
+    &'a EvaluatedFeature,
+    Option<&'a Mesh3d>,
+    Option<&'a MeshMaterial3d<StandardMaterial>>,
+);
+
 /// System set for the evaluation pipeline (CSG, constraints, etc.).
 /// Runs after history commands are applied, before mesh generation.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -136,16 +162,7 @@ fn spawn_primitive_meshes<P: MeshGenerator>(
     mut meshes: ResMut<Assets<Mesh>>,
     primitive_material: Res<PrimitiveMaterial>,
     plane_material: Res<PlaneMaterial>,
-    query: Query<
-        (
-            Entity,
-            &P,
-            Option<&ShapeRotation>,
-            Option<&Mesh3d>,
-            Option<&MeshMaterial3d<StandardMaterial>>,
-        ),
-        With<NeedsMesh>,
-    >,
+    query: Query<PrimitiveMeshQueryItem<P>, With<NeedsMesh>>,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     #[cfg(feature = "perf-stats")]
@@ -178,12 +195,7 @@ fn spawn_primitive_meshes<P: MeshGenerator>(
 }
 
 fn draw_polylines(
-    polylines: Query<(
-        &Polyline,
-        Option<&Visibility>,
-        Option<&ElevationMetadata>,
-        Has<GroupEditMuted>,
-    )>,
+    polylines: Query<PolylineDrawQueryItem>,
     mut gizmos: Gizmos,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
@@ -296,15 +308,7 @@ fn spawn_evaluated_csg_meshes(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     primitive_material: Res<PrimitiveMaterial>,
-    query: Query<
-        (
-            Entity,
-            &EvaluatedCsg,
-            Option<&Mesh3d>,
-            Option<&MeshMaterial3d<StandardMaterial>>,
-        ),
-        With<NeedsMesh>,
-    >,
+    query: Query<EvaluatedCsgQueryItem, With<NeedsMesh>>,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     #[cfg(feature = "perf-stats")]
@@ -338,15 +342,7 @@ fn spawn_evaluated_feature_meshes(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     primitive_material: Res<PrimitiveMaterial>,
-    query: Query<
-        (
-            Entity,
-            &EvaluatedFeature,
-            Option<&Mesh3d>,
-            Option<&MeshMaterial3d<StandardMaterial>>,
-        ),
-        With<NeedsMesh>,
-    >,
+    query: Query<EvaluatedFeatureQueryItem, With<NeedsMesh>>,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     #[cfg(feature = "perf-stats")]

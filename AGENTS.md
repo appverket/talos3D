@@ -34,9 +34,17 @@ contributors use.
 If you are integrating an external agent:
 
 - enable the model API with `cargo run --features model-api`
+- when running multiple Talos3D instances, pass a unique instance id and port:
+  `cargo run --features model-api -- --instance-id claude --model-api-port 24901`
 - prefer structured MCP tools over scraping UI state
 - inspect first, then invoke commands or property updates
 - expect the MCP surface to reflect authored entities and command metadata
+- call `get_instance_info` after connecting to confirm you are talking to the
+  intended app instance
+
+Each MCP-enabled app instance also writes a discovery manifest to
+`/tmp/talos3d-instances/<instance-id>.json` by default. Agents can use that
+registry to find the correct port before connecting.
 
 See [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md) for the transport and
 tool surface.

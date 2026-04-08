@@ -5311,6 +5311,7 @@ dependencies = [
  "cadio-dwg",
  "cadio-ir",
  "dxf",
+ "image",
  "rfd",
  "rmcp",
  "schemars",
