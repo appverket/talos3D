@@ -257,6 +257,7 @@ impl Plugin for ModelingPlugin {
                 id: "modeling".to_string(),
                 label: "Modeling".to_string(),
                 default_dock: ToolbarDock::Left,
+                default_visible: true,
                 sections: vec![
                     ToolbarSection {
                         label: "Primitives".to_string(),
@@ -381,7 +382,7 @@ fn start_transform_or_pend(
     world: &mut World,
     mode: TransformMode,
 ) -> Result<CommandResult, String> {
-    match start_transform_mode(world, mode.clone()) {
+    match start_transform_mode(world, mode) {
         Ok(()) => Ok(CommandResult::empty()),
         Err(msg) if msg.contains("Cursor is not over") => {
             // Defer activation until cursor enters viewport

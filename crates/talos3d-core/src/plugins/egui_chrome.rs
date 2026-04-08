@@ -30,7 +30,7 @@ use crate::plugins::{
     selection::Selected,
     toolbar::{
         apply_toolbar_float, redock_toolbar, set_toolbar_visibility, FloatingToolbarStates,
-        ToolbarDescriptor, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
+        RedockTarget, ToolbarDescriptor, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
     },
     tools::ActiveTool,
     transform::TransformState,
@@ -74,6 +74,7 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<MenuBarState>()
         .init_resource::<EguiWantsInput>()
         .init_resource::<ToolbarDragState>()
+        .init_resource::<ViewportContextMenu>()
         .add_systems(Update, draw_egui_chrome.in_set(EguiChromeSystems));
     }
 }
@@ -82,6 +83,12 @@ impl Plugin for EguiChromePlugin {
 pub struct EguiWantsInput {
     pub pointer: bool,
     pub keyboard: bool,
+}
+
+#[derive(Resource, Default, Debug, Clone)]
+struct ViewportContextMenu {
+    open: bool,
+    position: egui::Pos2,
 }
 
 /// Describes exactly where a dragged toolbar should land.
@@ -159,6 +166,7 @@ struct ChromeData<'w, 's> {
     viewport_ui_inset: ResMut<'w, ViewportUiInset>,
     egui_wants_input: ResMut<'w, EguiWantsInput>,
     drag_state: ResMut<'w, ToolbarDragState>,
+    viewport_context_menu: ResMut<'w, ViewportContextMenu>,
     #[cfg(feature = "perf-stats")]
     perf_stats: Res<'w, PerfStats>,
 }
@@ -221,6 +229,17 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                     );
                                     ui.close();
                                 }
+                            }
+                            if category.label() == "View" {
+                                ui.separator();
+                                ui.menu_button("Toolbars", |ui| {
+                                    draw_toolbar_visibility_menu(
+                                        ui,
+                                        &data.toolbar_registry,
+                                        &mut data.toolbar_layout_state,
+                                        &mut data.doc_props,
+                                    );
+                                });
                             }
                         });
                     }
@@ -380,6 +399,22 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     data.viewport_ui_inset.bottom = (window.height() - available.max.y).max(0.0);
     data.viewport_ui_inset.left = available.min.x;
     data.viewport_ui_inset.right = (window.width() - available.max.x).max(0.0);
+
+    // Viewport right-click context menu.
+    // Detect right-click release without drag, outside any egui area.
+    let right_released_in_viewport = ctx.input(|i| {
+        i.pointer
+            .button_released(egui::PointerButton::Secondary)
+            && !i.pointer.is_decidedly_dragging()
+    }) && !data.egui_wants_input.pointer
+        && !data.keys.pressed(crate::plugins::camera::ORBIT_KEY);
+    if right_released_in_viewport {
+        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+            data.viewport_context_menu.open = true;
+            data.viewport_context_menu.position = pos;
+        }
+    }
+    draw_viewport_context_menu(&ctx, &mut data.viewport_context_menu, selection_count, &mut data.pending_command_invocations);
 
     let wants_ptr = ctx.wants_pointer_input();
     let over_area = ctx.is_pointer_over_area();
@@ -1729,6 +1764,73 @@ fn draw_floating_toolbar(
         });
 }
 
+fn draw_viewport_context_menu(
+    ctx: &egui::Context,
+    menu: &mut ViewportContextMenu,
+    selection_count: usize,
+    pending: &mut PendingCommandInvocations,
+) {
+    if !menu.open {
+        return;
+    }
+
+    let has_selection = selection_count > 0;
+
+    let area_response = egui::Area::new(egui::Id::new("viewport_ctx_menu"))
+        .fixed_pos(menu.position)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(160.0);
+
+                macro_rules! item {
+                    ($label:expr, $id:expr) => {{
+                        if ui.button($label).clicked() {
+                            queue_command_invocation_resource(
+                                pending,
+                                $id.to_string(),
+                                serde_json::json!({}),
+                            );
+                            menu.open = false;
+                        }
+                    }};
+                    (enabled: $enabled:expr, $label:expr, $id:expr) => {{
+                        if ui
+                            .add_enabled($enabled, egui::Button::new($label))
+                            .clicked()
+                        {
+                            queue_command_invocation_resource(
+                                pending,
+                                $id.to_string(),
+                                serde_json::json!({}),
+                            );
+                            menu.open = false;
+                        }
+                    }};
+                }
+
+                item!("Select All    Cmd+A", "core.select_all");
+                item!(enabled: has_selection, "Deselect    Esc", "core.deselect");
+                ui.separator();
+                item!(enabled: has_selection, "Delete    Delete", "core.delete");
+                ui.separator();
+                item!(enabled: has_selection, "Group    Cmd+G", "core.group");
+                item!(enabled: has_selection, "Ungroup    Cmd+\u{21e7}G", "core.ungroup");
+                ui.separator();
+                item!("Zoom to Extents    Home", "core.zoom_to_extents");
+                item!(enabled: has_selection, "Zoom to Selection    \u{21e7}Home", "core.zoom_to_selection");
+            });
+        });
+
+    // Close on click outside or Escape.
+    let clicked_outside = ctx.input(|i| i.pointer.any_click())
+        && !area_response.response.contains_pointer();
+    let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    if clicked_outside || escape {
+        menu.open = false;
+    }
+}
+
 fn draw_toolbar_visibility_menu(
     ui: &mut egui::Ui,
     toolbar_registry: &ToolbarRegistry,
@@ -2039,8 +2141,10 @@ fn compute_insertion_target(
 
     // Group by row index. Compute the band rect (union of all rects in row).
     // rows: Vec<(row_idx, Vec<(order, id, rect_option)>)>
-    let mut rows: Vec<(u32, Vec<(u32, String, Option<egui::Rect>)>)> = {
-        let mut map: std::collections::BTreeMap<u32, Vec<(u32, String, Option<egui::Rect>)>> =
+    type ToolbarRowEntry = (u32, String, Option<egui::Rect>);
+    type ToolbarRows = Vec<(u32, Vec<ToolbarRowEntry>)>;
+    let mut rows: ToolbarRows = {
+        let mut map: std::collections::BTreeMap<u32, Vec<ToolbarRowEntry>> =
             std::collections::BTreeMap::new();
         for (row, order, id, rect) in entries {
             map.entry(row).or_default().push((order, id, rect));
@@ -2551,10 +2655,12 @@ fn complete_toolbar_drag(
         floating_states,
         doc_props,
         &toolbar_id,
-        target.dock,
-        target.row,
-        target.new_row,
-        target.insert_after.as_deref(),
+        RedockTarget {
+            dock: target.dock,
+            target_row: target.row,
+            new_row: target.new_row,
+            insert_after: target.insert_after.as_deref(),
+        },
     );
 }
 
