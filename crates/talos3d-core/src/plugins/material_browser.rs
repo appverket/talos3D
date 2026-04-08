@@ -6,7 +6,7 @@ use bevy_egui::egui;
 
 use crate::plugins::{
     command_registry::{queue_command_invocation_resource, PendingCommandInvocations},
-    materials::{MaterialAlphaMode, MaterialDef, MaterialRegistry},
+    materials::{MaterialAlphaMode, MaterialDef, MaterialRegistry, TextureRef},
     ui::{tool_window_max_size, tool_window_rect},
 };
 
@@ -33,10 +33,10 @@ pub struct MaterialsWindowState {
     pub double_sided: bool,
     pub uv_scale: [f32; 2],
     pub uv_rotation_deg: f32,
-    pub base_color_tex_buf: String,
-    pub normal_map_tex_buf: String,
-    pub metallic_roughness_tex_buf: String,
-    pub emissive_tex_buf: String,
+    pub base_color_tex: Option<TextureRef>,
+    pub normal_map_tex: Option<TextureRef>,
+    pub metallic_roughness_tex: Option<TextureRef>,
+    pub emissive_tex: Option<TextureRef>,
     pub editor_tab: EditorTab,
     pub dirty: bool,
 }
@@ -62,11 +62,10 @@ impl MaterialsWindowState {
         self.double_sided = def.double_sided;
         self.uv_scale = def.uv_scale;
         self.uv_rotation_deg = def.uv_rotation.to_degrees();
-        self.base_color_tex_buf = def.base_color_texture.clone().unwrap_or_default();
-        self.normal_map_tex_buf = def.normal_map_texture.clone().unwrap_or_default();
-        self.metallic_roughness_tex_buf =
-            def.metallic_roughness_texture.clone().unwrap_or_default();
-        self.emissive_tex_buf = def.emissive_texture.clone().unwrap_or_default();
+        self.base_color_tex = def.base_color_texture.clone();
+        self.normal_map_tex = def.normal_map_texture.clone();
+        self.metallic_roughness_tex = def.metallic_roughness_texture.clone();
+        self.emissive_tex = def.emissive_texture.clone();
         self.dirty = false;
     }
 
@@ -83,10 +82,10 @@ impl MaterialsWindowState {
         def.double_sided = self.double_sided;
         def.uv_scale = self.uv_scale;
         def.uv_rotation = self.uv_rotation_deg.to_radians();
-        def.base_color_texture = non_empty(self.base_color_tex_buf.clone());
-        def.normal_map_texture = non_empty(self.normal_map_tex_buf.clone());
-        def.metallic_roughness_texture = non_empty(self.metallic_roughness_tex_buf.clone());
-        def.emissive_texture = non_empty(self.emissive_tex_buf.clone());
+        def.base_color_texture = self.base_color_tex.clone();
+        def.normal_map_texture = self.normal_map_tex.clone();
+        def.metallic_roughness_texture = self.metallic_roughness_tex.clone();
+        def.emissive_texture = self.emissive_tex.clone();
     }
 }
 
@@ -486,57 +485,73 @@ fn draw_textures_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
-                    texture_row(
-                        ui,
-                        "Base Color",
-                        &mut state.base_color_tex_buf,
-                        &mut state.dirty,
-                    );
-                    texture_row(
-                        ui,
-                        "Normal Map",
-                        &mut state.normal_map_tex_buf,
-                        &mut state.dirty,
-                    );
+                    texture_row(ui, "Base Color", &mut state.base_color_tex, &mut state.dirty);
+                    texture_row(ui, "Normal Map", &mut state.normal_map_tex, &mut state.dirty);
                     texture_row(
                         ui,
                         "Metallic/Roughness",
-                        &mut state.metallic_roughness_tex_buf,
+                        &mut state.metallic_roughness_tex,
                         &mut state.dirty,
                     );
-                    texture_row(
-                        ui,
-                        "Emissive",
-                        &mut state.emissive_tex_buf,
-                        &mut state.dirty,
-                    );
+                    texture_row(ui, "Emissive", &mut state.emissive_tex, &mut state.dirty);
                 });
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new("Enter absolute or project-relative paths.")
-                    .weak()
-                    .small(),
-            );
         });
 }
 
-fn texture_row(ui: &mut egui::Ui, label: &str, buf: &mut String, dirty: &mut bool) {
+/// Render a single texture slot row: label, current texture name, Upload and
+/// Clear buttons.  Modifies `slot` and `dirty` in place.
+fn texture_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    slot: &mut Option<TextureRef>,
+    dirty: &mut bool,
+) {
     ui.label(label);
     ui.horizontal(|ui| {
-        ui.set_max_width(220.0);
-        if ui
-            .add(egui::TextEdit::singleline(buf).hint_text("(none)"))
-            .changed()
-        {
-            *dirty = true;
+        // Show current texture label
+        let current = slot.as_ref().map(|t| t.label()).unwrap_or("(none)");
+        ui.label(egui::RichText::new(current).weak());
+
+        if ui.small_button("Upload").clicked() {
+            if let Some(tex) = pick_texture_file() {
+                *slot = Some(tex);
+                *dirty = true;
+            }
         }
-        // Clear button
-        if !buf.is_empty() && ui.small_button("✕").clicked() {
-            buf.clear();
+        if slot.is_some() && ui.small_button("✕").clicked() {
+            *slot = None;
             *dirty = true;
         }
     });
     ui.end_row();
+}
+
+/// Open a native file picker and return a `TextureRef::Embedded` for the
+/// chosen image file, or `None` if the user cancelled or an error occurred.
+fn pick_texture_file() -> Option<TextureRef> {
+    use base64::prelude::*;
+
+    let path = rfd::FileDialog::new()
+        .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+        .pick_file()?;
+
+    let bytes = std::fs::read(&path).ok()?;
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "image/png",
+    };
+
+    Some(TextureRef::Embedded {
+        data: BASE64_STANDARD.encode(&bytes),
+        mime: mime.to_string(),
+    })
 }
 
 // ─── Alpha mode helpers ───────────────────────────────────────────────────────
@@ -567,10 +582,3 @@ fn idx_to_alpha_mode(idx: usize) -> MaterialAlphaMode {
     }
 }
 
-fn non_empty(s: String) -> Option<String> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}
