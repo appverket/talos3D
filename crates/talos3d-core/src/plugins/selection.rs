@@ -5,8 +5,6 @@ use bevy::{
     window::PrimaryWindow,
 };
 
-#[cfg(feature = "perf-stats")]
-use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::{
     authored_entity::EntityBounds,
     capability_registry::{CapabilityRegistry, HitCandidate},
@@ -425,12 +423,9 @@ fn draw_selected_outlines(
     registry: Res<CapabilityRegistry>,
     transform_state: Res<TransformState>,
     mut gizmos: Gizmos,
-    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     let active_mode = transform_state.mode;
     let is_active_transform = !transform_state.is_idle();
-    #[cfg(feature = "perf-stats")]
-    let mut line_count = 0usize;
 
     for entity in &selected_query {
         if !entity_is_visible(world, entity) {
@@ -464,15 +459,6 @@ fn draw_selected_outlines(
             SELECTION_HIGHLIGHT_COLOR
         };
         factory.draw_selection(world, entity, &mut gizmos, color);
-        #[cfg(feature = "perf-stats")]
-        {
-            line_count += factory.selection_line_count(world, entity);
-        }
-    }
-
-    #[cfg(feature = "perf-stats")]
-    if line_count > 0 {
-        add_gizmo_line_count(&mut perf_stats, line_count);
     }
 }
 

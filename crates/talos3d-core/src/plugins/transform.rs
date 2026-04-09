@@ -855,7 +855,6 @@ fn draw_transform_constraint(
 fn draw_transform_preview(
     world: &World,
     mut gizmos: Gizmos,
-    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     // During push/pull the real entity mesh is updated live — no gizmo
     // outline needed.
@@ -868,23 +867,12 @@ fn draw_transform_preview(
         return;
     };
     let live_transform_preview = mode != TransformMode::Idle;
-    #[cfg(feature = "perf-stats")]
-    let mut line_count = 0usize;
 
     for snapshot in preview.after {
         if live_transform_preview && snapshot.preview_transform().is_some() {
             continue;
         }
         snapshot.draw_preview(&mut gizmos, TRANSFORM_PREVIEW_COLOR);
-        #[cfg(feature = "perf-stats")]
-        {
-            line_count += snapshot.preview_line_count();
-        }
-    }
-
-    #[cfg(feature = "perf-stats")]
-    if line_count > 0 {
-        add_gizmo_line_count(&mut perf_stats, line_count);
     }
 }
 
