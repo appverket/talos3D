@@ -1767,12 +1767,10 @@ fn spawn_model_api_server(
             runtime.block_on(async move {
                 let ct = tokio_util::sync::CancellationToken::new();
                 let sender = http_sender;
-                let config = StreamableHttpServerConfig {
-                    stateful_mode: false,
-                    json_response: true,
-                    cancellation_token: ct.clone(),
-                    ..Default::default()
-                };
+                let config = StreamableHttpServerConfig::default()
+                    .with_stateful_mode(false)
+                    .with_json_response(true)
+                    .with_cancellation_token(ct.clone());
                 let service: StreamableHttpService<ModelApiServer, LocalSessionManager> =
                     StreamableHttpService::new(
                         move || Ok(ModelApiServer::new(sender.clone())),
