@@ -13,7 +13,7 @@ use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
 #[cfg(feature = "model-api")]
 use crate::plugins::{
-    camera::focus_orbit_camera_on_bounds,
+    camera::{apply_orbit_state, focus_orbit_camera_on_bounds, CameraProjectionMode, OrbitCamera},
     commands::{
         find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
         BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
@@ -24,6 +24,7 @@ use crate::plugins::{
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
+    named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
     selection::Selected,
     toolbar::{
@@ -224,6 +225,36 @@ pub struct LayerInfo {
     pub locked: bool,
     pub color: Option<[f32; 4]>,
     pub active: bool,
+}
+
+// --- Named View types ---
+
+/// A serialisable description of a saved camera position.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NamedViewInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub focus: [f32; 3],
+    pub radius: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    /// `"perspective"` or `"orthographic"`.
+    pub projection: String,
+    pub focal_length_mm: f32,
+}
+
+/// Partial camera parameters for saving or updating a named view.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CameraParams {
+    pub focus: Option<[f32; 3]>,
+    pub radius: Option<f32>,
+    pub yaw: Option<f32>,
+    pub pitch: Option<f32>,
+    /// `"perspective"` or `"orthographic"`.
+    pub projection: Option<String>,
+    pub focal_length_mm: Option<f32>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -1074,6 +1105,29 @@ enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    // --- Named Views ---
+    ViewList(oneshot::Sender<Vec<NamedViewInfo>>),
+    ViewSave {
+        name: String,
+        description: Option<String>,
+        camera_params: Option<CameraParams>,
+        response: oneshot::Sender<ApiResult<NamedViewInfo>>,
+    },
+    ViewRestore {
+        name: String,
+        response: oneshot::Sender<ApiResult<NamedViewInfo>>,
+    },
+    ViewUpdate {
+        name: String,
+        new_name: Option<String>,
+        description: Option<String>,
+        camera_params: Option<CameraParams>,
+        response: oneshot::Sender<ApiResult<NamedViewInfo>>,
+    },
+    ViewDelete {
+        name: String,
+        response: oneshot::Sender<ApiResult<()>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -1540,6 +1594,34 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_mirror_get(world, element_id));
+        }
+        // --- Named Views ---
+        ModelApiRequest::ViewList(response) => {
+            let _ = response.send(handle_view_list(world));
+        }
+        ModelApiRequest::ViewSave {
+            name,
+            description,
+            camera_params,
+            response,
+        } => {
+            let _ = response.send(handle_view_save(world, name, description, camera_params));
+        }
+        ModelApiRequest::ViewRestore { name, response } => {
+            let _ = response.send(handle_view_restore(world, name));
+        }
+        ModelApiRequest::ViewUpdate {
+            name,
+            new_name,
+            description,
+            camera_params,
+            response,
+        } => {
+            let _ =
+                response.send(handle_view_update(world, name, new_name, description, camera_params));
+        }
+        ModelApiRequest::ViewDelete { name, response } => {
+            let _ = response.send(handle_view_delete(world, name));
         }
     }
 }
@@ -2195,6 +2277,80 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::CreateLayer { name, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    // --- Named Views ---
+
+    async fn request_view_list(&self) -> Result<Vec<NamedViewInfo>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ViewList(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_view_save(
+        &self,
+        name: String,
+        description: Option<String>,
+        camera_params: Option<CameraParams>,
+    ) -> ApiResult<NamedViewInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ViewSave {
+                name,
+                description,
+                camera_params,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_view_restore(&self, name: String) -> ApiResult<NamedViewInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ViewRestore { name, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_view_update(
+        &self,
+        name: String,
+        new_name: Option<String>,
+        description: Option<String>,
+        camera_params: Option<CameraParams>,
+    ) -> ApiResult<NamedViewInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ViewUpdate {
+                name,
+                new_name,
+                description,
+                camera_params,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_view_delete(&self, name: String) -> ApiResult<()> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ViewDelete { name, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3163,6 +3319,43 @@ struct RemoveMaterialRequest {
     element_ids: Vec<u64>,
 }
 
+// --- Named View request types ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ViewSaveRequest {
+    name: String,
+    description: Option<String>,
+    #[serde(flatten)]
+    camera: Option<CameraParams>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct ViewRestoreRequest {
+    name: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct ViewUpdateRequest {
+    name: String,
+    new_name: Option<String>,
+    description: Option<String>,
+    #[serde(flatten)]
+    camera: Option<CameraParams>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct ViewDeleteRequest {
+    name: String,
+}
+
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3917,6 +4110,78 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(layers)
+    }
+
+    // --- Named Views ---
+
+    #[tool(name = "view_list", description = "List all named views.")]
+    async fn view_list_tool(&self) -> Result<CallToolResult, McpError> {
+        let views = self
+            .request_view_list()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(views)
+    }
+
+    #[tool(
+        name = "view_save",
+        description = "Save the current camera position as a named view, or save explicit camera parameters."
+    )]
+    async fn view_save_tool(
+        &self,
+        Parameters(params): Parameters<ViewSaveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let view = self
+            .request_view_save(params.name, params.description, params.camera)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(view)
+    }
+
+    #[tool(
+        name = "view_restore",
+        description = "Restore the camera to a previously saved named view."
+    )]
+    async fn view_restore_tool(
+        &self,
+        Parameters(params): Parameters<ViewRestoreRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let view = self
+            .request_view_restore(params.name)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(view)
+    }
+
+    #[tool(
+        name = "view_update",
+        description = "Update a named view's name, description, or camera parameters."
+    )]
+    async fn view_update_tool(
+        &self,
+        Parameters(params): Parameters<ViewUpdateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let view = self
+            .request_view_update(
+                params.name,
+                params.new_name,
+                params.description,
+                params.camera,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(view)
+    }
+
+    #[tool(name = "view_delete", description = "Delete a named view by name.")]
+    async fn view_delete_tool(
+        &self,
+        Parameters(params): Parameters<ViewDeleteRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.request_view_delete(params.name)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(serde_json::json!({"ok": true}))
     }
 
     // --- Materials ---
@@ -4919,6 +5184,219 @@ fn handle_create_layer(world: &mut World, name: &str) -> Result<Vec<LayerInfo>, 
         registry.create_layer(name.to_string());
     }
     Ok(handle_list_layers(world))
+}
+
+// --- Named View Handlers ---
+
+#[cfg(feature = "model-api")]
+fn named_view_info_from_view(
+    view: &crate::plugins::named_views::NamedView,
+) -> NamedViewInfo {
+    NamedViewInfo {
+        name: view.name.clone(),
+        description: view.description.clone(),
+        focus: view.focus,
+        radius: view.radius,
+        yaw: view.yaw,
+        pitch: view.pitch,
+        projection: match view.projection_mode {
+            CameraProjectionMode::Perspective => "perspective".to_string(),
+            CameraProjectionMode::Isometric => "orthographic".to_string(),
+        },
+        focal_length_mm: view.focal_length_mm,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn projection_mode_from_str(s: &str) -> Result<CameraProjectionMode, String> {
+    match s.to_lowercase().as_str() {
+        "perspective" => Ok(CameraProjectionMode::Perspective),
+        "orthographic" | "isometric" => Ok(CameraProjectionMode::Isometric),
+        other => Err(format!(
+            "Unknown projection '{other}'. Expected 'perspective' or 'orthographic'."
+        )),
+    }
+}
+
+/// Snapshot of live `OrbitCamera` state we can read without keeping a borrow.
+#[cfg(feature = "model-api")]
+struct LiveCameraSnapshot {
+    focus: bevy::math::Vec3,
+    radius: f32,
+    yaw: f32,
+    pitch: f32,
+    projection_mode: CameraProjectionMode,
+    focal_length_mm: f32,
+}
+
+#[cfg(feature = "model-api")]
+fn live_camera_snapshot(world: &World) -> LiveCameraSnapshot {
+    let mut q = world.try_query::<&OrbitCamera>().unwrap();
+    if let Some(orbit) = q.iter(world).next() {
+        LiveCameraSnapshot {
+            focus: orbit.focus,
+            radius: orbit.radius,
+            yaw: orbit.yaw,
+            pitch: orbit.pitch,
+            projection_mode: orbit.projection_mode,
+            focal_length_mm: orbit.focal_length_mm,
+        }
+    } else {
+        let default = OrbitCamera::default();
+        LiveCameraSnapshot {
+            focus: default.focus,
+            radius: default.radius,
+            yaw: default.yaw,
+            pitch: default.pitch,
+            projection_mode: default.projection_mode,
+            focal_length_mm: default.focal_length_mm,
+        }
+    }
+}
+
+/// Build an `OrbitCamera` from optional `CameraParams`, falling back to the live camera state.
+#[cfg(feature = "model-api")]
+fn orbit_from_camera_params(
+    world: &World,
+    params: Option<&CameraParams>,
+) -> Result<OrbitCamera, String> {
+    let live = live_camera_snapshot(world);
+
+    let Some(params) = params else {
+        return Ok(OrbitCamera {
+            focus: live.focus,
+            radius: live.radius,
+            yaw: live.yaw,
+            pitch: live.pitch,
+            projection_mode: live.projection_mode,
+            focal_length_mm: live.focal_length_mm,
+        });
+    };
+
+    let projection_mode = if let Some(ref proj) = params.projection {
+        projection_mode_from_str(proj)?
+    } else {
+        live.projection_mode
+    };
+
+    Ok(OrbitCamera {
+        focus: params
+            .focus
+            .map(bevy::math::Vec3::from)
+            .unwrap_or(live.focus),
+        radius: params.radius.unwrap_or(live.radius),
+        yaw: params.yaw.unwrap_or(live.yaw),
+        pitch: params.pitch.unwrap_or(live.pitch),
+        projection_mode,
+        focal_length_mm: params.focal_length_mm.unwrap_or(live.focal_length_mm),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_view_list(world: &World) -> Vec<NamedViewInfo> {
+    world
+        .resource::<NamedViewRegistry>()
+        .list()
+        .iter()
+        .map(named_view_info_from_view)
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+fn handle_view_save(
+    world: &mut World,
+    name: String,
+    description: Option<String>,
+    camera_params: Option<CameraParams>,
+) -> Result<NamedViewInfo, String> {
+    let orbit = orbit_from_camera_params(world, camera_params.as_ref())?;
+    let mut view = crate::plugins::named_views::NamedView::from_orbit(&name, &orbit);
+    view.description = description;
+
+    world
+        .resource_mut::<NamedViewRegistry>()
+        .save(view.clone())?;
+
+    Ok(named_view_info_from_view(&view))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_view_restore(world: &mut World, name: String) -> Result<NamedViewInfo, String> {
+    // Read everything we need from the registry while we hold the immutable borrow.
+    let (orbit_state, view_info) = {
+        let registry = world.resource::<NamedViewRegistry>();
+        let view = registry
+            .get(&name)
+            .ok_or_else(|| format!("No view named '{name}' exists"))?;
+        (view.to_orbit(), named_view_info_from_view(view))
+    };
+
+    // Apply directly to the camera entity — borrow released above.
+    let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
+    if let Some((mut orbit, mut transform, mut projection)) = q.iter_mut(world).next() {
+        *orbit = orbit_state;
+        apply_orbit_state(&orbit, &mut transform, &mut projection);
+    }
+
+    Ok(view_info)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_view_update(
+    world: &mut World,
+    name: String,
+    new_name: Option<String>,
+    description: Option<String>,
+    camera_params: Option<CameraParams>,
+) -> Result<NamedViewInfo, String> {
+    // Resolve camera params against the current live camera or existing view.
+    let orbit = if camera_params.is_some() {
+        orbit_from_camera_params(world, camera_params.as_ref())?
+    } else {
+        // Keep existing camera params from the stored view.
+        world
+            .resource::<NamedViewRegistry>()
+            .get(&name)
+            .ok_or_else(|| format!("No view named '{name}' exists"))?
+            .to_orbit()
+    };
+
+    {
+        let mut registry = world.resource_mut::<NamedViewRegistry>();
+        let view = registry
+            .get_mut(&name)
+            .ok_or_else(|| format!("No view named '{name}' exists"))?;
+
+        view.focus = orbit.focus.into();
+        view.radius = orbit.radius;
+        view.yaw = orbit.yaw;
+        view.pitch = orbit.pitch;
+        view.projection_mode = orbit.projection_mode;
+        view.focal_length_mm = orbit.focal_length_mm;
+
+        if let Some(ref desc) = description {
+            view.description = Some(desc.clone());
+        }
+    }
+
+    // Rename if requested.
+    if let Some(ref target_name) = new_name {
+        world
+            .resource_mut::<NamedViewRegistry>()
+            .rename(&name, target_name)?;
+    }
+
+    let final_name = new_name.as_deref().unwrap_or(&name);
+    let registry = world.resource::<NamedViewRegistry>();
+    let view = registry
+        .get(final_name)
+        .ok_or_else(|| format!("View '{final_name}' not found after update"))?;
+    Ok(named_view_info_from_view(view))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_view_delete(world: &mut World, name: String) -> Result<(), String> {
+    world.resource_mut::<NamedViewRegistry>().delete(&name)
 }
 
 // --- Material Handlers ---

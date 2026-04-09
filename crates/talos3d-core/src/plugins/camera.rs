@@ -53,7 +53,7 @@ struct TrackpadState {
     prev_centroid: Option<Vec2>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CameraProjectionMode {
     Perspective,
     Isometric,
@@ -296,7 +296,7 @@ fn apply_camera_controls(
     controls.projection_mode = orbit.projection_mode;
 }
 
-fn apply_orbit_state(orbit: &OrbitCamera, transform: &mut Transform, projection: &mut Projection) {
+pub(crate) fn apply_orbit_state(orbit: &OrbitCamera, transform: &mut Transform, projection: &mut Projection) {
     *transform = orbit_transform(orbit);
     sync_projection_from_orbit(orbit, projection);
 }

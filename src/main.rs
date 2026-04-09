@@ -13,6 +13,7 @@ use talos3d_core::plugins::model_api::ModelApiPlugin;
 use talos3d_core::plugins::perf_stats::PerfStatsPlugin;
 use talos3d_core::plugins::{
     camera::CameraPlugin,
+    named_views::NamedViewsPlugin,
     command_registry::CommandRegistryPlugin,
     commands::CommandPlugin,
     cursor::CursorPlugin,
@@ -74,6 +75,7 @@ fn main() {
     .insert_resource(Storage(Box::new(LocalFileBackend)))
     .init_state::<AppMode>()
     .add_plugins(CameraPlugin)
+    .add_plugins(NamedViewsPlugin)
     .add_plugins(CommandRegistryPlugin)
     .add_plugins(DocumentStatePlugin)
     .add_plugins(GridPlugin)
