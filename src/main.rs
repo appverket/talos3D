@@ -13,6 +13,7 @@ use talos3d_core::plugins::model_api::ModelApiPlugin;
 use talos3d_core::plugins::perf_stats::PerfStatsPlugin;
 use talos3d_core::plugins::{
     camera::CameraPlugin,
+    clipping_planes::ClippingPlanesPlugin,
     named_views::NamedViewsPlugin,
     command_registry::CommandRegistryPlugin,
     commands::CommandPlugin,
@@ -76,6 +77,7 @@ fn main() {
     .init_state::<AppMode>()
     .add_plugins(CameraPlugin)
     .add_plugins(NamedViewsPlugin)
+    .add_plugins(ClippingPlanesPlugin)
     .add_plugins(CommandRegistryPlugin)
     .add_plugins(DocumentStatePlugin)
     .add_plugins(GridPlugin)
