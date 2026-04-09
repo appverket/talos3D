@@ -104,6 +104,7 @@ pub struct EguiWantsInput {
 struct ViewportContextMenu {
     open: bool,
     position: egui::Pos2,
+    just_opened: bool,
 }
 
 /// Describes exactly where a dragged toolbar should land.
@@ -464,6 +465,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
             data.viewport_context_menu.open = true;
             data.viewport_context_menu.position = pos;
+            data.viewport_context_menu.just_opened = true;
         }
     }
     draw_viewport_context_menu(
@@ -1900,9 +1902,10 @@ fn draw_viewport_context_menu(
     let clicked_outside =
         ctx.input(|i| i.pointer.any_click()) && !area_response.response.contains_pointer();
     let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-    if clicked_outside || escape {
+    if (!menu.just_opened && clicked_outside) || escape {
         menu.open = false;
     }
+    menu.just_opened = false;
 }
 
 fn draw_toolbar_visibility_menu(
