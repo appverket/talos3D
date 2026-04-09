@@ -1017,6 +1017,38 @@ enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    // --- Array ---
+    ArrayCreateLinear {
+        source_id: u64,
+        count: u32,
+        spacing: [f32; 3],
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    ArrayCreatePolar {
+        source_id: u64,
+        count: u32,
+        axis: [f32; 3],
+        total_angle_degrees: f32,
+        center: [f32; 3],
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    ArrayUpdate {
+        element_id: u64,
+        count: Option<u32>,
+        spacing: Option<[f32; 3]>,
+        axis: Option<[f32; 3]>,
+        total_angle_degrees: Option<f32>,
+        center: Option<[f32; 3]>,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    ArrayDissolve {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    ArrayGet {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     // --- Mirror ---
     MirrorCreate {
         source_id: u64,
@@ -1410,6 +1442,57 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_resolve_occurrence(world, element_id));
+        }
+        // --- Array ---
+        ModelApiRequest::ArrayCreateLinear {
+            source_id,
+            count,
+            spacing,
+            response,
+        } => {
+            let _ = response.send(handle_array_create_linear(world, source_id, count, spacing));
+        }
+        ModelApiRequest::ArrayCreatePolar {
+            source_id,
+            count,
+            axis,
+            total_angle_degrees,
+            center,
+            response,
+        } => {
+            let _ = response.send(handle_array_create_polar(
+                world,
+                source_id,
+                count,
+                axis,
+                total_angle_degrees,
+                center,
+            ));
+        }
+        ModelApiRequest::ArrayUpdate {
+            element_id,
+            count,
+            spacing,
+            axis,
+            total_angle_degrees,
+            center,
+            response,
+        } => {
+            let _ = response.send(handle_array_update(
+                world,
+                element_id,
+                count,
+                spacing,
+                axis,
+                total_angle_degrees,
+                center,
+            ));
+        }
+        ModelApiRequest::ArrayDissolve { element_id, response } => {
+            let _ = response.send(handle_array_dissolve(world, element_id));
+        }
+        ModelApiRequest::ArrayGet { element_id, response } => {
+            let _ = response.send(handle_array_get(world, element_id));
         }
         // --- Mirror ---
         ModelApiRequest::MirrorCreate {
@@ -2728,6 +2811,93 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    // --- Array requests ---
+
+    async fn request_array_create_linear(
+        &self,
+        source_id: u64,
+        count: u32,
+        spacing: [f32; 3],
+    ) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ArrayCreateLinear { source_id, count, spacing, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_array_create_polar(
+        &self,
+        source_id: u64,
+        count: u32,
+        axis: [f32; 3],
+        total_angle_degrees: f32,
+        center: [f32; 3],
+    ) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ArrayCreatePolar {
+                source_id,
+                count,
+                axis,
+                total_angle_degrees,
+                center,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_array_update(
+        &self,
+        element_id: u64,
+        count: Option<u32>,
+        spacing: Option<[f32; 3]>,
+        axis: Option<[f32; 3]>,
+        total_angle_degrees: Option<f32>,
+        center: Option<[f32; 3]>,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ArrayUpdate {
+                element_id,
+                count,
+                spacing,
+                axis,
+                total_angle_degrees,
+                center,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_array_dissolve(&self, element_id: u64) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ArrayDissolve { element_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_array_get(&self, element_id: u64) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ArrayGet { element_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     // --- Mirror requests ---
 
     async fn request_mirror_create(
@@ -3235,6 +3405,60 @@ struct OccurrenceUpdateOverridesRequest {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OccurrenceResolveRequest {
+    element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct ArrayCreateLinearRequest {
+    /// Source entity ID to array.
+    source: u64,
+    /// Number of copies (includes the original). Minimum 2.
+    count: u32,
+    /// Spacing vector [x, y, z] — direction × distance between successive copies.
+    spacing: [f32; 3],
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct ArrayCreatePolarRequest {
+    /// Source entity ID to array.
+    source: u64,
+    /// Number of copies (includes the original). Minimum 2.
+    count: u32,
+    /// Rotation axis [x, y, z]. Defaults to [0, 1, 0] (Y axis).
+    axis: Option<[f32; 3]>,
+    /// Total sweep angle in degrees. Defaults to 360.0 (full circle).
+    total_angle_degrees: Option<f32>,
+    /// Centre point of rotation [x, y, z]. Defaults to [0, 0, 0].
+    center: Option<[f32; 3]>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct ArrayUpdateRequest {
+    /// Element ID of the array node to update.
+    element_id: u64,
+    /// New copy count (minimum 2).
+    count: Option<u32>,
+    /// New spacing vector [x, y, z] (linear array only).
+    spacing: Option<[f32; 3]>,
+    /// New rotation axis [x, y, z] (polar array only).
+    axis: Option<[f32; 3]>,
+    /// New total angle in degrees (polar array only).
+    total_angle_degrees: Option<f32>,
+    /// New centre of rotation [x, y, z] (polar array only).
+    center: Option<[f32; 3]>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct ArrayEntityRequest {
+    /// Element ID of the array node.
     element_id: u64,
 }
 
@@ -4381,6 +4605,96 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_explain_occurrence(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    // --- Array tools ---
+
+    #[tool(
+        name = "array_create_linear",
+        description = "Create a linear array of N copies of a source entity, spaced evenly along a direction vector."
+    )]
+    async fn array_create_linear_tool(
+        &self,
+        Parameters(params): Parameters<ArrayCreateLinearRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_array_create_linear(params.source, params.count, params.spacing)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "array_create_polar",
+        description = "Create a polar (rotational) array of N copies of a source entity, distributed around an axis."
+    )]
+    async fn array_create_polar_tool(
+        &self,
+        Parameters(params): Parameters<ArrayCreatePolarRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_array_create_polar(
+                params.source,
+                params.count,
+                params.axis.unwrap_or([0.0, 1.0, 0.0]),
+                params.total_angle_degrees.unwrap_or(360.0),
+                params.center.unwrap_or([0.0, 0.0, 0.0]),
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "array_update",
+        description = "Update the count, spacing, axis, angle, or center of an array node."
+    )]
+    async fn array_update_tool(
+        &self,
+        Parameters(params): Parameters<ArrayUpdateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_array_update(
+                params.element_id,
+                params.count,
+                params.spacing,
+                params.axis,
+                params.total_angle_degrees,
+                params.center,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "array_dissolve",
+        description = "Convert an array node into an independent entity, breaking the link to its source."
+    )]
+    async fn array_dissolve_tool(
+        &self,
+        Parameters(params): Parameters<ArrayEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let new_id = self
+            .request_array_dissolve(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(new_id)
+    }
+
+    #[tool(
+        name = "array_get",
+        description = "Get the parameters of an array node (source, count, spacing or axis/angle/center)."
+    )]
+    async fn array_get_tool(
+        &self,
+        Parameters(params): Parameters<ArrayEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_array_get(params.element_id)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
@@ -7487,6 +7801,246 @@ pub fn handle_explain_occurrence(
         anchors,
         generated_parts,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Array handlers
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn handle_array_create_linear(
+    world: &mut World,
+    source_id: u64,
+    count: u32,
+    spacing: [f32; 3],
+) -> ApiResult<u64> {
+    use crate::plugins::modeling::array::{LinearArrayNode, LinearArraySnapshot};
+
+    ensure_entity_exists(world, ElementId(source_id))?;
+
+    let array_id = world
+        .resource::<crate::plugins::identity::ElementIdAllocator>()
+        .next_id();
+
+    let snapshot = LinearArraySnapshot {
+        element_id: array_id,
+        node: LinearArrayNode {
+            source: ElementId(source_id),
+            count: count.max(2),
+            spacing: bevy::math::Vec3::from(spacing),
+        },
+    };
+
+    send_event(
+        world,
+        crate::plugins::commands::CreateEntityCommand {
+            snapshot: snapshot.into(),
+        },
+    );
+    flush_model_api_write_pipeline(world);
+
+    get_entity_snapshot(world, array_id)
+        .map(|_| array_id.0)
+        .ok_or_else(|| "Failed to create linear array entity".to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_array_create_polar(
+    world: &mut World,
+    source_id: u64,
+    count: u32,
+    axis: [f32; 3],
+    total_angle_degrees: f32,
+    center: [f32; 3],
+) -> ApiResult<u64> {
+    use crate::plugins::modeling::array::{PolarArrayNode, PolarArraySnapshot};
+
+    ensure_entity_exists(world, ElementId(source_id))?;
+
+    let array_id = world
+        .resource::<crate::plugins::identity::ElementIdAllocator>()
+        .next_id();
+
+    let snapshot = PolarArraySnapshot {
+        element_id: array_id,
+        node: PolarArrayNode {
+            source: ElementId(source_id),
+            count: count.max(2),
+            axis: bevy::math::Vec3::from(axis),
+            total_angle_degrees,
+            center: bevy::math::Vec3::from(center),
+        },
+    };
+
+    send_event(
+        world,
+        crate::plugins::commands::CreateEntityCommand {
+            snapshot: snapshot.into(),
+        },
+    );
+    flush_model_api_write_pipeline(world);
+
+    get_entity_snapshot(world, array_id)
+        .map(|_| array_id.0)
+        .ok_or_else(|| "Failed to create polar array entity".to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_array_update(
+    world: &mut World,
+    element_id: u64,
+    count: Option<u32>,
+    spacing: Option<[f32; 3]>,
+    axis: Option<[f32; 3]>,
+    total_angle_degrees: Option<f32>,
+    center: Option<[f32; 3]>,
+) -> ApiResult<Value> {
+    use crate::authored_entity::AuthoredEntity;
+    use crate::plugins::commands::ApplyEntityChangesCommand;
+    use crate::plugins::modeling::array::{LinearArraySnapshot, PolarArraySnapshot};
+
+    let eid = ElementId(element_id);
+    let before = capture_snapshot_by_id(world, eid)?;
+
+    // Attempt linear array first, then polar.
+    if let Some(linear_snap) = before.0.as_any().downcast_ref::<LinearArraySnapshot>() {
+        let mut updated = linear_snap.clone();
+        if let Some(c) = count {
+            updated.node.count = c.max(2);
+        }
+        if let Some(s) = spacing {
+            updated.node.spacing = bevy::math::Vec3::from(s);
+        }
+        let after_json = updated.to_json();
+        let after: crate::authored_entity::BoxedEntity = updated.into();
+        send_event(
+            world,
+            ApplyEntityChangesCommand {
+                label: "Update linear array",
+                before: vec![before],
+                after: vec![after],
+            },
+        );
+        flush_model_api_write_pipeline(world);
+        return Ok(after_json);
+    }
+
+    if let Some(polar_snap) = before.0.as_any().downcast_ref::<PolarArraySnapshot>() {
+        let mut updated = polar_snap.clone();
+        if let Some(c) = count {
+            updated.node.count = c.max(2);
+        }
+        if let Some(a) = axis {
+            updated.node.axis = bevy::math::Vec3::from(a);
+        }
+        if let Some(angle) = total_angle_degrees {
+            updated.node.total_angle_degrees = angle;
+        }
+        if let Some(ctr) = center {
+            updated.node.center = bevy::math::Vec3::from(ctr);
+        }
+        let after_json = updated.to_json();
+        let after: crate::authored_entity::BoxedEntity = updated.into();
+        send_event(
+            world,
+            ApplyEntityChangesCommand {
+                label: "Update polar array",
+                before: vec![before],
+                after: vec![after],
+            },
+        );
+        flush_model_api_write_pipeline(world);
+        return Ok(after_json);
+    }
+
+    Err(format!("Entity {element_id} is not a linear or polar array node"))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_array_dissolve(world: &mut World, element_id: u64) -> ApiResult<u64> {
+    use crate::plugins::commands::{CreateEntityCommand, ResolvedDeleteEntitiesCommand};
+    use crate::plugins::identity::ElementIdAllocator;
+    use crate::plugins::modeling::array::EvaluatedArray;
+    use crate::plugins::modeling::primitives::TriangleMesh;
+    use crate::plugins::modeling::snapshots::TriangleMeshSnapshot;
+
+    let eid = ElementId(element_id);
+
+    let evaluated = {
+        let mut q = world
+            .try_query::<(Entity, &ElementId, &EvaluatedArray)>()
+            .unwrap();
+        q.iter(world)
+            .find(|(_, id, _)| **id == eid)
+            .map(|(_, _, ev)| ev.clone())
+            .ok_or_else(|| {
+                format!(
+                    "Entity {element_id} is not an evaluated array node (has it been evaluated yet?)"
+                )
+            })?
+    };
+
+    send_event(
+        world,
+        ResolvedDeleteEntitiesCommand {
+            element_ids: vec![eid],
+        },
+    );
+
+    let faces: Vec<[u32; 3]> = evaluated
+        .indices
+        .chunks(3)
+        .filter(|c| c.len() == 3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+
+    let new_id = world.resource::<ElementIdAllocator>().next_id();
+    let tri_mesh = TriangleMesh {
+        vertices: evaluated.vertices.clone(),
+        faces,
+        normals: Some(evaluated.normals.clone()),
+        name: None,
+    };
+    let snapshot = TriangleMeshSnapshot {
+        element_id: new_id,
+        primitive: tri_mesh,
+        layer: None,
+    };
+
+    send_event(
+        world,
+        CreateEntityCommand {
+            snapshot: snapshot.into(),
+        },
+    );
+    flush_model_api_write_pipeline(world);
+    Ok(new_id.0)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_array_get(world: &World, element_id: u64) -> ApiResult<Value> {
+    use crate::authored_entity::AuthoredEntity;
+    use crate::plugins::modeling::array::{LinearArrayNode, PolarArrayNode};
+
+    let eid = ElementId(element_id);
+    let mut q = world.try_query::<bevy::ecs::world::EntityRef>().unwrap();
+    let entity_ref = q
+        .iter(world)
+        .find(|e| e.get::<ElementId>().copied() == Some(eid))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+
+    if let Some(node) = entity_ref.get::<LinearArrayNode>() {
+        use crate::plugins::modeling::array::LinearArraySnapshot;
+        let snap = LinearArraySnapshot { element_id: eid, node: node.clone() };
+        return Ok(snap.to_json());
+    }
+    if let Some(node) = entity_ref.get::<PolarArrayNode>() {
+        use crate::plugins::modeling::array::PolarArraySnapshot;
+        let snap = PolarArraySnapshot { element_id: eid, node: node.clone() };
+        return Ok(snap.to_json());
+    }
+
+    Err(format!("Entity {element_id} is not a linear or polar array node"))
 }
 
 // ---------------------------------------------------------------------------
