@@ -30,6 +30,7 @@ use talos3d_core::plugins::{
     inference::InferencePlugin,
     input_ownership::InputOwnershipPlugin,
     layers::LayerPlugin,
+    lighting::LightingPlugin,
     materials::MaterialPlugin,
     modeling::ModelingPlugin,
     named_views::NamedViewsPlugin,
@@ -89,6 +90,7 @@ fn main() {
     .add_plugins(ImportPlugin)
     .add_plugins(LayerPlugin)
     .add_plugins(MaterialPlugin)
+    .add_plugins(LightingPlugin)
     .add_plugins(ModelingPlugin)
     .add_plugins(BundledDefinitionLibrariesPlugin)
     .add_plugins(ArchitecturalPlugin);
@@ -115,7 +117,7 @@ fn main() {
         .add_plugins(ToolbarPlugin)
         .add_plugins(PalettePlugin)
         .add_plugins(ToolPlugin)
-        .add_systems(Startup, (init_document_properties, setup_lighting))
+        .add_systems(Startup, init_document_properties)
         .add_systems(Update, exit_on_close_request);
 
     #[cfg(feature = "perf-stats")]
@@ -155,34 +157,6 @@ fn init_document_properties(world: &mut World) {
         registry.apply_all(&mut props);
     }
     world.insert_resource(props);
-}
-
-fn setup_lighting(mut commands: Commands) {
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.9, 0.92, 1.0),
-        brightness: 40.0,
-        affects_lightmapped_meshes: true,
-    });
-
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(1.0, 0.97, 0.88),
-            illuminance: 8_000.0,
-            shadows_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(10.0, 20.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(0.6, 0.7, 0.9),
-            illuminance: 2_000.0,
-            shadows_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(-8.0, 4.0, -6.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
 }
 
 fn exit_on_close_request(

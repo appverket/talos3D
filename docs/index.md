@@ -46,6 +46,8 @@ Talos3D is currently oriented around:
   typed relations for higher-order domain structure
 - the MCP surface now exposes vocabulary discovery plus assembly and relation
   inspection/creation tools
+- viewport appearance and scene lighting are exposed through public renderer
+  and lighting state rather than hidden editor-only startup code
 - the geometry layer stays compatible with future definition DAGs, including
   parameterized paradigms like MultiSurf
 

@@ -659,7 +659,9 @@ fn collect_source_dependencies<T: Component>(
     out: &mut Vec<ElementId>,
     source_of: impl Fn(&T) -> ElementId,
 ) {
-    let mut query = world.try_query::<(&ElementId, &T)>().unwrap();
+    let Some(mut query) = world.try_query::<(&ElementId, &T)>() else {
+        return;
+    };
     for (feature_id, node) in query.iter(world) {
         if requested_ids.contains(&source_of(node)) {
             out.push(*feature_id);

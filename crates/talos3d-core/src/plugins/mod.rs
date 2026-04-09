@@ -19,6 +19,7 @@ pub mod import;
 pub mod inference;
 pub mod input_ownership;
 pub mod layers;
+pub mod lighting;
 pub mod material_browser;
 pub mod materials;
 pub mod math;
