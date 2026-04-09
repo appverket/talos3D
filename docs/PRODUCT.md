@@ -95,6 +95,33 @@ The platform should support:
 
 The platform should not lock itself to one representation style.
 
+### 6. Hosted and partner-extensible content catalogs
+
+Talos3D must support reusable content catalogs for both authored Definitions
+and material/texture assets.
+
+This is an explicit product requirement, not an optional deployment detail.
+
+The requirement is:
+
+- bundled repository content may provide bootstrap libraries, but it must not be
+  the only publication path
+- users, firms, and external partners must be able to publish new definition
+  libraries and texture/material catalogs without requiring a desktop reinstall
+  or browser client redeploy
+- local deployments may satisfy this through a local API service backed by
+  directory files
+- hosted deployments must be able to satisfy the same contract through backend
+  storage such as Firebase Firestore plus Storage, Supabase Postgres plus
+  Storage, or an equivalent service pair
+- the authored model, UI, and MCP surface must treat these catalogs as
+  first-class sources, not as ad hoc import side channels
+
+Example business cases include manufacturers publishing product families such as
+windows, doors, finishes, or fixtures directly into the ecosystem so those
+items can be selected during design and later flow into schedules, quantities,
+or bills of materials.
+
 ## Public Packaging Story
 
 Talos3D should be easy to explain publicly:

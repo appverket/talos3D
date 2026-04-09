@@ -36,6 +36,23 @@ The core platform owns:
 
 The core platform should not own discipline-specific entities.
 
+## Content Catalogs And Storage
+
+The platform distinguishes between:
+
+- bundled catalogs shipped with the app
+- project-local authored data persisted with the document
+- future remote catalogs or project stores provided by a backend
+
+Built-in reusable definitions should load from bundled data rather than
+desktop-only filesystem conventions. That keeps the same authored content model
+usable in native builds and browser deployments.
+
+Project persistence should cross an abstract storage boundary. A native setup
+can interpret storage keys as file paths, while a browser or hosted deployment
+can map the same operations to Firebase, Supabase, or another backend-owned
+store for accounts, projects, and shared catalogs.
+
 ## Capability Modules
 
 A capability can contribute:

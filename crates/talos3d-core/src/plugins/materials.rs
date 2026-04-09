@@ -15,6 +15,14 @@ use bevy::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO: &str =
+    "builtin.maibec.red_cedar_light_h2bo";
+pub const BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80: &str = "builtin.glass.blue_tint_glazing_80";
+
+pub fn is_builtin_material_id(id: &str) -> bool {
+    id.starts_with("builtin.")
+}
+
 // ─── Alpha mode ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -112,9 +120,29 @@ pub struct MaterialDef {
     pub metallic: f32,
     /// Specular reflectance at normal incidence (0–1).
     pub reflectance: f32,
+    /// Specular tint for non-metallic highlights.
+    pub specular_tint: [f32; 3],
     /// Emissive colour (RGB, HDR values > 1 allowed).
     pub emissive: [f32; 3],
     pub emissive_exposure_weight: f32,
+    /// Thin-surface diffuse transmission (translucency).
+    pub diffuse_transmission: f32,
+    /// Specular transmission / refraction.
+    pub specular_transmission: f32,
+    /// Thickness of the transmissive volume in metres.
+    pub thickness: f32,
+    /// Index of refraction.
+    pub ior: f32,
+    /// Average absorption distance through the transmissive volume.
+    pub attenuation_distance: f32,
+    /// Resulting color after travelling `attenuation_distance`.
+    pub attenuation_color: [f32; 3],
+    /// Strength of the clearcoat layer.
+    pub clearcoat: f32,
+    /// Roughness of the clearcoat layer.
+    pub clearcoat_perceptual_roughness: f32,
+    /// Strength of anisotropy in tangent space.
+    pub anisotropy_strength: f32,
 
     // --- Transparency ---
     pub alpha_mode: MaterialAlphaMode,
@@ -133,9 +161,17 @@ pub struct MaterialDef {
     pub uv_scale: [f32; 2],
     /// Additional UV rotation in radians.
     pub uv_rotation: f32,
+    /// Anisotropy direction in radians relative to the mesh tangent.
+    pub anisotropy_rotation: f32,
 
     // --- Double-sided rendering ---
     pub double_sided: bool,
+    /// Ignore lighting and render as pure base color/emissive.
+    pub unlit: bool,
+    /// Whether this material participates in scene fog.
+    pub fog_enabled: bool,
+    /// Bias applied to material depth to help with overlays and z-fighting.
+    pub depth_bias: f32,
 }
 
 impl Default for MaterialDef {
@@ -147,8 +183,18 @@ impl Default for MaterialDef {
             perceptual_roughness: 0.85,
             metallic: 0.0,
             reflectance: 0.5,
+            specular_tint: [1.0, 1.0, 1.0],
             emissive: [0.0, 0.0, 0.0],
             emissive_exposure_weight: 1.0,
+            diffuse_transmission: 0.0,
+            specular_transmission: 0.0,
+            thickness: 0.0,
+            ior: 1.5,
+            attenuation_distance: f32::INFINITY,
+            attenuation_color: [1.0, 1.0, 1.0],
+            clearcoat: 0.0,
+            clearcoat_perceptual_roughness: 0.5,
+            anisotropy_strength: 0.0,
             alpha_mode: MaterialAlphaMode::Opaque,
             alpha_cutoff: 0.5,
             base_color_texture: None,
@@ -158,7 +204,11 @@ impl Default for MaterialDef {
             occlusion_texture: None,
             uv_scale: [1.0, 1.0],
             uv_rotation: 0.0,
+            anisotropy_rotation: 0.0,
             double_sided: false,
+            unlit: false,
+            fog_enabled: true,
+            depth_bias: 0.0,
         }
     }
 }
@@ -182,7 +232,9 @@ impl MaterialDef {
         images: &mut Assets<Image>,
     ) -> StandardMaterial {
         let [r, g, b, a] = self.base_color;
+        let [sr, sg, sb] = self.specular_tint;
         let [er, eg, eb] = self.emissive;
+        let [ar, ag, ab] = self.attenuation_color;
 
         let uv_transform = if self.uv_scale != [1.0f32, 1.0f32] || self.uv_rotation != 0.0 {
             Affine2::from_scale_angle_translation(
@@ -212,6 +264,7 @@ impl MaterialDef {
                 .as_ref()
                 .and_then(|t| t.load(asset_server, images)),
             reflectance: self.reflectance,
+            specular_tint: Color::srgb(sr, sg, sb),
             normal_map_texture: self
                 .normal_map_texture
                 .as_ref()
@@ -220,6 +273,16 @@ impl MaterialDef {
                 .occlusion_texture
                 .as_ref()
                 .and_then(|t| t.load(asset_server, images)),
+            diffuse_transmission: self.diffuse_transmission,
+            specular_transmission: self.specular_transmission,
+            thickness: self.thickness,
+            ior: self.ior,
+            attenuation_distance: self.attenuation_distance,
+            attenuation_color: Color::srgb(ar, ag, ab),
+            clearcoat: self.clearcoat,
+            clearcoat_perceptual_roughness: self.clearcoat_perceptual_roughness,
+            anisotropy_strength: self.anisotropy_strength,
+            anisotropy_rotation: self.anisotropy_rotation,
             alpha_mode: self.alpha_mode.to_bevy(self.alpha_cutoff),
             double_sided: self.double_sided,
             cull_mode: if self.double_sided {
@@ -227,6 +290,9 @@ impl MaterialDef {
             } else {
                 Some(bevy::render::render_resource::Face::Back)
             },
+            unlit: self.unlit,
+            fog_enabled: self.fog_enabled,
+            depth_bias: self.depth_bias,
             uv_transform,
             ..default()
         }
@@ -369,6 +435,7 @@ impl Plugin for MaterialPlugin {
 
         app.init_resource::<MaterialRegistry>()
             .init_resource::<MaterialHandleCache>()
+            .add_systems(Startup, seed_builtin_materials)
             .add_systems(
                 Update,
                 (
@@ -423,6 +490,84 @@ impl Plugin for MaterialPlugin {
     }
 }
 
+pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
+    registry.upsert(MaterialDef {
+        id: BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO.to_string(),
+        name: "Maibec Red Cedar Light H2BO".to_string(),
+        base_color: [0.72, 0.57, 0.44, 1.0],
+        perceptual_roughness: 0.92,
+        metallic: 0.0,
+        reflectance: 0.32,
+        specular_tint: [0.98, 0.96, 0.93],
+        emissive: [0.0, 0.0, 0.0],
+        emissive_exposure_weight: 1.0,
+        diffuse_transmission: 0.0,
+        specular_transmission: 0.0,
+        thickness: 0.0,
+        ior: 1.45,
+        attenuation_distance: f32::INFINITY,
+        attenuation_color: [1.0, 1.0, 1.0],
+        clearcoat: 0.08,
+        clearcoat_perceptual_roughness: 0.34,
+        anisotropy_strength: 0.25,
+        alpha_mode: MaterialAlphaMode::Opaque,
+        alpha_cutoff: 0.5,
+        base_color_texture: Some(TextureRef::AssetPath(
+            "materials/maibec_red_cedar_light_h2bo/diffuse.png".to_string(),
+        )),
+        normal_map_texture: Some(TextureRef::AssetPath(
+            "materials/maibec_red_cedar_light_h2bo/normal_opengl.png".to_string(),
+        )),
+        metallic_roughness_texture: Some(TextureRef::AssetPath(
+            "materials/maibec_red_cedar_light_h2bo/roughness.png".to_string(),
+        )),
+        emissive_texture: None,
+        occlusion_texture: None,
+        uv_scale: [1.0, 1.0],
+        uv_rotation: 0.0,
+        anisotropy_rotation: 90.0_f32.to_radians(),
+        double_sided: false,
+        unlit: false,
+        fog_enabled: true,
+        depth_bias: 0.0,
+    });
+
+    registry.upsert(MaterialDef {
+        id: BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80.to_string(),
+        name: "Blue Tint Glazing 80%".to_string(),
+        base_color: [0.70, 0.84, 1.0, 0.8],
+        perceptual_roughness: 0.08,
+        metallic: 0.0,
+        reflectance: 0.18,
+        specular_tint: [0.88, 0.94, 1.0],
+        emissive: [0.0, 0.0, 0.0],
+        emissive_exposure_weight: 1.0,
+        diffuse_transmission: 0.0,
+        specular_transmission: 0.85,
+        thickness: 0.024,
+        ior: 1.52,
+        attenuation_distance: 0.5,
+        attenuation_color: [0.72, 0.88, 1.0],
+        clearcoat: 0.0,
+        clearcoat_perceptual_roughness: 0.03,
+        anisotropy_strength: 0.0,
+        alpha_mode: MaterialAlphaMode::Blend,
+        alpha_cutoff: 0.5,
+        base_color_texture: None,
+        normal_map_texture: None,
+        metallic_roughness_texture: None,
+        emissive_texture: None,
+        occlusion_texture: None,
+        uv_scale: [1.0, 1.0],
+        uv_rotation: 0.0,
+        anisotropy_rotation: 0.0,
+        double_sided: true,
+        unlit: false,
+        fog_enabled: true,
+        depth_bias: 0.0,
+    });
+}
+
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
 fn execute_apply_material_to_selection(
@@ -467,6 +612,10 @@ fn execute_toggle_materials_browser(
 }
 
 // ─── Systems ─────────────────────────────────────────────────────────────────
+
+fn seed_builtin_materials(mut registry: ResMut<MaterialRegistry>) {
+    ensure_builtin_materials(&mut registry);
+}
 
 /// When the registry changes, invalidate cached handles so they are rebuilt.
 fn rebuild_changed_material_handles(
@@ -571,4 +720,18 @@ fn uuid_v4() -> String {
     // Simple pseudo-random id based on memory address + time.
     let ptr = uuid_v4 as *const () as usize;
     format!("mat-{:x}-{:x}", ptr ^ (nanos as usize), nanos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_materials_are_seeded_with_stable_ids() {
+        let mut registry = MaterialRegistry::default();
+        ensure_builtin_materials(&mut registry);
+
+        assert!(registry.contains(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO));
+        assert!(registry.contains(BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80));
+    }
 }
