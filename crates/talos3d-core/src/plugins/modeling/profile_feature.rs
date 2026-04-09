@@ -689,9 +689,9 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
         requested_ids: &[ElementId],
         out: &mut Vec<ElementId>,
     ) {
-        let mut q = world
-            .try_query::<(&ElementId, &FaceProfileFeature)>()
-            .unwrap();
+        let Some(mut q) = world.try_query::<(&ElementId, &FaceProfileFeature)>() else {
+            return;
+        };
         for (feature_id, feature) in q.iter(world) {
             if requested_ids.contains(&feature.parent) {
                 out.push(*feature_id);

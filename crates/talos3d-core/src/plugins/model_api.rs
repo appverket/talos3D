@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "model-api")]
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
@@ -23,6 +22,7 @@ use crate::plugins::{
     history::{apply_pending_history_commands, HistorySet},
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
+    lighting::{create_daylight_rig, SceneLightNode, SceneLightingSettings},
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
@@ -505,6 +505,91 @@ fn default_uv_scale() -> [f32; 2] {
 pub struct ApplyMaterialRequest {
     pub material_id: String,
     pub element_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AmbientLightInfo {
+    pub color: [f32; 3],
+    pub brightness: f32,
+    pub affects_lightmapped_meshes: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneLightInfo {
+    pub element_id: u64,
+    pub name: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    pub shadows_enabled: bool,
+    pub position: [f32; 3],
+    pub yaw_deg: f32,
+    pub pitch_deg: f32,
+    pub range: f32,
+    pub radius: f32,
+    pub inner_angle_deg: f32,
+    pub outer_angle_deg: f32,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LightingSceneInfo {
+    pub ambient: AmbientLightInfo,
+    pub lights: Vec<SceneLightInfo>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateLightRequest {
+    pub kind: String,
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
+    pub color: Option<[f32; 3]>,
+    pub intensity: Option<f32>,
+    pub shadows_enabled: Option<bool>,
+    pub position: Option<[f32; 3]>,
+    pub yaw_deg: Option<f32>,
+    pub pitch_deg: Option<f32>,
+    pub range: Option<f32>,
+    pub radius: Option<f32>,
+    pub inner_angle_deg: Option<f32>,
+    pub outer_angle_deg: Option<f32>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct UpdateLightRequest {
+    pub element_id: u64,
+    pub name: Option<String>,
+    pub kind: Option<String>,
+    pub enabled: Option<bool>,
+    pub color: Option<[f32; 3]>,
+    pub intensity: Option<f32>,
+    pub shadows_enabled: Option<bool>,
+    pub position: Option<[f32; 3]>,
+    pub yaw_deg: Option<f32>,
+    pub pitch_deg: Option<f32>,
+    pub range: Option<f32>,
+    pub radius: Option<f32>,
+    pub inner_angle_deg: Option<f32>,
+    pub outer_angle_deg: Option<f32>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeleteLightRequest {
+    pub element_id: u64,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct AmbientLightUpdateRequest {
+    pub color: Option<[f32; 3]>,
+    pub brightness: Option<f32>,
+    pub affects_lightmapped_meshes: Option<bool>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -1062,6 +1147,27 @@ enum ModelApiRequest {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    GetLightingScene(oneshot::Sender<LightingSceneInfo>),
+    ListLights(oneshot::Sender<Vec<SceneLightInfo>>),
+    CreateLight {
+        request: CreateLightRequest,
+        response: oneshot::Sender<ApiResult<SceneLightInfo>>,
+    },
+    UpdateLight {
+        request: UpdateLightRequest,
+        response: oneshot::Sender<ApiResult<SceneLightInfo>>,
+    },
+    DeleteLight {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<usize>>,
+    },
+    SetAmbientLight {
+        request: AmbientLightUpdateRequest,
+        response: oneshot::Sender<ApiResult<AmbientLightInfo>>,
+    },
+    RestoreDefaultLightRig {
+        response: oneshot::Sender<ApiResult<Vec<SceneLightInfo>>>,
+    },
     GetRenderSettings(oneshot::Sender<RenderSettingsInfo>),
     SetRenderSettings {
         request: RenderSettingsUpdateRequest,
@@ -1516,6 +1622,30 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_remove_material(world, element_ids));
+        }
+        ModelApiRequest::GetLightingScene(response) => {
+            let _ = response.send(handle_get_lighting_scene(world));
+        }
+        ModelApiRequest::ListLights(response) => {
+            let _ = response.send(handle_list_lights(world));
+        }
+        ModelApiRequest::CreateLight { request, response } => {
+            let _ = response.send(handle_create_light(world, request));
+        }
+        ModelApiRequest::UpdateLight { request, response } => {
+            let _ = response.send(handle_update_light(world, request));
+        }
+        ModelApiRequest::DeleteLight {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_delete_light(world, element_id));
+        }
+        ModelApiRequest::SetAmbientLight { request, response } => {
+            let _ = response.send(handle_set_ambient_light(world, request));
+        }
+        ModelApiRequest::RestoreDefaultLightRig { response } => {
+            let _ = response.send(handle_restore_default_light_rig(world));
         }
         ModelApiRequest::GetRenderSettings(response) => {
             let _ = response.send(handle_get_render_settings(world));
@@ -2755,6 +2885,82 @@ impl ModelApiServer {
                 element_ids,
                 response,
             })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_lighting_scene(&self) -> Result<LightingSceneInfo, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetLightingScene(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_list_lights(&self) -> Result<Vec<SceneLightInfo>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListLights(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_create_light(&self, request: CreateLightRequest) -> ApiResult<SceneLightInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateLight { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_light(&self, request: UpdateLightRequest) -> ApiResult<SceneLightInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateLight { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_delete_light(&self, element_id: u64) -> ApiResult<usize> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DeleteLight {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_set_ambient_light(
+        &self,
+        request: AmbientLightUpdateRequest,
+    ) -> ApiResult<AmbientLightInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SetAmbientLight { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_restore_default_light_rig(&self) -> ApiResult<Vec<SceneLightInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::RestoreDefaultLightRig { response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -4761,6 +4967,102 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "get_lighting_scene",
+        description = "Get ambient scene lighting settings and all authored light entities."
+    )]
+    async fn get_lighting_scene_tool(&self) -> Result<CallToolResult, McpError> {
+        let lighting = self
+            .request_get_lighting_scene()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(lighting)
+    }
+
+    #[tool(
+        name = "list_lights",
+        description = "List all authored light entities in the current scene."
+    )]
+    async fn list_lights_tool(&self) -> Result<CallToolResult, McpError> {
+        let lights = self
+            .request_list_lights()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(lights)
+    }
+
+    #[tool(
+        name = "create_light",
+        description = "Create an authored light entity. kind must be directional, point, or spot."
+    )]
+    async fn create_light_tool(
+        &self,
+        Parameters(params): Parameters<CreateLightRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let light = self
+            .request_create_light(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(light)
+    }
+
+    #[tool(
+        name = "update_light",
+        description = "Update an authored light entity by element_id."
+    )]
+    async fn update_light_tool(
+        &self,
+        Parameters(params): Parameters<UpdateLightRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let light = self
+            .request_update_light(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(light)
+    }
+
+    #[tool(
+        name = "delete_light",
+        description = "Delete an authored light entity by element_id."
+    )]
+    async fn delete_light_tool(
+        &self,
+        Parameters(params): Parameters<DeleteLightRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let deleted = self
+            .request_delete_light(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(deleted)
+    }
+
+    #[tool(
+        name = "set_ambient_light",
+        description = "Update ambient scene lighting without changing authored light entities."
+    )]
+    async fn set_ambient_light_tool(
+        &self,
+        Parameters(params): Parameters<AmbientLightUpdateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let ambient = self
+            .request_set_ambient_light(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(ambient)
+    }
+
+    #[tool(
+        name = "restore_default_light_rig",
+        description = "Replace existing authored lights with the default daylight rig."
+    )]
+    async fn restore_default_light_rig_tool(&self) -> Result<CallToolResult, McpError> {
+        let lights = self
+            .request_restore_default_light_rig()
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(lights)
+    }
+
+    #[tool(
         name = "get_render_settings",
         description = "Get the current viewport renderer settings, including tonemapping, exposure, SSAO, bloom, and SSR controls."
     )]
@@ -6113,6 +6415,253 @@ fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Ve
         removed.push(eid);
     }
     Ok(removed)
+}
+
+#[cfg(feature = "model-api")]
+fn ambient_light_info_from_settings(settings: &SceneLightingSettings) -> AmbientLightInfo {
+    AmbientLightInfo {
+        color: settings.ambient_color,
+        brightness: settings.ambient_brightness,
+        affects_lightmapped_meshes: settings.affects_lightmapped_meshes,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn scene_light_info_from_parts(
+    element_id: ElementId,
+    node: &SceneLightNode,
+    transform: &Transform,
+) -> SceneLightInfo {
+    let (yaw, pitch, _roll) = transform.rotation.to_euler(EulerRot::YXZ);
+    SceneLightInfo {
+        element_id: element_id.0,
+        name: node.name.clone(),
+        kind: node.kind.as_str().to_string(),
+        enabled: node.enabled,
+        color: node.color,
+        intensity: node.intensity,
+        shadows_enabled: node.shadows_enabled,
+        position: transform.translation.to_array(),
+        yaw_deg: yaw.to_degrees(),
+        pitch_deg: pitch.to_degrees(),
+        range: node.range,
+        radius: node.radius,
+        inner_angle_deg: node.inner_angle_deg,
+        outer_angle_deg: node.outer_angle_deg,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn scene_light_info_from_world(world: &World, element_id: ElementId) -> Option<SceneLightInfo> {
+    let Some(mut query) = world.try_query::<(&ElementId, &SceneLightNode, &Transform)>() else {
+        return None;
+    };
+    query.iter(world).find_map(|(current_id, node, transform)| {
+        (*current_id == element_id)
+            .then(|| scene_light_info_from_parts(*current_id, node, transform))
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_lighting_scene(world: &World) -> LightingSceneInfo {
+    LightingSceneInfo {
+        ambient: ambient_light_info_from_settings(world.resource::<SceneLightingSettings>()),
+        lights: handle_list_lights(world),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn handle_list_lights(world: &World) -> Vec<SceneLightInfo> {
+    let Some(mut query) = world.try_query::<(&ElementId, &SceneLightNode, &Transform)>() else {
+        return Vec::new();
+    };
+    query
+        .iter(world)
+        .map(|(element_id, node, transform)| {
+            scene_light_info_from_parts(*element_id, node, transform)
+        })
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+fn handle_create_light(
+    world: &mut World,
+    request: CreateLightRequest,
+) -> Result<SceneLightInfo, String> {
+    let element_id = handle_create_entity(world, create_light_request_json(&request))?;
+    scene_light_info_from_world(world, ElementId(element_id))
+        .ok_or_else(|| format!("Light {element_id} was not found after creation"))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_update_light(
+    world: &mut World,
+    request: UpdateLightRequest,
+) -> Result<SceneLightInfo, String> {
+    let element_id = ElementId(request.element_id);
+    let before = capture_snapshot_by_id(world, element_id)?;
+    if before.type_name() != "scene_light" {
+        return Err(format!(
+            "Entity {} is not a scene light",
+            request.element_id
+        ));
+    }
+
+    let mut updated = before.clone();
+    if let Some(name) = request.name {
+        updated = updated.set_property_json("name", &json!(name))?;
+    }
+    if let Some(kind) = request.kind {
+        updated = updated.set_property_json("kind", &json!(kind))?;
+    }
+    if let Some(enabled) = request.enabled {
+        updated = updated.set_property_json("enabled", &json!(enabled))?;
+    }
+    if let Some(color) = request.color {
+        updated = updated.set_property_json("color", &json!(color))?;
+    }
+    if let Some(intensity) = request.intensity {
+        updated = updated.set_property_json("intensity", &json!(intensity))?;
+    }
+    if let Some(shadows_enabled) = request.shadows_enabled {
+        updated = updated.set_property_json("shadows_enabled", &json!(shadows_enabled))?;
+    }
+    if let Some(position) = request.position {
+        updated = updated.set_property_json("position", &json!(position))?;
+    }
+    if let Some(yaw_deg) = request.yaw_deg {
+        updated = updated.set_property_json("yaw_deg", &json!(yaw_deg))?;
+    }
+    if let Some(pitch_deg) = request.pitch_deg {
+        updated = updated.set_property_json("pitch_deg", &json!(pitch_deg))?;
+    }
+    if let Some(range) = request.range {
+        updated = updated.set_property_json("range", &json!(range))?;
+    }
+    if let Some(radius) = request.radius {
+        updated = updated.set_property_json("radius", &json!(radius))?;
+    }
+    if let Some(inner_angle_deg) = request.inner_angle_deg {
+        updated = updated.set_property_json("inner_angle_deg", &json!(inner_angle_deg))?;
+    }
+    if let Some(outer_angle_deg) = request.outer_angle_deg {
+        updated = updated.set_property_json("outer_angle_deg", &json!(outer_angle_deg))?;
+    }
+
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label: "AI update light",
+            before: vec![before],
+            after: vec![updated],
+        },
+    );
+    flush_model_api_write_pipeline(world);
+
+    scene_light_info_from_world(world, element_id)
+        .ok_or_else(|| format!("Light {} was not found after update", request.element_id))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_delete_light(world: &mut World, element_id: u64) -> Result<usize, String> {
+    scene_light_info_from_world(world, ElementId(element_id))
+        .ok_or_else(|| format!("Light {element_id} not found"))?;
+    handle_delete_entities(world, vec![element_id])
+}
+
+#[cfg(feature = "model-api")]
+fn handle_set_ambient_light(
+    world: &mut World,
+    request: AmbientLightUpdateRequest,
+) -> Result<AmbientLightInfo, String> {
+    let mut settings = world.resource::<SceneLightingSettings>().clone();
+    if let Some(color) = request.color {
+        settings.ambient_color = color;
+    }
+    if let Some(brightness) = request.brightness {
+        settings.ambient_brightness = brightness.max(0.0);
+    }
+    if let Some(affects_lightmapped_meshes) = request.affects_lightmapped_meshes {
+        settings.affects_lightmapped_meshes = affects_lightmapped_meshes;
+    }
+    let info = ambient_light_info_from_settings(&settings);
+    world.insert_resource(settings);
+    Ok(info)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_restore_default_light_rig(world: &mut World) -> Result<Vec<SceneLightInfo>, String> {
+    let existing_ids = handle_list_lights(world)
+        .into_iter()
+        .map(|light| light.element_id)
+        .collect::<Vec<_>>();
+    if !existing_ids.is_empty() {
+        handle_delete_entities(world, existing_ids)?;
+    }
+
+    send_event(
+        world,
+        BeginCommandGroup {
+            label: "Restore default light rig",
+        },
+    );
+    for snapshot in create_daylight_rig(world.resource::<ElementIdAllocator>()) {
+        send_event(
+            world,
+            CreateEntityCommand {
+                snapshot: snapshot.into(),
+            },
+        );
+    }
+    send_event(world, EndCommandGroup);
+    flush_model_api_write_pipeline(world);
+
+    Ok(handle_list_lights(world))
+}
+
+#[cfg(feature = "model-api")]
+fn create_light_request_json(request: &CreateLightRequest) -> Value {
+    let mut value = json!({
+        "type": "scene_light",
+        "kind": request.kind,
+    });
+    if let Some(name) = &request.name {
+        value["name"] = json!(name);
+    }
+    if let Some(enabled) = request.enabled {
+        value["enabled"] = json!(enabled);
+    }
+    if let Some(color) = request.color {
+        value["color"] = json!(color);
+    }
+    if let Some(intensity) = request.intensity {
+        value["intensity"] = json!(intensity);
+    }
+    if let Some(shadows_enabled) = request.shadows_enabled {
+        value["shadows_enabled"] = json!(shadows_enabled);
+    }
+    if let Some(position) = request.position {
+        value["position"] = json!(position);
+    }
+    if let Some(yaw_deg) = request.yaw_deg {
+        value["yaw_deg"] = json!(yaw_deg);
+    }
+    if let Some(pitch_deg) = request.pitch_deg {
+        value["pitch_deg"] = json!(pitch_deg);
+    }
+    if let Some(range) = request.range {
+        value["range"] = json!(range);
+    }
+    if let Some(radius) = request.radius {
+        value["radius"] = json!(radius);
+    }
+    if let Some(inner_angle_deg) = request.inner_angle_deg {
+        value["inner_angle_deg"] = json!(inner_angle_deg);
+    }
+    if let Some(outer_angle_deg) = request.outer_angle_deg {
+        value["outer_angle_deg"] = json!(outer_angle_deg);
+    }
+    value
 }
 
 #[cfg(feature = "model-api")]
@@ -10123,6 +10672,7 @@ mod tests {
         registry.register_factory(TriangleMeshFactory);
         registry.register_factory(FilletFactory);
         registry.register_factory(ChamferFactory);
+        registry.register_factory(crate::plugins::lighting::SceneLightFactory);
         registry.register_factory(crate::plugins::modeling::occurrence::OccurrenceFactory);
         world.insert_resource(registry);
         world.insert_resource(crate::plugins::modeling::definition::DefinitionRegistry::default());
@@ -10134,6 +10684,7 @@ mod tests {
         );
         world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
         world.insert_resource(RenderSettings::default());
+        world.insert_resource(SceneLightingSettings::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(crate::plugins::layers::LayerRegistry::default());
         world.insert_resource(crate::plugins::materials::MaterialRegistry::default());
@@ -11446,5 +11997,94 @@ mod tests {
         )
         .expect_err("invalid tonemapping should fail");
         assert!(error.contains("Unknown tonemapping mode"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn lighting_round_trip_and_restore_default_rig() {
+        let mut world = init_model_api_test_world();
+
+        let created = handle_create_light(
+            &mut world,
+            CreateLightRequest {
+                kind: "spot".to_string(),
+                name: Some("Workbench Spot".to_string()),
+                enabled: Some(true),
+                color: Some([0.7, 0.8, 1.0]),
+                intensity: Some(3200.0),
+                shadows_enabled: Some(true),
+                position: Some([2.0, 3.5, 1.0]),
+                yaw_deg: Some(-45.0),
+                pitch_deg: Some(-30.0),
+                range: Some(14.0),
+                radius: Some(0.12),
+                inner_angle_deg: Some(12.0),
+                outer_angle_deg: Some(24.0),
+            },
+        )
+        .expect("create_light should succeed");
+
+        assert_eq!(created.kind, "spot");
+        assert_eq!(created.name, "Workbench Spot");
+        assert_eq!(created.position, [2.0, 3.5, 1.0]);
+
+        let listed = handle_list_lights(&world);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].element_id, created.element_id);
+
+        let updated = handle_update_light(
+            &mut world,
+            UpdateLightRequest {
+                element_id: created.element_id,
+                name: Some("Workbench Fill".to_string()),
+                kind: Some("point".to_string()),
+                enabled: Some(false),
+                color: Some([1.0, 0.9, 0.75]),
+                intensity: Some(1800.0),
+                shadows_enabled: Some(false),
+                position: Some([1.0, 2.0, 3.0]),
+                yaw_deg: Some(0.0),
+                pitch_deg: Some(0.0),
+                range: Some(10.0),
+                radius: Some(0.3),
+                inner_angle_deg: Some(8.0),
+                outer_angle_deg: Some(18.0),
+            },
+        )
+        .expect("update_light should succeed");
+
+        assert_eq!(updated.name, "Workbench Fill");
+        assert_eq!(updated.kind, "point");
+        assert!(!updated.enabled);
+        assert_eq!(updated.position, [1.0, 2.0, 3.0]);
+        assert_eq!(updated.radius, 0.3);
+
+        let ambient = handle_set_ambient_light(
+            &mut world,
+            AmbientLightUpdateRequest {
+                color: Some([0.25, 0.3, 0.4]),
+                brightness: Some(18.0),
+                affects_lightmapped_meshes: Some(false),
+            },
+        )
+        .expect("ambient update should succeed");
+        assert_eq!(ambient.color, [0.25, 0.3, 0.4]);
+        assert_eq!(ambient.brightness, 18.0);
+        assert!(!ambient.affects_lightmapped_meshes);
+
+        let scene = handle_get_lighting_scene(&world);
+        assert_eq!(scene.lights.len(), 1);
+        assert_eq!(scene.ambient.color, [0.25, 0.3, 0.4]);
+
+        let restored =
+            handle_restore_default_light_rig(&mut world).expect("restore_default_light_rig works");
+        assert_eq!(restored.len(), 2);
+        assert!(restored.iter().any(|light| light.name == "Sun Key"));
+        assert!(restored.iter().any(|light| light.name == "Sky Fill"));
+
+        let removed = handle_delete_light(&mut world, restored[0].element_id)
+            .expect("delete_light should succeed");
+        assert_eq!(removed, 1);
+        assert_eq!(handle_list_lights(&world).len(), 1);
     }
 }

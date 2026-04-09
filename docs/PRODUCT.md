@@ -67,6 +67,10 @@ through the same public command substrate the UI uses.
 That MCP surface now also exposes vocabulary discovery and assembly/relation
 operations, which makes domain-level structure more legible to external tools.
 
+It also exposes viewport appearance and scene-lighting controls so agents can
+reason about visual presentation through structured state instead of hidden
+editor startup logic.
+
 ### 3. Pluggability and extensibility
 
 Talos3D is intentionally designed so domain functionality can be:
