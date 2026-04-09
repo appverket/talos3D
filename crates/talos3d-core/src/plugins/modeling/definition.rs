@@ -587,6 +587,7 @@ impl Definition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefinitionLibraryScope {
     DocumentLocal,
+    Bundled,
     ExternalFile,
 }
 

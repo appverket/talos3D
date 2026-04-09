@@ -25,6 +25,13 @@ The intended operating model is:
 - reference domain packs in this repository
 - room for community, private, and commercial extensions outside it
 
+Built-in definition catalogs are now bundled into the app and auto-loaded at
+startup. That keeps reusable authored content available in native and browser
+deployments without depending on a local filesystem convention. Project save
+and load still persist user-authored materials, definitions, and entities, but
+the storage boundary is intentionally abstract so backend-owned project storage
+can replace local files later.
+
 ## Featured: MCP Model API
 
 Talos3D includes a structured Model Context Protocol surface for AI agents and
@@ -55,6 +62,9 @@ Start with [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md).
   than becoming an opaque mesh.
 - One command surface: keyboard, toolbar, menu, command palette, automation,
   and MCP all converge on the same command substrate.
+- Browser-safe content catalogs: built-in reusable definitions load from
+  bundled app data, while project-local materials and authored data remain
+  serializable for future backend-backed deployments.
 
 ## Current Scope
 

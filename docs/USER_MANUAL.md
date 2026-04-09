@@ -5,6 +5,10 @@
 This manual describes the current interaction model at a high level. The exact
 available tools depend on which capabilities and setups are loaded.
 
+Built-in definition libraries ship with the app and appear automatically in the
+Definitions browser when Talos3D starts. Imported or project-local definitions
+remain part of the saved document.
+
 ## Core Interaction Pattern
 
 - Select with the mouse
@@ -78,6 +82,26 @@ The status bar reports:
 - contextual command hints
 - transform and face-edit state
 - validation or feedback messages
+
+## Definitions And Materials
+
+The Definitions browser shows reusable authored families from two sources:
+
+- bundled libraries that ship with the app
+- project-local or imported libraries saved with the document
+
+Material textures can either reference bundled app assets or embed image data
+directly in the project. That keeps materials portable across native and
+browser deployments even before a backend-hosted catalog exists.
+
+The Materials window now exposes more of the physically based material model:
+specular tint, transmission, thickness, IOR, attenuation, clearcoat,
+anisotropy, fog participation, and depth bias are available alongside the
+existing base color and texture controls.
+
+The View menu also exposes a Renderer window for direct control over
+tonemapping, exposure, ambient occlusion, bloom, and screen-space reflections.
+The same renderer state is available over MCP for agent-driven workflows.
 
 ## Capability-Specific Workflows
 
