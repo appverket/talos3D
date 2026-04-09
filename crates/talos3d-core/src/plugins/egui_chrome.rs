@@ -14,17 +14,22 @@ use crate::plugins::{
         ordered_menu_categories, queue_command_invocation_resource, CommandDescriptor,
         CommandRegistry, IconRegistry, PendingCommandInvocations,
     },
-    commands::ApplyEntityChangesCommand,
+    commands::{
+        ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
+        EndCommandGroup,
+    },
     cursor::{CursorWorldPos, ViewportUiInset},
     definition_browser::{
         draw_definitions_window, sync_definition_selection_context, DefinitionSelectionContext,
         DefinitionsWindowState,
     },
     document_properties::DocumentProperties,
+    identity::{ElementId, ElementIdAllocator},
     import::{
         apply_import_review_to_pending, DocumentImportPlacementState, ImportOriginMode,
         ImportProgressState, ImportReviewState, ImportedLayerPanelState, PendingImportCommit,
     },
+    lighting::{create_daylight_rig, SceneLightNode, SceneLightSnapshot, SceneLightingSettings},
     material_browser::{draw_materials_window, MaterialsWindowState},
     materials::MaterialRegistry,
     menu_bar::MenuBarState,
@@ -84,6 +89,7 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<ToolbarDragState>()
         .init_resource::<ViewportContextMenu>()
         .init_resource::<MaterialsWindowState>()
+        .init_resource::<LightingWindowState>()
         .init_resource::<RenderSettingsWindowState>()
         .add_systems(
             Update,
@@ -111,6 +117,11 @@ struct ViewportContextMenu {
 
 #[derive(Resource, Default, Debug, Clone)]
 pub struct RenderSettingsWindowState {
+    pub visible: bool,
+}
+
+#[derive(Resource, Default, Debug, Clone)]
+pub struct LightingWindowState {
     pub visible: bool,
 }
 
@@ -158,6 +169,7 @@ struct ToolbarRenderContext<'a, 'w, 's> {
 
 #[derive(SystemParam)]
 struct ChromeData<'w, 's> {
+    commands: Commands<'w, 's>,
     camera_controls: ResMut<'w, CameraControlsState>,
     command_registry: Res<'w, CommandRegistry>,
     icon_registry: Res<'w, IconRegistry>,
@@ -178,10 +190,17 @@ struct ChromeData<'w, 's> {
     cursor_world_pos: Res<'w, CursorWorldPos>,
     definitions_window_state: ResMut<'w, DefinitionsWindowState>,
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
+    lighting_window_state: ResMut<'w, LightingWindowState>,
+    lighting_settings: ResMut<'w, SceneLightingSettings>,
     materials_window_state: ResMut<'w, MaterialsWindowState>,
     material_registry: ResMut<'w, MaterialRegistry>,
     render_settings: ResMut<'w, RenderSettings>,
     render_settings_window_state: ResMut<'w, RenderSettingsWindowState>,
+    element_id_allocator: Res<'w, ElementIdAllocator>,
+    create_entity_commands: ResMut<'w, Messages<CreateEntityCommand>>,
+    delete_entities_commands: ResMut<'w, Messages<DeleteEntitiesCommand>>,
+    begin_command_groups: ResMut<'w, Messages<BeginCommandGroup>>,
+    end_command_groups: ResMut<'w, Messages<EndCommandGroup>>,
     asset_server: Res<'w, AssetServer>,
     images: ResMut<'w, Assets<Image>>,
     definition_registry: Res<'w, DefinitionRegistry>,
@@ -190,6 +209,8 @@ struct ChromeData<'w, 's> {
         ResMut<'w, crate::plugins::definition_authoring::DefinitionDraftRegistry>,
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
+    selected_entities: Query<'w, 's, Entity, With<Selected>>,
+    light_query: Query<'w, 's, (Entity, &'static ElementId, &'static SceneLightNode)>,
     property_edit_state: ResMut<'w, PropertyEditState>,
     property_panel_state: ResMut<'w, PropertyPanelState>,
     property_panel_data: Res<'w, PropertyPanelData>,
@@ -266,6 +287,11 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 }
                             }
                             if category.label() == "View" {
+                                ui.separator();
+                                if ui.button("Lights...").clicked() {
+                                    data.lighting_window_state.visible = true;
+                                    ui.close();
+                                }
                                 ui.separator();
                                 if ui.button("Renderer...").clicked() {
                                     data.render_settings_window_state.visible = true;
@@ -394,6 +420,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.images,
         &mut data.pending_command_invocations,
     );
+    draw_lighting_window(&ctx, &mut data);
     draw_render_settings_window(
         &ctx,
         &mut data.render_settings_window_state,
@@ -2114,6 +2141,183 @@ fn draw_render_settings_window(
                 });
             });
         });
+}
+
+fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
+    if !data.lighting_window_state.visible {
+        return;
+    }
+
+    let mut lights = data
+        .light_query
+        .iter()
+        .map(|(entity, element_id, node)| (entity, *element_id, node.clone()))
+        .collect::<Vec<_>>();
+    lights.sort_by(|left, right| left.2.name.cmp(&right.2.name));
+    let selected_entities = data
+        .selected_entities
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+
+    egui::Window::new("Lights")
+        .open(&mut data.lighting_window_state.visible)
+        .default_width(380.0)
+        .default_height(420.0)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Lights are authored entities. Create them here, then edit details through the Properties panel or MCP.",
+                )
+                .small()
+                .color(CHROME_MUTED),
+            );
+            ui.add_space(8.0);
+
+            ui.collapsing("Ambient", |ui| {
+                draw_rgb_triplet(ui, "Ambient Color", &mut data.lighting_settings.ambient_color);
+                ui.add(
+                    egui::Slider::new(&mut data.lighting_settings.ambient_brightness, 0.0..=200.0)
+                        .text("Brightness"),
+                );
+                ui.checkbox(
+                    &mut data.lighting_settings.affects_lightmapped_meshes,
+                    "Affect lightmapped meshes",
+                );
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Daylight Rig").clicked() {
+                    data.begin_command_groups.write(BeginCommandGroup {
+                        label: "Create daylight rig",
+                    });
+                    for snapshot in create_daylight_rig(&data.element_id_allocator) {
+                        data.create_entity_commands
+                            .write(CreateEntityCommand { snapshot: snapshot.into() });
+                    }
+                    data.end_command_groups.write(EndCommandGroup);
+                }
+                if ui.button("Add Sun").clicked() {
+                    data.create_entity_commands.write(CreateEntityCommand {
+                        snapshot: SceneLightSnapshot::default_directional(
+                            &data.element_id_allocator,
+                            "Directional Light",
+                            Vec3::new(10.0, 20.0, 8.0),
+                            Vec3::ZERO,
+                            [1.0, 0.97, 0.88],
+                            8_000.0,
+                            true,
+                        )
+                        .into(),
+                    });
+                }
+                if ui.button("Add Point").clicked() {
+                    data.create_entity_commands.write(CreateEntityCommand {
+                        snapshot: SceneLightSnapshot::default_point(
+                            &data.element_id_allocator,
+                            "Point Light",
+                            Vec3::new(0.0, 4.0, 0.0),
+                        )
+                        .into(),
+                    });
+                }
+                if ui.button("Add Spot").clicked() {
+                    data.create_entity_commands.write(CreateEntityCommand {
+                        snapshot: SceneLightSnapshot::default_spot(
+                            &data.element_id_allocator,
+                            "Spot Light",
+                            Vec3::new(4.0, 5.0, 4.0),
+                            Vec3::ZERO,
+                        )
+                        .into(),
+                    });
+                }
+            });
+
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("lights_window_list")
+                .show(ui, |ui| {
+                    for (entity, element_id, node) in &lights {
+                        let selected = selected_entities.contains(entity);
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new(&node.name).strong());
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} | id {}",
+                                            node.kind.as_str(),
+                                            element_id.0
+                                        ))
+                                        .small()
+                                        .color(CHROME_MUTED),
+                                    );
+                                });
+                                if selected {
+                                    ui.label(
+                                        egui::RichText::new("Selected")
+                                            .small()
+                                            .color(CHROME_TEXT),
+                                    );
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Delete").clicked() {
+                                            data.delete_entities_commands.write(DeleteEntitiesCommand {
+                                                element_ids: vec![*element_id],
+                                            });
+                                        }
+                                        if ui.small_button("Select").clicked() {
+                                            replace_selection(
+                                                &mut data.commands,
+                                                &data.light_query,
+                                                element_id,
+                                            );
+                                        }
+                                    },
+                                );
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
+                    if lights.is_empty() {
+                        ui.label(
+                            egui::RichText::new(
+                                "No authored lights yet. Add one here or restore the daylight rig.",
+                            )
+                            .italics()
+                            .color(CHROME_MUTED),
+                        );
+                    }
+                });
+        });
+}
+
+fn draw_rgb_triplet(ui: &mut egui::Ui, label: &str, value: &mut [f32; 3]) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for channel in value.iter_mut() {
+            ui.add(egui::DragValue::new(channel).speed(0.01).range(0.0..=4.0));
+        }
+    });
+}
+
+fn replace_selection(
+    commands: &mut Commands,
+    light_query: &Query<(Entity, &ElementId, &SceneLightNode)>,
+    target: &ElementId,
+) {
+    for (entity, _, _) in light_query.iter() {
+        commands.entity(entity).remove::<Selected>();
+    }
+    if let Some((entity, _, _)) = light_query
+        .iter()
+        .find(|(_, element_id, _)| **element_id == *target)
+    {
+        commands.entity(entity).insert(Selected);
+    }
 }
 
 fn tonemapping_label(tonemapping: RenderTonemapping) -> &'static str {

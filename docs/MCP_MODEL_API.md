@@ -47,6 +47,10 @@ Viewport renderer state is also available over MCP through
 tonemapping, exposure, SSAO, bloom, and SSR controls so an agent can tune the
 working view without simulating UI input.
 
+Scene lighting is also available over MCP. Ambient lighting is explicit scene
+state, while directional, point, and spot lights are authored entities with
+stable element ids and editable properties.
+
 ## Running Talos3D With MCP Enabled
 
 Start the app with the `model-api` feature:
@@ -141,6 +145,15 @@ For fillet/chamfer specifically:
 - `invoke_command`
 - `get_selection`
 - `set_selection`
+- `get_render_settings`
+- `set_render_settings`
+- `get_lighting_scene`
+- `list_lights`
+- `create_light`
+- `update_light`
+- `delete_light`
+- `set_ambient_light`
+- `restore_default_light_rig`
 
 ### Groups and layers
 
@@ -162,6 +175,55 @@ For fillet/chamfer specifically:
 
 `model_summary` now also reports `assembly_counts` and `relation_counts` in
 addition to entity counts and capability-defined metrics.
+
+## Lighting And Viewport Lookdev
+
+The renderer and lighting surfaces are intentionally agent-facing:
+
+- renderer tuning lives in `get_render_settings` and `set_render_settings`
+- ambient scene lighting lives in `get_lighting_scene` and `set_ambient_light`
+- authored lights live in `list_lights`, `create_light`, `update_light`, and
+  `delete_light`
+- the startup/default daylight setup is recoverable through
+  `restore_default_light_rig`
+
+Lighting is treated as authored scene state rather than a private startup
+fixture. That means:
+
+- agents can inspect and modify the active lighting contract directly
+- user-created light rigs persist with the project
+- the same concepts work in desktop and browser-hosted deployments
+
+Light creation/update currently supports:
+
+- `kind`: `directional`, `point`, or `spot`
+- `name`
+- `enabled`
+- `color`
+- `intensity`
+- `position`
+- `yaw_deg` and `pitch_deg`
+- `shadows_enabled`
+- `range` and `radius`
+- `inner_angle_deg` and `outer_angle_deg` for spot lights
+
+Example spot light creation:
+
+```json
+{
+  "kind": "spot",
+  "name": "Accent Rim",
+  "position": [-3.0, 4.5, 3.5],
+  "yaw_deg": 45.0,
+  "pitch_deg": -32.0,
+  "color": [0.72, 0.82, 1.0],
+  "intensity": 3600.0,
+  "range": 18.0,
+  "inner_angle_deg": 12.0,
+  "outer_angle_deg": 24.0,
+  "shadows_enabled": true
+}
+```
 
 Semantic assemblies are authored records, distinct from editing groups. They
 are intended as a first step toward domain structures such as rooms, storeys,

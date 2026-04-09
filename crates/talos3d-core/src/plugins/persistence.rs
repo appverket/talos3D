@@ -14,6 +14,7 @@ use crate::{
         history::{History, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         layers::LayerRegistry,
+        lighting::{ensure_default_lighting_scene, SceneLightingSettings},
         materials::{ensure_builtin_materials, is_builtin_material_id, MaterialRegistry},
         modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
         named_views::NamedViewRegistry,
@@ -72,6 +73,8 @@ struct ProjectFile {
     definition_libraries: Option<DefinitionLibraryRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     named_views: Option<NamedViewRegistry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lighting: Option<SceneLightingSettings>,
     entities: Vec<PersistedEntityRecord>,
 }
 
@@ -211,7 +214,9 @@ pub fn new_document(world: &mut World) {
         }
     }
     world.insert_resource(NamedViewRegistry::default());
+    world.insert_resource(SceneLightingSettings::default());
     world.resource_mut::<ElementIdAllocator>().set_next(1);
+    ensure_default_lighting_scene(world);
     world.resource_mut::<History>().clear();
     world.resource_mut::<PendingCommandQueue>().clear();
     world.resource_mut::<PropertyEditState>().clear();
@@ -328,6 +333,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     } else {
         Some(named_view_registry)
     };
+    let lighting = Some(world.resource::<SceneLightingSettings>().clone());
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
@@ -338,6 +344,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         definitions,
         definition_libraries,
         named_views,
+        lighting,
         entities,
     })
 }
@@ -352,6 +359,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
 
     clear_scene(world);
 
+    let had_lighting = project.lighting.is_some();
     let doc_props = match project.document_properties {
         Some(props) => props,
         None => {
@@ -376,6 +384,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
     }
     world.insert_resource(project.named_views.unwrap_or_default());
+    world.insert_resource(project.lighting.unwrap_or_default());
 
     let registry = world.resource::<CapabilityRegistry>();
     let mut recognized = Vec::new();
@@ -396,6 +405,9 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
 
     world.insert_resource(OpaquePersistedEntities(opaque));
+    if !had_lighting {
+        ensure_default_lighting_scene(world);
+    }
     world
         .resource_mut::<ElementIdAllocator>()
         .set_next(project.next_element_id);

@@ -32,6 +32,10 @@ and load still persist user-authored materials, definitions, and entities, but
 the storage boundary is intentionally abstract so backend-owned project storage
 can replace local files later.
 
+Scene lighting is now handled the same way: the default daylight rig is seeded
+through authored light entities, ambient lighting is explicit scene state, and
+the same lighting contract is available to both UI workflows and MCP clients.
+
 ## Featured: MCP Model API
 
 Talos3D includes a structured Model Context Protocol surface for AI agents and
@@ -74,6 +78,8 @@ Talos3D already includes:
 - a modeling capability with primitives, transforms, groups, face editing, and
   profile-based solids
 - authored fillet and chamfer features with command and MCP-driven editing
+- authored scene lighting with persistent ambient state, recoverable default
+  rig, and MCP light-management tools
 - an architectural capability with walls, openings, BIM metadata, and
   wall-opening rules
 - an MCP-backed model API
