@@ -3,9 +3,15 @@ use std::collections::HashMap;
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
+#[cfg(feature = "model-api")]
+use crate::plugins::model_api::ModelApiRuntimeInfo;
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{overlay_text as perf_overlay_text, PerfStats};
 use crate::plugins::{
+    assistant_chat::{
+        draw_assistant_window, AssistantChatState, AssistantWindowState, PendingAssistantJob,
+        ASSISTANT_PANEL_WIDTH,
+    },
     camera::{
         focal_length_range_mm, CameraControlsState, CameraProjectionMode, CameraViewPreset,
         CAMERA_TOOLBAR_ID,
@@ -188,6 +194,9 @@ struct ChromeData<'w, 's> {
     layer_registry: ResMut<'w, crate::plugins::layers::LayerRegistry>,
     layer_state: ResMut<'w, crate::plugins::layers::LayerState>,
     cursor_world_pos: Res<'w, CursorWorldPos>,
+    assistant_chat_state: ResMut<'w, AssistantChatState>,
+    assistant_window_state: ResMut<'w, AssistantWindowState>,
+    pending_assistant_job: Res<'w, PendingAssistantJob>,
     definitions_window_state: ResMut<'w, DefinitionsWindowState>,
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
     lighting_window_state: ResMut<'w, LightingWindowState>,
@@ -223,6 +232,8 @@ struct ChromeData<'w, 's> {
     egui_wants_input: ResMut<'w, EguiWantsInput>,
     drag_state: ResMut<'w, ToolbarDragState>,
     viewport_context_menu: ResMut<'w, ViewportContextMenu>,
+    #[cfg(feature = "model-api")]
+    model_api_runtime_info: Option<Res<'w, ModelApiRuntimeInfo>>,
     #[cfg(feature = "perf-stats")]
     perf_stats: Res<'w, PerfStats>,
 }
@@ -287,6 +298,11 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 }
                             }
                             if category.label() == "View" {
+                                ui.separator();
+                                if ui.button("Assistant...").clicked() {
+                                    data.assistant_window_state.visible = true;
+                                    ui.close();
+                                }
                                 ui.separator();
                                 if ui.button("Lights...").clicked() {
                                     data.lighting_window_state.visible = true;
@@ -420,6 +436,14 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.images,
         &mut data.pending_command_invocations,
     );
+    let assistant_mcp_url = default_assistant_mcp_url(&data).map(str::to_string);
+    draw_assistant_window(
+        &ctx,
+        data.assistant_chat_state.as_mut(),
+        data.assistant_window_state.as_mut(),
+        &data.pending_assistant_job,
+        assistant_mcp_url.as_deref(),
+    );
     draw_lighting_window(&ctx, &mut data);
     draw_render_settings_window(
         &ctx,
@@ -542,8 +566,13 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
 
     // Position in top-right of the available area
     let available = ctx.available_rect();
+    let assistant_offset = if data.assistant_window_state.visible {
+        ASSISTANT_PANEL_WIDTH + 12.0
+    } else {
+        0.0
+    };
     let default_pos = egui::pos2(
-        available.max.x - PROPERTY_PANEL_WIDTH - 8.0,
+        available.max.x - PROPERTY_PANEL_WIDTH - assistant_offset - 8.0,
         available.min.y + 8.0,
     );
 
@@ -720,6 +749,19 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         .map(|r| r.response.contains_pointer())
         .unwrap_or(false)
         || ctx.wants_keyboard_input();
+}
+
+fn default_assistant_mcp_url<'a>(data: &'a ChromeData) -> Option<&'a str> {
+    #[cfg(feature = "model-api")]
+    {
+        data.model_api_runtime_info
+            .as_ref()
+            .map(|runtime_info| runtime_info.http_url.as_str())
+    }
+    #[cfg(not(feature = "model-api"))]
+    {
+        None
+    }
 }
 
 fn draw_import_review_window(ctx: &egui::Context, data: &mut ChromeData) {

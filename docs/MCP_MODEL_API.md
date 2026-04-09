@@ -267,6 +267,11 @@ The MCP surface follows these rules:
 This is what allows Talos3D to be AI-first without relying on private editor
 hooks.
 
+The embedded Assistant chat lane follows the same rule. It does not receive a
+private bypass API. Instead it uses the MCP endpoint through a generic
+`mcp_list_tools` / `mcp_call_tool` bridge, which keeps in-editor automation
+aligned with external agents.
+
 ## For Capability Authors
 
 Capability packs should contribute enough metadata that MCP clients can:

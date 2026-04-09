@@ -88,6 +88,9 @@ model, not as a permanently privileged built-in layer.
 Toolbar buttons, shortcuts, menus, the command palette, automation, tests, and
 the MCP model API all converge on the same command substrate.
 
+The embedded assistant chat lane follows the same rule: it is a client of MCP,
+not a privileged internal bypass.
+
 ### 5. Multiple modeling paradigms can coexist
 
 The platform should support:
@@ -125,6 +128,20 @@ Example business cases include manufacturers publishing product families such as
 windows, doors, finishes, or fixtures directly into the ecosystem so those
 items can be selected during design and later flow into schedules, quantities,
 or bills of materials.
+
+## Embedded Assistant Delivery Model
+
+Talos3D can host an in-app assistant, but that assistant must remain compatible
+with both local and hosted deployments.
+
+The delivery model is:
+
+- in-app chat is a first-class UI surface
+- model inspection and edits still flow through MCP
+- browser/SaaS deployments should prefer a managed relay so provider access and
+  account policy stay server-side
+- direct vendor API keys may exist as a local fallback, but they are not the
+  preferred browser deployment model
 
 ## Public Packaging Story
 
