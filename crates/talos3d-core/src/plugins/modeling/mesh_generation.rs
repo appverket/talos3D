@@ -5,6 +5,7 @@ use bevy::{
 };
 
 use crate::plugins::modeling::{
+    array::EvaluatedArray,
     csg::EvaluatedCsg,
     editable_mesh::EditableMesh,
     group::GroupEditMuted,
@@ -65,6 +66,12 @@ type EvaluatedMirrorQueryItem<'a> = (
     Option<&'a Mesh3d>,
     Option<&'a MeshMaterial3d<StandardMaterial>>,
 );
+type EvaluatedArrayQueryItem<'a> = (
+    Entity,
+    &'a EvaluatedArray,
+    Option<&'a Mesh3d>,
+    Option<&'a MeshMaterial3d<StandardMaterial>>,
+);
 
 /// System set for the evaluation pipeline (CSG, constraints, etc.).
 /// Runs after history commands are applied, before mesh generation.
@@ -116,6 +123,7 @@ impl Plugin for ModelingMeshPlugin {
                     spawn_evaluated_csg_meshes,
                     spawn_evaluated_feature_meshes,
                     spawn_evaluated_mirror_meshes,
+                    spawn_evaluated_array_meshes,
                     draw_polylines,
                 )
                     .in_set(MeshGenerationSet::Generate),
@@ -446,6 +454,55 @@ fn spawn_evaluated_mirror_meshes(
 }
 
 fn evaluated_mirror_to_mesh(evaluated: &EvaluatedMirror) -> Mesh {
+    let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
+    let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; positions.len()]);
+    mesh.insert_indices(Indices::U32(evaluated.indices.clone()));
+    mesh
+}
+
+fn spawn_evaluated_array_meshes(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    primitive_material: Res<PrimitiveMaterial>,
+    query: Query<EvaluatedArrayQueryItem, With<NeedsMesh>>,
+    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
+) {
+    #[cfg(feature = "perf-stats")]
+    let mut regenerated = 0usize;
+    for (entity, evaluated, mesh_handle, material_handle) in &query {
+        if evaluated.vertices.is_empty() {
+            commands.entity(entity).remove::<NeedsMesh>();
+            continue;
+        }
+        let mesh = evaluated_array_to_mesh(evaluated);
+        upsert_mesh_entity(
+            &mut commands,
+            &mut meshes,
+            (entity, mesh_handle, material_handle),
+            mesh,
+            primitive_material.0.clone(),
+            Transform::IDENTITY,
+        );
+        #[cfg(feature = "perf-stats")]
+        {
+            regenerated += 1;
+        }
+    }
+    #[cfg(feature = "perf-stats")]
+    if regenerated > 0 {
+        add_mesh_regen_count(&mut perf_stats, regenerated);
+    }
+}
+
+fn evaluated_array_to_mesh(evaluated: &EvaluatedArray) -> Mesh {
     let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
     let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
 
