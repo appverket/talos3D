@@ -15,6 +15,7 @@ use crate::{
         layers::LayerRegistry,
         materials::MaterialRegistry,
         modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+        named_views::NamedViewRegistry,
         property_edit::PropertyEditState,
         selection::Selected,
         tools::{ActiveTool, Preview},
@@ -67,6 +68,8 @@ struct ProjectFile {
     definitions: Option<DefinitionRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     definition_libraries: Option<DefinitionLibraryRegistry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    named_views: Option<NamedViewRegistry>,
     entities: Vec<PersistedEntityRecord>,
 }
 
@@ -197,6 +200,7 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(MaterialRegistry::default());
     world.insert_resource(DefinitionRegistry::default());
     world.insert_resource(DefinitionLibraryRegistry::default());
+    world.insert_resource(NamedViewRegistry::default());
     world.resource_mut::<ElementIdAllocator>().set_next(1);
     world.resource_mut::<History>().clear();
     world.resource_mut::<PendingCommandQueue>().clear();
@@ -296,6 +300,12 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     } else {
         Some(definition_library_registry)
     };
+    let named_view_registry = world.resource::<NamedViewRegistry>().clone();
+    let named_views = if named_view_registry.views.is_empty() {
+        None
+    } else {
+        Some(named_view_registry)
+    };
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
@@ -305,6 +315,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         materials,
         definitions,
         definition_libraries,
+        named_views,
         entities,
     })
 }
@@ -334,6 +345,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world.insert_resource(project.materials.unwrap_or_default());
     world.insert_resource(project.definitions.unwrap_or_default());
     world.insert_resource(project.definition_libraries.unwrap_or_default());
+    world.insert_resource(project.named_views.unwrap_or_default());
 
     let registry = world.resource::<CapabilityRegistry>();
     let mut recognized = Vec::new();
