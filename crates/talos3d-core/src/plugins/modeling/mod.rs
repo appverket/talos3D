@@ -2,6 +2,7 @@ pub mod assembly;
 pub mod bsp_csg;
 pub mod composite_solid;
 pub mod csg;
+pub mod mirror;
 pub mod definition;
 pub mod editable_mesh;
 pub mod generic_factory;
@@ -97,6 +98,7 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(TriangleMeshFactory)
             .register_authored_entity_factory(EditableMeshFactory)
             .register_authored_entity_factory(CsgFactory)
+            .register_authored_entity_factory(mirror::MirrorFactory)
             .register_authored_entity_factory(FaceProfileFeatureFactory)
             .register_authored_entity_factory(assembly::AssemblyFactory)
             .register_authored_entity_factory(assembly::RelationFactory)
@@ -491,6 +493,44 @@ impl Plugin for ModelingPlugin {
                 },
                 execute_boolean_intersection,
             )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.mirror_create".to_string(),
+                    label: "Mirror".to_string(),
+                    description: "Create a mirror of the selected entity across a plane"
+                        .to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: Some("icon.mirror".to_string()),
+                    hint: Some("Select entity, then apply".to_string()),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_mirror_create,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.mirror_copy".to_string(),
+                    label: "Mirror Copy".to_string(),
+                    description: "Create an independent mirrored copy of the selected entity"
+                        .to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: Some("icon.mirror_copy".to_string()),
+                    hint: Some("Select entity, then apply".to_string()),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_mirror_copy,
+            )
             .add_plugins(mesh_generation::ModelingMeshPlugin)
             .add_plugins(tools::ModelingToolPlugin)
             .add_systems(
@@ -499,6 +539,8 @@ impl Plugin for ModelingPlugin {
                     propagate_definition_changes_with_commands,
                     csg::propagate_operand_changes,
                     csg::evaluate_csg_nodes,
+                    mirror::propagate_mirror_source_changes,
+                    mirror::evaluate_mirror_nodes,
                     profile_feature::propagate_feature_parent_changes,
                     profile_feature::evaluate_face_profile_features,
                     evaluate_occurrences,
@@ -710,4 +752,70 @@ fn execute_boolean_op(world: &mut World, op: bsp_csg::BooleanOp) -> Result<Comma
         });
 
     Ok(CommandResult::empty())
+}
+
+fn execute_mirror_create(world: &mut World, _params: &Value) -> Result<CommandResult, String> {
+    use crate::authored_entity::AuthoredEntity;
+    use crate::plugins::{
+        commands::CreateEntityCommand,
+        identity::{ElementId, ElementIdAllocator},
+        selection::Selected,
+    };
+
+    let selected_ids: Vec<ElementId> = {
+        let mut query = world.query_filtered::<&ElementId, With<Selected>>();
+        query.iter(world).copied().collect()
+    };
+
+    if selected_ids.len() != 1 {
+        return Err(format!(
+            "Mirror requires exactly 1 selected entity, got {}",
+            selected_ids.len()
+        ));
+    }
+
+    let source_id = selected_ids[0];
+    let mirror_id = world.resource::<ElementIdAllocator>().next_id();
+    let snapshot = mirror::MirrorSnapshot {
+        element_id: mirror_id,
+        mirror_node: mirror::MirrorNode {
+            source: source_id,
+            plane: mirror::MirrorPlane::xz(),
+            merge: false,
+        },
+    };
+
+    snapshot.apply_to(world);
+
+    // Deselect source, select the new mirror node.
+    let selected_entities: Vec<Entity> = {
+        let mut query = world.query_filtered::<Entity, With<Selected>>();
+        query.iter(world).collect()
+    };
+    let mirror_entity = {
+        let mut q = world.try_query::<EntityRef>().unwrap();
+        q.iter(world)
+            .find(|e| e.get::<ElementId>().copied() == Some(mirror_id))
+            .map(|e| e.id())
+    };
+    for entity in &selected_entities {
+        world.entity_mut(*entity).remove::<Selected>();
+    }
+    if let Some(mirror_entity) = mirror_entity {
+        world.entity_mut(mirror_entity).insert(Selected);
+    }
+
+    world
+        .resource_mut::<Messages<CreateEntityCommand>>()
+        .write(CreateEntityCommand {
+            snapshot: snapshot.into(),
+        });
+
+    Ok(CommandResult::empty())
+}
+
+fn execute_mirror_copy(world: &mut World, params: &Value) -> Result<CommandResult, String> {
+    // For now, mirror_copy creates a live mirror node (same as mirror_create).
+    // Dissolving the link into an independent mesh can be added as a follow-up.
+    execute_mirror_create(world, params)
 }
