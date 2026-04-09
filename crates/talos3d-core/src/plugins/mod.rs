@@ -1,3 +1,4 @@
+pub mod assistant_chat;
 pub mod bundled_definition_libraries;
 pub mod camera;
 pub mod clipping_planes;

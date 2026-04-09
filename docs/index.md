@@ -46,6 +46,8 @@ Talos3D is currently oriented around:
   inspection/creation tools
 - viewport appearance and scene lighting are exposed through public renderer
   and lighting state rather than hidden editor-only startup code
+- the in-app assistant is a first-class client of the same MCP surface rather
+  than a privileged private editor hook
 - the geometry layer stays compatible with future definition DAGs, including
   parameterized paradigms like MultiSurf
 
