@@ -46,3 +46,4 @@ cadio-dwg = { path = "../cadio-dwg" }
 cadio-ir = { path = "../cadio-ir" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
