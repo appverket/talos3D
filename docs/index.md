@@ -39,6 +39,7 @@ Talos3D is currently oriented around:
 
 - profile-based solids are first-class authored geometry
 - face-drawn protrusions and recesses remain semantic features after commit
+- fillet and chamfer remain authored feature nodes instead of mesh-only edits
 - interaction semantics are derived from authored affordances
 - evaluated body summaries expose facts such as connectedness and volume to AI
 - the authored model now includes first steps toward semantic assemblies and

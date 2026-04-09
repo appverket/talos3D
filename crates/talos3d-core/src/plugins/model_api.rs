@@ -9516,9 +9516,12 @@ mod tests {
     #[cfg(feature = "model-api")]
     use crate::importers::obj::ObjImporter;
     #[cfg(feature = "model-api")]
-    use crate::plugins::modeling::primitives::{CylinderPrimitive, SpherePrimitive};
-    #[cfg(feature = "model-api")]
     use crate::plugins::modeling::snapshots::TriangleMeshFactory;
+    #[cfg(feature = "model-api")]
+    use crate::plugins::modeling::{
+        fillet::{ChamferFactory, FilletFactory},
+        primitives::{CylinderPrimitive, SpherePrimitive},
+    };
     use crate::plugins::modeling::{
         generic_factory::PrimitiveFactory,
         primitives::{BoxPrimitive, PlanePrimitive, Polyline, ShapeRotation},
@@ -9755,6 +9758,8 @@ mod tests {
         registry.register_factory(PrimitiveFactory::<PlanePrimitive>::new());
         registry.register_factory(PolylineFactory);
         registry.register_factory(TriangleMeshFactory);
+        registry.register_factory(FilletFactory);
+        registry.register_factory(ChamferFactory);
         registry.register_factory(crate::plugins::modeling::occurrence::OccurrenceFactory);
         world.insert_resource(registry);
         world.insert_resource(crate::plugins::modeling::definition::DefinitionRegistry::default());
@@ -9858,6 +9863,81 @@ mod tests {
 
         let summary = model_summary(&world);
         assert_eq!(summary.entity_counts.get("sphere"), Some(&1));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn write_handlers_create_and_edit_fillet_and_chamfer() {
+        let mut world = init_model_api_test_world();
+
+        let fillet_source_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [0.0, 0.0, 0.0],
+                "half_extents": [1.0, 1.0, 1.0]
+            }),
+        )
+        .expect("fillet source should be created");
+        let chamfer_source_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 0.0, 0.0],
+                "half_extents": [1.0, 1.0, 1.0]
+            }),
+        )
+        .expect("chamfer source should be created");
+
+        let fillet_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "fillet",
+                "source": fillet_source_id,
+                "radius": 0.2,
+                "segments": 4
+            }),
+        )
+        .expect("fillet should be created");
+        let chamfer_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "chamfer",
+                "source": chamfer_source_id,
+                "distance": 0.15
+            }),
+        )
+        .expect("chamfer should be created");
+
+        let fillet_updated = handle_set_property(&mut world, fillet_id, "radius", json!(0.35))
+            .expect("setting fillet radius should succeed");
+        assert!(
+            (fillet_updated["radius"].as_f64().unwrap_or_default() - 0.35).abs() < 1e-5,
+            "fillet radius should be updated"
+        );
+
+        let segments_updated = handle_set_property(&mut world, fillet_id, "segments", json!(6.0))
+            .expect("setting fillet segments should succeed");
+        assert_eq!(segments_updated["segments"], json!(6));
+
+        let chamfer_updated = handle_set_property(&mut world, chamfer_id, "distance", json!(0.25))
+            .expect("setting chamfer distance should succeed");
+        assert!(
+            (chamfer_updated["distance"].as_f64().unwrap_or_default() - 0.25).abs() < 1e-5,
+            "chamfer distance should be updated"
+        );
+
+        let fillet_details =
+            get_entity_details(&world, ElementId(fillet_id)).expect("fillet details should exist");
+        assert_eq!(fillet_details.entity_type, "fillet");
+
+        let chamfer_details = get_entity_details(&world, ElementId(chamfer_id))
+            .expect("chamfer details should exist");
+        assert_eq!(chamfer_details.entity_type, "chamfer");
+
+        let summary = model_summary(&world);
+        assert_eq!(summary.entity_counts.get("fillet"), Some(&1));
+        assert_eq!(summary.entity_counts.get("chamfer"), Some(&1));
     }
 
     #[cfg(feature = "model-api")]

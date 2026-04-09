@@ -50,6 +50,9 @@ Start with [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md).
 - Extensible geometry stack: simple primitives, profile-based solids, authored
   features, evaluated bodies, and future DAG-based parameterized geometry can
   coexist under one model.
+- Authored edge features: fillet and chamfer are first-class authored nodes,
+  so the rounded/bevelled result stays editable through commands and MCP rather
+  than becoming an opaque mesh.
 - One command surface: keyboard, toolbar, menu, command palette, automation,
   and MCP all converge on the same command substrate.
 
@@ -60,6 +63,7 @@ Talos3D already includes:
 - a Rust + Bevy core platform
 - a modeling capability with primitives, transforms, groups, face editing, and
   profile-based solids
+- authored fillet and chamfer features with command and MCP-driven editing
 - an architectural capability with walls, openings, BIM metadata, and
   wall-opening rules
 - an MCP-backed model API
