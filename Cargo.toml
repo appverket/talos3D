@@ -43,6 +43,8 @@ bevy = { version = "0.18", default-features = false, features = [
     "tonemapping_luts",
     "webgpu",
     "default_font",
+    "png",
+    "jpeg",
 ] }
 talos3d-core = { path = "crates/talos3d-core" }
 talos3d-architectural = { path = "crates/talos3d-architectural" }
