@@ -6,6 +6,7 @@ pub mod csg;
 pub mod mirror;
 pub mod definition;
 pub mod editable_mesh;
+pub mod fillet;
 pub mod generic_factory;
 pub mod generic_snapshot;
 pub mod group;
@@ -38,10 +39,15 @@ use crate::{
             execute_toggle_definitions_browser, DefinitionSelectionContext, DefinitionsWindowState,
         },
         handles::arm_move_handles,
+        identity::ElementId,
         import::ImportRegistryAppExt,
         modeling::{
             csg::CsgFactory,
             definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+            fillet::{
+                ChamferFactory, ChamferNode, ChamferSnapshot, FilletFactory, FilletNode,
+                FilletSnapshot,
+            },
             generic_factory::PrimitiveFactory,
             group::{GroupEditContext, GroupFactory},
             occurrence::{
@@ -103,6 +109,8 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(mirror::MirrorFactory)
             .register_authored_entity_factory(array::LinearArrayFactory)
             .register_authored_entity_factory(array::PolarArrayFactory)
+            .register_authored_entity_factory(FilletFactory)
+            .register_authored_entity_factory(ChamferFactory)
             .register_authored_entity_factory(FaceProfileFeatureFactory)
             .register_authored_entity_factory(assembly::AssemblyFactory)
             .register_authored_entity_factory(assembly::RelationFactory)
@@ -436,6 +444,55 @@ impl Plugin for ModelingPlugin {
                 },
                 execute_begin_scale,
             )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.create_fillet".to_string(),
+                    label: "Create Fillet".to_string(),
+                    description: "Create a fillet feature from a source entity".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({
+                        "type":"object",
+                        "properties": {
+                            "source_element_id": {"type":"integer"},
+                            "radius": {"type":"number"},
+                            "segments": {"type":"integer"}
+                        }
+                    })),
+                    default_shortcut: None,
+                    icon: Some("icon.create_fillet".to_string()),
+                    hint: Some("Round the sharp edges of the selected source".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_create_fillet,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.create_chamfer".to_string(),
+                    label: "Create Chamfer".to_string(),
+                    description: "Create a chamfer feature from a source entity".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({
+                        "type":"object",
+                        "properties": {
+                            "source_element_id": {"type":"integer"},
+                            "distance": {"type":"number"}
+                        }
+                    })),
+                    default_shortcut: None,
+                    icon: Some("icon.create_chamfer".to_string()),
+                    hint: Some("Bevel the sharp edges of the selected source".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_create_chamfer,
+            )
             .register_toolbar(ToolbarDescriptor {
                 id: "modeling".to_string(),
                 label: "Modeling".to_string(),
@@ -458,6 +515,13 @@ impl Plugin for ModelingPlugin {
                             "modeling.move".to_string(),
                             "modeling.rotate".to_string(),
                             "modeling.scale".to_string(),
+                        ],
+                    },
+                    ToolbarSection {
+                        label: "Features".to_string(),
+                        command_ids: vec![
+                            "modeling.create_fillet".to_string(),
+                            "modeling.create_chamfer".to_string(),
                         ],
                     },
                 ],
@@ -604,6 +668,9 @@ impl Plugin for ModelingPlugin {
                     array::propagate_array_source_changes,
                     array::evaluate_linear_array_nodes,
                     array::evaluate_polar_array_nodes,
+                    fillet::propagate_fillet_source_changes,
+                    fillet::evaluate_fillet_nodes,
+                    fillet::evaluate_chamfer_nodes,
                     profile_feature::propagate_feature_parent_changes,
                     profile_feature::evaluate_face_profile_features,
                     evaluate_occurrences,
@@ -660,6 +727,14 @@ fn start_transform_or_pend(
         }
         Err(msg) => Err(msg),
     }
+}
+
+fn execute_create_fillet(world: &mut World, params: &Value) -> Result<CommandResult, String> {
+    create_feature_snapshot(world, fillet_snapshot_from_params(world, params)?.into())
+}
+
+fn execute_create_chamfer(world: &mut World, params: &Value) -> Result<CommandResult, String> {
+    create_feature_snapshot(world, chamfer_snapshot_from_params(world, params)?.into())
 }
 
 fn execute_group(world: &mut World, _: &Value) -> Result<CommandResult, String> {
@@ -913,7 +988,6 @@ fn execute_linear_array(world: &mut World, _params: &Value) -> Result<CommandRes
             spacing: Vec3::X * 1.0,
         },
     };
-
     snapshot.apply_to(world);
 
     let selected_entities: Vec<Entity> = {
@@ -1026,4 +1100,94 @@ fn execute_clip_plane_create(world: &mut World, _: &Value) -> Result<CommandResu
         });
 
     Ok(CommandResult::empty())
+}
+
+fn create_feature_snapshot(
+    world: &mut World,
+    snapshot: crate::authored_entity::BoxedEntity,
+) -> Result<CommandResult, String> {
+    use crate::plugins::{commands::CreateEntityCommand, selection::Selected};
+
+    let feature_id = snapshot.element_id();
+    snapshot.apply_to(world);
+
+    let selected_entities: Vec<Entity> = {
+        let mut query = world.query_filtered::<Entity, With<Selected>>();
+        query.iter(world).collect()
+    };
+    let feature_entity = {
+        let mut query = world.try_query::<EntityRef>().unwrap();
+        query
+            .iter(world)
+            .find(|entity| entity.get::<ElementId>().copied() == Some(feature_id))
+            .map(|entity| entity.id())
+    };
+    for entity in &selected_entities {
+        world.entity_mut(*entity).remove::<Selected>();
+    }
+    if let Some(feature_entity) = feature_entity {
+        world.entity_mut(feature_entity).insert(Selected);
+    }
+
+    world
+        .resource_mut::<Messages<CreateEntityCommand>>()
+        .write(CreateEntityCommand { snapshot });
+
+    Ok(CommandResult::empty())
+}
+
+fn fillet_snapshot_from_params(world: &World, params: &Value) -> Result<FilletSnapshot, String> {
+    let source = feature_source_from_params(world, params)?;
+    let radius = params.get("radius").and_then(Value::as_f64).unwrap_or(0.1) as f32;
+    let segments = params
+        .get("segments")
+        .and_then(Value::as_u64)
+        .unwrap_or(3)
+        .max(1) as u32;
+    Ok(FilletSnapshot {
+        element_id: world
+            .resource::<crate::plugins::identity::ElementIdAllocator>()
+            .next_id(),
+        fillet_node: FilletNode {
+            source,
+            radius,
+            segments,
+        },
+    })
+}
+
+fn chamfer_snapshot_from_params(world: &World, params: &Value) -> Result<ChamferSnapshot, String> {
+    let source = feature_source_from_params(world, params)?;
+    let distance = params
+        .get("distance")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.1) as f32;
+    Ok(ChamferSnapshot {
+        element_id: world
+            .resource::<crate::plugins::identity::ElementIdAllocator>()
+            .next_id(),
+        chamfer_node: ChamferNode { source, distance },
+    })
+}
+
+fn feature_source_from_params(world: &World, params: &Value) -> Result<ElementId, String> {
+    if let Some(source_id) = params.get("source_element_id").and_then(Value::as_u64) {
+        return Ok(ElementId(source_id));
+    }
+
+    use crate::plugins::selection::Selected;
+
+    let selected_ids: Vec<ElementId> = {
+        let mut query = world
+            .try_query_filtered::<&ElementId, With<Selected>>()
+            .unwrap();
+        query.iter(world).copied().collect()
+    };
+    if selected_ids.len() != 1 {
+        return Err(
+            "Fillet/chamfer creation requires exactly one selected source or source_element_id"
+                .to_string(),
+        );
+    }
+    Ok(selected_ids[0])
 }
