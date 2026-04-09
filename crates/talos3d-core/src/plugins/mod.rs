@@ -1,4 +1,5 @@
 pub mod camera;
+pub mod clipping_planes;
 pub mod command_registry;
 pub mod commands;
 pub mod cursor;

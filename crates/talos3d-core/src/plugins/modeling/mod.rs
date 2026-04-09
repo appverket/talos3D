@@ -26,6 +26,7 @@ use crate::{
     },
     importers::{dxf::DxfImporter, obj::ObjImporter},
     plugins::{
+        clipping_planes::ClipPlaneFactory,
         command_registry::{
             activate_tool_command, CommandCategory, CommandDescriptor, CommandRegistryAppExt,
             CommandResult,
@@ -105,6 +106,25 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(FaceProfileFeatureFactory)
             .register_authored_entity_factory(assembly::AssemblyFactory)
             .register_authored_entity_factory(assembly::RelationFactory)
+            .register_authored_entity_factory(ClipPlaneFactory)
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.clip_plane_create".to_string(),
+                    label: "Add Clipping Plane".to_string(),
+                    description: "Add a horizontal clipping plane at height 2m for architectural section views".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Cut the viewport horizontally to see inside the model".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_clip_plane_create,
+            )
             .register_format_importer(ObjImporter)
             .register_format_importer(DxfImporter)
             .register_command(
@@ -973,6 +993,31 @@ fn execute_polar_array(world: &mut World, _params: &Value) -> Result<CommandResu
     if let Some(array_entity) = array_entity {
         world.entity_mut(array_entity).insert(Selected);
     }
+
+    world
+        .resource_mut::<Messages<CreateEntityCommand>>()
+        .write(CreateEntityCommand {
+            snapshot: snapshot.into(),
+        });
+
+    Ok(CommandResult::empty())
+}
+
+fn execute_clip_plane_create(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    use crate::plugins::{
+        clipping_planes::{ClipPlaneNode, ClipPlaneSnapshot},
+        commands::CreateEntityCommand,
+        identity::ElementIdAllocator,
+    };
+
+    let element_id = world
+        .resource::<ElementIdAllocator>()
+        .next_id();
+
+    let snapshot = ClipPlaneSnapshot {
+        element_id,
+        node: ClipPlaneNode::at_y(2.0),
+    };
 
     world
         .resource_mut::<Messages<CreateEntityCommand>>()
