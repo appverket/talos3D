@@ -29,6 +29,8 @@ bevy = { version = "0.18", default-features = false, features = [
     "tonemapping_luts",
     "webgpu",
     "default_font",
+    "png",
+    "jpeg",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

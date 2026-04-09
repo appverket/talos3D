@@ -2,7 +2,16 @@
 ///
 /// Follows the same floating-window pattern as `definition_browser`.
 /// Exposed via `draw_materials_window` which is called from `egui_chrome`.
-use bevy_egui::egui;
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+};
+
+use bevy::{
+    asset::AssetServer,
+    prelude::{Assets, Handle, Image},
+};
+use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 
 use crate::plugins::{
     command_registry::{queue_command_invocation_resource, PendingCommandInvocations},
@@ -13,6 +22,8 @@ use crate::plugins::{
 const MATERIALS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(480.0, 560.0);
 const MATERIALS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(340.0, 280.0);
 const MATERIALS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(640.0, 760.0);
+const MATERIAL_LIST_THUMBNAIL_SIZE: f32 = 30.0;
+const TEXTURE_SLOT_THUMBNAIL_SIZE: f32 = 52.0;
 
 // ─── Window state ─────────────────────────────────────────────────────────────
 
@@ -28,6 +39,7 @@ pub struct MaterialsWindowState {
     pub metallic: f32,
     pub reflectance: f32,
     pub emissive: [f32; 3],
+    pub emissive_exposure_weight: f32,
     pub alpha_mode_idx: usize,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
@@ -37,6 +49,8 @@ pub struct MaterialsWindowState {
     pub normal_map_tex: Option<TextureRef>,
     pub metallic_roughness_tex: Option<TextureRef>,
     pub emissive_tex: Option<TextureRef>,
+    pub occlusion_tex: Option<TextureRef>,
+    preview_texture_handles: HashMap<String, Handle<Image>>,
     pub editor_tab: EditorTab,
     pub dirty: bool,
 }
@@ -57,6 +71,7 @@ impl MaterialsWindowState {
         self.metallic = def.metallic;
         self.reflectance = def.reflectance;
         self.emissive = def.emissive;
+        self.emissive_exposure_weight = def.emissive_exposure_weight;
         self.alpha_mode_idx = alpha_mode_to_idx(&def.alpha_mode);
         self.alpha_cutoff = def.alpha_cutoff;
         self.double_sided = def.double_sided;
@@ -66,6 +81,7 @@ impl MaterialsWindowState {
         self.normal_map_tex = def.normal_map_texture.clone();
         self.metallic_roughness_tex = def.metallic_roughness_texture.clone();
         self.emissive_tex = def.emissive_texture.clone();
+        self.occlusion_tex = def.occlusion_texture.clone();
         self.dirty = false;
     }
 
@@ -77,6 +93,7 @@ impl MaterialsWindowState {
         def.metallic = self.metallic;
         def.reflectance = self.reflectance;
         def.emissive = self.emissive;
+        def.emissive_exposure_weight = self.emissive_exposure_weight;
         def.alpha_mode = idx_to_alpha_mode(self.alpha_mode_idx);
         def.alpha_cutoff = self.alpha_cutoff;
         def.double_sided = self.double_sided;
@@ -86,6 +103,7 @@ impl MaterialsWindowState {
         def.normal_map_texture = self.normal_map_tex.clone();
         def.metallic_roughness_texture = self.metallic_roughness_tex.clone();
         def.emissive_texture = self.emissive_tex.clone();
+        def.occlusion_texture = self.occlusion_tex.clone();
     }
 }
 
@@ -93,9 +111,12 @@ impl MaterialsWindowState {
 
 #[allow(clippy::too_many_arguments)]
 pub fn draw_materials_window(
+    contexts: &mut EguiContexts,
     ctx: &egui::Context,
     state: &mut MaterialsWindowState,
     registry: &mut MaterialRegistry,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
     pending: &mut PendingCommandInvocations,
 ) {
     if !state.visible {
@@ -113,7 +134,7 @@ pub fn draw_materials_window(
         .constrain_to(ctx.content_rect())
         .open(&mut open)
         .show(ctx, |ui| {
-            draw_browser_panel(ui, state, registry, pending);
+            draw_browser_panel(ui, contexts, state, registry, asset_server, images, pending);
         });
 
     state.visible = open;
@@ -123,8 +144,11 @@ pub fn draw_materials_window(
 
 fn draw_browser_panel(
     ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
     state: &mut MaterialsWindowState,
     registry: &mut MaterialRegistry,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
     pending: &mut PendingCommandInvocations,
 ) {
     ui.horizontal(|ui| {
@@ -175,19 +199,23 @@ fn draw_browser_panel(
                         let selected = state.selected_id.as_deref() == Some(id.as_str());
 
                         ui.horizontal(|ui| {
-                            // Colour swatch
-                            let [r, g, b, _] = def.base_color;
-                            let swatch = egui::Color32::from_rgb(
-                                (r * 255.0) as u8,
-                                (g * 255.0) as u8,
-                                (b * 255.0) as u8,
+                            draw_material_list_thumbnail(
+                                ui,
+                                contexts,
+                                &mut state.preview_texture_handles,
+                                asset_server,
+                                images,
+                                def,
                             );
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                            ui.painter().rect_filled(rect, 2.0, swatch);
 
-                            let label = egui::Button::new(def.name.as_str()).selected(selected);
-                            if ui.add(label).clicked() {
+                            let label = egui::Button::new(format!(
+                                "{}\n{}",
+                                def.name,
+                                material_meta_label(def)
+                            ))
+                            .selected(selected)
+                            .wrap();
+                            if ui.add_sized([ui.available_width(), 36.0], label).clicked() {
                                 if state.selected_id.as_deref() != Some(id.as_str()) {
                                     state.selected_id = Some(id.clone());
                                     if let Some(def) = registry.get(&id) {
@@ -239,7 +267,15 @@ fn draw_browser_panel(
 
             if let Some(selected_id) = state.selected_id.clone() {
                 if registry.contains(&selected_id) {
-                    draw_editor(ui, state, registry, &selected_id);
+                    draw_editor(
+                        ui,
+                        contexts,
+                        state,
+                        registry,
+                        asset_server,
+                        images,
+                        &selected_id,
+                    );
                 } else {
                     ui.label("(Material removed)");
                     state.selected_id = None;
@@ -260,8 +296,11 @@ fn draw_browser_panel(
 
 fn draw_editor(
     ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
     state: &mut MaterialsWindowState,
     registry: &mut MaterialRegistry,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
     id: &str,
 ) {
     // Tab bar
@@ -283,7 +322,7 @@ fn draw_editor(
 
     match state.editor_tab {
         EditorTab::Properties => draw_properties_tab(ui, state),
-        EditorTab::Textures => draw_textures_tab(ui, state),
+        EditorTab::Textures => draw_textures_tab(ui, contexts, state, asset_server, images),
     }
 
     ui.add_space(8.0);
@@ -393,6 +432,18 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                     }
                     ui.end_row();
 
+                    ui.label("Emissive Strength");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut state.emissive_exposure_weight, 0.0..=8.0)
+                                .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
                     // Alpha mode
                     ui.label("Alpha Mode");
                     egui::ComboBox::from_id_salt("alpha_mode_combo")
@@ -477,7 +528,13 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
         });
 }
 
-fn draw_textures_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
+fn draw_textures_tab(
+    ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
+    state: &mut MaterialsWindowState,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+) {
     egui::ScrollArea::vertical()
         .id_salt("mat_textures")
         .show(ui, |ui| {
@@ -485,15 +542,56 @@ fn draw_textures_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
-                    texture_row(ui, "Base Color", &mut state.base_color_tex, &mut state.dirty);
-                    texture_row(ui, "Normal Map", &mut state.normal_map_tex, &mut state.dirty);
                     texture_row(
                         ui,
+                        contexts,
+                        &mut state.preview_texture_handles,
+                        asset_server,
+                        images,
+                        "Base Color",
+                        &mut state.base_color_tex,
+                        &mut state.dirty,
+                    );
+                    texture_row(
+                        ui,
+                        contexts,
+                        &mut state.preview_texture_handles,
+                        asset_server,
+                        images,
+                        "Normal Map",
+                        &mut state.normal_map_tex,
+                        &mut state.dirty,
+                    );
+                    texture_row(
+                        ui,
+                        contexts,
+                        &mut state.preview_texture_handles,
+                        asset_server,
+                        images,
                         "Metallic/Roughness",
                         &mut state.metallic_roughness_tex,
                         &mut state.dirty,
                     );
-                    texture_row(ui, "Emissive", &mut state.emissive_tex, &mut state.dirty);
+                    texture_row(
+                        ui,
+                        contexts,
+                        &mut state.preview_texture_handles,
+                        asset_server,
+                        images,
+                        "Emissive",
+                        &mut state.emissive_tex,
+                        &mut state.dirty,
+                    );
+                    texture_row(
+                        ui,
+                        contexts,
+                        &mut state.preview_texture_handles,
+                        asset_server,
+                        images,
+                        "Occlusion",
+                        &mut state.occlusion_tex,
+                        &mut state.dirty,
+                    );
                 });
         });
 }
@@ -502,28 +600,207 @@ fn draw_textures_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
 /// Clear buttons.  Modifies `slot` and `dirty` in place.
 fn texture_row(
     ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
+    preview_texture_handles: &mut HashMap<String, Handle<Image>>,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
     label: &str,
     slot: &mut Option<TextureRef>,
     dirty: &mut bool,
 ) {
     ui.label(label);
     ui.horizontal(|ui| {
-        // Show current texture label
-        let current = slot.as_ref().map(|t| t.label()).unwrap_or("(none)");
-        ui.label(egui::RichText::new(current).weak());
+        if let Some(texture) = slot.as_ref() {
+            draw_texture_thumbnail(
+                ui,
+                contexts,
+                preview_texture_handles,
+                asset_server,
+                images,
+                Some(texture),
+                TEXTURE_SLOT_THUMBNAIL_SIZE,
+                egui::Color32::from_gray(52),
+            );
+        } else {
+            draw_placeholder_thumbnail(
+                ui,
+                egui::vec2(TEXTURE_SLOT_THUMBNAIL_SIZE, TEXTURE_SLOT_THUMBNAIL_SIZE),
+                egui::Color32::from_gray(52),
+                egui::Color32::from_gray(110),
+                "No\nTexture",
+            );
+        }
 
-        if ui.small_button("Upload").clicked() {
-            if let Some(tex) = pick_texture_file() {
-                *slot = Some(tex);
+        // Show current texture label
+        let current = slot
+            .as_ref()
+            .map(|t| t.label().to_string())
+            .unwrap_or_else(|| "(none)".to_string());
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(&current).weak());
+
+            if ui.small_button("Upload").clicked() {
+                if let Some(tex) = pick_texture_file() {
+                    *slot = Some(tex);
+                    *dirty = true;
+                }
+            }
+            if slot.is_some() && ui.small_button("✕").clicked() {
+                *slot = None;
                 *dirty = true;
             }
-        }
-        if slot.is_some() && ui.small_button("✕").clicked() {
-            *slot = None;
-            *dirty = true;
-        }
+        });
     });
     ui.end_row();
+}
+
+fn draw_material_list_thumbnail(
+    ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
+    preview_texture_handles: &mut HashMap<String, Handle<Image>>,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+    def: &MaterialDef,
+) {
+    let preview_texture = def
+        .base_color_texture
+        .as_ref()
+        .or(def.emissive_texture.as_ref())
+        .or(def.metallic_roughness_texture.as_ref())
+        .or(def.normal_map_texture.as_ref())
+        .or(def.occlusion_texture.as_ref());
+    draw_texture_thumbnail(
+        ui,
+        contexts,
+        preview_texture_handles,
+        asset_server,
+        images,
+        preview_texture,
+        MATERIAL_LIST_THUMBNAIL_SIZE,
+        material_swatch_color(def),
+    );
+}
+
+fn draw_texture_thumbnail(
+    ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
+    preview_texture_handles: &mut HashMap<String, Handle<Image>>,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+    texture: Option<&TextureRef>,
+    size: f32,
+    fallback_fill: egui::Color32,
+) {
+    if let Some(texture) = texture {
+        if let Some(handle) =
+            cached_texture_handle(preview_texture_handles, asset_server, images, texture)
+        {
+            let image = egui_texture_image(contexts, &handle, egui::vec2(size, size));
+            ui.add(image);
+            return;
+        }
+    }
+
+    draw_placeholder_thumbnail(
+        ui,
+        egui::vec2(size, size),
+        fallback_fill,
+        egui::Color32::from_gray(86),
+        "",
+    );
+}
+
+fn draw_placeholder_thumbnail(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    fill: egui::Color32,
+    stroke_color: egui::Color32,
+    label: &str,
+) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, 6.0, fill);
+    ui.painter().rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, stroke_color),
+        egui::StrokeKind::Inside,
+    );
+    if !label.is_empty() {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::TextStyle::Small.resolve(ui.style()),
+            egui::Color32::from_gray(220),
+        );
+    }
+}
+
+fn egui_texture_image<'a>(
+    contexts: &'a mut EguiContexts,
+    handle: &Handle<Image>,
+    size: egui::Vec2,
+) -> egui::Image<'a> {
+    let texture_id = contexts
+        .image_id(handle)
+        .unwrap_or_else(|| contexts.add_image(EguiTextureHandle::Weak(handle.id())));
+    egui::Image::new((texture_id, size)).corner_radius(6.0)
+}
+
+fn cached_texture_handle(
+    preview_texture_handles: &mut HashMap<String, Handle<Image>>,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+    texture: &TextureRef,
+) -> Option<Handle<Image>> {
+    let key = texture_preview_key(texture);
+    if let Some(handle) = preview_texture_handles.get(&key) {
+        return Some(handle.clone());
+    }
+    let handle = texture.load(asset_server, images)?;
+    preview_texture_handles.insert(key, handle.clone());
+    Some(handle)
+}
+
+fn texture_preview_key(texture: &TextureRef) -> String {
+    match texture {
+        TextureRef::AssetPath(path) => format!("asset:{path}"),
+        TextureRef::Embedded { data, mime } => {
+            let mut hasher = DefaultHasher::new();
+            data.hash(&mut hasher);
+            mime.hash(&mut hasher);
+            format!("embedded:{mime}:{:x}", hasher.finish())
+        }
+    }
+}
+
+fn material_swatch_color(def: &MaterialDef) -> egui::Color32 {
+    let [r, g, b, a] = def.base_color;
+    egui::Color32::from_rgba_premultiplied(
+        (r.clamp(0.0, 1.0) * 255.0) as u8,
+        (g.clamp(0.0, 1.0) * 255.0) as u8,
+        (b.clamp(0.0, 1.0) * 255.0) as u8,
+        (a.clamp(0.0, 1.0) * 255.0) as u8,
+    )
+}
+
+fn material_meta_label(def: &MaterialDef) -> String {
+    let texture_count = [
+        def.base_color_texture.as_ref(),
+        def.normal_map_texture.as_ref(),
+        def.metallic_roughness_texture.as_ref(),
+        def.emissive_texture.as_ref(),
+        def.occlusion_texture.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .count();
+
+    if texture_count > 0 {
+        format!("{} · {texture_count} tex", def.summary())
+    } else {
+        def.summary()
+    }
 }
 
 /// Open a native file picker and return a `TextureRef::Embedded` for the
@@ -581,4 +858,3 @@ fn idx_to_alpha_mode(idx: usize) -> MaterialAlphaMode {
         _ => MaterialAlphaMode::Opaque,
     }
 }
-

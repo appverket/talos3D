@@ -172,6 +172,8 @@ struct ChromeData<'w, 's> {
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
     materials_window_state: ResMut<'w, MaterialsWindowState>,
     material_registry: ResMut<'w, MaterialRegistry>,
+    asset_server: Res<'w, AssetServer>,
+    images: ResMut<'w, Assets<Image>>,
     definition_registry: Res<'w, DefinitionRegistry>,
     definition_library_registry: Res<'w, DefinitionLibraryRegistry>,
     definition_draft_registry:
@@ -369,9 +371,12 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.status_bar_data,
     );
     draw_materials_window(
+        &mut contexts,
         &ctx,
         &mut data.materials_window_state,
         &mut data.material_registry,
+        &data.asset_server,
+        &mut data.images,
         &mut data.pending_command_invocations,
     );
     draw_import_review_window(&ctx, &mut data);
