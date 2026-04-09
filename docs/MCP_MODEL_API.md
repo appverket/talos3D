@@ -27,6 +27,11 @@ Recent additions expose first steps toward higher-order semantic structure:
 capabilities can register assembly and relation vocabulary, and MCP clients can
 inspect or create authored assemblies and relations through structured tools.
 
+The modeling layer also exposes authored edge features such as `fillet` and
+`chamfer` through the same public APIs. AI clients can create them with
+`create_entity`, edit them with `set_property`, or invoke the matching command
+entries through `invoke_command`.
+
 ## Running Talos3D With MCP Enabled
 
 Start the app with the `model-api` feature:
@@ -101,6 +106,16 @@ Current tool categories include:
 - `set_entity_property`
 - `split_box_face`
 
+For fillet/chamfer specifically:
+
+- `create_entity` supports `type: "fillet"` with `source`, `radius`, and
+  optional `segments`
+- `create_entity` supports `type: "chamfer"` with `source` and `distance`
+- `set_property` can update `radius` / `segments` on a fillet and `distance`
+  on a chamfer
+- `invoke_command` can call `modeling.create_fillet` or
+  `modeling.create_chamfer`
+
 ### Document and UI state
 
 - `get_document_properties`
@@ -136,6 +151,32 @@ addition to entity counts and capability-defined metrics.
 Semantic assemblies are authored records, distinct from editing groups. They
 are intended as a first step toward domain structures such as rooms, storeys,
 houses, and future domain-specific assemblies.
+
+## Example: Fillet Via MCP
+
+Create a box, then add a fillet feature that references it:
+
+```json
+{
+  "type": "fillet",
+  "source": 12,
+  "radius": 0.15,
+  "segments": 4
+}
+```
+
+Later, adjust the feature with `set_property`:
+
+```json
+{
+  "element_id": 13,
+  "property_name": "radius",
+  "value": 0.2
+}
+```
+
+This keeps the feature AI-readable as authored intent instead of collapsing the
+operation into an opaque mesh edit.
 
 ## Design Contract
 

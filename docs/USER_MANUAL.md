@@ -38,6 +38,10 @@ available tools depend on which capabilities and setups are loaded.
 | `Ctrl/Cmd+G` | Group |
 | `Ctrl/Cmd+Shift+G` | Ungroup |
 
+Fillet and chamfer are currently exposed through the Modeling toolbar, command
+palette, and MCP/automation surfaces rather than a dedicated keyboard shortcut.
+Select one source solid, then run `Create Fillet` or `Create Chamfer`.
+
 ## Face Editing
 
 Double-click a supported solid to enter face editing.

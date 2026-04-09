@@ -53,6 +53,11 @@ That direction now extends beyond individual solids. The current platform also
 has first steps toward authored semantic assemblies and relations for
 higher-order domain structure.
 
+Recent modeling work also treats fillet and chamfer as authored features rather
+than destructive mesh edits. That matters for AI because the source entity,
+feature parameters, and resulting derived mesh stay inspectable through the
+same public model surface.
+
 ### 2. MCP as a public integration surface
 
 Talos3D exposes a structured MCP model API so external AI systems and
