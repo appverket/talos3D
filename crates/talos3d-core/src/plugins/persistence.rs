@@ -7,17 +7,19 @@ use serde_json::Value;
 use crate::{
     capability_registry::{CapabilityRegistry, DefaultsRegistry},
     plugins::{
+        bundled_definition_libraries::apply_bundled_definition_libraries,
         commands::snapshot_dependency_order,
         document_properties::DocumentProperties,
         document_state::DocumentState,
         history::{History, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         layers::LayerRegistry,
-        materials::MaterialRegistry,
+        materials::{ensure_builtin_materials, is_builtin_material_id, MaterialRegistry},
         modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
         named_views::NamedViewRegistry,
         property_edit::PropertyEditState,
         selection::Selected,
+        storage::Storage,
         tools::{ActiveTool, Preview},
         transform::TransformState,
         ui::StatusBarData,
@@ -198,8 +200,16 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(OpaquePersistedEntities::default());
     world.insert_resource(LayerRegistry::default());
     world.insert_resource(MaterialRegistry::default());
+    if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
+        ensure_builtin_materials(&mut materials);
+    }
     world.insert_resource(DefinitionRegistry::default());
     world.insert_resource(DefinitionLibraryRegistry::default());
+    if let Some(mut libraries) = world.get_resource_mut::<DefinitionLibraryRegistry>() {
+        if let Err(error) = apply_bundled_definition_libraries(&mut libraries) {
+            error!("Failed to restore bundled definition libraries for new document: {error}");
+        }
+    }
     world.insert_resource(NamedViewRegistry::default());
     world.resource_mut::<ElementIdAllocator>().set_next(1);
     world.resource_mut::<History>().clear();
@@ -217,8 +227,8 @@ pub fn new_document(world: &mut World) {
 fn save_to_path(world: &mut World, path: &PathBuf) -> Result<(), String> {
     let project = build_project_file(world)?;
     let json = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
-
-    std::fs::write(path, json.as_bytes()).map_err(|e| e.to_string())?;
+    let key = path.to_string_lossy().into_owned();
+    world.resource::<Storage>().0.save(json.as_bytes(), &key)?;
 
     world.resource_mut::<History>().mark_save_point();
     world
@@ -229,7 +239,9 @@ fn save_to_path(world: &mut World, path: &PathBuf) -> Result<(), String> {
 }
 
 fn load_from_path(world: &mut World, path: &PathBuf) -> Result<(), String> {
-    let contents = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let key = path.to_string_lossy().into_owned();
+    let contents = String::from_utf8(world.resource::<Storage>().0.load(&key)?)
+        .map_err(|error| error.to_string())?;
     let project: ProjectFile = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
     load_project(world, project)?;
 
@@ -282,7 +294,12 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     } else {
         None
     };
-    let material_registry = world.resource::<MaterialRegistry>().clone();
+    let mut material_registry = MaterialRegistry::default();
+    for material in world.resource::<MaterialRegistry>().all() {
+        if !is_builtin_material_id(&material.id) {
+            material_registry.upsert(material.clone());
+        }
+    }
     let materials = if material_registry.count() > 0 {
         Some(material_registry)
     } else {
@@ -294,7 +311,12 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     } else {
         Some(definition_registry)
     };
-    let definition_library_registry = world.resource::<DefinitionLibraryRegistry>().clone();
+    let mut definition_library_registry = DefinitionLibraryRegistry::default();
+    for library in world.resource::<DefinitionLibraryRegistry>().list() {
+        if library.scope != crate::plugins::modeling::definition::DefinitionLibraryScope::Bundled {
+            definition_library_registry.insert(library.clone());
+        }
+    }
     let definition_libraries = if definition_library_registry.list().is_empty() {
         None
     } else {
@@ -343,8 +365,16 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world.insert_resource(doc_props);
     world.insert_resource(project.layers.unwrap_or_default());
     world.insert_resource(project.materials.unwrap_or_default());
+    if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
+        ensure_builtin_materials(&mut materials);
+    }
     world.insert_resource(project.definitions.unwrap_or_default());
     world.insert_resource(project.definition_libraries.unwrap_or_default());
+    if let Some(mut libraries) = world.get_resource_mut::<DefinitionLibraryRegistry>() {
+        if let Err(error) = apply_bundled_definition_libraries(&mut libraries) {
+            error!("Failed to restore bundled definition libraries after project load: {error}");
+        }
+    }
     world.insert_resource(project.named_views.unwrap_or_default());
 
     let registry = world.resource::<CapabilityRegistry>();
@@ -432,6 +462,91 @@ fn clear_scene(world: &mut World) {
 
     for entity in entities_to_despawn {
         let _ = world.despawn(entity);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::{
+        bundled_definition_libraries::apply_bundled_definition_libraries,
+        layers::LayerRegistry,
+        materials::{
+            ensure_builtin_materials, BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80,
+            BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO,
+        },
+        modeling::definition::{DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope},
+    };
+
+    #[test]
+    fn build_project_file_omits_bundled_definition_libraries() {
+        let mut world = World::new();
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(DocumentProperties::default());
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(MaterialRegistry::default());
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+
+        let mut libraries = DefinitionLibraryRegistry::default();
+        apply_bundled_definition_libraries(&mut libraries)
+            .expect("bundled definition libraries should load");
+        libraries.insert(DefinitionLibrary {
+            id: DefinitionLibraryId("test.document-library".to_string()),
+            name: "Document Library".to_string(),
+            scope: DefinitionLibraryScope::DocumentLocal,
+            source_path: None,
+            tags: vec!["test".to_string()],
+            definitions: default(),
+        });
+        world.insert_resource(libraries);
+
+        let project = build_project_file(&mut world).expect("project should serialize");
+        let libraries = project
+            .definition_libraries
+            .expect("document-scoped library should be persisted");
+        assert_eq!(libraries.list().len(), 1);
+        assert_eq!(
+            libraries.list()[0].id,
+            DefinitionLibraryId("test.document-library".to_string())
+        );
+    }
+
+    #[test]
+    fn build_project_file_omits_bundled_materials() {
+        let mut world = World::new();
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(DocumentProperties::default());
+        world.insert_resource(LayerRegistry::default());
+        let mut materials = MaterialRegistry::default();
+        ensure_builtin_materials(&mut materials);
+        materials.create("Project Material");
+        world.insert_resource(materials);
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(DefinitionLibraryRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+
+        let project = build_project_file(&mut world).expect("project should serialize");
+        let materials = project.materials.expect("project material should persist");
+        assert_eq!(materials.count(), 1);
+        assert!(materials
+            .get(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO)
+            .is_none());
+        assert!(materials
+            .get(BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80)
+            .is_none());
+        assert_eq!(
+            materials
+                .all()
+                .next()
+                .expect("one project material should remain")
+                .name,
+            "Project Material"
+        );
     }
 }
 

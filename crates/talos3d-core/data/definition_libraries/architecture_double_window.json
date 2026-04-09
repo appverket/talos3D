@@ -1,0 +1,2508 @@
+{
+  "version": 1,
+  "library": {
+    "id": "architecture.double-european-window",
+    "name": "Architecture Double Window Library",
+    "scope": "ExternalFile",
+    "tags": [
+      "window",
+      "bim",
+      "architecture"
+    ],
+    "definitions": {
+      "architecture.window.mullion": {
+        "id": "architecture.window.mullion",
+        "name": "Window Mullion",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "mullion_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "mullion_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "mullion_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "mullion_width",
+              "depth_param": "mullion_depth",
+              "height_param": "mullion_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": null
+      },
+      "architecture.window.muntin": {
+        "id": "architecture.window.muntin",
+        "name": "Window Muntin",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "muntin_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "muntin_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "muntin_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "muntin_width",
+              "depth_param": "muntin_depth",
+              "height_param": "muntin_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": {
+          "architectural": {
+            "material_assignment": {
+              "material_id": "builtin.glass.blue_tint_glazing_80"
+            }
+          }
+        }
+      },
+      "architecture.window.apron": {
+        "id": "architecture.window.apron",
+        "name": "Window Apron",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "apron_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "apron_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "apron_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "apron_width",
+              "depth_param": "apron_depth",
+              "height_param": "apron_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": null
+      },
+      "architecture.window.weatherboard": {
+        "id": "architecture.window.weatherboard",
+        "name": "Weatherboard",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "weatherboard_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "weatherboard_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "weatherboard_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "weatherboard_width",
+              "depth_param": "weatherboard_depth",
+              "height_param": "weatherboard_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": null
+      },
+      "architecture.window.frame": {
+        "id": "architecture.window.frame",
+        "name": "Window Frame",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "frame_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "frame_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "frame_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "frame_width",
+              "depth_param": "frame_depth",
+              "height_param": "frame_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": {
+          "architectural": {
+            "material_assignment": {
+              "category": "frame"
+            },
+            "property_set_schemas": [
+              {
+                "fields": {
+                  "Material": {
+                    "type": "string"
+                  },
+                  "Reference": {
+                    "type": "string"
+                  }
+                },
+                "name": "Pset_WindowFrameCommon"
+              }
+            ]
+          }
+        }
+      },
+      "architecture.window.double-european.greyline": {
+        "id": "architecture.window.double-european.greyline",
+        "base_definition_id": "architecture.window.double-european",
+        "name": "European Double Window - Greyline",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "finish_color",
+              "param_type": "StringVal",
+              "default_value": "greyline",
+              "override_policy": "Locked",
+              "metadata": {
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [],
+        "representations": [],
+        "domain_data": {
+          "architectural": {
+            "material_assignment": {
+              "finish": "greyline",
+              "palette": "design_variant"
+            },
+            "property_set_schemas": []
+          }
+        }
+      },
+      "architecture.window.glazing": {
+        "id": "architecture.window.glazing",
+        "name": "Window Glazing",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "glazing_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "glazing_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "glazing_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "glazing_width",
+              "depth_param": "glazing_depth",
+              "height_param": "glazing_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": null
+      },
+      "architecture.window.double-european": {
+        "id": "architecture.window.double-european",
+        "name": "European Double Window",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "overall_width",
+              "param_type": "Numeric",
+              "default_value": 1.2,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "overall_height",
+              "param_type": "Numeric",
+              "default_value": 1.4,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "wall_thickness",
+              "param_type": "Numeric",
+              "default_value": 0.3,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "frame_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "frame_face_width",
+              "param_type": "Numeric",
+              "default_value": 0.05,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sash_face_width",
+              "param_type": "Numeric",
+              "default_value": 0.06,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sash_height",
+              "param_type": "Numeric",
+              "default_value": 1.18,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sash_split",
+              "param_type": "Numeric",
+              "default_value": 0.5,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "mullion_width",
+              "param_type": "Numeric",
+              "default_value": 0.08,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "glazing_thickness",
+              "param_type": "Numeric",
+              "default_value": 0.024,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "muntin_width",
+              "param_type": "Numeric",
+              "default_value": 0.03,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "casing_width",
+              "param_type": "Numeric",
+              "default_value": 0.08,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "casing_depth",
+              "param_type": "Numeric",
+              "default_value": 0.018,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "stool_depth",
+              "param_type": "Numeric",
+              "default_value": 0.16,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "stool_height",
+              "param_type": "Numeric",
+              "default_value": 0.03,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "apron_height",
+              "param_type": "Numeric",
+              "default_value": 0.12,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "apron_depth",
+              "param_type": "Numeric",
+              "default_value": 0.02,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sill_depth",
+              "param_type": "Numeric",
+              "default_value": 0.12,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sill_height",
+              "param_type": "Numeric",
+              "default_value": 0.04,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "weatherboard_depth",
+              "param_type": "Numeric",
+              "default_value": 0.03,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "weatherboard_height",
+              "param_type": "Numeric",
+              "default_value": 0.08,
+              "override_policy": "Overridable",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "has_mullion",
+              "param_type": "Boolean",
+              "default_value": true,
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "has_muntins",
+              "param_type": "Boolean",
+              "default_value": false,
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "has_interior_casing",
+              "param_type": "Boolean",
+              "default_value": true,
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "has_stool",
+              "param_type": "Boolean",
+              "default_value": true,
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "has_apron",
+              "param_type": "Boolean",
+              "default_value": true,
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "has_exterior_sill",
+              "param_type": "Boolean",
+              "default_value": true,
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "has_weatherboard",
+              "param_type": "Boolean",
+              "default_value": true,
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "finish_color",
+              "param_type": "StringVal",
+              "default_value": "white",
+              "override_policy": "Overridable",
+              "metadata": {
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "overall_width",
+              "depth_param": "frame_depth",
+              "height_param": "overall_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "compound": {
+          "child_slots": [
+            {
+              "slot_id": "frame",
+              "role": "frame",
+              "definition_id": "architecture.window.frame",
+              "parameter_bindings": [
+                {
+                  "target_param": "frame_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "overall_width"
+                  }
+                },
+                {
+                  "target_param": "frame_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "frame_depth"
+                  }
+                },
+                {
+                  "target_param": "frame_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "overall_height"
+                  }
+                }
+              ],
+              "transform_binding": {}
+            },
+            {
+              "slot_id": "mullion",
+              "role": "mullion",
+              "definition_id": "architecture.window.mullion",
+              "parameter_bindings": [
+                {
+                  "target_param": "mullion_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "mullion_effective_width"
+                  }
+                },
+                {
+                  "target_param": "mullion_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "frame_depth"
+                  }
+                },
+                {
+                  "target_param": "mullion_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "overall_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_mullion"
+              }
+            },
+            {
+              "slot_id": "left_sash",
+              "role": "left_sash",
+              "definition_id": "architecture.window.sash",
+              "parameter_bindings": [
+                {
+                  "target_param": "sash_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "left_sash_width"
+                  }
+                },
+                {
+                  "target_param": "sash_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "frame_depth"
+                  }
+                },
+                {
+                  "target_param": "sash_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "sash_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "mullion_effective_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "left_sash_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  }
+                ]
+              }
+            },
+            {
+              "slot_id": "right_sash",
+              "role": "right_sash",
+              "definition_id": "architecture.window.sash",
+              "parameter_bindings": [
+                {
+                  "target_param": "sash_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "right_sash_width"
+                  }
+                },
+                {
+                  "target_param": "sash_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "frame_depth"
+                  }
+                },
+                {
+                  "target_param": "sash_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "sash_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "mullion_effective_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "right_sash_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  }
+                ]
+              }
+            },
+            {
+              "slot_id": "left_glazing",
+              "role": "glazing",
+              "definition_id": "architecture.window.glazing",
+              "parameter_bindings": [
+                {
+                  "target_param": "glazing_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "left_glazing_width"
+                  }
+                },
+                {
+                  "target_param": "glazing_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_thickness"
+                  }
+                },
+                {
+                  "target_param": "glazing_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "mullion_effective_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "left_sash_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  }
+                ]
+              }
+            },
+            {
+              "slot_id": "right_glazing",
+              "role": "glazing",
+              "definition_id": "architecture.window.glazing",
+              "parameter_bindings": [
+                {
+                  "target_param": "glazing_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "right_glazing_width"
+                  }
+                },
+                {
+                  "target_param": "glazing_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_thickness"
+                  }
+                },
+                {
+                  "target_param": "glazing_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "mullion_effective_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "right_sash_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  }
+                ]
+              }
+            },
+            {
+              "slot_id": "left_muntin",
+              "role": "muntin",
+              "definition_id": "architecture.window.muntin",
+              "parameter_bindings": [
+                {
+                  "target_param": "muntin_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "muntin_width"
+                  }
+                },
+                {
+                  "target_param": "muntin_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_thickness"
+                  }
+                },
+                {
+                  "target_param": "muntin_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "mullion_effective_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "left_sash_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_muntins"
+              }
+            },
+            {
+              "slot_id": "right_muntin",
+              "role": "muntin",
+              "definition_id": "architecture.window.muntin",
+              "parameter_bindings": [
+                {
+                  "target_param": "muntin_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "muntin_width"
+                  }
+                },
+                {
+                  "target_param": "muntin_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_thickness"
+                  }
+                },
+                {
+                  "target_param": "muntin_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "glazing_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "mullion_effective_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "right_sash_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_muntins"
+              }
+            },
+            {
+              "slot_id": "left_casing",
+              "role": "casing",
+              "definition_id": "architecture.window.casing",
+              "parameter_bindings": [
+                {
+                  "target_param": "casing_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "casing_width"
+                  }
+                },
+                {
+                  "target_param": "casing_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "casing_depth"
+                  }
+                },
+                {
+                  "target_param": "casing_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "overall_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "overall_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "casing_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "wall_thickness"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "casing_depth"
+                      }
+                    }
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_interior_casing"
+              }
+            },
+            {
+              "slot_id": "right_casing",
+              "role": "casing",
+              "definition_id": "architecture.window.casing",
+              "parameter_bindings": [
+                {
+                  "target_param": "casing_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "casing_width"
+                  }
+                },
+                {
+                  "target_param": "casing_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "casing_depth"
+                  }
+                },
+                {
+                  "target_param": "casing_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "overall_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 1.0
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "overall_width"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "casing_width"
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "wall_thickness"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "casing_depth"
+                      }
+                    }
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_interior_casing"
+              }
+            },
+            {
+              "slot_id": "head_casing",
+              "role": "casing",
+              "definition_id": "architecture.window.casing",
+              "parameter_bindings": [
+                {
+                  "target_param": "casing_width",
+                  "expr": {
+                    "kind": "add",
+                    "left": {
+                      "kind": "param_ref",
+                      "path": "overall_width"
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "casing_width"
+                      },
+                      "right": {
+                        "kind": "literal",
+                        "value": 2.0
+                      }
+                    }
+                  }
+                },
+                {
+                  "target_param": "casing_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "casing_depth"
+                  }
+                },
+                {
+                  "target_param": "casing_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "casing_width"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "overall_height"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "casing_width"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "wall_thickness"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "casing_depth"
+                      }
+                    }
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_interior_casing"
+              }
+            },
+            {
+              "slot_id": "stool",
+              "role": "stool",
+              "definition_id": "architecture.window.stool",
+              "parameter_bindings": [
+                {
+                  "target_param": "stool_width",
+                  "expr": {
+                    "kind": "add",
+                    "left": {
+                      "kind": "param_ref",
+                      "path": "overall_width"
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "casing_width"
+                      },
+                      "right": {
+                        "kind": "literal",
+                        "value": 2.0
+                      }
+                    }
+                  }
+                },
+                {
+                  "target_param": "stool_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "stool_depth"
+                  }
+                },
+                {
+                  "target_param": "stool_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "stool_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "overall_height"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "stool_height"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "wall_thickness"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "stool_depth"
+                      }
+                    }
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_stool"
+              }
+            },
+            {
+              "slot_id": "apron",
+              "role": "apron",
+              "definition_id": "architecture.window.apron",
+              "parameter_bindings": [
+                {
+                  "target_param": "apron_width",
+                  "expr": {
+                    "kind": "add",
+                    "left": {
+                      "kind": "param_ref",
+                      "path": "overall_width"
+                    },
+                    "right": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "casing_width"
+                      },
+                      "right": {
+                        "kind": "literal",
+                        "value": 2.0
+                      }
+                    }
+                  }
+                },
+                {
+                  "target_param": "apron_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "apron_depth"
+                  }
+                },
+                {
+                  "target_param": "apron_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "apron_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -1.0
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "mul",
+                        "left": {
+                          "kind": "literal",
+                          "value": 0.5
+                        },
+                        "right": {
+                          "kind": "add",
+                          "left": {
+                            "kind": "param_ref",
+                            "path": "overall_height"
+                          },
+                          "right": {
+                            "kind": "param_ref",
+                            "path": "apron_height"
+                          }
+                        }
+                      },
+                      "right": {
+                        "kind": "if_else",
+                        "condition": {
+                          "kind": "param_ref",
+                          "path": "has_stool"
+                        },
+                        "when_true": {
+                          "kind": "param_ref",
+                          "path": "stool_height"
+                        },
+                        "when_false": {
+                          "kind": "literal",
+                          "value": 0.0
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": 0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "wall_thickness"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "apron_depth"
+                      }
+                    }
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_apron"
+              }
+            },
+            {
+              "slot_id": "sill",
+              "role": "sill",
+              "definition_id": "architecture.window.sill",
+              "parameter_bindings": [
+                {
+                  "target_param": "sill_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "overall_width"
+                  }
+                },
+                {
+                  "target_param": "sill_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "sill_depth"
+                  }
+                },
+                {
+                  "target_param": "sill_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "sill_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "overall_height"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "sill_height"
+                      }
+                    }
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "wall_thickness"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "sill_depth"
+                      }
+                    }
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_exterior_sill"
+              }
+            },
+            {
+              "slot_id": "weatherboard",
+              "role": "weatherboard",
+              "definition_id": "architecture.window.weatherboard",
+              "parameter_bindings": [
+                {
+                  "target_param": "weatherboard_width",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "overall_width"
+                  }
+                },
+                {
+                  "target_param": "weatherboard_depth",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "weatherboard_depth"
+                  }
+                },
+                {
+                  "target_param": "weatherboard_height",
+                  "expr": {
+                    "kind": "param_ref",
+                    "path": "weatherboard_height"
+                  }
+                }
+              ],
+              "transform_binding": {
+                "translation": [
+                  {
+                    "kind": "literal",
+                    "value": 0.0
+                  },
+                  {
+                    "kind": "sub",
+                    "left": {
+                      "kind": "mul",
+                      "left": {
+                        "kind": "literal",
+                        "value": 0.5
+                      },
+                      "right": {
+                        "kind": "add",
+                        "left": {
+                          "kind": "param_ref",
+                          "path": "overall_height"
+                        },
+                        "right": {
+                          "kind": "param_ref",
+                          "path": "weatherboard_height"
+                        }
+                      }
+                    },
+                    "right": {
+                      "kind": "param_ref",
+                      "path": "weatherboard_height"
+                    }
+                  },
+                  {
+                    "kind": "mul",
+                    "left": {
+                      "kind": "literal",
+                      "value": -0.5
+                    },
+                    "right": {
+                      "kind": "add",
+                      "left": {
+                        "kind": "param_ref",
+                        "path": "wall_thickness"
+                      },
+                      "right": {
+                        "kind": "param_ref",
+                        "path": "weatherboard_depth"
+                      }
+                    }
+                  }
+                ]
+              },
+              "suppression_expr": {
+                "kind": "param_ref",
+                "path": "has_weatherboard"
+              }
+            }
+          ],
+          "anchors": [
+            {
+              "id": "opening.center",
+              "kind": "opening_center"
+            },
+            {
+              "id": "opening.exterior_face",
+              "kind": "host_exterior_face"
+            },
+            {
+              "id": "opening.interior_face",
+              "kind": "host_interior_face"
+            }
+          ],
+          "derived_parameters": [
+            {
+              "name": "mullion_effective_width",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "if_else",
+                "condition": {
+                  "kind": "param_ref",
+                  "path": "has_mullion"
+                },
+                "when_true": {
+                  "kind": "param_ref",
+                  "path": "mullion_width"
+                },
+                "when_false": {
+                  "kind": "literal",
+                  "value": 0.0
+                }
+              },
+              "dependencies": [
+                "has_mullion",
+                "mullion_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "clear_width",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "overall_width"
+                },
+                "right": {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "param_ref",
+                    "path": "frame_face_width"
+                  },
+                  "right": {
+                    "kind": "literal",
+                    "value": 2.0
+                  }
+                }
+              },
+              "dependencies": [
+                "overall_width",
+                "frame_face_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "clear_height",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "overall_height"
+                },
+                "right": {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "param_ref",
+                    "path": "frame_face_width"
+                  },
+                  "right": {
+                    "kind": "literal",
+                    "value": 2.0
+                  }
+                }
+              },
+              "dependencies": [
+                "overall_height",
+                "frame_face_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "sash_pair_width",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "clear_width"
+                },
+                "right": {
+                  "kind": "param_ref",
+                  "path": "mullion_effective_width"
+                }
+              },
+              "dependencies": [
+                "clear_width",
+                "mullion_effective_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "left_sash_width",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "mul",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "sash_pair_width"
+                },
+                "right": {
+                  "kind": "param_ref",
+                  "path": "sash_split"
+                }
+              },
+              "dependencies": [
+                "sash_pair_width",
+                "sash_split"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "right_sash_width",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "sash_pair_width"
+                },
+                "right": {
+                  "kind": "param_ref",
+                  "path": "left_sash_width"
+                }
+              },
+              "dependencies": [
+                "sash_pair_width",
+                "left_sash_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "left_glazing_width",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "left_sash_width"
+                },
+                "right": {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "param_ref",
+                    "path": "sash_face_width"
+                  },
+                  "right": {
+                    "kind": "literal",
+                    "value": 2.0
+                  }
+                }
+              },
+              "dependencies": [
+                "left_sash_width",
+                "sash_face_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "right_glazing_width",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "right_sash_width"
+                },
+                "right": {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "param_ref",
+                    "path": "sash_face_width"
+                  },
+                  "right": {
+                    "kind": "literal",
+                    "value": 2.0
+                  }
+                }
+              },
+              "dependencies": [
+                "right_sash_width",
+                "sash_face_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            },
+            {
+              "name": "glazing_height",
+              "param_type": "Numeric",
+              "expr": {
+                "kind": "sub",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "sash_height"
+                },
+                "right": {
+                  "kind": "mul",
+                  "left": {
+                    "kind": "param_ref",
+                    "path": "sash_face_width"
+                  },
+                  "right": {
+                    "kind": "literal",
+                    "value": 2.0
+                  }
+                }
+              },
+              "dependencies": [
+                "sash_height",
+                "sash_face_width"
+              ],
+              "metadata": {
+                "unit": "m",
+                "mutability": "Derived"
+              }
+            }
+          ],
+          "constraints": [
+            {
+              "id": "minimum_window_width",
+              "expr": {
+                "kind": "gt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "overall_width"
+                },
+                "right": {
+                  "kind": "literal",
+                  "value": 0.9
+                }
+              },
+              "dependencies": [
+                "overall_width"
+              ],
+              "severity": "Error",
+              "message": "Overall window width must remain large enough for frame, mullion, and both sashes"
+            },
+            {
+              "id": "minimum_window_height",
+              "expr": {
+                "kind": "gt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "overall_height"
+                },
+                "right": {
+                  "kind": "literal",
+                  "value": 1.0
+                }
+              },
+              "dependencies": [
+                "overall_height"
+              ],
+              "severity": "Error",
+              "message": "Overall window height must remain above the minimum family size"
+            },
+            {
+              "id": "wall_depth_vs_frame_depth",
+              "expr": {
+                "kind": "gt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "wall_thickness"
+                },
+                "right": {
+                  "kind": "param_ref",
+                  "path": "frame_depth"
+                }
+              },
+              "dependencies": [
+                "wall_thickness",
+                "frame_depth"
+              ],
+              "severity": "Error",
+              "message": "Wall thickness must exceed frame depth"
+            },
+            {
+              "id": "split_lower_bound",
+              "expr": {
+                "kind": "gt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "sash_split"
+                },
+                "right": {
+                  "kind": "literal",
+                  "value": 0.15
+                }
+              },
+              "dependencies": [
+                "sash_split"
+              ],
+              "severity": "Error",
+              "message": "Sash split must stay above 15%"
+            },
+            {
+              "id": "split_upper_bound",
+              "expr": {
+                "kind": "lt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "sash_split"
+                },
+                "right": {
+                  "kind": "literal",
+                  "value": 0.85
+                }
+              },
+              "dependencies": [
+                "sash_split"
+              ],
+              "severity": "Error",
+              "message": "Sash split must stay below 85%"
+            },
+            {
+              "id": "left_glazing_positive",
+              "expr": {
+                "kind": "gt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "left_glazing_width"
+                },
+                "right": {
+                  "kind": "literal",
+                  "value": 0.1
+                }
+              },
+              "dependencies": [
+                "left_glazing_width"
+              ],
+              "severity": "Error",
+              "message": "Left glazing width must remain positive"
+            },
+            {
+              "id": "right_glazing_positive",
+              "expr": {
+                "kind": "gt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "right_glazing_width"
+                },
+                "right": {
+                  "kind": "literal",
+                  "value": 0.1
+                }
+              },
+              "dependencies": [
+                "right_glazing_width"
+              ],
+              "severity": "Error",
+              "message": "Right glazing width must remain positive"
+            },
+            {
+              "id": "glazing_height_positive",
+              "expr": {
+                "kind": "gt",
+                "left": {
+                  "kind": "param_ref",
+                  "path": "glazing_height"
+                },
+                "right": {
+                  "kind": "literal",
+                  "value": 0.1
+                }
+              },
+              "dependencies": [
+                "glazing_height"
+              ],
+              "severity": "Error",
+              "message": "Glazing height must remain positive"
+            }
+          ]
+        },
+        "domain_data": {
+          "architectural": {
+            "material_assignment": {
+              "category": "window_assembly",
+              "finish": "white"
+            },
+            "property_set_schemas": [
+              {
+                "fields": {
+                  "FinishColor": {
+                    "type": "string"
+                  },
+                  "FireRating": {
+                    "type": "string"
+                  },
+                  "IsExternal": {
+                    "type": "boolean"
+                  },
+                  "Reference": {
+                    "type": "string"
+                  }
+                },
+                "name": "Pset_WindowCommon"
+              }
+            ],
+            "void_declaration": {
+              "kind": "opening",
+              "parameters": {
+                "host": "wall",
+                "placement": "wall_opening",
+                "requires_architecture_extension": true
+              }
+            }
+          }
+        }
+      },
+      "architecture.window.sash": {
+        "id": "architecture.window.sash",
+        "name": "Window Sash",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "sash_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sash_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sash_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "sash_width",
+              "depth_param": "sash_depth",
+              "height_param": "sash_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": {
+          "architectural": {
+            "material_assignment": {
+              "category": "sash"
+            },
+            "property_set_schemas": [
+              {
+                "fields": {
+                  "GlazingType": {
+                    "type": "string"
+                  },
+                  "OperationType": {
+                    "type": "string"
+                  }
+                },
+                "name": "Pset_WindowPanelCommon"
+              }
+            ]
+          }
+        }
+      },
+      "architecture.window.stool": {
+        "id": "architecture.window.stool",
+        "name": "Window Stool",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "stool_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "stool_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "stool_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "stool_width",
+              "depth_param": "stool_depth",
+              "height_param": "stool_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": null
+      },
+      "architecture.window.sill": {
+        "id": "architecture.window.sill",
+        "name": "Window Sill",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "sill_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sill_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "sill_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "sill_width",
+              "depth_param": "sill_depth",
+              "height_param": "sill_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": null
+      },
+      "architecture.window.casing": {
+        "id": "architecture.window.casing",
+        "name": "Window Casing",
+        "definition_kind": "Solid",
+        "definition_version": 1,
+        "interface": {
+          "parameters": [
+            {
+              "name": "casing_width",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "casing_depth",
+              "param_type": "Numeric",
+              "default_value": 0.14,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            },
+            {
+              "name": "casing_height",
+              "param_type": "Numeric",
+              "default_value": 1.0,
+              "override_policy": "Locked",
+              "metadata": {
+                "unit": "m",
+                "mutability": "Input"
+              }
+            }
+          ]
+        },
+        "evaluators": [
+          {
+            "RectangularExtrusion": {
+              "width_param": "casing_width",
+              "depth_param": "casing_depth",
+              "height_param": "casing_height"
+            }
+          }
+        ],
+        "representations": [
+          {
+            "kind": "Body",
+            "role": "PrimaryGeometry"
+          }
+        ],
+        "domain_data": null
+      }
+    }
+  }
+}

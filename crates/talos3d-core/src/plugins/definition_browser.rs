@@ -253,6 +253,11 @@ pub fn execute_instantiate_definition(
     if let Some(offset) = offset {
         snapshot.offset = offset;
     }
+    if let Some(host_context) = hosted.as_ref() {
+        if let Some(rotation) = wall_host_rotation(host_context) {
+            snapshot.rotation = rotation;
+        }
+    }
     enqueue_create_boxed_entity(world, snapshot.into());
     apply_pending_history_commands(world);
     created.push(element_id.0);
@@ -2045,6 +2050,13 @@ fn build_hosted_occurrence_context(
         opening_element_id: context.opening_element_id,
         anchors,
     }
+}
+
+fn wall_host_rotation(context: &DefinitionSelectionContext) -> Option<Quat> {
+    let axis = context.wall_axis?;
+    let planar = Vec2::new(axis.x, axis.z).try_normalize()?;
+    let angle = planar.y.atan2(planar.x);
+    Some(Quat::from_rotation_y(-angle))
 }
 
 fn apply_contextual_window_overrides(

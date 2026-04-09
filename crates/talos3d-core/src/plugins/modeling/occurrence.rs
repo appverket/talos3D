@@ -21,6 +21,7 @@ use crate::{
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id},
         identity::ElementId,
+        materials::MaterialAssignment,
         modeling::{
             definition::{
                 ChildSlotDef, ConstraintSeverity, Definition, DefinitionId, DefinitionRegistry,
@@ -594,9 +595,11 @@ fn render_occurrence(
             extrusion,
             ShapeRotation(transform.rotation),
         );
+        apply_occurrence_material_assignment(world, root_entity, &definition);
     } else {
         clear_occurrence_root_geometry(world, root_entity);
         world.entity_mut(root_entity).insert(transform);
+        clear_occurrence_material_assignment(world, root_entity);
     }
 
     if let Some(compound) = &definition.compound {
@@ -688,7 +691,7 @@ fn spawn_compound_slot(
     if let Some(extrusion) =
         build_rectangular_extrusion_from_values(&child_definition, &state.values, world_translation)
     {
-        world.spawn((
+        let mut entity = world.spawn((
             extrusion,
             ShapeRotation(context.parent_rotation),
             NeedsMesh,
@@ -699,6 +702,7 @@ fn spawn_compound_slot(
                 definition_id: slot.definition_id.clone(),
             },
         ));
+        apply_spawned_material_assignment(&mut entity, &child_definition);
     }
 
     if let Some(compound) = &child_definition.compound {
@@ -924,6 +928,40 @@ fn clear_occurrence_root_geometry(world: &mut World, entity: Entity) {
             MeshMaterial3d<StandardMaterial>,
         )>();
     }
+}
+
+fn apply_occurrence_material_assignment(
+    world: &mut World,
+    entity: Entity,
+    definition: &Definition,
+) {
+    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+        apply_spawned_material_assignment(&mut entity_mut, definition);
+    }
+}
+
+fn clear_occurrence_material_assignment(world: &mut World, entity: Entity) {
+    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+        entity_mut.remove::<MaterialAssignment>();
+    }
+}
+
+fn apply_spawned_material_assignment(entity: &mut EntityWorldMut<'_>, definition: &Definition) {
+    if let Some(material_id) = definition_material_id(definition) {
+        entity.insert(MaterialAssignment::new(material_id));
+    } else {
+        entity.remove::<MaterialAssignment>();
+    }
+}
+
+fn definition_material_id(definition: &Definition) -> Option<String> {
+    definition
+        .domain_data
+        .get("architectural")
+        .and_then(|architectural| architectural.get("material_assignment"))
+        .and_then(|assignment| assignment.get("material_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn cleanup_generated_occurrence_parts(world: &mut World, owner: ElementId) {

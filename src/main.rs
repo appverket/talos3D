@@ -12,9 +12,9 @@ use talos3d_core::plugins::model_api::ModelApiPlugin;
 #[cfg(feature = "perf-stats")]
 use talos3d_core::plugins::perf_stats::PerfStatsPlugin;
 use talos3d_core::plugins::{
+    bundled_definition_libraries::BundledDefinitionLibrariesPlugin,
     camera::CameraPlugin,
     clipping_planes::ClippingPlanesPlugin,
-    named_views::NamedViewsPlugin,
     command_registry::CommandRegistryPlugin,
     commands::CommandPlugin,
     cursor::CursorPlugin,
@@ -32,6 +32,7 @@ use talos3d_core::plugins::{
     layers::LayerPlugin,
     materials::MaterialPlugin,
     modeling::ModelingPlugin,
+    named_views::NamedViewsPlugin,
     palette::PalettePlugin,
     persistence::PersistencePlugin,
     property_edit::PropertyEditPlugin,
@@ -89,6 +90,7 @@ fn main() {
     .add_plugins(LayerPlugin)
     .add_plugins(MaterialPlugin)
     .add_plugins(ModelingPlugin)
+    .add_plugins(BundledDefinitionLibrariesPlugin)
     .add_plugins(ArchitecturalPlugin);
 
     #[cfg(feature = "terrain")]

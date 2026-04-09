@@ -38,13 +38,27 @@ pub struct MaterialsWindowState {
     pub roughness: f32,
     pub metallic: f32,
     pub reflectance: f32,
+    pub specular_tint: [f32; 3],
     pub emissive: [f32; 3],
     pub emissive_exposure_weight: f32,
+    pub diffuse_transmission: f32,
+    pub specular_transmission: f32,
+    pub thickness: f32,
+    pub ior: f32,
+    pub attenuation_distance: f32,
+    pub attenuation_color: [f32; 3],
+    pub clearcoat: f32,
+    pub clearcoat_perceptual_roughness: f32,
+    pub anisotropy_strength: f32,
     pub alpha_mode_idx: usize,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
+    pub unlit: bool,
+    pub fog_enabled: bool,
+    pub depth_bias: f32,
     pub uv_scale: [f32; 2],
     pub uv_rotation_deg: f32,
+    pub anisotropy_rotation_deg: f32,
     pub base_color_tex: Option<TextureRef>,
     pub normal_map_tex: Option<TextureRef>,
     pub metallic_roughness_tex: Option<TextureRef>,
@@ -70,13 +84,31 @@ impl MaterialsWindowState {
         self.roughness = def.perceptual_roughness;
         self.metallic = def.metallic;
         self.reflectance = def.reflectance;
+        self.specular_tint = def.specular_tint;
         self.emissive = def.emissive;
         self.emissive_exposure_weight = def.emissive_exposure_weight;
+        self.diffuse_transmission = def.diffuse_transmission;
+        self.specular_transmission = def.specular_transmission;
+        self.thickness = def.thickness;
+        self.ior = def.ior;
+        self.attenuation_distance = if def.attenuation_distance.is_finite() {
+            def.attenuation_distance
+        } else {
+            1_000_000.0
+        };
+        self.attenuation_color = def.attenuation_color;
+        self.clearcoat = def.clearcoat;
+        self.clearcoat_perceptual_roughness = def.clearcoat_perceptual_roughness;
+        self.anisotropy_strength = def.anisotropy_strength;
         self.alpha_mode_idx = alpha_mode_to_idx(&def.alpha_mode);
         self.alpha_cutoff = def.alpha_cutoff;
         self.double_sided = def.double_sided;
+        self.unlit = def.unlit;
+        self.fog_enabled = def.fog_enabled;
+        self.depth_bias = def.depth_bias;
         self.uv_scale = def.uv_scale;
         self.uv_rotation_deg = def.uv_rotation.to_degrees();
+        self.anisotropy_rotation_deg = def.anisotropy_rotation.to_degrees();
         self.base_color_tex = def.base_color_texture.clone();
         self.normal_map_tex = def.normal_map_texture.clone();
         self.metallic_roughness_tex = def.metallic_roughness_texture.clone();
@@ -92,13 +124,31 @@ impl MaterialsWindowState {
         def.perceptual_roughness = self.roughness;
         def.metallic = self.metallic;
         def.reflectance = self.reflectance;
+        def.specular_tint = self.specular_tint;
         def.emissive = self.emissive;
         def.emissive_exposure_weight = self.emissive_exposure_weight;
+        def.diffuse_transmission = self.diffuse_transmission;
+        def.specular_transmission = self.specular_transmission;
+        def.thickness = self.thickness;
+        def.ior = self.ior;
+        def.attenuation_distance = if self.attenuation_distance >= 999_999.0 {
+            f32::INFINITY
+        } else {
+            self.attenuation_distance
+        };
+        def.attenuation_color = self.attenuation_color;
+        def.clearcoat = self.clearcoat;
+        def.clearcoat_perceptual_roughness = self.clearcoat_perceptual_roughness;
+        def.anisotropy_strength = self.anisotropy_strength;
         def.alpha_mode = idx_to_alpha_mode(self.alpha_mode_idx);
         def.alpha_cutoff = self.alpha_cutoff;
         def.double_sided = self.double_sided;
+        def.unlit = self.unlit;
+        def.fog_enabled = self.fog_enabled;
+        def.depth_bias = self.depth_bias;
         def.uv_scale = self.uv_scale;
         def.uv_rotation = self.uv_rotation_deg.to_radians();
+        def.anisotropy_rotation = self.anisotropy_rotation_deg.to_radians();
         def.base_color_texture = self.base_color_tex.clone();
         def.normal_map_texture = self.normal_map_tex.clone();
         def.metallic_roughness_texture = self.metallic_roughness_tex.clone();
@@ -417,6 +467,21 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                     }
                     ui.end_row();
 
+                    ui.label("Specular Tint");
+                    let [sr, sg, sb] = state.specular_tint;
+                    let mut scol = egui::Color32::from_rgb(
+                        (sr.clamp(0.0, 1.0) * 255.0) as u8,
+                        (sg.clamp(0.0, 1.0) * 255.0) as u8,
+                        (sb.clamp(0.0, 1.0) * 255.0) as u8,
+                    );
+                    if ui.color_edit_button_srgba(&mut scol).changed() {
+                        let [cr, cg, cb, _] = scol.to_srgba_unmultiplied();
+                        state.specular_tint =
+                            [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
                     // Emissive
                     ui.label("Emissive");
                     let [er, eg, eb] = state.emissive;
@@ -437,6 +502,130 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                         .add(
                             egui::Slider::new(&mut state.emissive_exposure_weight, 0.0..=8.0)
                                 .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Diffuse Transmission");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut state.diffuse_transmission, 0.0..=1.0)
+                                .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Specular Transmission");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut state.specular_transmission, 0.0..=1.0)
+                                .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Thickness (m)");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut state.thickness)
+                                .speed(0.005)
+                                .range(0.0..=10.0),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("IOR");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut state.ior)
+                                .speed(0.01)
+                                .range(1.0..=3.0),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Attenuation Dist.");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut state.attenuation_distance)
+                                .speed(0.05)
+                                .range(0.0..=1000.0),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Attenuation Color");
+                    let [atr, atg, atb] = state.attenuation_color;
+                    let mut atcol = egui::Color32::from_rgb(
+                        (atr.clamp(0.0, 1.0) * 255.0) as u8,
+                        (atg.clamp(0.0, 1.0) * 255.0) as u8,
+                        (atb.clamp(0.0, 1.0) * 255.0) as u8,
+                    );
+                    if ui.color_edit_button_srgba(&mut atcol).changed() {
+                        let [cr, cg, cb, _] = atcol.to_srgba_unmultiplied();
+                        state.attenuation_color =
+                            [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Clearcoat");
+                    if ui
+                        .add(egui::Slider::new(&mut state.clearcoat, 0.0..=1.0).fixed_decimals(2))
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Clearcoat Rough.");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut state.clearcoat_perceptual_roughness, 0.0..=1.0)
+                                .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Anisotropy");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut state.anisotropy_strength, 0.0..=1.0)
+                                .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Aniso Rotation (°)");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut state.anisotropy_rotation_deg)
+                                .speed(1.0)
+                                .suffix("°"),
                         )
                         .changed()
                     {
@@ -483,6 +672,18 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                     }
                     ui.end_row();
 
+                    ui.label("Unlit");
+                    if ui.checkbox(&mut state.unlit, "").changed() {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Fog Enabled");
+                    if ui.checkbox(&mut state.fog_enabled, "").changed() {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
                     // UV scale
                     ui.label("UV Tiling (X, Y)");
                     ui.horizontal(|ui| {
@@ -518,6 +719,19 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                             egui::DragValue::new(&mut state.uv_rotation_deg)
                                 .speed(1.0)
                                 .suffix("°"),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Depth Bias");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut state.depth_bias)
+                                .speed(0.01)
+                                .range(-10.0..=10.0),
                         )
                         .changed()
                     {

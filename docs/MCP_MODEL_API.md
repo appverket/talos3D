@@ -32,6 +32,21 @@ The modeling layer also exposes authored edge features such as `fillet` and
 `create_entity`, edit them with `set_property`, or invoke the matching command
 entries through `invoke_command`.
 
+Built-in definition libraries are also loaded at startup and show up through
+the same definition-library inspection tools as project-local libraries. Their
+reported scope is `Bundled`, which distinguishes shipped catalogs from
+document-local or imported external libraries.
+
+Material payloads expose a broader Bevy-backed appearance contract than the
+initial MVP: specular tint, transmission, thickness, IOR, attenuation,
+clearcoat, anisotropy, unlit/fog flags, and depth bias are all readable and
+writeable through the material tools.
+
+Viewport renderer state is also available over MCP through
+`get_render_settings` and `set_render_settings`. Those tools expose
+tonemapping, exposure, SSAO, bloom, and SSR controls so an agent can tune the
+working view without simulating UI input.
+
 ## Running Talos3D With MCP Enabled
 
 Start the app with the `model-api` feature:

@@ -34,6 +34,7 @@ use crate::plugins::{
         parse_property_value, shared_property_value, PropertyEditState, PropertyPanelData,
         PropertyPanelState,
     },
+    render_pipeline::{RenderSettings, RenderTonemapping},
     selection::Selected,
     toolbar::{
         apply_toolbar_float, redock_toolbar, set_toolbar_visibility, FloatingToolbarStates,
@@ -83,6 +84,7 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<ToolbarDragState>()
         .init_resource::<ViewportContextMenu>()
         .init_resource::<MaterialsWindowState>()
+        .init_resource::<RenderSettingsWindowState>()
         .add_systems(
             Update,
             (
@@ -105,6 +107,11 @@ struct ViewportContextMenu {
     open: bool,
     position: egui::Pos2,
     just_opened: bool,
+}
+
+#[derive(Resource, Default, Debug, Clone)]
+pub struct RenderSettingsWindowState {
+    pub visible: bool,
 }
 
 /// Describes exactly where a dragged toolbar should land.
@@ -173,6 +180,8 @@ struct ChromeData<'w, 's> {
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
     materials_window_state: ResMut<'w, MaterialsWindowState>,
     material_registry: ResMut<'w, MaterialRegistry>,
+    render_settings: ResMut<'w, RenderSettings>,
+    render_settings_window_state: ResMut<'w, RenderSettingsWindowState>,
     asset_server: Res<'w, AssetServer>,
     images: ResMut<'w, Assets<Image>>,
     definition_registry: Res<'w, DefinitionRegistry>,
@@ -257,6 +266,11 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 }
                             }
                             if category.label() == "View" {
+                                ui.separator();
+                                if ui.button("Renderer...").clicked() {
+                                    data.render_settings_window_state.visible = true;
+                                    ui.close();
+                                }
                                 ui.separator();
                                 ui.menu_button("Toolbars", |ui| {
                                     draw_toolbar_visibility_menu(
@@ -379,6 +393,11 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &data.asset_server,
         &mut data.images,
         &mut data.pending_command_invocations,
+    );
+    draw_render_settings_window(
+        &ctx,
+        &mut data.render_settings_window_state,
+        &mut data.render_settings,
     );
     draw_import_review_window(&ctx, &mut data);
     draw_imported_layers_window(&ctx, &mut data);
@@ -1946,6 +1965,179 @@ fn draw_toolbar_visibility_menu(
     }
 }
 
+fn draw_render_settings_window(
+    ctx: &egui::Context,
+    state: &mut RenderSettingsWindowState,
+    settings: &mut RenderSettings,
+) {
+    if !state.visible {
+        return;
+    }
+
+    egui::Window::new("Renderer")
+        .open(&mut state.visible)
+        .default_width(340.0)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "These controls map directly to the renderer state exposed over MCP.",
+                )
+                .small()
+                .color(CHROME_MUTED),
+            );
+            ui.add_space(8.0);
+
+            ui.collapsing("Tone and Exposure", |ui| {
+                let selected = tonemapping_label(settings.tonemapping);
+                egui::ComboBox::from_id_salt("renderer_tonemapping")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for tonemapping in [
+                            RenderTonemapping::None,
+                            RenderTonemapping::Reinhard,
+                            RenderTonemapping::ReinhardLuminance,
+                            RenderTonemapping::AcesFitted,
+                            RenderTonemapping::AgX,
+                            RenderTonemapping::SomewhatBoringDisplayTransform,
+                            RenderTonemapping::TonyMcMapface,
+                            RenderTonemapping::BlenderFilmic,
+                        ] {
+                            ui.selectable_value(
+                                &mut settings.tonemapping,
+                                tonemapping,
+                                tonemapping_label(tonemapping),
+                            );
+                        }
+                    });
+                ui.add(
+                    egui::Slider::new(&mut settings.exposure_ev100, -8.0..=16.0)
+                        .text("Exposure (EV100)"),
+                );
+            });
+
+            ui.collapsing("Ambient Occlusion", |ui| {
+                ui.checkbox(&mut settings.ssao_enabled, "Enable SSAO");
+                ui.add_enabled_ui(settings.ssao_enabled, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut settings.ssao_constant_object_thickness, 0.01..=5.0)
+                            .text("Object Thickness"),
+                    );
+                    egui::ComboBox::from_id_salt("renderer_ssao_quality")
+                        .selected_text(ssao_quality_label(settings.ambient_occlusion_quality))
+                        .show_ui(ui, |ui| {
+                            for (value, label) in
+                                [(0, "Low"), (1, "Medium"), (2, "High"), (3, "Ultra")]
+                            {
+                                ui.selectable_value(
+                                    &mut settings.ambient_occlusion_quality,
+                                    value,
+                                    label,
+                                );
+                            }
+                        });
+                });
+            });
+
+            ui.collapsing("Bloom", |ui| {
+                ui.checkbox(&mut settings.bloom_enabled, "Enable Bloom");
+                ui.add_enabled_ui(settings.bloom_enabled, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut settings.bloom_intensity, 0.0..=3.0)
+                            .text("Intensity"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.bloom_low_frequency_boost, 0.0..=1.0)
+                            .text("Low Freq Boost"),
+                    );
+                    ui.add(
+                        egui::Slider::new(
+                            &mut settings.bloom_low_frequency_boost_curvature,
+                            0.0..=1.0,
+                        )
+                        .text("Boost Curvature"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.bloom_high_pass_frequency, 0.0..=4.0)
+                            .text("High Pass"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.bloom_threshold, 0.0..=4.0)
+                            .text("Threshold"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.bloom_threshold_softness, 0.0..=1.0)
+                            .text("Threshold Softness"),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Anamorphic Scale");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.bloom_scale[0])
+                                .speed(0.05)
+                                .range(0.1..=4.0),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut settings.bloom_scale[1])
+                                .speed(0.05)
+                                .range(0.1..=4.0),
+                        );
+                    });
+                });
+            });
+
+            ui.collapsing("Reflections", |ui| {
+                ui.checkbox(&mut settings.ssr_enabled, "Enable SSR");
+                ui.add_enabled_ui(settings.ssr_enabled, |ui| {
+                    ui.add(
+                        egui::Slider::new(
+                            &mut settings.ssr_perceptual_roughness_threshold,
+                            0.0..=1.0,
+                        )
+                        .text("Roughness Threshold"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.ssr_thickness, 0.01..=5.0)
+                            .text("Thickness"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.ssr_linear_steps, 1..=64)
+                            .text("Linear Steps"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.ssr_linear_march_exponent, 0.1..=4.0)
+                            .text("March Exponent"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut settings.ssr_bisection_steps, 0..=16)
+                            .text("Bisection Steps"),
+                    );
+                    ui.checkbox(&mut settings.ssr_use_secant, "Use Secant Refinement");
+                });
+            });
+        });
+}
+
+fn tonemapping_label(tonemapping: RenderTonemapping) -> &'static str {
+    match tonemapping {
+        RenderTonemapping::None => "None",
+        RenderTonemapping::Reinhard => "Reinhard",
+        RenderTonemapping::ReinhardLuminance => "Reinhard Luminance",
+        RenderTonemapping::AcesFitted => "ACES Fitted",
+        RenderTonemapping::AgX => "AgX",
+        RenderTonemapping::SomewhatBoringDisplayTransform => "Somewhat Boring",
+        RenderTonemapping::TonyMcMapface => "TonyMcMapface",
+        RenderTonemapping::BlenderFilmic => "Blender Filmic",
+    }
+}
+
+fn ssao_quality_label(value: u8) -> &'static str {
+    match value {
+        0 => "Low",
+        1 => "Medium",
+        3 => "Ultra",
+        _ => "High",
+    }
+}
+
 fn draw_toolbar_grip(ui: &mut egui::Ui, dock: ToolbarDock) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(TOOLBAR_GRIP_SIZE, TOOLBAR_GRIP_SIZE),
@@ -2745,17 +2937,30 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = CHROME_BG;
     visuals.panel_fill = CHROME_BG;
+    visuals.extreme_bg_color = egui::Color32::from_rgb(52, 61, 76);
     visuals.widgets.noninteractive.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.inactive.bg_fill = CHROME_BG;
+    visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(68, 80, 100);
     visuals.widgets.inactive.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.hovered.bg_fill = CHROME_HOVER;
+    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(88, 103, 128);
     visuals.widgets.hovered.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.active.bg_fill = CHROME_ACCENT;
+    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(108, 136, 176);
     visuals.widgets.active.fg_stroke.color = CHROME_TEXT;
     visuals.widgets.open.bg_fill = CHROME_ACCENT;
+    visuals.widgets.open.weak_bg_fill = egui::Color32::from_rgb(96, 121, 156);
     visuals.override_text_color = Some(CHROME_TEXT);
     visuals.selection.bg_fill = CHROME_ACCENT;
     visuals.selection.stroke.color = CHROME_TEXT;
     visuals.widgets.noninteractive.bg_stroke.color = CHROME_MUTED;
     ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    if let Some(button_font) = style.text_styles.get(&egui::TextStyle::Button).cloned() {
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, button_font);
+    }
+    ctx.set_style(style);
 }

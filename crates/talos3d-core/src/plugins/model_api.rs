@@ -26,6 +26,7 @@ use crate::plugins::{
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
+    render_pipeline::{RenderSettings, RenderTonemapping},
     selection::Selected,
     toolbar::{
         update_toolbar_layout_entry, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
@@ -292,10 +293,24 @@ pub struct MaterialInfo {
     pub perceptual_roughness: f32,
     pub metallic: f32,
     pub reflectance: f32,
+    pub specular_tint: [f32; 3],
     pub emissive: [f32; 3],
     pub emissive_exposure_weight: f32,
+    pub diffuse_transmission: f32,
+    pub specular_transmission: f32,
+    pub thickness: f32,
+    pub ior: f32,
+    pub attenuation_distance: f32,
+    pub attenuation_color: [f32; 3],
+    pub clearcoat: f32,
+    pub clearcoat_perceptual_roughness: f32,
+    pub anisotropy_strength: f32,
+    pub anisotropy_rotation_deg: f32,
     pub alpha_mode: String,
     pub double_sided: bool,
+    pub unlit: bool,
+    pub fog_enabled: bool,
+    pub depth_bias: f32,
     pub uv_scale: [f32; 2],
     pub uv_rotation_deg: f32,
     /// Base64-encoded image data (no data-URI prefix) or `null`.
@@ -341,10 +356,24 @@ impl MaterialInfo {
             perceptual_roughness: def.perceptual_roughness,
             metallic: def.metallic,
             reflectance: def.reflectance,
+            specular_tint: def.specular_tint,
             emissive: def.emissive,
             emissive_exposure_weight: def.emissive_exposure_weight,
+            diffuse_transmission: def.diffuse_transmission,
+            specular_transmission: def.specular_transmission,
+            thickness: def.thickness,
+            ior: def.ior,
+            attenuation_distance: def.attenuation_distance,
+            attenuation_color: def.attenuation_color,
+            clearcoat: def.clearcoat,
+            clearcoat_perceptual_roughness: def.clearcoat_perceptual_roughness,
+            anisotropy_strength: def.anisotropy_strength,
+            anisotropy_rotation_deg: def.anisotropy_rotation.to_degrees(),
             alpha_mode: format!("{:?}", def.alpha_mode),
             double_sided: def.double_sided,
+            unlit: def.unlit,
+            fog_enabled: def.fog_enabled,
+            depth_bias: def.depth_bias,
             uv_scale: def.uv_scale,
             uv_rotation_deg: def.uv_rotation.to_degrees(),
             base_color_texture: tex_data(&def.base_color_texture),
@@ -373,16 +402,44 @@ pub struct CreateMaterialRequest {
     pub metallic: f32,
     #[serde(default = "default_reflectance")]
     pub reflectance: f32,
+    #[serde(default = "default_specular_tint")]
+    pub specular_tint: [f32; 3],
     #[serde(default)]
     pub emissive: [f32; 3],
     #[serde(default = "default_emissive_exposure_weight")]
     pub emissive_exposure_weight: f32,
+    #[serde(default)]
+    pub diffuse_transmission: f32,
+    #[serde(default)]
+    pub specular_transmission: f32,
+    #[serde(default)]
+    pub thickness: f32,
+    #[serde(default = "default_ior")]
+    pub ior: f32,
+    #[serde(default = "default_attenuation_distance")]
+    pub attenuation_distance: f32,
+    #[serde(default = "default_attenuation_color")]
+    pub attenuation_color: [f32; 3],
+    #[serde(default)]
+    pub clearcoat: f32,
+    #[serde(default = "default_clearcoat_roughness")]
+    pub clearcoat_perceptual_roughness: f32,
+    #[serde(default)]
+    pub anisotropy_strength: f32,
+    #[serde(default)]
+    pub anisotropy_rotation_deg: f32,
     #[serde(default = "default_alpha_mode")]
     pub alpha_mode: String,
     #[serde(default = "default_alpha_cutoff")]
     pub alpha_cutoff: f32,
     #[serde(default)]
     pub double_sided: bool,
+    #[serde(default)]
+    pub unlit: bool,
+    #[serde(default = "default_true")]
+    pub fog_enabled: bool,
+    #[serde(default)]
+    pub depth_bias: f32,
     #[serde(default = "default_uv_scale")]
     pub uv_scale: [f32; 2],
     #[serde(default)]
@@ -415,8 +472,23 @@ fn default_roughness() -> f32 {
 fn default_reflectance() -> f32 {
     0.5
 }
+fn default_specular_tint() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
 fn default_emissive_exposure_weight() -> f32 {
     1.0
+}
+fn default_ior() -> f32 {
+    1.5
+}
+fn default_attenuation_distance() -> f32 {
+    f32::INFINITY
+}
+fn default_attenuation_color() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
+}
+fn default_clearcoat_roughness() -> f32 {
+    0.5
 }
 fn default_alpha_mode() -> String {
     "opaque".to_string()
@@ -433,6 +505,84 @@ fn default_uv_scale() -> [f32; 2] {
 pub struct ApplyMaterialRequest {
     pub material_id: String,
     pub element_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RenderSettingsInfo {
+    pub tonemapping: String,
+    pub exposure_ev100: f32,
+    pub ssao_enabled: bool,
+    pub ssao_constant_object_thickness: f32,
+    pub ambient_occlusion_quality: u8,
+    pub bloom_enabled: bool,
+    pub bloom_intensity: f32,
+    pub bloom_low_frequency_boost: f32,
+    pub bloom_low_frequency_boost_curvature: f32,
+    pub bloom_high_pass_frequency: f32,
+    pub bloom_threshold: f32,
+    pub bloom_threshold_softness: f32,
+    pub bloom_scale: [f32; 2],
+    pub ssr_enabled: bool,
+    pub ssr_perceptual_roughness_threshold: f32,
+    pub ssr_thickness: f32,
+    pub ssr_linear_steps: u32,
+    pub ssr_linear_march_exponent: f32,
+    pub ssr_bisection_steps: u32,
+    pub ssr_use_secant: bool,
+}
+
+impl RenderSettingsInfo {
+    fn from_settings(settings: &RenderSettings) -> Self {
+        Self {
+            tonemapping: settings.tonemapping.as_str().to_string(),
+            exposure_ev100: settings.exposure_ev100,
+            ssao_enabled: settings.ssao_enabled,
+            ssao_constant_object_thickness: settings.ssao_constant_object_thickness,
+            ambient_occlusion_quality: settings.ambient_occlusion_quality,
+            bloom_enabled: settings.bloom_enabled,
+            bloom_intensity: settings.bloom_intensity,
+            bloom_low_frequency_boost: settings.bloom_low_frequency_boost,
+            bloom_low_frequency_boost_curvature: settings.bloom_low_frequency_boost_curvature,
+            bloom_high_pass_frequency: settings.bloom_high_pass_frequency,
+            bloom_threshold: settings.bloom_threshold,
+            bloom_threshold_softness: settings.bloom_threshold_softness,
+            bloom_scale: settings.bloom_scale,
+            ssr_enabled: settings.ssr_enabled,
+            ssr_perceptual_roughness_threshold: settings.ssr_perceptual_roughness_threshold,
+            ssr_thickness: settings.ssr_thickness,
+            ssr_linear_steps: settings.ssr_linear_steps,
+            ssr_linear_march_exponent: settings.ssr_linear_march_exponent,
+            ssr_bisection_steps: settings.ssr_bisection_steps,
+            ssr_use_secant: settings.ssr_use_secant,
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RenderSettingsUpdateRequest {
+    pub tonemapping: Option<String>,
+    pub exposure_ev100: Option<f32>,
+    pub ssao_enabled: Option<bool>,
+    pub ssao_constant_object_thickness: Option<f32>,
+    pub ambient_occlusion_quality: Option<u8>,
+    pub bloom_enabled: Option<bool>,
+    pub bloom_intensity: Option<f32>,
+    pub bloom_low_frequency_boost: Option<f32>,
+    pub bloom_low_frequency_boost_curvature: Option<f32>,
+    pub bloom_high_pass_frequency: Option<f32>,
+    pub bloom_threshold: Option<f32>,
+    pub bloom_threshold_softness: Option<f32>,
+    pub bloom_scale: Option<[f32; 2]>,
+    pub ssr_enabled: Option<bool>,
+    pub ssr_perceptual_roughness_threshold: Option<f32>,
+    pub ssr_thickness: Option<f32>,
+    pub ssr_linear_steps: Option<u32>,
+    pub ssr_linear_march_exponent: Option<f32>,
+    pub ssr_bisection_steps: Option<u32>,
+    pub ssr_use_secant: Option<bool>,
 }
 
 // --- Definition / Occurrence types ---
@@ -912,6 +1062,11 @@ enum ModelApiRequest {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    GetRenderSettings(oneshot::Sender<RenderSettingsInfo>),
+    SetRenderSettings {
+        request: RenderSettingsUpdateRequest,
+        response: oneshot::Sender<ApiResult<RenderSettingsInfo>>,
+    },
     // --- Selection ---
     GetSelection(oneshot::Sender<Vec<u64>>),
     SetSelection {
@@ -1362,6 +1517,12 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         } => {
             let _ = response.send(handle_remove_material(world, element_ids));
         }
+        ModelApiRequest::GetRenderSettings(response) => {
+            let _ = response.send(handle_get_render_settings(world));
+        }
+        ModelApiRequest::SetRenderSettings { request, response } => {
+            let _ = response.send(handle_set_render_settings(world, request));
+        }
         // --- Selection ---
         ModelApiRequest::GetSelection(response) => {
             let _ = response.send(handle_get_selection(world));
@@ -1580,10 +1741,16 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
                 center,
             ));
         }
-        ModelApiRequest::ArrayDissolve { element_id, response } => {
+        ModelApiRequest::ArrayDissolve {
+            element_id,
+            response,
+        } => {
             let _ = response.send(handle_array_dissolve(world, element_id));
         }
-        ModelApiRequest::ArrayGet { element_id, response } => {
+        ModelApiRequest::ArrayGet {
+            element_id,
+            response,
+        } => {
             let _ = response.send(handle_array_get(world, element_id));
         }
         // --- Mirror ---
@@ -1655,8 +1822,13 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             camera_params,
             response,
         } => {
-            let _ =
-                response.send(handle_view_update(world, name, new_name, description, camera_params));
+            let _ = response.send(handle_view_update(
+                world,
+                name,
+                new_name,
+                description,
+                camera_params,
+            ));
         }
         ModelApiRequest::ViewDelete { name, response } => {
             let _ = response.send(handle_view_delete(world, name));
@@ -1669,7 +1841,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             active,
             response,
         } => {
-            let _ = response.send(handle_clip_plane_create(world, name, origin, normal, active));
+            let _ = response.send(handle_clip_plane_create(
+                world, name, origin, normal, active,
+            ));
         }
         ModelApiRequest::ClipPlaneUpdate {
             element_id,
@@ -2587,6 +2761,29 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_get_render_settings(&self) -> Result<RenderSettingsInfo, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetRenderSettings(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_set_render_settings(
+        &self,
+        request: RenderSettingsUpdateRequest,
+    ) -> ApiResult<RenderSettingsInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SetRenderSettings { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     // --- Selection ---
 
     async fn request_get_selection(&self) -> Result<Vec<u64>, String> {
@@ -3121,7 +3318,12 @@ impl ModelApiServer {
     ) -> ApiResult<u64> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::ArrayCreateLinear { source_id, count, spacing, response })
+            .send(ModelApiRequest::ArrayCreateLinear {
+                source_id,
+                count,
+                spacing,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3181,7 +3383,10 @@ impl ModelApiServer {
     async fn request_array_dissolve(&self, element_id: u64) -> ApiResult<u64> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::ArrayDissolve { element_id, response })
+            .send(ModelApiRequest::ArrayDissolve {
+                element_id,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3191,7 +3396,10 @@ impl ModelApiServer {
     async fn request_array_get(&self, element_id: u64) -> ApiResult<Value> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::ArrayGet { element_id, response })
+            .send(ModelApiRequest::ArrayGet {
+                element_id,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3251,7 +3459,10 @@ impl ModelApiServer {
     async fn request_mirror_dissolve(&self, element_id: u64) -> ApiResult<u64> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::MirrorDissolve { element_id, response })
+            .send(ModelApiRequest::MirrorDissolve {
+                element_id,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3261,7 +3472,10 @@ impl ModelApiServer {
     async fn request_mirror_get(&self, element_id: u64) -> ApiResult<Value> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::MirrorGet { element_id, response })
+            .send(ModelApiRequest::MirrorGet {
+                element_id,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3596,7 +3810,7 @@ fn default_screenshot_path() -> String {
 
 #[cfg(feature = "model-api")]
 async fn wait_for_screenshot_file(path: &str) -> Result<(), String> {
-    const ATTEMPTS: usize = 50;
+    const ATTEMPTS: usize = 150;
     const POLL_INTERVAL_MS: u64 = 100;
 
     for _ in 0..ATTEMPTS {
@@ -4546,6 +4760,33 @@ impl ModelApiServer {
         json_tool_result(removed)
     }
 
+    #[tool(
+        name = "get_render_settings",
+        description = "Get the current viewport renderer settings, including tonemapping, exposure, SSAO, bloom, and SSR controls."
+    )]
+    async fn get_render_settings_tool(&self) -> Result<CallToolResult, McpError> {
+        let settings = self
+            .request_get_render_settings()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(settings)
+    }
+
+    #[tool(
+        name = "set_render_settings",
+        description = "Update viewport renderer settings. Pass any subset of tonemapping, exposure_ev100, SSAO, bloom, and SSR fields."
+    )]
+    async fn set_render_settings_tool(
+        &self,
+        Parameters(params): Parameters<RenderSettingsUpdateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings = self
+            .request_set_render_settings(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(settings)
+    }
+
     // --- Selection ---
 
     #[tool(
@@ -5447,9 +5688,7 @@ fn handle_create_layer(world: &mut World, name: &str) -> Result<Vec<LayerInfo>, 
 // --- Named View Handlers ---
 
 #[cfg(feature = "model-api")]
-fn named_view_info_from_view(
-    view: &crate::plugins::named_views::NamedView,
-) -> NamedViewInfo {
+fn named_view_info_from_view(view: &crate::plugins::named_views::NamedView) -> NamedViewInfo {
     NamedViewInfo {
         name: view.name.clone(),
         description: view.description.clone(),
@@ -5663,28 +5902,23 @@ fn handle_view_delete(world: &mut World, name: String) -> Result<(), String> {
 fn clip_plane_info_from_world(world: &World, element_id: ElementId) -> Option<ClipPlaneInfo> {
     use crate::plugins::clipping_planes::ClipPlaneNode;
 
-    let mut q = world
-        .try_query::<(&ElementId, &ClipPlaneNode)>()
-        .unwrap();
-    q.iter(world)
-        .find_map(|(eid, node)| {
-            (*eid == element_id).then(|| ClipPlaneInfo {
-                element_id: eid.0,
-                name: node.name.clone(),
-                origin: node.origin.into(),
-                normal: node.normal.into(),
-                active: node.active,
-            })
+    let mut q = world.try_query::<(&ElementId, &ClipPlaneNode)>().unwrap();
+    q.iter(world).find_map(|(eid, node)| {
+        (*eid == element_id).then(|| ClipPlaneInfo {
+            element_id: eid.0,
+            name: node.name.clone(),
+            origin: node.origin.into(),
+            normal: node.normal.into(),
+            active: node.active,
         })
+    })
 }
 
 #[cfg(feature = "model-api")]
 fn handle_clip_plane_list(world: &World) -> Vec<ClipPlaneInfo> {
     use crate::plugins::clipping_planes::ClipPlaneNode;
 
-    let mut q = world
-        .try_query::<(&ElementId, &ClipPlaneNode)>()
-        .unwrap();
+    let mut q = world.try_query::<(&ElementId, &ClipPlaneNode)>().unwrap();
     q.iter(world)
         .map(|(eid, node)| ClipPlaneInfo {
             element_id: eid.0,
@@ -5882,6 +6116,85 @@ fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Ve
 }
 
 #[cfg(feature = "model-api")]
+fn handle_get_render_settings(world: &World) -> RenderSettingsInfo {
+    RenderSettingsInfo::from_settings(world.resource::<RenderSettings>())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_set_render_settings(
+    world: &mut World,
+    request: RenderSettingsUpdateRequest,
+) -> Result<RenderSettingsInfo, String> {
+    let mut settings = world.resource::<RenderSettings>().clone();
+
+    if let Some(tonemapping) = request.tonemapping {
+        settings.tonemapping = RenderTonemapping::from_str(&tonemapping)
+            .ok_or_else(|| format!("Unknown tonemapping mode '{tonemapping}'"))?;
+    }
+    if let Some(exposure_ev100) = request.exposure_ev100 {
+        settings.exposure_ev100 = exposure_ev100;
+    }
+    if let Some(ssao_enabled) = request.ssao_enabled {
+        settings.ssao_enabled = ssao_enabled;
+    }
+    if let Some(thickness) = request.ssao_constant_object_thickness {
+        settings.ssao_constant_object_thickness = thickness.max(0.0);
+    }
+    if let Some(quality) = request.ambient_occlusion_quality {
+        settings.ambient_occlusion_quality = quality.min(3);
+    }
+    if let Some(bloom_enabled) = request.bloom_enabled {
+        settings.bloom_enabled = bloom_enabled;
+    }
+    if let Some(value) = request.bloom_intensity {
+        settings.bloom_intensity = value.max(0.0);
+    }
+    if let Some(value) = request.bloom_low_frequency_boost {
+        settings.bloom_low_frequency_boost = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = request.bloom_low_frequency_boost_curvature {
+        settings.bloom_low_frequency_boost_curvature = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = request.bloom_high_pass_frequency {
+        settings.bloom_high_pass_frequency = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = request.bloom_threshold {
+        settings.bloom_threshold = value.max(0.0);
+    }
+    if let Some(value) = request.bloom_threshold_softness {
+        settings.bloom_threshold_softness = value.clamp(0.0, 1.0);
+    }
+    if let Some(scale) = request.bloom_scale {
+        settings.bloom_scale = [scale[0].max(0.0), scale[1].max(0.0)];
+    }
+    if let Some(ssr_enabled) = request.ssr_enabled {
+        settings.ssr_enabled = ssr_enabled;
+    }
+    if let Some(value) = request.ssr_perceptual_roughness_threshold {
+        settings.ssr_perceptual_roughness_threshold = value.clamp(0.0, 1.0);
+    }
+    if let Some(value) = request.ssr_thickness {
+        settings.ssr_thickness = value.max(0.0);
+    }
+    if let Some(value) = request.ssr_linear_steps {
+        settings.ssr_linear_steps = value.max(1);
+    }
+    if let Some(value) = request.ssr_linear_march_exponent {
+        settings.ssr_linear_march_exponent = value.max(0.1);
+    }
+    if let Some(value) = request.ssr_bisection_steps {
+        settings.ssr_bisection_steps = value;
+    }
+    if let Some(value) = request.ssr_use_secant {
+        settings.ssr_use_secant = value;
+    }
+
+    let info = RenderSettingsInfo::from_settings(&settings);
+    world.insert_resource(settings);
+    Ok(info)
+}
+
+#[cfg(feature = "model-api")]
 fn material_def_from_request(req: CreateMaterialRequest) -> MaterialDef {
     let mut def = MaterialDef::new(req.name.clone());
     apply_request_to_def(req, &mut def);
@@ -5906,11 +6219,25 @@ fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
     def.perceptual_roughness = req.perceptual_roughness;
     def.metallic = req.metallic;
     def.reflectance = req.reflectance;
+    def.specular_tint = req.specular_tint;
     def.emissive = req.emissive;
     def.emissive_exposure_weight = req.emissive_exposure_weight;
+    def.diffuse_transmission = req.diffuse_transmission;
+    def.specular_transmission = req.specular_transmission;
+    def.thickness = req.thickness;
+    def.ior = req.ior;
+    def.attenuation_distance = req.attenuation_distance;
+    def.attenuation_color = req.attenuation_color;
+    def.clearcoat = req.clearcoat;
+    def.clearcoat_perceptual_roughness = req.clearcoat_perceptual_roughness;
+    def.anisotropy_strength = req.anisotropy_strength;
+    def.anisotropy_rotation = req.anisotropy_rotation_deg.to_radians();
     def.alpha_mode = parse_alpha_mode(&req.alpha_mode);
     def.alpha_cutoff = req.alpha_cutoff;
     def.double_sided = req.double_sided;
+    def.unlit = req.unlit;
+    def.fog_enabled = req.fog_enabled;
+    def.depth_bias = req.depth_bias;
     def.uv_scale = req.uv_scale;
     def.uv_rotation = req.uv_rotation_deg.to_radians();
     def.base_color_texture = to_texture_ref(req.base_color_texture, req.base_color_texture_mime);
@@ -8031,6 +8358,11 @@ fn vec3_value(vector: Vec3) -> Value {
 }
 
 #[cfg(feature = "model-api")]
+fn quat_value(rotation: Quat) -> Value {
+    serde_json::json!([rotation.x, rotation.y, rotation.z, rotation.w])
+}
+
+#[cfg(feature = "model-api")]
 fn infer_wall_thickness_from_snapshot(snapshot: &BoxedEntity) -> Option<f32> {
     let bounds = snapshot.bounds()?;
     let extents = bounds.max - bounds.min;
@@ -8128,6 +8460,14 @@ fn infer_position_along_wall(snapshot: &BoxedEntity, point: Vec3) -> Option<f64>
         return None;
     }
     Some(((point.xz() - start).dot(direction) / length).clamp(0.0, 1.0) as f64)
+}
+
+#[cfg(feature = "model-api")]
+fn infer_wall_rotation(snapshot: &BoxedEntity) -> Option<Quat> {
+    let axis = extract_wall_axis_from_snapshot(snapshot)?;
+    let planar = Vec2::new(axis.x, axis.z).try_normalize()?;
+    let angle = planar.y.atan2(planar.x);
+    Some(Quat::from_rotation_y(-angle))
 }
 
 #[cfg(feature = "model-api")]
@@ -8317,6 +8657,15 @@ fn prepare_hosted_occurrence_request(
     }
 
     let mut request_object = object.clone();
+    if let Some(host_id) = host_element_id {
+        if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
+            if let Some(rotation) = infer_wall_rotation(&host_snapshot) {
+                request_object
+                    .entry("rotation".to_string())
+                    .or_insert_with(|| quat_value(rotation));
+            }
+        }
+    }
     request_object.insert(
         "offset".to_string(),
         vec3_value(placement_origin + local_offset),
@@ -8472,10 +8821,16 @@ pub fn handle_place_occurrence(world: &mut World, request: Value) -> ApiResult<u
         .and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok())
         .map(|[x, y, z]| bevy::prelude::Vec3::new(x, y, z))
         .unwrap_or(bevy::prelude::Vec3::ZERO);
+    let rotation = obj
+        .get("rotation")
+        .and_then(|v| serde_json::from_value::<[f32; 4]>(v.clone()).ok())
+        .map(|[x, y, z, w]| Quat::from_xyzw(x, y, z, w))
+        .unwrap_or(Quat::IDENTITY);
 
     let element_id = world.resource_mut::<ElementIdAllocator>().next_id();
     let mut snapshot = OccurrenceSnapshot::new(element_id, identity, label);
     snapshot.offset = offset;
+    snapshot.rotation = rotation;
 
     let result_id = element_id.0;
     enqueue_create_boxed_entity(world, snapshot.into());
@@ -8814,7 +9169,9 @@ fn handle_array_update(
         return Ok(after_json);
     }
 
-    Err(format!("Entity {element_id} is not a linear or polar array node"))
+    Err(format!(
+        "Entity {element_id} is not a linear or polar array node"
+    ))
 }
 
 #[cfg(feature = "model-api")]
@@ -8892,16 +9249,24 @@ fn handle_array_get(world: &World, element_id: u64) -> ApiResult<Value> {
 
     if let Some(node) = entity_ref.get::<LinearArrayNode>() {
         use crate::plugins::modeling::array::LinearArraySnapshot;
-        let snap = LinearArraySnapshot { element_id: eid, node: node.clone() };
+        let snap = LinearArraySnapshot {
+            element_id: eid,
+            node: node.clone(),
+        };
         return Ok(snap.to_json());
     }
     if let Some(node) = entity_ref.get::<PolarArrayNode>() {
         use crate::plugins::modeling::array::PolarArraySnapshot;
-        let snap = PolarArraySnapshot { element_id: eid, node: node.clone() };
+        let snap = PolarArraySnapshot {
+            element_id: eid,
+            node: node.clone(),
+        };
         return Ok(snap.to_json());
     }
 
-    Err(format!("Entity {element_id} is not a linear or polar array node"))
+    Err(format!(
+        "Entity {element_id} is not a linear or polar array node"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -9768,6 +10133,7 @@ mod tests {
             crate::plugins::definition_authoring::DefinitionDraftRegistry::default(),
         );
         world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
+        world.insert_resource(RenderSettings::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(crate::plugins::layers::LayerRegistry::default());
         world.insert_resource(crate::plugins::materials::MaterialRegistry::default());
@@ -11040,5 +11406,45 @@ mod tests {
             !cls.mesh_dirty,
             "modifying domain_data must not set mesh_dirty"
         );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn render_settings_round_trip_and_validate() {
+        let mut world = init_model_api_test_world();
+
+        let initial = handle_get_render_settings(&world);
+        assert_eq!(initial.tonemapping, "agx");
+
+        let updated = handle_set_render_settings(
+            &mut world,
+            RenderSettingsUpdateRequest {
+                tonemapping: Some("blender_filmic".to_string()),
+                exposure_ev100: Some(1.5),
+                ssao_enabled: Some(false),
+                bloom_enabled: Some(true),
+                bloom_intensity: Some(0.42),
+                ssr_enabled: Some(true),
+                ssr_linear_steps: Some(24),
+                ..Default::default()
+            },
+        )
+        .expect("render settings update should succeed");
+
+        assert_eq!(updated.tonemapping, "blender_filmic");
+        assert_eq!(updated.exposure_ev100, 1.5);
+        assert!(!updated.ssao_enabled);
+        assert!(updated.ssr_enabled);
+        assert_eq!(updated.ssr_linear_steps, 24);
+
+        let error = handle_set_render_settings(
+            &mut world,
+            RenderSettingsUpdateRequest {
+                tonemapping: Some("not-a-tonemapper".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("invalid tonemapping should fail");
+        assert!(error.contains("Unknown tonemapping mode"));
     }
 }
