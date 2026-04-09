@@ -649,7 +649,6 @@ fn draw_rotate_ring(
     world: &World,
     rotate_ring: RotateRingContext,
     mut gizmos: Gizmos,
-    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     if rotate_ring.handle_context.display_mode != HandleDisplayMode::Rotate
         || !rotate_ring.transform_state.is_idle()
@@ -679,15 +678,12 @@ fn draw_rotate_ring(
 
     let radius = handle_world_radius(camera, camera_transform, projection, center) * 3.0;
     draw_ring(&mut gizmos, center, radius, ROTATE_RING_COLOR);
-    #[cfg(feature = "perf-stats")]
-    add_gizmo_line_count(&mut perf_stats, ROTATE_RING_SEGMENTS);
 }
 
 fn draw_selected_handles(
     world: &World,
     selected_handles: SelectedHandleContext,
     mut gizmos: Gizmos,
-    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     if !selected_handles.ownership.is_idle()
         || selected_handles.selected_query.is_empty()
@@ -700,9 +696,6 @@ fn draw_selected_handles(
     else {
         return;
     };
-
-    #[cfg(feature = "perf-stats")]
-    let mut line_count = 0usize;
 
     for entity in &selected_handles.selected_query {
         let Ok(entity_ref) = world.get_entity(entity) else {
@@ -736,19 +729,10 @@ fn draw_selected_handles(
                     .pressed
                     .as_ref()
                     .map(|pressed| pressed.handle.matches(entity, &handle.id))
-                    .unwrap_or(false);
+                .unwrap_or(false);
             let radius = handle_world_radius(camera, camera_transform, projection, handle.position);
             draw_handle(&mut gizmos, &handle, radius, highlighted);
-            #[cfg(feature = "perf-stats")]
-            {
-                line_count += handle_line_count(&handle);
-            }
         }
-    }
-
-    #[cfg(feature = "perf-stats")]
-    if line_count > 0 {
-        add_gizmo_line_count(&mut perf_stats, line_count);
     }
 }
 
@@ -1023,19 +1007,6 @@ fn handle_world_radius(
     };
 
     (diameter * 0.5).clamp(HANDLE_MIN_RADIUS_METRES, HANDLE_MAX_RADIUS_METRES)
-}
-
-#[cfg(feature = "perf-stats")]
-fn handle_line_count(handle: &ResolvedHandle) -> usize {
-    match handle.render_style {
-        HandleRenderStyle::Scale => 12,
-        HandleRenderStyle::Move
-        | HandleRenderStyle::Rotate
-        | HandleRenderStyle::Vertex
-        | HandleRenderStyle::Center
-        | HandleRenderStyle::Control
-        | HandleRenderStyle::Parameter => 24,
-    }
 }
 
 fn draw_cube_handle(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
