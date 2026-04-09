@@ -4755,7 +4755,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/list",
+        name = "definition.list",
         description = "List all reusable definitions in the document."
     )]
     async fn definition_list_tool(&self) -> Result<CallToolResult, McpError> {
@@ -4767,7 +4767,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/get",
+        name = "definition.get",
         description = "Get a definition by its definition_id. Returns both the raw stored definition and the effective inherited definition."
     )]
     async fn definition_get_tool(
@@ -4782,7 +4782,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/create",
+        name = "definition.create",
         description = "Create a new reusable definition. Requires: name. Optionally: base_definition_id, definition_kind, parameters, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data."
     )]
     async fn definition_create_tool(
@@ -4797,7 +4797,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/update",
+        name = "definition.update",
         description = "Update an existing definition. Requires: definition_id. Optionally: name, base_definition_id, definition_kind, parameters, evaluators, representations, compound, and domain_data. Bumps definition_version and propagates changes to all linked occurrences."
     )]
     async fn definition_update_tool(
@@ -4812,7 +4812,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/draft/list",
+        name = "definition.draft.list",
         description = "List all open definition drafts."
     )]
     async fn definition_draft_list_tool(&self) -> Result<CallToolResult, McpError> {
@@ -4824,7 +4824,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/draft/get",
+        name = "definition.draft.get",
         description = "Get a definition draft by draft_id."
     )]
     async fn definition_draft_get_tool(
@@ -4839,7 +4839,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/draft/open",
+        name = "definition.draft.open",
         description = "Open an existing definition as a draft for editing. Requires: definition_id. Optionally: library_id."
     )]
     async fn definition_draft_open_tool(
@@ -4854,7 +4854,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/draft/create",
+        name = "definition.draft.create",
         description = "Create a new definition draft. Same payload shape as definition/create, but stored only as an editable draft until published."
     )]
     async fn definition_draft_create_tool(
@@ -4869,7 +4869,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/draft/derive",
+        name = "definition.draft.derive",
         description = "Create a derived definition draft from an existing definition. Requires: definition_id. Optionally: library_id and name."
     )]
     async fn definition_draft_derive_tool(
@@ -4884,7 +4884,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/draft/patch",
+        name = "definition.draft.patch",
         description = "Apply one or more patch operations to a definition draft. Requires: draft_id and either patch or patches."
     )]
     async fn definition_draft_patch_tool(
@@ -4899,7 +4899,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/draft/publish",
+        name = "definition.draft.publish",
         description = "Validate and publish a definition draft into the document. Requires: draft_id."
     )]
     async fn definition_draft_publish_tool(
@@ -4914,7 +4914,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/validate",
+        name = "definition.validate",
         description = "Validate either a draft or a published definition. Requires either draft_id or definition_id. Optionally: library_id for library definitions."
     )]
     async fn definition_validate_tool(
@@ -4929,7 +4929,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/compile",
+        name = "definition.compile",
         description = "Compile a dependency summary for either a draft or a published definition. Requires either draft_id or definition_id. Optionally: library_id for library definitions."
     )]
     async fn definition_compile_tool(
@@ -4944,7 +4944,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/explain",
+        name = "definition.explain",
         description = "Explain either a draft or a published definition, including effective inherited shape and dependency summary. Requires either draft_id or definition_id. Optionally: library_id for library definitions."
     )]
     async fn definition_explain_tool(
@@ -4959,7 +4959,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/library/list",
+        name = "definition.library.list",
         description = "List reusable definition libraries available to the current document."
     )]
     async fn definition_library_list_tool(&self) -> Result<CallToolResult, McpError> {
@@ -4971,7 +4971,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/library/get",
+        name = "definition.library.get",
         description = "Get a definition library by library_id, including the definitions it contains."
     )]
     async fn definition_library_get_tool(
@@ -4986,7 +4986,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/library/create",
+        name = "definition.library.create",
         description = "Create a new definition library. Requires: name. Optionally: scope (\"DocumentLocal\"|\"ExternalFile\"), source_path, tags."
     )]
     async fn definition_library_create_tool(
@@ -5001,7 +5001,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/library/add_definition",
+        name = "definition.library.add_definition",
         description = "Copy a document definition into a library. Requires: library_id, definition_id."
     )]
     async fn definition_library_add_definition_tool(
@@ -5016,7 +5016,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/library/import",
+        name = "definition.library.import",
         description = "Import a definition library JSON file into the current document context. Requires: path."
     )]
     async fn definition_library_import_tool(
@@ -5031,7 +5031,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/library/export",
+        name = "definition.library.export",
         description = "Export a definition library JSON file. Requires: library_id, path."
     )]
     async fn definition_library_export_tool(
@@ -5046,7 +5046,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/instantiate",
+        name = "definition.instantiate",
         description = "Instantiate a definition into the model. Requires: definition_id. Optionally: library_id (imports from library first if needed), overrides, label, offset, domain_data."
     )]
     async fn definition_instantiate_tool(
@@ -5061,7 +5061,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "definition/instantiate_hosted",
+        name = "definition.instantiate_hosted",
         description = "Instantiate a hosted definition into the model. Requires: definition_id and hosting. Optionally: library_id, overrides, label, offset, and domain_data. Hosting may provide host_element_id, opening_element_id, wall_thickness, relation_type, relation_parameters, and anchors keyed by anchor id."
     )]
     async fn definition_instantiate_hosted_tool(
@@ -5076,7 +5076,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "occurrence/place",
+        name = "occurrence.place",
         description = "Place an occurrence of a definition. Requires: definition_id. Optionally: overrides, label, offset, and domain_data."
     )]
     async fn occurrence_place_tool(
@@ -5091,7 +5091,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "occurrence/update_overrides",
+        name = "occurrence.update_overrides",
         description = "Update the parameter overrides on an existing occurrence. Requires: element_id (u64), overrides (object mapping param names to values)."
     )]
     async fn occurrence_update_overrides_tool(
@@ -5106,7 +5106,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "occurrence/resolve",
+        name = "occurrence.resolve",
         description = "Resolve and return the effective parameter values for an occurrence, including provenance (DefinitionDefault or OccurrenceOverride). Requires: element_id (u64)."
     )]
     async fn occurrence_resolve_tool(
@@ -5121,7 +5121,7 @@ impl ModelApiServer {
     }
 
     #[tool(
-        name = "occurrence/explain",
+        name = "occurrence.explain",
         description = "Explain a placed occurrence for agent inspection. Returns resolved parameters, anchors, and generated compound slot parts. Requires: element_id (u64)."
     )]
     async fn occurrence_explain_tool(
@@ -7129,7 +7129,7 @@ fn compile_summary_to_result(
 fn definition_explain_value_to_result(value: Value) -> ApiResult<DefinitionExplainResult> {
     let object = value
         .as_object()
-        .ok_or_else(|| "definition/explain result must be a JSON object".to_string())?;
+        .ok_or_else(|| "definition.explain result must be a JSON object".to_string())?;
     let raw_full = object.get("raw_full").cloned().unwrap_or(Value::Null);
     let effective_full = object.get("effective_full").cloned().unwrap_or(Value::Null);
     let local_parameter_names = serde_json::from_value::<Vec<String>>(
@@ -7324,7 +7324,7 @@ pub fn handle_create_definition(world: &mut World, request: Value) -> ApiResult<
 
     let obj = request
         .as_object()
-        .ok_or_else(|| "definition/create expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.create expects a JSON object".to_string())?;
 
     let definition = build_definition_from_object(obj)?;
     let entry = {
@@ -7347,7 +7347,7 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
 
     let obj = request
         .as_object()
-        .ok_or_else(|| "definition/update expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.update expects a JSON object".to_string())?;
 
     let id_str = obj
         .get("definition_id")
@@ -7451,7 +7451,7 @@ pub fn handle_open_definition_draft(
 ) -> ApiResult<DefinitionDraftEntry> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/draft/open expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.draft.open expects a JSON object".to_string())?;
     let definition_id = object
         .get("definition_id")
         .and_then(Value::as_str)
@@ -7493,7 +7493,7 @@ pub fn handle_create_definition_draft(
 ) -> ApiResult<DefinitionDraftEntry> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/draft/create expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.draft.create expects a JSON object".to_string())?;
     let definition = build_definition_from_object(object)?;
 
     {
@@ -7525,7 +7525,7 @@ pub fn handle_derive_definition_draft(
 ) -> ApiResult<DefinitionDraftEntry> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/draft/derive expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.draft.derive expects a JSON object".to_string())?;
     let definition_id = object
         .get("definition_id")
         .and_then(Value::as_str)
@@ -7577,7 +7577,7 @@ pub fn handle_patch_definition_draft(
 ) -> ApiResult<DefinitionDraftEntry> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/draft/patch expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.draft.patch expects a JSON object".to_string())?;
     let draft_id = crate::plugins::definition_authoring::DefinitionDraftId(
         object
             .get("draft_id")
@@ -7644,7 +7644,7 @@ pub fn handle_validate_definition(
 ) -> ApiResult<DefinitionValidationResult> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/validate expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.validate expects a JSON object".to_string())?;
     if let Some(draft_id) = object.get("draft_id").and_then(Value::as_str) {
         let definitions =
             world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
@@ -7722,7 +7722,7 @@ pub fn handle_compile_definition(
 ) -> ApiResult<DefinitionCompileResult> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/compile expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.compile expects a JSON object".to_string())?;
     let (preview, definition) = resolve_definition_analysis_target(world, object)?;
     let effective = preview.effective_definition(&definition.id)?;
     let summary =
@@ -7740,7 +7740,7 @@ pub fn handle_explain_definition(
 ) -> ApiResult<DefinitionExplainResult> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/explain expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.explain expects a JSON object".to_string())?;
     let (preview, definition) = resolve_definition_analysis_target(world, object)?;
     let explained =
         crate::plugins::definition_authoring::explain_definition(&preview, &definition)?;
@@ -7756,7 +7756,7 @@ pub fn handle_create_definition_library(
 
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/library/create expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.library.create expects a JSON object".to_string())?;
     let name = object
         .get("name")
         .and_then(|value| value.as_str())
@@ -7803,7 +7803,7 @@ pub fn handle_add_definition_to_library(
 
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/library/add_definition expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.library.add_definition expects a JSON object".to_string())?;
     let library_id = DefinitionLibraryId(
         object
             .get("library_id")
@@ -8007,7 +8007,7 @@ pub fn handle_instantiate_definition(
 ) -> ApiResult<InstantiateDefinitionResult> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/instantiate expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.instantiate expects a JSON object".to_string())?;
     let (definition_id, imported_definition_ids) =
         ensure_definition_available_for_request(world, object)?;
 
@@ -8386,7 +8386,7 @@ pub fn handle_instantiate_hosted_definition(
 ) -> ApiResult<InstantiateDefinitionResult> {
     let object = request
         .as_object()
-        .ok_or_else(|| "definition/instantiate_hosted expects a JSON object".to_string())?;
+        .ok_or_else(|| "definition.instantiate_hosted expects a JSON object".to_string())?;
     let (definition_id, imported_definition_ids) =
         ensure_definition_available_for_request(world, object)?;
     let (hosted_request, relation_type, host_element_id, relation_parameters) =
@@ -8426,7 +8426,7 @@ pub fn handle_place_occurrence(world: &mut World, request: Value) -> ApiResult<u
 
     let obj = request
         .as_object()
-        .ok_or_else(|| "occurrence/place expects a JSON object".to_string())?;
+        .ok_or_else(|| "occurrence.place expects a JSON object".to_string())?;
 
     let def_id_str = obj
         .get("definition_id")
