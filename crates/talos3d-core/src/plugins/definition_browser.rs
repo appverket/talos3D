@@ -23,8 +23,8 @@ use crate::{
         modeling::{
             assembly::{RelationSnapshot, SemanticRelation},
             definition::{
-                Definition, DefinitionId, DefinitionLibraryId, DefinitionLibraryRegistry,
-                DefinitionRegistry, OverrideMap,
+                Definition, DefinitionId, DefinitionKind, DefinitionLibraryId,
+                DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap,
             },
             occurrence::{
                 HostedAnchor, HostedOccurrenceContext, OccurrenceIdentity, OccurrenceSnapshot,
@@ -41,6 +41,52 @@ const DEFINITIONS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(620.0, 680.0);
 const INSPECTOR_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(620.0, 620.0);
 const INSPECTOR_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(460.0, 360.0);
 const INSPECTOR_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(760.0, 760.0);
+
+#[derive(Debug, Clone)]
+struct DefinitionListEntry {
+    id: String,
+    name: String,
+    definition_kind: DefinitionKind,
+    parameter_count: usize,
+    representation_count: usize,
+    child_slot_count: usize,
+    derived_parameter_count: usize,
+}
+
+impl DefinitionListEntry {
+    fn from_definition(definition: &Definition) -> Self {
+        let compound = definition.compound.as_ref();
+        Self {
+            id: definition.id.to_string(),
+            name: definition.name.clone(),
+            definition_kind: definition.definition_kind.clone(),
+            parameter_count: definition.interface.parameters.0.len(),
+            representation_count: definition.representations.len(),
+            child_slot_count: compound.map(|value| value.child_slots.len()).unwrap_or(0),
+            derived_parameter_count: compound
+                .map(|value| value.derived_parameters.len())
+                .unwrap_or(0),
+        }
+    }
+
+    fn meta_label(&self) -> String {
+        let kind = match self.definition_kind {
+            DefinitionKind::Solid => "Solid",
+            DefinitionKind::Annotation => "Annotation",
+        };
+        let mut parts = vec![kind.to_string(), format!("{} params", self.parameter_count)];
+        if self.child_slot_count > 0 {
+            parts.push(format!("{} slots", self.child_slot_count));
+        }
+        if self.derived_parameter_count > 0 {
+            parts.push(format!("{} derived", self.derived_parameter_count));
+        }
+        if self.representation_count > 0 {
+            parts.push(format!("{} reps", self.representation_count));
+        }
+        parts.join(" · ")
+    }
+}
 #[derive(Resource, Default, Debug, Clone)]
 pub struct DefinitionsWindowState {
     pub visible: bool,
@@ -580,38 +626,39 @@ pub fn draw_definitions_window(
             }
 
             let selected_library_id = state.selected_library_id.clone();
-            let mut definition_entries: Vec<(String, String)> = match selected_library_id.as_deref() {
+            let mut definition_entries: Vec<DefinitionListEntry> = match selected_library_id.as_deref() {
                 Some(library_id) => libraries
                     .get(&DefinitionLibraryId(library_id.to_string()))
                     .map(|library| {
                         library
                             .definitions
                             .values()
-                            .map(|definition| (definition.id.to_string(), definition.name.clone()))
+                            .map(DefinitionListEntry::from_definition)
                             .collect()
                     })
                     .unwrap_or_default(),
                 None => definitions
                     .list()
                     .into_iter()
-                    .map(|definition| (definition.id.to_string(), definition.name.clone()))
+                    .map(DefinitionListEntry::from_definition)
                     .collect(),
             };
-            definition_entries.sort_by(|left, right| left.1.cmp(&right.1));
+            definition_entries.sort_by(|left, right| left.name.cmp(&right.name));
             let search = state.search.trim().to_ascii_lowercase();
             if !search.is_empty() {
-                definition_entries.retain(|(id, name)| {
-                    id.to_ascii_lowercase().contains(&search)
-                        || name.to_ascii_lowercase().contains(&search)
+                definition_entries.retain(|entry| {
+                    entry.id.to_ascii_lowercase().contains(&search)
+                        || entry.name.to_ascii_lowercase().contains(&search)
                 });
             }
 
             if state.selected_definition_id.as_ref().is_none_or(|selected_id| {
                 !definition_entries
                     .iter()
-                    .any(|(definition_id, _)| definition_id == selected_id)
+                    .any(|entry| entry.id == *selected_id)
             }) {
-                state.selected_definition_id = definition_entries.first().map(|(id, _)| id.clone());
+                state.selected_definition_id =
+                    definition_entries.first().map(|entry| entry.id.clone());
             }
 
             let selected_definition_id = state.selected_definition_id.as_deref().unwrap_or_default();
@@ -775,16 +822,31 @@ pub fn draw_definitions_window(
                                         if definition_entries.is_empty() {
                                             ui.label("No definitions match the current source and search.");
                                         }
-                                        for (definition_id, name) in &definition_entries {
+                                        for entry in &definition_entries {
                                             let selected = state.selected_definition_id.as_deref()
-                                                == Some(definition_id.as_str());
-                                            if ui.selectable_label(selected, name).clicked() {
-                                                state.selected_definition_id =
-                                                    Some(definition_id.clone());
-                                                if state.instantiate_label.is_empty() {
-                                                    state.instantiate_label = name.clone();
-                                                }
-                                            }
+                                                == Some(entry.id.as_str());
+                                            ui.horizontal(|ui| {
+                                                draw_definition_list_thumbnail(ui, entry);
+                                                ui.vertical(|ui| {
+                                                    if ui
+                                                        .selectable_label(selected, &entry.name)
+                                                        .clicked()
+                                                    {
+                                                        state.selected_definition_id =
+                                                            Some(entry.id.clone());
+                                                        if state.instantiate_label.is_empty() {
+                                                            state.instantiate_label =
+                                                                entry.name.clone();
+                                                        }
+                                                    }
+                                                    ui.label(
+                                                        egui::RichText::new(entry.meta_label())
+                                                            .small()
+                                                            .weak(),
+                                                    );
+                                                });
+                                            });
+                                            ui.add_space(4.0);
                                         }
                                     });
                             });
@@ -894,6 +956,106 @@ pub fn draw_definitions_window(
         });
     state.visible = open;
     draw_definition_inspector(ctx, state, definitions, libraries, drafts, pending, status);
+}
+
+fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry) {
+    let size = egui::vec2(40.0, 40.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let (fill, accent) = match entry.definition_kind {
+        DefinitionKind::Solid => (
+            egui::Color32::from_rgb(52, 73, 64),
+            egui::Color32::from_rgb(169, 218, 186),
+        ),
+        DefinitionKind::Annotation => (
+            egui::Color32::from_rgb(49, 63, 83),
+            egui::Color32::from_rgb(182, 213, 255),
+        ),
+    };
+
+    ui.painter().rect_filled(rect, 8.0, fill);
+    ui.painter().rect_stroke(
+        rect,
+        8.0,
+        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(60)),
+        egui::StrokeKind::Inside,
+    );
+
+    match entry.definition_kind {
+        DefinitionKind::Solid => {
+            let front = egui::Rect::from_min_max(
+                rect.left_top() + egui::vec2(9.0, 13.0),
+                rect.right_bottom() - egui::vec2(11.0, 9.0),
+            );
+            let offset = egui::vec2(6.0, -5.0);
+            let back = front.translate(offset);
+            ui.painter().rect_stroke(
+                front,
+                4.0,
+                egui::Stroke::new(1.5, accent),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().rect_stroke(
+                back,
+                4.0,
+                egui::Stroke::new(1.0, accent.gamma_multiply(0.8)),
+                egui::StrokeKind::Inside,
+            );
+            for (a, b) in [
+                (front.left_top(), back.left_top()),
+                (front.right_top(), back.right_top()),
+                (front.left_bottom(), back.left_bottom()),
+                (front.right_bottom(), back.right_bottom()),
+            ] {
+                ui.painter()
+                    .line_segment([a, b], egui::Stroke::new(1.0, accent));
+            }
+        }
+        DefinitionKind::Annotation => {
+            let sheet = egui::Rect::from_min_max(
+                rect.left_top() + egui::vec2(10.0, 8.0),
+                rect.right_bottom() - egui::vec2(10.0, 8.0),
+            );
+            ui.painter()
+                .rect_filled(sheet, 4.0, egui::Color32::from_white_alpha(18));
+            ui.painter().rect_stroke(
+                sheet,
+                4.0,
+                egui::Stroke::new(1.5, accent),
+                egui::StrokeKind::Inside,
+            );
+            for y in [15.0, 20.0, 25.0] {
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(sheet.left() + 4.0, rect.top() + y),
+                        egui::pos2(sheet.right() - 4.0, rect.top() + y),
+                    ],
+                    egui::Stroke::new(1.0, accent),
+                );
+            }
+        }
+    }
+
+    let badge_text = if entry.child_slot_count > 0 {
+        entry.child_slot_count.to_string()
+    } else {
+        entry.parameter_count.to_string()
+    };
+    let badge_rect = egui::Rect::from_min_size(
+        rect.right_bottom() - egui::vec2(16.0, 16.0),
+        egui::vec2(14.0, 14.0),
+    );
+    ui.painter().circle_filled(
+        badge_rect.center(),
+        7.0,
+        egui::Color32::from_black_alpha(70),
+    );
+    ui.painter().text(
+        badge_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        badge_text,
+        egui::TextStyle::Small.resolve(ui.style()),
+        egui::Color32::WHITE,
+    );
 }
 
 fn draw_definition_inspector(
