@@ -227,6 +227,22 @@ pub struct LayerInfo {
     pub active: bool,
 }
 
+// --- Clip Plane types ---
+
+/// Information about an authored clipping plane.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClipPlaneInfo {
+    pub element_id: u64,
+    pub name: String,
+    /// Point on the plane in world space.
+    pub origin: [f32; 3],
+    /// Normal pointing toward the visible side.
+    pub normal: [f32; 3],
+    /// Whether this plane is currently cutting the view.
+    pub active: bool,
+}
+
 // --- Named View types ---
 
 /// A serialisable description of a saved camera position.
@@ -1128,6 +1144,28 @@ enum ModelApiRequest {
         name: String,
         response: oneshot::Sender<ApiResult<()>>,
     },
+    // --- Clipping Planes ---
+    ClipPlaneCreate {
+        name: String,
+        origin: [f32; 3],
+        normal: [f32; 3],
+        active: bool,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    ClipPlaneUpdate {
+        element_id: u64,
+        name: Option<String>,
+        origin: Option<[f32; 3]>,
+        normal: Option<[f32; 3]>,
+        active: Option<bool>,
+        response: oneshot::Sender<ApiResult<ClipPlaneInfo>>,
+    },
+    ClipPlaneList(oneshot::Sender<Vec<ClipPlaneInfo>>),
+    ClipPlaneToggle {
+        element_id: u64,
+        active: bool,
+        response: oneshot::Sender<ApiResult<ClipPlaneInfo>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -1622,6 +1660,38 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::ViewDelete { name, response } => {
             let _ = response.send(handle_view_delete(world, name));
+        }
+        // --- Clipping Planes ---
+        ModelApiRequest::ClipPlaneCreate {
+            name,
+            origin,
+            normal,
+            active,
+            response,
+        } => {
+            let _ = response.send(handle_clip_plane_create(world, name, origin, normal, active));
+        }
+        ModelApiRequest::ClipPlaneUpdate {
+            element_id,
+            name,
+            origin,
+            normal,
+            active,
+            response,
+        } => {
+            let _ = response.send(handle_clip_plane_update(
+                world, element_id, name, origin, normal, active,
+            ));
+        }
+        ModelApiRequest::ClipPlaneList(response) => {
+            let _ = response.send(handle_clip_plane_list(world));
+        }
+        ModelApiRequest::ClipPlaneToggle {
+            element_id,
+            active,
+            response,
+        } => {
+            let _ = response.send(handle_clip_plane_toggle(world, element_id, active));
         }
     }
 }
@@ -2351,6 +2421,82 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::ViewDelete { name, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    // --- Clipping Planes ---
+
+    async fn request_clip_plane_create(
+        &self,
+        name: String,
+        origin: [f32; 3],
+        normal: [f32; 3],
+        active: bool,
+    ) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ClipPlaneCreate {
+                name,
+                origin,
+                normal,
+                active,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_clip_plane_update(
+        &self,
+        element_id: u64,
+        name: Option<String>,
+        origin: Option<[f32; 3]>,
+        normal: Option<[f32; 3]>,
+        active: Option<bool>,
+    ) -> ApiResult<ClipPlaneInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ClipPlaneUpdate {
+                element_id,
+                name,
+                origin,
+                normal,
+                active,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_clip_plane_list(&self) -> Result<Vec<ClipPlaneInfo>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ClipPlaneList(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_clip_plane_toggle(
+        &self,
+        element_id: u64,
+        active: bool,
+    ) -> ApiResult<ClipPlaneInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ClipPlaneToggle {
+                element_id,
+                active,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3396,6 +3542,55 @@ struct LoadProjectRequest {
     path: String,
 }
 
+// --- Clipping Plane request types ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClipPlaneCreateRequest {
+    /// Display name for the clipping plane.
+    #[serde(default = "default_clip_plane_name")]
+    name: String,
+    /// Point on the plane in world space `[x, y, z]`. Defaults to origin.
+    #[serde(default)]
+    origin: [f32; 3],
+    /// Normal pointing toward the visible side `[x, y, z]`. Defaults to `[0,1,0]` (up).
+    #[serde(default = "default_clip_plane_normal")]
+    normal: [f32; 3],
+    /// Whether the plane is active immediately. Defaults to `true`.
+    #[serde(default = "default_true")]
+    active: bool,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClipPlaneUpdateRequest {
+    element_id: u64,
+    name: Option<String>,
+    origin: Option<[f32; 3]>,
+    normal: Option<[f32; 3]>,
+    active: Option<bool>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClipPlaneToggleRequest {
+    element_id: u64,
+    active: bool,
+}
+
+#[cfg(feature = "model-api")]
+fn default_clip_plane_name() -> String {
+    "Section".to_string()
+}
+
+#[cfg(feature = "model-api")]
+fn default_clip_plane_normal() -> [f32; 3] {
+    [0.0, 1.0, 0.0]
+}
+
 #[cfg(feature = "model-api")]
 fn default_screenshot_path() -> String {
     "/tmp/talos_screenshot.png".to_string()
@@ -4182,6 +4377,71 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(serde_json::json!({"ok": true}))
+    }
+
+    // --- Clipping Planes ---
+
+    #[tool(
+        name = "clip_plane_create",
+        description = "Create a clipping plane that cuts the viewport. Geometry on the side opposite to the normal is hidden. Returns the new element_id."
+    )]
+    async fn clip_plane_create_tool(
+        &self,
+        Parameters(params): Parameters<ClipPlaneCreateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_clip_plane_create(params.name, params.origin, params.normal, params.active)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(serde_json::json!({ "element_id": element_id }))
+    }
+
+    #[tool(
+        name = "clip_plane_update",
+        description = "Update a clipping plane's name, origin, normal, or active state."
+    )]
+    async fn clip_plane_update_tool(
+        &self,
+        Parameters(params): Parameters<ClipPlaneUpdateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_clip_plane_update(
+                params.element_id,
+                params.name,
+                params.origin,
+                params.normal,
+                params.active,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(info)
+    }
+
+    #[tool(
+        name = "clip_plane_list",
+        description = "List all clipping planes and their active state."
+    )]
+    async fn clip_plane_list_tool(&self) -> Result<CallToolResult, McpError> {
+        let planes = self
+            .request_clip_plane_list()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(planes)
+    }
+
+    #[tool(
+        name = "clip_plane_toggle",
+        description = "Activate or deactivate a clipping plane by element_id."
+    )]
+    async fn clip_plane_toggle_tool(
+        &self,
+        Parameters(params): Parameters<ClipPlaneToggleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_clip_plane_toggle(params.element_id, params.active)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(info)
     }
 
     // --- Materials ---
@@ -5397,6 +5657,131 @@ fn handle_view_update(
 #[cfg(feature = "model-api")]
 fn handle_view_delete(world: &mut World, name: String) -> Result<(), String> {
     world.resource_mut::<NamedViewRegistry>().delete(&name)
+}
+
+// --- Clipping Plane Handlers ---
+
+#[cfg(feature = "model-api")]
+fn clip_plane_info_from_world(world: &World, element_id: ElementId) -> Option<ClipPlaneInfo> {
+    use crate::plugins::clipping_planes::ClipPlaneNode;
+
+    let mut q = world
+        .try_query::<(&ElementId, &ClipPlaneNode)>()
+        .unwrap();
+    q.iter(world)
+        .find_map(|(eid, node)| {
+            (*eid == element_id).then(|| ClipPlaneInfo {
+                element_id: eid.0,
+                name: node.name.clone(),
+                origin: node.origin.into(),
+                normal: node.normal.into(),
+                active: node.active,
+            })
+        })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_clip_plane_list(world: &World) -> Vec<ClipPlaneInfo> {
+    use crate::plugins::clipping_planes::ClipPlaneNode;
+
+    let mut q = world
+        .try_query::<(&ElementId, &ClipPlaneNode)>()
+        .unwrap();
+    q.iter(world)
+        .map(|(eid, node)| ClipPlaneInfo {
+            element_id: eid.0,
+            name: node.name.clone(),
+            origin: node.origin.into(),
+            normal: node.normal.into(),
+            active: node.active,
+        })
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+fn handle_clip_plane_create(
+    world: &mut World,
+    name: String,
+    origin: [f32; 3],
+    normal: [f32; 3],
+    active: bool,
+) -> ApiResult<u64> {
+    use crate::plugins::clipping_planes::{ClipPlaneNode, ClipPlaneSnapshot};
+
+    let element_id = world
+        .resource::<crate::plugins::identity::ElementIdAllocator>()
+        .next_id();
+
+    let snapshot = ClipPlaneSnapshot {
+        element_id,
+        node: ClipPlaneNode {
+            name,
+            origin: bevy::math::Vec3::from(origin),
+            normal: bevy::math::Vec3::from(normal),
+            active,
+        },
+    };
+
+    send_event(
+        world,
+        crate::plugins::commands::CreateEntityCommand {
+            snapshot: snapshot.into(),
+        },
+    );
+    flush_model_api_write_pipeline(world);
+
+    clip_plane_info_from_world(world, element_id)
+        .map(|_| element_id.0)
+        .ok_or_else(|| "Failed to create clipping plane entity".to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_clip_plane_update(
+    world: &mut World,
+    element_id: u64,
+    name: Option<String>,
+    origin: Option<[f32; 3]>,
+    normal: Option<[f32; 3]>,
+    active: Option<bool>,
+) -> ApiResult<ClipPlaneInfo> {
+    use serde_json::json;
+
+    ensure_entity_exists(world, ElementId(element_id))?;
+
+    // Apply each supplied field via set_property.
+    if let Some(n) = name {
+        handle_set_property(world, element_id, "name", json!(n))?;
+    }
+    if let Some([x, y, z]) = origin {
+        handle_set_property(world, element_id, "origin_x", json!(x))?;
+        handle_set_property(world, element_id, "origin_y", json!(y))?;
+        handle_set_property(world, element_id, "origin_z", json!(z))?;
+    }
+    if let Some([x, y, z]) = normal {
+        handle_set_property(world, element_id, "normal_x", json!(x))?;
+        handle_set_property(world, element_id, "normal_y", json!(y))?;
+        handle_set_property(world, element_id, "normal_z", json!(z))?;
+    }
+    if let Some(a) = active {
+        handle_set_property(
+            world,
+            element_id,
+            "active",
+            json!(if a { "true" } else { "false" }),
+        )?;
+    }
+
+    clip_plane_info_from_world(world, ElementId(element_id))
+        .ok_or_else(|| format!("Clipping plane {element_id} not found after update"))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_clip_plane_toggle(
+    world: &mut World,
+    element_id: u64,
+    active: bool,
+) -> ApiResult<ClipPlaneInfo> {
+    handle_clip_plane_update(world, element_id, None, None, None, Some(active))
 }
 
 // --- Material Handlers ---
