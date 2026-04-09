@@ -1,3 +1,4 @@
+pub mod array;
 pub mod assembly;
 pub mod bsp_csg;
 pub mod composite_solid;
@@ -99,6 +100,8 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(EditableMeshFactory)
             .register_authored_entity_factory(CsgFactory)
             .register_authored_entity_factory(mirror::MirrorFactory)
+            .register_authored_entity_factory(array::LinearArrayFactory)
+            .register_authored_entity_factory(array::PolarArrayFactory)
             .register_authored_entity_factory(FaceProfileFeatureFactory)
             .register_authored_entity_factory(assembly::AssemblyFactory)
             .register_authored_entity_factory(assembly::RelationFactory)
@@ -531,6 +534,43 @@ impl Plugin for ModelingPlugin {
                 },
                 execute_mirror_copy,
             )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.linear_array".to_string(),
+                    label: "Linear Array".to_string(),
+                    description: "Create a linear array of the selected entity".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: Some("icon.linear_array".to_string()),
+                    hint: Some("Select entity, then apply".to_string()),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_linear_array,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.polar_array".to_string(),
+                    label: "Polar Array".to_string(),
+                    description: "Create a polar (rotational) array of the selected entity"
+                        .to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({"type":"object"})),
+                    default_shortcut: None,
+                    icon: Some("icon.polar_array".to_string()),
+                    hint: Some("Select entity, then apply".to_string()),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_polar_array,
+            )
             .add_plugins(mesh_generation::ModelingMeshPlugin)
             .add_plugins(tools::ModelingToolPlugin)
             .add_systems(
@@ -541,6 +581,9 @@ impl Plugin for ModelingPlugin {
                     csg::evaluate_csg_nodes,
                     mirror::propagate_mirror_source_changes,
                     mirror::evaluate_mirror_nodes,
+                    array::propagate_array_source_changes,
+                    array::evaluate_linear_array_nodes,
+                    array::evaluate_polar_array_nodes,
                     profile_feature::propagate_feature_parent_changes,
                     profile_feature::evaluate_face_profile_features,
                     evaluate_occurrences,
@@ -818,4 +861,124 @@ fn execute_mirror_copy(world: &mut World, params: &Value) -> Result<CommandResul
     // For now, mirror_copy creates a live mirror node (same as mirror_create).
     // Dissolving the link into an independent mesh can be added as a follow-up.
     execute_mirror_create(world, params)
+}
+
+fn execute_linear_array(world: &mut World, _params: &Value) -> Result<CommandResult, String> {
+    use crate::authored_entity::AuthoredEntity;
+    use crate::plugins::{
+        commands::CreateEntityCommand,
+        identity::{ElementId, ElementIdAllocator},
+        selection::Selected,
+    };
+
+    let selected_ids: Vec<ElementId> = {
+        let mut query = world.query_filtered::<&ElementId, With<Selected>>();
+        query.iter(world).copied().collect()
+    };
+
+    if selected_ids.len() != 1 {
+        return Err(format!(
+            "Linear Array requires exactly 1 selected entity, got {}",
+            selected_ids.len()
+        ));
+    }
+
+    let source_id = selected_ids[0];
+    let array_id = world.resource::<ElementIdAllocator>().next_id();
+    let snapshot = array::LinearArraySnapshot {
+        element_id: array_id,
+        node: array::LinearArrayNode {
+            source: source_id,
+            count: 3,
+            spacing: Vec3::X * 1.0,
+        },
+    };
+
+    snapshot.apply_to(world);
+
+    let selected_entities: Vec<Entity> = {
+        let mut query = world.query_filtered::<Entity, With<Selected>>();
+        query.iter(world).collect()
+    };
+    let array_entity = {
+        let mut q = world.try_query::<EntityRef>().unwrap();
+        q.iter(world)
+            .find(|e| e.get::<ElementId>().copied() == Some(array_id))
+            .map(|e| e.id())
+    };
+    for entity in &selected_entities {
+        world.entity_mut(*entity).remove::<Selected>();
+    }
+    if let Some(array_entity) = array_entity {
+        world.entity_mut(array_entity).insert(Selected);
+    }
+
+    world
+        .resource_mut::<Messages<CreateEntityCommand>>()
+        .write(CreateEntityCommand {
+            snapshot: snapshot.into(),
+        });
+
+    Ok(CommandResult::empty())
+}
+
+fn execute_polar_array(world: &mut World, _params: &Value) -> Result<CommandResult, String> {
+    use crate::authored_entity::AuthoredEntity;
+    use crate::plugins::{
+        commands::CreateEntityCommand,
+        identity::{ElementId, ElementIdAllocator},
+        selection::Selected,
+    };
+
+    let selected_ids: Vec<ElementId> = {
+        let mut query = world.query_filtered::<&ElementId, With<Selected>>();
+        query.iter(world).copied().collect()
+    };
+
+    if selected_ids.len() != 1 {
+        return Err(format!(
+            "Polar Array requires exactly 1 selected entity, got {}",
+            selected_ids.len()
+        ));
+    }
+
+    let source_id = selected_ids[0];
+    let array_id = world.resource::<ElementIdAllocator>().next_id();
+    let snapshot = array::PolarArraySnapshot {
+        element_id: array_id,
+        node: array::PolarArrayNode {
+            source: source_id,
+            count: 4,
+            axis: Vec3::Y,
+            total_angle_degrees: 360.0,
+            center: Vec3::ZERO,
+        },
+    };
+
+    snapshot.apply_to(world);
+
+    let selected_entities: Vec<Entity> = {
+        let mut query = world.query_filtered::<Entity, With<Selected>>();
+        query.iter(world).collect()
+    };
+    let array_entity = {
+        let mut q = world.try_query::<EntityRef>().unwrap();
+        q.iter(world)
+            .find(|e| e.get::<ElementId>().copied() == Some(array_id))
+            .map(|e| e.id())
+    };
+    for entity in &selected_entities {
+        world.entity_mut(*entity).remove::<Selected>();
+    }
+    if let Some(array_entity) = array_entity {
+        world.entity_mut(array_entity).insert(Selected);
+    }
+
+    world
+        .resource_mut::<Messages<CreateEntityCommand>>()
+        .write(CreateEntityCommand {
+            snapshot: snapshot.into(),
+        });
+
+    Ok(CommandResult::empty())
 }
