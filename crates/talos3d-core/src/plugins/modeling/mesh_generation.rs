@@ -8,6 +8,7 @@ use crate::plugins::modeling::{
     csg::EvaluatedCsg,
     editable_mesh::EditableMesh,
     group::GroupEditMuted,
+    mirror::EvaluatedMirror,
     primitive_trait::{MeshGenerator, MeshMaterialKind},
     primitives::{
         BoxPrimitive, CylinderPrimitive, ElevationMetadata, PlanePrimitive, Polyline,
@@ -55,6 +56,12 @@ type EvaluatedCsgQueryItem<'a> = (
 type EvaluatedFeatureQueryItem<'a> = (
     Entity,
     &'a EvaluatedFeature,
+    Option<&'a Mesh3d>,
+    Option<&'a MeshMaterial3d<StandardMaterial>>,
+);
+type EvaluatedMirrorQueryItem<'a> = (
+    Entity,
+    &'a EvaluatedMirror,
     Option<&'a Mesh3d>,
     Option<&'a MeshMaterial3d<StandardMaterial>>,
 );
@@ -108,6 +115,7 @@ impl Plugin for ModelingMeshPlugin {
                     spawn_editable_meshes,
                     spawn_evaluated_csg_meshes,
                     spawn_evaluated_feature_meshes,
+                    spawn_evaluated_mirror_meshes,
                     draw_polylines,
                 )
                     .in_set(MeshGenerationSet::Generate),
@@ -389,6 +397,55 @@ fn evaluated_csg_to_mesh(evaluated: &EvaluatedCsg) -> Mesh {
 }
 
 fn evaluated_feature_to_mesh(evaluated: &EvaluatedFeature) -> Mesh {
+    let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
+    let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; positions.len()]);
+    mesh.insert_indices(Indices::U32(evaluated.indices.clone()));
+    mesh
+}
+
+fn spawn_evaluated_mirror_meshes(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    primitive_material: Res<PrimitiveMaterial>,
+    query: Query<EvaluatedMirrorQueryItem, With<NeedsMesh>>,
+    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
+) {
+    #[cfg(feature = "perf-stats")]
+    let mut regenerated = 0usize;
+    for (entity, evaluated, mesh_handle, material_handle) in &query {
+        if evaluated.vertices.is_empty() {
+            commands.entity(entity).remove::<NeedsMesh>();
+            continue;
+        }
+        let mesh = evaluated_mirror_to_mesh(evaluated);
+        upsert_mesh_entity(
+            &mut commands,
+            &mut meshes,
+            (entity, mesh_handle, material_handle),
+            mesh,
+            primitive_material.0.clone(),
+            Transform::IDENTITY,
+        );
+        #[cfg(feature = "perf-stats")]
+        {
+            regenerated += 1;
+        }
+    }
+    #[cfg(feature = "perf-stats")]
+    if regenerated > 0 {
+        add_mesh_regen_count(&mut perf_stats, regenerated);
+    }
+}
+
+fn evaluated_mirror_to_mesh(evaluated: &EvaluatedMirror) -> Mesh {
     let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
     let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
 

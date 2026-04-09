@@ -246,6 +246,7 @@ pub struct MaterialInfo {
     pub metallic: f32,
     pub reflectance: f32,
     pub emissive: [f32; 3],
+    pub emissive_exposure_weight: f32,
     pub alpha_mode: String,
     pub double_sided: bool,
     pub uv_scale: [f32; 2],
@@ -262,6 +263,9 @@ pub struct MaterialInfo {
     /// Base64-encoded image data (no data-URI prefix) or `null`.
     pub emissive_texture: Option<String>,
     pub emissive_texture_mime: Option<String>,
+    /// Base64-encoded image data (no data-URI prefix) or `null`.
+    pub occlusion_texture: Option<String>,
+    pub occlusion_texture_mime: Option<String>,
 }
 
 impl MaterialInfo {
@@ -291,6 +295,7 @@ impl MaterialInfo {
             metallic: def.metallic,
             reflectance: def.reflectance,
             emissive: def.emissive,
+            emissive_exposure_weight: def.emissive_exposure_weight,
             alpha_mode: format!("{:?}", def.alpha_mode),
             double_sided: def.double_sided,
             uv_scale: def.uv_scale,
@@ -303,6 +308,8 @@ impl MaterialInfo {
             metallic_roughness_texture_mime: tex_mime(&def.metallic_roughness_texture),
             emissive_texture: tex_data(&def.emissive_texture),
             emissive_texture_mime: tex_mime(&def.emissive_texture),
+            occlusion_texture: tex_data(&def.occlusion_texture),
+            occlusion_texture_mime: tex_mime(&def.occlusion_texture),
         }
     }
 }
@@ -321,6 +328,8 @@ pub struct CreateMaterialRequest {
     pub reflectance: f32,
     #[serde(default)]
     pub emissive: [f32; 3],
+    #[serde(default = "default_emissive_exposure_weight")]
+    pub emissive_exposure_weight: f32,
     #[serde(default = "default_alpha_mode")]
     pub alpha_mode: String,
     #[serde(default = "default_alpha_cutoff")]
@@ -345,6 +354,9 @@ pub struct CreateMaterialRequest {
     pub emissive_texture: Option<String>,
     #[serde(default)]
     pub emissive_texture_mime: Option<String>,
+    pub occlusion_texture: Option<String>,
+    #[serde(default)]
+    pub occlusion_texture_mime: Option<String>,
 }
 
 fn default_base_color() -> [f32; 4] {
@@ -355,6 +367,9 @@ fn default_roughness() -> f32 {
 }
 fn default_reflectance() -> f32 {
     0.5
+}
+fn default_emissive_exposure_weight() -> f32 {
+    1.0
 }
 fn default_alpha_mode() -> String {
     "opaque".to_string()
@@ -1002,6 +1017,31 @@ enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    // --- Mirror ---
+    MirrorCreate {
+        source_id: u64,
+        plane_str: Option<String>,
+        plane_origin: Option<[f32; 3]>,
+        plane_normal: Option<[f32; 3]>,
+        merge: Option<bool>,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    MirrorUpdate {
+        element_id: u64,
+        plane_str: Option<String>,
+        plane_origin: Option<[f32; 3]>,
+        plane_normal: Option<[f32; 3]>,
+        merge: Option<bool>,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    MirrorDissolve {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    MirrorGet {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -1370,6 +1410,53 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_resolve_occurrence(world, element_id));
+        }
+        // --- Mirror ---
+        ModelApiRequest::MirrorCreate {
+            source_id,
+            plane_str,
+            plane_origin,
+            plane_normal,
+            merge,
+            response,
+        } => {
+            let _ = response.send(handle_mirror_create(
+                world,
+                source_id,
+                plane_str,
+                plane_origin,
+                plane_normal,
+                merge,
+            ));
+        }
+        ModelApiRequest::MirrorUpdate {
+            element_id,
+            plane_str,
+            plane_origin,
+            plane_normal,
+            merge,
+            response,
+        } => {
+            let _ = response.send(handle_mirror_update(
+                world,
+                element_id,
+                plane_str,
+                plane_origin,
+                plane_normal,
+                merge,
+            ));
+        }
+        ModelApiRequest::MirrorDissolve {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_mirror_dissolve(world, element_id));
+        }
+        ModelApiRequest::MirrorGet {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_mirror_get(world, element_id));
         }
     }
 }
@@ -2640,6 +2727,76 @@ impl ModelApiServer {
             .await
             .map_err(|_| "model API response channel closed".to_string())?
     }
+
+    // --- Mirror requests ---
+
+    async fn request_mirror_create(
+        &self,
+        source_id: u64,
+        plane_str: Option<String>,
+        plane_origin: Option<[f32; 3]>,
+        plane_normal: Option<[f32; 3]>,
+        merge: Option<bool>,
+    ) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::MirrorCreate {
+                source_id,
+                plane_str,
+                plane_origin,
+                plane_normal,
+                merge,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_mirror_update(
+        &self,
+        element_id: u64,
+        plane_str: Option<String>,
+        plane_origin: Option<[f32; 3]>,
+        plane_normal: Option<[f32; 3]>,
+        merge: Option<bool>,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::MirrorUpdate {
+                element_id,
+                plane_str,
+                plane_origin,
+                plane_normal,
+                merge,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_mirror_dissolve(&self, element_id: u64) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::MirrorDissolve { element_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_mirror_get(&self, element_id: u64) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::MirrorGet { element_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -3078,6 +3235,47 @@ struct OccurrenceUpdateOverridesRequest {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OccurrenceResolveRequest {
+    element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct MirrorCreateRequest {
+    /// Source entity ID to mirror.
+    source: u64,
+    /// Mirror plane shortcut: "XY", "XZ", or "YZ". Takes priority over plane_origin/plane_normal.
+    plane: Option<String>,
+    /// Mirror plane origin [x, y, z]. Used when `plane` is not set.
+    plane_origin: Option<[f32; 3]>,
+    /// Mirror plane normal [x, y, z]. Used when `plane` is not set.
+    plane_normal: Option<[f32; 3]>,
+    /// Whether to merge vertices at the seam (default: false).
+    #[serde(default)]
+    merge: bool,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct MirrorUpdateRequest {
+    /// Element ID of the MirrorNode to update.
+    element_id: u64,
+    /// Mirror plane shortcut: "XY", "XZ", or "YZ".
+    plane: Option<String>,
+    /// Mirror plane origin [x, y, z].
+    plane_origin: Option<[f32; 3]>,
+    /// Mirror plane normal [x, y, z].
+    plane_normal: Option<[f32; 3]>,
+    /// Whether to merge vertices at the seam.
+    merge: Option<bool>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Serialize, Deserialize)]
+struct MirrorEntityRequest {
+    /// Element ID of the MirrorNode.
     element_id: u64,
 }
 
@@ -4187,6 +4385,80 @@ impl ModelApiServer {
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
     }
+
+    // --- Mirror tools ---
+
+    #[tool(
+        name = "mirror_create",
+        description = "Create a mirror geometry node that reflects a source entity across a plane. The mirror maintains a live dependency on the source. Returns the new element_id."
+    )]
+    async fn mirror_create_tool(
+        &self,
+        Parameters(params): Parameters<MirrorCreateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_mirror_create(
+                params.source,
+                params.plane,
+                params.plane_origin,
+                params.plane_normal,
+                Some(params.merge),
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "mirror_update",
+        description = "Update the mirror plane or merge setting of a MirrorNode entity."
+    )]
+    async fn mirror_update_tool(
+        &self,
+        Parameters(params): Parameters<MirrorUpdateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_mirror_update(
+                params.element_id,
+                params.plane,
+                params.plane_origin,
+                params.plane_normal,
+                params.merge,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "mirror_dissolve",
+        description = "Break the live link of a MirrorNode, converting it to an independent triangle mesh entity with the current reflected geometry. Returns the new entity's element_id."
+    )]
+    async fn mirror_dissolve_tool(
+        &self,
+        Parameters(params): Parameters<MirrorEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let new_id = self
+            .request_mirror_dissolve(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(new_id)
+    }
+
+    #[tool(
+        name = "mirror_get",
+        description = "Get the mirror parameters (source entity, plane origin, plane normal, merge) of a MirrorNode entity."
+    )]
+    async fn mirror_get_tool(
+        &self,
+        Parameters(params): Parameters<MirrorEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_mirror_get(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -4460,6 +4732,7 @@ fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
     def.metallic = req.metallic;
     def.reflectance = req.reflectance;
     def.emissive = req.emissive;
+    def.emissive_exposure_weight = req.emissive_exposure_weight;
     def.alpha_mode = parse_alpha_mode(&req.alpha_mode);
     def.alpha_cutoff = req.alpha_cutoff;
     def.double_sided = req.double_sided;
@@ -4472,6 +4745,7 @@ fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
         req.metallic_roughness_texture_mime,
     );
     def.emissive_texture = to_texture_ref(req.emissive_texture, req.emissive_texture_mime);
+    def.occlusion_texture = to_texture_ref(req.occlusion_texture, req.occlusion_texture_mime);
 }
 
 #[cfg(feature = "model-api")]
@@ -7213,6 +7487,209 @@ pub fn handle_explain_occurrence(
         anchors,
         generated_parts,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Mirror handlers
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn handle_mirror_create(
+    world: &mut World,
+    source_id: u64,
+    plane_str: Option<String>,
+    plane_origin: Option<[f32; 3]>,
+    plane_normal: Option<[f32; 3]>,
+    merge: Option<bool>,
+) -> ApiResult<u64> {
+    use crate::plugins::modeling::mirror::{MirrorNode, MirrorSnapshot};
+
+    // Verify source exists.
+    ensure_entity_exists(world, ElementId(source_id))?;
+
+    let plane = build_mirror_plane(plane_str, plane_origin, plane_normal)?;
+    let mirror_id = world
+        .resource::<crate::plugins::identity::ElementIdAllocator>()
+        .next_id();
+
+    let snapshot = MirrorSnapshot {
+        element_id: mirror_id,
+        mirror_node: MirrorNode {
+            source: ElementId(source_id),
+            plane,
+            merge: merge.unwrap_or(false),
+        },
+    };
+
+    send_event(
+        world,
+        crate::plugins::commands::CreateEntityCommand {
+            snapshot: snapshot.into(),
+        },
+    );
+    flush_model_api_write_pipeline(world);
+
+    get_entity_snapshot(world, mirror_id)
+        .map(|_| mirror_id.0)
+        .ok_or_else(|| "Failed to create mirror entity".to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_mirror_update(
+    world: &mut World,
+    element_id: u64,
+    plane_str: Option<String>,
+    plane_origin: Option<[f32; 3]>,
+    plane_normal: Option<[f32; 3]>,
+    merge: Option<bool>,
+) -> ApiResult<Value> {
+    use crate::authored_entity::AuthoredEntity;
+    use crate::plugins::commands::ApplyEntityChangesCommand;
+    use crate::plugins::modeling::mirror::MirrorSnapshot;
+
+    let eid = ElementId(element_id);
+    let before = capture_snapshot_by_id(world, eid)?;
+    let mirror_snap = before
+        .0
+        .as_any()
+        .downcast_ref::<MirrorSnapshot>()
+        .ok_or_else(|| format!("Entity {element_id} is not a mirror node"))?
+        .clone();
+
+    let mut updated = mirror_snap;
+
+    // Only replace the plane when the caller provided plane parameters.
+    if plane_str.is_some() || plane_origin.is_some() || plane_normal.is_some() {
+        updated.mirror_node.plane = build_mirror_plane(plane_str, plane_origin, plane_normal)?;
+    }
+    if let Some(m) = merge {
+        updated.mirror_node.merge = m;
+    }
+
+    let after_json = updated.to_json();
+    let after: crate::authored_entity::BoxedEntity = updated.into();
+
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label: "Update mirror",
+            before: vec![before],
+            after: vec![after],
+        },
+    );
+    flush_model_api_write_pipeline(world);
+    Ok(after_json)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_mirror_dissolve(world: &mut World, element_id: u64) -> ApiResult<u64> {
+    use crate::plugins::commands::{CreateEntityCommand, ResolvedDeleteEntitiesCommand};
+    use crate::plugins::identity::ElementIdAllocator;
+    use crate::plugins::modeling::mirror::EvaluatedMirror;
+    use crate::plugins::modeling::primitives::TriangleMesh;
+    use crate::plugins::modeling::snapshots::TriangleMeshSnapshot;
+
+    let eid = ElementId(element_id);
+
+    // Capture the evaluated geometry before deletion.
+    let evaluated = {
+        let mut q = world
+            .try_query::<(Entity, &ElementId, &EvaluatedMirror)>()
+            .unwrap();
+        q.iter(world)
+            .find(|(_, id, _)| **id == eid)
+            .map(|(_, _, ev)| ev.clone())
+            .ok_or_else(|| {
+                format!(
+                    "Entity {element_id} is not an evaluated mirror node (has it been evaluated yet?)"
+                )
+            })?
+    };
+
+    // Delete the mirror entity.
+    send_event(
+        world,
+        ResolvedDeleteEntitiesCommand {
+            element_ids: vec![eid],
+        },
+    );
+
+    // Convert the flat index buffer to [u32; 3] face triples.
+    let faces: Vec<[u32; 3]> = evaluated
+        .indices
+        .chunks(3)
+        .filter(|c| c.len() == 3)
+        .map(|c| [c[0], c[1], c[2]])
+        .collect();
+
+    // Create an independent TriangleMesh with the reflected geometry.
+    let new_id = world.resource::<ElementIdAllocator>().next_id();
+    let tri_mesh = TriangleMesh {
+        vertices: evaluated.vertices.clone(),
+        faces,
+        normals: Some(evaluated.normals.clone()),
+        name: None,
+    };
+    let snapshot = TriangleMeshSnapshot {
+        element_id: new_id,
+        primitive: tri_mesh,
+        layer: None,
+    };
+
+    send_event(
+        world,
+        CreateEntityCommand {
+            snapshot: snapshot.into(),
+        },
+    );
+    flush_model_api_write_pipeline(world);
+    Ok(new_id.0)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_mirror_get(world: &World, element_id: u64) -> ApiResult<Value> {
+    use crate::authored_entity::AuthoredEntity;
+    use crate::plugins::modeling::mirror::{MirrorNode, MirrorSnapshot};
+
+    let eid = ElementId(element_id);
+    let mut q = world.try_query::<bevy::ecs::world::EntityRef>().unwrap();
+    let entity_ref = q
+        .iter(world)
+        .find(|e| e.get::<ElementId>().copied() == Some(eid))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+
+    let mirror_node = entity_ref
+        .get::<MirrorNode>()
+        .ok_or_else(|| format!("Entity {element_id} is not a mirror node"))?
+        .clone();
+    let snap = MirrorSnapshot {
+        element_id: eid,
+        mirror_node,
+    };
+    Ok(snap.to_json())
+}
+
+/// Build a `MirrorPlane` from the optional API parameters.
+///
+/// Priority: `plane_str` shortcut → `plane_origin` + `plane_normal` → XZ default.
+#[cfg(feature = "model-api")]
+fn build_mirror_plane(
+    plane_str: Option<String>,
+    plane_origin: Option<[f32; 3]>,
+    plane_normal: Option<[f32; 3]>,
+) -> ApiResult<crate::plugins::modeling::mirror::MirrorPlane> {
+    use crate::plugins::modeling::mirror::MirrorPlane;
+
+    if let Some(s) = plane_str {
+        return MirrorPlane::try_from(s.as_str());
+    }
+    if let (Some(origin), Some(normal)) = (plane_origin, plane_normal) {
+        return Ok(MirrorPlane::new(
+            bevy::math::Vec3::from(origin),
+            bevy::math::Vec3::from(normal),
+        ));
+    }
+    Ok(MirrorPlane::xz())
 }
 
 #[cfg(feature = "model-api")]
