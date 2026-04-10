@@ -166,12 +166,10 @@ impl AssistantChatState {
             anthropic_model,
             mcp_url: env::var("TALOS3D_ASSISTANT_MCP_URL").unwrap_or_default(),
             draft: String::new(),
-            messages: vec![AssistantChatMessage::assistant(
-                "Ask me to inspect or modify the model. I use the Talos3D MCP surface for edits and scene inspection.",
-            )],
+            messages: Vec::new(),
             pending: false,
             last_error: None,
-            show_connection: true,
+            show_connection: false,
         }
     }
 
@@ -221,177 +219,176 @@ pub fn draw_assistant_window(
         .default_width(ASSISTANT_PANEL_WIDTH)
         .default_height(default_height)
         .show(ctx, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Right-lane assistant. Preferred for SaaS/browser deployments: connect through a managed relay. Local fallback: direct OpenAI or Anthropic API keys.",
-                )
-                .small(),
-            );
-            ui.add_space(6.0);
-
-            egui::CollapsingHeader::new("Connection")
-                .default_open(state.show_connection)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Provider");
-                        egui::ComboBox::from_id_salt("assistant_provider")
-                            .selected_text(state.provider.label())
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut state.provider,
-                                    AssistantProviderKind::ManagedRelay,
-                                    AssistantProviderKind::ManagedRelay.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut state.provider,
-                                    AssistantProviderKind::OpenAi,
-                                    AssistantProviderKind::OpenAi.label(),
-                                );
-                                ui.selectable_value(
-                                    &mut state.provider,
-                                    AssistantProviderKind::Anthropic,
-                                    AssistantProviderKind::Anthropic.label(),
-                                );
-                            });
+            // --- Header bar: model badge | gear | overflow menu ---
+            ui.horizontal(|ui| {
+                let model_label = match state.provider {
+                    AssistantProviderKind::ManagedRelay => &state.relay_model,
+                    AssistantProviderKind::OpenAi => &state.openai_model,
+                    AssistantProviderKind::Anthropic => &state.anthropic_model,
+                };
+                let badge = egui::RichText::new(model_label.as_str())
+                    .small()
+                    .color(egui::Color32::from_rgb(180, 200, 220));
+                egui::Frame::NONE
+                    .fill(egui::Color32::from_rgb(40, 50, 65))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.label(badge);
                     });
-
-                    ui.horizontal(|ui| {
-                        ui.label("MCP URL");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.mcp_url)
-                                .desired_width(280.0),
-                        );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button(egui::RichText::new("...").strong(), |ui| {
+                        if ui.button("Clear chat").clicked() && !state.pending {
+                            state.messages.clear();
+                            state.last_error = None;
+                            ui.close();
+                        }
                     });
-
-                    match state.provider {
-                        AssistantProviderKind::ManagedRelay => {
-                            ui.horizontal(|ui| {
-                                ui.label("Relay URL");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.relay_url)
-                                        .desired_width(280.0),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Bearer");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.relay_bearer_token)
-                                        .desired_width(280.0)
-                                        .password(true),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("Model");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.relay_model)
-                                        .desired_width(280.0),
-                                );
-                            });
-                            ui.label(
-                                egui::RichText::new(
-                                    "Managed relay is the preferred browser/SaaS path. It can broker vendor APIs or fixed-plan account access without exposing secrets in the client.",
-                                )
-                                .small(),
-                            );
-                        }
-                        AssistantProviderKind::OpenAi => {
-                            ui.horizontal(|ui| {
-                                ui.label("Model");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.openai_model)
-                                        .desired_width(280.0),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("API key");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.openai_api_key)
-                                        .desired_width(280.0)
-                                        .password(true),
-                                );
-                            });
-                            ui.label(
-                                egui::RichText::new(
-                                    "Direct OpenAI fallback uses the Responses API with tool calling. For managed deployments, prefer the relay path so keys stay server-side.",
-                                )
-                                .small(),
-                            );
-                        }
-                        AssistantProviderKind::Anthropic => {
-                            ui.horizontal(|ui| {
-                                ui.label("Model");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.anthropic_model)
-                                        .desired_width(280.0),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label("API key");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.anthropic_api_key)
-                                        .desired_width(280.0)
-                                        .password(true),
-                                );
-                            });
-                            ui.label(
-                                egui::RichText::new(
-                                    "Direct Anthropic fallback uses the Messages API with tool use. For managed deployments, prefer the relay path so keys stay server-side.",
-                                )
-                                .small(),
-                            );
-                        }
+                    let gear_label = if state.show_connection { "x" } else { "#" };
+                    if ui.button(egui::RichText::new(gear_label).monospace()).clicked() {
+                        state.show_connection = !state.show_connection;
                     }
                 });
+            });
 
-            if let Some(error) = &state.last_error {
-                ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
-            } else if state.pending {
-                ui.label(egui::RichText::new("Waiting for provider response...").italics());
+            // --- Settings panel (toggled by gear) ---
+            if state.show_connection {
+                ui.add_space(4.0);
+                egui::Frame::group(ui.style())
+                    .fill(egui::Color32::from_rgb(30, 35, 44))
+                    .show(ui, |ui| {
+                        egui::Grid::new("assistant_settings_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Provider");
+                                egui::ComboBox::from_id_salt("assistant_provider")
+                                    .selected_text(state.provider.label())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut state.provider,
+                                            AssistantProviderKind::ManagedRelay,
+                                            AssistantProviderKind::ManagedRelay.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut state.provider,
+                                            AssistantProviderKind::OpenAi,
+                                            AssistantProviderKind::OpenAi.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut state.provider,
+                                            AssistantProviderKind::Anthropic,
+                                            AssistantProviderKind::Anthropic.label(),
+                                        );
+                                    });
+                                ui.end_row();
+
+                                ui.label("MCP URL");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut state.mcp_url)
+                                        .desired_width(ui.available_width()),
+                                );
+                                ui.end_row();
+
+                                match state.provider {
+                                    AssistantProviderKind::ManagedRelay => {
+                                        ui.label("Relay URL");
+                                        ui.add(egui::TextEdit::singleline(&mut state.relay_url).desired_width(ui.available_width()));
+                                        ui.end_row();
+                                        ui.label("Bearer");
+                                        ui.add(egui::TextEdit::singleline(&mut state.relay_bearer_token).desired_width(ui.available_width()).password(true));
+                                        ui.end_row();
+                                        ui.label("Model");
+                                        ui.add(egui::TextEdit::singleline(&mut state.relay_model).desired_width(ui.available_width()));
+                                        ui.end_row();
+                                    }
+                                    AssistantProviderKind::OpenAi => {
+                                        ui.label("API key");
+                                        ui.add(egui::TextEdit::singleline(&mut state.openai_api_key).desired_width(ui.available_width()).password(true));
+                                        ui.end_row();
+                                        ui.label("Model");
+                                        ui.add(egui::TextEdit::singleline(&mut state.openai_model).desired_width(ui.available_width()));
+                                        ui.end_row();
+                                    }
+                                    AssistantProviderKind::Anthropic => {
+                                        ui.label("API key");
+                                        ui.add(egui::TextEdit::singleline(&mut state.anthropic_api_key).desired_width(ui.available_width()).password(true));
+                                        ui.end_row();
+                                        ui.label("Model");
+                                        ui.add(egui::TextEdit::singleline(&mut state.anthropic_model).desired_width(ui.available_width()));
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
             }
 
             ui.separator();
+
+            // --- Chat area ---
             egui::ScrollArea::vertical()
                 .id_salt("assistant_chat_messages")
                 .stick_to_bottom(true)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    if state.messages.is_empty() && !state.pending {
+                        ui.add_space(40.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new("Ask me to create, modify, or explain objects in your scene.")
+                                    .italics()
+                                    .color(egui::Color32::from_rgb(140, 150, 165)),
+                            );
+                        });
+                        ui.add_space(40.0);
+                    }
                     for message in &state.messages {
                         draw_message_bubble(ui, message);
                         ui.add_space(6.0);
                     }
+                    if state.pending {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(egui::RichText::new("Thinking...").italics());
+                        });
+                    }
+                    if let Some(error) = &state.last_error {
+                        ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
+                    }
                 });
 
             ui.separator();
-            let input = ui.add(
-                egui::TextEdit::multiline(&mut state.draft)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(4)
-                    .hint_text("Ask the assistant to inspect or modify the model"),
-            );
-            let submit_shortcut = input.has_focus()
-                && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+
+            // --- Input bar ---
             ui.horizontal(|ui| {
+                let input = ui.add(
+                    egui::TextEdit::multiline(&mut state.draft)
+                        .desired_width(ui.available_width() - 36.0)
+                        .desired_rows(1)
+                        .hint_text("Ask about your scene..."),
+                );
+                let enter_to_send = input.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                 if ui
-                    .add_enabled(!state.pending, egui::Button::new("Send"))
+                    .add_enabled(
+                        !state.pending && !state.draft.trim().is_empty(),
+                        egui::Button::new(egui::RichText::new("\u{2191}").strong())
+                            .min_size(egui::vec2(28.0, 28.0)),
+                    )
                     .clicked()
                 {
                     send_now = true;
                 }
-                if ui.button("Clear").clicked() && !state.pending {
-                    state.messages.clear();
-                    state.messages.push(AssistantChatMessage::assistant(
-                        "Conversation cleared. I still have access to the configured MCP endpoint.",
-                    ));
-                    state.last_error = None;
+                if enter_to_send {
+                    send_now = true;
                 }
-                ui.label(egui::RichText::new("Cmd+Enter to send").small());
             });
-
-            if submit_shortcut {
-                send_now = true;
-            }
         });
 
     if send_now {
+        // Strip trailing newline that Enter key inserts before we process
+        let trimmed = state.draft.trim().to_string();
+        state.draft = trimmed;
         if let Err(error) = start_assistant_job(state, pending_job) {
             state.last_error = Some(error);
         }
