@@ -12,6 +12,7 @@ pub mod document_state;
 pub mod egui_chrome;
 pub mod face_edit;
 pub mod grid;
+pub mod guide_line;
 pub mod handles;
 pub mod history;
 pub mod icons;

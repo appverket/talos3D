@@ -31,6 +31,7 @@ use talos3d_core::plugins::{
     inference::InferencePlugin,
     input_ownership::InputOwnershipPlugin,
     layers::LayerPlugin,
+    guide_line::GuideLinePlugin,
     lighting::LightingPlugin,
     materials::MaterialPlugin,
     modeling::ModelingPlugin,
@@ -92,6 +93,7 @@ fn main() {
     .add_plugins(ImportPlugin)
     .add_plugins(LayerPlugin)
     .add_plugins(MaterialPlugin)
+    .add_plugins(GuideLinePlugin)
     .add_plugins(LightingPlugin)
     .add_plugins(ModelingPlugin)
     .add_plugins(BundledDefinitionLibrariesPlugin)
