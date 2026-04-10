@@ -19,11 +19,13 @@ use talos3d_core::plugins::{
     command_registry::CommandRegistryPlugin,
     commands::CommandPlugin,
     cursor::CursorPlugin,
+    dimension_line::DimensionLinePlugin,
     document_properties::DocumentProperties,
     document_state::DocumentStatePlugin,
     egui_chrome::EguiChromePlugin,
     face_edit::FaceEditPlugin,
     grid::GridPlugin,
+    guide_line::GuideLinePlugin,
     handles::HandlesPlugin,
     history::HistoryPlugin,
     identity::IdentityPlugin,
@@ -31,7 +33,6 @@ use talos3d_core::plugins::{
     inference::InferencePlugin,
     input_ownership::InputOwnershipPlugin,
     layers::LayerPlugin,
-    guide_line::GuideLinePlugin,
     lighting::LightingPlugin,
     materials::MaterialPlugin,
     modeling::ModelingPlugin,
@@ -94,6 +95,7 @@ fn main() {
     .add_plugins(LayerPlugin)
     .add_plugins(MaterialPlugin)
     .add_plugins(GuideLinePlugin)
+    .add_plugins(DimensionLinePlugin)
     .add_plugins(LightingPlugin)
     .add_plugins(ModelingPlugin)
     .add_plugins(BundledDefinitionLibrariesPlugin)

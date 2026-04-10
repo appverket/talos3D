@@ -78,7 +78,10 @@ pub struct ClippingPlanesPlugin;
 
 impl Plugin for ClippingPlanesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (apply_clip_plane_visibility, draw_clip_plane_gizmos));
+        app.add_systems(
+            Update,
+            (apply_clip_plane_visibility, draw_clip_plane_gizmos),
+        );
     }
 }
 
@@ -94,24 +97,17 @@ fn apply_clip_plane_visibility(
     clip_planes: Query<&ClipPlaneNode>,
     renderables: Query<
         (Entity, &Transform),
-        (
-            With<Mesh3d>,
-            Without<ClipPlaneNode>,
-            Without<CsgOperand>,
-        ),
+        (With<Mesh3d>, Without<ClipPlaneNode>, Without<CsgOperand>),
     >,
     mut visibility: Query<&mut Visibility>,
 ) {
-    let active_planes: Vec<&ClipPlaneNode> = clip_planes
-        .iter()
-        .filter(|p| p.active)
-        .collect();
+    let active_planes: Vec<&ClipPlaneNode> = clip_planes.iter().filter(|p| p.active).collect();
 
     for (entity, transform) in &renderables {
         let pos = transform.translation;
-        let clipped = active_planes.iter().any(|plane| {
-            (pos - plane.origin).dot(plane.normal) < 0.0
-        });
+        let clipped = active_planes
+            .iter()
+            .any(|plane| (pos - plane.origin).dot(plane.normal) < 0.0);
 
         if let Ok(mut vis) = visibility.get_mut(entity) {
             // Only overwrite Visible/Hidden; never un-hide a CsgOperand-hidden
@@ -127,10 +123,7 @@ fn apply_clip_plane_visibility(
 }
 
 /// Draw a square outline and normal arrow for every active clip plane.
-fn draw_clip_plane_gizmos(
-    clip_planes: Query<&ClipPlaneNode>,
-    mut gizmos: Gizmos,
-) {
+fn draw_clip_plane_gizmos(clip_planes: Query<&ClipPlaneNode>, mut gizmos: Gizmos) {
     let color = Color::srgba(0.2, 0.6, 1.0, 0.8);
     for plane in clip_planes.iter().filter(|p| p.active) {
         draw_plane_gizmo(plane, &mut gizmos, color);
@@ -266,32 +259,38 @@ impl AuthoredEntity for ClipPlaneSnapshot {
             "origin_x" => {
                 snap.node.origin.x = value
                     .as_f64()
-                    .ok_or_else(|| "origin_x must be a number".to_string())? as f32;
+                    .ok_or_else(|| "origin_x must be a number".to_string())?
+                    as f32;
             }
             "origin_y" => {
                 snap.node.origin.y = value
                     .as_f64()
-                    .ok_or_else(|| "origin_y must be a number".to_string())? as f32;
+                    .ok_or_else(|| "origin_y must be a number".to_string())?
+                    as f32;
             }
             "origin_z" => {
                 snap.node.origin.z = value
                     .as_f64()
-                    .ok_or_else(|| "origin_z must be a number".to_string())? as f32;
+                    .ok_or_else(|| "origin_z must be a number".to_string())?
+                    as f32;
             }
             "normal_x" => {
                 snap.node.normal.x = value
                     .as_f64()
-                    .ok_or_else(|| "normal_x must be a number".to_string())? as f32;
+                    .ok_or_else(|| "normal_x must be a number".to_string())?
+                    as f32;
             }
             "normal_y" => {
                 snap.node.normal.y = value
                     .as_f64()
-                    .ok_or_else(|| "normal_y must be a number".to_string())? as f32;
+                    .ok_or_else(|| "normal_y must be a number".to_string())?
+                    as f32;
             }
             "normal_z" => {
                 snap.node.normal.z = value
                     .as_f64()
-                    .ok_or_else(|| "normal_z must be a number".to_string())? as f32;
+                    .ok_or_else(|| "normal_z must be a number".to_string())?
+                    as f32;
             }
             "active" => {
                 let s = value
@@ -300,11 +299,7 @@ impl AuthoredEntity for ClipPlaneSnapshot {
                 snap.node.active = match s {
                     "true" | "1" | "yes" => true,
                     "false" | "0" | "no" => false,
-                    _ => {
-                        return Err(format!(
-                            "active must be \"true\" or \"false\", got \"{s}\""
-                        ))
-                    }
+                    _ => return Err(format!("active must be \"true\" or \"false\", got \"{s}\"")),
                 };
             }
             _ => {
@@ -440,7 +435,12 @@ impl AuthoredEntityFactory for ClipPlaneFactory {
 
         Ok(ClipPlaneSnapshot {
             element_id,
-            node: ClipPlaneNode { name, origin, normal, active },
+            node: ClipPlaneNode {
+                name,
+                origin,
+                normal,
+                active,
+            },
         }
         .into())
     }

@@ -645,11 +645,7 @@ fn draw_pivot_indicator(
     add_gizmo_line_count(&mut perf_stats, 4);
 }
 
-fn draw_rotate_ring(
-    world: &World,
-    rotate_ring: RotateRingContext,
-    mut gizmos: Gizmos,
-) {
+fn draw_rotate_ring(world: &World, rotate_ring: RotateRingContext, mut gizmos: Gizmos) {
     if rotate_ring.handle_context.display_mode != HandleDisplayMode::Rotate
         || !rotate_ring.transform_state.is_idle()
         || rotate_ring.selected_query.is_empty()
@@ -729,7 +725,7 @@ fn draw_selected_handles(
                     .pressed
                     .as_ref()
                     .map(|pressed| pressed.handle.matches(entity, &handle.id))
-                .unwrap_or(false);
+                    .unwrap_or(false);
             let radius = handle_world_radius(camera, camera_transform, projection, handle.position);
             draw_handle(&mut gizmos, &handle, radius, highlighted);
         }

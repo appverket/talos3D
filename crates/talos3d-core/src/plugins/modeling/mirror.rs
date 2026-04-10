@@ -259,11 +259,7 @@ impl AuthoredEntity for MirrorSnapshot {
         ]
     }
 
-    fn set_property_json(
-        &self,
-        property_name: &str,
-        value: &Value,
-    ) -> Result<BoxedEntity, String> {
+    fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
         let mut snap = self.clone();
         let as_f32 = |v: &Value| -> Result<f32, String> {
             v.as_f64()
@@ -281,7 +277,8 @@ impl AuthoredEntity for MirrorSnapshot {
                 snap.mirror_node.merge = if let Some(b) = value.as_bool() {
                     b
                 } else if let Some(s) = value.as_str() {
-                    s.parse::<bool>().map_err(|_| "Expected 'true' or 'false' for 'merge'".to_string())?
+                    s.parse::<bool>()
+                        .map_err(|_| "Expected 'true' or 'false' for 'merge'".to_string())?
                 } else {
                     return Err("Expected a bool for 'merge'".to_string());
                 };
@@ -327,9 +324,11 @@ impl AuthoredEntity for MirrorSnapshot {
 
     fn apply_to(&self, world: &mut World) {
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world
-                .entity_mut(entity)
-                .insert((self.mirror_node.clone(), NeedsEvaluation, Visibility::Visible));
+            world.entity_mut(entity).insert((
+                self.mirror_node.clone(),
+                NeedsEvaluation,
+                Visibility::Visible,
+            ));
         } else {
             world.spawn((
                 self.element_id,
@@ -407,7 +406,13 @@ impl AuthoredEntityFactory for MirrorFactory {
     ) -> Option<BoxedEntity> {
         let element_id = *entity_ref.get::<ElementId>()?;
         let mirror_node = entity_ref.get::<MirrorNode>()?.clone();
-        Some(MirrorSnapshot { element_id, mirror_node }.into())
+        Some(
+            MirrorSnapshot {
+                element_id,
+                mirror_node,
+            }
+            .into(),
+        )
     }
 
     fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String> {
@@ -418,7 +423,11 @@ impl AuthoredEntityFactory for MirrorFactory {
         );
         let mirror_node: MirrorNode =
             serde_json::from_value(data.clone()).map_err(|e| e.to_string())?;
-        Ok(MirrorSnapshot { element_id, mirror_node }.into())
+        Ok(MirrorSnapshot {
+            element_id,
+            mirror_node,
+        }
+        .into())
     }
 
     fn from_create_request(&self, world: &World, request: &Value) -> Result<BoxedEntity, String> {
@@ -442,7 +451,11 @@ impl AuthoredEntityFactory for MirrorFactory {
 
         Ok(MirrorSnapshot {
             element_id,
-            mirror_node: MirrorNode { source, plane, merge },
+            mirror_node: MirrorNode {
+                source,
+                plane,
+                merge,
+            },
         }
         .into())
     }
@@ -631,9 +644,9 @@ fn get_source_triangles(
 
     try_get_primitive_triangles::<crate::plugins::modeling::primitives::BoxPrimitive>(&entity_ref)
         .or_else(|| {
-            try_get_primitive_triangles::<
-                crate::plugins::modeling::primitives::CylinderPrimitive,
-            >(&entity_ref)
+            try_get_primitive_triangles::<crate::plugins::modeling::primitives::CylinderPrimitive>(
+                &entity_ref,
+            )
         })
         .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::primitives::PlanePrimitive>(

@@ -141,6 +141,8 @@ impl EditorCommand for CreateEntityHistoryCommand {
             "cylinder" => "Create cylinder",
             "sphere" => "Create sphere",
             "plane" => "Create plane",
+            "guide_line" => "Create guide line",
+            "dimension_line" => "Create dimension line",
             "profile_extrusion" => "Create profile extrusion",
             "face_profile_feature" => "Create profile feature",
             "profile_sweep" => "Create profile sweep",

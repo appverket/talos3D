@@ -852,10 +852,7 @@ fn draw_transform_constraint(
     add_gizmo_line_count(&mut perf_stats, 1);
 }
 
-fn draw_transform_preview(
-    world: &World,
-    mut gizmos: Gizmos,
-) {
+fn draw_transform_preview(world: &World, mut gizmos: Gizmos) {
     // During push/pull the real entity mesh is updated live — no gizmo
     // outline needed.
     if world.resource::<PushPullContext>().active_face.is_some() {
