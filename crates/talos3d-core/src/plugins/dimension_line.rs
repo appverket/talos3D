@@ -44,6 +44,17 @@ const DIMENSION_LINE_DEFAULT_EXTENSION_FACTOR: f32 = 0.12;
 
 pub struct DimensionLinePlugin;
 
+#[derive(Resource, Debug, Clone)]
+pub struct DimensionLineVisibility {
+    pub show_all: bool,
+}
+
+impl Default for DimensionLineVisibility {
+    fn default() -> Self {
+        Self { show_all: true }
+    }
+}
+
 #[derive(Component, Clone, Debug, Serialize, Deserialize)]
 pub struct DimensionLineNode {
     pub start: Vec3,
@@ -534,6 +545,10 @@ impl AuthoredEntityFactory for DimensionLineFactory {
     }
 
     fn hit_test(&self, world: &World, ray: Ray3d) -> Option<HitCandidate> {
+        let visibility = world.get_resource::<DimensionLineVisibility>()?;
+        if !visibility.show_all {
+            return None;
+        }
         let mut query = world.try_query::<(Entity, &DimensionLineNode)>()?;
         query
             .iter(world)
@@ -558,6 +573,12 @@ impl AuthoredEntityFactory for DimensionLineFactory {
     }
 
     fn collect_snap_points(&self, world: &World, out: &mut Vec<SnapPoint>) {
+        let Some(visibility) = world.get_resource::<DimensionLineVisibility>() else {
+            return;
+        };
+        if !visibility.show_all {
+            return;
+        }
         let Some(mut query) = world.try_query::<&DimensionLineNode>() else {
             return;
         };
@@ -617,6 +638,7 @@ fn draw_dimension_line_gizmo(
 }
 
 fn draw_dimension_line_visuals(
+    visibility: Res<DimensionLineVisibility>,
     dimensions: Query<(Entity, &DimensionLineNode), Without<crate::plugins::selection::Selected>>,
     selected_dimensions: Query<
         (Entity, &DimensionLineNode),
@@ -624,6 +646,9 @@ fn draw_dimension_line_visuals(
     >,
     mut gizmos: Gizmos,
 ) {
+    if !visibility.show_all {
+        return;
+    }
     for (_entity, node) in &dimensions {
         if !node.visible {
             continue;
@@ -654,6 +679,7 @@ fn draw_dimension_line_visuals(
 fn draw_dimension_line_labels(
     mut contexts: EguiContexts,
     doc_props: Res<DocumentProperties>,
+    visibility: Res<DimensionLineVisibility>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     dimensions: Query<(
@@ -661,6 +687,9 @@ fn draw_dimension_line_labels(
         Option<&crate::plugins::selection::Selected>,
     )>,
 ) {
+    if !visibility.show_all {
+        return;
+    }
     let Ok(ctx_ref) = contexts.ctx_mut() else {
         return;
     };
@@ -753,6 +782,15 @@ fn execute_place_dimension_line(
     world
         .resource_mut::<NextState<ActiveTool>>()
         .set(ActiveTool::PlaceDimensionLine);
+    Ok(CommandResult::empty())
+}
+
+fn execute_toggle_dimension_line_visibility(
+    world: &mut World,
+    _params: &Value,
+) -> Result<CommandResult, String> {
+    let mut visibility = world.resource_mut::<DimensionLineVisibility>();
+    visibility.show_all = !visibility.show_all;
     Ok(CommandResult::empty())
 }
 
@@ -855,7 +893,8 @@ fn draw_dimension_line_tool_preview(
 
 impl Plugin for DimensionLinePlugin {
     fn build(&self, app: &mut App) {
-        app.register_authored_entity_factory(DimensionLineFactory)
+        app.init_resource::<DimensionLineVisibility>()
+            .register_authored_entity_factory(DimensionLineFactory)
             .register_capability(CapabilityDescriptor {
                 id: "dimensions".to_string(),
                 name: "Dimensions".to_string(),
@@ -894,6 +933,24 @@ impl Plugin for DimensionLinePlugin {
                 },
                 execute_place_dimension_line,
             )
+            .register_command(
+                CommandDescriptor {
+                    id: "view.toggle_dimensions".to_string(),
+                    label: "Dimensions".to_string(),
+                    description: "Show or hide all dimensions".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Toggle visibility of dimension annotations".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("dimensions".to_string()),
+                },
+                execute_toggle_dimension_line_visibility,
+            )
             .register_toolbar(ToolbarDescriptor {
                 id: "dimensions".to_string(),
                 label: "Dimensions".to_string(),
@@ -901,7 +958,10 @@ impl Plugin for DimensionLinePlugin {
                 default_visible: true,
                 sections: vec![ToolbarSection {
                     label: "Annotate".to_string(),
-                    command_ids: vec!["dimensions.place".to_string()],
+                    command_ids: vec![
+                        "dimensions.place".to_string(),
+                        "view.toggle_dimensions".to_string(),
+                    ],
                 }],
             })
             .add_systems(
@@ -1129,5 +1189,28 @@ mod tests {
             parse_precision_override_json(&json!("document")).expect("precision should parse"),
             None
         );
+    }
+
+    #[test]
+    fn dimension_snap_points_respect_global_visibility_toggle() {
+        let mut world = World::new();
+        world.insert_resource(DimensionLineVisibility { show_all: false });
+        world.spawn((
+            ElementId(17),
+            DimensionLineNode {
+                start: Vec3::ZERO,
+                end: Vec3::X,
+                extension: 0.2,
+                visible: true,
+                label: None,
+                display_unit: None,
+                precision: None,
+            },
+        ));
+
+        let mut snap_points = Vec::new();
+        DimensionLineFactory.collect_snap_points(&world, &mut snap_points);
+
+        assert!(snap_points.is_empty());
     }
 }

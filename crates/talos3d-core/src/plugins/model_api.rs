@@ -11059,7 +11059,7 @@ mod tests {
             CreateTriangleMeshCommand, DeleteEntitiesCommand, EndCommandGroup,
             ResolvedDeleteEntitiesCommand,
         },
-        dimension_line::DimensionLineFactory,
+        dimension_line::{DimensionLineFactory, DimensionLineVisibility},
         document_properties::DocumentProperties,
         document_state::DocumentState,
         guide_line::{GuideLineFactory, GuideLineVisibility},
@@ -11228,6 +11228,7 @@ mod tests {
         world.insert_resource(ElementIdAllocator::default());
         world.insert_resource(DocumentState::default());
         world.insert_resource(OpaquePersistedEntities::default());
+        world.insert_resource(DimensionLineVisibility::default());
         world.insert_resource(GuideLineVisibility::default());
         world.insert_resource(PropertyEditState::default());
         world.insert_resource(TransformState::default());
