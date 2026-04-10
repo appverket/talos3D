@@ -3,7 +3,6 @@ pub mod assembly;
 pub mod bsp_csg;
 pub mod composite_solid;
 pub mod csg;
-pub mod mirror;
 pub mod definition;
 pub mod editable_mesh;
 pub mod fillet;
@@ -11,6 +10,7 @@ pub mod generic_factory;
 pub mod generic_snapshot;
 pub mod group;
 pub mod mesh_generation;
+pub mod mirror;
 pub mod occurrence;
 pub mod primitive_trait;
 pub mod primitives;
@@ -1084,9 +1084,7 @@ fn execute_clip_plane_create(world: &mut World, _: &Value) -> Result<CommandResu
         identity::ElementIdAllocator,
     };
 
-    let element_id = world
-        .resource::<ElementIdAllocator>()
-        .next_id();
+    let element_id = world.resource::<ElementIdAllocator>().next_id();
 
     let snapshot = ClipPlaneSnapshot {
         element_id,

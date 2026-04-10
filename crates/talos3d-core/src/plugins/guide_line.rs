@@ -18,10 +18,15 @@ use crate::{
         command_registry::{
             CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
         },
-        commands::{despawn_by_element_id, find_entity_by_element_id},
+        commands::{despawn_by_element_id, find_entity_by_element_id, CreateEntityCommand},
+        cursor::CursorWorldPos,
+        egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
         inference::{InferenceEngine, ReferenceEdge},
         snap::SnapKind,
+        toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
+        tools::ActiveTool,
+        ui::StatusBarData,
     },
 };
 
@@ -30,6 +35,7 @@ const GUIDE_LINE_SELECTED_COLOR: Color = Color::srgba(0.0, 1.0, 1.0, 0.9);
 const GUIDE_LINE_HALF_LENGTH: f32 = 500.0;
 const GUIDE_LINE_HIT_RADIUS: f32 = 0.15;
 const GUIDE_ANCHOR_CROSS_SIZE: f32 = 0.12;
+const GUIDE_LINE_MIN_DIRECTION_LENGTH: f32 = 0.01;
 
 pub struct GuideLinePlugin;
 
@@ -71,6 +77,11 @@ impl Default for GuideLineVisibility {
     fn default() -> Self {
         Self { show_all: true }
     }
+}
+
+#[derive(Resource, Default)]
+struct GuideLineToolState {
+    anchor: Option<Vec3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +221,13 @@ impl AuthoredEntity for GuideLineSnapshot {
             "label" => {
                 s.label = value
                     .as_str()
-                    .map(|text| if text.is_empty() { None } else { Some(text.to_string()) })
+                    .map(|text| {
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some(text.to_string())
+                        }
+                    })
                     .unwrap_or(None);
             }
             _ => {
@@ -289,7 +306,13 @@ impl AuthoredEntity for GuideLineSnapshot {
     }
 
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
-        draw_guide_line_gizmo(gizmos, &self.anchor, &self.direction, self.finite_length, color);
+        draw_guide_line_gizmo(
+            gizmos,
+            &self.anchor,
+            &self.direction,
+            self.finite_length,
+            color,
+        );
     }
 
     fn preview_line_count(&self) -> usize {
@@ -470,7 +493,7 @@ impl AuthoredEntityFactory for GuideLineFactory {
             }
             out.push(SnapPoint {
                 position: node.anchor,
-                kind: SnapKind::Endpoint,
+                kind: SnapKind::GuideAnchor,
             });
             if let Some(length) = node.finite_length {
                 let dir = node.direction.normalize_or_zero();
@@ -481,10 +504,6 @@ impl AuthoredEntityFactory for GuideLineFactory {
                 out.push(SnapPoint {
                     position: node.anchor + dir * length,
                     kind: SnapKind::Endpoint,
-                });
-                out.push(SnapPoint {
-                    position: node.anchor,
-                    kind: SnapKind::Midpoint,
                 });
             }
         }
@@ -647,6 +666,112 @@ fn execute_toggle_guide_line_visibility(
     Ok(CommandResult::empty())
 }
 
+fn execute_place_guide_line(world: &mut World, _params: &Value) -> Result<CommandResult, String> {
+    world
+        .resource_mut::<NextState<ActiveTool>>()
+        .set(ActiveTool::PlaceGuideLine);
+    Ok(CommandResult::empty())
+}
+
+fn initialize_guide_line_tool(mut commands: Commands) {
+    commands.insert_resource(GuideLineToolState::default());
+}
+
+fn cleanup_guide_line_tool(mut commands: Commands) {
+    commands.remove_resource::<GuideLineToolState>();
+}
+
+fn cancel_guide_line_tool(
+    keys: Res<ButtonInput<KeyCode>>,
+    egui_wants_input: Res<EguiWantsInput>,
+    mut next_active_tool: ResMut<NextState<ActiveTool>>,
+    mut status_bar_data: ResMut<StatusBarData>,
+) {
+    if egui_wants_input.keyboard || !keys.just_pressed(KeyCode::Escape) {
+        return;
+    }
+
+    next_active_tool.set(ActiveTool::Select);
+    status_bar_data.hint.clear();
+}
+
+fn handle_guide_line_clicks(
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    egui_wants_input: Res<EguiWantsInput>,
+    cursor_world_pos: Res<CursorWorldPos>,
+    mut guide_line_tool_state: ResMut<GuideLineToolState>,
+    allocator: Res<ElementIdAllocator>,
+    mut create_entity: MessageWriter<CreateEntityCommand>,
+    mut status_bar_data: ResMut<StatusBarData>,
+    mut next_active_tool: ResMut<NextState<ActiveTool>>,
+) {
+    if egui_wants_input.pointer || !mouse_buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Some(cursor_position) = cursor_world_pos.snapped else {
+        return;
+    };
+
+    match guide_line_tool_state.anchor {
+        None => {
+            guide_line_tool_state.anchor = Some(cursor_position);
+            status_bar_data.hint = "Click again to confirm guide direction".to_string();
+        }
+        Some(anchor) => {
+            let delta = cursor_position - anchor;
+            if delta.length_squared()
+                < GUIDE_LINE_MIN_DIRECTION_LENGTH * GUIDE_LINE_MIN_DIRECTION_LENGTH
+            {
+                return;
+            }
+
+            let snapshot = GuideLineSnapshot {
+                element_id: allocator.next_id(),
+                anchor,
+                direction: delta.normalize(),
+                finite_length: None,
+                visible: true,
+                label: None,
+            };
+            create_entity.write(CreateEntityCommand {
+                snapshot: snapshot.into(),
+            });
+            guide_line_tool_state.anchor = None;
+            next_active_tool.set(ActiveTool::Select);
+            status_bar_data.hint.clear();
+        }
+    }
+}
+
+fn draw_guide_line_tool_preview(
+    cursor_world_pos: Res<CursorWorldPos>,
+    guide_line_tool_state: Option<Res<GuideLineToolState>>,
+    mut gizmos: Gizmos,
+) {
+    let Some(guide_line_tool_state) = guide_line_tool_state else {
+        return;
+    };
+    let Some(anchor) = guide_line_tool_state.anchor else {
+        return;
+    };
+    let Some(cursor_position) = cursor_world_pos.snapped else {
+        return;
+    };
+    let delta = cursor_position - anchor;
+    if delta.length_squared() < GUIDE_LINE_MIN_DIRECTION_LENGTH * GUIDE_LINE_MIN_DIRECTION_LENGTH {
+        return;
+    }
+
+    draw_guide_line_gizmo(
+        &mut gizmos,
+        &anchor,
+        &delta.normalize(),
+        None,
+        GUIDE_LINE_SELECTED_COLOR,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -674,6 +799,24 @@ impl Plugin for GuideLinePlugin {
             })
             .register_command(
                 CommandDescriptor {
+                    id: "guide_lines.place".to_string(),
+                    label: "Guide Line".to_string(),
+                    description: "Activate guide line placement".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: None,
+                    default_shortcut: Some("G".to_string()),
+                    icon: None,
+                    hint: Some("Click anchor point, then click again to set direction".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: Some("PlaceGuideLine".to_string()),
+                    capability_id: Some("guide_lines".to_string()),
+                },
+                execute_place_guide_line,
+            )
+            .register_command(
+                CommandDescriptor {
                     id: "view.toggle_guide_lines".to_string(),
                     label: "Guide Lines".to_string(),
                     description: "Show or hide all guide lines".to_string(),
@@ -690,6 +833,94 @@ impl Plugin for GuideLinePlugin {
                 },
                 execute_toggle_guide_line_visibility,
             )
-            .add_systems(Update, draw_guide_line_visuals);
+            .register_toolbar(ToolbarDescriptor {
+                id: "reference_geometry".to_string(),
+                label: "Reference".to_string(),
+                default_dock: ToolbarDock::Left,
+                default_visible: true,
+                sections: vec![ToolbarSection {
+                    label: "Construction".to_string(),
+                    command_ids: vec!["guide_lines.place".to_string()],
+                }],
+            })
+            .add_systems(OnEnter(ActiveTool::PlaceGuideLine), initialize_guide_line_tool)
+            .add_systems(OnExit(ActiveTool::PlaceGuideLine), cleanup_guide_line_tool)
+            .add_systems(
+                Update,
+                (
+                    cancel_guide_line_tool,
+                    handle_guide_line_clicks,
+                    draw_guide_line_tool_preview,
+                    draw_guide_line_visuals,
+                )
+                    .run_if(in_state(ActiveTool::PlaceGuideLine)),
+            )
+            .add_systems(
+                Update,
+                draw_guide_line_visuals.run_if(not(in_state(ActiveTool::PlaceGuideLine))),
+            );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability_registry::AuthoredEntityFactory;
+
+    #[test]
+    fn create_request_normalizes_direction_and_supports_length_alias() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+
+        let snapshot = GuideLineFactory
+            .from_create_request(
+                &world,
+                &json!({
+                    "type": "guide_line",
+                    "anchor": [1.0, 2.0, 3.0],
+                    "direction": [3.0, 0.0, 4.0],
+                    "length": 2.5,
+                    "visible": false,
+                    "label": "Axis A"
+                }),
+            )
+            .expect("guide line request should parse");
+
+        let snapshot = snapshot
+            .0
+            .as_any()
+            .downcast_ref::<GuideLineSnapshot>()
+            .expect("snapshot should downcast");
+        assert_eq!(snapshot.anchor, Vec3::new(1.0, 2.0, 3.0));
+        assert!((snapshot.direction.length() - 1.0).abs() < 1e-5);
+        assert_eq!(snapshot.finite_length, Some(2.5));
+        assert!(!snapshot.visible);
+        assert_eq!(snapshot.label.as_deref(), Some("Axis A"));
+    }
+
+    #[test]
+    fn guide_line_snap_points_use_dedicated_anchor_kind() {
+        let mut world = World::new();
+        world.insert_resource(GuideLineVisibility::default());
+        world.spawn((
+            ElementId(7),
+            GuideLineNode {
+                anchor: Vec3::new(1.0, 0.0, 2.0),
+                direction: Vec3::X,
+                finite_length: Some(2.0),
+                visible: true,
+                label: None,
+            },
+        ));
+
+        let mut snap_points = Vec::new();
+        GuideLineFactory.collect_snap_points(&world, &mut snap_points);
+
+        assert_eq!(snap_points.len(), 3);
+        assert_eq!(snap_points[0].position, Vec3::new(1.0, 0.0, 2.0));
+        assert_eq!(snap_points[0].kind, SnapKind::GuideAnchor);
+        assert!(snap_points[1..]
+            .iter()
+            .all(|snap_point| snap_point.kind == SnapKind::Endpoint));
     }
 }

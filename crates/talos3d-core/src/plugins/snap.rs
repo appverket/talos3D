@@ -13,6 +13,7 @@ const SNAP_TRAIL_COLOR: Color = Color::srgb(0.4, 1.0, 0.75);
 const SNAP_ENDPOINT_COLOR: Color = Color::srgb(0.38, 0.92, 1.0);
 const SNAP_MIDPOINT_COLOR: Color = Color::srgb(0.55, 1.0, 0.72);
 const SNAP_CONTROL_COLOR: Color = Color::srgb(1.0, 0.82, 0.28);
+const SNAP_GUIDE_ANCHOR_COLOR: Color = Color::srgb(0.0, 0.86, 0.86);
 const SNAP_GRID_COLOR: Color = Color::srgb(0.4, 1.0, 0.75);
 const SNAP_INDICATOR_RADIUS: f32 = 0.08;
 const SNAP_HALO_RADIUS: f32 = 0.11;
@@ -42,6 +43,7 @@ pub enum SnapKind {
     Endpoint,
     Midpoint,
     Control,
+    GuideAnchor,
 }
 
 fn update_snap_result(world: &mut World) {
@@ -185,6 +187,15 @@ fn draw_snap_target(gizmos: &mut Gizmos, target: Vec3, kind: SnapKind) {
             draw_diamond_marker(gizmos, target, SNAP_HALO_RADIUS, SNAP_CONTROL_COLOR);
             draw_cross_marker(gizmos, target, SNAP_INDICATOR_RADIUS, SNAP_CONTROL_COLOR);
         }
+        SnapKind::GuideAnchor => {
+            draw_diamond_marker(gizmos, target, SNAP_HALO_RADIUS, SNAP_GUIDE_ANCHOR_COLOR);
+            draw_cross_marker(
+                gizmos,
+                target,
+                SNAP_INDICATOR_RADIUS,
+                SNAP_GUIDE_ANCHOR_COLOR,
+            );
+        }
         SnapKind::Grid | SnapKind::None => {
             draw_sphere_marker(gizmos, target, SNAP_INDICATOR_RADIUS, SNAP_GRID_COLOR);
         }
@@ -197,6 +208,7 @@ fn snap_indicator_line_count(kind: SnapKind) -> usize {
         SnapKind::Endpoint => 5,
         SnapKind::Midpoint => 5,
         SnapKind::Control => 8,
+        SnapKind::GuideAnchor => 7,
         SnapKind::Grid | SnapKind::None => 1,
     }
 }

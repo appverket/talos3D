@@ -236,9 +236,11 @@ impl AuthoredEntity for LinearArraySnapshot {
 
     fn apply_to(&self, world: &mut World) {
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world
-                .entity_mut(entity)
-                .insert((self.node.clone(), NeedsEvaluation, Visibility::Visible));
+            world.entity_mut(entity).insert((
+                self.node.clone(),
+                NeedsEvaluation,
+                Visibility::Visible,
+            ));
         } else {
             world.spawn((
                 self.element_id,
@@ -472,9 +474,11 @@ impl AuthoredEntity for PolarArraySnapshot {
 
     fn apply_to(&self, world: &mut World) {
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world
-                .entity_mut(entity)
-                .insert((self.node.clone(), NeedsEvaluation, Visibility::Visible));
+            world.entity_mut(entity).insert((
+                self.node.clone(),
+                NeedsEvaluation,
+                Visibility::Visible,
+            ));
         } else {
             world.spawn((
                 self.element_id,
@@ -586,7 +590,11 @@ impl AuthoredEntityFactory for LinearArrayFactory {
 
         Ok(LinearArraySnapshot {
             element_id,
-            node: LinearArrayNode { source, count, spacing },
+            node: LinearArrayNode {
+                source,
+                count,
+                spacing,
+            },
         }
         .into())
     }
@@ -665,7 +673,13 @@ impl AuthoredEntityFactory for PolarArrayFactory {
 
         Ok(PolarArraySnapshot {
             element_id,
-            node: PolarArrayNode { source, count, axis, total_angle_degrees, center },
+            node: PolarArrayNode {
+                source,
+                count,
+                axis,
+                total_angle_degrees,
+                center,
+            },
         }
         .into())
     }
@@ -889,7 +903,11 @@ pub fn evaluate_linear_array_nodes(
         }
 
         commands.entity(entity).try_insert((
-            EvaluatedArray { vertices, normals, indices },
+            EvaluatedArray {
+                vertices,
+                normals,
+                indices,
+            },
             NeedsMesh,
         ));
         commands.entity(entity).remove::<NeedsEvaluation>();
@@ -946,7 +964,11 @@ pub fn evaluate_polar_array_nodes(
         }
 
         commands.entity(entity).try_insert((
-            EvaluatedArray { vertices, normals, indices },
+            EvaluatedArray {
+                vertices,
+                normals,
+                indices,
+            },
             NeedsMesh,
         ));
         commands.entity(entity).remove::<NeedsEvaluation>();
@@ -969,9 +991,9 @@ fn get_source_triangles(
 
     try_get_primitive_triangles::<crate::plugins::modeling::primitives::BoxPrimitive>(&entity_ref)
         .or_else(|| {
-            try_get_primitive_triangles::<
-                crate::plugins::modeling::primitives::CylinderPrimitive,
-            >(&entity_ref)
+            try_get_primitive_triangles::<crate::plugins::modeling::primitives::CylinderPrimitive>(
+                &entity_ref,
+            )
         })
         .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::primitives::PlanePrimitive>(

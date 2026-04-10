@@ -585,6 +585,27 @@ pub struct DeleteLightRequest {
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaceGuideLineRequest {
+    pub anchor: [f32; 3],
+    pub direction: [f32; 3],
+    pub finite_length: Option<f32>,
+    pub visible: Option<bool>,
+    pub label: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaceDimensionLineRequest {
+    pub start: [f32; 3],
+    pub end: [f32; 3],
+    pub offset: Option<[f32; 3]>,
+    pub line_point: Option<[f32; 3]>,
+    pub visible: Option<bool>,
+    pub label: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AmbientLightUpdateRequest {
     pub color: Option<[f32; 3]>,
@@ -1179,6 +1200,22 @@ enum ModelApiRequest {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    AlignPreview {
+        request: AlignRequest,
+        response: oneshot::Sender<ApiResult<Vec<SpatialPreviewEntry>>>,
+    },
+    AlignExecute {
+        request: AlignRequest,
+        response: oneshot::Sender<ApiResult<Vec<SpatialPreviewEntry>>>,
+    },
+    DistributePreview {
+        request: DistributeRequest,
+        response: oneshot::Sender<ApiResult<Vec<SpatialPreviewEntry>>>,
+    },
+    DistributeExecute {
+        request: DistributeRequest,
+        response: oneshot::Sender<ApiResult<Vec<SpatialPreviewEntry>>>,
+    },
     // --- Face Subdivision ---
     SplitBoxFace {
         element_id: u64,
@@ -1662,6 +1699,18 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_set_selection(world, element_ids));
+        }
+        ModelApiRequest::AlignPreview { request, response } => {
+            let _ = response.send(handle_align_preview(world, request));
+        }
+        ModelApiRequest::AlignExecute { request, response } => {
+            let _ = response.send(handle_align_execute(world, request));
+        }
+        ModelApiRequest::DistributePreview { request, response } => {
+            let _ = response.send(handle_distribute_preview(world, request));
+        }
+        ModelApiRequest::DistributeExecute { request, response } => {
+            let _ = response.send(handle_distribute_execute(world, request));
         }
         // --- Face Subdivision ---
         ModelApiRequest::SplitBoxFace {
@@ -3015,6 +3064,58 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_align_preview(
+        &self,
+        request: AlignRequest,
+    ) -> ApiResult<Vec<SpatialPreviewEntry>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::AlignPreview { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_align_execute(
+        &self,
+        request: AlignRequest,
+    ) -> ApiResult<Vec<SpatialPreviewEntry>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::AlignExecute { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_distribute_preview(
+        &self,
+        request: DistributeRequest,
+    ) -> ApiResult<Vec<SpatialPreviewEntry>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DistributePreview { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_distribute_execute(
+        &self,
+        request: DistributeRequest,
+    ) -> ApiResult<Vec<SpatialPreviewEntry>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DistributeExecute { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     // --- Face Subdivision ---
 
     async fn request_split_box_face(
@@ -3925,6 +4026,36 @@ struct ViewDeleteRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SetSelectionRequest {
     element_ids: Vec<u64>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct AlignRequest {
+    element_ids: Vec<u64>,
+    axis: String,
+    mode: String,
+    reference_element_id: Option<u64>,
+    reference_value: Option<f32>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct DistributeRequest {
+    element_ids: Vec<u64>,
+    axis: String,
+    mode: String,
+    value: Option<f32>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct SpatialPreviewEntry {
+    element_id: u64,
+    current_position: [f32; 3],
+    proposed_position: [f32; 3],
 }
 
 #[cfg(feature = "model-api")]
@@ -5006,6 +5137,36 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "place_guide_line",
+        description = "Create a construction guide line from an anchor point and direction vector."
+    )]
+    async fn place_guide_line_tool(
+        &self,
+        Parameters(params): Parameters<PlaceGuideLineRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_create_entity(create_guide_line_request_json(&params))
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "place_dimension_line",
+        description = "Create a dimension line from two witness points and either an offset vector or a placement point."
+    )]
+    async fn place_dimension_line_tool(
+        &self,
+        Parameters(params): Parameters<PlaceDimensionLineRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_create_entity(create_dimension_line_request_json(&params))
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
         name = "update_light",
         description = "Update an authored light entity by element_id."
     )]
@@ -5116,6 +5277,66 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(selection)
+    }
+
+    #[tool(
+        name = "align_preview",
+        description = "Preview multi-entity axis alignment without applying it. Supports min, max, or center alignment on x, y, or z."
+    )]
+    async fn align_preview_tool(
+        &self,
+        Parameters(params): Parameters<AlignRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let preview = self
+            .request_align_preview(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(preview)
+    }
+
+    #[tool(
+        name = "align_execute",
+        description = "Align multiple entities along x, y, or z using min, max, or center semantics. Returns the applied positions."
+    )]
+    async fn align_execute_tool(
+        &self,
+        Parameters(params): Parameters<AlignRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let preview = self
+            .request_align_execute(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(preview)
+    }
+
+    #[tool(
+        name = "distribute_preview",
+        description = "Preview equal spacing or equal gap distribution along x, y, or z without applying it."
+    )]
+    async fn distribute_preview_tool(
+        &self,
+        Parameters(params): Parameters<DistributeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let preview = self
+            .request_distribute_preview(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(preview)
+    }
+
+    #[tool(
+        name = "distribute_execute",
+        description = "Distribute multiple entities along x, y, or z using equal center spacing or equal edge gaps. Returns the applied positions."
+    )]
+    async fn distribute_execute_tool(
+        &self,
+        Parameters(params): Parameters<DistributeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let preview = self
+            .request_distribute_execute(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(preview)
     }
 
     // --- Face Subdivision ---
@@ -6494,6 +6715,39 @@ fn handle_create_light(
 }
 
 #[cfg(feature = "model-api")]
+fn create_guide_line_request_json(request: &PlaceGuideLineRequest) -> Value {
+    json!({
+        "type": "guide_line",
+        "anchor": request.anchor,
+        "direction": request.direction,
+        "finite_length": request.finite_length,
+        "visible": request.visible.unwrap_or(true),
+        "label": request.label,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn create_dimension_line_request_json(request: &PlaceDimensionLineRequest) -> Value {
+    let mut request_json = json!({
+        "type": "dimension_line",
+        "start": request.start,
+        "end": request.end,
+        "visible": request.visible.unwrap_or(true),
+        "label": request.label,
+    });
+    let object = request_json
+        .as_object_mut()
+        .expect("dimension line create request should serialize as an object");
+    if let Some(offset) = request.offset {
+        object.insert("offset".to_string(), json!(offset));
+    }
+    if let Some(line_point) = request.line_point {
+        object.insert("line_point".to_string(), json!(line_point));
+    }
+    request_json
+}
+
+#[cfg(feature = "model-api")]
 fn handle_update_light(
     world: &mut World,
     request: UpdateLightRequest,
@@ -6855,6 +7109,360 @@ fn handle_set_selection(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<
 
     result_ids.sort();
     Ok(result_ids)
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpatialAxis {
+    X,
+    Y,
+    Z,
+}
+
+#[cfg(feature = "model-api")]
+impl SpatialAxis {
+    fn parse(value: &str) -> ApiResult<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "x" => Ok(Self::X),
+            "y" => Ok(Self::Y),
+            "z" => Ok(Self::Z),
+            _ => Err(format!("Invalid axis '{value}'. Valid axes: x, y, z")),
+        }
+    }
+
+    fn unit_vector(self) -> Vec3 {
+        match self {
+            Self::X => Vec3::X,
+            Self::Y => Vec3::Y,
+            Self::Z => Vec3::Z,
+        }
+    }
+
+    fn component(self, value: Vec3) -> f32 {
+        match self {
+            Self::X => value.x,
+            Self::Y => value.y,
+            Self::Z => value.z,
+        }
+    }
+
+    fn bounds_min(self, bounds: crate::authored_entity::EntityBounds) -> f32 {
+        self.component(bounds.min)
+    }
+
+    fn bounds_max(self, bounds: crate::authored_entity::EntityBounds) -> f32 {
+        self.component(bounds.max)
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpatialAlignMode {
+    Min,
+    Max,
+    Center,
+}
+
+#[cfg(feature = "model-api")]
+impl SpatialAlignMode {
+    fn parse(value: &str) -> ApiResult<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "min" => Ok(Self::Min),
+            "max" => Ok(Self::Max),
+            "center" => Ok(Self::Center),
+            _ => Err(format!(
+                "Invalid align mode '{value}'. Valid modes: min, max, center"
+            )),
+        }
+    }
+
+    fn coordinate(self, axis: SpatialAxis, bounds: crate::authored_entity::EntityBounds) -> f32 {
+        match self {
+            Self::Min => axis.bounds_min(bounds),
+            Self::Max => axis.bounds_max(bounds),
+            Self::Center => axis.component(bounds.center()),
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpatialDistributeMode {
+    Spacing,
+    Gap,
+}
+
+#[cfg(feature = "model-api")]
+impl SpatialDistributeMode {
+    fn parse(value: &str) -> ApiResult<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "spacing" => Ok(Self::Spacing),
+            "gap" => Ok(Self::Gap),
+            _ => Err(format!(
+                "Invalid distribute mode '{value}'. Valid modes: spacing, gap"
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone)]
+struct SpatialEntityPlan {
+    element_id: ElementId,
+    snapshot: BoxedEntity,
+    bounds: crate::authored_entity::EntityBounds,
+    locked: bool,
+}
+
+#[cfg(feature = "model-api")]
+fn handle_align_preview(
+    world: &mut World,
+    request: AlignRequest,
+) -> ApiResult<Vec<SpatialPreviewEntry>> {
+    preview_align(world, &request).map(|(entries, _, _)| entries)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_align_execute(
+    world: &mut World,
+    request: AlignRequest,
+) -> ApiResult<Vec<SpatialPreviewEntry>> {
+    let (entries, before, after) = preview_align(world, &request)?;
+    apply_spatial_preview(world, "Align selection", before, after);
+    Ok(entries)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_distribute_preview(
+    world: &mut World,
+    request: DistributeRequest,
+) -> ApiResult<Vec<SpatialPreviewEntry>> {
+    preview_distribute(world, &request).map(|(entries, _, _)| entries)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_distribute_execute(
+    world: &mut World,
+    request: DistributeRequest,
+) -> ApiResult<Vec<SpatialPreviewEntry>> {
+    let (entries, before, after) = preview_distribute(world, &request)?;
+    apply_spatial_preview(world, "Distribute selection", before, after);
+    Ok(entries)
+}
+
+#[cfg(feature = "model-api")]
+fn preview_align(
+    world: &World,
+    request: &AlignRequest,
+) -> ApiResult<(Vec<SpatialPreviewEntry>, Vec<BoxedEntity>, Vec<BoxedEntity>)> {
+    let axis = SpatialAxis::parse(&request.axis)?;
+    let mode = SpatialAlignMode::parse(&request.mode)?;
+    let plans = gather_spatial_entity_plans(world, &request.element_ids)?;
+
+    if plans.is_empty() {
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
+    }
+
+    let reference_bounds = match (request.reference_element_id, request.reference_value) {
+        (_, Some(value)) => Some(value),
+        (Some(element_id), None) => {
+            let snapshot = capture_snapshot_by_id(world, ElementId(element_id))?;
+            Some(mode.coordinate(axis, alignment_bounds(&snapshot)))
+        }
+        (None, None) => None,
+    };
+
+    let aggregate_bounds = plans
+        .iter()
+        .map(|plan| plan.bounds)
+        .reduce(|acc, bounds| merge_bounds(Some(acc), bounds))
+        .expect("plans is not empty");
+    let target_value = reference_bounds.unwrap_or_else(|| mode.coordinate(axis, aggregate_bounds));
+
+    let mut entries = Vec::with_capacity(plans.len());
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+
+    for plan in plans {
+        let current_position = plan.snapshot.center().to_array();
+        let proposed_snapshot =
+            if plan.locked || Some(plan.element_id.0) == request.reference_element_id {
+                plan.snapshot.clone()
+            } else {
+                let current_value = mode.coordinate(axis, plan.bounds);
+                let delta = target_value - current_value;
+                if delta.abs() < 1e-5 {
+                    plan.snapshot.clone()
+                } else {
+                    plan.snapshot.translate_by(axis.unit_vector() * delta)
+                }
+            };
+
+        if proposed_snapshot != plan.snapshot {
+            before.push(plan.snapshot.clone());
+            after.push(proposed_snapshot.clone());
+        }
+
+        entries.push(SpatialPreviewEntry {
+            element_id: plan.element_id.0,
+            current_position,
+            proposed_position: proposed_snapshot.center().to_array(),
+        });
+    }
+
+    Ok((entries, before, after))
+}
+
+#[cfg(feature = "model-api")]
+fn preview_distribute(
+    world: &World,
+    request: &DistributeRequest,
+) -> ApiResult<(Vec<SpatialPreviewEntry>, Vec<BoxedEntity>, Vec<BoxedEntity>)> {
+    let axis = SpatialAxis::parse(&request.axis)?;
+    let mode = SpatialDistributeMode::parse(&request.mode)?;
+    let plans = gather_spatial_entity_plans(world, &request.element_ids)?;
+    let movable_count = plans.iter().filter(|plan| !plan.locked).count();
+    if movable_count < 3 {
+        return Err("Distribute requires at least three movable entities".to_string());
+    }
+
+    let mut unlocked: Vec<&SpatialEntityPlan> = plans.iter().filter(|plan| !plan.locked).collect();
+    unlocked.sort_by(|a, b| {
+        axis.component(a.bounds.center())
+            .total_cmp(&axis.component(b.bounds.center()))
+    });
+
+    let mut target_centers = std::collections::HashMap::<u64, f32>::new();
+    match mode {
+        SpatialDistributeMode::Spacing => {
+            let first = unlocked.first().expect("at least three movable entities");
+            let first_center = axis.component(first.bounds.center());
+            let last_center = axis.component(unlocked.last().expect("non-empty").bounds.center());
+            let step = request
+                .value
+                .unwrap_or_else(|| (last_center - first_center) / (unlocked.len() - 1) as f32);
+            for (index, plan) in unlocked.iter().enumerate() {
+                target_centers.insert(plan.element_id.0, first_center + step * index as f32);
+            }
+        }
+        SpatialDistributeMode::Gap => {
+            let first = unlocked.first().expect("at least three movable entities");
+            let first_min = axis.bounds_min(first.bounds);
+            let gap = if let Some(value) = request.value {
+                value
+            } else {
+                let last = unlocked.last().expect("non-empty");
+                let span = axis.bounds_max(last.bounds) - first_min;
+                let total_size: f32 = unlocked
+                    .iter()
+                    .map(|plan| axis.bounds_max(plan.bounds) - axis.bounds_min(plan.bounds))
+                    .sum();
+                (span - total_size) / (unlocked.len() - 1) as f32
+            };
+            let mut current_min = first_min;
+            for plan in unlocked {
+                let size = axis.bounds_max(plan.bounds) - axis.bounds_min(plan.bounds);
+                target_centers.insert(plan.element_id.0, current_min + size * 0.5);
+                current_min += size + gap;
+            }
+        }
+    }
+
+    let mut entries = Vec::with_capacity(plans.len());
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for plan in plans {
+        let current_position = plan.snapshot.center().to_array();
+        let proposed_snapshot = if plan.locked {
+            plan.snapshot.clone()
+        } else if let Some(target_center) = target_centers.get(&plan.element_id.0) {
+            let current_center = axis.component(plan.bounds.center());
+            let delta = *target_center - current_center;
+            if delta.abs() < 1e-5 {
+                plan.snapshot.clone()
+            } else {
+                plan.snapshot.translate_by(axis.unit_vector() * delta)
+            }
+        } else {
+            plan.snapshot.clone()
+        };
+
+        if proposed_snapshot != plan.snapshot {
+            before.push(plan.snapshot.clone());
+            after.push(proposed_snapshot.clone());
+        }
+
+        entries.push(SpatialPreviewEntry {
+            element_id: plan.element_id.0,
+            current_position,
+            proposed_position: proposed_snapshot.center().to_array(),
+        });
+    }
+
+    Ok((entries, before, after))
+}
+
+#[cfg(feature = "model-api")]
+fn gather_spatial_entity_plans(
+    world: &World,
+    element_ids: &[u64],
+) -> ApiResult<Vec<SpatialEntityPlan>> {
+    let mut plans = Vec::with_capacity(element_ids.len());
+    for element_id in element_ids {
+        let element_id = ElementId(*element_id);
+        let snapshot = capture_snapshot_by_id(world, element_id)?;
+        let entity = find_entity_by_element_id_readonly(world, element_id)
+            .ok_or_else(|| format!("Entity {} not found", element_id.0))?;
+        let locked = crate::plugins::layers::entity_on_locked_layer(world, entity);
+        plans.push(SpatialEntityPlan {
+            element_id,
+            bounds: alignment_bounds(&snapshot),
+            snapshot,
+            locked,
+        });
+    }
+    Ok(plans)
+}
+
+#[cfg(feature = "model-api")]
+fn find_entity_by_element_id_readonly(world: &World, element_id: ElementId) -> Option<Entity> {
+    let mut query = world.try_query::<(Entity, &ElementId)>()?;
+    query
+        .iter(world)
+        .find_map(|(entity, current)| (*current == element_id).then_some(entity))
+}
+
+#[cfg(feature = "model-api")]
+fn alignment_bounds(snapshot: &BoxedEntity) -> crate::authored_entity::EntityBounds {
+    snapshot.bounds().unwrap_or_else(|| {
+        let center = snapshot.center();
+        crate::authored_entity::EntityBounds {
+            min: center,
+            max: center,
+        }
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn apply_spatial_preview(
+    world: &mut World,
+    label: &'static str,
+    before: Vec<BoxedEntity>,
+    after: Vec<BoxedEntity>,
+) {
+    if before.is_empty() {
+        return;
+    }
+
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label,
+            before,
+            after,
+        },
+    );
+    flush_model_api_write_pipeline(world);
 }
 
 // --- Face Subdivision Handler ---
@@ -10447,8 +11055,10 @@ mod tests {
             CreateTriangleMeshCommand, DeleteEntitiesCommand, EndCommandGroup,
             ResolvedDeleteEntitiesCommand,
         },
+        dimension_line::DimensionLineFactory,
         document_properties::DocumentProperties,
         document_state::DocumentState,
+        guide_line::{GuideLineFactory, GuideLineVisibility},
         history::{History, PendingCommandQueue},
         identity::ElementIdAllocator,
         import::ImportRegistry,
@@ -10614,13 +11224,18 @@ mod tests {
         world.insert_resource(ElementIdAllocator::default());
         world.insert_resource(DocumentState::default());
         world.insert_resource(OpaquePersistedEntities::default());
+        world.insert_resource(GuideLineVisibility::default());
         world.insert_resource(PropertyEditState::default());
         world.insert_resource(TransformState::default());
         world.insert_resource(NextState::<ActiveTool>::default());
+        world.insert_resource(crate::plugins::storage::Storage(Box::new(
+            crate::plugins::storage::LocalFileBackend,
+        )));
         let mut import_registry = ImportRegistry::default();
         import_registry.register_importer(ObjImporter);
         world.insert_resource(import_registry);
         world.insert_resource(DocumentProperties::default());
+        world.insert_resource(crate::plugins::named_views::NamedViewRegistry::default());
         let mut toolbar_registry = ToolbarRegistry::default();
         toolbar_registry.register(ToolbarDescriptor {
             id: "core".to_string(),
@@ -10672,6 +11287,8 @@ mod tests {
         registry.register_factory(TriangleMeshFactory);
         registry.register_factory(FilletFactory);
         registry.register_factory(ChamferFactory);
+        registry.register_factory(GuideLineFactory);
+        registry.register_factory(DimensionLineFactory);
         registry.register_factory(crate::plugins::lighting::SceneLightFactory);
         registry.register_factory(crate::plugins::modeling::occurrence::OccurrenceFactory);
         world.insert_resource(registry);
@@ -10689,6 +11306,187 @@ mod tests {
         world.insert_resource(crate::plugins::layers::LayerRegistry::default());
         world.insert_resource(crate::plugins::materials::MaterialRegistry::default());
         world
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn guide_line_create_round_trip_through_model_api() {
+        let mut world = init_model_api_test_world();
+
+        let element_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "guide_line",
+                "anchor": [2.0, 0.0, 3.0],
+                "direction": [0.0, 0.0, 5.0],
+                "finite_length": 4.0,
+                "label": "Survey axis"
+            }),
+        )
+        .expect("guide line should be created");
+
+        let snapshot = get_entity_snapshot(&world, ElementId(element_id))
+            .expect("guide line snapshot should exist");
+        assert_eq!(snapshot["anchor"], json!([2.0, 0.0, 3.0]));
+        assert_eq!(snapshot["finite_length"], json!(4.0));
+        assert_eq!(snapshot["label"], json!("Survey axis"));
+
+        let details = get_entity_details(&world, ElementId(element_id))
+            .expect("guide line details should exist");
+        assert_eq!(details.entity_type, "guide_line");
+        assert!(details
+            .properties
+            .iter()
+            .any(|property| property.name == "direction"));
+
+        let entities = list_entities(&world);
+        assert!(entities
+            .iter()
+            .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn dimension_line_create_round_trip_through_model_api() {
+        let mut world = init_model_api_test_world();
+
+        let element_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "dimension_line",
+                "start": [0.0, 0.0, 0.0],
+                "end": [2.0, 0.0, 0.0],
+                "line_point": [1.0, 0.0, 0.75],
+                "label": "Width"
+            }),
+        )
+        .expect("dimension line should be created");
+
+        let snapshot = get_entity_snapshot(&world, ElementId(element_id))
+            .expect("dimension line snapshot should exist");
+        assert_eq!(snapshot["start"], json!([0.0, 0.0, 0.0]));
+        assert_eq!(snapshot["end"], json!([2.0, 0.0, 0.0]));
+        assert_eq!(snapshot["offset"], json!([0.0, 0.0, 0.75]));
+        assert_eq!(snapshot["label"], json!("Width"));
+        assert_eq!(snapshot["length"], json!(2.0));
+
+        let details = get_entity_details(&world, ElementId(element_id))
+            .expect("dimension line details should exist");
+        assert_eq!(details.entity_type, "dimension_line");
+        assert!(details
+            .properties
+            .iter()
+            .any(|property| property.name == "offset"));
+        assert!(details
+            .properties
+            .iter()
+            .any(|property| property.name == "length"));
+
+        let entities = list_entities(&world);
+        assert!(entities.iter().any(|entry| {
+            entry.element_id == element_id && entry.entity_type == "dimension_line"
+        }));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn align_preview_and_execute_match_reference_edge() {
+        let mut world = init_model_api_test_world();
+        let left = handle_create_entity(
+            &mut world,
+            json!({"type": "box", "centre": [0.0, 0.0, 0.0], "half_extents": [1.0, 1.0, 1.0]}),
+        )
+        .expect("left box should be created");
+        let reference = handle_create_entity(
+            &mut world,
+            json!({"type": "box", "centre": [5.0, 3.0, 0.0], "half_extents": [1.0, 2.0, 1.0]}),
+        )
+        .expect("reference box should be created");
+        let right = handle_create_entity(
+            &mut world,
+            json!({"type": "box", "centre": [10.0, 0.5, 0.0], "half_extents": [1.0, 0.5, 1.0]}),
+        )
+        .expect("right box should be created");
+
+        let request = AlignRequest {
+            element_ids: vec![left, reference, right],
+            axis: "y".to_string(),
+            mode: "max".to_string(),
+            reference_element_id: Some(reference),
+            reference_value: None,
+        };
+        let preview =
+            handle_align_preview(&mut world, request.clone()).expect("preview should work");
+        let preview_left = preview
+            .iter()
+            .find(|entry| entry.element_id == left)
+            .expect("left preview should exist");
+        assert_eq!(preview_left.proposed_position, [0.0, 4.0, 0.0]);
+
+        handle_align_execute(&mut world, request).expect("execute should work");
+
+        let left_snapshot =
+            capture_snapshot_by_id(&world, ElementId(left)).expect("left snapshot should exist");
+        let reference_snapshot = capture_snapshot_by_id(&world, ElementId(reference))
+            .expect("reference snapshot should exist");
+        let right_snapshot =
+            capture_snapshot_by_id(&world, ElementId(right)).expect("right snapshot should exist");
+
+        assert_eq!(alignment_bounds(&left_snapshot).max.y, 5.0);
+        assert_eq!(alignment_bounds(&reference_snapshot).max.y, 5.0);
+        assert_eq!(alignment_bounds(&right_snapshot).max.y, 5.0);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn distribute_execute_evenly_spaces_centers() {
+        let mut world = init_model_api_test_world();
+        let first = handle_create_entity(
+            &mut world,
+            json!({"type": "box", "centre": [0.0, 0.0, 0.0], "half_extents": [1.0, 1.0, 1.0]}),
+        )
+        .expect("first box should be created");
+        let middle = handle_create_entity(
+            &mut world,
+            json!({"type": "box", "centre": [3.0, 0.0, 0.0], "half_extents": [1.0, 1.0, 1.0]}),
+        )
+        .expect("middle box should be created");
+        let last = handle_create_entity(
+            &mut world,
+            json!({"type": "box", "centre": [12.0, 0.0, 0.0], "half_extents": [1.0, 1.0, 1.0]}),
+        )
+        .expect("last box should be created");
+
+        let preview = handle_distribute_preview(
+            &mut world,
+            DistributeRequest {
+                element_ids: vec![first, middle, last],
+                axis: "x".to_string(),
+                mode: "spacing".to_string(),
+                value: None,
+            },
+        )
+        .expect("preview should work");
+        let middle_preview = preview
+            .iter()
+            .find(|entry| entry.element_id == middle)
+            .expect("middle preview should exist");
+        assert_eq!(middle_preview.proposed_position, [6.0, 0.0, 0.0]);
+
+        handle_distribute_execute(
+            &mut world,
+            DistributeRequest {
+                element_ids: vec![first, middle, last],
+                axis: "x".to_string(),
+                mode: "spacing".to_string(),
+                value: None,
+            },
+        )
+        .expect("execute should work");
+
+        let middle_snapshot = capture_snapshot_by_id(&world, ElementId(middle))
+            .expect("middle snapshot should exist");
+        assert_eq!(middle_snapshot.center(), Vec3::new(6.0, 0.0, 0.0));
     }
 
     #[cfg(feature = "model-api")]
@@ -11908,6 +12706,108 @@ mod tests {
             explanation.domain_data["architectural"]["exchange_identity_map"]["GlobalId"],
             json!("rt-1")
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn primitive_round_trip_through_project_persistence() {
+        let mut source_world = init_model_api_test_world();
+        let sphere_id = handle_create_entity(
+            &mut source_world,
+            json!({
+                "type": "sphere",
+                "centre": [1.5, 2.0, -0.5],
+                "radius": 0.75
+            }),
+        )
+        .expect("sphere should be created");
+
+        let path = temp_json_path("talos3d-primitive-roundtrip").with_extension("talos3d");
+        handle_save_project(&mut source_world, path.to_str().unwrap_or_default())
+            .expect("project should save");
+
+        let mut loaded_world = init_model_api_test_world();
+        handle_load_project(&mut loaded_world, path.to_str().unwrap_or_default())
+            .expect("project should load");
+
+        let snapshot = get_entity_snapshot(&loaded_world, ElementId(sphere_id))
+            .expect("loaded sphere snapshot should exist");
+        assert_eq!(snapshot["centre"], json!([1.5, 2.0, -0.5]));
+        assert_eq!(snapshot["radius"], json!(0.75));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn legacy_primitive_project_loads_successfully() {
+        let path = temp_json_path("talos3d-legacy-primitive").with_extension("talos3d");
+        let project = json!({
+            "version": 1,
+            "next_element_id": 7,
+            "entities": [
+                {
+                    "type": "sphere",
+                    "data": {
+                        "centre": [0.0, 0.0, 0.0],
+                        "radius": 1.25
+                    }
+                }
+            ]
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&project).expect("legacy project should serialize"),
+        )
+        .expect("legacy project should write");
+
+        let mut world = init_model_api_test_world();
+        handle_load_project(&mut world, path.to_str().unwrap_or_default())
+            .expect("legacy project should load");
+
+        let entities = list_entities(&world);
+        assert!(entities.iter().any(|entity| entity.entity_type == "sphere"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn failed_load_does_not_clear_existing_scene() {
+        let mut world = init_model_api_test_world();
+        let box_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [0.0, 0.0, 0.0],
+                "half_extents": [1.0, 1.0, 1.0]
+            }),
+        )
+        .expect("box should be created");
+
+        let path = temp_json_path("talos3d-invalid-load").with_extension("talos3d");
+        let invalid_project = json!({
+            "version": 1,
+            "next_element_id": 2,
+            "entities": [
+                {
+                    "type": "scene_light",
+                    "data": {}
+                }
+            ]
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&invalid_project).expect("invalid project should serialize"),
+        )
+        .expect("invalid project should write");
+
+        let error = handle_load_project(&mut world, path.to_str().unwrap_or_default())
+            .expect_err("invalid project should fail to load");
+        assert!(error.contains("Missing element_id"));
+        assert!(get_entity_snapshot(&world, ElementId(box_id)).is_some());
 
         let _ = fs::remove_file(path);
     }
