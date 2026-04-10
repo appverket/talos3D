@@ -11,6 +11,16 @@ pub enum DisplayUnit {
 }
 
 impl DisplayUnit {
+    pub fn identifier(&self) -> &'static str {
+        match self {
+            Self::Millimetres => "mm",
+            Self::Centimetres => "cm",
+            Self::Metres => "m",
+            Self::Feet => "ft",
+            Self::Inches => "in",
+        }
+    }
+
     pub fn from_metres(&self, metres: f32) -> f32 {
         metres * self.scale_factor()
     }
@@ -20,13 +30,7 @@ impl DisplayUnit {
     }
 
     pub fn abbreviation(&self) -> &'static str {
-        match self {
-            Self::Millimetres => "mm",
-            Self::Centimetres => "cm",
-            Self::Metres => "m",
-            Self::Feet => "ft",
-            Self::Inches => "in",
-        }
+        self.identifier()
     }
 
     pub fn format_value(&self, metres: f32, precision: u8) -> String {
@@ -46,6 +50,21 @@ impl DisplayUnit {
             Self::Metres => 1.0,
             Self::Feet => 3.280_84,
             Self::Inches => 39.370_1,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mm" | "millimetre" | "millimetres" | "millimeter" | "millimeters" => {
+                Some(Self::Millimetres)
+            }
+            "cm" | "centimetre" | "centimetres" | "centimeter" | "centimeters" => {
+                Some(Self::Centimetres)
+            }
+            "m" | "metre" | "metres" | "meter" | "meters" => Some(Self::Metres),
+            "ft" | "foot" | "feet" => Some(Self::Feet),
+            "in" | "inch" | "inches" => Some(Self::Inches),
+            _ => None,
         }
     }
 }
@@ -80,5 +99,19 @@ mod tests {
     fn format_value_precision() {
         assert_eq!(DisplayUnit::Metres.format_value(1.234, 2), "1.23m");
         assert_eq!(DisplayUnit::Millimetres.format_value(0.001, 0), "1mm");
+    }
+
+    #[test]
+    fn parse_common_unit_names() {
+        assert_eq!(DisplayUnit::parse("mm"), Some(DisplayUnit::Millimetres));
+        assert_eq!(
+            DisplayUnit::parse("millimeters"),
+            Some(DisplayUnit::Millimetres)
+        );
+        assert_eq!(DisplayUnit::parse("cm"), Some(DisplayUnit::Centimetres));
+        assert_eq!(DisplayUnit::parse("m"), Some(DisplayUnit::Metres));
+        assert_eq!(DisplayUnit::parse("feet"), Some(DisplayUnit::Feet));
+        assert_eq!(DisplayUnit::parse("inches"), Some(DisplayUnit::Inches));
+        assert_eq!(DisplayUnit::parse("yards"), None);
     }
 }
