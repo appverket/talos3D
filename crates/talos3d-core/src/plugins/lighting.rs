@@ -432,13 +432,17 @@ impl AuthoredEntity for SceneLightSnapshot {
 
     fn apply_to(&self, world: &mut World) {
         let transform = Transform::from_translation(self.translation).with_rotation(self.rotation);
-        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+        let entity = if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             world
                 .entity_mut(entity)
                 .insert((self.node.clone(), transform));
+            entity
         } else {
-            world.spawn((self.element_id, self.node.clone(), transform));
-        }
+            world
+                .spawn((self.element_id, self.node.clone(), transform))
+                .id()
+        };
+        insert_bevy_light_direct(&mut world.entity_mut(entity), &self.node);
     }
 
     fn remove_from(&self, world: &mut World) {
@@ -843,6 +847,54 @@ fn draw_scene_light_gizmos(query: Query<(&SceneLightNode, &Transform)>, mut gizm
             Color::srgba(node.color[0], node.color[1], node.color[2], 0.55),
             false,
         );
+    }
+}
+
+/// Insert the correct Bevy light component directly via world access.
+/// Used by `apply_to` so lights work immediately without waiting for
+/// the deferred `sync_scene_lights` system.
+fn insert_bevy_light_direct(entity_mut: &mut EntityWorldMut, node: &SceneLightNode) {
+    entity_mut
+        .remove::<DirectionalLight>()
+        .remove::<PointLight>()
+        .remove::<SpotLight>();
+
+    if !node.enabled {
+        return;
+    }
+
+    let color = Color::srgb(node.color[0], node.color[1], node.color[2]);
+    match node.kind {
+        SceneLightKind::Directional => {
+            entity_mut.insert(DirectionalLight {
+                color,
+                illuminance: node.intensity.max(0.0),
+                shadows_enabled: node.shadows_enabled,
+                ..default()
+            });
+        }
+        SceneLightKind::Point => {
+            entity_mut.insert(PointLight {
+                color,
+                intensity: node.intensity.max(0.0),
+                shadows_enabled: node.shadows_enabled,
+                range: node.range.max(0.01),
+                radius: node.radius.max(0.0),
+                ..default()
+            });
+        }
+        SceneLightKind::Spot => {
+            entity_mut.insert(SpotLight {
+                color,
+                intensity: node.intensity.max(0.0),
+                shadows_enabled: node.shadows_enabled,
+                range: node.range.max(0.01),
+                radius: node.radius.max(0.0),
+                inner_angle: node.inner_angle_deg.to_radians(),
+                outer_angle: node.outer_angle_deg.max(node.inner_angle_deg).to_radians(),
+                ..default()
+            });
+        }
     }
 }
 

@@ -447,6 +447,10 @@ fn snapshot_dependency_order_by_name(type_name: &str) -> u8 {
 }
 
 fn clear_scene(world: &mut World) {
+    // Flush deferred commands so mesh-generation inserts on about-to-be-despawned
+    // entities don't fire after the entities are gone (causing a panic).
+    world.flush();
+
     let mut entities_to_despawn = Vec::new();
     let mut meshes_to_remove = Vec::new();
 
