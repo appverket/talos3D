@@ -280,7 +280,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         .filter_map(|entity_ref| registry.capture_snapshot(&entity_ref, world))
         .map(|snapshot| PersistedEntityRecord {
             type_name: snapshot.type_name().to_string(),
-            data: snapshot.to_json(),
+            data: snapshot.to_persisted_json(),
         })
         .collect::<Vec<_>>();
     entities.sort_by_key(entity_record_sort_key);
@@ -350,17 +350,44 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
 }
 
 fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
-    if project.version != PROJECT_FILE_VERSION {
+    let ProjectFile {
+        version,
+        mut next_element_id,
+        document_properties,
+        layers,
+        materials,
+        definitions,
+        definition_libraries,
+        named_views,
+        lighting,
+        entities,
+    } = project;
+
+    if version != PROJECT_FILE_VERSION {
         return Err(format!(
             "Unsupported project version {} (expected {})",
-            project.version, PROJECT_FILE_VERSION
+            version, PROJECT_FILE_VERSION
         ));
+    }
+
+    let had_lighting = lighting.is_some();
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut recognized = Vec::new();
+    let mut opaque = Vec::new();
+
+    for mut record in entities {
+        upgrade_legacy_entity_record(&mut record, &mut next_element_id);
+        if let Some(factory) = registry.factory_for(&record.type_name) {
+            let snapshot = factory.from_persisted_json(&record.data)?;
+            recognized.push(snapshot);
+        } else {
+            opaque.push(record);
+        }
     }
 
     clear_scene(world);
 
-    let had_lighting = project.lighting.is_some();
-    let doc_props = match project.document_properties {
+    let doc_props = match document_properties {
         Some(props) => props,
         None => {
             let mut props = DocumentProperties::default();
@@ -371,33 +398,20 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
     };
     world.insert_resource(doc_props);
-    world.insert_resource(project.layers.unwrap_or_default());
-    world.insert_resource(project.materials.unwrap_or_default());
+    world.insert_resource(layers.unwrap_or_default());
+    world.insert_resource(materials.unwrap_or_default());
     if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
         ensure_builtin_materials(&mut materials);
     }
-    world.insert_resource(project.definitions.unwrap_or_default());
-    world.insert_resource(project.definition_libraries.unwrap_or_default());
+    world.insert_resource(definitions.unwrap_or_default());
+    world.insert_resource(definition_libraries.unwrap_or_default());
     if let Some(mut libraries) = world.get_resource_mut::<DefinitionLibraryRegistry>() {
         if let Err(error) = apply_bundled_definition_libraries(&mut libraries) {
             error!("Failed to restore bundled definition libraries after project load: {error}");
         }
     }
-    world.insert_resource(project.named_views.unwrap_or_default());
-    world.insert_resource(project.lighting.unwrap_or_default());
-
-    let registry = world.resource::<CapabilityRegistry>();
-    let mut recognized = Vec::new();
-    let mut opaque = Vec::new();
-
-    for record in project.entities {
-        if let Some(factory) = registry.factory_for(&record.type_name) {
-            let snapshot = factory.from_persisted_json(&record.data)?;
-            recognized.push(snapshot);
-        } else {
-            opaque.push(record);
-        }
-    }
+    world.insert_resource(named_views.unwrap_or_default());
+    world.insert_resource(lighting.unwrap_or_default());
 
     recognized.sort_by_key(snapshot_dependency_order);
     for snapshot in recognized {
@@ -410,7 +424,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     world
         .resource_mut::<ElementIdAllocator>()
-        .set_next(project.next_element_id);
+        .set_next(next_element_id);
     world.resource_mut::<History>().clear();
     world.resource_mut::<PendingCommandQueue>().clear();
     world.resource_mut::<PropertyEditState>().clear();
@@ -426,13 +440,46 @@ fn entity_record_sort_key(record: &PersistedEntityRecord) -> (u8, u64) {
     let type_order = snapshot_dependency_order_by_name(&record.type_name);
     let element_id = record
         .data
-        .as_object()
-        .and_then(|obj| {
-            obj.values()
-                .find_map(|v| v.get("element_id").and_then(Value::as_u64))
+        .get("element_id")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            record.data.as_object().and_then(|obj| {
+                obj.values()
+                    .find_map(|v| v.get("element_id").and_then(Value::as_u64))
+            })
         })
         .unwrap_or(u64::MAX);
     (type_order, element_id)
+}
+
+fn upgrade_legacy_entity_record(record: &mut PersistedEntityRecord, next_element_id: &mut u64) {
+    if !is_legacy_primitive_record_type(&record.type_name) {
+        return;
+    }
+    let Some(object) = record.data.as_object_mut() else {
+        return;
+    };
+    if !object.contains_key("element_id") {
+        object.insert("element_id".to_string(), Value::from(*next_element_id));
+        *next_element_id += 1;
+    }
+    object.entry("rotation".to_string()).or_insert_with(|| {
+        serde_json::to_value(crate::plugins::modeling::primitives::ShapeRotation::default())
+            .unwrap_or(Value::Null)
+    });
+}
+
+fn is_legacy_primitive_record_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "box"
+            | "cylinder"
+            | "sphere"
+            | "plane"
+            | "profile_extrusion"
+            | "profile_sweep"
+            | "profile_revolve"
+    )
 }
 
 fn snapshot_dependency_order_by_name(type_name: &str) -> u8 {

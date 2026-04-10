@@ -9,8 +9,8 @@ use crate::plugins::model_api::ModelApiRuntimeInfo;
 use crate::plugins::perf_stats::{overlay_text as perf_overlay_text, PerfStats};
 use crate::plugins::{
     assistant_chat::{
-        draw_assistant_window, AssistantChatState, AssistantWindowState, PendingAssistantJob,
-        ASSISTANT_PANEL_WIDTH,
+        draw_assistant_window, AssistantChatState, PendingAssistantJob, RightSidebarState,
+        ASSISTANT_PANEL_DEFAULT_WIDTH,
     },
     camera::{
         focal_length_range_mm, CameraControlsState, CameraProjectionMode, CameraViewPreset,
@@ -35,7 +35,10 @@ use crate::plugins::{
         apply_import_review_to_pending, DocumentImportPlacementState, ImportOriginMode,
         ImportProgressState, ImportReviewState, ImportedLayerPanelState, PendingImportCommit,
     },
-    lighting::{create_daylight_rig, SceneLightKind, SceneLightNode, SceneLightSnapshot, SceneLightingSettings},
+    lighting::{
+        create_daylight_rig, SceneLightKind, SceneLightNode, SceneLightSnapshot,
+        SceneLightingSettings,
+    },
     material_browser::{draw_materials_window, MaterialsWindowState},
     materials::MaterialRegistry,
     menu_bar::MenuBarState,
@@ -195,7 +198,7 @@ struct ChromeData<'w, 's> {
     layer_state: ResMut<'w, crate::plugins::layers::LayerState>,
     cursor_world_pos: Res<'w, CursorWorldPos>,
     assistant_chat_state: ResMut<'w, AssistantChatState>,
-    assistant_window_state: ResMut<'w, AssistantWindowState>,
+    assistant_window_state: ResMut<'w, RightSidebarState>,
     pending_assistant_job: Res<'w, PendingAssistantJob>,
     definitions_window_state: ResMut<'w, DefinitionsWindowState>,
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
@@ -219,7 +222,16 @@ struct ChromeData<'w, 's> {
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
     selected_entities: Query<'w, 's, Entity, With<Selected>>,
-    light_query: Query<'w, 's, (Entity, &'static ElementId, &'static SceneLightNode, &'static Transform)>,
+    light_query: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static ElementId,
+            &'static SceneLightNode,
+            &'static Transform,
+        ),
+    >,
     property_edit_state: ResMut<'w, PropertyEditState>,
     property_panel_state: ResMut<'w, PropertyPanelState>,
     property_panel_data: Res<'w, PropertyPanelData>,
@@ -566,8 +578,14 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
 
     // Position in top-right of the available area
     let available = ctx.available_rect();
+    let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
     let assistant_offset = if data.assistant_window_state.visible {
-        ASSISTANT_PANEL_WIDTH + 12.0
+        (data
+            .assistant_window_state
+            .width
+            .max(ASSISTANT_PANEL_DEFAULT_WIDTH)
+            / pixels_per_point)
+            + 12.0
     } else {
         0.0
     };
@@ -2193,7 +2211,9 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
     let mut lights = data
         .light_query
         .iter()
-        .map(|(entity, element_id, node, transform)| (entity, *element_id, node.clone(), *transform))
+        .map(|(entity, element_id, node, transform)| {
+            (entity, *element_id, node.clone(), *transform)
+        })
         .collect::<Vec<_>>();
     lights.sort_by(|left, right| left.2.name.cmp(&right.2.name));
     let selected_entities = data
@@ -2207,16 +2227,18 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
         .default_height(420.0)
         .show(ctx, |ui| {
             ui.label(
-                egui::RichText::new(
-                    "Create and edit scene lights. Changes are undoable.",
-                )
-                .small()
-                .color(CHROME_MUTED),
+                egui::RichText::new("Create and edit scene lights. Changes are undoable.")
+                    .small()
+                    .color(CHROME_MUTED),
             );
             ui.add_space(8.0);
 
             ui.collapsing("Ambient", |ui| {
-                draw_rgb_triplet(ui, "Ambient Color", &mut data.lighting_settings.ambient_color);
+                draw_rgb_triplet(
+                    ui,
+                    "Ambient Color",
+                    &mut data.lighting_settings.ambient_color,
+                );
                 ui.add(
                     egui::Slider::new(&mut data.lighting_settings.ambient_brightness, 0.0..=200.0)
                         .text("Brightness"),
@@ -2234,8 +2256,9 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                         label: "Create daylight rig",
                     });
                     for snapshot in create_daylight_rig(&data.element_id_allocator) {
-                        data.create_entity_commands
-                            .write(CreateEntityCommand { snapshot: snapshot.into() });
+                        data.create_entity_commands.write(CreateEntityCommand {
+                            snapshot: snapshot.into(),
+                        });
                     }
                     data.end_command_groups.write(EndCommandGroup);
                 }
@@ -2298,18 +2321,18 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                                 });
                                 if selected {
                                     ui.label(
-                                        egui::RichText::new("Selected")
-                                            .small()
-                                            .color(CHROME_TEXT),
+                                        egui::RichText::new("Selected").small().color(CHROME_TEXT),
                                     );
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
                                         if ui.small_button("Delete").clicked() {
-                                            data.delete_entities_commands.write(DeleteEntitiesCommand {
-                                                element_ids: vec![*element_id],
-                                            });
+                                            data.delete_entities_commands.write(
+                                                DeleteEntitiesCommand {
+                                                    element_ids: vec![*element_id],
+                                                },
+                                            );
                                         }
                                         if ui.small_button("Select").clicked() {
                                             replace_selection(
@@ -2333,8 +2356,19 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                             egui::ComboBox::from_id_salt(format!("kind_{}", element_id.0))
                                 .selected_text(node_edit.kind.as_str())
                                 .show_ui(ui, |ui| {
-                                    for kind in [SceneLightKind::Directional, SceneLightKind::Point, SceneLightKind::Spot] {
-                                        if ui.selectable_value(&mut node_edit.kind, kind, kind.as_str()).changed() {
+                                    for kind in [
+                                        SceneLightKind::Directional,
+                                        SceneLightKind::Point,
+                                        SceneLightKind::Spot,
+                                    ] {
+                                        if ui
+                                            .selectable_value(
+                                                &mut node_edit.kind,
+                                                kind,
+                                                kind.as_str(),
+                                            )
+                                            .changed()
+                                        {
                                             changed = true;
                                         }
                                     }
@@ -2348,29 +2382,60 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                                 SceneLightKind::Directional => 50_000.0,
                                 _ => 100_000.0,
                             };
-                            changed |= ui.add(
-                                egui::Slider::new(&mut node_edit.intensity, 0.0..=max_intensity)
+                            changed |= ui
+                                .add(
+                                    egui::Slider::new(
+                                        &mut node_edit.intensity,
+                                        0.0..=max_intensity,
+                                    )
                                     .text("Intensity"),
-                            ).changed();
+                                )
+                                .changed();
 
                             ui.horizontal(|ui| {
                                 ui.label("Position");
-                                changed |= ui.add(egui::DragValue::new(&mut translation_edit.x).speed(0.1).prefix("X: ")).changed();
-                                changed |= ui.add(egui::DragValue::new(&mut translation_edit.y).speed(0.1).prefix("Y: ")).changed();
-                                changed |= ui.add(egui::DragValue::new(&mut translation_edit.z).speed(0.1).prefix("Z: ")).changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut translation_edit.x)
+                                            .speed(0.1)
+                                            .prefix("X: "),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut translation_edit.y)
+                                            .speed(0.1)
+                                            .prefix("Y: "),
+                                    )
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::DragValue::new(&mut translation_edit.z)
+                                            .speed(0.1)
+                                            .prefix("Z: "),
+                                    )
+                                    .changed();
                             });
 
                             let mut rotation_edit = transform.rotation;
-                            if matches!(node_edit.kind, SceneLightKind::Directional | SceneLightKind::Spot) {
+                            if matches!(
+                                node_edit.kind,
+                                SceneLightKind::Directional | SceneLightKind::Spot
+                            ) {
                                 let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
                                 let mut yaw_deg = yaw.to_degrees();
                                 let mut pitch_deg = pitch.to_degrees();
-                                let yaw_changed = ui.add(
-                                    egui::Slider::new(&mut yaw_deg, -180.0..=180.0).text("Yaw"),
-                                ).changed();
-                                let pitch_changed = ui.add(
-                                    egui::Slider::new(&mut pitch_deg, -90.0..=90.0).text("Pitch"),
-                                ).changed();
+                                let yaw_changed = ui
+                                    .add(
+                                        egui::Slider::new(&mut yaw_deg, -180.0..=180.0).text("Yaw"),
+                                    )
+                                    .changed();
+                                let pitch_changed = ui
+                                    .add(
+                                        egui::Slider::new(&mut pitch_deg, -90.0..=90.0)
+                                            .text("Pitch"),
+                                    )
+                                    .changed();
                                 if yaw_changed || pitch_changed {
                                     rotation_edit = Quat::from_euler(
                                         EulerRot::YXZ,
@@ -2382,22 +2447,43 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                                 }
                             }
 
-                            changed |= ui.checkbox(&mut node_edit.shadows_enabled, "Shadows").changed();
+                            changed |= ui
+                                .checkbox(&mut node_edit.shadows_enabled, "Shadows")
+                                .changed();
 
-                            if matches!(node_edit.kind, SceneLightKind::Point | SceneLightKind::Spot) {
-                                changed |= ui.add(
-                                    egui::Slider::new(&mut node_edit.range, 0.01..=100.0).text("Range"),
-                                ).changed();
+                            if matches!(
+                                node_edit.kind,
+                                SceneLightKind::Point | SceneLightKind::Spot
+                            ) {
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut node_edit.range, 0.01..=100.0)
+                                            .text("Range"),
+                                    )
+                                    .changed();
                             }
 
                             if matches!(node_edit.kind, SceneLightKind::Spot) {
-                                changed |= ui.add(
-                                    egui::Slider::new(&mut node_edit.inner_angle_deg, 0.1..=89.0).text("Inner Angle"),
-                                ).changed();
-                                node_edit.outer_angle_deg = node_edit.outer_angle_deg.max(node_edit.inner_angle_deg);
-                                changed |= ui.add(
-                                    egui::Slider::new(&mut node_edit.outer_angle_deg, node_edit.inner_angle_deg..=89.0).text("Outer Angle"),
-                                ).changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut node_edit.inner_angle_deg,
+                                            0.1..=89.0,
+                                        )
+                                        .text("Inner Angle"),
+                                    )
+                                    .changed();
+                                node_edit.outer_angle_deg =
+                                    node_edit.outer_angle_deg.max(node_edit.inner_angle_deg);
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(
+                                            &mut node_edit.outer_angle_deg,
+                                            node_edit.inner_angle_deg..=89.0,
+                                        )
+                                        .text("Outer Angle"),
+                                    )
+                                    .changed();
                             }
 
                             if changed {

@@ -296,7 +296,11 @@ fn apply_camera_controls(
     controls.projection_mode = orbit.projection_mode;
 }
 
-pub(crate) fn apply_orbit_state(orbit: &OrbitCamera, transform: &mut Transform, projection: &mut Projection) {
+pub(crate) fn apply_orbit_state(
+    orbit: &OrbitCamera,
+    transform: &mut Transform,
+    projection: &mut Projection,
+) {
     *transform = orbit_transform(orbit);
     sync_projection_from_orbit(orbit, projection);
 }

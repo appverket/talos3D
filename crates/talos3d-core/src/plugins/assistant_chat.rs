@@ -2,10 +2,16 @@ use std::{env, sync::mpsc, sync::Mutex, thread, time::Duration};
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_egui::egui::containers::panel::PanelState;
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const ASSISTANT_PANEL_WIDTH: f32 = 420.0;
+use crate::plugins::document_properties::DocumentProperties;
+
+pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 300.0;
+pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 260.0;
+pub const ASSISTANT_PANEL_MAX_WIDTH: f32 = 420.0;
 const ASSISTANT_TOOL_STEPS: usize = 12;
 const ASSISTANT_MAX_TOKENS: u32 = 1600;
 
@@ -13,26 +19,48 @@ const DEFAULT_OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses"
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
+const RIGHT_SIDEBAR_STATE_KEY: &str = "right_sidebar_state";
 
 pub struct AssistantChatPlugin;
 
 impl Plugin for AssistantChatPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(AssistantWindowState::default())
+        app.insert_resource(RightSidebarState::default())
             .insert_resource(AssistantChatState::from_environment())
             .insert_resource(PendingAssistantJob::default())
+            .add_systems(Update, sync_right_sidebar_state)
             .add_systems(Update, poll_assistant_jobs);
     }
 }
 
-#[derive(Resource, Debug, Clone)]
-pub struct AssistantWindowState {
-    pub visible: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RightSidebarTab {
+    Assistant,
 }
 
-impl Default for AssistantWindowState {
+impl RightSidebarTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Assistant => "Assistant",
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RightSidebarState {
+    pub visible: bool,
+    pub width: f32,
+    pub active_tab: RightSidebarTab,
+}
+
+impl Default for RightSidebarState {
     fn default() -> Self {
-        Self { visible: true }
+        Self {
+            visible: true,
+            width: ASSISTANT_PANEL_DEFAULT_WIDTH,
+            active_tab: RightSidebarTab::Assistant,
+        }
     }
 }
 
@@ -191,11 +219,11 @@ impl AssistantChatState {
 pub fn draw_assistant_window(
     ctx: &egui::Context,
     state: &mut AssistantChatState,
-    window_state: &mut AssistantWindowState,
+    sidebar_state: &mut RightSidebarState,
     pending_job: &PendingAssistantJob,
     default_mcp_url: Option<&str>,
 ) {
-    if !window_state.visible {
+    if !sidebar_state.visible {
         return;
     }
     if state.mcp_url.trim().is_empty() {
@@ -204,39 +232,30 @@ pub fn draw_assistant_window(
         }
     }
 
-    let available = ctx.available_rect();
-    let default_pos = egui::pos2(
-        available.max.x - ASSISTANT_PANEL_WIDTH - 8.0,
-        available.min.y + 8.0,
-    );
-    let default_height = (available.height() - 16.0).max(520.0);
+    sync_right_sidebar_panel_memory(ctx, sidebar_state);
+    let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
+    let min_width_points = ASSISTANT_PANEL_MIN_WIDTH / pixels_per_point;
+    let max_width_points = ASSISTANT_PANEL_MAX_WIDTH / pixels_per_point;
 
     let mut send_now = false;
-    egui::Window::new("Assistant")
-        .id(egui::Id::new("assistant_chat_window"))
-        .open(&mut window_state.visible)
-        .default_pos(default_pos)
-        .default_width(ASSISTANT_PANEL_WIDTH)
-        .default_height(default_height)
+    let panel_response = egui::SidePanel::right("assistant_chat_sidebar")
+        .resizable(true)
+        .default_width(sidebar_state.width / pixels_per_point)
+        .width_range(min_width_points..=max_width_points)
         .show(ctx, |ui| {
-            // --- Header bar: model badge | gear | overflow menu ---
+            ui.add_space(4.0);
+
             ui.horizontal(|ui| {
-                let model_label = match state.provider {
-                    AssistantProviderKind::ManagedRelay => &state.relay_model,
-                    AssistantProviderKind::OpenAi => &state.openai_model,
-                    AssistantProviderKind::Anthropic => &state.anthropic_model,
-                };
-                let badge = egui::RichText::new(model_label.as_str())
-                    .small()
-                    .color(egui::Color32::from_rgb(180, 200, 220));
-                egui::Frame::NONE
-                    .fill(egui::Color32::from_rgb(40, 50, 65))
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(6, 2))
-                    .show(ui, |ui| {
-                        ui.label(badge);
-                    });
+                let active_tab_label = sidebar_state.active_tab.label();
+                ui.selectable_value(
+                    &mut sidebar_state.active_tab,
+                    RightSidebarTab::Assistant,
+                    active_tab_label,
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(egui::RichText::new("x").monospace()).clicked() {
+                        sidebar_state.visible = false;
+                    }
                     ui.menu_button(egui::RichText::new("...").strong(), |ui| {
                         if ui.button("Clear chat").clicked() && !state.pending {
                             state.messages.clear();
@@ -248,10 +267,25 @@ pub fn draw_assistant_window(
                     if ui.button(egui::RichText::new(gear_label).monospace()).clicked() {
                         state.show_connection = !state.show_connection;
                     }
+                    let model_label = match state.provider {
+                        AssistantProviderKind::ManagedRelay => &state.relay_model,
+                        AssistantProviderKind::OpenAi => &state.openai_model,
+                        AssistantProviderKind::Anthropic => &state.anthropic_model,
+                    };
+                    let badge = egui::RichText::new(model_label.as_str())
+                        .small()
+                        .color(egui::Color32::from_rgb(180, 200, 220));
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(40, 50, 65))
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(6, 2))
+                        .show(ui, |ui| {
+                            ui.label(badge);
+                        });
                 });
             });
+            ui.separator();
 
-            // --- Settings panel (toggled by gear) ---
             if state.show_connection {
                 ui.add_space(4.0);
                 egui::Frame::group(ui.style())
@@ -321,69 +355,72 @@ pub fn draw_assistant_window(
                                 }
                             });
                     });
+                ui.separator();
             }
 
-            ui.separator();
-
-            // --- Chat area ---
-            egui::ScrollArea::vertical()
-                .id_salt("assistant_chat_messages")
-                .stick_to_bottom(true)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if state.messages.is_empty() && !state.pending {
-                        ui.add_space(40.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new("Ask me to create, modify, or explain objects in your scene.")
-                                    .italics()
-                                    .color(egui::Color32::from_rgb(140, 150, 165)),
-                            );
+            match sidebar_state.active_tab {
+                RightSidebarTab::Assistant => {
+                    egui::ScrollArea::vertical()
+                        .id_salt("assistant_chat_messages")
+                        .stick_to_bottom(true)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if state.messages.is_empty() && !state.pending {
+                                ui.add_space(40.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Ask me to create, modify, or explain objects in your scene.")
+                                            .italics()
+                                            .color(egui::Color32::from_rgb(140, 150, 165)),
+                                    );
+                                });
+                                ui.add_space(40.0);
+                            }
+                            for message in &state.messages {
+                                draw_message_bubble(ui, message);
+                                ui.add_space(6.0);
+                            }
+                            if state.pending {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(egui::RichText::new("Thinking...").italics());
+                                });
+                            }
+                            if let Some(error) = &state.last_error {
+                                ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
+                            }
                         });
-                        ui.add_space(40.0);
-                    }
-                    for message in &state.messages {
-                        draw_message_bubble(ui, message);
-                        ui.add_space(6.0);
-                    }
-                    if state.pending {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(egui::RichText::new("Thinking...").italics());
-                        });
-                    }
-                    if let Some(error) = &state.last_error {
-                        ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
-                    }
-                });
 
-            ui.separator();
+                    ui.separator();
 
-            // --- Input bar ---
-            ui.horizontal(|ui| {
-                let input = ui.add(
-                    egui::TextEdit::multiline(&mut state.draft)
-                        .desired_width(ui.available_width() - 36.0)
-                        .desired_rows(1)
-                        .hint_text("Ask about your scene..."),
-                );
-                let enter_to_send = input.has_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                if ui
-                    .add_enabled(
-                        !state.pending && !state.draft.trim().is_empty(),
-                        egui::Button::new(egui::RichText::new("\u{2191}").strong())
-                            .min_size(egui::vec2(28.0, 28.0)),
-                    )
-                    .clicked()
-                {
-                    send_now = true;
+                    ui.horizontal(|ui| {
+                        let input = ui.add(
+                            egui::TextEdit::multiline(&mut state.draft)
+                                .desired_width((ui.available_width() - 36.0).max(120.0))
+                                .desired_rows(1)
+                                .hint_text("Ask about your scene..."),
+                        );
+                        let enter_to_send = input.has_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                        if ui
+                            .add_enabled(
+                                !state.pending && !state.draft.trim().is_empty(),
+                                egui::Button::new(egui::RichText::new("\u{2191}").strong())
+                                    .min_size(egui::vec2(28.0, 28.0)),
+                            )
+                            .clicked()
+                        {
+                            send_now = true;
+                        }
+                        if enter_to_send {
+                            send_now = true;
+                        }
+                    });
                 }
-                if enter_to_send {
-                    send_now = true;
-                }
-            });
+            }
         });
+    sidebar_state.width = (panel_response.response.rect.width() * pixels_per_point)
+        .clamp(ASSISTANT_PANEL_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH);
 
     if send_now {
         // Strip trailing newline that Enter key inserts before we process
@@ -393,6 +430,64 @@ pub fn draw_assistant_window(
             state.last_error = Some(error);
         }
     }
+}
+
+fn sync_right_sidebar_panel_memory(ctx: &egui::Context, sidebar_state: &RightSidebarState) {
+    let available_rect = ctx.available_rect();
+    let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
+    let width = sidebar_state
+        .width
+        .clamp(ASSISTANT_PANEL_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH)
+        .min(available_rect.width() * pixels_per_point);
+    let width_points = width / pixels_per_point;
+    let rect = egui::Rect::from_min_max(
+        egui::pos2(available_rect.max.x - width_points, available_rect.min.y),
+        available_rect.max,
+    );
+    ctx.data_mut(|data| {
+        data.insert_persisted(egui::Id::new("assistant_chat_sidebar"), PanelState { rect });
+    });
+}
+
+fn sync_right_sidebar_state(
+    mut sidebar_state: ResMut<RightSidebarState>,
+    mut doc_props: ResMut<DocumentProperties>,
+    mut last_serialized: Local<Option<serde_json::Value>>,
+) {
+    let saved = doc_props
+        .domain_defaults
+        .get(RIGHT_SIDEBAR_STATE_KEY)
+        .cloned();
+    if saved != *last_serialized {
+        if let Some(saved_state) = saved.as_ref().and_then(deserialize_right_sidebar_state) {
+            if *sidebar_state != saved_state {
+                *sidebar_state = saved_state;
+            }
+        } else if saved.is_none() && last_serialized.is_some() {
+            *sidebar_state = RightSidebarState::default();
+        }
+        *last_serialized = saved.clone();
+    }
+
+    let serialized = serialize_right_sidebar_state(&sidebar_state);
+    if doc_props.domain_defaults.get(RIGHT_SIDEBAR_STATE_KEY) != Some(&serialized) {
+        doc_props
+            .domain_defaults
+            .insert(RIGHT_SIDEBAR_STATE_KEY.to_string(), serialized.clone());
+    }
+    *last_serialized = Some(serialized);
+}
+
+fn serialize_right_sidebar_state(state: &RightSidebarState) -> serde_json::Value {
+    serde_json::to_value(state).unwrap_or_else(|_| json!({}))
+}
+
+fn deserialize_right_sidebar_state(value: &serde_json::Value) -> Option<RightSidebarState> {
+    let mut state: RightSidebarState = serde_json::from_value(value.clone()).ok()?;
+    state.width = state
+        .width
+        .clamp(ASSISTANT_PANEL_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH);
+    Some(state)
 }
 
 fn draw_message_bubble(ui: &mut egui::Ui, message: &AssistantChatMessage) {
@@ -1061,6 +1156,31 @@ fn compact_json(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn right_sidebar_state_round_trips_through_json() {
+        let state = RightSidebarState {
+            visible: false,
+            width: 412.0,
+            active_tab: RightSidebarTab::Assistant,
+        };
+
+        let decoded = deserialize_right_sidebar_state(&serialize_right_sidebar_state(&state))
+            .expect("sidebar state should deserialize");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn right_sidebar_state_clamps_persisted_width() {
+        let decoded = deserialize_right_sidebar_state(&json!({
+            "visible": true,
+            "width": 9999.0,
+            "active_tab": "assistant"
+        }))
+        .expect("sidebar state should deserialize");
+
+        assert_eq!(decoded.width, ASSISTANT_PANEL_MAX_WIDTH);
+    }
 
     #[test]
     fn extract_openai_function_calls_parses_arguments() {

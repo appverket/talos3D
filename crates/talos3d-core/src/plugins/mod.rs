@@ -7,6 +7,7 @@ pub mod commands;
 pub mod cursor;
 pub mod definition_authoring;
 pub mod definition_browser;
+pub mod dimension_line;
 pub mod document_properties;
 pub mod document_state;
 pub mod egui_chrome;

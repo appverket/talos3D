@@ -309,6 +309,9 @@ pub trait AuthoredEntity: Send + Sync + 'static {
         None
     }
     fn to_json(&self) -> Value;
+    fn to_persisted_json(&self) -> Value {
+        self.to_json()
+    }
 
     fn apply_to(&self, world: &mut World);
     fn apply_with_previous(&self, world: &mut World, _previous: Option<&dyn AuthoredEntity>) {
@@ -425,6 +428,10 @@ impl BoxedEntity {
 
     pub fn to_json(&self) -> Value {
         self.0.to_json()
+    }
+
+    pub fn to_persisted_json(&self) -> Value {
+        self.0.to_persisted_json()
     }
 
     pub fn apply_to(&self, world: &mut World) {

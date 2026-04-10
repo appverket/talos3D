@@ -32,6 +32,11 @@ The modeling layer also exposes authored edge features such as `fillet` and
 `create_entity`, edit them with `set_property`, or invoke the matching command
 entries through `invoke_command`.
 
+Reference annotations are also directly addressable through MCP:
+`place_guide_line` creates construction lines from an anchor plus direction,
+and `place_dimension_line` creates measured annotations from two witness
+points plus either an offset vector or a placement point.
+
 Built-in definition libraries are also loaded at startup and show up through
 the same definition-library inspection tools as project-local libraries. Their
 reported scope is `Bundled`, which distinguishes shipped catalogs from
@@ -118,6 +123,8 @@ Current tool categories include:
 ### Editing and authored changes
 
 - `create_entity`
+- `place_guide_line`
+- `place_dimension_line`
 - `create_assembly`
 - `delete_entities`
 - `transform`

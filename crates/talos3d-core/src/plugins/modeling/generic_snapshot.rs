@@ -150,6 +150,21 @@ where
         self.primitive.to_json()
     }
 
+    fn to_persisted_json(&self) -> Value {
+        let mut json = self.primitive.to_json();
+        if let Some(object) = json.as_object_mut() {
+            object.insert(
+                "element_id".to_string(),
+                serde_json::to_value(self.element_id).unwrap_or(Value::Null),
+            );
+            object.insert(
+                "rotation".to_string(),
+                serde_json::to_value(self.rotation).unwrap_or(Value::Null),
+            );
+        }
+        json
+    }
+
     fn apply_to(&self, world: &mut World) {
         apply_mesh_primitive(
             world,

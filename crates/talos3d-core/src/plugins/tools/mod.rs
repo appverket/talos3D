@@ -12,6 +12,11 @@ impl Plugin for ToolPlugin {
         app.init_state::<ActiveTool>()
             .add_systems(Update, activate_tools.in_set(InputPhase::ToolInput))
             .add_systems(OnEnter(ActiveTool::Select), enter_select_tool)
+            .add_systems(
+                OnEnter(ActiveTool::PlaceDimensionLine),
+                enter_dimension_line_tool,
+            )
+            .add_systems(OnEnter(ActiveTool::PlaceGuideLine), enter_guide_line_tool)
             .add_systems(OnEnter(ActiveTool::PlaceWall), enter_wall_tool)
             .add_systems(OnEnter(ActiveTool::PlaceOpening), enter_opening_tool)
             .add_systems(OnEnter(ActiveTool::PlaceBox), enter_box_tool)
@@ -26,6 +31,8 @@ impl Plugin for ToolPlugin {
 pub enum ActiveTool {
     #[default]
     Select,
+    PlaceDimensionLine,
+    PlaceGuideLine,
     PlaceWall,
     PlaceOpening,
     PlaceBox,
@@ -59,7 +66,11 @@ fn activate_tools(
 
     let active_tool = active_tool.get();
 
-    if keys.just_pressed(KeyCode::KeyW) && *active_tool != ActiveTool::PlaceWall {
+    if keys.just_pressed(KeyCode::KeyD) && *active_tool != ActiveTool::PlaceDimensionLine {
+        next_active_tool.set(ActiveTool::PlaceDimensionLine);
+    } else if keys.just_pressed(KeyCode::KeyG) && *active_tool != ActiveTool::PlaceGuideLine {
+        next_active_tool.set(ActiveTool::PlaceGuideLine);
+    } else if keys.just_pressed(KeyCode::KeyW) && *active_tool != ActiveTool::PlaceWall {
         next_active_tool.set(ActiveTool::PlaceWall);
     } else if keys.just_pressed(KeyCode::KeyO) && *active_tool != ActiveTool::PlaceOpening {
         next_active_tool.set(ActiveTool::PlaceOpening);
@@ -78,6 +89,22 @@ fn enter_select_tool(mut status_bar_data: ResMut<StatusBarData>) {
     status_bar_data.tool_name.clear();
     status_bar_data.tool_name.push_str("Select");
     status_bar_data.hint.clear();
+}
+
+fn enter_guide_line_tool(mut status_bar_data: ResMut<StatusBarData>) {
+    set_tool_status(
+        &mut status_bar_data,
+        "Guide Line",
+        "Click anchor point, then click again to set direction",
+    );
+}
+
+fn enter_dimension_line_tool(mut status_bar_data: ResMut<StatusBarData>) {
+    set_tool_status(
+        &mut status_bar_data,
+        "Dimension",
+        "Click first witness point, click second witness point, then click to place the dimension line",
+    );
 }
 
 fn enter_wall_tool(mut status_bar_data: ResMut<StatusBarData>) {
