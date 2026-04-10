@@ -599,10 +599,11 @@ pub struct PlaceGuideLineRequest {
 pub struct PlaceDimensionLineRequest {
     pub start: [f32; 3],
     pub end: [f32; 3],
-    pub offset: Option<[f32; 3]>,
-    pub line_point: Option<[f32; 3]>,
+    pub extension: Option<f32>,
     pub visible: Option<bool>,
     pub label: Option<String>,
+    pub display_unit: Option<String>,
+    pub precision: Option<u8>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -5153,7 +5154,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "place_dimension_line",
-        description = "Create a dimension line from two witness points and either an offset vector or a placement point."
+        description = "Create a two-point dimension line with automatic visible overhang. Optionally override extension, units, and precision."
     )]
     async fn place_dimension_line_tool(
         &self,
@@ -6738,11 +6739,14 @@ fn create_dimension_line_request_json(request: &PlaceDimensionLineRequest) -> Va
     let object = request_json
         .as_object_mut()
         .expect("dimension line create request should serialize as an object");
-    if let Some(offset) = request.offset {
-        object.insert("offset".to_string(), json!(offset));
+    if let Some(extension) = request.extension {
+        object.insert("extension".to_string(), json!(extension));
     }
-    if let Some(line_point) = request.line_point {
-        object.insert("line_point".to_string(), json!(line_point));
+    if let Some(display_unit) = &request.display_unit {
+        object.insert("display_unit".to_string(), json!(display_unit));
+    }
+    if let Some(precision) = request.precision {
+        object.insert("precision".to_string(), json!(precision));
     }
     request_json
 }
@@ -11356,8 +11360,10 @@ mod tests {
                 "type": "dimension_line",
                 "start": [0.0, 0.0, 0.0],
                 "end": [2.0, 0.0, 0.0],
-                "line_point": [1.0, 0.0, 0.75],
-                "label": "Width"
+                "extension": 0.3,
+                "label": "Width",
+                "display_unit": "cm",
+                "precision": 1
             }),
         )
         .expect("dimension line should be created");
@@ -11366,8 +11372,13 @@ mod tests {
             .expect("dimension line snapshot should exist");
         assert_eq!(snapshot["start"], json!([0.0, 0.0, 0.0]));
         assert_eq!(snapshot["end"], json!([2.0, 0.0, 0.0]));
-        assert_eq!(snapshot["offset"], json!([0.0, 0.0, 0.75]));
+        let extension = snapshot["extension"]
+            .as_f64()
+            .expect("extension should be numeric");
+        assert!((extension - 0.3).abs() < 1e-5);
         assert_eq!(snapshot["label"], json!("Width"));
+        assert_eq!(snapshot["display_unit"], json!("cm"));
+        assert_eq!(snapshot["precision"], json!(1));
         assert_eq!(snapshot["length"], json!(2.0));
 
         let details = get_entity_details(&world, ElementId(element_id))
@@ -11376,7 +11387,7 @@ mod tests {
         assert!(details
             .properties
             .iter()
-            .any(|property| property.name == "offset"));
+            .any(|property| property.name == "extension"));
         assert!(details
             .properties
             .iter()

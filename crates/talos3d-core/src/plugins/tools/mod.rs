@@ -103,7 +103,7 @@ fn enter_dimension_line_tool(mut status_bar_data: ResMut<StatusBarData>) {
     set_tool_status(
         &mut status_bar_data,
         "Dimension",
-        "Click first witness point, click second witness point, then click to place the dimension line",
+        "Click a start point, then click an end point to create a dimension",
     );
 }
 

@@ -8,8 +8,8 @@ use serde_json::{json, Value};
 use crate::{
     authored_entity::{
         invalid_property_error, property_field, property_field_with, read_only_property_field,
-        vec3_from_json, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, HandleKind,
-        PropertyFieldDef, PropertyValue, PropertyValueKind,
+        scalar_from_json, vec3_from_json, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo,
+        HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
     },
     capability_registry::{
         AuthoredEntityFactory, CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity,
@@ -28,6 +28,7 @@ use crate::{
         toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
         tools::ActiveTool,
         ui::StatusBarData,
+        units::DisplayUnit,
     },
 };
 
@@ -35,10 +36,11 @@ const DIMENSION_LINE_COLOR: Color = Color::srgba(0.95, 0.92, 0.42, 0.9);
 const DIMENSION_LINE_SELECTED_COLOR: Color = Color::srgba(1.0, 0.98, 0.66, 1.0);
 const DIMENSION_LINE_HIT_RADIUS: f32 = 0.18;
 const DIMENSION_LINE_TICK_HALF: f32 = 0.08;
-const DIMENSION_LINE_LABEL_OFFSET: f32 = 0.08;
+const DIMENSION_LINE_LABEL_SCREEN_OFFSET_Y: f32 = 18.0;
 const DIMENSION_LINE_MIN_MEASURE_LENGTH: f32 = 0.01;
-const DIMENSION_LINE_MIN_OFFSET_LENGTH: f32 = 0.05;
-const DIMENSION_LINE_DEFAULT_OFFSET: f32 = 0.75;
+const DIMENSION_LINE_DEFAULT_EXTENSION_MIN: f32 = 0.15;
+const DIMENSION_LINE_DEFAULT_EXTENSION_MAX: f32 = 0.4;
+const DIMENSION_LINE_DEFAULT_EXTENSION_FACTOR: f32 = 0.12;
 
 pub struct DimensionLinePlugin;
 
@@ -46,9 +48,11 @@ pub struct DimensionLinePlugin;
 pub struct DimensionLineNode {
     pub start: Vec3,
     pub end: Vec3,
-    pub offset: Vec3,
+    pub extension: f32,
     pub visible: bool,
     pub label: Option<String>,
+    pub display_unit: Option<DisplayUnit>,
+    pub precision: Option<u8>,
 }
 
 impl Default for DimensionLineNode {
@@ -56,9 +60,11 @@ impl Default for DimensionLineNode {
         Self {
             start: Vec3::ZERO,
             end: Vec3::X,
-            offset: Vec3::Z * DIMENSION_LINE_DEFAULT_OFFSET,
+            extension: DIMENSION_LINE_DEFAULT_EXTENSION_MIN,
             visible: true,
             label: None,
+            display_unit: None,
+            precision: None,
         }
     }
 }
@@ -66,7 +72,6 @@ impl Default for DimensionLineNode {
 #[derive(Resource, Default)]
 struct DimensionLineToolState {
     start: Option<Vec3>,
-    end: Option<Vec3>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,9 +79,11 @@ pub struct DimensionLineSnapshot {
     pub element_id: ElementId,
     pub start: Vec3,
     pub end: Vec3,
-    pub offset: Vec3,
+    pub extension: f32,
     pub visible: bool,
     pub label: Option<String>,
+    pub display_unit: Option<DisplayUnit>,
+    pub precision: Option<u8>,
 }
 
 impl DimensionLineSnapshot {
@@ -96,22 +103,26 @@ impl DimensionLineSnapshot {
         (self.start + self.end) * 0.5
     }
 
-    fn line_points(&self) -> (Vec3, Vec3) {
-        (self.start + self.offset, self.end + self.offset)
+    fn visible_segment(&self) -> (Vec3, Vec3) {
+        let axis_dir = self.axis_direction();
+        (
+            self.start - axis_dir * self.extension,
+            self.end + axis_dir * self.extension,
+        )
     }
 
-    fn label_anchor(&self) -> Vec3 {
-        let (line_start, line_end) = self.line_points();
-        let midpoint = (line_start + line_end) * 0.5;
-        midpoint
-            + label_offset_direction(self.axis_direction(), self.offset)
-                * DIMENSION_LINE_LABEL_OFFSET
+    fn effective_display_unit(&self, doc_props: &DocumentProperties) -> DisplayUnit {
+        self.display_unit.unwrap_or(doc_props.display_unit)
+    }
+
+    fn effective_precision(&self, doc_props: &DocumentProperties) -> u8 {
+        self.precision.unwrap_or(doc_props.precision)
     }
 
     fn display_text(&self, doc_props: &DocumentProperties) -> String {
-        let value = doc_props
-            .display_unit
-            .format_value(self.measured_length(), doc_props.precision);
+        let unit = self.effective_display_unit(doc_props);
+        let precision = self.effective_precision(doc_props);
+        let value = unit.format_value(self.measured_length(), precision);
         match self.label.as_deref() {
             Some(label) if !label.is_empty() => format!("{label}: {value}"),
             _ => value,
@@ -125,10 +136,27 @@ impl DimensionLineSnapshot {
         }
     }
 
+    fn display_unit_text(&self) -> String {
+        self.display_unit
+            .map(|unit| unit.identifier().to_string())
+            .unwrap_or_else(|| "document".to_string())
+    }
+
+    fn precision_text(&self) -> String {
+        self.precision
+            .map(|precision| precision.to_string())
+            .unwrap_or_else(|| "document".to_string())
+    }
+
     fn entity_bounds(&self) -> EntityBounds {
-        let (line_start, line_end) = self.line_points();
-        let label_anchor = self.label_anchor();
-        bounds_from_points(&[self.start, self.end, line_start, line_end, label_anchor])
+        let (visible_start, visible_end) = self.visible_segment();
+        bounds_from_points(&[
+            visible_start,
+            self.start,
+            self.end,
+            visible_end,
+            self.midpoint(),
+        ])
     }
 }
 
@@ -150,7 +178,7 @@ impl AuthoredEntity for DimensionLineSnapshot {
     }
 
     fn center(&self) -> Vec3 {
-        self.midpoint() + self.offset
+        self.midpoint()
     }
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
@@ -164,20 +192,20 @@ impl AuthoredEntity for DimensionLineSnapshot {
         let mut snapshot = self.clone();
         snapshot.start = rotation * snapshot.start;
         snapshot.end = rotation * snapshot.end;
-        snapshot.offset = rotation * snapshot.offset;
         snapshot.into()
     }
 
     fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity {
         let mut snapshot = self.clone();
+        let axis_dir = snapshot.axis_direction();
         snapshot.start = center + (snapshot.start - center) * factor;
         snapshot.end = center + (snapshot.end - center) * factor;
-        snapshot.offset *= factor;
+        snapshot.extension *= directional_scale(axis_dir, factor);
         snapshot.into()
     }
 
     fn property_fields(&self) -> Vec<PropertyFieldDef> {
-        let mut fields = vec![
+        vec![
             property_field(
                 "start",
                 PropertyValueKind::Vec3,
@@ -188,15 +216,31 @@ impl AuthoredEntity for DimensionLineSnapshot {
                 PropertyValueKind::Vec3,
                 Some(PropertyValue::Vec3(self.end)),
             ),
-            property_field(
-                "offset",
-                PropertyValueKind::Vec3,
-                Some(PropertyValue::Vec3(self.offset)),
+            property_field_with(
+                "extension",
+                "Extension",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.extension)),
+                true,
             ),
             property_field(
                 "visible",
                 PropertyValueKind::Text,
                 Some(PropertyValue::Text(self.visible.to_string())),
+            ),
+            property_field_with(
+                "display_unit",
+                "Units",
+                PropertyValueKind::Text,
+                Some(PropertyValue::Text(self.display_unit_text())),
+                true,
+            ),
+            property_field_with(
+                "precision",
+                "Precision",
+                PropertyValueKind::Text,
+                Some(PropertyValue::Text(self.precision_text())),
+                true,
             ),
             read_only_property_field(
                 "length",
@@ -204,17 +248,14 @@ impl AuthoredEntity for DimensionLineSnapshot {
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.measured_length())),
             ),
-        ];
-        if let Some(label) = &self.label {
-            fields.push(property_field_with(
+            property_field_with(
                 "label",
                 "Label",
                 PropertyValueKind::Text,
-                Some(PropertyValue::Text(label.clone())),
+                Some(PropertyValue::Text(self.label.clone().unwrap_or_default())),
                 true,
-            ));
-        }
-        fields
+            ),
+        ]
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
@@ -222,7 +263,7 @@ impl AuthoredEntity for DimensionLineSnapshot {
         match property_name {
             "start" => snapshot.start = vec3_from_json(value)?,
             "end" => snapshot.end = vec3_from_json(value)?,
-            "offset" => snapshot.offset = vec3_from_json(value)?,
+            "extension" => snapshot.extension = scalar_from_json(value)?,
             "visible" => {
                 snapshot.visible = match value.as_bool() {
                     Some(value) => value,
@@ -233,26 +274,31 @@ impl AuthoredEntity for DimensionLineSnapshot {
                     },
                 };
             }
+            "display_unit" => snapshot.display_unit = parse_display_unit_override_json(value)?,
+            "precision" => snapshot.precision = parse_precision_override_json(value)?,
             "label" => {
                 snapshot.label = value
                     .as_str()
-                    .map(|text| {
-                        if text.is_empty() {
-                            None
-                        } else {
-                            Some(text.to_string())
-                        }
-                    })
-                    .unwrap_or(None);
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(ToOwned::to_owned);
             }
             _ => {
                 return Err(invalid_property_error(
                     "dimension_line",
-                    &["start", "end", "offset", "visible", "label"],
+                    &[
+                        "start",
+                        "end",
+                        "extension",
+                        "visible",
+                        "display_unit",
+                        "precision",
+                        "label",
+                    ],
                 ));
             }
         }
-        validate_dimension_geometry(snapshot.start, snapshot.end, snapshot.offset)?;
+        validate_dimension_geometry(snapshot.start, snapshot.end, snapshot.extension)?;
         Ok(snapshot.into())
     }
 
@@ -270,12 +316,6 @@ impl AuthoredEntity for DimensionLineSnapshot {
                 kind: HandleKind::Vertex,
                 label: "End".to_string(),
             },
-            HandleInfo {
-                id: "offset".to_string(),
-                position: self.midpoint() + self.offset,
-                kind: HandleKind::Parameter,
-                label: "Offset".to_string(),
-            },
         ]
     }
 
@@ -288,12 +328,9 @@ impl AuthoredEntity for DimensionLineSnapshot {
         match handle_id {
             "start" => snapshot.start = cursor,
             "end" => snapshot.end = cursor,
-            "offset" => {
-                snapshot.offset = offset_from_line_point(snapshot.start, snapshot.end, cursor)
-            }
             _ => return None,
         }
-        validate_dimension_geometry(snapshot.start, snapshot.end, snapshot.offset).ok()?;
+        validate_dimension_geometry(snapshot.start, snapshot.end, snapshot.extension).ok()?;
         Some(snapshot.into())
     }
 
@@ -302,9 +339,11 @@ impl AuthoredEntity for DimensionLineSnapshot {
             "element_id": self.element_id,
             "start": self.start.to_array(),
             "end": self.end.to_array(),
-            "offset": self.offset.to_array(),
+            "extension": self.extension,
             "visible": self.visible,
             "label": self.label,
+            "display_unit": self.display_unit.map(|unit| unit.identifier()),
+            "precision": self.precision,
             "length": self.measured_length(),
         })
     }
@@ -313,9 +352,11 @@ impl AuthoredEntity for DimensionLineSnapshot {
         let node = DimensionLineNode {
             start: self.start,
             end: self.end,
-            offset: self.offset,
+            extension: self.extension,
             visible: self.visible,
             label: self.label.clone(),
+            display_unit: self.display_unit,
+            precision: self.precision,
         };
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             world.entity_mut(entity).insert(node);
@@ -329,11 +370,11 @@ impl AuthoredEntity for DimensionLineSnapshot {
     }
 
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
-        draw_dimension_line_gizmo(gizmos, self.start, self.end, self.offset, color);
+        draw_dimension_line_gizmo(gizmos, self.start, self.end, self.extension, color);
     }
 
     fn preview_line_count(&self) -> usize {
-        5
+        3
     }
 
     fn box_clone(&self) -> BoxedEntity {
@@ -370,9 +411,11 @@ impl AuthoredEntityFactory for DimensionLineFactory {
                 element_id,
                 start: node.start,
                 end: node.end,
-                offset: node.offset,
+                extension: node.extension,
                 visible: node.visible,
                 label: node.label.clone(),
+                display_unit: node.display_unit,
+                precision: node.precision,
             }
             .into(),
         )
@@ -395,21 +438,35 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .map(vec3_from_json)
             .transpose()?
             .ok_or_else(|| "Missing end".to_string())?;
-        let offset = data
-            .get("offset")
-            .map(vec3_from_json)
+        let extension = data
+            .get("extension")
+            .map(scalar_from_json)
             .transpose()?
-            .unwrap_or_else(|| default_dimension_offset(start, end));
+            .unwrap_or_else(|| default_dimension_extension(start, end));
         let visible = data.get("visible").and_then(Value::as_bool).unwrap_or(true);
         let label = data.get("label").and_then(Value::as_str).map(String::from);
-        validate_dimension_geometry(start, end, offset)?;
+        let display_unit = data
+            .get("display_unit")
+            .filter(|value| !value.is_null())
+            .map(parse_display_unit_override_json)
+            .transpose()?
+            .flatten();
+        let precision = data
+            .get("precision")
+            .filter(|value| !value.is_null())
+            .map(parse_precision_override_json)
+            .transpose()?
+            .flatten();
+        validate_dimension_geometry(start, end, extension)?;
         Ok(DimensionLineSnapshot {
             element_id,
             start,
             end,
-            offset,
+            extension,
             visible,
             label,
+            display_unit,
+            precision,
         }
         .into())
     }
@@ -434,20 +491,11 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .map(vec3_from_json)
             .transpose()?
             .ok_or_else(|| "dimension_line requires end".to_string())?;
-        let offset = if let Some(offset) = object.get("offset").filter(|value| !value.is_null()) {
-            vec3_from_json(offset)?
-        } else if let Some(line_point) = object
-            .get("line_point")
-            .filter(|value| !value.is_null())
-            .or_else(|| object.get("placement_point"))
-            .filter(|value| !value.is_null())
-            .or_else(|| object.get("offset_point"))
-            .filter(|value| !value.is_null())
-        {
-            offset_from_line_point(start, end, vec3_from_json(line_point)?)
-        } else {
-            default_dimension_offset(start, end)
-        };
+        let extension = object
+            .get("extension")
+            .map(scalar_from_json)
+            .transpose()?
+            .unwrap_or_else(|| default_dimension_extension(start, end));
         let visible = object
             .get("visible")
             .and_then(Value::as_bool)
@@ -457,15 +505,30 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .or_else(|| object.get("name"))
             .and_then(Value::as_str)
             .map(String::from);
+        let display_unit = object
+            .get("display_unit")
+            .or_else(|| object.get("unit"))
+            .filter(|value| !value.is_null())
+            .map(parse_display_unit_override_json)
+            .transpose()?
+            .flatten();
+        let precision = object
+            .get("precision")
+            .filter(|value| !value.is_null())
+            .map(parse_precision_override_json)
+            .transpose()?
+            .flatten();
 
-        validate_dimension_geometry(start, end, offset)?;
+        validate_dimension_geometry(start, end, extension)?;
         Ok(DimensionLineSnapshot {
             element_id,
             start,
             end,
-            offset,
+            extension,
             visible,
             label,
+            display_unit,
+            precision,
         }
         .into())
     }
@@ -476,7 +539,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .iter(world)
             .filter(|(_, node)| node.visible)
             .filter_map(|(entity, node)| {
-                let segments = dimension_segments(node.start, node.end, node.offset);
+                let segments = dimension_segments(node.start, node.end, node.extension);
                 let best_distance = segments
                     .into_iter()
                     .filter_map(|(start, end)| {
@@ -486,8 +549,10 @@ impl AuthoredEntityFactory for DimensionLineFactory {
                 if best_distance > DIMENSION_LINE_HIT_RADIUS {
                     return None;
                 }
-                let distance = (node.start + node.end).length() * 0.5;
-                Some(HitCandidate { entity, distance })
+                Some(HitCandidate {
+                    entity,
+                    distance: ray.origin.distance((node.start + node.end) * 0.5),
+                })
             })
             .min_by(|left, right| left.distance.total_cmp(&right.distance))
     }
@@ -509,7 +574,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
                 kind: SnapKind::Endpoint,
             });
             out.push(SnapPoint {
-                position: (node.start + node.end) * 0.5 + node.offset,
+                position: (node.start + node.end) * 0.5,
                 kind: SnapKind::Control,
             });
         }
@@ -532,23 +597,21 @@ fn draw_dimension_line_gizmo(
     gizmos: &mut Gizmos,
     start: Vec3,
     end: Vec3,
-    offset: Vec3,
+    extension: f32,
     color: Color,
 ) {
-    let (line_start, line_end) = (start + offset, end + offset);
-    gizmos.line(start, line_start, color);
-    gizmos.line(end, line_end, color);
-    gizmos.line(line_start, line_end, color);
-
-    let tick_dir = tick_direction(end - start, offset);
+    let axis_dir = (end - start).try_normalize().unwrap_or(Vec3::X);
+    let (visible_start, visible_end) = (start - axis_dir * extension, end + axis_dir * extension);
+    let tick_dir = tick_direction(axis_dir);
+    gizmos.line(visible_start, visible_end, color);
     gizmos.line(
-        line_start - tick_dir * DIMENSION_LINE_TICK_HALF,
-        line_start + tick_dir * DIMENSION_LINE_TICK_HALF,
+        start - tick_dir * DIMENSION_LINE_TICK_HALF,
+        start + tick_dir * DIMENSION_LINE_TICK_HALF,
         color,
     );
     gizmos.line(
-        line_end - tick_dir * DIMENSION_LINE_TICK_HALF,
-        line_end + tick_dir * DIMENSION_LINE_TICK_HALF,
+        end - tick_dir * DIMENSION_LINE_TICK_HALF,
+        end + tick_dir * DIMENSION_LINE_TICK_HALF,
         color,
     );
 }
@@ -569,7 +632,7 @@ fn draw_dimension_line_visuals(
             &mut gizmos,
             node.start,
             node.end,
-            node.offset,
+            node.extension,
             DIMENSION_LINE_COLOR,
         );
     }
@@ -582,7 +645,7 @@ fn draw_dimension_line_visuals(
             &mut gizmos,
             node.start,
             node.end,
-            node.offset,
+            node.extension,
             DIMENSION_LINE_SELECTED_COLOR,
         );
     }
@@ -622,15 +685,16 @@ fn draw_dimension_line_labels(
             element_id: ElementId(u64::MAX),
             start: node.start,
             end: node.end,
-            offset: node.offset,
+            extension: node.extension,
             visible: node.visible,
             label: node.label.clone(),
+            display_unit: node.display_unit,
+            precision: node.precision,
         };
         if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
             continue;
         }
-        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, snapshot.label_anchor())
-        else {
+        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, snapshot.midpoint()) else {
             continue;
         };
         if screen_pos.x < 0.0
@@ -642,7 +706,10 @@ fn draw_dimension_line_labels(
         }
 
         let text = snapshot.display_text(&doc_props);
-        let pos = egui::pos2(screen_pos.x, screen_pos.y);
+        let pos = egui::pos2(
+            screen_pos.x,
+            screen_pos.y - DIMENSION_LINE_LABEL_SCREEN_OFFSET_Y,
+        );
         let rect =
             egui::Rect::from_center_size(pos, egui::vec2(text.len() as f32 * 7.5 + 14.0, 22.0));
         let selected = selected.is_some();
@@ -729,37 +796,30 @@ fn handle_dimension_line_clicks(
         return;
     };
 
-    match (tool_state.start, tool_state.end) {
-        (None, _) => {
+    match tool_state.start {
+        None => {
             tool_state.start = Some(cursor_position);
-            status_bar_data.hint = "Click second witness point".to_string();
+            status_bar_data.hint = "Click second point to place the dimension".to_string();
         }
-        (Some(start), None) => {
+        Some(start) => {
             if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
-                return;
-            }
-            tool_state.end = Some(cursor_position);
-            status_bar_data.hint = "Click to place dimension line offset".to_string();
-        }
-        (Some(start), Some(end)) => {
-            let offset = offset_from_line_point(start, end, cursor_position);
-            if offset.length() < DIMENSION_LINE_MIN_OFFSET_LENGTH {
                 return;
             }
 
             let snapshot = DimensionLineSnapshot {
                 element_id: allocator.next_id(),
                 start,
-                end,
-                offset,
+                end: cursor_position,
+                extension: default_dimension_extension(start, cursor_position),
                 visible: true,
                 label: None,
+                display_unit: None,
+                precision: None,
             };
             create_entity.write(CreateEntityCommand {
                 snapshot: snapshot.into(),
             });
             tool_state.start = None;
-            tool_state.end = None;
             next_active_tool.set(ActiveTool::Select);
             status_bar_data.hint.clear();
         }
@@ -774,29 +834,23 @@ fn draw_dimension_line_tool_preview(
     let Some(tool_state) = tool_state else {
         return;
     };
+    let Some(start) = tool_state.start else {
+        return;
+    };
     let Some(cursor_position) = cursor_world_pos.snapped else {
         return;
     };
-
-    match (tool_state.start, tool_state.end) {
-        (Some(start), None) => {
-            gizmos.line(start, cursor_position, DIMENSION_LINE_SELECTED_COLOR);
-        }
-        (Some(start), Some(end)) => {
-            let offset = offset_from_line_point(start, end, cursor_position);
-            if offset.length() < DIMENSION_LINE_MIN_OFFSET_LENGTH {
-                return;
-            }
-            draw_dimension_line_gizmo(
-                &mut gizmos,
-                start,
-                end,
-                offset,
-                DIMENSION_LINE_SELECTED_COLOR,
-            );
-        }
-        _ => {}
+    if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
+        return;
     }
+
+    draw_dimension_line_gizmo(
+        &mut gizmos,
+        start,
+        cursor_position,
+        default_dimension_extension(start, cursor_position),
+        DIMENSION_LINE_SELECTED_COLOR,
+    );
 }
 
 impl Plugin for DimensionLinePlugin {
@@ -808,7 +862,7 @@ impl Plugin for DimensionLinePlugin {
                 version: 1,
                 api_version: crate::capability_registry::CAPABILITY_API_VERSION,
                 description: Some(
-                    "Authored dimension annotations with witness points, offset placement, and measured labels."
+                    "Authored two-point dimensions with automatic visible overhang, configurable units, and measured labels."
                         .to_string(),
                 ),
                 dependencies: vec![],
@@ -823,13 +877,13 @@ impl Plugin for DimensionLinePlugin {
                 CommandDescriptor {
                     id: "dimensions.place".to_string(),
                     label: "Dimension".to_string(),
-                    description: "Activate dimension line placement".to_string(),
+                    description: "Activate dimension placement".to_string(),
                     category: CommandCategory::Create,
                     parameters: None,
                     default_shortcut: Some("D".to_string()),
                     icon: None,
                     hint: Some(
-                        "Click first witness point, click second witness point, then click to place the dimension line."
+                        "Click a start point, then click an end point to create a dimension."
                             .to_string(),
                     ),
                     requires_selection: false,
@@ -879,63 +933,39 @@ impl Plugin for DimensionLinePlugin {
     }
 }
 
-fn validate_dimension_geometry(start: Vec3, end: Vec3, offset: Vec3) -> Result<(), String> {
+fn validate_dimension_geometry(start: Vec3, end: Vec3, extension: f32) -> Result<(), String> {
     if start.distance(end) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
         return Err("Dimension start and end points must be distinct".to_string());
     }
-    if offset.length() < DIMENSION_LINE_MIN_OFFSET_LENGTH {
-        return Err("Dimension offset must move the line away from the measured axis".to_string());
+    if extension < 0.0 {
+        return Err("Dimension extension must be zero or positive".to_string());
     }
     Ok(())
 }
 
-fn offset_from_line_point(start: Vec3, end: Vec3, line_point: Vec3) -> Vec3 {
-    let axis = end - start;
-    let Some(axis_dir) = axis.try_normalize() else {
-        return Vec3::ZERO;
-    };
-    let projected = axis_dir * (line_point - start).dot(axis_dir);
-    line_point - (start + projected)
+fn default_dimension_extension(start: Vec3, end: Vec3) -> f32 {
+    let measured_length = start.distance(end);
+    (measured_length * DIMENSION_LINE_DEFAULT_EXTENSION_FACTOR).clamp(
+        DIMENSION_LINE_DEFAULT_EXTENSION_MIN,
+        DIMENSION_LINE_DEFAULT_EXTENSION_MAX,
+    )
 }
 
-fn default_dimension_offset(start: Vec3, end: Vec3) -> Vec3 {
-    let axis = end - start;
-    let Some(axis_dir) = axis.try_normalize() else {
-        return Vec3::Z * DIMENSION_LINE_DEFAULT_OFFSET;
-    };
-
-    for candidate in [Vec3::Y, Vec3::Z, Vec3::X] {
-        let offset = orthogonal_component(candidate * DIMENSION_LINE_DEFAULT_OFFSET, axis_dir);
-        if offset.length() >= DIMENSION_LINE_MIN_OFFSET_LENGTH {
-            return offset;
-        }
-    }
-
-    Vec3::Z * DIMENSION_LINE_DEFAULT_OFFSET
+fn directional_scale(axis_dir: Vec3, factor: Vec3) -> f32 {
+    Vec3::new(
+        axis_dir.x * factor.x.abs(),
+        axis_dir.y * factor.y.abs(),
+        axis_dir.z * factor.z.abs(),
+    )
+    .length()
+    .max(1e-4)
 }
 
-fn orthogonal_component(vector: Vec3, axis_dir: Vec3) -> Vec3 {
-    vector - axis_dir * vector.dot(axis_dir)
-}
-
-fn tick_direction(axis: Vec3, offset: Vec3) -> Vec3 {
-    let axis_dir = axis.try_normalize().unwrap_or(Vec3::X);
-    let offset_dir = if offset.length_squared() > f32::EPSILON {
-        offset.normalize()
-    } else {
-        perpendicular_pair(axis_dir).0
-    };
-    (axis_dir + offset_dir)
+fn tick_direction(axis_dir: Vec3) -> Vec3 {
+    let perpendicular = perpendicular_pair(axis_dir).0;
+    (axis_dir + perpendicular)
         .try_normalize()
-        .unwrap_or(offset_dir)
-}
-
-fn label_offset_direction(axis_dir: Vec3, offset: Vec3) -> Vec3 {
-    if offset.length_squared() > f32::EPSILON {
-        offset.normalize()
-    } else {
-        perpendicular_pair(axis_dir).0
-    }
+        .unwrap_or(perpendicular)
 }
 
 fn perpendicular_pair(dir: Vec3) -> (Vec3, Vec3) {
@@ -943,6 +973,52 @@ fn perpendicular_pair(dir: Vec3) -> (Vec3, Vec3) {
     let perp1 = dir.cross(candidate).normalize_or_zero();
     let perp2 = dir.cross(perp1).normalize_or_zero();
     (perp1, perp2)
+}
+
+fn parse_display_unit_override_json(value: &Value) -> Result<Option<DisplayUnit>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(text) = value.as_str() else {
+        return Err(
+            "display_unit must be a string such as mm, cm, m, ft, in, or document".to_string(),
+        );
+    };
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("document") {
+        return Ok(None);
+    }
+    DisplayUnit::parse(text)
+        .map(Some)
+        .ok_or_else(|| "display_unit must be one of: document, mm, cm, m, ft, in".to_string())
+}
+
+fn parse_precision_override_json(value: &Value) -> Result<Option<u8>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        if text.is_empty() || text.eq_ignore_ascii_case("document") {
+            return Ok(None);
+        }
+        return text
+            .parse::<u8>()
+            .map(Some)
+            .map_err(|_| "precision must be a whole number or 'document'".to_string());
+    }
+    if let Some(number) = value.as_u64() {
+        return u8::try_from(number)
+            .map(Some)
+            .map_err(|_| "precision is out of range for u8".to_string());
+    }
+    if let Some(number) = value.as_f64() {
+        if number.fract().abs() > f64::EPSILON || number < 0.0 || number > u8::MAX as f64 {
+            return Err("precision must be a whole number between 0 and 255".to_string());
+        }
+        return Ok(Some(number as u8));
+    }
+    Err("precision must be a whole number or 'document'".to_string())
 }
 
 fn ray_segment_distance(
@@ -971,10 +1047,16 @@ fn ray_segment_distance(
     Some(closest_on_ray.distance(closest_on_seg))
 }
 
-fn dimension_segments(start: Vec3, end: Vec3, offset: Vec3) -> [(Vec3, Vec3); 3] {
-    let line_start = start + offset;
-    let line_end = end + offset;
-    [(start, line_start), (end, line_end), (line_start, line_end)]
+fn dimension_segments(start: Vec3, end: Vec3, extension: f32) -> [(Vec3, Vec3); 3] {
+    let axis_dir = (end - start).try_normalize().unwrap_or(Vec3::X);
+    let visible_start = start - axis_dir * extension;
+    let visible_end = end + axis_dir * extension;
+    let tick_dir = tick_direction(axis_dir) * DIMENSION_LINE_TICK_HALF;
+    [
+        (visible_start, visible_end),
+        (start - tick_dir, start + tick_dir),
+        (end - tick_dir, end + tick_dir),
+    ]
 }
 
 fn bounds_from_points(points: &[Vec3]) -> EntityBounds {
@@ -993,7 +1075,7 @@ mod tests {
     use crate::capability_registry::AuthoredEntityFactory;
 
     #[test]
-    fn create_request_projects_line_point_to_orthogonal_offset() {
+    fn create_request_defaults_visible_extension() {
         let mut world = World::new();
         world.insert_resource(ElementIdAllocator::default());
 
@@ -1004,7 +1086,6 @@ mod tests {
                     "type": "dimension_line",
                     "start": [0.0, 0.0, 0.0],
                     "end": [2.0, 0.0, 0.0],
-                    "line_point": [0.5, 0.0, 1.25],
                     "label": "Width"
                 }),
             )
@@ -1017,22 +1098,36 @@ mod tests {
             .expect("snapshot should downcast");
         assert_eq!(snapshot.start, Vec3::ZERO);
         assert_eq!(snapshot.end, Vec3::new(2.0, 0.0, 0.0));
-        assert_eq!(snapshot.offset, Vec3::new(0.0, 0.0, 1.25));
+        assert_eq!(snapshot.extension, 0.24);
         assert_eq!(snapshot.label.as_deref(), Some("Width"));
     }
 
     #[test]
-    fn measured_length_uses_document_display_units() {
+    fn measured_length_can_override_units_and_precision() {
         let snapshot = DimensionLineSnapshot {
             element_id: ElementId(7),
             start: Vec3::ZERO,
             end: Vec3::new(2.5, 0.0, 0.0),
-            offset: Vec3::Z,
+            extension: 0.25,
             visible: true,
             label: Some("Overall".to_string()),
+            display_unit: Some(DisplayUnit::Feet),
+            precision: Some(2),
         };
         let doc_props = DocumentProperties::default();
 
-        assert_eq!(snapshot.display_text(&doc_props), "Overall: 2500mm");
+        assert_eq!(snapshot.display_text(&doc_props), "Overall: 8.20ft");
+    }
+
+    #[test]
+    fn display_unit_and_precision_accept_document_keyword() {
+        assert_eq!(
+            parse_display_unit_override_json(&json!("document")).expect("unit should parse"),
+            None
+        );
+        assert_eq!(
+            parse_precision_override_json(&json!("document")).expect("precision should parse"),
+            None
+        );
     }
 }

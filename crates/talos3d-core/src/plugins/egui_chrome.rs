@@ -1272,6 +1272,7 @@ fn scalar_uses_display_units(field_name: &str) -> bool {
             || name.contains("thickness")
             || name.contains("radius")
             || name.contains("length")
+            || name.contains("extension")
             || name.contains("elevation")
     )
 }
