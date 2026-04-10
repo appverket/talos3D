@@ -35,7 +35,7 @@ use crate::plugins::{
         apply_import_review_to_pending, DocumentImportPlacementState, ImportOriginMode,
         ImportProgressState, ImportReviewState, ImportedLayerPanelState, PendingImportCommit,
     },
-    lighting::{create_daylight_rig, SceneLightNode, SceneLightSnapshot, SceneLightingSettings},
+    lighting::{create_daylight_rig, SceneLightKind, SceneLightNode, SceneLightSnapshot, SceneLightingSettings},
     material_browser::{draw_materials_window, MaterialsWindowState},
     materials::MaterialRegistry,
     menu_bar::MenuBarState,
@@ -219,7 +219,7 @@ struct ChromeData<'w, 's> {
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
     selected_entities: Query<'w, 's, Entity, With<Selected>>,
-    light_query: Query<'w, 's, (Entity, &'static ElementId, &'static SceneLightNode)>,
+    light_query: Query<'w, 's, (Entity, &'static ElementId, &'static SceneLightNode, &'static Transform)>,
     property_edit_state: ResMut<'w, PropertyEditState>,
     property_panel_state: ResMut<'w, PropertyPanelState>,
     property_panel_data: Res<'w, PropertyPanelData>,
@@ -2193,7 +2193,7 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
     let mut lights = data
         .light_query
         .iter()
-        .map(|(entity, element_id, node)| (entity, *element_id, node.clone()))
+        .map(|(entity, element_id, node, transform)| (entity, *element_id, node.clone(), *transform))
         .collect::<Vec<_>>();
     lights.sort_by(|left, right| left.2.name.cmp(&right.2.name));
     let selected_entities = data
@@ -2208,7 +2208,7 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
         .show(ctx, |ui| {
             ui.label(
                 egui::RichText::new(
-                    "Lights are authored entities. Create them here, then edit details through the Properties panel or MCP.",
+                    "Create and edit scene lights. Changes are undoable.",
                 )
                 .small()
                 .color(CHROME_MUTED),
@@ -2280,7 +2280,7 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
             egui::ScrollArea::vertical()
                 .id_salt("lights_window_list")
                 .show(ui, |ui| {
-                    for (entity, element_id, node) in &lights {
+                    for (entity, element_id, node, transform) in &lights {
                         let selected = selected_entities.contains(entity);
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -2321,6 +2321,104 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                                     },
                                 );
                             });
+
+                            // Inline editing controls
+                            let mut node_edit = node.clone();
+                            let mut translation_edit = transform.translation;
+                            let mut changed = false;
+
+                            ui.add_space(4.0);
+                            changed |= ui.checkbox(&mut node_edit.enabled, "Enabled").changed();
+
+                            egui::ComboBox::from_id_salt(format!("kind_{}", element_id.0))
+                                .selected_text(node_edit.kind.as_str())
+                                .show_ui(ui, |ui| {
+                                    for kind in [SceneLightKind::Directional, SceneLightKind::Point, SceneLightKind::Spot] {
+                                        if ui.selectable_value(&mut node_edit.kind, kind, kind.as_str()).changed() {
+                                            changed = true;
+                                        }
+                                    }
+                                });
+
+                            let color_before = node_edit.color;
+                            draw_rgb_triplet(ui, "Color", &mut node_edit.color);
+                            changed |= node_edit.color != color_before;
+
+                            let max_intensity = match node_edit.kind {
+                                SceneLightKind::Directional => 50_000.0,
+                                _ => 100_000.0,
+                            };
+                            changed |= ui.add(
+                                egui::Slider::new(&mut node_edit.intensity, 0.0..=max_intensity)
+                                    .text("Intensity"),
+                            ).changed();
+
+                            ui.horizontal(|ui| {
+                                ui.label("Position");
+                                changed |= ui.add(egui::DragValue::new(&mut translation_edit.x).speed(0.1).prefix("X: ")).changed();
+                                changed |= ui.add(egui::DragValue::new(&mut translation_edit.y).speed(0.1).prefix("Y: ")).changed();
+                                changed |= ui.add(egui::DragValue::new(&mut translation_edit.z).speed(0.1).prefix("Z: ")).changed();
+                            });
+
+                            let mut rotation_edit = transform.rotation;
+                            if matches!(node_edit.kind, SceneLightKind::Directional | SceneLightKind::Spot) {
+                                let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+                                let mut yaw_deg = yaw.to_degrees();
+                                let mut pitch_deg = pitch.to_degrees();
+                                let yaw_changed = ui.add(
+                                    egui::Slider::new(&mut yaw_deg, -180.0..=180.0).text("Yaw"),
+                                ).changed();
+                                let pitch_changed = ui.add(
+                                    egui::Slider::new(&mut pitch_deg, -90.0..=90.0).text("Pitch"),
+                                ).changed();
+                                if yaw_changed || pitch_changed {
+                                    rotation_edit = Quat::from_euler(
+                                        EulerRot::YXZ,
+                                        yaw_deg.to_radians(),
+                                        pitch_deg.to_radians(),
+                                        0.0,
+                                    );
+                                    changed = true;
+                                }
+                            }
+
+                            changed |= ui.checkbox(&mut node_edit.shadows_enabled, "Shadows").changed();
+
+                            if matches!(node_edit.kind, SceneLightKind::Point | SceneLightKind::Spot) {
+                                changed |= ui.add(
+                                    egui::Slider::new(&mut node_edit.range, 0.01..=100.0).text("Range"),
+                                ).changed();
+                            }
+
+                            if matches!(node_edit.kind, SceneLightKind::Spot) {
+                                changed |= ui.add(
+                                    egui::Slider::new(&mut node_edit.inner_angle_deg, 0.1..=89.0).text("Inner Angle"),
+                                ).changed();
+                                node_edit.outer_angle_deg = node_edit.outer_angle_deg.max(node_edit.inner_angle_deg);
+                                changed |= ui.add(
+                                    egui::Slider::new(&mut node_edit.outer_angle_deg, node_edit.inner_angle_deg..=89.0).text("Outer Angle"),
+                                ).changed();
+                            }
+
+                            if changed {
+                                let before = SceneLightSnapshot {
+                                    element_id: *element_id,
+                                    node: node.clone(),
+                                    translation: transform.translation,
+                                    rotation: transform.rotation,
+                                };
+                                let after = SceneLightSnapshot {
+                                    element_id: *element_id,
+                                    node: node_edit,
+                                    translation: translation_edit,
+                                    rotation: rotation_edit,
+                                };
+                                data.apply_entity_changes.write(ApplyEntityChangesCommand {
+                                    label: "Edit light",
+                                    before: vec![before.into()],
+                                    after: vec![after.into()],
+                                });
+                            }
                         });
                         ui.add_space(6.0);
                     }
@@ -2348,15 +2446,15 @@ fn draw_rgb_triplet(ui: &mut egui::Ui, label: &str, value: &mut [f32; 3]) {
 
 fn replace_selection(
     commands: &mut Commands,
-    light_query: &Query<(Entity, &ElementId, &SceneLightNode)>,
+    light_query: &Query<(Entity, &ElementId, &SceneLightNode, &Transform)>,
     target: &ElementId,
 ) {
-    for (entity, _, _) in light_query.iter() {
+    for (entity, _, _, _) in light_query.iter() {
         commands.entity(entity).remove::<Selected>();
     }
-    if let Some((entity, _, _)) = light_query
+    if let Some((entity, _, _, _)) = light_query
         .iter()
-        .find(|(_, element_id, _)| **element_id == *target)
+        .find(|(_, element_id, _, _)| **element_id == *target)
     {
         commands.entity(entity).insert(Selected);
     }
