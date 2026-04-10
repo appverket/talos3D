@@ -723,41 +723,14 @@ pub fn ensure_default_lighting_scene(world: &mut World) {
     if world.get_resource::<SceneLightingSettings>().is_none() {
         world.insert_resource(SceneLightingSettings::default());
     }
-
-    let has_scene_lights = {
-        match world.try_query::<&SceneLightNode>() {
-            Some(mut query) => query.iter(world).next().is_some(),
-            None => false,
+    if list_scene_lights(world).is_empty() {
+        let snapshots = {
+            let allocator = world.resource::<ElementIdAllocator>();
+            create_daylight_rig(allocator)
+        };
+        for snapshot in snapshots {
+            snapshot.apply_to(world);
         }
-    };
-    if has_scene_lights {
-        return;
-    }
-
-    let allocator = world.resource::<ElementIdAllocator>();
-    let snapshots = vec![
-        SceneLightSnapshot::default_directional(
-            allocator,
-            "Sun Key",
-            Vec3::new(10.0, 20.0, 8.0),
-            Vec3::ZERO,
-            [1.0, 0.97, 0.88],
-            8_000.0,
-            true,
-        ),
-        SceneLightSnapshot::default_directional(
-            allocator,
-            "Sky Fill",
-            Vec3::new(-8.0, 4.0, -6.0),
-            Vec3::ZERO,
-            [0.6, 0.7, 0.9],
-            2_000.0,
-            false,
-        ),
-    ];
-
-    for snapshot in snapshots {
-        snapshot.apply_to(world);
     }
 }
 
@@ -1131,4 +1104,33 @@ fn default_light_intensity(kind: SceneLightKind) -> f32 {
 
 fn default_light_shadows(kind: SceneLightKind) -> bool {
     !matches!(kind, SceneLightKind::Point)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_daylight_rig_matches_pre_pp59_startup_contract() {
+        let settings = SceneLightingSettings::default();
+        assert_eq!(settings.ambient_color, [0.9, 0.92, 1.0]);
+        assert_eq!(settings.ambient_brightness, 40.0);
+        assert!(settings.affects_lightmapped_meshes);
+
+        let allocator = ElementIdAllocator::default();
+        let rig = create_daylight_rig(&allocator);
+        assert_eq!(rig.len(), 2);
+
+        let key = &rig[0];
+        assert_eq!(key.node.name, "Sun Key");
+        assert_eq!(key.node.intensity, 8_000.0);
+        assert!(key.node.shadows_enabled);
+        assert_eq!(key.translation, Vec3::new(10.0, 20.0, 8.0));
+
+        let fill = &rig[1];
+        assert_eq!(fill.node.name, "Sky Fill");
+        assert_eq!(fill.node.intensity, 2_000.0);
+        assert!(!fill.node.shadows_enabled);
+        assert_eq!(fill.translation, Vec3::new(-8.0, 4.0, -6.0));
+    }
 }

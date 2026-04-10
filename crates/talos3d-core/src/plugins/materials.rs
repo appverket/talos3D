@@ -509,7 +509,7 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         attenuation_color: [1.0, 1.0, 1.0],
         clearcoat: 0.08,
         clearcoat_perceptual_roughness: 0.34,
-        anisotropy_strength: 0.25,
+        anisotropy_strength: 0.0,
         alpha_mode: MaterialAlphaMode::Opaque,
         alpha_cutoff: 0.5,
         base_color_texture: Some(TextureRef::AssetPath(
@@ -525,7 +525,7 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         occlusion_texture: None,
         uv_scale: [1.0, 1.0],
         uv_rotation: 0.0,
-        anisotropy_rotation: 90.0_f32.to_radians(),
+        anisotropy_rotation: 0.0,
         double_sided: false,
         unlit: false,
         fog_enabled: true,
@@ -686,9 +686,11 @@ fn apply_material_assignments(
                 std_materials.add(def.to_standard_material(&asset_server, &mut images))
             })
             .clone();
-        commands
-            .entity(entity)
-            .insert(MeshMaterial3d::<StandardMaterial>(handle));
+        commands.queue(move |world: &mut World| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(MeshMaterial3d::<StandardMaterial>(handle));
+            }
+        });
     }
 }
 
@@ -703,9 +705,12 @@ fn revert_removed_material_assignments(
         return;
     };
     for entity in removed.read() {
-        commands
-            .entity(entity)
-            .insert(MeshMaterial3d::<StandardMaterial>(prim_mat.0.clone()));
+        let handle = prim_mat.0.clone();
+        commands.queue(move |world: &mut World| {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(MeshMaterial3d::<StandardMaterial>(handle));
+            }
+        });
     }
 }
 
@@ -733,5 +738,11 @@ mod tests {
 
         assert!(registry.contains(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO));
         assert!(registry.contains(BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80));
+
+        let cedar = registry
+            .get(BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO)
+            .expect("cedar builtin should exist");
+        assert_eq!(cedar.anisotropy_strength, 0.0);
+        assert_eq!(cedar.anisotropy_rotation, 0.0);
     }
 }
