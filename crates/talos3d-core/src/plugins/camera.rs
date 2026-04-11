@@ -62,6 +62,7 @@ pub enum CameraProjectionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraViewPreset {
     Isometric,
+    Front,
     Top,
     Left,
     Right,
@@ -349,19 +350,28 @@ impl OrbitCamera {
                 self.yaw = std::f32::consts::FRAC_PI_4;
                 self.pitch = TRUE_ISOMETRIC_PITCH;
             }
+            CameraViewPreset::Front => {
+                self.projection_mode = CameraProjectionMode::Isometric;
+                self.yaw = 0.0;
+                self.pitch = 0.0;
+            }
             CameraViewPreset::Top => {
+                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = 0.0;
                 self.pitch = -std::f32::consts::FRAC_PI_2;
             }
             CameraViewPreset::Left => {
+                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = -std::f32::consts::FRAC_PI_2;
                 self.pitch = 0.0;
             }
             CameraViewPreset::Right => {
+                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = std::f32::consts::FRAC_PI_2;
                 self.pitch = 0.0;
             }
             CameraViewPreset::Bottom => {
+                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = 0.0;
                 self.pitch = std::f32::consts::FRAC_PI_2;
             }
@@ -428,6 +438,10 @@ mod tests {
     #[test]
     fn top_and_bottom_views_align_to_world_vertical_axis() {
         let mut orbit = OrbitCamera::default();
+
+        orbit.apply_view_preset(CameraViewPreset::Front);
+        let front = orbit_transform(&orbit);
+        assert!((front.translation.z - orbit.radius).abs() < 0.001);
 
         orbit.apply_view_preset(CameraViewPreset::Top);
         let top = orbit_transform(&orbit);

@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use super::document_properties::DocumentProperties;
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
+use crate::plugins::render_pipeline::RenderSettings;
 
 const GRID_EXTENT: f32 = 50.0;
 const GRID_MINOR_COLOR: Color = Color::srgba(0.5, 0.5, 0.5, 0.3);
@@ -21,8 +22,12 @@ impl Plugin for GridPlugin {
 fn draw_grid(
     mut gizmos: Gizmos,
     doc_props: Res<DocumentProperties>,
+    render_settings: Option<Res<RenderSettings>>,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
+    if render_settings.is_some_and(|settings| !settings.grid_enabled) {
+        return;
+    }
     let minor_spacing = doc_props.grid_minor_spacing;
     let major_spacing = doc_props.grid_major_spacing;
     #[cfg(feature = "perf-stats")]
