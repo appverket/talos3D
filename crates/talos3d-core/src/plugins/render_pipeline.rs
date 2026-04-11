@@ -14,13 +14,18 @@ use bevy::{
     post_process::bloom::Bloom,
     prelude::*,
 };
+use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::{
     capability_registry::CapabilityRegistry,
     plugins::{
+        command_registry::{
+            CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
+        },
         identity::ElementId,
         modeling::{mesh_generation::MeshGenerationSet, snapshots::ray_triangle_intersection},
+        toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
     },
 };
 
@@ -33,6 +38,7 @@ const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 const VISIBLE_EDGE_RAY_SAMPLE_T_VALUES: [f32; 3] = [0.2, 0.5, 0.8];
 const EDGE_VISIBILITY_EPSILON: f32 = 0.01;
 const ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH: f32 = 10_000.0;
+pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 
 // ─── Settings resource ───────────────────────────────────────────────────────
 
@@ -204,6 +210,97 @@ pub struct RenderPipelinePlugin;
 impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RenderSettings>()
+            .register_toolbar(ToolbarDescriptor {
+                id: VIEW_RENDER_TOOLBAR_ID.to_string(),
+                label: "Render".to_string(),
+                default_dock: ToolbarDock::Top,
+                default_visible: true,
+                sections: vec![ToolbarSection {
+                    label: "Drawing".to_string(),
+                    command_ids: vec![
+                        "view.apply_paper_preset".to_string(),
+                        "view.toggle_grid".to_string(),
+                        "view.toggle_outline".to_string(),
+                        "view.toggle_wireframe".to_string(),
+                    ],
+                }],
+            })
+            .register_command(
+                CommandDescriptor {
+                    id: "view.apply_paper_preset".to_string(),
+                    label: "Paper Drawing".to_string(),
+                    description:
+                        "Apply a white-paper drawing preset with grid off and outline mode on."
+                            .to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: Some("icon.view_paper".to_string()),
+                    hint: Some(
+                        "Set white background, hide the grid, enable paper fill, and turn on outline rendering".to_string(),
+                    ),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_apply_paper_preset,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "view.toggle_grid".to_string(),
+                    label: "Toggle Grid".to_string(),
+                    description: "Show or hide the modeling grid.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: Some("icon.view_grid".to_string()),
+                    hint: Some("Show or hide the modeling grid".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_toggle_grid,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "view.toggle_outline".to_string(),
+                    label: "Toggle Outline".to_string(),
+                    description: "Toggle visible-edge outline rendering.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: Some("icon.view_outline".to_string()),
+                    hint: Some("Toggle hidden-line-friendly outline rendering".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_toggle_outline,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "view.toggle_wireframe".to_string(),
+                    label: "Toggle Wireframe".to_string(),
+                    description: "Toggle full wireframe overlay rendering.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: Some("icon.view_wireframe".to_string()),
+                    hint: Some("Toggle full wireframe overlay rendering".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_toggle_wireframe,
+            )
             // PostStartup ensures the camera plugin has already run Startup.
             .add_systems(PostStartup, setup_render_pipeline)
             .add_systems(Update, (sync_render_settings, sync_clear_color, sync_paper_fill_materials))
@@ -211,6 +308,78 @@ impl Plugin for RenderPipelinePlugin {
                 Update,
                 draw_model_edge_overlays.after(MeshGenerationSet::Generate),
             );
+    }
+}
+
+fn execute_apply_paper_preset(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    update_render_settings(world, "Paper drawing preset applied", |settings| {
+        settings.background_rgb = [1.0, 1.0, 1.0];
+        settings.grid_enabled = false;
+        settings.paper_fill_enabled = true;
+        settings.visible_edge_overlay_enabled = true;
+        settings.contour_overlay_enabled = false;
+        settings.wireframe_overlay_enabled = false;
+    })
+}
+
+fn execute_toggle_grid(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    update_render_settings(world, "", |settings| {
+        settings.grid_enabled = !settings.grid_enabled;
+    })
+}
+
+fn execute_toggle_outline(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    update_render_settings(world, "", |settings| {
+        settings.visible_edge_overlay_enabled = !settings.visible_edge_overlay_enabled;
+    })
+}
+
+fn execute_toggle_wireframe(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    update_render_settings(world, "", |settings| {
+        settings.wireframe_overlay_enabled = !settings.wireframe_overlay_enabled;
+    })
+}
+
+fn update_render_settings(
+    world: &mut World,
+    feedback: &str,
+    apply: impl FnOnce(&mut RenderSettings),
+) -> Result<CommandResult, String> {
+    let message = {
+        let mut settings = world
+            .get_resource_mut::<RenderSettings>()
+            .ok_or_else(|| "Render settings are unavailable".to_string())?;
+        apply(&mut settings);
+
+        if feedback.is_empty() {
+            format!(
+                "Grid {} · Outline {} · Wireframe {}",
+                on_off(settings.grid_enabled),
+                on_off(settings.visible_edge_overlay_enabled),
+                on_off(settings.wireframe_overlay_enabled)
+            )
+        } else {
+            feedback.to_string()
+        }
+    };
+
+    set_render_feedback(world, &message);
+
+    Ok(CommandResult::empty())
+}
+
+fn set_render_feedback(world: &mut World, feedback: &str) {
+    if let Some(mut status_bar_data) = world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+    {
+        status_bar_data.set_feedback(feedback.to_string(), 2.0);
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
     }
 }
 
@@ -906,6 +1075,7 @@ impl FeatureEdgeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::ui::StatusBarData;
 
     #[test]
     fn internal_triangle_diagonal_is_not_treated_as_contour() {
@@ -938,6 +1108,24 @@ mod tests {
         assert!(settings.grid_enabled);
         assert!(!settings.paper_fill_enabled);
         assert_eq!(settings.background_rgb, DEFAULT_BACKGROUND_RGB);
+    }
+
+    #[test]
+    fn paper_preset_enables_white_background_and_outline_mode() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings::default())
+            .insert_resource(StatusBarData::default());
+
+        execute_apply_paper_preset(app.world_mut(), &Value::Null)
+            .expect("paper preset should apply");
+
+        let settings = app.world().resource::<RenderSettings>();
+        assert_eq!(settings.background_rgb, [1.0, 1.0, 1.0]);
+        assert!(!settings.grid_enabled);
+        assert!(settings.paper_fill_enabled);
+        assert!(settings.visible_edge_overlay_enabled);
+        assert!(!settings.wireframe_overlay_enabled);
+        assert!(!settings.contour_overlay_enabled);
     }
 
     #[test]

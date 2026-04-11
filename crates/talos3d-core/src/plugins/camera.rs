@@ -5,18 +5,23 @@ use bevy::{
     input::touch::TouchPhase,
     prelude::*,
 };
+use serde_json::Value;
 
 use crate::authored_entity::EntityBounds;
 use crate::plugins::{
+    command_registry::{
+        CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
+    },
     cursor::ViewportUiInset,
     egui_chrome::EguiWantsInput,
     input_ownership::InputPhase,
-    toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt},
+    toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
 };
 
 pub struct CameraPlugin;
 
 pub const CAMERA_TOOLBAR_ID: &str = "camera.controls";
+pub const VIEW_TOOLBAR_ID: &str = "view.presets";
 const DEFAULT_FOCAL_LENGTH_MM: f32 = 50.0;
 const MIN_FOCAL_LENGTH_MM: f32 = 12.0;
 const MAX_FOCAL_LENGTH_MM: f32 = 200.0;
@@ -35,6 +40,132 @@ impl Plugin for CameraPlugin {
                 default_visible: false,
                 sections: Vec::new(),
             })
+            .register_toolbar(ToolbarDescriptor {
+                id: VIEW_TOOLBAR_ID.to_string(),
+                label: "Views".to_string(),
+                default_dock: ToolbarDock::Top,
+                default_visible: true,
+                sections: vec![
+                    ToolbarSection {
+                        label: "Projection".to_string(),
+                        command_ids: vec![
+                            "view.projection_perspective".to_string(),
+                            "view.projection_orthographic".to_string(),
+                        ],
+                    },
+                    ToolbarSection {
+                        label: "Views".to_string(),
+                        command_ids: vec![
+                            "view.isometric".to_string(),
+                            "view.front".to_string(),
+                            "view.back".to_string(),
+                            "view.top".to_string(),
+                            "view.bottom".to_string(),
+                            "view.left".to_string(),
+                            "view.right".to_string(),
+                        ],
+                    },
+                ],
+            })
+            .register_command(
+                CommandDescriptor {
+                    id: "view.projection_perspective".to_string(),
+                    label: "Perspective".to_string(),
+                    description: "Switch the camera to perspective projection.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: Some("icon.view_perspective".to_string()),
+                    hint: Some("Return to perspective projection".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_projection_perspective,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "view.projection_orthographic".to_string(),
+                    label: "Orthographic".to_string(),
+                    description: "Switch the camera to orthographic projection.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: Some("icon.view_orthographic".to_string()),
+                    hint: Some("Use orthographic projection for drawing and drafting views".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_projection_orthographic,
+            )
+            .register_command(
+                view_preset_command(
+                    "view.isometric",
+                    "Isometric",
+                    "icon.view_isometric",
+                    "Restore the isometric orthographic view",
+                ),
+                execute_view_isometric,
+            )
+            .register_command(
+                view_preset_command(
+                    "view.front",
+                    "Front",
+                    "icon.view_front",
+                    "Look straight at the model front in orthographic projection",
+                ),
+                execute_view_front,
+            )
+            .register_command(
+                view_preset_command(
+                    "view.back",
+                    "Back",
+                    "icon.view_back",
+                    "Look straight at the model back in orthographic projection",
+                ),
+                execute_view_back,
+            )
+            .register_command(
+                view_preset_command(
+                    "view.top",
+                    "Top",
+                    "icon.view_top",
+                    "Look straight down in orthographic projection",
+                ),
+                execute_view_top,
+            )
+            .register_command(
+                view_preset_command(
+                    "view.bottom",
+                    "Bottom",
+                    "icon.view_bottom",
+                    "Look straight up from below in orthographic projection",
+                ),
+                execute_view_bottom,
+            )
+            .register_command(
+                view_preset_command(
+                    "view.left",
+                    "Left",
+                    "icon.view_left",
+                    "Look straight at the model left side in orthographic projection",
+                ),
+                execute_view_left,
+            )
+            .register_command(
+                view_preset_command(
+                    "view.right",
+                    "Right",
+                    "icon.view_right",
+                    "Look straight at the model right side in orthographic projection",
+                ),
+                execute_view_right,
+            )
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -63,6 +194,7 @@ pub enum CameraProjectionMode {
 pub enum CameraViewPreset {
     Isometric,
     Front,
+    Back,
     Top,
     Left,
     Right,
@@ -355,6 +487,11 @@ impl OrbitCamera {
                 self.yaw = 0.0;
                 self.pitch = 0.0;
             }
+            CameraViewPreset::Back => {
+                self.projection_mode = CameraProjectionMode::Isometric;
+                self.yaw = std::f32::consts::PI;
+                self.pitch = 0.0;
+            }
             CameraViewPreset::Top => {
                 self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = 0.0;
@@ -376,6 +513,97 @@ impl OrbitCamera {
                 self.pitch = std::f32::consts::FRAC_PI_2;
             }
         }
+    }
+}
+
+fn view_preset_command(id: &str, label: &str, icon: &str, hint: &str) -> CommandDescriptor {
+    CommandDescriptor {
+        id: id.to_string(),
+        label: label.to_string(),
+        description: format!("Switch the camera to the {label} view."),
+        category: CommandCategory::View,
+        parameters: None,
+        default_shortcut: None,
+        icon: Some(icon.to_string()),
+        hint: Some(hint.to_string()),
+        requires_selection: false,
+        show_in_menu: true,
+        version: 1,
+        activates_tool: None,
+        capability_id: None,
+    }
+}
+
+fn execute_projection_perspective(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_projection_mode(world, CameraProjectionMode::Perspective, "Perspective view")
+}
+
+fn execute_projection_orthographic(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_projection_mode(world, CameraProjectionMode::Isometric, "Orthographic view")
+}
+
+fn execute_view_isometric(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_view_preset(world, CameraViewPreset::Isometric, "Isometric view")
+}
+
+fn execute_view_front(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_view_preset(world, CameraViewPreset::Front, "Front view")
+}
+
+fn execute_view_back(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_view_preset(world, CameraViewPreset::Back, "Back view")
+}
+
+fn execute_view_top(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_view_preset(world, CameraViewPreset::Top, "Top view")
+}
+
+fn execute_view_bottom(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_view_preset(world, CameraViewPreset::Bottom, "Bottom view")
+}
+
+fn execute_view_left(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_view_preset(world, CameraViewPreset::Left, "Left view")
+}
+
+fn execute_view_right(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    set_view_preset(world, CameraViewPreset::Right, "Right view")
+}
+
+fn set_projection_mode(
+    world: &mut World,
+    mode: CameraProjectionMode,
+    feedback: &str,
+) -> Result<CommandResult, String> {
+    {
+        let mut controls = world
+            .get_resource_mut::<CameraControlsState>()
+            .ok_or_else(|| "Camera controls are unavailable".to_string())?;
+        controls.projection_mode = mode;
+    }
+    set_camera_feedback(world, feedback);
+    Ok(CommandResult::empty())
+}
+
+fn set_view_preset(
+    world: &mut World,
+    preset: CameraViewPreset,
+    feedback: &str,
+) -> Result<CommandResult, String> {
+    {
+        let mut controls = world
+            .get_resource_mut::<CameraControlsState>()
+            .ok_or_else(|| "Camera controls are unavailable".to_string())?;
+        controls.pending_view_preset = Some(preset);
+    }
+    set_camera_feedback(world, feedback);
+    Ok(CommandResult::empty())
+}
+
+fn set_camera_feedback(world: &mut World, feedback: &str) {
+    if let Some(mut status_bar_data) = world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+    {
+        status_bar_data.set_feedback(feedback.to_string(), 2.0);
     }
 }
 
@@ -442,6 +670,10 @@ mod tests {
         orbit.apply_view_preset(CameraViewPreset::Front);
         let front = orbit_transform(&orbit);
         assert!((front.translation.z - orbit.radius).abs() < 0.001);
+
+        orbit.apply_view_preset(CameraViewPreset::Back);
+        let back = orbit_transform(&orbit);
+        assert!((back.translation.z + orbit.radius).abs() < 0.001);
 
         orbit.apply_view_preset(CameraViewPreset::Top);
         let top = orbit_transform(&orbit);

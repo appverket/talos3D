@@ -490,6 +490,91 @@ fn draw_create_polyline(c: &mut Canvas) {
     c.circle(20.0, 5.0, 1.5);
 }
 
+fn draw_view_perspective(c: &mut Canvas) {
+    draw_create_box(c);
+}
+
+fn draw_view_orthographic(c: &mut Canvas) {
+    c.rounded_rect(4.0, 4.0, 16.0, 16.0, 1.5);
+    c.line(8.0, 4.0, 8.0, 20.0);
+    c.line(4.0, 8.0, 20.0, 8.0);
+}
+
+fn draw_view_isometric(c: &mut Canvas) {
+    draw_create_box(c);
+}
+
+fn draw_view_front(c: &mut Canvas) {
+    c.rounded_rect(5.0, 5.0, 14.0, 14.0, 1.5);
+    c.line(3.0, 20.0, 21.0, 20.0);
+    c.line(12.0, 8.0, 12.0, 16.0);
+}
+
+fn draw_view_back(c: &mut Canvas) {
+    c.rounded_rect(5.0, 5.0, 14.0, 14.0, 1.5);
+    c.line(3.0, 4.0, 21.0, 4.0);
+    c.line(12.0, 8.0, 12.0, 16.0);
+}
+
+fn draw_view_top(c: &mut Canvas) {
+    c.rounded_rect(5.0, 7.0, 14.0, 12.0, 1.5);
+    c.line(12.0, 3.0, 12.0, 9.0);
+    c.line(9.0, 6.0, 12.0, 3.0);
+    c.line(15.0, 6.0, 12.0, 3.0);
+}
+
+fn draw_view_bottom(c: &mut Canvas) {
+    c.rounded_rect(5.0, 5.0, 14.0, 12.0, 1.5);
+    c.line(12.0, 15.0, 12.0, 21.0);
+    c.line(9.0, 18.0, 12.0, 21.0);
+    c.line(15.0, 18.0, 12.0, 21.0);
+}
+
+fn draw_view_left(c: &mut Canvas) {
+    c.rounded_rect(7.0, 5.0, 12.0, 14.0, 1.5);
+    c.line(3.0, 12.0, 9.0, 12.0);
+    c.line(6.0, 9.0, 3.0, 12.0);
+    c.line(6.0, 15.0, 3.0, 12.0);
+}
+
+fn draw_view_right(c: &mut Canvas) {
+    c.rounded_rect(5.0, 5.0, 12.0, 14.0, 1.5);
+    c.line(15.0, 12.0, 21.0, 12.0);
+    c.line(18.0, 9.0, 21.0, 12.0);
+    c.line(18.0, 15.0, 21.0, 12.0);
+}
+
+fn draw_view_wireframe(c: &mut Canvas) {
+    draw_create_box(c);
+}
+
+fn draw_view_outline(c: &mut Canvas) {
+    c.rounded_rect(4.0, 5.0, 16.0, 14.0, 1.5);
+    c.line(7.0, 15.0, 17.0, 9.0);
+}
+
+fn draw_view_grid(c: &mut Canvas) {
+    for x in [6.0, 11.0, 16.0] {
+        c.line(x, 4.0, x, 20.0);
+    }
+    for y in [6.0, 11.0, 16.0] {
+        c.line(4.0, y, 20.0, y);
+    }
+    c.rounded_rect(4.0, 4.0, 16.0, 16.0, 1.5);
+}
+
+fn draw_view_paper(c: &mut Canvas) {
+    c.line(6.0, 3.0, 15.0, 3.0);
+    c.line(15.0, 3.0, 20.0, 8.0);
+    c.line(20.0, 8.0, 20.0, 21.0);
+    c.line(20.0, 21.0, 6.0, 21.0);
+    c.line(6.0, 21.0, 6.0, 3.0);
+    c.line(15.0, 3.0, 15.0, 8.0);
+    c.line(15.0, 8.0, 20.0, 8.0);
+    c.line(9.0, 11.0, 17.0, 11.0);
+    c.line(9.0, 15.0, 17.0, 15.0);
+}
+
 // Wall: vertical rectangle with hatching
 fn draw_wall(c: &mut Canvas) {
     c.rounded_rect(6.0, 3.0, 12.0, 18.0, 1.5);
@@ -545,6 +630,19 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "create_sphere" => draw_create_sphere(&mut c),
         "create_plane" => draw_create_plane(&mut c),
         "create_polyline" => draw_create_polyline(&mut c),
+        "view_perspective" => draw_view_perspective(&mut c),
+        "view_orthographic" => draw_view_orthographic(&mut c),
+        "view_isometric" => draw_view_isometric(&mut c),
+        "view_front" => draw_view_front(&mut c),
+        "view_back" => draw_view_back(&mut c),
+        "view_top" => draw_view_top(&mut c),
+        "view_bottom" => draw_view_bottom(&mut c),
+        "view_left" => draw_view_left(&mut c),
+        "view_right" => draw_view_right(&mut c),
+        "view_wireframe" => draw_view_wireframe(&mut c),
+        "view_outline" => draw_view_outline(&mut c),
+        "view_grid" => draw_view_grid(&mut c),
+        "view_paper" => draw_view_paper(&mut c),
         "wall" => draw_wall(&mut c),
         "opening" => draw_opening(&mut c),
         _ => draw_plus(&mut c),

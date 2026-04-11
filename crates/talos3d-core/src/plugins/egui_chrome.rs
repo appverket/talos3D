@@ -294,7 +294,9 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 } else {
                                     descriptor.label.clone()
                                 };
-                                let response = ui.add_enabled(enabled, egui::Button::new(label));
+                                let response = ui
+                                    .add_enabled(enabled, egui::Button::new(label))
+                                    .on_hover_text(command_tooltip_text(descriptor));
                                 if enabled && response.contains_pointer() {
                                     hovered_menu_hint = descriptor.hint.clone();
                                 }
@@ -1629,7 +1631,7 @@ fn draw_toolbar_content(
                         )
                         .gap(12.0)
                         .show(|ui| {
-                            ui.label(&command.label);
+                            ui.label(command_tooltip_text(command));
                         });
                     }
                     if ptr_over && ui.ctx().input(|i| i.pointer.primary_released()) {
@@ -1703,11 +1705,13 @@ fn draw_camera_toolbar_controls(
         ui.separator();
         ui.horizontal(|ui| {
             for (label, preset) in [
+                ("Iso", CameraViewPreset::Isometric),
                 ("Front", CameraViewPreset::Front),
+                ("Back", CameraViewPreset::Back),
                 ("Top", CameraViewPreset::Top),
+                ("Bottom", CameraViewPreset::Bottom),
                 ("Left", CameraViewPreset::Left),
                 ("Right", CameraViewPreset::Right),
-                ("Bottom", CameraViewPreset::Bottom),
             ] {
                 if ui
                     .add_sized(
@@ -1752,11 +1756,13 @@ fn draw_camera_toolbar_controls(
 
         ui.separator();
         for (label, preset) in [
+            ("I", CameraViewPreset::Isometric),
             ("F", CameraViewPreset::Front),
+            ("Bk", CameraViewPreset::Back),
             ("T", CameraViewPreset::Top),
+            ("B", CameraViewPreset::Bottom),
             ("L", CameraViewPreset::Left),
             ("R", CameraViewPreset::Right),
-            ("B", CameraViewPreset::Bottom),
         ] {
             if ui
                 .add_sized(
@@ -2759,6 +2765,17 @@ fn toolbar_button_fallback_text(descriptor: &CommandDescriptor) -> String {
         .next()
         .map(|character| character.to_ascii_uppercase().to_string())
         .unwrap_or_else(|| "?".to_string())
+}
+
+fn command_tooltip_text(descriptor: &CommandDescriptor) -> String {
+    let mut lines = vec![descriptor.label.clone()];
+    if let Some(shortcut) = &descriptor.default_shortcut {
+        lines.push(format!("Shortcut: {shortcut}"));
+    }
+    if let Some(hint) = &descriptor.hint {
+        lines.push(hint.clone());
+    }
+    lines.join("\n")
 }
 
 fn dock_target_for_position(ctx: &egui::Context, position: egui::Pos2) -> Option<ToolbarDock> {
