@@ -24,6 +24,7 @@ use crate::{
         document_properties::DocumentProperties,
         egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
+        render_pipeline::RenderSettings,
         snap::SnapKind,
         toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
         tools::ActiveTool,
@@ -34,13 +35,19 @@ use crate::{
 
 const DIMENSION_LINE_COLOR: Color = Color::srgba(0.95, 0.92, 0.42, 0.9);
 const DIMENSION_LINE_SELECTED_COLOR: Color = Color::srgba(1.0, 0.98, 0.66, 1.0);
+const DIMENSION_LINE_PAPER_COLOR: Color = Color::srgba(0.15, 0.15, 0.18, 0.95);
+const DIMENSION_LINE_PAPER_SELECTED_COLOR: Color = Color::srgba(0.08, 0.22, 0.5, 1.0);
 const DIMENSION_LINE_HIT_RADIUS: f32 = 0.18;
 const DIMENSION_LINE_TICK_HALF: f32 = 0.08;
-const DIMENSION_LINE_LABEL_SCREEN_OFFSET_Y: f32 = 18.0;
+const DIMENSION_LINE_LABEL_SCREEN_OFFSET: f32 = 18.0;
 const DIMENSION_LINE_MIN_MEASURE_LENGTH: f32 = 0.01;
 const DIMENSION_LINE_DEFAULT_EXTENSION_MIN: f32 = 0.15;
 const DIMENSION_LINE_DEFAULT_EXTENSION_MAX: f32 = 0.4;
 const DIMENSION_LINE_DEFAULT_EXTENSION_FACTOR: f32 = 0.12;
+const DIMENSION_LINE_DEFAULT_OFFSET_MIN: f32 = 0.2;
+const DIMENSION_LINE_DEFAULT_OFFSET_MAX: f32 = 0.8;
+const DIMENSION_LINE_DEFAULT_OFFSET_FACTOR: f32 = 0.18;
+const DIMENSION_LINE_MIN_OFFSET: f32 = 0.001;
 
 pub struct DimensionLinePlugin;
 
@@ -66,6 +73,7 @@ impl Default for DimensionLineVisibility {
 pub struct DimensionLineNode {
     pub start: Vec3,
     pub end: Vec3,
+    pub line_point: Vec3,
     pub extension: f32,
     pub visible: bool,
     pub label: Option<String>,
@@ -78,6 +86,7 @@ impl Default for DimensionLineNode {
         Self {
             start: Vec3::ZERO,
             end: Vec3::X,
+            line_point: Vec3::new(0.0, 0.0, DIMENSION_LINE_DEFAULT_OFFSET_MIN),
             extension: DIMENSION_LINE_DEFAULT_EXTENSION_MIN,
             visible: true,
             label: None,
@@ -90,6 +99,7 @@ impl Default for DimensionLineNode {
 #[derive(Resource, Default)]
 struct DimensionLineToolState {
     start: Option<Vec3>,
+    end: Option<Vec3>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,6 +107,7 @@ pub struct DimensionLineSnapshot {
     pub element_id: ElementId,
     pub start: Vec3,
     pub end: Vec3,
+    pub line_point: Vec3,
     pub extension: f32,
     pub visible: bool,
     pub label: Option<String>,
@@ -121,12 +132,24 @@ impl DimensionLineSnapshot {
         (self.start + self.end) * 0.5
     }
 
-    fn visible_segment(&self) -> (Vec3, Vec3) {
-        let axis_dir = self.axis_direction();
-        (
-            self.start - axis_dir * self.extension,
-            self.end + axis_dir * self.extension,
-        )
+    fn geometry(&self) -> DimensionGeometry {
+        dimension_geometry(self.start, self.end, self.line_point, self.extension)
+    }
+
+    fn line_midpoint(&self) -> Vec3 {
+        self.geometry().line_midpoint()
+    }
+
+    fn offset_distance(&self) -> f32 {
+        self.geometry().offset_vec.length()
+    }
+
+    fn with_offset_distance(&self, offset: f32) -> Self {
+        let mut snapshot = self.clone();
+        let geometry = self.geometry();
+        snapshot.line_point =
+            self.midpoint() + geometry.offset_dir * offset.max(DIMENSION_LINE_MIN_OFFSET);
+        snapshot
     }
 
     fn effective_display_unit(&self, doc_props: &DocumentProperties) -> DisplayUnit {
@@ -167,13 +190,15 @@ impl DimensionLineSnapshot {
     }
 
     fn entity_bounds(&self) -> EntityBounds {
-        let (visible_start, visible_end) = self.visible_segment();
+        let geometry = self.geometry();
         bounds_from_points(&[
-            visible_start,
+            geometry.visible_start,
             self.start,
             self.end,
-            visible_end,
-            self.midpoint(),
+            geometry.dimension_start,
+            geometry.dimension_end,
+            geometry.visible_end,
+            self.line_midpoint(),
         ])
     }
 }
@@ -196,13 +221,14 @@ impl AuthoredEntity for DimensionLineSnapshot {
     }
 
     fn center(&self) -> Vec3 {
-        self.midpoint()
+        self.line_midpoint()
     }
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
         let mut snapshot = self.clone();
         snapshot.start += delta;
         snapshot.end += delta;
+        snapshot.line_point += delta;
         snapshot.into()
     }
 
@@ -210,6 +236,7 @@ impl AuthoredEntity for DimensionLineSnapshot {
         let mut snapshot = self.clone();
         snapshot.start = rotation * snapshot.start;
         snapshot.end = rotation * snapshot.end;
+        snapshot.line_point = rotation * snapshot.line_point;
         snapshot.into()
     }
 
@@ -218,6 +245,7 @@ impl AuthoredEntity for DimensionLineSnapshot {
         let axis_dir = snapshot.axis_direction();
         snapshot.start = center + (snapshot.start - center) * factor;
         snapshot.end = center + (snapshot.end - center) * factor;
+        snapshot.line_point = center + (snapshot.line_point - center) * factor;
         snapshot.extension *= directional_scale(axis_dir, factor);
         snapshot.into()
     }
@@ -233,6 +261,20 @@ impl AuthoredEntity for DimensionLineSnapshot {
                 "end",
                 PropertyValueKind::Vec3,
                 Some(PropertyValue::Vec3(self.end)),
+            ),
+            property_field_with(
+                "line_point",
+                "Line Point",
+                PropertyValueKind::Vec3,
+                Some(PropertyValue::Vec3(self.line_point)),
+                true,
+            ),
+            property_field_with(
+                "offset",
+                "Offset",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.offset_distance())),
+                true,
             ),
             property_field_with(
                 "extension",
@@ -281,6 +323,8 @@ impl AuthoredEntity for DimensionLineSnapshot {
         match property_name {
             "start" => snapshot.start = vec3_from_json(value)?,
             "end" => snapshot.end = vec3_from_json(value)?,
+            "line_point" => snapshot.line_point = vec3_from_json(value)?,
+            "offset" => snapshot = snapshot.with_offset_distance(scalar_from_json(value)?),
             "extension" => snapshot.extension = scalar_from_json(value)?,
             "visible" => {
                 snapshot.visible = match value.as_bool() {
@@ -307,6 +351,8 @@ impl AuthoredEntity for DimensionLineSnapshot {
                     &[
                         "start",
                         "end",
+                        "line_point",
+                        "offset",
                         "extension",
                         "visible",
                         "display_unit",
@@ -334,6 +380,12 @@ impl AuthoredEntity for DimensionLineSnapshot {
                 kind: HandleKind::Vertex,
                 label: "End".to_string(),
             },
+            HandleInfo {
+                id: "line_point".to_string(),
+                position: self.line_midpoint(),
+                kind: HandleKind::Control,
+                label: "Offset".to_string(),
+            },
         ]
     }
 
@@ -346,6 +398,7 @@ impl AuthoredEntity for DimensionLineSnapshot {
         match handle_id {
             "start" => snapshot.start = cursor,
             "end" => snapshot.end = cursor,
+            "line_point" => snapshot.line_point = cursor,
             _ => return None,
         }
         validate_dimension_geometry(snapshot.start, snapshot.end, snapshot.extension).ok()?;
@@ -357,6 +410,8 @@ impl AuthoredEntity for DimensionLineSnapshot {
             "element_id": self.element_id,
             "start": self.start.to_array(),
             "end": self.end.to_array(),
+            "line_point": self.line_point.to_array(),
+            "offset": self.offset_distance(),
             "extension": self.extension,
             "visible": self.visible,
             "label": self.label,
@@ -370,6 +425,7 @@ impl AuthoredEntity for DimensionLineSnapshot {
         let node = DimensionLineNode {
             start: self.start,
             end: self.end,
+            line_point: self.line_point,
             extension: self.extension,
             visible: self.visible,
             label: self.label.clone(),
@@ -388,11 +444,18 @@ impl AuthoredEntity for DimensionLineSnapshot {
     }
 
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
-        draw_dimension_line_gizmo(gizmos, self.start, self.end, self.extension, color);
+        draw_dimension_line_gizmo(
+            gizmos,
+            self.start,
+            self.end,
+            self.line_point,
+            self.extension,
+            color,
+        );
     }
 
     fn preview_line_count(&self) -> usize {
-        3
+        5
     }
 
     fn box_clone(&self) -> BoxedEntity {
@@ -429,6 +492,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
                 element_id,
                 start: node.start,
                 end: node.end,
+                line_point: node.line_point,
                 extension: node.extension,
                 visible: node.visible,
                 label: node.label.clone(),
@@ -456,6 +520,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .map(vec3_from_json)
             .transpose()?
             .ok_or_else(|| "Missing end".to_string())?;
+        let line_point = parse_dimension_line_point_json(data, start, end)?;
         let extension = data
             .get("extension")
             .map(scalar_from_json)
@@ -480,6 +545,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             element_id,
             start,
             end,
+            line_point,
             extension,
             visible,
             label,
@@ -509,6 +575,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .map(vec3_from_json)
             .transpose()?
             .ok_or_else(|| "dimension_line requires end".to_string())?;
+        let line_point = parse_dimension_line_point_json(request, start, end)?;
         let extension = object
             .get("extension")
             .map(scalar_from_json)
@@ -542,6 +609,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             element_id,
             start,
             end,
+            line_point,
             extension,
             visible,
             label,
@@ -561,7 +629,8 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .iter(world)
             .filter(|(_, node)| node.visible)
             .filter_map(|(entity, node)| {
-                let segments = dimension_segments(node.start, node.end, node.extension);
+                let segments =
+                    dimension_segments(node.start, node.end, node.line_point, node.extension);
                 let best_distance = segments
                     .into_iter()
                     .filter_map(|(start, end)| {
@@ -602,7 +671,8 @@ impl AuthoredEntityFactory for DimensionLineFactory {
                 kind: SnapKind::Endpoint,
             });
             out.push(SnapPoint {
-                position: (node.start + node.end) * 0.5,
+                position: dimension_geometry(node.start, node.end, node.line_point, node.extension)
+                    .line_midpoint(),
                 kind: SnapKind::Control,
             });
         }
@@ -625,27 +695,18 @@ fn draw_dimension_line_gizmo(
     gizmos: &mut Gizmos,
     start: Vec3,
     end: Vec3,
+    line_point: Vec3,
     extension: f32,
     color: Color,
 ) {
-    let axis_dir = (end - start).try_normalize().unwrap_or(Vec3::X);
-    let (visible_start, visible_end) = (start - axis_dir * extension, end + axis_dir * extension);
-    let tick_dir = tick_direction(axis_dir);
-    gizmos.line(visible_start, visible_end, color);
-    gizmos.line(
-        start - tick_dir * DIMENSION_LINE_TICK_HALF,
-        start + tick_dir * DIMENSION_LINE_TICK_HALF,
-        color,
-    );
-    gizmos.line(
-        end - tick_dir * DIMENSION_LINE_TICK_HALF,
-        end + tick_dir * DIMENSION_LINE_TICK_HALF,
-        color,
-    );
+    for (segment_start, segment_end) in dimension_segments(start, end, line_point, extension) {
+        gizmos.line(segment_start, segment_end, color);
+    }
 }
 
 fn draw_dimension_line_visuals(
     visibility: Res<DimensionLineVisibility>,
+    render_settings: Res<RenderSettings>,
     dimensions: Query<(Entity, &DimensionLineNode), Without<crate::plugins::selection::Selected>>,
     selected_dimensions: Query<
         (Entity, &DimensionLineNode),
@@ -656,6 +717,8 @@ fn draw_dimension_line_visuals(
     if !visibility.show_all {
         return;
     }
+    let regular_color = dimension_line_color(Some(&render_settings), false);
+    let selected_color = dimension_line_color(Some(&render_settings), true);
     for (_entity, node) in &dimensions {
         if !node.visible {
             continue;
@@ -664,8 +727,9 @@ fn draw_dimension_line_visuals(
             &mut gizmos,
             node.start,
             node.end,
+            node.line_point,
             node.extension,
-            DIMENSION_LINE_COLOR,
+            regular_color,
         );
     }
 
@@ -677,8 +741,9 @@ fn draw_dimension_line_visuals(
             &mut gizmos,
             node.start,
             node.end,
+            node.line_point,
             node.extension,
-            DIMENSION_LINE_SELECTED_COLOR,
+            selected_color,
         );
     }
 }
@@ -687,6 +752,7 @@ fn draw_dimension_line_labels(
     mut contexts: EguiContexts,
     doc_props: Res<DocumentProperties>,
     visibility: Res<DimensionLineVisibility>,
+    render_settings: Res<RenderSettings>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     dimensions: Query<(
@@ -719,6 +785,7 @@ fn draw_dimension_line_labels(
     if overlays.is_empty() {
         return;
     }
+    let paper_style = drawing_annotation_paper_style(&render_settings);
 
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -730,7 +797,7 @@ fn draw_dimension_line_labels(
             pos,
             egui::vec2(overlay.text.chars().count() as f32 * 7.5 + 14.0, 22.0),
         );
-        let (background, border, foreground) = label_colors(overlay.selected);
+        let (background, border, foreground) = label_colors(overlay.selected, paper_style);
         painter.rect_filled(rect, 4.0, background);
         painter.rect_stroke(
             rect,
@@ -810,18 +877,30 @@ fn handle_dimension_line_clicks(
     match tool_state.start {
         None => {
             tool_state.start = Some(cursor_position);
-            status_bar_data.hint = "Click second point to place the dimension".to_string();
+            tool_state.end = None;
+            status_bar_data.hint =
+                "Click the end point, then drag away from the edge to place the dimension line"
+                    .to_string();
         }
-        Some(start) => {
+        Some(start) if tool_state.end.is_none() => {
             if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
                 return;
             }
 
+            tool_state.end = Some(cursor_position);
+            status_bar_data.hint =
+                "Click to place the offset dimension line outside the geometry".to_string();
+        }
+        Some(start) => {
+            let end = tool_state
+                .end
+                .expect("dimension tool end point should exist in offset placement stage");
             let snapshot = DimensionLineSnapshot {
                 element_id: allocator.next_id(),
                 start,
-                end: cursor_position,
-                extension: default_dimension_extension(start, cursor_position),
+                end,
+                line_point: cursor_position,
+                extension: default_dimension_extension(start, end),
                 visible: true,
                 label: None,
                 display_unit: None,
@@ -831,8 +910,10 @@ fn handle_dimension_line_clicks(
                 snapshot: snapshot.into(),
             });
             tool_state.start = None;
-            next_active_tool.set(ActiveTool::Select);
-            status_bar_data.hint.clear();
+            tool_state.end = None;
+            next_active_tool.set(ActiveTool::PlaceDimensionLine);
+            status_bar_data.hint = "Click a start point, then click an end point, then click to place the offset"
+                .to_string();
         }
     }
 }
@@ -840,6 +921,7 @@ fn handle_dimension_line_clicks(
 fn draw_dimension_line_tool_preview(
     cursor_world_pos: Res<CursorWorldPos>,
     tool_state: Option<Res<DimensionLineToolState>>,
+    render_settings: Res<RenderSettings>,
     mut gizmos: Gizmos,
 ) {
     let Some(tool_state) = tool_state else {
@@ -851,17 +933,33 @@ fn draw_dimension_line_tool_preview(
     let Some(cursor_position) = cursor_world_pos.snapped else {
         return;
     };
-    if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
-        return;
+    let preview_color = dimension_line_color(Some(&render_settings), true);
+    match tool_state.end {
+        None => {
+            if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
+                return;
+            }
+            let end = cursor_position;
+            draw_dimension_line_gizmo(
+                &mut gizmos,
+                start,
+                end,
+                default_dimension_line_point(start, end),
+                default_dimension_extension(start, end),
+                preview_color,
+            );
+        }
+        Some(end) => {
+            draw_dimension_line_gizmo(
+                &mut gizmos,
+                start,
+                end,
+                cursor_position,
+                default_dimension_extension(start, end),
+                preview_color,
+            );
+        }
     }
-
-    draw_dimension_line_gizmo(
-        &mut gizmos,
-        start,
-        cursor_position,
-        default_dimension_extension(start, cursor_position),
-        DIMENSION_LINE_SELECTED_COLOR,
-    );
 }
 
 impl Plugin for DimensionLinePlugin {
@@ -874,7 +972,7 @@ impl Plugin for DimensionLinePlugin {
                 version: 1,
                 api_version: crate::capability_registry::CAPABILITY_API_VERSION,
                 description: Some(
-                    "Authored two-point dimensions with automatic visible overhang, configurable units, and measured labels."
+                    "Authored drafting dimensions with witness lines, dragged offset placement, configurable units, and measured labels."
                         .to_string(),
                 ),
                 dependencies: vec![],
@@ -895,7 +993,7 @@ impl Plugin for DimensionLinePlugin {
                     default_shortcut: Some("D".to_string()),
                     icon: None,
                     hint: Some(
-                        "Click a start point, then click an end point to create a dimension."
+                        "Click a start point, click an end point, then click to place the offset dimension line."
                             .to_string(),
                     ),
                     requires_selection: false,
@@ -983,6 +1081,27 @@ fn default_dimension_extension(start: Vec3, end: Vec3) -> f32 {
         DIMENSION_LINE_DEFAULT_EXTENSION_MIN,
         DIMENSION_LINE_DEFAULT_EXTENSION_MAX,
     )
+}
+
+fn default_dimension_offset(start: Vec3, end: Vec3) -> f32 {
+    let measured_length = start.distance(end);
+    (measured_length * DIMENSION_LINE_DEFAULT_OFFSET_FACTOR)
+        .clamp(DIMENSION_LINE_DEFAULT_OFFSET_MIN, DIMENSION_LINE_DEFAULT_OFFSET_MAX)
+}
+
+fn stable_offset_direction(axis_dir: Vec3) -> Vec3 {
+    for candidate in [Vec3::Z, Vec3::Y, Vec3::X] {
+        if let Some(direction) = axis_dir.cross(candidate).try_normalize() {
+            return direction;
+        }
+    }
+    perpendicular_pair(axis_dir).0
+}
+
+fn default_dimension_line_point(start: Vec3, end: Vec3) -> Vec3 {
+    let midpoint = (start + end) * 0.5;
+    midpoint + stable_offset_direction((end - start).try_normalize().unwrap_or(Vec3::X))
+        * default_dimension_offset(start, end)
 }
 
 fn directional_scale(axis_dir: Vec3, factor: Vec3) -> f32 {
@@ -1081,15 +1200,97 @@ fn ray_segment_distance(
     Some(closest_on_ray.distance(closest_on_seg))
 }
 
-fn dimension_segments(start: Vec3, end: Vec3, extension: f32) -> [(Vec3, Vec3); 3] {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DimensionGeometry {
+    axis_dir: Vec3,
+    offset_dir: Vec3,
+    offset_vec: Vec3,
+    dimension_start: Vec3,
+    dimension_end: Vec3,
+    visible_start: Vec3,
+    visible_end: Vec3,
+}
+
+impl DimensionGeometry {
+    fn line_midpoint(&self) -> Vec3 {
+        (self.dimension_start + self.dimension_end) * 0.5
+    }
+}
+
+fn dimension_geometry(start: Vec3, end: Vec3, line_point: Vec3, extension: f32) -> DimensionGeometry {
     let axis_dir = (end - start).try_normalize().unwrap_or(Vec3::X);
-    let visible_start = start - axis_dir * extension;
-    let visible_end = end + axis_dir * extension;
-    let tick_dir = tick_direction(axis_dir) * DIMENSION_LINE_TICK_HALF;
+    let midpoint = (start + end) * 0.5;
+    let raw_offset_vec = line_point - midpoint;
+    let projected_offset_vec = raw_offset_vec - axis_dir * raw_offset_vec.dot(axis_dir);
+    let (offset_dir, offset_vec) =
+        if let Some(direction) = projected_offset_vec.try_normalize().filter(|_| {
+            projected_offset_vec.length_squared()
+                >= DIMENSION_LINE_MIN_OFFSET * DIMENSION_LINE_MIN_OFFSET
+        }) {
+            (direction, projected_offset_vec)
+        } else {
+            let direction = stable_offset_direction(axis_dir);
+            (
+                direction,
+                direction * default_dimension_offset(start, end).max(DIMENSION_LINE_MIN_OFFSET),
+            )
+        };
+    let dimension_start = start + offset_vec;
+    let dimension_end = end + offset_vec;
+    let visible_start = dimension_start - axis_dir * extension;
+    let visible_end = dimension_end + axis_dir * extension;
+
+    DimensionGeometry {
+        axis_dir,
+        offset_dir,
+        offset_vec,
+        dimension_start,
+        dimension_end,
+        visible_start,
+        visible_end,
+    }
+}
+
+fn parse_dimension_line_point_json(
+    value: &Value,
+    start: Vec3,
+    end: Vec3,
+) -> Result<Vec3, String> {
+    let Some(object) = value.as_object() else {
+        return Ok(default_dimension_line_point(start, end));
+    };
+    if let Some(line_point) = object.get("line_point").filter(|value| !value.is_null()) {
+        return vec3_from_json(line_point);
+    }
+    if let Some(offset) = object.get("offset").filter(|value| !value.is_null()) {
+        let midpoint = (start + end) * 0.5;
+        let offset = scalar_from_json(offset)?.max(DIMENSION_LINE_MIN_OFFSET);
+        return Ok(
+            midpoint
+                + stable_offset_direction((end - start).try_normalize().unwrap_or(Vec3::X))
+                    * offset,
+        );
+    }
+    Ok(default_dimension_line_point(start, end))
+}
+
+fn dimension_segments(
+    start: Vec3,
+    end: Vec3,
+    line_point: Vec3,
+    extension: f32,
+) -> [(Vec3, Vec3); 5] {
+    let geometry = dimension_geometry(start, end, line_point, extension);
+    let tick_dir = tick_direction(geometry.axis_dir) * DIMENSION_LINE_TICK_HALF;
     [
-        (visible_start, visible_end),
-        (start - tick_dir, start + tick_dir),
-        (end - tick_dir, end + tick_dir),
+        (geometry.visible_start, geometry.visible_end),
+        (start, geometry.dimension_start),
+        (end, geometry.dimension_end),
+        (
+            geometry.dimension_start - tick_dir,
+            geometry.dimension_start + tick_dir,
+        ),
+        (geometry.dimension_end - tick_dir, geometry.dimension_end + tick_dir),
     ]
 }
 
@@ -1108,6 +1309,7 @@ fn snapshot_from_node(node: &DimensionLineNode) -> DimensionLineSnapshot {
         element_id: ElementId(u64::MAX),
         start: node.start,
         end: node.end,
+        line_point: node.line_point,
         extension: node.extension,
         visible: node.visible,
         label: node.label.clone(),
@@ -1116,19 +1318,53 @@ fn snapshot_from_node(node: &DimensionLineNode) -> DimensionLineSnapshot {
     }
 }
 
-fn label_colors(selected: bool) -> (egui::Color32, egui::Color32, egui::Color32) {
-    if selected {
-        (
+fn drawing_annotation_paper_style(render_settings: &RenderSettings) -> bool {
+    render_settings.paper_fill_enabled
+        || (render_settings.background_rgb[0] * 0.2126
+            + render_settings.background_rgb[1] * 0.7152
+            + render_settings.background_rgb[2] * 0.0722)
+            >= 0.8
+}
+
+fn dimension_line_color(render_settings: Option<&RenderSettings>, selected: bool) -> Color {
+    if render_settings.is_some_and(drawing_annotation_paper_style) {
+        if selected {
+            DIMENSION_LINE_PAPER_SELECTED_COLOR
+        } else {
+            DIMENSION_LINE_PAPER_COLOR
+        }
+    } else if selected {
+        DIMENSION_LINE_SELECTED_COLOR
+    } else {
+        DIMENSION_LINE_COLOR
+    }
+}
+
+fn label_colors(
+    selected: bool,
+    paper_style: bool,
+) -> (egui::Color32, egui::Color32, egui::Color32) {
+    match (paper_style, selected) {
+        (true, true) => (
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 242),
+            egui::Color32::from_rgb(54, 103, 191),
+            egui::Color32::from_rgb(22, 35, 64),
+        ),
+        (true, false) => (
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 236),
+            egui::Color32::from_rgb(54, 54, 64),
+            egui::Color32::from_rgb(28, 28, 34),
+        ),
+        (false, true) => (
             egui::Color32::from_rgba_unmultiplied(64, 60, 24, 220),
             egui::Color32::from_rgb(255, 232, 120),
             egui::Color32::from_rgb(255, 246, 190),
-        )
-    } else {
-        (
+        ),
+        (false, false) => (
             egui::Color32::from_rgba_unmultiplied(26, 26, 26, 200),
             egui::Color32::from_rgb(222, 210, 110),
             egui::Color32::from_rgb(245, 236, 180),
-        )
+        ),
     }
 }
 
@@ -1153,7 +1389,11 @@ fn collect_dimension_label_overlays_from_iter<'a>(
         if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
             continue;
         }
-        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, snapshot.midpoint()) else {
+        let geometry = snapshot.geometry();
+        let line_midpoint = geometry.line_midpoint();
+        let Ok(screen_pos) =
+            camera.world_to_viewport(camera_transform, line_midpoint)
+        else {
             continue;
         };
         if screen_pos.x < 0.0
@@ -1163,12 +1403,18 @@ fn collect_dimension_label_overlays_from_iter<'a>(
         {
             continue;
         }
+        let label_center = camera
+            .world_to_viewport(
+                camera_transform,
+                line_midpoint + geometry.offset_dir * 0.15_f32.max(snapshot.offset_distance() * 0.15),
+            )
+            .ok()
+            .and_then(|probe| (probe - screen_pos).try_normalize())
+            .map(|direction| screen_pos + direction * DIMENSION_LINE_LABEL_SCREEN_OFFSET)
+            .unwrap_or(screen_pos);
         overlays.push(DimensionLabelOverlayInfo {
             text: snapshot.display_text(doc_props),
-            center: Vec2::new(
-                screen_pos.x,
-                screen_pos.y - DIMENSION_LINE_LABEL_SCREEN_OFFSET_Y,
-            ),
+            center: label_center,
             selected,
         });
     }
@@ -1204,6 +1450,7 @@ mod tests {
             .expect("snapshot should downcast");
         assert_eq!(snapshot.start, Vec3::ZERO);
         assert_eq!(snapshot.end, Vec3::new(2.0, 0.0, 0.0));
+        assert_eq!(snapshot.line_point, Vec3::new(1.0, -0.36, 0.0));
         assert_eq!(snapshot.extension, 0.24);
         assert_eq!(snapshot.label.as_deref(), Some("Width"));
     }
@@ -1214,6 +1461,7 @@ mod tests {
             element_id: ElementId(7),
             start: Vec3::ZERO,
             end: Vec3::new(2.5, 0.0, 0.0),
+            line_point: Vec3::new(1.25, -0.45, 0.0),
             extension: 0.25,
             visible: true,
             label: Some("Overall".to_string()),
@@ -1238,6 +1486,31 @@ mod tests {
     }
 
     #[test]
+    fn explicit_offset_creates_dimension_line_point() {
+        let start = Vec3::ZERO;
+        let end = Vec3::new(2.0, 0.0, 0.0);
+        let line_point = parse_dimension_line_point_json(&json!({ "offset": 0.5 }), start, end)
+            .expect("offset should parse");
+
+        assert_eq!(line_point, Vec3::new(1.0, -0.5, 0.0));
+    }
+
+    #[test]
+    fn dimension_geometry_offsets_line_outside_measurement() {
+        let geometry = dimension_geometry(
+            Vec3::ZERO,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(1.0, -0.5, 0.0),
+            0.25,
+        );
+
+        assert_eq!(geometry.dimension_start, Vec3::new(0.0, -0.5, 0.0));
+        assert_eq!(geometry.dimension_end, Vec3::new(2.0, -0.5, 0.0));
+        assert_eq!(geometry.visible_start, Vec3::new(-0.25, -0.5, 0.0));
+        assert_eq!(geometry.visible_end, Vec3::new(2.25, -0.5, 0.0));
+    }
+
+    #[test]
     fn dimension_snap_points_respect_global_visibility_toggle() {
         let mut world = World::new();
         world.insert_resource(DimensionLineVisibility { show_all: false });
@@ -1246,6 +1519,7 @@ mod tests {
             DimensionLineNode {
                 start: Vec3::ZERO,
                 end: Vec3::X,
+                line_point: Vec3::new(0.5, -0.2, 0.0),
                 extension: 0.2,
                 visible: true,
                 label: None,

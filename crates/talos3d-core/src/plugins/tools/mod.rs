@@ -103,7 +103,7 @@ fn enter_dimension_line_tool(mut status_bar_data: ResMut<StatusBarData>) {
     set_tool_status(
         &mut status_bar_data,
         "Dimension",
-        "Click a start point, then click an end point to create a dimension",
+        "Click start, click end, then click to place the offset dimension line",
     );
 }
 

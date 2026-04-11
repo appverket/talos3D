@@ -599,6 +599,8 @@ pub struct PlaceGuideLineRequest {
 pub struct PlaceDimensionLineRequest {
     pub start: [f32; 3],
     pub end: [f32; 3],
+    pub line_point: Option<[f32; 3]>,
+    pub offset: Option<f32>,
     pub extension: Option<f32>,
     pub visible: Option<bool>,
     pub label: Option<String>,
@@ -5262,7 +5264,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "place_dimension_line",
-        description = "Create a two-point dimension line with automatic visible overhang. Optionally override extension, units, and precision."
+        description = "Create a drafting dimension from start and end points, then place the visible dimension line with line_point or offset. Optionally override extension, units, and precision."
     )]
     async fn place_dimension_line_tool(
         &self,
@@ -6849,6 +6851,12 @@ fn create_dimension_line_request_json(request: &PlaceDimensionLineRequest) -> Va
         .expect("dimension line create request should serialize as an object");
     if let Some(extension) = request.extension {
         object.insert("extension".to_string(), json!(extension));
+    }
+    if let Some(line_point) = request.line_point {
+        object.insert("line_point".to_string(), json!(line_point));
+    }
+    if let Some(offset) = request.offset {
+        object.insert("offset".to_string(), json!(offset));
     }
     if let Some(display_unit) = &request.display_unit {
         object.insert("display_unit".to_string(), json!(display_unit));
@@ -11504,6 +11512,17 @@ mod tests {
             .expect("dimension line snapshot should exist");
         assert_eq!(snapshot["start"], json!([0.0, 0.0, 0.0]));
         assert_eq!(snapshot["end"], json!([2.0, 0.0, 0.0]));
+        let line_point = snapshot["line_point"]
+            .as_array()
+            .expect("line_point should serialize as an array");
+        assert_eq!(line_point.len(), 3);
+        assert!((line_point[0].as_f64().expect("x should be numeric") - 1.0).abs() < 1e-5);
+        assert!((line_point[1].as_f64().expect("y should be numeric") + 0.36).abs() < 1e-5);
+        assert!(line_point[2].as_f64().expect("z should be numeric").abs() < 1e-5);
+        let offset = snapshot["offset"]
+            .as_f64()
+            .expect("offset should serialize as numeric");
+        assert!((offset - 0.36).abs() < 1e-5);
         let extension = snapshot["extension"]
             .as_f64()
             .expect("extension should be numeric");
