@@ -2201,6 +2201,24 @@ fn draw_render_settings_window(
                     ui.checkbox(&mut settings.ssr_use_secant, "Use Secant Refinement");
                 });
             });
+
+            ui.collapsing("Drawing Overlays", |ui| {
+                ui.checkbox(
+                    &mut settings.wireframe_overlay_enabled,
+                    "Enable Wireframe Overlay",
+                );
+                ui.checkbox(
+                    &mut settings.contour_overlay_enabled,
+                    "Enable Contour Overlay",
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Contours draw camera silhouettes. Wireframe draws authored edge linework on top of shaded solids.",
+                    )
+                    .small()
+                    .color(CHROME_MUTED),
+                );
+            });
         });
 }
 
