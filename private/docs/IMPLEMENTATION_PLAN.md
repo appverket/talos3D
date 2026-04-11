@@ -1,5 +1,14 @@
 # Implementation Plan
 
+## Completed: Proof Point 68 — Multi-Format Drawing Export
+
+The drawing-view contract now exports the current cropped drawing viewport to
+PNG, PDF, and SVG through one shared capture path. Desktop users get a File
+menu / toolbar export command, and MCP gets a first-class `export_drawing`
+tool.
+
+See [PROOF_POINT_68.md](./proof_points/PROOF_POINT_68.md).
+
 ## Completed: Proof Point 61 — Drawing Views And Paper Export
 
 **Validates**: ADR-030 (renderer control surface), ADR-035 (drawing views and

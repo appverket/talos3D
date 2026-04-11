@@ -475,6 +475,7 @@ fn register_core_toolbar(app: &mut App) {
             "core.new".to_string(),
             "core.open".to_string(),
             "core.save".to_string(),
+            "core.export_drawing".to_string(),
             "core.import".to_string(),
         ],
     };

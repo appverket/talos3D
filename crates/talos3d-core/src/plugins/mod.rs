@@ -10,6 +10,7 @@ pub mod definition_browser;
 pub mod dimension_line;
 pub mod document_properties;
 pub mod document_state;
+pub mod drawing_export;
 pub mod egui_chrome;
 pub mod face_edit;
 pub mod grid;

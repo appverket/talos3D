@@ -7,8 +7,7 @@ use serde_json::Value;
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
     camera::focus_orbit_camera_on_bounds, commands::DeleteEntitiesCommand,
-    history::PendingCommandQueue, identity::ElementId,
-    lighting::scene_light_object_exposed,
+    history::PendingCommandQueue, identity::ElementId, lighting::scene_light_object_exposed,
     palette::PaletteState, selection::Selected, tools::ActiveTool, transform::PivotPoint,
 };
 
@@ -597,6 +596,7 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.rotate", "rotate"),
         ("icon.scale", "scale"),
         ("icon.save", "save"),
+        ("icon.export", "export"),
         ("icon.load", "folder_open"),
         ("icon.create", "plus"),
         ("icon.view", "scan"),
@@ -1098,7 +1098,8 @@ mod tests {
             .insert_resource(crate::plugins::egui_chrome::EguiWantsInput::default());
 
         app.world_mut().spawn(ElementId(1));
-        app.world_mut().spawn((ElementId(2), SceneLightNode::default()));
+        app.world_mut()
+            .spawn((ElementId(2), SceneLightNode::default()));
 
         queue_command_invocation(app.world_mut(), "core.select_all", Value::Null);
         app.update();
@@ -1121,7 +1122,8 @@ mod tests {
             .insert_resource(crate::plugins::egui_chrome::EguiWantsInput::default());
 
         app.world_mut().spawn(ElementId(1));
-        app.world_mut().spawn((ElementId(2), SceneLightNode::default()));
+        app.world_mut()
+            .spawn((ElementId(2), SceneLightNode::default()));
 
         queue_command_invocation(app.world_mut(), "core.select_all", Value::Null);
         app.update();

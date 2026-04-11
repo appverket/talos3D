@@ -77,6 +77,9 @@ The export path crops to the modeling viewport:
 
 - menu bars, toolbars, assistant UI, and property panels are excluded
 - authored viewport annotations such as dimensions remain included
+- the first multi-format export contract writes the same cropped drawing view
+  to PNG directly and to PDF/SVG by embedding that exact capture, so there is
+  no second drawing renderer to drift from the live viewport result
 
 This makes exported images usable as drawing assets without post-cropping.
 
@@ -88,6 +91,7 @@ The following must be public through MCP:
 - renderer settings including background, grid visibility, paper fill, and
   edge overlays
 - viewport screenshot export
+- drawing export to PDF, PNG, and SVG
 
 This is required for Agent Experience parity. An AI should be able to create a
 drawing-ready view without simulating mouse interaction.
