@@ -18,12 +18,21 @@ use std::collections::HashMap;
 
 use crate::{
     capability_registry::CapabilityRegistry,
-    plugins::{identity::ElementId, modeling::mesh_generation::MeshGenerationSet},
+    plugins::{
+        identity::ElementId,
+        modeling::{mesh_generation::MeshGenerationSet, snapshots::ray_triangle_intersection},
+    },
 };
 
 const WIREFRAME_OVERLAY_COLOR: Color = Color::srgba(0.12, 0.13, 0.15, 1.0);
 const CONTOUR_OVERLAY_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 1.0);
+const VISIBLE_EDGE_OVERLAY_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 1.0);
 const EDGE_QUANTIZATION_SCALE: f32 = 10_000.0;
+const DEFAULT_BACKGROUND_RGB: [f32; 3] = [0.17, 0.18, 0.20];
+const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
+const VISIBLE_EDGE_RAY_SAMPLE_T_VALUES: [f32; 3] = [0.2, 0.5, 0.8];
+const EDGE_VISIBILITY_EPSILON: f32 = 0.01;
+const ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH: f32 = 10_000.0;
 
 // ─── Settings resource ───────────────────────────────────────────────────────
 
@@ -138,6 +147,14 @@ pub struct RenderSettings {
     pub wireframe_overlay_enabled: bool,
     /// Draw silhouette / contour edges against the active camera.
     pub contour_overlay_enabled: bool,
+    /// Draw visible sharp and silhouette edges with hidden-line removal.
+    pub visible_edge_overlay_enabled: bool,
+    /// Whether the construction grid is visible.
+    pub grid_enabled: bool,
+    /// Background color used for the 3D viewport and exported drawing views.
+    pub background_rgb: [f32; 3],
+    /// Swap scene materials for white unlit fill so drawing edges read cleanly.
+    pub paper_fill_enabled: bool,
 }
 
 impl Default for RenderSettings {
@@ -165,8 +182,18 @@ impl Default for RenderSettings {
             ssr_use_secant: true,
             wireframe_overlay_enabled: false,
             contour_overlay_enabled: false,
+            visible_edge_overlay_enabled: false,
+            grid_enabled: true,
+            background_rgb: DEFAULT_BACKGROUND_RGB,
+            paper_fill_enabled: false,
         }
     }
+}
+
+#[derive(Component, Debug, Clone)]
+struct PaperFillMaterialOverride {
+    original: Handle<StandardMaterial>,
+    override_handle: Handle<StandardMaterial>,
 }
 
 // ─── Plugin ──────────────────────────────────────────────────────────────────
@@ -179,7 +206,7 @@ impl Plugin for RenderPipelinePlugin {
         app.init_resource::<RenderSettings>()
             // PostStartup ensures the camera plugin has already run Startup.
             .add_systems(PostStartup, setup_render_pipeline)
-            .add_systems(Update, sync_render_settings)
+            .add_systems(Update, (sync_render_settings, sync_clear_color, sync_paper_fill_materials))
             .add_systems(
                 Update,
                 draw_model_edge_overlays.after(MeshGenerationSet::Generate),
@@ -193,6 +220,7 @@ fn setup_render_pipeline(
     mut commands: Commands,
     settings: Res<RenderSettings>,
     camera_query: Query<Entity, With<Camera3d>>,
+    mut clear_color: ResMut<ClearColor>,
 ) {
     let Ok(camera) = camera_query.single() else {
         warn!("RenderPipelinePlugin: no Camera3d found at startup");
@@ -208,6 +236,11 @@ fn setup_render_pipeline(
         .insert(Exposure {
             ev100: settings.exposure_ev100,
         });
+    *clear_color = ClearColor(Color::srgb(
+        settings.background_rgb[0],
+        settings.background_rgb[1],
+        settings.background_rgb[2],
+    ));
 
     sync_ssao_component(&mut commands, camera, &settings);
     sync_bloom_component(&mut commands, camera, &settings);
@@ -240,6 +273,59 @@ fn sync_render_settings(
     sync_ssao_component(&mut commands, camera, &settings);
     sync_bloom_component(&mut commands, camera, &settings);
     sync_ssr_component(&mut commands, camera, &settings);
+}
+
+fn sync_clear_color(settings: Res<RenderSettings>, mut clear_color: ResMut<ClearColor>) {
+    let target = Color::srgb(
+        settings.background_rgb[0],
+        settings.background_rgb[1],
+        settings.background_rgb[2],
+    );
+    if clear_color.0 != target {
+        *clear_color = ClearColor(target);
+    }
+}
+
+fn sync_paper_fill_materials(
+    settings: Res<RenderSettings>,
+    mut commands: Commands,
+    mut mesh_query: Query<(
+        Entity,
+        &mut MeshMaterial3d<StandardMaterial>,
+        Option<&PaperFillMaterialOverride>,
+    )>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (entity, mut material_handle, override_state) in &mut mesh_query {
+        match (settings.paper_fill_enabled, override_state) {
+            (true, None) => {
+                let original = material_handle.0.clone();
+                let Some(source) = materials.get(&original).cloned() else {
+                    continue;
+                };
+                let mut override_material = source;
+                override_material.base_color = Color::WHITE;
+                override_material.emissive = LinearRgba::BLACK;
+                override_material.perceptual_roughness = 1.0;
+                override_material.metallic = 0.0;
+                override_material.reflectance = 0.0;
+                override_material.unlit = true;
+                override_material.alpha_mode = AlphaMode::Opaque;
+                let override_handle = materials.add(override_material);
+                material_handle.0 = override_handle.clone();
+                commands.entity(entity).insert(PaperFillMaterialOverride {
+                    original,
+                    override_handle,
+                });
+            }
+            (false, Some(state)) => {
+                material_handle.0 = state.original.clone();
+                materials.remove(state.override_handle.id());
+                commands.entity(entity).remove::<PaperFillMaterialOverride>();
+            }
+            _ => {}
+        }
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -300,6 +386,14 @@ fn sync_ssr_component(commands: &mut Commands, camera: Entity, settings: &Render
     }
 }
 
+#[derive(Clone)]
+struct MeshOverlaySubject {
+    entity: Entity,
+    mesh_handle: Handle<Mesh>,
+    mesh_transform: GlobalTransform,
+    type_name: &'static str,
+}
+
 fn draw_model_edge_overlays(
     world: &World,
     settings: Res<RenderSettings>,
@@ -308,7 +402,10 @@ fn draw_model_edge_overlays(
     camera_query: Query<(&GlobalTransform, &Projection), With<Camera3d>>,
     mut gizmos: Gizmos,
 ) {
-    if !settings.wireframe_overlay_enabled && !settings.contour_overlay_enabled {
+    if !settings.wireframe_overlay_enabled
+        && !settings.contour_overlay_enabled
+        && !settings.visible_edge_overlay_enabled
+    {
         return;
     }
 
@@ -328,6 +425,7 @@ fn draw_model_edge_overlays(
         return;
     };
 
+    let mut subjects = Vec::new();
     for (entity, _element_id, mesh_handle, mesh_transform, visibility) in query.iter(world) {
         if visibility.is_some_and(|visibility| *visibility == Visibility::Hidden) {
             continue;
@@ -341,25 +439,54 @@ fn draw_model_edge_overlays(
         if drawing_overlay_excluded(snapshot.type_name()) {
             continue;
         }
+        subjects.push(MeshOverlaySubject {
+            entity,
+            mesh_handle: mesh_handle.0.clone(),
+            mesh_transform: *mesh_transform,
+            type_name: snapshot.type_name(),
+        });
+    }
 
+    let scene_triangles = if settings.visible_edge_overlay_enabled {
+        collect_scene_triangles(&subjects, &mesh_assets)
+    } else {
+        Vec::new()
+    };
+
+    for subject in subjects {
         if settings.wireframe_overlay_enabled {
-            if let Some(factory) = registry.factory_for(snapshot.type_name()) {
-                factory.draw_selection(world, entity, &mut gizmos, WIREFRAME_OVERLAY_COLOR);
+            if let Some(factory) = registry.factory_for(subject.type_name) {
+                factory.draw_selection(world, subject.entity, &mut gizmos, WIREFRAME_OVERLAY_COLOR);
             }
         }
 
+        let Some(mesh) = mesh_assets.get(&subject.mesh_handle) else {
+            continue;
+        };
+
         if settings.contour_overlay_enabled {
-            let Some(mesh) = mesh_assets.get(mesh_handle.id()) else {
-                continue;
-            };
             draw_mesh_contours(
                 mesh,
-                mesh_transform,
+                &subject.mesh_transform,
                 camera_position,
                 camera_forward,
                 orthographic,
                 &mut gizmos,
                 CONTOUR_OVERLAY_COLOR,
+            );
+        }
+
+        if settings.visible_edge_overlay_enabled {
+            draw_visible_feature_edges(
+                mesh,
+                &subject.mesh_transform,
+                subject.entity,
+                camera_position,
+                camera_forward,
+                orthographic,
+                &scene_triangles,
+                &mut gizmos,
+                VISIBLE_EDGE_OVERLAY_COLOR,
             );
         }
     }
@@ -370,6 +497,51 @@ fn drawing_overlay_excluded(type_name: &str) -> bool {
         type_name,
         "dimension_line" | "guide_line" | "scene_light" | "clipping_plane" | "group"
     )
+}
+
+#[derive(Clone, Copy)]
+struct SceneTriangle {
+    entity: Entity,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+}
+
+fn collect_scene_triangles(
+    subjects: &[MeshOverlaySubject],
+    mesh_assets: &Assets<Mesh>,
+) -> Vec<SceneTriangle> {
+    let mut triangles = Vec::new();
+    for subject in subjects {
+        let Some(mesh) = mesh_assets.get(&subject.mesh_handle) else {
+            continue;
+        };
+        let Some(positions) = mesh_positions(mesh) else {
+            continue;
+        };
+        let Some(indices) = mesh_triangle_indices(mesh, positions.len()) else {
+            continue;
+        };
+        for triangle in indices.chunks(3) {
+            if triangle.len() < 3 {
+                continue;
+            }
+            let (Some(local_a), Some(local_b), Some(local_c)) = (
+                positions.get(triangle[0] as usize).copied(),
+                positions.get(triangle[1] as usize).copied(),
+                positions.get(triangle[2] as usize).copied(),
+            ) else {
+                continue;
+            };
+            triangles.push(SceneTriangle {
+                entity: subject.entity,
+                a: subject.mesh_transform.transform_point(Vec3::from(local_a)),
+                b: subject.mesh_transform.transform_point(Vec3::from(local_b)),
+                c: subject.mesh_transform.transform_point(Vec3::from(local_c)),
+            });
+        }
+    }
+    triangles
 }
 
 fn draw_mesh_contours(
@@ -398,6 +570,180 @@ fn draw_mesh_contours(
     for (start, end) in contour_segments {
         gizmos.line(start, end, color);
     }
+}
+
+fn draw_visible_feature_edges(
+    mesh: &Mesh,
+    mesh_transform: &GlobalTransform,
+    entity: Entity,
+    camera_position: Vec3,
+    camera_forward: Vec3,
+    orthographic: bool,
+    scene_triangles: &[SceneTriangle],
+    gizmos: &mut Gizmos,
+    color: Color,
+) {
+    for (start, end) in collect_visible_feature_segments(
+        mesh,
+        mesh_transform,
+        entity,
+        camera_position,
+        camera_forward,
+        orthographic,
+        scene_triangles,
+    ) {
+        gizmos.line(start, end, color);
+    }
+}
+
+fn collect_visible_feature_segments(
+    mesh: &Mesh,
+    mesh_transform: &GlobalTransform,
+    entity: Entity,
+    camera_position: Vec3,
+    camera_forward: Vec3,
+    orthographic: bool,
+    scene_triangles: &[SceneTriangle],
+) -> Vec<(Vec3, Vec3)> {
+    let Some(positions) = mesh_positions(mesh) else {
+        return Vec::new();
+    };
+    let Some(indices) = mesh_triangle_indices(mesh, positions.len()) else {
+        return Vec::new();
+    };
+
+    let mut edges = HashMap::<EdgeKey, FeatureEdgeState>::new();
+    for triangle in indices.chunks(3) {
+        if triangle.len() < 3 {
+            continue;
+        }
+        let (Some(local_a), Some(local_b), Some(local_c)) = (
+            positions.get(triangle[0] as usize).copied(),
+            positions.get(triangle[1] as usize).copied(),
+            positions.get(triangle[2] as usize).copied(),
+        ) else {
+            continue;
+        };
+
+        let world_a = mesh_transform.transform_point(Vec3::from(local_a));
+        let world_b = mesh_transform.transform_point(Vec3::from(local_b));
+        let world_c = mesh_transform.transform_point(Vec3::from(local_c));
+        let normal = (world_b - world_a).cross(world_c - world_a).normalize_or_zero();
+        if normal.length_squared() <= f32::EPSILON {
+            continue;
+        }
+        let face_center = (world_a + world_b + world_c) / 3.0;
+        let view_to_camera = if orthographic {
+            -camera_forward
+        } else {
+            (camera_position - face_center).normalize_or_zero()
+        };
+        let front_facing = normal.dot(view_to_camera) >= 0.0;
+
+        register_feature_edge(&mut edges, local_a, local_b, world_a, world_b, normal, front_facing);
+        register_feature_edge(&mut edges, local_b, local_c, world_b, world_c, normal, front_facing);
+        register_feature_edge(&mut edges, local_c, local_a, world_c, world_a, normal, front_facing);
+    }
+
+    edges
+        .into_values()
+        .filter(|edge| edge.is_visible_candidate())
+        .filter(|edge| {
+            edge_is_visible(
+                edge.start_world,
+                edge.end_world,
+                entity,
+                camera_position,
+                camera_forward,
+                orthographic,
+                scene_triangles,
+            )
+        })
+        .map(|edge| (edge.start_world, edge.end_world))
+        .collect()
+}
+
+fn register_feature_edge(
+    edges: &mut HashMap<EdgeKey, FeatureEdgeState>,
+    local_start: [f32; 3],
+    local_end: [f32; 3],
+    world_start: Vec3,
+    world_end: Vec3,
+    normal: Vec3,
+    front_facing: bool,
+) {
+    let key = EdgeKey::from_points(local_start, local_end);
+    let state = edges.entry(key).or_insert_with(|| FeatureEdgeState {
+        start_world: world_start,
+        end_world: world_end,
+        normals: [Vec3::ZERO; 2],
+        front_facing: [false; 2],
+        total_faces: 0,
+    });
+    let face_index = usize::from(state.total_faces.min(1));
+    state.normals[face_index] = normal;
+    state.front_facing[face_index] = front_facing;
+    state.total_faces = state.total_faces.saturating_add(1);
+}
+
+fn edge_is_visible(
+    start: Vec3,
+    end: Vec3,
+    owner_entity: Entity,
+    camera_position: Vec3,
+    camera_forward: Vec3,
+    orthographic: bool,
+    scene_triangles: &[SceneTriangle],
+) -> bool {
+    VISIBLE_EDGE_RAY_SAMPLE_T_VALUES
+        .into_iter()
+        .map(|t| start.lerp(end, t))
+        .any(|sample| {
+            point_is_visible(
+                sample,
+                owner_entity,
+                camera_position,
+                camera_forward,
+                orthographic,
+                scene_triangles,
+            )
+        })
+}
+
+fn point_is_visible(
+    sample: Vec3,
+    owner_entity: Entity,
+    camera_position: Vec3,
+    camera_forward: Vec3,
+    orthographic: bool,
+    scene_triangles: &[SceneTriangle],
+) -> bool {
+    let (ray_origin, ray_direction, max_distance) = if orthographic {
+        let Some(direction) = Dir3::new(camera_forward).ok() else {
+            return true;
+        };
+        (
+            sample - direction.as_vec3() * ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH,
+            direction,
+            ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH,
+        )
+    } else {
+        let ray_vector = sample - camera_position;
+        let max_distance = ray_vector.length();
+        let Some(direction) = Dir3::new(ray_vector).ok() else {
+            return true;
+        };
+        (camera_position, direction, max_distance)
+    };
+    let ray = Ray3d::new(ray_origin, ray_direction);
+    !scene_triangles.iter().any(|triangle| {
+        if triangle.entity == owner_entity {
+            return ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c)
+                .is_some_and(|distance| distance > EDGE_VISIBILITY_EPSILON && distance < max_distance - EDGE_VISIBILITY_EPSILON);
+        }
+        ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c)
+            .is_some_and(|distance| distance > EDGE_VISIBILITY_EPSILON && distance < max_distance - EDGE_VISIBILITY_EPSILON)
+    })
 }
 
 fn mesh_positions(mesh: &Mesh) -> Option<Vec<[f32; 3]>> {
@@ -534,6 +880,29 @@ impl EdgeContourState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FeatureEdgeState {
+    start_world: Vec3,
+    end_world: Vec3,
+    normals: [Vec3; 2],
+    front_facing: [bool; 2],
+    total_faces: u8,
+}
+
+impl FeatureEdgeState {
+    fn is_visible_candidate(&self) -> bool {
+        match self.total_faces {
+            0 => false,
+            1 => true,
+            _ => {
+                let silhouette = self.front_facing[0] != self.front_facing[1];
+                let crease = self.normals[0].dot(self.normals[1]) <= FEATURE_EDGE_COS_THRESHOLD;
+                silhouette || crease
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +934,58 @@ mod tests {
 
         assert!(!settings.wireframe_overlay_enabled);
         assert!(!settings.contour_overlay_enabled);
+        assert!(!settings.visible_edge_overlay_enabled);
+        assert!(settings.grid_enabled);
+        assert!(!settings.paper_fill_enabled);
+        assert_eq!(settings.background_rgb, DEFAULT_BACKGROUND_RGB);
+    }
+
+    #[test]
+    fn visible_feature_edges_hide_back_edges_in_front_projection() {
+        let positions = vec![
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+        ];
+        let indices = vec![
+            0, 1, 2, 0, 2, 3, // back
+            4, 6, 5, 4, 7, 6, // front
+            0, 4, 5, 0, 5, 1, // bottom
+            3, 2, 6, 3, 6, 7, // top
+            1, 5, 6, 1, 6, 2, // right
+            0, 3, 7, 0, 7, 4, // left
+        ];
+        let mut mesh = Mesh::new(
+            bevy::render::render_resource::PrimitiveTopology::TriangleList,
+            Default::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
+        mesh.insert_indices(Indices::U32(indices));
+
+        let mut meshes = Assets::<Mesh>::default();
+        let handle = meshes.add(mesh.clone());
+        let subjects = vec![MeshOverlaySubject {
+            entity: Entity::from_bits(1),
+            mesh_handle: handle,
+            mesh_transform: GlobalTransform::IDENTITY,
+            type_name: "box",
+        }];
+        let scene_triangles = collect_scene_triangles(&subjects, &meshes);
+        let segments = collect_visible_feature_segments(
+            &mesh,
+            &GlobalTransform::IDENTITY,
+            Entity::from_bits(1),
+            Vec3::new(0.0, 0.0, 10.0),
+            Vec3::NEG_Z,
+            true,
+            &scene_triangles,
+        );
+
+        assert_eq!(segments.len(), 4);
     }
 }

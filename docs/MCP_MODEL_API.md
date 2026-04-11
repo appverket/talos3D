@@ -49,8 +49,9 @@ writeable through the material tools.
 
 Viewport renderer state is also available over MCP through
 `get_render_settings` and `set_render_settings`. Those tools expose
-tonemapping, exposure, SSAO, bloom, and SSR controls so an agent can tune the
-working view without simulating UI input.
+tonemapping, exposure, SSAO, bloom, SSR, background color, grid visibility,
+paper fill, and drawing overlays so an agent can tune the working view or
+compose export-ready drawing views without simulating UI input.
 
 Scene lighting is also available over MCP. Ambient lighting is explicit scene
 state, while directional, point, and spot lights are authored entities with
@@ -161,6 +162,11 @@ For fillet/chamfer specifically:
 - `delete_light`
 - `set_ambient_light`
 - `restore_default_light_rig`
+- `view_list`
+- `view_save`
+- `view_restore`
+- `view_update`
+- `view_delete`
 
 ### Groups and layers
 
@@ -188,6 +194,8 @@ addition to entity counts and capability-defined metrics.
 The renderer and lighting surfaces are intentionally agent-facing:
 
 - renderer tuning lives in `get_render_settings` and `set_render_settings`
+- named camera states live in `view_list`, `view_save`, `view_restore`,
+  `view_update`, and `view_delete`
 - ambient scene lighting lives in `get_lighting_scene` and `set_ambient_light`
 - authored lights live in `list_lights`, `create_light`, `update_light`, and
   `delete_light`
@@ -200,6 +208,14 @@ fixture. That means:
 - agents can inspect and modify the active lighting contract directly
 - user-created light rigs persist with the project
 - the same concepts work in desktop and browser-hosted deployments
+
+Renderer control also now supports drawing-style viewport composition:
+
+- orthographic views can be saved/restored as named views
+- white-paper presentation can be produced through `background_rgb`,
+  `grid_enabled`, and `paper_fill_enabled`
+- hidden-line-friendly export can be approximated with
+  `visible_edge_overlay_enabled`
 
 Light creation/update currently supports:
 

@@ -639,6 +639,10 @@ pub struct RenderSettingsInfo {
     pub ssr_use_secant: bool,
     pub wireframe_overlay_enabled: bool,
     pub contour_overlay_enabled: bool,
+    pub visible_edge_overlay_enabled: bool,
+    pub grid_enabled: bool,
+    pub background_rgb: [f32; 3],
+    pub paper_fill_enabled: bool,
 }
 
 impl RenderSettingsInfo {
@@ -666,6 +670,10 @@ impl RenderSettingsInfo {
             ssr_use_secant: settings.ssr_use_secant,
             wireframe_overlay_enabled: settings.wireframe_overlay_enabled,
             contour_overlay_enabled: settings.contour_overlay_enabled,
+            visible_edge_overlay_enabled: settings.visible_edge_overlay_enabled,
+            grid_enabled: settings.grid_enabled,
+            background_rgb: settings.background_rgb,
+            paper_fill_enabled: settings.paper_fill_enabled,
         }
     }
 }
@@ -696,6 +704,10 @@ pub struct RenderSettingsUpdateRequest {
     pub ssr_use_secant: Option<bool>,
     pub wireframe_overlay_enabled: Option<bool>,
     pub contour_overlay_enabled: Option<bool>,
+    pub visible_edge_overlay_enabled: Option<bool>,
+    pub grid_enabled: Option<bool>,
+    pub background_rgb: Option<[f32; 3]>,
+    pub paper_fill_enabled: Option<bool>,
 }
 
 // --- Definition / Occurrence types ---
@@ -5322,7 +5334,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "get_render_settings",
-        description = "Get the current viewport renderer settings, including tonemapping, exposure, SSAO, bloom, and SSR controls."
+        description = "Get the current viewport renderer settings, including tonemapping, exposure, post-processing, drawing overlays, grid visibility, paper fill, and background color."
     )]
     async fn get_render_settings_tool(&self) -> Result<CallToolResult, McpError> {
         let settings = self
@@ -5334,7 +5346,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "set_render_settings",
-        description = "Update viewport renderer settings. Pass any subset of tonemapping, exposure_ev100, SSAO, bloom, and SSR fields."
+        description = "Update viewport renderer settings. Pass any subset of tonemapping, exposure, post-processing, drawing overlays, grid visibility, paper fill, and background color fields."
     )]
     async fn set_render_settings_tool(
         &self,
@@ -7096,6 +7108,22 @@ fn handle_set_render_settings(
     }
     if let Some(value) = request.contour_overlay_enabled {
         settings.contour_overlay_enabled = value;
+    }
+    if let Some(value) = request.visible_edge_overlay_enabled {
+        settings.visible_edge_overlay_enabled = value;
+    }
+    if let Some(value) = request.grid_enabled {
+        settings.grid_enabled = value;
+    }
+    if let Some(value) = request.background_rgb {
+        settings.background_rgb = [
+            value[0].clamp(0.0, 1.0),
+            value[1].clamp(0.0, 1.0),
+            value[2].clamp(0.0, 1.0),
+        ];
+    }
+    if let Some(value) = request.paper_fill_enabled {
+        settings.paper_fill_enabled = value;
     }
 
     let info = RenderSettingsInfo::from_settings(&settings);
@@ -12994,6 +13022,10 @@ mod tests {
                 ssr_linear_steps: Some(24),
                 wireframe_overlay_enabled: Some(true),
                 contour_overlay_enabled: Some(true),
+                visible_edge_overlay_enabled: Some(true),
+                grid_enabled: Some(false),
+                background_rgb: Some([1.0, 1.0, 1.0]),
+                paper_fill_enabled: Some(true),
                 ..Default::default()
             },
         )
@@ -13006,6 +13038,10 @@ mod tests {
         assert_eq!(updated.ssr_linear_steps, 24);
         assert!(updated.wireframe_overlay_enabled);
         assert!(updated.contour_overlay_enabled);
+        assert!(updated.visible_edge_overlay_enabled);
+        assert!(!updated.grid_enabled);
+        assert_eq!(updated.background_rgb, [1.0, 1.0, 1.0]);
+        assert!(updated.paper_fill_enabled);
 
         let error = handle_set_render_settings(
             &mut world,
