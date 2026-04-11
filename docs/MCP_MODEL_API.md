@@ -217,6 +217,13 @@ Renderer control also now supports drawing-style viewport composition:
   `grid_enabled`, and `paper_fill_enabled`
 - hidden-line-friendly export can be approximated with
   `visible_edge_overlay_enabled`
+- the same viewpoint and drawing toggles are also reachable through
+  `invoke_command` and discoverable through `list_commands` / `list_toolbars`
+  using the `view.*` command family (`view.front`, `view.back`, `view.top`,
+  `view.bottom`, `view.left`, `view.right`, `view.isometric`,
+  `view.projection_perspective`, `view.projection_orthographic`,
+  `view.apply_paper_preset`, `view.toggle_grid`, `view.toggle_outline`, and
+  `view.toggle_wireframe`)
 
 Light creation/update currently supports:
 

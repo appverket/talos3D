@@ -30,6 +30,15 @@ them as objects.
 
 See [PROOF_POINT_64.md](./proof_points/PROOF_POINT_64.md).
 
+## Completed: Proof Point 65 — View Commands And Drawing Mode Toolbars
+
+Projection presets, orthographic viewpoints, and drawing-presentation toggles
+are now exposed through dedicated `Views` and `Render` toolbars plus command
+registry entries, so the same surface is available to menus, palette, toolbars,
+and MCP command invocation.
+
+See [PROOF_POINT_65.md](./proof_points/PROOF_POINT_65.md).
+
 ## Planned: Proof Point 63 — Inferred Guide Lines And Protractor Workflow
 
 Guide lines need a deeper construction workflow: hosted planes, inferred
