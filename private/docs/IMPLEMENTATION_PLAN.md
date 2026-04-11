@@ -972,6 +972,26 @@ ready for additional sidebar tabs later.
   tool activity appears while the request is running instead of only after the
   final answer arrives.
 
+## Complete: Proof Point 67 — Surface Cursor For 3D Dimensions And Guides
+
+**Validates**: normal 3D authoring for construction annotations instead of
+silently depending on the ground-plane cursor path.
+
+Guide lines and dimension lines were previously reading the generic drawing
+plane cursor even in perspective modeling. That left them effectively grounded
+to the plane projection instead of the visible model surface, which made
+construction annotation in normal 3D workflows unreliable or unusable.
+
+### Landed
+
+- The cursor pipeline now switches to a scene-surface ray hit for
+  `PlaceDimensionLine` and `PlaceGuideLine`.
+- When no scene surface is under the pointer, those tools still fall back to
+  the drawing plane instead of losing placement entirely.
+- For those tools, the snapped cursor now starts from the 3D surface hit rather
+  than an immediate plane-grid increment, so existing snap points can win from
+  a real 3D pick location.
+
 ## Dependency Order
 
 ```
@@ -1018,4 +1038,5 @@ PP43 (geometric inference)       — FUTURE, depends on PP42, PP39
 PP64 (selection + hidden light helpers) — COMPLETE, depends on PP29, PP17
 PP65 (view commands + drawing toolbars) — COMPLETE, depends on PP29, PP30
 PP66 (assistant sidebar profiles) — COMPLETE, depends on PP29, PP7, PP9
+PP67 (3D construction cursor) — COMPLETE, depends on PP29, PP64, PP65
 ```
