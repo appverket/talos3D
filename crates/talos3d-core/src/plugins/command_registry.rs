@@ -7,8 +7,9 @@ use serde_json::Value;
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
     camera::focus_orbit_camera_on_bounds, commands::DeleteEntitiesCommand,
-    history::PendingCommandQueue, identity::ElementId, palette::PaletteState, selection::Selected,
-    tools::ActiveTool, transform::PivotPoint,
+    history::PendingCommandQueue, identity::ElementId,
+    lighting::scene_light_object_exposed,
+    palette::PaletteState, selection::Selected, tools::ActiveTool, transform::PivotPoint,
 };
 
 use crate::plugins::icons;
@@ -398,7 +399,7 @@ pub fn register_core_commands(app: &mut App) {
             description: "Clear the current selection".to_string(),
             category: CommandCategory::Edit,
             parameters: None,
-            default_shortcut: Some("Esc".to_string()),
+            default_shortcut: Some("Esc, Ctrl/Cmd+D".to_string()),
             icon: Some("icon.deselect".to_string()),
             hint: Some("Clear the current selection".to_string()),
             requires_selection: true,
@@ -657,6 +658,13 @@ fn detect_command_shortcuts(
         }
     }
 
+    if primary_modifier && keys.just_pressed(KeyCode::KeyD) {
+        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        if !shift {
+            queue_command_invocation_resource(&mut pending, "core.deselect", Value::Null);
+        }
+    }
+
     if primary_modifier && keys.just_pressed(KeyCode::KeyG) {
         let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
         if shift {
@@ -744,6 +752,7 @@ fn execute_select_all(world: &mut World, _: &Value) -> Result<CommandResult, Str
             // Skip hidden entities
             entity_ref.get::<Visibility>().copied() != Some(Visibility::Hidden)
         })
+        .filter(|entity_ref| scene_light_object_exposed(entity_ref, world))
         .map(|entity_ref| entity_ref.id())
         .collect();
     for entity in entities {
@@ -762,6 +771,7 @@ fn execute_deselect(world: &mut World, _: &Value) -> Result<CommandResult, Strin
     for entity in entities {
         world.entity_mut(entity).remove::<Selected>();
     }
+    world.insert_resource(PivotPoint::default());
     Ok(CommandResult::empty())
 }
 
@@ -815,6 +825,7 @@ fn snapshot_bounds_for_entities(
     q.iter(world)
         .filter(|entity_ref| entity_ref.contains::<ElementId>())
         .filter(|entity_ref| !selected_only || entity_ref.contains::<Selected>())
+        .filter(|entity_ref| scene_light_object_exposed(entity_ref, world))
         .filter_map(|entity_ref| registry.capture_snapshot(&entity_ref, world))
         .filter_map(|snapshot: crate::authored_entity::BoxedEntity| snapshot.bounds())
         .reduce(|acc, bounds| crate::authored_entity::EntityBounds {
@@ -888,7 +899,12 @@ fn execute_save_as(world: &mut World, _: &Value) -> Result<CommandResult, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{palette::filtered_commands, transform::PivotPoint, ui::StatusBarData};
+    use crate::plugins::{
+        lighting::{SceneLightNode, SceneLightObjectVisibility},
+        palette::filtered_commands,
+        transform::PivotPoint,
+        ui::StatusBarData,
+    };
 
     struct TestCommandPlugin;
 
@@ -1056,5 +1072,52 @@ mod tests {
         let test_cmd = test_cmd.unwrap();
         assert_eq!(test_cmd["label"], "Custom Test Command");
         assert_eq!(test_cmd["version"], 1);
+    }
+
+    #[test]
+    fn select_all_skips_hidden_light_objects_by_default() {
+        let mut app = App::new();
+        app.add_plugins(CommandRegistryPlugin)
+            .init_resource::<Assets<Image>>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(crate::plugins::layers::LayerRegistry::default())
+            .insert_resource(SceneLightObjectVisibility::default())
+            .insert_resource(crate::plugins::egui_chrome::EguiWantsInput::default());
+
+        app.world_mut().spawn(ElementId(1));
+        app.world_mut().spawn((ElementId(2), SceneLightNode::default()));
+
+        queue_command_invocation(app.world_mut(), "core.select_all", Value::Null);
+        app.update();
+
+        let selected_ids: Vec<u64> = {
+            let mut query = app.world_mut().query::<(&ElementId, &Selected)>();
+            query.iter(app.world()).map(|(id, _)| id.0).collect()
+        };
+        assert_eq!(selected_ids, vec![1]);
+    }
+
+    #[test]
+    fn select_all_includes_light_objects_when_exposed() {
+        let mut app = App::new();
+        app.add_plugins(CommandRegistryPlugin)
+            .init_resource::<Assets<Image>>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(crate::plugins::layers::LayerRegistry::default())
+            .insert_resource(SceneLightObjectVisibility { visible: true })
+            .insert_resource(crate::plugins::egui_chrome::EguiWantsInput::default());
+
+        app.world_mut().spawn(ElementId(1));
+        app.world_mut().spawn((ElementId(2), SceneLightNode::default()));
+
+        queue_command_invocation(app.world_mut(), "core.select_all", Value::Null);
+        app.update();
+
+        let mut selected_ids: Vec<u64> = {
+            let mut query = app.world_mut().query::<(&ElementId, &Selected)>();
+            query.iter(app.world()).map(|(id, _)| id.0).collect()
+        };
+        selected_ids.sort();
+        assert_eq!(selected_ids, vec![1, 2]);
     }
 }
