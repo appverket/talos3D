@@ -44,6 +44,13 @@ const DIMENSION_LINE_DEFAULT_EXTENSION_FACTOR: f32 = 0.12;
 
 pub struct DimensionLinePlugin;
 
+#[derive(Debug, Clone, PartialEq)]
+struct DimensionLabelOverlayInfo {
+    pub text: String,
+    pub center: Vec2,
+    pub selected: bool,
+}
+
 #[derive(Resource, Debug, Clone)]
 pub struct DimensionLineVisibility {
     pub show_all: bool,
@@ -701,63 +708,29 @@ fn draw_dimension_line_labels(
         return;
     };
 
+    let overlays = collect_dimension_label_overlays_from_iter(
+        &doc_props,
+        &visibility,
+        camera,
+        camera_transform,
+        window,
+        dimensions.iter().map(|(node, selected)| (node, selected.is_some())),
+    );
+    if overlays.is_empty() {
+        return;
+    }
+
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("dimension_line_labels"),
     ));
-
-    for (node, selected) in &dimensions {
-        if !node.visible {
-            continue;
-        }
-        let snapshot = DimensionLineSnapshot {
-            element_id: ElementId(u64::MAX),
-            start: node.start,
-            end: node.end,
-            extension: node.extension,
-            visible: node.visible,
-            label: node.label.clone(),
-            display_unit: node.display_unit,
-            precision: node.precision,
-        };
-        if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
-            continue;
-        }
-        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, snapshot.midpoint()) else {
-            continue;
-        };
-        if screen_pos.x < 0.0
-            || screen_pos.y < 0.0
-            || screen_pos.x > window.width()
-            || screen_pos.y > window.height()
-        {
-            continue;
-        }
-
-        let text = snapshot.display_text(&doc_props);
-        let pos = egui::pos2(
-            screen_pos.x,
-            screen_pos.y - DIMENSION_LINE_LABEL_SCREEN_OFFSET_Y,
+    for overlay in overlays {
+        let pos = egui::pos2(overlay.center.x, overlay.center.y);
+        let rect = egui::Rect::from_center_size(
+            pos,
+            egui::vec2(overlay.text.chars().count() as f32 * 7.5 + 14.0, 22.0),
         );
-        let rect =
-            egui::Rect::from_center_size(pos, egui::vec2(text.len() as f32 * 7.5 + 14.0, 22.0));
-        let selected = selected.is_some();
-        let background = if selected {
-            egui::Color32::from_rgba_unmultiplied(64, 60, 24, 220)
-        } else {
-            egui::Color32::from_rgba_unmultiplied(26, 26, 26, 200)
-        };
-        let border = if selected {
-            egui::Color32::from_rgb(255, 232, 120)
-        } else {
-            egui::Color32::from_rgb(222, 210, 110)
-        };
-        let foreground = if selected {
-            egui::Color32::from_rgb(255, 246, 190)
-        } else {
-            egui::Color32::from_rgb(245, 236, 180)
-        };
-
+        let (background, border, foreground) = label_colors(overlay.selected);
         painter.rect_filled(rect, 4.0, background);
         painter.rect_stroke(
             rect,
@@ -768,7 +741,7 @@ fn draw_dimension_line_labels(
         painter.text(
             pos,
             egui::Align2::CENTER_CENTER,
-            text,
+            overlay.text,
             egui::FontId::proportional(13.0),
             foreground,
         );
@@ -979,6 +952,7 @@ impl Plugin for DimensionLinePlugin {
                     handle_dimension_line_clicks,
                     draw_dimension_line_tool_preview,
                     draw_dimension_line_visuals,
+                    draw_dimension_line_labels,
                 )
                     .run_if(in_state(ActiveTool::PlaceDimensionLine)),
             )
@@ -1127,6 +1101,78 @@ fn bounds_from_points(points: &[Vec3]) -> EntityBounds {
         max = max.max(*point);
     }
     EntityBounds { min, max }
+}
+
+fn snapshot_from_node(node: &DimensionLineNode) -> DimensionLineSnapshot {
+    DimensionLineSnapshot {
+        element_id: ElementId(u64::MAX),
+        start: node.start,
+        end: node.end,
+        extension: node.extension,
+        visible: node.visible,
+        label: node.label.clone(),
+        display_unit: node.display_unit,
+        precision: node.precision,
+    }
+}
+
+fn label_colors(selected: bool) -> (egui::Color32, egui::Color32, egui::Color32) {
+    if selected {
+        (
+            egui::Color32::from_rgba_unmultiplied(64, 60, 24, 220),
+            egui::Color32::from_rgb(255, 232, 120),
+            egui::Color32::from_rgb(255, 246, 190),
+        )
+    } else {
+        (
+            egui::Color32::from_rgba_unmultiplied(26, 26, 26, 200),
+            egui::Color32::from_rgb(222, 210, 110),
+            egui::Color32::from_rgb(245, 236, 180),
+        )
+    }
+}
+
+fn collect_dimension_label_overlays_from_iter<'a>(
+    doc_props: &DocumentProperties,
+    visibility: &DimensionLineVisibility,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    window: &Window,
+    dimensions: impl Iterator<Item = (&'a DimensionLineNode, bool)>,
+) -> Vec<DimensionLabelOverlayInfo> {
+    if !visibility.show_all {
+        return Vec::new();
+    }
+
+    let mut overlays = Vec::new();
+    for (node, selected) in dimensions {
+        if !node.visible {
+            continue;
+        }
+        let snapshot = snapshot_from_node(node);
+        if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
+            continue;
+        }
+        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, snapshot.midpoint()) else {
+            continue;
+        };
+        if screen_pos.x < 0.0
+            || screen_pos.y < 0.0
+            || screen_pos.x > window.width()
+            || screen_pos.y > window.height()
+        {
+            continue;
+        }
+        overlays.push(DimensionLabelOverlayInfo {
+            text: snapshot.display_text(doc_props),
+            center: Vec2::new(
+                screen_pos.x,
+                screen_pos.y - DIMENSION_LINE_LABEL_SCREEN_OFFSET_Y,
+            ),
+            selected,
+        });
+    }
+    overlays
 }
 
 #[cfg(test)]
