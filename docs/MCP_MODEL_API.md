@@ -34,9 +34,11 @@ entries through `invoke_command`.
 
 Reference annotations are also directly addressable through MCP:
 `place_guide_line` creates construction lines from an anchor plus direction,
-and `place_dimension_line` creates measured annotations from start and end
-points plus an explicit visible line placement (`line_point` or scalar
-`offset`), with optional extension and unit overrides.
+an anchor plus `through` point, or an angular contract
+(`reference_direction`, `angle_degrees`, `plane_normal`). `place_dimension_line`
+creates measured annotations from start and end points plus an explicit visible
+line placement (`line_point` or scalar `offset`), with optional extension and
+unit overrides.
 
 Built-in definition libraries are also loaded at startup and show up through
 the same definition-library inspection tools as project-local libraries. Their
