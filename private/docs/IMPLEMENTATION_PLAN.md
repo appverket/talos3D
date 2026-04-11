@@ -39,11 +39,11 @@ and MCP command invocation.
 
 See [PROOF_POINT_65.md](./proof_points/PROOF_POINT_65.md).
 
-## Planned: Proof Point 63 — Inferred Guide Lines And Protractor Workflow
+## Completed: Proof Point 63 — Inferred Guide Lines And Protractor Workflow
 
-Guide lines need a deeper construction workflow: hosted planes, inferred
-direction from edges and other guides, snap-aware drag placement, axis locks,
-and protractor-driven angular creation.
+Guide lines now support hosted face planes, edge- and guide-derived reference
+directions, edge-aware drag placement, `X/Y/Z` axis locks, protractor previews,
+direct numeric angle entry, and an expanded MCP guide contract.
 
 See [PROOF_POINT_63.md](./proof_points/PROOF_POINT_63.md).
 

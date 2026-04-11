@@ -95,7 +95,7 @@ fn enter_guide_line_tool(mut status_bar_data: ResMut<StatusBarData>) {
     set_tool_status(
         &mut status_bar_data,
         "Guide Line",
-        "Click anchor point, then click again to set direction",
+        "Click anchor or edge, then drag/click to place the guide · X/Y/Z locks axis · type angle + Enter",
     );
 }
 
