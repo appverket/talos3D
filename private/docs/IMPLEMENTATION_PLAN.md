@@ -13,11 +13,11 @@ viewport.
 
 See [PROOF_POINT_61.md](./proof_points/PROOF_POINT_61.md).
 
-## Planned: Proof Point 62 — Architectural Dimension Offsets
+## Completed: Proof Point 62 — Architectural Dimension Offsets
 
-The current two-point dimension entity needs to evolve into a true
-architectural drawing dimension with an explicit dragged offset from the
-measured geometry.
+The dimension entity now behaves as a true architectural drawing dimension:
+it persists a dragged line placement, renders witness lines and readable paper
+annotations, and exposes the same geometry through UI editing and MCP.
 
 See [PROOF_POINT_62.md](./proof_points/PROOF_POINT_62.md).
 
