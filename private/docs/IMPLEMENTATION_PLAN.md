@@ -942,6 +942,36 @@ Each step must end with `cargo check` passing.
 - View menu toggle.
 - `cargo clippy` clean.
 
+## Complete: Proof Point 66 — Assistant Sidebar Profiles And Streaming Transcript
+
+**Validates**: the egui-chrome sidebar direction established by PP29, plus the
+AI interaction surface from PP7 and PP9.
+
+The in-app assistant must behave like a real editor lane instead of a modal
+overlay or a single hardcoded provider form. The sidebar now carries a stable
+chat surface, a provider/configuration surface, and a persistence model that is
+ready for additional sidebar tabs later.
+
+### Landed
+
+- The assistant now lives in a proper right `SidePanel` with a narrower default
+  width, a wider resize range, and persisted width/visibility state.
+- The assistant pane now has two explicit modes:
+  - `Chat` for transcript plus prompt composition.
+  - `Configs` for saved model/provider profiles.
+- Provider profiles are persisted and can be created, duplicated, deleted, and
+  switched without rewriting code.
+- Supported protocols now include:
+  - OpenAI Responses
+  - OpenAI Chat Completions
+  - Anthropic Messages
+  - Gemini Generate Content
+- Local OpenAI-compatible profiles are first-class, so LM Studio and Ollama can
+  be configured alongside cloud providers.
+- Assistant job output is now streamed back into the transcript incrementally so
+  tool activity appears while the request is running instead of only after the
+  final answer arrives.
+
 ## Dependency Order
 
 ```
@@ -985,4 +1015,7 @@ PP40 (transform reliability)     — IN PROGRESS, depends on PP16
 PP41 (face selection)            — FUTURE, depends on PP40, PP34
 PP42 (push/pull modeling)        — FUTURE, depends on PP41
 PP43 (geometric inference)       — FUTURE, depends on PP42, PP39
+PP64 (selection + hidden light helpers) — COMPLETE, depends on PP29, PP17
+PP65 (view commands + drawing toolbars) — COMPLETE, depends on PP29, PP30
+PP66 (assistant sidebar profiles) — COMPLETE, depends on PP29, PP7, PP9
 ```
