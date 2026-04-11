@@ -2,24 +2,28 @@ use std::{env, sync::mpsc, sync::Mutex, thread, time::Duration};
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use bevy_egui::egui::containers::panel::PanelState;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::plugins::document_properties::DocumentProperties;
 
-pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 300.0;
-pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 260.0;
-pub const ASSISTANT_PANEL_MAX_WIDTH: f32 = 420.0;
+pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
+pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 280.0;
+pub const ASSISTANT_PANEL_MAX_WIDTH: f32 = 520.0;
 const ASSISTANT_TOOL_STEPS: usize = 12;
 const ASSISTANT_MAX_TOKENS: u32 = 1600;
 
 const DEFAULT_OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const DEFAULT_OPENAI_CHAT_URL: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-mini";
 const DEFAULT_ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
+const DEFAULT_GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+const DEFAULT_LM_STUDIO_CHAT_URL: &str = "http://127.0.0.1:1234/v1/chat/completions";
+const DEFAULT_OLLAMA_CHAT_URL: &str = "http://127.0.0.1:11434/v1/chat/completions";
 const RIGHT_SIDEBAR_STATE_KEY: &str = "right_sidebar_state";
+const ASSISTANT_PREFERENCES_KEY: &str = "assistant_chat_preferences";
 
 pub struct AssistantChatPlugin;
 
@@ -29,6 +33,7 @@ impl Plugin for AssistantChatPlugin {
             .insert_resource(AssistantChatState::from_environment())
             .insert_resource(PendingAssistantJob::default())
             .add_systems(Update, sync_right_sidebar_state)
+            .add_systems(Update, sync_assistant_preferences)
             .add_systems(Update, poll_assistant_jobs);
     }
 }
@@ -64,11 +69,14 @@ impl Default for RightSidebarState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssistantProviderKind {
     ManagedRelay,
     OpenAi,
     Anthropic,
+    Gemini,
+    OpenAiCompatible,
 }
 
 impl AssistantProviderKind {
@@ -77,8 +85,413 @@ impl AssistantProviderKind {
             Self::ManagedRelay => "Managed Relay",
             Self::OpenAi => "OpenAI",
             Self::Anthropic => "Anthropic",
+            Self::Gemini => "Google Gemini",
+            Self::OpenAiCompatible => "Local / OpenAI-Compatible",
         }
     }
+
+    fn supported_protocols(self) -> &'static [AssistantProtocolKind] {
+        match self {
+            Self::ManagedRelay => &[AssistantProtocolKind::OpenAiResponses],
+            Self::OpenAi => &[
+                AssistantProtocolKind::OpenAiResponses,
+                AssistantProtocolKind::OpenAiChatCompletions,
+            ],
+            Self::Anthropic => &[AssistantProtocolKind::AnthropicMessages],
+            Self::Gemini => &[AssistantProtocolKind::GeminiGenerateContent],
+            Self::OpenAiCompatible => &[AssistantProtocolKind::OpenAiChatCompletions],
+        }
+    }
+
+    fn default_protocol(self) -> AssistantProtocolKind {
+        self.supported_protocols()[0]
+    }
+
+    fn default_profile_name(self) -> &'static str {
+        match self {
+            Self::ManagedRelay => "Managed Relay",
+            Self::OpenAi => "OpenAI",
+            Self::Anthropic => "Claude",
+            Self::Gemini => "Gemini",
+            Self::OpenAiCompatible => "Local Model",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantProtocolKind {
+    OpenAiResponses,
+    OpenAiChatCompletions,
+    AnthropicMessages,
+    GeminiGenerateContent,
+}
+
+impl AssistantProtocolKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::OpenAiResponses => "OpenAI Responses",
+            Self::OpenAiChatCompletions => "OpenAI Chat Completions",
+            Self::AnthropicMessages => "Anthropic Messages",
+            Self::GeminiGenerateContent => "Gemini Generate Content",
+        }
+    }
+
+    fn default_endpoint(self, provider: AssistantProviderKind) -> &'static str {
+        match (provider, self) {
+            (AssistantProviderKind::ManagedRelay, Self::OpenAiResponses) => "",
+            (AssistantProviderKind::OpenAi, Self::OpenAiResponses) => DEFAULT_OPENAI_RESPONSES_URL,
+            (AssistantProviderKind::OpenAi, Self::OpenAiChatCompletions) => DEFAULT_OPENAI_CHAT_URL,
+            (AssistantProviderKind::Anthropic, Self::AnthropicMessages) => DEFAULT_ANTHROPIC_URL,
+            (AssistantProviderKind::Gemini, Self::GeminiGenerateContent) => {
+                DEFAULT_GEMINI_API_BASE
+            }
+            (AssistantProviderKind::OpenAiCompatible, Self::OpenAiChatCompletions) => {
+                DEFAULT_LM_STUDIO_CHAT_URL
+            }
+            _ => "",
+        }
+    }
+
+    fn endpoint_label(self) -> &'static str {
+        match self {
+            Self::GeminiGenerateContent => "API Base",
+            _ => "Endpoint",
+        }
+    }
+
+    fn api_key_label(self, provider: AssistantProviderKind) -> &'static str {
+        match provider {
+            AssistantProviderKind::ManagedRelay => "Bearer token",
+            _ => "API key",
+        }
+    }
+
+    fn api_key_required(self, provider: AssistantProviderKind) -> bool {
+        !matches!(provider, AssistantProviderKind::OpenAiCompatible)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPanelTab {
+    Chat,
+    Settings,
+}
+
+impl AssistantPanelTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Settings => "Configs",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantConnectionProfile {
+    pub id: String,
+    pub name: String,
+    pub provider: AssistantProviderKind,
+    pub protocol: AssistantProtocolKind,
+    pub endpoint: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl AssistantConnectionProfile {
+    fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        provider: AssistantProviderKind,
+        endpoint: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        let mut profile = Self {
+            id: id.into(),
+            name: name.into(),
+            provider,
+            protocol: provider.default_protocol(),
+            endpoint: endpoint.into(),
+            api_key: api_key.into(),
+            model: model.into(),
+        };
+        profile.normalize();
+        profile
+    }
+
+    fn normalize(&mut self) {
+        if !self.provider.supported_protocols().contains(&self.protocol) {
+            self.protocol = self.provider.default_protocol();
+        }
+        if self.name.trim().is_empty() {
+            self.name = self.provider.default_profile_name().to_string();
+        }
+        if self.endpoint.trim().is_empty() {
+            self.endpoint = self.protocol.default_endpoint(self.provider).to_string();
+        }
+    }
+
+    fn badge_label(&self) -> String {
+        let model = if self.model.trim().is_empty() {
+            self.protocol.label().to_string()
+        } else {
+            self.model.trim().to_string()
+        };
+        format!("{} · {}", self.name.trim(), model)
+    }
+
+    fn retarget_provider(&mut self, provider: AssistantProviderKind) {
+        let old_default = self.protocol.default_endpoint(self.provider).to_string();
+        let old_endpoint = self.endpoint.trim().to_string();
+        self.provider = provider;
+        if !self.provider.supported_protocols().contains(&self.protocol) {
+            self.protocol = self.provider.default_protocol();
+        }
+        let new_default = self.protocol.default_endpoint(self.provider).to_string();
+        if old_endpoint.is_empty() || old_endpoint == old_default {
+            self.endpoint = new_default;
+        }
+        if self.name.trim().is_empty() {
+            self.name = self.provider.default_profile_name().to_string();
+        }
+    }
+
+    fn retarget_protocol(&mut self, protocol: AssistantProtocolKind) {
+        if !self.provider.supported_protocols().contains(&protocol) {
+            return;
+        }
+        let old_default = self.protocol.default_endpoint(self.provider).to_string();
+        let old_endpoint = self.endpoint.trim().to_string();
+        self.protocol = protocol;
+        let new_default = self.protocol.default_endpoint(self.provider).to_string();
+        if old_endpoint.is_empty() || old_endpoint == old_default {
+            self.endpoint = new_default;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssistantPreferences {
+    pub active_panel_tab: AssistantPanelTab,
+    pub mcp_url: String,
+    pub active_profile_id: String,
+    pub profiles: Vec<AssistantConnectionProfile>,
+}
+
+impl AssistantPreferences {
+    fn normalize(&mut self) {
+        if self.profiles.is_empty() {
+            self.profiles = default_assistant_profiles();
+        }
+        for profile in &mut self.profiles {
+            profile.normalize();
+        }
+        if self.active_profile_id.trim().is_empty()
+            || self
+                .profiles
+                .iter()
+                .all(|profile| profile.id != self.active_profile_id)
+        {
+            self.active_profile_id = self
+                .profiles
+                .first()
+                .map(|profile| profile.id.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    fn active_profile(&self) -> Option<&AssistantConnectionProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == self.active_profile_id)
+            .or_else(|| self.profiles.first())
+    }
+
+    fn active_profile_mut(&mut self) -> Option<&mut AssistantConnectionProfile> {
+        let active_id = self.active_profile_id.clone();
+        let index = self
+            .profiles
+            .iter()
+            .position(|profile| profile.id == active_id)
+            .unwrap_or(0);
+        self.profiles.get_mut(index)
+    }
+
+    fn next_profile_id(&self) -> String {
+        let mut next = self.profiles.len() + 1;
+        loop {
+            let candidate = format!("profile-{next}");
+            if self.profiles.iter().all(|profile| profile.id != candidate) {
+                return candidate;
+            }
+            next += 1;
+        }
+    }
+
+    fn add_profile(&mut self, profile: AssistantConnectionProfile) {
+        self.active_profile_id = profile.id.clone();
+        self.profiles.push(profile);
+    }
+
+    fn add_blank_profile(&mut self) {
+        self.add_profile(AssistantConnectionProfile::new(
+            self.next_profile_id(),
+            "New Profile",
+            AssistantProviderKind::OpenAi,
+            DEFAULT_OPENAI_RESPONSES_URL,
+            "",
+            DEFAULT_OPENAI_MODEL,
+        ));
+    }
+
+    fn duplicate_active_profile(&mut self) {
+        let Some(mut profile) = self.active_profile().cloned() else {
+            return;
+        };
+        profile.id = self.next_profile_id();
+        profile.name = format!("{} Copy", profile.name.trim());
+        self.add_profile(profile);
+    }
+
+    fn delete_active_profile(&mut self) {
+        if self.profiles.len() <= 1 {
+            return;
+        }
+        self.profiles
+            .retain(|profile| profile.id != self.active_profile_id);
+        self.normalize();
+    }
+}
+
+fn default_assistant_profiles() -> Vec<AssistantConnectionProfile> {
+    vec![
+        AssistantConnectionProfile::new(
+            "managed-relay",
+            "Managed Relay",
+            AssistantProviderKind::ManagedRelay,
+            env::var("TALOS3D_ASSISTANT_RELAY_URL").unwrap_or_default(),
+            env::var("TALOS3D_ASSISTANT_RELAY_TOKEN").unwrap_or_default(),
+            env::var("TALOS3D_ASSISTANT_RELAY_MODEL")
+                .unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string()),
+        ),
+        AssistantConnectionProfile::new(
+            "openai",
+            "OpenAI",
+            AssistantProviderKind::OpenAi,
+            DEFAULT_OPENAI_RESPONSES_URL,
+            env::var("OPENAI_API_KEY").unwrap_or_default(),
+            env::var("TALOS3D_ASSISTANT_OPENAI_MODEL")
+                .unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string()),
+        ),
+        AssistantConnectionProfile::new(
+            "anthropic",
+            "Claude",
+            AssistantProviderKind::Anthropic,
+            DEFAULT_ANTHROPIC_URL,
+            env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+            env::var("TALOS3D_ASSISTANT_ANTHROPIC_MODEL")
+                .unwrap_or_else(|_| DEFAULT_ANTHROPIC_MODEL.to_string()),
+        ),
+        AssistantConnectionProfile::new(
+            "gemini",
+            "Gemini",
+            AssistantProviderKind::Gemini,
+            DEFAULT_GEMINI_API_BASE,
+            env::var("GEMINI_API_KEY").unwrap_or_default(),
+            env::var("TALOS3D_ASSISTANT_GEMINI_MODEL").unwrap_or_default(),
+        ),
+        AssistantConnectionProfile::new(
+            "lm-studio",
+            "LM Studio",
+            AssistantProviderKind::OpenAiCompatible,
+            DEFAULT_LM_STUDIO_CHAT_URL,
+            env::var("TALOS3D_ASSISTANT_LMSTUDIO_API_KEY").unwrap_or_default(),
+            env::var("TALOS3D_ASSISTANT_LMSTUDIO_MODEL").unwrap_or_default(),
+        ),
+        AssistantConnectionProfile::new(
+            "ollama",
+            "Ollama",
+            AssistantProviderKind::OpenAiCompatible,
+            DEFAULT_OLLAMA_CHAT_URL,
+            env::var("TALOS3D_ASSISTANT_OLLAMA_API_KEY").unwrap_or_default(),
+            env::var("TALOS3D_ASSISTANT_OLLAMA_MODEL").unwrap_or_default(),
+        ),
+    ]
+}
+
+fn default_assistant_preferences() -> AssistantPreferences {
+    let profiles = default_assistant_profiles();
+    let active_profile_id = if profiles
+        .iter()
+        .any(|profile| profile.id == "managed-relay" && !profile.endpoint.trim().is_empty())
+    {
+        "managed-relay".to_string()
+    } else if profiles
+        .iter()
+        .any(|profile| profile.id == "openai" && !profile.api_key.trim().is_empty())
+    {
+        "openai".to_string()
+    } else if profiles
+        .iter()
+        .any(|profile| profile.id == "anthropic" && !profile.api_key.trim().is_empty())
+    {
+        "anthropic".to_string()
+    } else if profiles
+        .iter()
+        .any(|profile| profile.id == "gemini" && !profile.api_key.trim().is_empty())
+    {
+        "gemini".to_string()
+    } else {
+        "openai".to_string()
+    };
+
+    AssistantPreferences {
+        active_panel_tab: AssistantPanelTab::Chat,
+        mcp_url: env::var("TALOS3D_ASSISTANT_MCP_URL").unwrap_or_default(),
+        active_profile_id,
+        profiles,
+    }
+}
+
+fn serialize_assistant_preferences(preferences: &AssistantPreferences) -> serde_json::Value {
+    serde_json::to_value(preferences).unwrap_or_else(|_| json!({}))
+}
+
+fn deserialize_assistant_preferences(value: &serde_json::Value) -> Option<AssistantPreferences> {
+    let mut preferences: AssistantPreferences = serde_json::from_value(value.clone()).ok()?;
+    preferences.normalize();
+    Some(preferences)
+}
+
+fn sync_assistant_preferences(
+    mut state: ResMut<AssistantChatState>,
+    mut doc_props: ResMut<DocumentProperties>,
+    mut last_serialized: Local<Option<serde_json::Value>>,
+) {
+    let saved = doc_props
+        .domain_defaults
+        .get(ASSISTANT_PREFERENCES_KEY)
+        .cloned();
+    if saved != *last_serialized {
+        if let Some(saved_preferences) = saved.as_ref().and_then(deserialize_assistant_preferences)
+        {
+            if state.preferences != saved_preferences {
+                state.preferences = saved_preferences;
+            }
+        }
+        *last_serialized = saved.clone();
+    }
+
+    state.preferences.normalize();
+    let serialized = serialize_assistant_preferences(&state.preferences);
+    if doc_props.domain_defaults.get(ASSISTANT_PREFERENCES_KEY) != Some(&serialized) {
+        doc_props
+            .domain_defaults
+            .insert(ASSISTANT_PREFERENCES_KEY.to_string(), serialized.clone());
+    }
+    *last_serialized = Some(serialized);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,92 +540,50 @@ impl AssistantChatMessage {
 
 #[derive(Debug, Clone)]
 struct AssistantRuntimeConfig {
-    provider: AssistantProviderKind,
-    relay_url: String,
-    relay_bearer_token: String,
-    relay_model: String,
-    openai_api_key: String,
-    openai_model: String,
-    anthropic_api_key: String,
-    anthropic_model: String,
+    profile: AssistantConnectionProfile,
     mcp_url: String,
+}
+
+#[derive(Debug)]
+enum AssistantJobEvent {
+    Message(AssistantChatMessage),
+    Completed,
+    Failed(String),
 }
 
 #[derive(Resource)]
 pub struct AssistantChatState {
-    pub provider: AssistantProviderKind,
-    pub relay_url: String,
-    pub relay_bearer_token: String,
-    pub relay_model: String,
-    pub openai_api_key: String,
-    pub openai_model: String,
-    pub anthropic_api_key: String,
-    pub anthropic_model: String,
-    pub mcp_url: String,
+    pub preferences: AssistantPreferences,
     pub draft: String,
     pub messages: Vec<AssistantChatMessage>,
     pub pending: bool,
     pub last_error: Option<String>,
-    pub show_connection: bool,
 }
 
 #[derive(Resource, Default)]
-pub struct PendingAssistantJob(
-    pub Mutex<Option<mpsc::Receiver<Result<Vec<AssistantChatMessage>, String>>>>,
-);
+pub struct PendingAssistantJob(Mutex<Option<mpsc::Receiver<AssistantJobEvent>>>);
 
 impl AssistantChatState {
     pub fn from_environment() -> Self {
-        let relay_url = env::var("TALOS3D_ASSISTANT_RELAY_URL").unwrap_or_default();
-        let relay_bearer_token = env::var("TALOS3D_ASSISTANT_RELAY_TOKEN").unwrap_or_default();
-        let relay_model = env::var("TALOS3D_ASSISTANT_RELAY_MODEL")
-            .unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string());
-        let openai_api_key = env::var("OPENAI_API_KEY").unwrap_or_default();
-        let openai_model = env::var("TALOS3D_ASSISTANT_OPENAI_MODEL")
-            .unwrap_or_else(|_| DEFAULT_OPENAI_MODEL.to_string());
-        let anthropic_api_key = env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-        let anthropic_model = env::var("TALOS3D_ASSISTANT_ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| DEFAULT_ANTHROPIC_MODEL.to_string());
-        let provider = if !relay_url.is_empty() {
-            AssistantProviderKind::ManagedRelay
-        } else if !openai_api_key.is_empty() {
-            AssistantProviderKind::OpenAi
-        } else if !anthropic_api_key.is_empty() {
-            AssistantProviderKind::Anthropic
-        } else {
-            AssistantProviderKind::ManagedRelay
-        };
-
         Self {
-            provider,
-            relay_url,
-            relay_bearer_token,
-            relay_model,
-            openai_api_key,
-            openai_model,
-            anthropic_api_key,
-            anthropic_model,
-            mcp_url: env::var("TALOS3D_ASSISTANT_MCP_URL").unwrap_or_default(),
+            preferences: default_assistant_preferences(),
             draft: String::new(),
             messages: Vec::new(),
             pending: false,
             last_error: None,
-            show_connection: false,
         }
     }
 
-    fn runtime_config(&self) -> AssistantRuntimeConfig {
-        AssistantRuntimeConfig {
-            provider: self.provider,
-            relay_url: self.relay_url.trim().to_string(),
-            relay_bearer_token: self.relay_bearer_token.trim().to_string(),
-            relay_model: self.relay_model.trim().to_string(),
-            openai_api_key: self.openai_api_key.trim().to_string(),
-            openai_model: self.openai_model.trim().to_string(),
-            anthropic_api_key: self.anthropic_api_key.trim().to_string(),
-            anthropic_model: self.anthropic_model.trim().to_string(),
-            mcp_url: self.mcp_url.trim().to_string(),
-        }
+    fn runtime_config(&self) -> Result<AssistantRuntimeConfig, String> {
+        let profile = self
+            .preferences
+            .active_profile()
+            .cloned()
+            .ok_or_else(|| "Assistant profile list is empty".to_string())?;
+        Ok(AssistantRuntimeConfig {
+            profile,
+            mcp_url: self.preferences.mcp_url.trim().to_string(),
+        })
     }
 }
 
@@ -226,18 +597,23 @@ pub fn draw_assistant_window(
     if !sidebar_state.visible {
         return;
     }
-    if state.mcp_url.trim().is_empty() {
+    if state.preferences.mcp_url.trim().is_empty() {
         if let Some(url) = default_mcp_url {
-            state.mcp_url = url.to_string();
+            state.preferences.mcp_url = url.to_string();
         }
     }
 
-    sync_right_sidebar_panel_memory(ctx, sidebar_state);
+    state.preferences.normalize();
     let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
     let min_width_points = ASSISTANT_PANEL_MIN_WIDTH / pixels_per_point;
     let max_width_points = ASSISTANT_PANEL_MAX_WIDTH / pixels_per_point;
 
     let mut send_now = false;
+    let profile_badge = state
+        .preferences
+        .active_profile()
+        .map(AssistantConnectionProfile::badge_label)
+        .unwrap_or_else(|| "Assistant".to_string());
     let panel_response = egui::SidePanel::right("assistant_chat_sidebar")
         .resizable(true)
         .default_width(sidebar_state.width / pixels_per_point)
@@ -246,15 +622,43 @@ pub fn draw_assistant_window(
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
-                let active_tab_label = sidebar_state.active_tab.label();
+                ui.heading(sidebar_state.active_tab.label());
+                ui.add_space(6.0);
                 ui.selectable_value(
-                    &mut sidebar_state.active_tab,
-                    RightSidebarTab::Assistant,
-                    active_tab_label,
+                    &mut state.preferences.active_panel_tab,
+                    AssistantPanelTab::Chat,
+                    AssistantPanelTab::Chat.label(),
+                );
+                ui.selectable_value(
+                    &mut state.preferences.active_panel_tab,
+                    AssistantPanelTab::Settings,
+                    AssistantPanelTab::Settings.label(),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(egui::RichText::new("x").monospace()).clicked() {
+                    if assistant_icon_button(
+                        ui,
+                        AssistantUiIcon::Close,
+                        "Hide the assistant sidebar",
+                        false,
+                    )
+                    .clicked()
+                    {
                         sidebar_state.visible = false;
+                    }
+                    if assistant_icon_button(
+                        ui,
+                        AssistantUiIcon::Settings,
+                        "Show assistant settings",
+                        state.preferences.active_panel_tab == AssistantPanelTab::Settings,
+                    )
+                    .clicked()
+                    {
+                        state.preferences.active_panel_tab =
+                            if state.preferences.active_panel_tab == AssistantPanelTab::Settings {
+                                AssistantPanelTab::Chat
+                            } else {
+                                AssistantPanelTab::Settings
+                            };
                     }
                     ui.menu_button(egui::RichText::new("...").strong(), |ui| {
                         if ui.button("Clear chat").clicked() && !state.pending {
@@ -263,16 +667,7 @@ pub fn draw_assistant_window(
                             ui.close();
                         }
                     });
-                    let gear_label = if state.show_connection { "x" } else { "#" };
-                    if ui.button(egui::RichText::new(gear_label).monospace()).clicked() {
-                        state.show_connection = !state.show_connection;
-                    }
-                    let model_label = match state.provider {
-                        AssistantProviderKind::ManagedRelay => &state.relay_model,
-                        AssistantProviderKind::OpenAi => &state.openai_model,
-                        AssistantProviderKind::Anthropic => &state.anthropic_model,
-                    };
-                    let badge = egui::RichText::new(model_label.as_str())
+                    let badge = egui::RichText::new(profile_badge.as_str())
                         .small()
                         .color(egui::Color32::from_rgb(180, 200, 220));
                     egui::Frame::NONE
@@ -286,136 +681,16 @@ pub fn draw_assistant_window(
             });
             ui.separator();
 
-            if state.show_connection {
-                ui.add_space(4.0);
-                egui::Frame::group(ui.style())
-                    .fill(egui::Color32::from_rgb(30, 35, 44))
-                    .show(ui, |ui| {
-                        egui::Grid::new("assistant_settings_grid")
-                            .num_columns(2)
-                            .spacing([8.0, 4.0])
-                            .show(ui, |ui| {
-                                ui.label("Provider");
-                                egui::ComboBox::from_id_salt("assistant_provider")
-                                    .selected_text(state.provider.label())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut state.provider,
-                                            AssistantProviderKind::ManagedRelay,
-                                            AssistantProviderKind::ManagedRelay.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut state.provider,
-                                            AssistantProviderKind::OpenAi,
-                                            AssistantProviderKind::OpenAi.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut state.provider,
-                                            AssistantProviderKind::Anthropic,
-                                            AssistantProviderKind::Anthropic.label(),
-                                        );
-                                    });
-                                ui.end_row();
-
-                                ui.label("MCP URL");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.mcp_url)
-                                        .desired_width(ui.available_width()),
-                                );
-                                ui.end_row();
-
-                                match state.provider {
-                                    AssistantProviderKind::ManagedRelay => {
-                                        ui.label("Relay URL");
-                                        ui.add(egui::TextEdit::singleline(&mut state.relay_url).desired_width(ui.available_width()));
-                                        ui.end_row();
-                                        ui.label("Bearer");
-                                        ui.add(egui::TextEdit::singleline(&mut state.relay_bearer_token).desired_width(ui.available_width()).password(true));
-                                        ui.end_row();
-                                        ui.label("Model");
-                                        ui.add(egui::TextEdit::singleline(&mut state.relay_model).desired_width(ui.available_width()));
-                                        ui.end_row();
-                                    }
-                                    AssistantProviderKind::OpenAi => {
-                                        ui.label("API key");
-                                        ui.add(egui::TextEdit::singleline(&mut state.openai_api_key).desired_width(ui.available_width()).password(true));
-                                        ui.end_row();
-                                        ui.label("Model");
-                                        ui.add(egui::TextEdit::singleline(&mut state.openai_model).desired_width(ui.available_width()));
-                                        ui.end_row();
-                                    }
-                                    AssistantProviderKind::Anthropic => {
-                                        ui.label("API key");
-                                        ui.add(egui::TextEdit::singleline(&mut state.anthropic_api_key).desired_width(ui.available_width()).password(true));
-                                        ui.end_row();
-                                        ui.label("Model");
-                                        ui.add(egui::TextEdit::singleline(&mut state.anthropic_model).desired_width(ui.available_width()));
-                                        ui.end_row();
-                                    }
-                                }
-                            });
-                    });
-                ui.separator();
-            }
-
             match sidebar_state.active_tab {
                 RightSidebarTab::Assistant => {
-                    egui::ScrollArea::vertical()
-                        .id_salt("assistant_chat_messages")
-                        .stick_to_bottom(true)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            if state.messages.is_empty() && !state.pending {
-                                ui.add_space(40.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("Ask me to create, modify, or explain objects in your scene.")
-                                            .italics()
-                                            .color(egui::Color32::from_rgb(140, 150, 165)),
-                                    );
-                                });
-                                ui.add_space(40.0);
-                            }
-                            for message in &state.messages {
-                                draw_message_bubble(ui, message);
-                                ui.add_space(6.0);
-                            }
-                            if state.pending {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label(egui::RichText::new("Thinking...").italics());
-                                });
-                            }
-                            if let Some(error) = &state.last_error {
-                                ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
-                            }
-                        });
-
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        let input = ui.add(
-                            egui::TextEdit::multiline(&mut state.draft)
-                                .desired_width((ui.available_width() - 36.0).max(120.0))
-                                .desired_rows(1)
-                                .hint_text("Ask about your scene..."),
-                        );
-                        let enter_to_send = input.has_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                        if ui
-                            .add_enabled(
-                                !state.pending && !state.draft.trim().is_empty(),
-                                egui::Button::new(egui::RichText::new("\u{2191}").strong())
-                                    .min_size(egui::vec2(28.0, 28.0)),
-                            )
-                            .clicked()
-                        {
-                            send_now = true;
+                    match state.preferences.active_panel_tab {
+                        AssistantPanelTab::Chat => {
+                            draw_assistant_chat_panel(ui, state, &mut send_now);
                         }
-                        if enter_to_send {
-                            send_now = true;
+                        AssistantPanelTab::Settings => {
+                            draw_assistant_settings_panel(ui, state);
                         }
-                    });
+                    }
                 }
             }
         });
@@ -423,7 +698,6 @@ pub fn draw_assistant_window(
         .clamp(ASSISTANT_PANEL_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH);
 
     if send_now {
-        // Strip trailing newline that Enter key inserts before we process
         let trimmed = state.draft.trim().to_string();
         state.draft = trimmed;
         if let Err(error) = start_assistant_job(state, pending_job) {
@@ -432,21 +706,363 @@ pub fn draw_assistant_window(
     }
 }
 
-fn sync_right_sidebar_panel_memory(ctx: &egui::Context, sidebar_state: &RightSidebarState) {
-    let available_rect = ctx.available_rect();
-    let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
-    let width = sidebar_state
-        .width
-        .clamp(ASSISTANT_PANEL_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH)
-        .min(available_rect.width() * pixels_per_point);
-    let width_points = width / pixels_per_point;
-    let rect = egui::Rect::from_min_max(
-        egui::pos2(available_rect.max.x - width_points, available_rect.min.y),
-        available_rect.max,
+fn draw_assistant_chat_panel(
+    ui: &mut egui::Ui,
+    state: &mut AssistantChatState,
+    send_now: &mut bool,
+) {
+    if let Err(error) = state.runtime_config().and_then(|config| validate_assistant_config(&config))
+    {
+        egui::Frame::group(ui.style())
+            .fill(egui::Color32::from_rgb(88, 34, 34))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .color(egui::Color32::from_rgb(255, 220, 220))
+                            .small(),
+                    );
+                    if ui.link("Open Configs").clicked() {
+                        state.preferences.active_panel_tab = AssistantPanelTab::Settings;
+                    }
+                });
+            });
+        ui.add_space(8.0);
+    }
+
+    egui::ScrollArea::vertical()
+        .id_salt("assistant_chat_messages")
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if state.messages.is_empty() && !state.pending {
+                ui.add_space(40.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "Ask me to inspect, create, modify, or explain objects in your scene.",
+                        )
+                        .italics()
+                        .color(egui::Color32::from_rgb(140, 150, 165)),
+                    );
+                });
+                ui.add_space(40.0);
+            }
+            for message in &state.messages {
+                draw_message_bubble(ui, message);
+                ui.add_space(6.0);
+            }
+            if state.pending {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Working...").italics());
+                });
+            }
+            if let Some(error) = &state.last_error {
+                ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
+            }
+        });
+
+    ui.separator();
+    egui::Frame::group(ui.style())
+        .fill(egui::Color32::from_rgb(25, 30, 38))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let input = ui.add(
+                    egui::TextEdit::multiline(&mut state.draft)
+                        .desired_width((ui.available_width() - 40.0).max(120.0))
+                        .desired_rows(2)
+                        .hint_text("Ask about your scene..."),
+                );
+                let enter_to_send =
+                    input.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                if assistant_icon_button(
+                    ui,
+                    AssistantUiIcon::Send,
+                    "Send prompt (Enter). Use Shift+Enter for a newline.",
+                    false,
+                )
+                .on_hover_text("Send prompt (Enter). Use Shift+Enter for a newline.")
+                .clicked()
+                    && !state.pending
+                    && !state.draft.trim().is_empty()
+                {
+                    *send_now = true;
+                }
+                if enter_to_send && !state.pending && !state.draft.trim().is_empty() {
+                    *send_now = true;
+                }
+            });
+        });
+}
+
+fn draw_assistant_settings_panel(ui: &mut egui::Ui, state: &mut AssistantChatState) {
+    egui::ScrollArea::vertical()
+        .id_salt("assistant_settings_panel")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Saved configurations persist with the editor state. Use them for Claude, Gemini, OpenAI, and local OpenAI-compatible runtimes such as LM Studio or Ollama.",
+                )
+                .small()
+                .color(egui::Color32::from_rgb(160, 170, 184)),
+            );
+            ui.add_space(8.0);
+
+            let selected_profile_name = state
+                .preferences
+                .active_profile()
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| "No profile".to_string());
+            let mut add_profile = false;
+            let mut duplicate_profile = false;
+            let mut delete_profile = false;
+            ui.horizontal(|ui| {
+                ui.label("Profile");
+                egui::ComboBox::from_id_salt("assistant_profile_select")
+                    .selected_text(selected_profile_name)
+                    .show_ui(ui, |ui| {
+                        for profile in &state.preferences.profiles {
+                            ui.selectable_value(
+                                &mut state.preferences.active_profile_id,
+                                profile.id.clone(),
+                                profile.name.as_str(),
+                            );
+                        }
+                    });
+                if ui.button("New").clicked() {
+                    add_profile = true;
+                }
+                if ui.button("Duplicate").clicked() {
+                    duplicate_profile = true;
+                }
+                if ui
+                    .add_enabled(
+                        state.preferences.profiles.len() > 1,
+                        egui::Button::new("Delete"),
+                    )
+                    .clicked()
+                {
+                    delete_profile = true;
+                }
+            });
+            if add_profile {
+                state.preferences.add_blank_profile();
+            }
+            if duplicate_profile {
+                state.preferences.duplicate_active_profile();
+            }
+            if delete_profile {
+                state.preferences.delete_active_profile();
+            }
+
+            ui.separator();
+            egui::Frame::group(ui.style())
+                .fill(egui::Color32::from_rgb(30, 35, 44))
+                .show(ui, |ui| {
+                    egui::Grid::new("assistant_settings_mcp_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("MCP URL");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut state.preferences.mcp_url)
+                                    .desired_width(ui.available_width()),
+                            );
+                            ui.end_row();
+                        });
+                    ui.separator();
+                    if let Some(profile) = state.preferences.active_profile_mut() {
+                        egui::Grid::new("assistant_settings_grid")
+                            .num_columns(2)
+                            .spacing([8.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Name");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut profile.name)
+                                        .desired_width(ui.available_width()),
+                                );
+                                ui.end_row();
+
+                                let previous_provider = profile.provider;
+                                ui.label("Provider");
+                                egui::ComboBox::from_id_salt("assistant_provider")
+                                    .selected_text(profile.provider.label())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut profile.provider,
+                                            AssistantProviderKind::ManagedRelay,
+                                            AssistantProviderKind::ManagedRelay.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut profile.provider,
+                                            AssistantProviderKind::OpenAi,
+                                            AssistantProviderKind::OpenAi.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut profile.provider,
+                                            AssistantProviderKind::Anthropic,
+                                            AssistantProviderKind::Anthropic.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut profile.provider,
+                                            AssistantProviderKind::Gemini,
+                                            AssistantProviderKind::Gemini.label(),
+                                        );
+                                        ui.selectable_value(
+                                            &mut profile.provider,
+                                            AssistantProviderKind::OpenAiCompatible,
+                                            AssistantProviderKind::OpenAiCompatible.label(),
+                                        );
+                                    });
+                                if profile.provider != previous_provider {
+                                    profile.retarget_provider(profile.provider);
+                                }
+                                ui.end_row();
+
+                                let previous_protocol = profile.protocol;
+                                let supported_protocols = profile.provider.supported_protocols();
+                                ui.label("Protocol");
+                                egui::ComboBox::from_id_salt("assistant_protocol")
+                                    .selected_text(profile.protocol.label())
+                                    .show_ui(ui, |ui| {
+                                        for protocol in supported_protocols {
+                                            ui.selectable_value(
+                                                &mut profile.protocol,
+                                                *protocol,
+                                                protocol.label(),
+                                            );
+                                        }
+                                    });
+                                if profile.protocol != previous_protocol {
+                                    profile.retarget_protocol(profile.protocol);
+                                }
+                                ui.end_row();
+
+                                ui.label("Model");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut profile.model)
+                                        .desired_width(ui.available_width()),
+                                );
+                                ui.end_row();
+
+                                ui.label(profile.protocol.endpoint_label());
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut profile.endpoint)
+                                        .desired_width(ui.available_width()),
+                                );
+                                ui.end_row();
+
+                                ui.label(profile.protocol.api_key_label(profile.provider));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut profile.api_key)
+                                        .desired_width(ui.available_width())
+                                        .password(true),
+                                );
+                                ui.end_row();
+                            });
+                    }
+                });
+            if let Some(profile) = state.preferences.active_profile() {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(profile_runtime_hint(profile))
+                        .small()
+                        .color(egui::Color32::from_rgb(150, 160, 172)),
+                );
+            }
+        });
+}
+
+fn profile_runtime_hint(profile: &AssistantConnectionProfile) -> &'static str {
+    match profile.provider {
+        AssistantProviderKind::ManagedRelay => {
+            "Managed Relay uses a bearer-authenticated endpoint and the OpenAI Responses protocol."
+        }
+        AssistantProviderKind::OpenAi => {
+            "OpenAI profiles can use the Responses API or Chat Completions."
+        }
+        AssistantProviderKind::Anthropic => {
+            "Anthropic profiles use the Messages API with tool calling enabled."
+        }
+        AssistantProviderKind::Gemini => {
+            "Gemini profiles expect a Google Generative Language API base URL; the model path is appended automatically."
+        }
+        AssistantProviderKind::OpenAiCompatible => {
+            "Use local OpenAI-compatible endpoints such as LM Studio or Ollama's /v1/chat/completions surface."
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AssistantUiIcon {
+    Settings,
+    Close,
+    Send,
+}
+
+fn assistant_icon_button(
+    ui: &mut egui::Ui,
+    icon: AssistantUiIcon,
+    tooltip: &str,
+    selected: bool,
+) -> egui::Response {
+    let size = egui::vec2(28.0, 28.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let visuals = ui.visuals();
+    let fill = if selected {
+        egui::Color32::from_rgb(50, 78, 108)
+    } else if response.hovered() {
+        egui::Color32::from_rgb(42, 48, 58)
+    } else {
+        egui::Color32::from_rgb(24, 28, 34)
+    };
+    ui.painter().rect(
+        rect,
+        6.0,
+        fill,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(56, 64, 76)),
+        egui::StrokeKind::Outside,
     );
-    ctx.data_mut(|data| {
-        data.insert_persisted(egui::Id::new("assistant_chat_sidebar"), PanelState { rect });
-    });
+    let stroke = egui::Stroke::new(1.7, visuals.strong_text_color());
+    match icon {
+        AssistantUiIcon::Close => {
+            ui.painter().line_segment(
+                [rect.left_top() + egui::vec2(8.0, 8.0), rect.right_bottom() - egui::vec2(8.0, 8.0)],
+                stroke,
+            );
+            ui.painter().line_segment(
+                [rect.right_top() + egui::vec2(-8.0, 8.0), rect.left_bottom() + egui::vec2(8.0, -8.0)],
+                stroke,
+            );
+        }
+        AssistantUiIcon::Send => {
+            let p1 = rect.left_center() + egui::vec2(7.0, -4.0);
+            let p2 = rect.right_center() + egui::vec2(-6.0, 0.0);
+            let p3 = rect.left_center() + egui::vec2(7.0, 4.0);
+            let mid = rect.center() + egui::vec2(0.0, 0.0);
+            ui.painter().line_segment([p1, p2], stroke);
+            ui.painter().line_segment([p3, p2], stroke);
+            ui.painter().line_segment([p1, mid], stroke);
+            ui.painter().line_segment([p3, mid], stroke);
+        }
+        AssistantUiIcon::Settings => {
+            let center = rect.center();
+            let radius = 5.0;
+            for index in 0..8 {
+                let angle = index as f32 * std::f32::consts::TAU / 8.0;
+                let dir = egui::vec2(angle.cos(), angle.sin());
+                ui.painter().line_segment(
+                    [center + dir * (radius + 1.0), center + dir * (radius + 4.0)],
+                    stroke,
+                );
+            }
+            ui.painter().circle_stroke(center, radius, stroke);
+            ui.painter().circle_stroke(center, 2.0, stroke);
+        }
+    }
+    response.on_hover_text(tooltip)
 }
 
 fn sync_right_sidebar_state(
@@ -544,24 +1160,32 @@ fn poll_assistant_jobs(
     let Some(receiver) = slot.as_ref() else {
         return;
     };
-    match receiver.try_recv() {
-        Ok(Ok(messages)) => {
-            state.messages.extend(messages);
-            state.pending = false;
-            state.last_error = None;
-            *slot = None;
-        }
-        Ok(Err(error)) => {
-            state.messages.push(AssistantChatMessage::error(&error));
-            state.pending = false;
-            state.last_error = Some(error);
-            *slot = None;
-        }
-        Err(mpsc::TryRecvError::Empty) => {}
-        Err(mpsc::TryRecvError::Disconnected) => {
-            state.pending = false;
-            state.last_error = Some("Assistant worker disconnected".to_string());
-            *slot = None;
+    loop {
+        match receiver.try_recv() {
+            Ok(AssistantJobEvent::Message(message)) => {
+                state.messages.push(message);
+                state.last_error = None;
+            }
+            Ok(AssistantJobEvent::Completed) => {
+                state.pending = false;
+                state.last_error = None;
+                *slot = None;
+                break;
+            }
+            Ok(AssistantJobEvent::Failed(error)) => {
+                state.messages.push(AssistantChatMessage::error(&error));
+                state.pending = false;
+                state.last_error = Some(error);
+                *slot = None;
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                state.pending = false;
+                state.last_error = Some("Assistant worker disconnected".to_string());
+                *slot = None;
+                break;
+            }
         }
     }
 }
@@ -578,7 +1202,7 @@ fn start_assistant_job(
         return Err("Assistant is already processing a request".to_string());
     }
 
-    let config = state.runtime_config();
+    let config = state.runtime_config()?;
     validate_assistant_config(&config)?;
 
     state.messages.push(AssistantChatMessage::user(prompt));
@@ -591,8 +1215,12 @@ fn start_assistant_job(
     thread::Builder::new()
         .name("talos3d-assistant".to_string())
         .spawn(move || {
-            let result = run_assistant_turn(config, conversation);
-            let _ = sender.send(result);
+            let result = run_assistant_turn(config, conversation, &sender);
+            let event = match result {
+                Ok(()) => AssistantJobEvent::Completed,
+                Err(error) => AssistantJobEvent::Failed(error),
+            };
+            let _ = sender.send(event);
         })
         .map_err(|error| format!("Failed to start assistant thread: {error}"))?;
 
@@ -608,31 +1236,21 @@ fn validate_assistant_config(config: &AssistantRuntimeConfig) -> Result<(), Stri
     if config.mcp_url.trim().is_empty() {
         return Err("Assistant MCP URL is not configured".to_string());
     }
-    match config.provider {
-        AssistantProviderKind::ManagedRelay => {
-            if config.relay_url.is_empty() {
-                return Err("Managed relay URL is not configured".to_string());
-            }
-            if config.relay_model.is_empty() {
-                return Err("Managed relay model is not configured".to_string());
-            }
-        }
-        AssistantProviderKind::OpenAi => {
-            if config.openai_api_key.is_empty() {
-                return Err("OpenAI API key is not configured".to_string());
-            }
-            if config.openai_model.is_empty() {
-                return Err("OpenAI model is not configured".to_string());
-            }
-        }
-        AssistantProviderKind::Anthropic => {
-            if config.anthropic_api_key.is_empty() {
-                return Err("Anthropic API key is not configured".to_string());
-            }
-            if config.anthropic_model.is_empty() {
-                return Err("Anthropic model is not configured".to_string());
-            }
-        }
+    let profile = &config.profile;
+    if profile.model.trim().is_empty() {
+        return Err(format!("{} model is not configured", profile.name.trim()));
+    }
+    if profile.endpoint.trim().is_empty() {
+        return Err(format!(
+            "{} endpoint is not configured",
+            profile.protocol.endpoint_label()
+        ));
+    }
+    if profile.protocol.api_key_required(profile.provider) && profile.api_key.trim().is_empty() {
+        return Err(format!(
+            "{} is not configured",
+            profile.protocol.api_key_label(profile.provider)
+        ));
     }
     Ok(())
 }
@@ -640,35 +1258,49 @@ fn validate_assistant_config(config: &AssistantRuntimeConfig) -> Result<(), Stri
 fn run_assistant_turn(
     config: AssistantRuntimeConfig,
     conversation: Vec<AssistantChatMessage>,
-) -> Result<Vec<AssistantChatMessage>, String> {
+    sender: &mpsc::Sender<AssistantJobEvent>,
+) -> Result<(), String> {
     let client = Client::builder()
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|error| format!("Failed to build assistant HTTP client: {error}"))?;
     let bridge = AssistantMcpBridge::new(client.clone(), config.mcp_url.clone());
-    match config.provider {
-        AssistantProviderKind::ManagedRelay => run_openai_turn(
+    match config.profile.protocol {
+        AssistantProtocolKind::OpenAiResponses => run_openai_turn(
             &client,
             &conversation,
             &bridge,
-            &config.relay_url,
-            &config.relay_bearer_token,
-            &config.relay_model,
+            sender,
+            &config.profile.endpoint,
+            &config.profile.api_key,
+            &config.profile.model,
         ),
-        AssistantProviderKind::OpenAi => run_openai_turn(
+        AssistantProtocolKind::OpenAiChatCompletions => run_openai_chat_completions_turn(
             &client,
             &conversation,
             &bridge,
-            DEFAULT_OPENAI_RESPONSES_URL,
-            &config.openai_api_key,
-            &config.openai_model,
+            sender,
+            &config.profile.endpoint,
+            &config.profile.api_key,
+            &config.profile.model,
         ),
-        AssistantProviderKind::Anthropic => run_anthropic_turn(
+        AssistantProtocolKind::AnthropicMessages => run_anthropic_turn(
             &client,
             &conversation,
             &bridge,
-            &config.anthropic_api_key,
-            &config.anthropic_model,
+            sender,
+            &config.profile.endpoint,
+            &config.profile.api_key,
+            &config.profile.model,
+        ),
+        AssistantProtocolKind::GeminiGenerateContent => run_gemini_turn(
+            &client,
+            &conversation,
+            &bridge,
+            sender,
+            &config.profile.endpoint,
+            &config.profile.api_key,
+            &config.profile.model,
         ),
     }
 }
@@ -713,17 +1345,24 @@ fn assistant_system_prompt(mcp_url: &str) -> String {
     )
 }
 
+fn emit_assistant_message(
+    sender: &mpsc::Sender<AssistantJobEvent>,
+    message: AssistantChatMessage,
+) {
+    let _ = sender.send(AssistantJobEvent::Message(message));
+}
+
 fn run_openai_turn(
     client: &Client,
     conversation: &[AssistantChatMessage],
     bridge: &AssistantMcpBridge,
+    sender: &mpsc::Sender<AssistantJobEvent>,
     endpoint: &str,
     bearer_token: &str,
     model: &str,
-) -> Result<Vec<AssistantChatMessage>, String> {
+) -> Result<(), String> {
     let mut previous_response_id: Option<String> = None;
     let mut next_input = json!(build_openai_input_messages(conversation));
-    let mut output_messages = Vec::new();
 
     for _ in 0..ASSISTANT_TOOL_STEPS {
         let body = if let Some(previous_response_id) = previous_response_id.as_ref() {
@@ -742,7 +1381,16 @@ fn run_openai_turn(
             })
         };
 
-        let response = post_json_with_bearer(client, endpoint, bearer_token, &body)?;
+        let response = post_json_with_optional_bearer(
+            client,
+            endpoint,
+            if bearer_token.trim().is_empty() {
+                None
+            } else {
+                Some(bearer_token)
+            },
+            &body,
+        )?;
         previous_response_id = response
             .get("id")
             .and_then(Value::as_str)
@@ -754,7 +1402,7 @@ fn run_openai_turn(
             for function_call in function_calls {
                 let result =
                     execute_assistant_tool(bridge, &function_call.name, &function_call.arguments)?;
-                output_messages.push(AssistantChatMessage::tool(format!(
+                emit_assistant_message(sender, AssistantChatMessage::tool(format!(
                     "{} {} -> {}",
                     function_call.name,
                     compact_json(&function_call.arguments),
@@ -772,23 +1420,121 @@ fn run_openai_turn(
 
         let text = extract_openai_text(&response);
         if !text.trim().is_empty() {
-            output_messages.push(AssistantChatMessage::assistant(text));
-            return Ok(output_messages);
+            emit_assistant_message(sender, AssistantChatMessage::assistant(text));
+            return Ok(());
         }
     }
 
     Err("OpenAI assistant did not produce a final response within the tool step budget".to_string())
 }
 
+fn run_openai_chat_completions_turn(
+    client: &Client,
+    conversation: &[AssistantChatMessage],
+    bridge: &AssistantMcpBridge,
+    sender: &mpsc::Sender<AssistantJobEvent>,
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<(), String> {
+    let mut messages = build_openai_chat_messages(conversation, &assistant_system_prompt(&bridge.base_url));
+
+    for _ in 0..ASSISTANT_TOOL_STEPS {
+        let body = json!({
+            "model": model,
+            "messages": messages,
+            "tools": build_openai_chat_tools(),
+            "tool_choice": "auto",
+        });
+        let response = post_json_with_optional_bearer(
+            client,
+            endpoint,
+            if api_key.trim().is_empty() { None } else { Some(api_key) },
+            &body,
+        )?;
+        let message = response
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .cloned()
+            .ok_or_else(|| "OpenAI chat completion response did not contain a message".to_string())?;
+
+        let tool_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !tool_calls.is_empty() {
+            messages.push(json!({
+                "role": "assistant",
+                "content": message.get("content").cloned().unwrap_or_else(|| json!("")),
+                "tool_calls": Value::Array(tool_calls.clone()),
+            }));
+            for tool_call in tool_calls {
+                let function = tool_call
+                    .get("function")
+                    .ok_or_else(|| "OpenAI chat tool call missing function".to_string())?;
+                let tool_name = function
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "OpenAI chat tool call missing name".to_string())?;
+                let call_id = tool_call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(tool_name);
+                let arguments = function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .map(|text| serde_json::from_str(text).unwrap_or_else(|_| json!({})))
+                    .unwrap_or_else(|| json!({}));
+                let result = execute_assistant_tool(bridge, tool_name, &arguments)?;
+                emit_assistant_message(
+                    sender,
+                    AssistantChatMessage::tool(format!(
+                        "{} {} -> {}",
+                        tool_name,
+                        compact_json(&arguments),
+                        compact_json(&result)
+                    )),
+                );
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": serde_json::to_string(&result).unwrap_or_else(|_| "null".to_string()),
+                }));
+            }
+            continue;
+        }
+
+        let text = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !text.is_empty() {
+            emit_assistant_message(sender, AssistantChatMessage::assistant(text));
+            return Ok(());
+        }
+    }
+
+    Err(
+        "OpenAI chat assistant did not produce a final response within the tool step budget"
+            .to_string(),
+    )
+}
+
 fn run_anthropic_turn(
     client: &Client,
     conversation: &[AssistantChatMessage],
     bridge: &AssistantMcpBridge,
+    sender: &mpsc::Sender<AssistantJobEvent>,
+    endpoint: &str,
     api_key: &str,
     model: &str,
-) -> Result<Vec<AssistantChatMessage>, String> {
+) -> Result<(), String> {
     let mut messages = build_anthropic_messages(conversation);
-    let mut output_messages = Vec::new();
 
     for _ in 0..ASSISTANT_TOOL_STEPS {
         let body = json!({
@@ -800,7 +1546,7 @@ fn run_anthropic_turn(
         });
         let response = post_json_with_headers(
             client,
-            DEFAULT_ANTHROPIC_URL,
+            endpoint,
             &[("x-api-key", api_key), ("anthropic-version", "2023-06-01")],
             &body,
         )?;
@@ -833,7 +1579,7 @@ fn run_anthropic_turn(
                     .ok_or_else(|| "Anthropic tool_use missing id".to_string())?;
                 let arguments = tool_use.get("input").cloned().unwrap_or_else(|| json!({}));
                 let result = execute_assistant_tool(bridge, tool_name, &arguments)?;
-                output_messages.push(AssistantChatMessage::tool(format!(
+                emit_assistant_message(sender, AssistantChatMessage::tool(format!(
                     "{} {} -> {}",
                     tool_name,
                     compact_json(&arguments),
@@ -859,8 +1605,8 @@ fn run_anthropic_turn(
             .collect::<Vec<_>>()
             .join("\n");
         if !text.trim().is_empty() {
-            output_messages.push(AssistantChatMessage::assistant(text));
-            return Ok(output_messages);
+            emit_assistant_message(sender, AssistantChatMessage::assistant(text));
+            return Ok(());
         }
     }
 
@@ -868,6 +1614,100 @@ fn run_anthropic_turn(
         "Anthropic assistant did not produce a final response within the tool step budget"
             .to_string(),
     )
+}
+
+fn run_gemini_turn(
+    client: &Client,
+    conversation: &[AssistantChatMessage],
+    bridge: &AssistantMcpBridge,
+    sender: &mpsc::Sender<AssistantJobEvent>,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+) -> Result<(), String> {
+    let mut contents = build_gemini_contents(conversation);
+    let endpoint = gemini_generate_content_endpoint(api_base, model);
+
+    for _ in 0..ASSISTANT_TOOL_STEPS {
+        let body = json!({
+            "system_instruction": {
+                "parts": [{ "text": assistant_system_prompt(&bridge.base_url) }]
+            },
+            "contents": contents,
+            "tools": [{
+                "functionDeclarations": build_gemini_function_declarations()
+            }],
+        });
+        let response = post_json_with_query_and_headers(
+            client,
+            &endpoint,
+            &[("key", api_key)],
+            &[],
+            &body,
+        )?;
+        let content = response
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("content"))
+            .cloned()
+            .ok_or_else(|| "Gemini response did not include candidate content".to_string())?;
+        let parts = content
+            .get("parts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let function_calls = parts
+            .iter()
+            .filter_map(|part| part.get("functionCall").cloned())
+            .collect::<Vec<_>>();
+        if !function_calls.is_empty() {
+            contents.push(content.clone());
+            let mut responses = Vec::new();
+            for function_call in function_calls {
+                let tool_name = function_call
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "Gemini functionCall missing name".to_string())?;
+                let arguments = function_call.get("args").cloned().unwrap_or_else(|| json!({}));
+                let result = execute_assistant_tool(bridge, tool_name, &arguments)?;
+                emit_assistant_message(
+                    sender,
+                    AssistantChatMessage::tool(format!(
+                        "{} {} -> {}",
+                        tool_name,
+                        compact_json(&arguments),
+                        compact_json(&result)
+                    )),
+                );
+                responses.push(json!({
+                    "functionResponse": {
+                        "name": tool_name,
+                        "response": {
+                            "result": result
+                        }
+                    }
+                }));
+            }
+            contents.push(json!({
+                "role": "user",
+                "parts": responses,
+            }));
+            continue;
+        }
+
+        let text = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.trim().is_empty() {
+            emit_assistant_message(sender, AssistantChatMessage::assistant(text));
+            return Ok(());
+        }
+    }
+
+    Err("Gemini assistant did not produce a final response within the tool step budget".to_string())
 }
 
 #[derive(Debug)]
@@ -965,6 +1805,25 @@ fn build_openai_input_messages(conversation: &[AssistantChatMessage]) -> Vec<Val
         .collect()
 }
 
+fn build_openai_chat_messages(conversation: &[AssistantChatMessage], system_prompt: &str) -> Vec<Value> {
+    let mut messages = vec![json!({
+        "role": "system",
+        "content": system_prompt,
+    })];
+    messages.extend(conversation.iter().filter_map(|message| match message.role {
+        AssistantChatRole::User => Some(json!({
+            "role": "user",
+            "content": message.content,
+        })),
+        AssistantChatRole::Assistant => Some(json!({
+            "role": "assistant",
+            "content": message.content,
+        })),
+        AssistantChatRole::Tool | AssistantChatRole::Error => None,
+    }));
+    messages
+}
+
 fn build_openai_tools() -> Vec<Value> {
     assistant_tool_defs()
         .into_iter()
@@ -974,6 +1833,22 @@ fn build_openai_tools() -> Vec<Value> {
                 "name": tool.name,
                 "description": tool.description,
                 "parameters": tool.parameters,
+            })
+        })
+        .collect()
+}
+
+fn build_openai_chat_tools() -> Vec<Value> {
+    assistant_tool_defs()
+        .into_iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
             })
         })
         .collect()
@@ -996,6 +1871,23 @@ fn build_anthropic_messages(conversation: &[AssistantChatMessage]) -> Vec<Value>
         .collect()
 }
 
+fn build_gemini_contents(conversation: &[AssistantChatMessage]) -> Vec<Value> {
+    conversation
+        .iter()
+        .filter_map(|message| match message.role {
+            AssistantChatRole::User => Some(json!({
+                "role": "user",
+                "parts": [{ "text": message.content }],
+            })),
+            AssistantChatRole::Assistant => Some(json!({
+                "role": "model",
+                "parts": [{ "text": message.content }],
+            })),
+            AssistantChatRole::Tool | AssistantChatRole::Error => None,
+        })
+        .collect()
+}
+
 fn build_anthropic_tools() -> Vec<Value> {
     assistant_tool_defs()
         .into_iter()
@@ -1007,6 +1899,27 @@ fn build_anthropic_tools() -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn build_gemini_function_declarations() -> Vec<Value> {
+    assistant_tool_defs()
+        .into_iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            })
+        })
+        .collect()
+}
+
+fn gemini_generate_content_endpoint(api_base: &str, model: &str) -> String {
+    let base = api_base.trim_end_matches('/');
+    if base.ends_with(":generateContent") {
+        return base.to_string();
+    }
+    format!("{base}/models/{model}:generateContent")
 }
 
 fn execute_assistant_tool(
@@ -1098,19 +2011,17 @@ impl AssistantMcpBridge {
     }
 }
 
-fn post_json_with_bearer(
+fn post_json_with_optional_bearer(
     client: &Client,
     endpoint: &str,
-    bearer_token: &str,
+    bearer_token: Option<&str>,
     body: &Value,
 ) -> Result<Value, String> {
-    if bearer_token.is_empty() {
-        return Err("Bearer token is not configured".to_string());
+    let mut request = client.post(endpoint).json(body);
+    if let Some(token) = bearer_token.filter(|token| !token.trim().is_empty()) {
+        request = request.bearer_auth(token);
     }
-    let response = client
-        .post(endpoint)
-        .bearer_auth(bearer_token)
-        .json(body)
+    let response = request
         .send()
         .map_err(|error| format!("HTTP request to {endpoint} failed: {error}"))?;
     decode_json_response(response)
@@ -1123,6 +2034,23 @@ fn post_json_with_headers(
     body: &Value,
 ) -> Result<Value, String> {
     let mut request = client.post(endpoint).json(body);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = request
+        .send()
+        .map_err(|error| format!("HTTP request to {endpoint} failed: {error}"))?;
+    decode_json_response(response)
+}
+
+fn post_json_with_query_and_headers(
+    client: &Client,
+    endpoint: &str,
+    query: &[(&str, &str)],
+    headers: &[(&str, &str)],
+    body: &Value,
+) -> Result<Value, String> {
+    let mut request = client.post(endpoint).query(query).json(body);
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
@@ -1180,6 +2108,50 @@ mod tests {
         .expect("sidebar state should deserialize");
 
         assert_eq!(decoded.width, ASSISTANT_PANEL_MAX_WIDTH);
+    }
+
+    #[test]
+    fn assistant_preferences_round_trip_and_normalize() {
+        let decoded = deserialize_assistant_preferences(&json!({
+            "active_panel_tab": "settings",
+            "mcp_url": "http://127.0.0.1:24865/mcp",
+            "active_profile_id": "missing",
+            "profiles": [
+                {
+                    "id": "local",
+                    "name": "LM Studio",
+                    "provider": "open_ai_compatible",
+                    "protocol": "anthropic_messages",
+                    "endpoint": "",
+                    "api_key": "",
+                    "model": "local-model"
+                }
+            ]
+        }))
+        .expect("assistant preferences should deserialize");
+
+        assert_eq!(decoded.active_panel_tab, AssistantPanelTab::Settings);
+        assert_eq!(decoded.active_profile_id, "local");
+        assert_eq!(
+            decoded.profiles[0].protocol,
+            AssistantProtocolKind::OpenAiChatCompletions
+        );
+        assert_eq!(decoded.profiles[0].endpoint, DEFAULT_LM_STUDIO_CHAT_URL);
+    }
+
+    #[test]
+    fn gemini_endpoint_appends_model_path_once() {
+        assert_eq!(
+            gemini_generate_content_endpoint(DEFAULT_GEMINI_API_BASE, "gemini-test"),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+        );
+        assert_eq!(
+            gemini_generate_content_endpoint(
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent",
+                "ignored"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+        );
     }
 
     #[test]
