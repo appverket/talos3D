@@ -311,6 +311,21 @@ fn draw_import(c: &mut Canvas) {
     c.line(20.0, 5.0, 16.0, 5.0);
 }
 
+// Lucide: file-output-ish export mark
+fn draw_export(c: &mut Canvas) {
+    c.line(6.0, 3.0, 15.0, 3.0);
+    c.line(15.0, 3.0, 20.0, 8.0);
+    c.line(20.0, 8.0, 20.0, 21.0);
+    c.line(20.0, 21.0, 6.0, 21.0);
+    c.line(6.0, 21.0, 6.0, 3.0);
+    c.line(15.0, 3.0, 15.0, 8.0);
+    c.line(15.0, 8.0, 20.0, 8.0);
+    c.line(12.0, 8.0, 12.0, 17.0);
+    c.line(8.0, 13.0, 12.0, 17.0);
+    c.line(16.0, 13.0, 12.0, 17.0);
+    c.line(8.0, 19.0, 16.0, 19.0);
+}
+
 // Lucide: box-select (select all - dashed corners)
 fn draw_box_select(c: &mut Canvas) {
     // Corner arcs
@@ -618,6 +633,7 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "scan" => draw_scan(&mut c),
         "file_plus" => draw_file_plus(&mut c),
         "import" => draw_import(&mut c),
+        "export" => draw_export(&mut c),
         "box_select" => draw_box_select(&mut c),
         "deselect" => draw_deselect(&mut c),
         "crosshair" => draw_crosshair(&mut c),
