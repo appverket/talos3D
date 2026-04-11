@@ -36,8 +36,8 @@ use crate::plugins::{
         ImportProgressState, ImportReviewState, ImportedLayerPanelState, PendingImportCommit,
     },
     lighting::{
-        create_daylight_rig, SceneLightKind, SceneLightNode, SceneLightSnapshot,
-        SceneLightingSettings,
+        create_daylight_rig, SceneLightKind, SceneLightNode, SceneLightObjectVisibility,
+        SceneLightSnapshot, SceneLightingSettings,
     },
     material_browser::{draw_materials_window, MaterialsWindowState},
     materials::MaterialRegistry,
@@ -204,6 +204,7 @@ struct ChromeData<'w, 's> {
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
     lighting_window_state: ResMut<'w, LightingWindowState>,
     lighting_settings: ResMut<'w, SceneLightingSettings>,
+    light_object_visibility: ResMut<'w, SceneLightObjectVisibility>,
     materials_window_state: ResMut<'w, MaterialsWindowState>,
     material_registry: ResMut<'w, MaterialRegistry>,
     render_settings: ResMut<'w, RenderSettings>,
@@ -1998,7 +1999,7 @@ fn draw_viewport_context_menu(
                     item!("Group    Cmd+G", "modeling.group");
                     item!("Ungroup    Cmd+\u{21e7}G", "modeling.ungroup");
                     ui.separator();
-                    item!("Deselect    Esc", "core.deselect");
+                    item!("Deselect    Esc / Cmd+D", "core.deselect");
                     item!("Delete    Delete", "core.delete");
                 } else {
                     item!("Select All    Cmd+A", "core.select_all");
@@ -2271,6 +2272,13 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                     .small()
                     .color(CHROME_MUTED),
             );
+            ui.checkbox(
+                &mut data.light_object_visibility.visible,
+                "Show light objects in viewport",
+            )
+            .on_hover_text(
+                "Expose light gizmos as selectable scene objects. Hidden by default so selection and framing stay geometry-focused.",
+            );
             ui.add_space(8.0);
 
             ui.collapsing("Ambient", |ui| {
@@ -2378,6 +2386,7 @@ fn draw_lighting_window(ctx: &egui::Context, data: &mut ChromeData) {
                                             replace_selection(
                                                 &mut data.commands,
                                                 &data.light_query,
+                                                &mut data.light_object_visibility,
                                                 element_id,
                                             );
                                         }
@@ -2573,8 +2582,10 @@ fn draw_rgb_triplet(ui: &mut egui::Ui, label: &str, value: &mut [f32; 3]) {
 fn replace_selection(
     commands: &mut Commands,
     light_query: &Query<(Entity, &ElementId, &SceneLightNode, &Transform)>,
+    light_object_visibility: &mut SceneLightObjectVisibility,
     target: &ElementId,
 ) {
+    light_object_visibility.visible = true;
     for (entity, _, _, _) in light_query.iter() {
         commands.entity(entity).remove::<Selected>();
     }

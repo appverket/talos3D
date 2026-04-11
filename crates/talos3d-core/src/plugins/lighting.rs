@@ -15,11 +15,13 @@ use crate::{
     plugins::{
         command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt},
         commands::{despawn_by_element_id, find_entity_by_element_id},
+        document_properties::DocumentProperties,
         identity::{ElementId, ElementIdAllocator},
     },
 };
 
 pub struct LightingPlugin;
+const LIGHT_OBJECT_VISIBILITY_KEY: &str = "scene_light_object_visibility";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -96,6 +98,28 @@ impl Default for SceneLightingSettings {
             affects_lightmapped_meshes: true,
         }
     }
+}
+
+#[derive(Resource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneLightObjectVisibility {
+    pub visible: bool,
+}
+
+impl Default for SceneLightObjectVisibility {
+    fn default() -> Self {
+        Self { visible: false }
+    }
+}
+
+pub fn scene_light_objects_visible(world: &World) -> bool {
+    world
+        .get_resource::<SceneLightObjectVisibility>()
+        .map(|state| state.visible)
+        .unwrap_or(false)
+}
+
+pub fn scene_light_object_exposed(entity_ref: &bevy::ecs::world::EntityRef, world: &World) -> bool {
+    !entity_ref.contains::<SceneLightNode>() || scene_light_objects_visible(world)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -622,6 +646,9 @@ impl AuthoredEntityFactory for SceneLightFactory {
     }
 
     fn draw_selection(&self, world: &World, entity: Entity, gizmos: &mut Gizmos, color: Color) {
+        if !scene_light_objects_visible(world) {
+            return;
+        }
         let Some((node, transform)) = world.get_entity(entity).ok().and_then(|entity_ref| {
             Some((
                 entity_ref.get::<SceneLightNode>()?.clone(),
@@ -634,6 +661,9 @@ impl AuthoredEntityFactory for SceneLightFactory {
     }
 
     fn hit_test(&self, world: &World, ray: Ray3d) -> Option<HitCandidate> {
+        if !scene_light_objects_visible(world) {
+            return None;
+        }
         let Some(mut query) = world.try_query::<(Entity, &SceneLightNode, &Transform)>() else {
             return None;
         };
@@ -671,6 +701,7 @@ impl AuthoredEntityFactory for SceneLightFactory {
 impl Plugin for LightingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SceneLightingSettings>()
+            .init_resource::<SceneLightObjectVisibility>()
             .register_authored_entity_factory(SceneLightFactory)
             .register_capability(CapabilityDescriptor {
                 id: "lighting".to_string(),
@@ -711,6 +742,8 @@ impl Plugin for LightingPlugin {
             .add_systems(
                 Update,
                 (
+                    sync_scene_light_object_visibility,
+                    clear_hidden_light_selection,
                     sync_ambient_light,
                     sync_scene_lights,
                     draw_scene_light_gizmos,
@@ -811,7 +844,63 @@ fn sync_scene_lights(
     }
 }
 
-fn draw_scene_light_gizmos(query: Query<(&SceneLightNode, &Transform)>, mut gizmos: Gizmos) {
+fn sync_scene_light_object_visibility(
+    mut visibility: ResMut<SceneLightObjectVisibility>,
+    mut doc_props: ResMut<DocumentProperties>,
+    mut last_serialized: Local<Option<Value>>,
+) {
+    let saved = doc_props
+        .domain_defaults
+        .get(LIGHT_OBJECT_VISIBILITY_KEY)
+        .cloned();
+    if saved != *last_serialized {
+        if let Some(saved_state) = saved
+            .as_ref()
+            .and_then(deserialize_scene_light_object_visibility)
+        {
+            if *visibility != saved_state {
+                *visibility = saved_state;
+            }
+        } else if saved.is_none() && last_serialized.is_some() {
+            *visibility = SceneLightObjectVisibility::default();
+        }
+        *last_serialized = saved.clone();
+    }
+
+    let serialized = serialize_scene_light_object_visibility(&visibility);
+    if doc_props.domain_defaults.get(LIGHT_OBJECT_VISIBILITY_KEY) != Some(&serialized) {
+        doc_props
+            .domain_defaults
+            .insert(LIGHT_OBJECT_VISIBILITY_KEY.to_string(), serialized.clone());
+    }
+    *last_serialized = Some(serialized);
+}
+
+fn clear_hidden_light_selection(
+    mut commands: Commands,
+    visibility: Res<SceneLightObjectVisibility>,
+    selected_lights: Query<Entity, (With<crate::plugins::selection::Selected>, With<SceneLightNode>)>,
+) {
+    if !visibility.is_changed() || visibility.visible {
+        return;
+    }
+
+    for entity in &selected_lights {
+        commands
+            .entity(entity)
+            .remove::<crate::plugins::selection::Selected>();
+    }
+}
+
+fn draw_scene_light_gizmos(
+    query: Query<(&SceneLightNode, &Transform)>,
+    visibility: Res<SceneLightObjectVisibility>,
+    mut gizmos: Gizmos,
+) {
+    if !visibility.visible {
+        return;
+    }
+
     for (node, transform) in &query {
         draw_light_gizmo(
             &mut gizmos,
@@ -821,6 +910,14 @@ fn draw_scene_light_gizmos(query: Query<(&SceneLightNode, &Transform)>, mut gizm
             false,
         );
     }
+}
+
+fn serialize_scene_light_object_visibility(state: &SceneLightObjectVisibility) -> Value {
+    serde_json::to_value(state).unwrap_or_else(|_| Value::Null)
+}
+
+fn deserialize_scene_light_object_visibility(value: &Value) -> Option<SceneLightObjectVisibility> {
+    serde_json::from_value(value.clone()).ok()
 }
 
 /// Insert the correct Bevy light component directly via world access.
@@ -1132,5 +1229,15 @@ mod tests {
         assert_eq!(fill.node.intensity, 2_000.0);
         assert!(!fill.node.shadows_enabled);
         assert_eq!(fill.translation, Vec3::new(-8.0, 4.0, -6.0));
+    }
+
+    #[test]
+    fn scene_light_object_visibility_round_trips_through_json() {
+        let state = SceneLightObjectVisibility { visible: true };
+        let decoded = deserialize_scene_light_object_visibility(
+            &serialize_scene_light_object_visibility(&state),
+        )
+        .expect("light object visibility should deserialize");
+        assert_eq!(decoded, state);
     }
 }

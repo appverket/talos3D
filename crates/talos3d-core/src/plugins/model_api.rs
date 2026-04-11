@@ -22,7 +22,9 @@ use crate::plugins::{
     history::{apply_pending_history_commands, HistorySet},
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
-    lighting::{create_daylight_rig, SceneLightNode, SceneLightingSettings},
+    lighting::{
+        create_daylight_rig, scene_light_object_exposed, SceneLightNode, SceneLightingSettings,
+    },
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
@@ -7872,6 +7874,9 @@ fn authored_model_bounds(world: &World) -> Option<crate::authored_entity::Entity
     let mut aggregate = None;
 
     for entity_ref in query.iter(world) {
+        if !scene_light_object_exposed(&entity_ref, world) {
+            continue;
+        }
         let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
             continue;
         };
