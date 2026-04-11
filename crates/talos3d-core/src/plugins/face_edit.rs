@@ -426,7 +426,7 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
             } else {
                 entity
             };
-            if let Some(verts) = get_face_verts(world, render_entity, pp.face_id) {
+            if let Some(verts) = face_vertices_for_entity(world, render_entity, pp.face_id) {
                 draw_face_outline_for_entity(
                     world,
                     &mut gizmos,
@@ -448,7 +448,7 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
                 .is_some_and(|s| s.face_id == hit.face_id);
             if !is_selected {
                 let render_entity = face_entity_for(hit.entity);
-                if let Some(verts) = get_face_verts(world, render_entity, hit.face_id) {
+                if let Some(verts) = face_vertices_for_entity(world, render_entity, hit.face_id) {
                     draw_face_outline_for_entity(
                         world,
                         &mut gizmos,
@@ -468,7 +468,7 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
         let render_entity = csg_operand_target
             .map(|(op_entity, _)| op_entity)
             .unwrap_or(entity);
-        if let Some(verts) = get_face_verts(world, render_entity, selected.face_id) {
+        if let Some(verts) = face_vertices_for_entity(world, render_entity, selected.face_id) {
             draw_face_outline_for_entity(
                 world,
                 &mut gizmos,
@@ -592,7 +592,11 @@ fn draw_face_outline_for_entity(
 }
 
 /// Get the world-space vertex positions of a face for any entity type.
-fn get_face_verts(world: &World, entity: Entity, face_id: FaceId) -> Option<Vec<Vec3>> {
+pub(crate) fn face_vertices_for_entity(
+    world: &World,
+    entity: Entity,
+    face_id: FaceId,
+) -> Option<Vec<Vec3>> {
     let entity_ref = world.get_entity(entity).ok()?;
 
     if entity_ref.get::<FaceProfileFeature>().is_some() {

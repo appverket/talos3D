@@ -590,7 +590,11 @@ pub struct DeleteLightRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PlaceGuideLineRequest {
     pub anchor: [f32; 3],
-    pub direction: [f32; 3],
+    pub direction: Option<[f32; 3]>,
+    pub through: Option<[f32; 3]>,
+    pub reference_direction: Option<[f32; 3]>,
+    pub angle_degrees: Option<f32>,
+    pub plane_normal: Option<[f32; 3]>,
     pub finite_length: Option<f32>,
     pub visible: Option<bool>,
     pub label: Option<String>,
@@ -5251,7 +5255,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "place_guide_line",
-        description = "Create a construction guide line from an anchor point and direction vector."
+        description = "Create a construction guide line from an anchor plus direction, a through point, or an angle relative to a reference direction on a plane."
     )]
     async fn place_guide_line_tool(
         &self,
@@ -6829,14 +6833,34 @@ fn handle_create_light(
 
 #[cfg(feature = "model-api")]
 fn create_guide_line_request_json(request: &PlaceGuideLineRequest) -> Value {
-    json!({
+    let mut request_json = json!({
         "type": "guide_line",
         "anchor": request.anchor,
-        "direction": request.direction,
-        "finite_length": request.finite_length,
         "visible": request.visible.unwrap_or(true),
         "label": request.label,
-    })
+    });
+    let object = request_json
+        .as_object_mut()
+        .expect("guide line create request should serialize as an object");
+    if let Some(direction) = request.direction {
+        object.insert("direction".to_string(), json!(direction));
+    }
+    if let Some(through) = request.through {
+        object.insert("through".to_string(), json!(through));
+    }
+    if let Some(reference_direction) = request.reference_direction {
+        object.insert("reference_direction".to_string(), json!(reference_direction));
+    }
+    if let Some(angle_degrees) = request.angle_degrees {
+        object.insert("angle_degrees".to_string(), json!(angle_degrees));
+    }
+    if let Some(plane_normal) = request.plane_normal {
+        object.insert("plane_normal".to_string(), json!(plane_normal));
+    }
+    if let Some(finite_length) = request.finite_length {
+        object.insert("finite_length".to_string(), json!(finite_length));
+    }
+    request_json
 }
 
 #[cfg(feature = "model-api")]
@@ -11492,6 +11516,31 @@ mod tests {
         assert!(entities
             .iter()
             .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn guide_line_request_json_supports_angle_contract() {
+        let request = PlaceGuideLineRequest {
+            anchor: [1.0, 1.0, 1.0],
+            direction: None,
+            through: None,
+            reference_direction: Some([1.0, 0.0, 0.0]),
+            angle_degrees: Some(45.0),
+            plane_normal: Some([0.0, 1.0, 0.0]),
+            finite_length: Some(2.5),
+            visible: Some(true),
+            label: Some("Top Face 45".to_string()),
+        };
+
+        let json = create_guide_line_request_json(&request);
+        assert_eq!(json["anchor"], json!([1.0, 1.0, 1.0]));
+        assert_eq!(json["reference_direction"], json!([1.0, 0.0, 0.0]));
+        assert_eq!(json["angle_degrees"], json!(45.0));
+        assert_eq!(json["plane_normal"], json!([0.0, 1.0, 0.0]));
+        assert_eq!(json["finite_length"], json!(2.5));
+        assert!(json.get("direction").is_none());
+        assert!(json.get("through").is_none());
     }
 
     #[cfg(feature = "model-api")]
