@@ -1701,6 +1701,7 @@ fn draw_camera_toolbar_controls(
         ui.separator();
         ui.horizontal(|ui| {
             for (label, preset) in [
+                ("Front", CameraViewPreset::Front),
                 ("Top", CameraViewPreset::Top),
                 ("Left", CameraViewPreset::Left),
                 ("Right", CameraViewPreset::Right),
@@ -1749,6 +1750,7 @@ fn draw_camera_toolbar_controls(
 
         ui.separator();
         for (label, preset) in [
+            ("F", CameraViewPreset::Front),
             ("T", CameraViewPreset::Top),
             ("L", CameraViewPreset::Left),
             ("R", CameraViewPreset::Right),
@@ -2202,7 +2204,21 @@ fn draw_render_settings_window(
                 });
             });
 
-            ui.collapsing("Drawing Overlays", |ui| {
+            ui.collapsing("Drawing Views", |ui| {
+                if ui.button("Apply Paper Drawing Preset").clicked() {
+                    settings.background_rgb = [1.0, 1.0, 1.0];
+                    settings.grid_enabled = false;
+                    settings.paper_fill_enabled = true;
+                    settings.visible_edge_overlay_enabled = true;
+                    settings.contour_overlay_enabled = false;
+                    settings.wireframe_overlay_enabled = false;
+                }
+                ui.checkbox(&mut settings.grid_enabled, "Show Grid");
+                ui.checkbox(&mut settings.paper_fill_enabled, "White Paper Fill");
+                ui.checkbox(
+                    &mut settings.visible_edge_overlay_enabled,
+                    "Visible Edge Overlay",
+                );
                 ui.checkbox(
                     &mut settings.wireframe_overlay_enabled,
                     "Enable Wireframe Overlay",
@@ -2211,9 +2227,13 @@ fn draw_render_settings_window(
                     &mut settings.contour_overlay_enabled,
                     "Enable Contour Overlay",
                 );
+                ui.horizontal(|ui| {
+                    ui.label("Background");
+                    ui.color_edit_button_rgb(&mut settings.background_rgb);
+                });
                 ui.label(
                     egui::RichText::new(
-                        "Contours draw camera silhouettes. Wireframe draws authored edge linework on top of shaded solids.",
+                        "Paper fill swaps scene materials to white unlit surfaces. Visible edges keep sharp and silhouette edges while hiding occluded edges. Wireframe remains a full construction overlay.",
                     )
                     .small()
                     .color(CHROME_MUTED),
