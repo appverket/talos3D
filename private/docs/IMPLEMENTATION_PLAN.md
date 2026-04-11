@@ -21,6 +21,15 @@ annotations, and exposes the same geometry through UI editing and MCP.
 
 See [PROOF_POINT_62.md](./proof_points/PROOF_POINT_62.md).
 
+## Completed: Proof Point 64 — Geometry-First Selection And Hidden Light Helpers
+
+Selection now defaults back to geometry-first behavior: authored light helpers
+stay in the scene and persist with lighting state, but they are hidden from
+viewport picking, select-all, and framing unless the user explicitly exposes
+them as objects.
+
+See [PROOF_POINT_64.md](./proof_points/PROOF_POINT_64.md).
+
 ## Planned: Proof Point 63 — Inferred Guide Lines And Protractor Workflow
 
 Guide lines need a deeper construction workflow: hosted planes, inferred

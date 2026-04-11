@@ -17,6 +17,7 @@ use crate::{
         identity::ElementId,
         input_ownership::{InputOwnership, InputPhase},
         layers::{LayerAssignment, LayerRegistry, DEFAULT_LAYER_NAME},
+        lighting::{SceneLightNode, SceneLightObjectVisibility},
         modeling::{
             csg::CsgNode,
             group::{
@@ -49,6 +50,7 @@ type BoxSelectEntityQueryItem = (
     Option<&'static LayerAssignment>,
     Has<GroupMembers>,
     Option<&'static bevy::camera::primitives::Aabb>,
+    Has<SceneLightNode>,
     Has<GroupEditMuted>,
 );
 type GroupMembershipQueryItem = (Entity, &'static ElementId, &'static GroupMembers);
@@ -551,6 +553,7 @@ struct BoxSelectContext<'w, 's> {
     handle_state: Res<'w, HandleInteractionState>,
     face_edit_context: Res<'w, FaceEditContext>,
     layer_registry: Res<'w, LayerRegistry>,
+    light_object_visibility: Res<'w, SceneLightObjectVisibility>,
     entity_query: Query<'w, 's, BoxSelectEntityQueryItem>,
     edit_context: Res<'w, GroupEditContext>,
     group_query: Query<'w, 's, GroupMembershipQueryItem>,
@@ -624,10 +627,15 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 layer_assignment,
                 has_group_members,
                 aabb,
+                is_scene_light,
                 is_muted,
             ) in &cx.entity_query
             {
                 if visibility.copied() == Some(Visibility::Hidden) {
+                    continue;
+                }
+
+                if is_scene_light && !cx.light_object_visibility.visible {
                     continue;
                 }
 
