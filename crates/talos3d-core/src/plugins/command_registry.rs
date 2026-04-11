@@ -615,6 +615,19 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.create_sphere", "create_sphere"),
         ("icon.create_plane", "create_plane"),
         ("icon.create_polyline", "create_polyline"),
+        ("icon.view_perspective", "view_perspective"),
+        ("icon.view_orthographic", "view_orthographic"),
+        ("icon.view_isometric", "view_isometric"),
+        ("icon.view_front", "view_front"),
+        ("icon.view_back", "view_back"),
+        ("icon.view_top", "view_top"),
+        ("icon.view_bottom", "view_bottom"),
+        ("icon.view_left", "view_left"),
+        ("icon.view_right", "view_right"),
+        ("icon.view_wireframe", "view_wireframe"),
+        ("icon.view_outline", "view_outline"),
+        ("icon.view_grid", "view_grid"),
+        ("icon.view_paper", "view_paper"),
     ];
 
     let size = bevy::render::render_resource::Extent3d {
