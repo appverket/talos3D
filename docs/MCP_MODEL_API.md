@@ -188,6 +188,7 @@ For fillet/chamfer specifically:
 - `list_importers`
 - `import_file`
 - `take_screenshot`
+- `export_drawing`
 
 `model_summary` now also reports `assembly_counts` and `relation_counts` in
 addition to entity counts and capability-defined metrics.
@@ -219,6 +220,9 @@ Renderer control also now supports drawing-style viewport composition:
   `grid_enabled`, and `paper_fill_enabled`
 - hidden-line-friendly export can be approximated with
   `visible_edge_overlay_enabled`
+- drawing exports can be written directly as `png`, `pdf`, or `svg` through
+  `export_drawing`; `take_screenshot` now accepts the same output formats when
+  a path extension requests them
 - the same viewpoint and drawing toggles are also reachable through
   `invoke_command` and discoverable through `list_commands` / `list_toolbars`
   using the `view.*` command family (`view.front`, `view.back`, `view.top`,

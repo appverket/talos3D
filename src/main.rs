@@ -22,6 +22,7 @@ use talos3d_core::plugins::{
     dimension_line::DimensionLinePlugin,
     document_properties::DocumentProperties,
     document_state::DocumentStatePlugin,
+    drawing_export::DrawingExportPlugin,
     egui_chrome::EguiChromePlugin,
     face_edit::FaceEditPlugin,
     grid::GridPlugin,
@@ -86,6 +87,7 @@ fn main() {
     .add_plugins(ClippingPlanesPlugin)
     .add_plugins(CommandRegistryPlugin)
     .add_plugins(DocumentStatePlugin)
+    .add_plugins(DrawingExportPlugin)
     .add_plugins(GridPlugin)
     .add_plugins(CursorPlugin)
     .add_plugins(IdentityPlugin)

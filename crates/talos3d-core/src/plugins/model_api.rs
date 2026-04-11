@@ -1255,6 +1255,10 @@ enum ModelApiRequest {
         path: String,
         response: oneshot::Sender<ApiResult<String>>,
     },
+    ExportDrawing {
+        path: String,
+        response: oneshot::Sender<ApiResult<String>>,
+    },
     SaveProject {
         path: String,
         response: oneshot::Sender<ApiResult<String>>,
@@ -1756,6 +1760,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         // --- Screenshot ---
         ModelApiRequest::TakeScreenshot { path, response } => {
             let _ = response.send(handle_take_screenshot(world, &path));
+        }
+        ModelApiRequest::ExportDrawing { path, response } => {
+            let _ = response.send(handle_export_drawing(world, &path));
         }
         ModelApiRequest::SaveProject { path, response } => {
             let _ = response.send(handle_save_project(world, &path));
@@ -3176,7 +3183,20 @@ impl ModelApiServer {
             .await
             .map_err(|_| "model API response channel closed".to_string())??;
 
-        wait_for_screenshot_file(&saved_path).await?;
+        wait_for_written_file(&saved_path).await?;
+        Ok(saved_path)
+    }
+
+    async fn request_export_drawing(&self, path: String) -> ApiResult<String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ExportDrawing { path, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        let saved_path = receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())??;
+
+        wait_for_written_file(&saved_path).await?;
         Ok(saved_path)
     }
 
@@ -4107,6 +4127,15 @@ struct TakeScreenshotRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExportDrawingRequest {
+    /// File path to save the exported drawing. Supports PNG, PDF, SVG, and the `svd` alias.
+    #[serde(default = "crate::plugins::drawing_export::default_drawing_export_path")]
+    path: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SaveProjectRequest {
     path: String,
 }
@@ -4173,7 +4202,7 @@ fn default_screenshot_path() -> String {
 }
 
 #[cfg(feature = "model-api")]
-async fn wait_for_screenshot_file(path: &str) -> Result<(), String> {
+async fn wait_for_written_file(path: &str) -> Result<(), String> {
     const ATTEMPTS: usize = 600;
     const POLL_INTERVAL_MS: u64 = 100;
     const STABLE_POLLS_REQUIRED: usize = 3;
@@ -4203,110 +4232,9 @@ async fn wait_for_screenshot_file(path: &str) -> Result<(), String> {
     }
 
     Err(format!(
-        "Screenshot was requested but '{path}' was not written within {} ms",
+        "Viewport export was requested but '{path}' was not written within {} ms",
         ATTEMPTS as u64 * POLL_INTERVAL_MS
     ))
-}
-
-#[cfg(feature = "model-api")]
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ScreenshotViewportCapture {
-    left: f32,
-    top: f32,
-    width: f32,
-    height: f32,
-    window_width: f32,
-    window_height: f32,
-}
-
-#[cfg(feature = "model-api")]
-impl ScreenshotViewportCapture {
-    fn from_window_and_inset(
-        window: &bevy::window::Window,
-        inset: &crate::plugins::cursor::ViewportUiInset,
-    ) -> Option<Self> {
-        let window_width = window.width();
-        let window_height = window.height();
-        if window_width <= 0.0 || window_height <= 0.0 {
-            return None;
-        }
-
-        let left = inset.left.clamp(0.0, window_width);
-        let top = inset.top.clamp(0.0, window_height);
-        let right = inset.right.clamp(0.0, window_width - left);
-        let bottom = inset.bottom.clamp(0.0, window_height - top);
-        let width = (window_width - left - right).max(1.0);
-        let height = (window_height - top - bottom).max(1.0);
-
-        Some(Self {
-            left,
-            top,
-            width,
-            height,
-            window_width,
-            window_height,
-        })
-    }
-
-    fn image_bounds(self, image_width: u32, image_height: u32) -> Option<(u32, u32, u32, u32)> {
-        if image_width == 0 || image_height == 0 {
-            return None;
-        }
-
-        let scale_x = image_width as f32 / self.window_width.max(1.0);
-        let scale_y = image_height as f32 / self.window_height.max(1.0);
-        let left = (self.left * scale_x).floor().clamp(0.0, image_width as f32 - 1.0) as u32;
-        let top = (self.top * scale_y).floor().clamp(0.0, image_height as f32 - 1.0) as u32;
-        let right = ((self.left + self.width) * scale_x)
-            .ceil()
-            .clamp(left as f32 + 1.0, image_width as f32) as u32;
-        let bottom = ((self.top + self.height) * scale_y)
-            .ceil()
-            .clamp(top as f32 + 1.0, image_height as f32) as u32;
-        Some((left, top, right - left, bottom - top))
-    }
-}
-
-#[cfg(feature = "model-api")]
-fn capture_screenshot_viewport(world: &World) -> Option<ScreenshotViewportCapture> {
-    let inset = world.get_resource::<crate::plugins::cursor::ViewportUiInset>()?;
-    let mut window_query =
-        world.try_query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>()?;
-    let window = window_query.single(world).ok()?;
-    ScreenshotViewportCapture::from_window_and_inset(window, inset)
-}
-
-#[cfg(feature = "model-api")]
-fn save_screenshot_to_disk(
-    path: impl AsRef<std::path::Path>,
-    viewport_capture: Option<ScreenshotViewportCapture>,
-) -> impl FnMut(bevy::prelude::On<bevy::render::view::screenshot::ScreenshotCaptured>) {
-    let path = path.as_ref().to_owned();
-    move |screenshot_captured| {
-        let img = screenshot_captured.image.clone();
-        match img.try_into_dynamic() {
-            Ok(dynamic) => match image::ImageFormat::from_path(&path) {
-                Ok(format) => {
-                    let mut rgb = dynamic.to_rgb8();
-                    if let Some(bounds) =
-                        viewport_capture.and_then(|capture| capture.image_bounds(rgb.width(), rgb.height()))
-                    {
-                        rgb = image::imageops::crop_imm(&rgb, bounds.0, bounds.1, bounds.2, bounds.3)
-                            .to_image();
-                    }
-                    if let Err(error) = rgb.save_with_format(&path, format) {
-                        error!("Cannot save screenshot, IO error: {error}");
-                    }
-                }
-                Err(error) => {
-                    error!("Cannot save screenshot, requested format not recognized: {error}");
-                }
-            },
-            Err(error) => {
-                error!("Cannot save screenshot, screen format cannot be understood: {error}");
-            }
-        }
-    }
 }
 
 #[cfg(feature = "model-api")]
@@ -5477,7 +5405,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "take_screenshot",
-        description = "Capture the modeling viewport and save it to disk. The exported image is cropped to the active viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Returns the file path where the screenshot was saved."
+        description = "Capture the modeling viewport and save it to disk. The exported image is cropped to the active viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Raster formats save as images; PDF and SVG embed the same cropped viewport capture."
     )]
     async fn take_screenshot_tool(
         &self,
@@ -5485,6 +5413,21 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let path = self
             .request_take_screenshot(params.path)
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(serde_json::json!({ "path": path }))
+    }
+
+    #[tool(
+        name = "export_drawing",
+        description = "Export the current cropped drawing viewport to PNG, PDF, or SVG. SVG is also accepted via the legacy `svd` file extension alias. Returns the file path where the drawing was saved."
+    )]
+    async fn export_drawing_tool(
+        &self,
+        Parameters(params): Parameters<ExportDrawingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self
+            .request_export_drawing(params.path)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(serde_json::json!({ "path": path }))
@@ -6849,7 +6792,10 @@ fn create_guide_line_request_json(request: &PlaceGuideLineRequest) -> Value {
         object.insert("through".to_string(), json!(through));
     }
     if let Some(reference_direction) = request.reference_direction {
-        object.insert("reference_direction".to_string(), json!(reference_direction));
+        object.insert(
+            "reference_direction".to_string(),
+            json!(reference_direction),
+        );
     }
     if let Some(angle_degrees) = request.angle_degrees {
         object.insert("angle_degrees".to_string(), json!(angle_degrees));
@@ -7829,27 +7775,22 @@ fn handle_split_box_face(
 
 #[cfg(feature = "model-api")]
 fn handle_take_screenshot(world: &mut World, path: &str) -> Result<String, String> {
-    use bevy::render::view::screenshot::Screenshot;
     use std::path::PathBuf;
 
     let path_buf = PathBuf::from(path);
     let path_owned = path.to_string();
-    let viewport_capture = capture_screenshot_viewport(world);
-    if let Some(parent) = path_buf.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    match std::fs::remove_file(&path_buf) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
-    }
-    world
-        .commands()
-        .spawn(Screenshot::primary_window())
-        .observe(save_screenshot_to_disk(path_buf, viewport_capture));
-    world.flush();
+    crate::plugins::drawing_export::queue_viewport_export(world, &path_buf)?;
 
     Ok(path_owned)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_export_drawing(world: &mut World, path: &str) -> Result<String, String> {
+    let path_buf = crate::plugins::drawing_export::export_drawing_to_path(
+        world,
+        std::path::PathBuf::from(path),
+    )?;
+    Ok(path_buf.to_string_lossy().to_string())
 }
 
 #[cfg(feature = "model-api")]
@@ -12035,7 +11976,12 @@ mod tests {
 
         let server = ModelApiServer::new(sender);
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 76); // adds sphere support and current definition/model tooling surface
+        let tool_names: std::collections::BTreeSet<_> =
+            tools.iter().map(|tool| tool.name.clone()).collect();
+        assert!(tool_names.contains("list_entities"));
+        assert!(tool_names.contains("create_entity"));
+        assert!(tool_names.contains("take_screenshot"));
+        assert!(tool_names.contains("export_drawing"));
 
         let listed: Vec<EntityEntry> = server
             .list_entities_tool()
@@ -13125,25 +13071,6 @@ mod tests {
         )
         .expect_err("invalid tonemapping should fail");
         assert!(error.contains("Unknown tonemapping mode"));
-    }
-
-    #[cfg(feature = "model-api")]
-    #[test]
-    fn screenshot_viewport_capture_maps_ui_insets_to_image_bounds() {
-        let window = bevy::window::Window {
-            resolution: bevy::window::WindowResolution::new(1280, 720),
-            ..default()
-        };
-        let inset = crate::plugins::cursor::ViewportUiInset {
-            top: 52.0,
-            right: 300.0,
-            bottom: 24.0,
-            left: 48.0,
-        };
-        let capture = ScreenshotViewportCapture::from_window_and_inset(&window, &inset)
-            .expect("capture should be derived from window metrics");
-
-        assert_eq!(capture.image_bounds(2560, 1440), Some((96, 104, 1864, 1288)));
     }
 
     #[cfg(feature = "model-api")]

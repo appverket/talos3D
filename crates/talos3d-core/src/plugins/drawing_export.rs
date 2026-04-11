@@ -1,0 +1,463 @@
+use std::{
+    io::{Cursor, Write},
+    path::{Path, PathBuf},
+};
+
+use base64::Engine;
+use bevy::{prelude::*, render::view::screenshot::Screenshot};
+use image::{codecs::jpeg::JpegEncoder, DynamicImage, RgbImage};
+use serde_json::Value;
+
+use crate::plugins::{
+    command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
+    document_state::DocumentState,
+    ui::StatusBarData,
+};
+
+const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
+const DEFAULT_EXPORT_FILE_NAME: &str = "drawing.png";
+
+pub struct DrawingExportPlugin;
+
+impl Plugin for DrawingExportPlugin {
+    fn build(&self, app: &mut App) {
+        app.register_command(
+            CommandDescriptor {
+                id: "core.export_drawing".to_string(),
+                label: "Export Drawing...".to_string(),
+                description: "Export the current drawing viewport as PNG, PDF, or SVG.".to_string(),
+                category: CommandCategory::File,
+                parameters: None,
+                version: 1,
+                default_shortcut: Some("Ctrl/Cmd+Shift+E".to_string()),
+                icon: Some("icon.export".to_string()),
+                hint: Some("Export the cropped drawing viewport as PNG, PDF, or SVG".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                activates_tool: None,
+                capability_id: None,
+            },
+            execute_export_drawing,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ViewportExportFormat {
+    Raster(image::ImageFormat),
+    Pdf,
+    Svg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ViewportCapture {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    window_width: f32,
+    window_height: f32,
+}
+
+impl ViewportCapture {
+    pub(crate) fn from_window_and_inset(
+        window: &bevy::window::Window,
+        inset: &crate::plugins::cursor::ViewportUiInset,
+    ) -> Option<Self> {
+        let window_width = window.width();
+        let window_height = window.height();
+        if window_width <= 0.0 || window_height <= 0.0 {
+            return None;
+        }
+
+        let left = inset.left.clamp(0.0, window_width);
+        let top = inset.top.clamp(0.0, window_height);
+        let right = inset.right.clamp(0.0, window_width - left);
+        let bottom = inset.bottom.clamp(0.0, window_height - top);
+        let width = (window_width - left - right).max(1.0);
+        let height = (window_height - top - bottom).max(1.0);
+
+        Some(Self {
+            left,
+            top,
+            width,
+            height,
+            window_width,
+            window_height,
+        })
+    }
+
+    pub(crate) fn image_bounds(
+        self,
+        image_width: u32,
+        image_height: u32,
+    ) -> Option<(u32, u32, u32, u32)> {
+        if image_width == 0 || image_height == 0 {
+            return None;
+        }
+
+        let scale_x = image_width as f32 / self.window_width.max(1.0);
+        let scale_y = image_height as f32 / self.window_height.max(1.0);
+        let left = (self.left * scale_x)
+            .floor()
+            .clamp(0.0, image_width as f32 - 1.0) as u32;
+        let top = (self.top * scale_y)
+            .floor()
+            .clamp(0.0, image_height as f32 - 1.0) as u32;
+        let right = ((self.left + self.width) * scale_x)
+            .ceil()
+            .clamp(left as f32 + 1.0, image_width as f32) as u32;
+        let bottom = ((self.top + self.height) * scale_y)
+            .ceil()
+            .clamp(top as f32 + 1.0, image_height as f32) as u32;
+        Some((left, top, right - left, bottom - top))
+    }
+}
+
+pub(crate) fn default_drawing_export_path() -> String {
+    "/tmp/talos_drawing.png".to_string()
+}
+
+pub(crate) fn capture_viewport(world: &World) -> Option<ViewportCapture> {
+    let inset = world.get_resource::<crate::plugins::cursor::ViewportUiInset>()?;
+    let mut window_query =
+        world.try_query_filtered::<&bevy::window::Window, With<bevy::window::PrimaryWindow>>()?;
+    let window = window_query.single(world).ok()?;
+    ViewportCapture::from_window_and_inset(window, inset)
+}
+
+pub(crate) fn normalize_export_path(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() {
+        path
+    } else {
+        path.with_extension("png")
+    }
+}
+
+pub(crate) fn viewport_export_format_from_path(
+    path: &Path,
+) -> Result<ViewportExportFormat, String> {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+    match extension.as_deref() {
+        None => Ok(ViewportExportFormat::Raster(image::ImageFormat::Png)),
+        Some("pdf") => Ok(ViewportExportFormat::Pdf),
+        Some("svg") | Some("svd") => Ok(ViewportExportFormat::Svg),
+        _ => image::ImageFormat::from_path(path)
+            .map(ViewportExportFormat::Raster)
+            .map_err(|_| {
+                format!(
+                    "Unsupported export format for '{}'. Use PNG, PDF, or SVG.",
+                    path.display()
+                )
+            }),
+    }
+}
+
+pub fn export_drawing_now(world: &mut World) -> Result<Option<PathBuf>, String> {
+    let current_path = world.resource::<DocumentState>().current_path.clone();
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("Drawing Export", &["png", "pdf", "svg"])
+        .add_filter("PNG Image", &["png"])
+        .add_filter("PDF Document", &["pdf"])
+        .add_filter("SVG Drawing", &["svg"])
+        .set_file_name(default_export_file_name(current_path.as_deref()));
+    if let Some(ref path) = current_path {
+        if let Some(parent) = path.parent() {
+            dialog = dialog.set_directory(parent);
+        }
+    }
+
+    match dialog.save_file() {
+        Some(path) => {
+            let path = export_drawing_to_path(world, path)?;
+            Ok(Some(path))
+        }
+        None => Ok(None),
+    }
+}
+
+pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
+    let path = normalize_export_path(path);
+    queue_viewport_export(world, &path)?;
+    Ok(path)
+}
+
+pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<(), String> {
+    let _ = viewport_export_format_from_path(path)?;
+    let viewport_capture = capture_viewport(world);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+
+    world
+        .commands()
+        .spawn(Screenshot::primary_window())
+        .observe(save_viewport_export_to_disk(
+            path.to_path_buf(),
+            viewport_capture,
+        ));
+    world.flush();
+    Ok(())
+}
+
+pub(crate) fn save_viewport_export_to_disk(
+    path: PathBuf,
+    viewport_capture: Option<ViewportCapture>,
+) -> impl FnMut(bevy::prelude::On<bevy::render::view::screenshot::ScreenshotCaptured>) {
+    move |screenshot_captured| {
+        let img = screenshot_captured.image.clone();
+        match img.try_into_dynamic() {
+            Ok(dynamic) => {
+                let rgb = crop_dynamic_to_viewport(dynamic, viewport_capture);
+                if let Err(error) = write_rgb_to_path(&path, &rgb) {
+                    error!("Cannot save drawing export '{}': {error}", path.display());
+                }
+            }
+            Err(error) => {
+                error!("Cannot save drawing export, screen format cannot be understood: {error}");
+            }
+        }
+    }
+}
+
+fn crop_dynamic_to_viewport(
+    dynamic: DynamicImage,
+    viewport_capture: Option<ViewportCapture>,
+) -> RgbImage {
+    let mut rgb = dynamic.to_rgb8();
+    if let Some(bounds) =
+        viewport_capture.and_then(|capture| capture.image_bounds(rgb.width(), rgb.height()))
+    {
+        rgb = image::imageops::crop_imm(&rgb, bounds.0, bounds.1, bounds.2, bounds.3).to_image();
+    }
+    rgb
+}
+
+fn write_rgb_to_path(path: &Path, rgb: &RgbImage) -> Result<(), String> {
+    match viewport_export_format_from_path(path)? {
+        ViewportExportFormat::Raster(format) => rgb
+            .save_with_format(path, format)
+            .map_err(|error| error.to_string()),
+        ViewportExportFormat::Svg => {
+            let document = svg_document(rgb)?;
+            std::fs::write(path, document).map_err(|error| error.to_string())
+        }
+        ViewportExportFormat::Pdf => {
+            let document = pdf_document(rgb)?;
+            std::fs::write(path, document).map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn svg_document(rgb: &RgbImage) -> Result<Vec<u8>, String> {
+    let mut png = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(rgb.clone())
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png.into_inner());
+    Ok(format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\">\n",
+            "  <rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n",
+            "  <image href=\"data:image/png;base64,{encoded}\" width=\"{width}\" height=\"{height}\" preserveAspectRatio=\"none\"/>\n",
+            "</svg>\n"
+        ),
+        width = rgb.width(),
+        height = rgb.height(),
+        encoded = encoded
+    )
+    .into_bytes())
+}
+
+fn pdf_document(rgb: &RgbImage) -> Result<Vec<u8>, String> {
+    let width = rgb.width();
+    let height = rgb.height();
+
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 95)
+        .encode_image(rgb)
+        .map_err(|error| error.to_string())?;
+
+    let content_stream = format!("q\n{width} 0 0 {height} 0 0 cm\n/Im0 Do\nQ\n");
+    let image_length = jpeg.len();
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"%PDF-1.4\n%\xC7\xEC\x8F\xA2\n");
+    let mut offsets = Vec::new();
+
+    write_pdf_object(
+        &mut out,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    )?;
+    write_pdf_object(
+        &mut out,
+        &mut offsets,
+        2,
+        format!("<< /Type /Pages /Kids [3 0 R] /Count 1 >>").as_bytes(),
+    )?;
+    write_pdf_object(
+        &mut out,
+        &mut offsets,
+        3,
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>"
+        )
+        .as_bytes(),
+    )?;
+
+    offsets.push(out.len());
+    write!(
+        out,
+        "4 0 obj\n<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {image_length} >>\nstream\n"
+    )
+    .map_err(|error| error.to_string())?;
+    out.extend_from_slice(&jpeg);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+
+    write_pdf_object(
+        &mut out,
+        &mut offsets,
+        5,
+        format!(
+            "<< /Length {} >>\nstream\n{}endstream",
+            content_stream.len(),
+            content_stream
+        )
+        .as_bytes(),
+    )?;
+
+    let xref_offset = out.len();
+    write!(out, "xref\n0 {}\n", offsets.len() + 1).map_err(|error| error.to_string())?;
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets {
+        writeln!(out, "{offset:010} 00000 n ").map_err(|error| error.to_string())?;
+    }
+    write!(
+        out,
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+        6, xref_offset
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(out)
+}
+
+fn write_pdf_object(
+    out: &mut Vec<u8>,
+    offsets: &mut Vec<usize>,
+    object_id: usize,
+    content: &[u8],
+) -> Result<(), String> {
+    offsets.push(out.len());
+    write!(out, "{object_id} 0 obj\n").map_err(|error| error.to_string())?;
+    out.extend_from_slice(content);
+    out.extend_from_slice(b"\nendobj\n");
+    Ok(())
+}
+
+fn default_export_file_name(current_path: Option<&Path>) -> String {
+    current_path
+        .and_then(|path| path.file_stem())
+        .map(|stem| format!("{}-drawing.png", stem.to_string_lossy()))
+        .unwrap_or_else(|| DEFAULT_EXPORT_FILE_NAME.to_string())
+}
+
+fn execute_export_drawing(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    let Some(path) = export_drawing_now(world)? else {
+        return Ok(CommandResult::empty());
+    };
+    if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
+        status_bar_data.set_feedback(
+            format!("Exporting drawing to {}", path.display()),
+            STATUS_MESSAGE_DURATION_SECONDS,
+        );
+    }
+    Ok(CommandResult::empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Rgb, RgbImage};
+
+    #[test]
+    fn viewport_capture_maps_ui_insets_to_image_bounds() {
+        let window = bevy::window::Window {
+            resolution: bevy::window::WindowResolution::new(1280, 720),
+            ..default()
+        };
+        let inset = crate::plugins::cursor::ViewportUiInset {
+            top: 52.0,
+            right: 300.0,
+            bottom: 24.0,
+            left: 48.0,
+        };
+        let capture = ViewportCapture::from_window_and_inset(&window, &inset)
+            .expect("capture should be derived from window metrics");
+
+        assert_eq!(
+            capture.image_bounds(2560, 1440),
+            Some((96, 104, 1864, 1288))
+        );
+    }
+
+    #[test]
+    fn export_format_defaults_to_png_and_accepts_svg_aliases() {
+        assert_eq!(
+            viewport_export_format_from_path(Path::new("/tmp/drawing")),
+            Ok(ViewportExportFormat::Raster(image::ImageFormat::Png))
+        );
+        assert_eq!(
+            viewport_export_format_from_path(Path::new("/tmp/drawing.png")),
+            Ok(ViewportExportFormat::Raster(image::ImageFormat::Png))
+        );
+        assert_eq!(
+            viewport_export_format_from_path(Path::new("/tmp/drawing.pdf")),
+            Ok(ViewportExportFormat::Pdf)
+        );
+        assert_eq!(
+            viewport_export_format_from_path(Path::new("/tmp/drawing.svg")),
+            Ok(ViewportExportFormat::Svg)
+        );
+        assert_eq!(
+            viewport_export_format_from_path(Path::new("/tmp/drawing.svd")),
+            Ok(ViewportExportFormat::Svg)
+        );
+    }
+
+    #[test]
+    fn svg_document_embeds_png_payload() {
+        let rgb = RgbImage::from_pixel(4, 3, Rgb([255, 255, 255]));
+        let svg = String::from_utf8(svg_document(&rgb).expect("svg export should render"))
+            .expect("svg export should be utf-8");
+
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("width=\"4\""));
+        assert!(svg.contains("height=\"3\""));
+        assert!(svg.contains("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn pdf_document_embeds_single_raster_page() {
+        let rgb = RgbImage::from_pixel(4, 3, Rgb([240, 240, 240]));
+        let pdf = pdf_document(&rgb).expect("pdf export should render");
+        let text = String::from_utf8_lossy(&pdf);
+
+        assert!(text.contains("%PDF-1.4"));
+        assert!(text.contains("/Subtype /Image"));
+        assert!(text.contains("/MediaBox [0 0 4 3]"));
+        assert!(text.contains("/Filter /DCTDecode"));
+        assert!(text.contains("startxref"));
+    }
+}
