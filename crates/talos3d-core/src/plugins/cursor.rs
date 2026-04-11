@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, picking::prelude::*, prelude::*};
 use bevy::window::PrimaryWindow;
 
 use super::document_properties::DocumentProperties;
@@ -6,6 +6,11 @@ use crate::plugins::egui_chrome::EguiWantsInput;
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::plugins::scene_ray;
+use crate::plugins::{
+    identity::ElementId,
+    modeling::profile_feature::FaceProfileFeature,
+    tools::ActiveTool,
+};
 
 const CROSSHAIR_HALF_SIZE: f32 = 0.15;
 const CROSSHAIR_COLOR: Color = Color::srgb(1.0, 0.95, 0.4);
@@ -33,6 +38,14 @@ pub struct ViewportUiInset {
     pub right: f32,
     pub bottom: f32,
     pub left: f32,
+}
+
+#[derive(SystemParam)]
+struct ToolCursorRayCast<'w, 's> {
+    ray_cast: MeshRayCast<'w, 's>,
+    mesh_selectable_query: Query<'w, 's, (), With<ElementId>>,
+    visibility_query: Query<'w, 's, &'static Visibility>,
+    face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +143,8 @@ fn update_cursor_world_pos(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     egui_wants_input: Res<EguiWantsInput>,
     doc_props: Res<DocumentProperties>,
+    active_tool: Res<State<ActiveTool>>,
+    mut tool_cursor_ray_cast: ToolCursorRayCast,
 ) {
     if egui_wants_input.pointer {
         clear_cursor_world_pos(&mut cursor_world_pos);
@@ -161,20 +176,50 @@ fn update_cursor_world_pos(
         return;
     };
 
-    // Project ray onto the active drawing plane
-    let Some(raw_position) = drawing_plane.intersect_ray(ray) else {
+    let use_scene_surface_cursor = matches!(
+        active_tool.get(),
+        ActiveTool::PlaceDimensionLine | ActiveTool::PlaceGuideLine
+    );
+    let raw_position = if use_scene_surface_cursor {
+        ray_cast_scene_surface(ray, &mut tool_cursor_ray_cast)
+            .or_else(|| drawing_plane.intersect_ray(ray))
+    } else {
+        drawing_plane.intersect_ray(ray)
+    };
+    let Some(raw_position) = raw_position else {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
     };
 
-    // Snap in the plane's local coordinate system
-    let uv = drawing_plane.project_to_2d(raw_position);
-    let snap = doc_props.snap_increment;
-    let snapped_uv = Vec2::new(snap_to_increment(uv.x, snap), snap_to_increment(uv.y, snap));
-    let snapped_position = drawing_plane.to_world(snapped_uv);
+    let snapped_position = if use_scene_surface_cursor {
+        raw_position
+    } else {
+        let uv = drawing_plane.project_to_2d(raw_position);
+        let snap = doc_props.snap_increment;
+        let snapped_uv = Vec2::new(snap_to_increment(uv.x, snap), snap_to_increment(uv.y, snap));
+        drawing_plane.to_world(snapped_uv)
+    };
 
     cursor_world_pos.raw = Some(raw_position);
     cursor_world_pos.snapped = Some(snapped_position);
+}
+
+fn ray_cast_scene_surface(ray: Ray3d, ray_cast: &mut ToolCursorRayCast) -> Option<Vec3> {
+    ray_cast
+        .ray_cast
+        .cast_ray(
+            ray,
+            &MeshRayCastSettings::default().with_filter(&|entity| {
+                ray_cast.mesh_selectable_query.contains(entity)
+                    && !ray_cast.face_profile_feature_query.contains(entity)
+                    && ray_cast
+                        .visibility_query
+                        .get(entity)
+                        .map_or(true, |visibility| *visibility != Visibility::Hidden)
+            }),
+        )
+        .first()
+        .map(|(_, hit)| ray.origin + *ray.direction * hit.distance)
 }
 
 fn draw_cursor_crosshair(
