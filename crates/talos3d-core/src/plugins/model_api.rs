@@ -1,18 +1,34 @@
 use std::collections::HashMap;
 
-use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
+#[cfg(feature = "model-api")]
+use bevy::window::PrimaryWindow;
+use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(feature = "model-api")]
+use serde_json::json;
+use serde_json::Value;
 
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
-use crate::plugins::identity::{ElementId, ElementIdAllocator};
+use crate::plugins::identity::ElementId;
+#[cfg(feature = "model-api")]
+use crate::plugins::identity::ElementIdAllocator;
+#[cfg(feature = "model-api")]
+use crate::plugins::materials::MaterialDef;
 use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
+#[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
 #[cfg(feature = "model-api")]
+use crate::plugins::render_pipeline::RenderSettings;
+#[cfg(feature = "model-api")]
+use crate::plugins::render_pipeline::RenderTonemapping;
+#[cfg(feature = "model-api")]
 use crate::plugins::{
-    camera::{apply_orbit_state, focus_orbit_camera_on_bounds, CameraProjectionMode, OrbitCamera},
+    camera::{
+        apply_orbit_state, focus_orbit_camera_on_bounds,
+        perspective_distance_to_orthographic_scale, CameraProjectionMode, OrbitCamera,
+    },
     commands::{
         find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
         BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
@@ -25,10 +41,9 @@ use crate::plugins::{
     lighting::{
         create_daylight_rig, scene_light_object_exposed, SceneLightNode, SceneLightingSettings,
     },
-    materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
+    materials::{MaterialAssignment, MaterialRegistry},
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
-    render_pipeline::{RenderSettings, RenderTonemapping},
     selection::Selected,
     toolbar::{
         update_toolbar_layout_entry, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
@@ -180,6 +195,7 @@ pub struct InstanceInfo {
     pub requested_port: Option<u16>,
 }
 
+#[cfg(feature = "model-api")]
 impl From<&ModelApiRuntimeInfo> for InstanceInfo {
     fn from(value: &ModelApiRuntimeInfo) -> Self {
         Self {
@@ -256,6 +272,7 @@ pub struct NamedViewInfo {
     pub description: Option<String>,
     pub focus: [f32; 3],
     pub radius: f32,
+    pub orthographic_scale: f32,
     pub yaw: f32,
     pub pitch: f32,
     /// `"perspective"` or `"orthographic"`.
@@ -269,6 +286,7 @@ pub struct NamedViewInfo {
 pub struct CameraParams {
     pub focus: Option<[f32; 3]>,
     pub radius: Option<f32>,
+    pub orthographic_scale: Option<f32>,
     pub yaw: Option<f32>,
     pub pitch: Option<f32>,
     /// `"perspective"` or `"orthographic"`.
@@ -333,6 +351,7 @@ pub struct MaterialInfo {
 }
 
 impl MaterialInfo {
+    #[cfg(feature = "model-api")]
     fn from_def(def: &MaterialDef) -> Self {
         use crate::plugins::materials::TextureRef;
 
@@ -615,6 +634,15 @@ pub struct PlaceDimensionLineRequest {
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BooleanOperationRequest {
+    /// Element ID of the base solid (the body that remains / is modified).
+    pub base: u64,
+    /// Element ID of the tool solid (the body that cuts, adds, or intersects).
+    pub tool: u64,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AmbientLightUpdateRequest {
     pub color: Option<[f32; 3]>,
@@ -654,6 +682,7 @@ pub struct RenderSettingsInfo {
 }
 
 impl RenderSettingsInfo {
+    #[cfg(feature = "model-api")]
     fn from_settings(settings: &RenderSettings) -> Self {
         Self {
             tonemapping: settings.tonemapping.as_str().to_string(),
@@ -2083,11 +2112,17 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
     }
 }
 
+#[cfg(feature = "model-api")]
 const MODEL_API_DEFAULT_HTTP_PORT: u16 = 24842;
+#[cfg(feature = "model-api")]
 const MODEL_API_DEFAULT_HTTP_HOST: &str = "127.0.0.1";
+#[cfg(feature = "model-api")]
 const MODEL_API_INSTANCE_ENV: &str = "TALOS3D_INSTANCE_ID";
+#[cfg(feature = "model-api")]
 const MODEL_API_PORT_ENV: &str = "TALOS3D_MODEL_API_PORT";
+#[cfg(feature = "model-api")]
 const MODEL_API_REGISTRY_DIR_ENV: &str = "TALOS3D_INSTANCE_REGISTRY_DIR";
+#[cfg(feature = "model-api")]
 const MODEL_API_DEFAULT_REGISTRY_DIR: &str = "/tmp/talos3d-instances";
 
 #[cfg(feature = "model-api")]
@@ -3951,7 +3986,6 @@ pub struct PrepareSiteSurfaceRequest {
     pub contour_interval: Option<f32>,
 }
 
-#[cfg(feature = "model-api")]
 fn default_true() -> bool {
     true
 }
@@ -4977,7 +5011,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "clip_plane_create",
-        description = "Create a clipping plane that cuts the viewport. Geometry on the side opposite to the normal is hidden. Returns the new element_id."
+        description = "Create a section-view clipping plane as drawing metadata. Geometry on the side opposite to the normal is hidden. Returns the new element_id."
     )]
     async fn clip_plane_create_tool(
         &self,
@@ -4992,7 +5026,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "clip_plane_update",
-        description = "Update a clipping plane's name, origin, normal, or active state."
+        description = "Update a section-view clipping plane's name, origin, normal, or active state."
     )]
     async fn clip_plane_update_tool(
         &self,
@@ -5013,7 +5047,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "clip_plane_list",
-        description = "List all clipping planes and their active state."
+        description = "List all section-view clipping planes and their active state."
     )]
     async fn clip_plane_list_tool(&self) -> Result<CallToolResult, McpError> {
         let planes = self
@@ -5025,7 +5059,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "clip_plane_toggle",
-        description = "Activate or deactivate a clipping plane by element_id."
+        description = "Activate or deactivate a section-view clipping plane by element_id."
     )]
     async fn clip_plane_toggle_tool(
         &self,
@@ -5198,7 +5232,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "place_dimension_line",
-        description = "Create a drafting dimension from start and end points, then place the visible dimension line with line_point or offset. Optionally override extension, units, and precision."
+        description = "Create a drawing dimension annotation from start and end points, then place the visible dimension line with line_point or offset. Optionally override extension, units, and precision."
     )]
     async fn place_dimension_line_tool(
         &self,
@@ -5206,6 +5240,63 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let element_id = self
             .request_create_entity(create_dimension_line_request_json(&params))
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "boolean_union",
+        description = "Combine two solids into one by adding their volumes together. Both operands become hidden and a new combined solid is created. The result preserves the parametric operands so either can still be edited."
+    )]
+    async fn boolean_union_tool(
+        &self,
+        Parameters(params): Parameters<BooleanOperationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_create_entity(boolean_request_json(
+                params.base,
+                params.tool,
+                "union",
+            ))
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "boolean_difference",
+        description = "Subtract the tool solid from the base solid. The tool volume is removed from the base. Both operands become hidden and a new result solid is created. Use this for cutting holes, openings, recesses, or any subtractive operation."
+    )]
+    async fn boolean_difference_tool(
+        &self,
+        Parameters(params): Parameters<BooleanOperationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_create_entity(boolean_request_json(
+                params.base,
+                params.tool,
+                "difference",
+            ))
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "boolean_intersection",
+        description = "Keep only the volume where two solids overlap. Both operands become hidden and a new result solid containing only the shared volume is created."
+    )]
+    async fn boolean_intersection_tool(
+        &self,
+        Parameters(params): Parameters<BooleanOperationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_create_entity(boolean_request_json(
+                params.base,
+                params.tool,
+                "intersection",
+            ))
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(element_id)
@@ -6271,12 +6362,24 @@ fn handle_create_layer(world: &mut World, name: &str) -> Result<Vec<LayerInfo>, 
 // --- Named View Handlers ---
 
 #[cfg(feature = "model-api")]
+fn named_view_orthographic_scale(view: &crate::plugins::named_views::NamedView) -> f32 {
+    view.orthographic_scale.unwrap_or_else(|| {
+        if view.projection_mode == CameraProjectionMode::Isometric {
+            view.radius.max(0.05)
+        } else {
+            perspective_distance_to_orthographic_scale(view.radius, view.focal_length_mm)
+        }
+    })
+}
+
+#[cfg(feature = "model-api")]
 fn named_view_info_from_view(view: &crate::plugins::named_views::NamedView) -> NamedViewInfo {
     NamedViewInfo {
         name: view.name.clone(),
         description: view.description.clone(),
         focus: view.focus,
         radius: view.radius,
+        orthographic_scale: named_view_orthographic_scale(view),
         yaw: view.yaw,
         pitch: view.pitch,
         projection: match view.projection_mode {
@@ -6303,6 +6406,7 @@ fn projection_mode_from_str(s: &str) -> Result<CameraProjectionMode, String> {
 struct LiveCameraSnapshot {
     focus: bevy::math::Vec3,
     radius: f32,
+    orthographic_scale: f32,
     yaw: f32,
     pitch: f32,
     projection_mode: CameraProjectionMode,
@@ -6316,6 +6420,7 @@ fn live_camera_snapshot(world: &World) -> LiveCameraSnapshot {
         LiveCameraSnapshot {
             focus: orbit.focus,
             radius: orbit.radius,
+            orthographic_scale: orbit.orthographic_scale,
             yaw: orbit.yaw,
             pitch: orbit.pitch,
             projection_mode: orbit.projection_mode,
@@ -6326,6 +6431,7 @@ fn live_camera_snapshot(world: &World) -> LiveCameraSnapshot {
         LiveCameraSnapshot {
             focus: default.focus,
             radius: default.radius,
+            orthographic_scale: default.orthographic_scale,
             yaw: default.yaw,
             pitch: default.pitch,
             projection_mode: default.projection_mode,
@@ -6346,6 +6452,7 @@ fn orbit_from_camera_params(
         return Ok(OrbitCamera {
             focus: live.focus,
             radius: live.radius,
+            orthographic_scale: live.orthographic_scale,
             yaw: live.yaw,
             pitch: live.pitch,
             projection_mode: live.projection_mode,
@@ -6365,6 +6472,7 @@ fn orbit_from_camera_params(
             .map(bevy::math::Vec3::from)
             .unwrap_or(live.focus),
         radius: params.radius.unwrap_or(live.radius),
+        orthographic_scale: params.orthographic_scale.unwrap_or(live.orthographic_scale),
         yaw: params.yaw.unwrap_or(live.yaw),
         pitch: params.pitch.unwrap_or(live.pitch),
         projection_mode,
@@ -6449,6 +6557,7 @@ fn handle_view_update(
 
         view.focus = orbit.focus.into();
         view.radius = orbit.radius;
+        view.orthographic_scale = Some(orbit.orthographic_scale);
         view.yaw = orbit.yaw;
         view.pitch = orbit.pitch;
         view.projection_mode = orbit.projection_mode;
@@ -6837,6 +6946,16 @@ fn create_dimension_line_request_json(request: &PlaceDimensionLineRequest) -> Va
         object.insert("precision".to_string(), json!(precision));
     }
     request_json
+}
+
+#[cfg(feature = "model-api")]
+fn boolean_request_json(base: u64, tool: u64, op: &str) -> Value {
+    json!({
+        "type": "csg",
+        "operand_a": base,
+        "operand_b": tool,
+        "op": op,
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -7809,8 +7928,27 @@ fn handle_frame_model(world: &mut World) -> Result<BoundingBox, String> {
 #[cfg(feature = "model-api")]
 fn handle_frame_entities(world: &mut World, element_ids: &[u64]) -> Result<BoundingBox, String> {
     let snapshots = capture_snapshots_by_ids(world, element_ids)?;
-    let bounds = aggregate_snapshot_bounds(snapshots.iter().map(|(_, snapshot)| snapshot))
-        .ok_or_else(|| "No bounded entities available to frame".to_string())?;
+    let model_snapshots = snapshots
+        .iter()
+        .filter(|(_, snapshot)| {
+            snapshot.scope() == crate::authored_entity::EntityScope::AuthoredModel
+        })
+        .collect::<Vec<_>>();
+    let bounds = aggregate_snapshot_bounds(
+        if model_snapshots.is_empty() {
+            snapshots
+                .iter()
+                .map(|(_, snapshot)| snapshot)
+                .collect::<Vec<_>>()
+        } else {
+            model_snapshots
+                .into_iter()
+                .map(|(_, snapshot)| snapshot)
+                .collect()
+        }
+        .into_iter(),
+    )
+    .ok_or_else(|| "No bounded entities available to frame".to_string())?;
     if !focus_orbit_camera_on_bounds(world, bounds) {
         return Err("No orbit camera available to frame the entities".to_string());
     }
@@ -7845,6 +7983,9 @@ fn authored_model_bounds(world: &World) -> Option<crate::authored_entity::Entity
         let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
             continue;
         };
+        if snapshot.scope() != crate::authored_entity::EntityScope::AuthoredModel {
+            continue;
+        }
         let Some(bounds) = snapshot.bounds() else {
             continue;
         };
