@@ -181,18 +181,29 @@ fn geometry_semantics_for_feature(
 fn geometry_semantics_for_csg(world: &World, snapshot: &BoxedEntity) -> Option<GeometrySemantics> {
     let entity_ref = entity_ref_by_element_id(world, snapshot.element_id())?;
     let csg = entity_ref.get::<CsgNode>()?;
+    let op_name = match csg.op {
+        crate::plugins::modeling::bsp_csg::BooleanOp::Union => "union",
+        crate::plugins::modeling::bsp_csg::BooleanOp::Difference => "difference",
+        crate::plugins::modeling::bsp_csg::BooleanOp::Intersection => "intersection",
+    };
+    // Use semantic role names: "base" and "tool" for Difference (order matters),
+    // "operand" for symmetric operations (Union, Intersection).
+    let (role_a, role_b) = match csg.op {
+        crate::plugins::modeling::bsp_csg::BooleanOp::Difference => ("base", "tool"),
+        _ => ("operand", "operand"),
+    };
     Some(GeometrySemantics {
         role: GeometryRole::CompositeDefinition,
         topology_intent: TopologyIntent::SingleClosedSolid,
         definition_inputs: vec![
             DefinitionInputRef {
                 element_id: csg.operand_a.0,
-                relation: "operand_a".to_string(),
+                relation: role_a.to_string(),
                 support_face: None,
             },
             DefinitionInputRef {
                 element_id: csg.operand_b.0,
-                relation: "operand_b".to_string(),
+                relation: role_b.to_string(),
                 support_face: None,
             },
         ],
@@ -200,8 +211,7 @@ fn geometry_semantics_for_csg(world: &World, snapshot: &BoxedEntity) -> Option<G
         invariants: vec![SemanticInvariant::PreserveConnectedness],
         evaluated_body: evaluate_entity_body_summary(world, snapshot.element_id()),
         notes: vec![
-            "CSG node is a definition-graph root and stays compatible with future DAG-based modeling"
-                .to_string(),
+            format!("Boolean {op_name}: CSG definition-graph root, compatible with future DAG-based modeling"),
         ],
     })
 }

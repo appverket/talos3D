@@ -434,10 +434,16 @@ fn get_operand_triangles(
             )
         })
         .or_else(|| {
+            try_get_primitive_triangles::<crate::plugins::modeling::primitives::SpherePrimitive>(
+                &entity_ref,
+            )
+        })
+        .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::primitives::PlanePrimitive>(
                 &entity_ref,
             )
         })
+        // WedgePrimitive does not implement Primitive trait — skip for now
         .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::profile::ProfileExtrusion>(
                 &entity_ref,
@@ -452,6 +458,23 @@ fn get_operand_triangles(
             try_get_primitive_triangles::<crate::plugins::modeling::profile::ProfileRevolve>(
                 &entity_ref,
             )
+        })
+        .or_else(|| {
+            // Fall back to EvaluatedCsg for nested CSG operands (chained booleans)
+            entity_ref.get::<EvaluatedCsg>().map(|evaluated| {
+                evaluated
+                    .indices
+                    .chunks(3)
+                    .filter(|c| c.len() == 3)
+                    .map(|c| {
+                        bsp_csg::CsgTriangle::new(
+                            evaluated.vertices[c[0] as usize],
+                            evaluated.vertices[c[1] as usize],
+                            evaluated.vertices[c[2] as usize],
+                        )
+                    })
+                    .collect()
+            })
         })
 }
 
@@ -494,10 +517,15 @@ pub fn point_inside_mesh(point: Vec3, triangles: &[bsp_csg::CsgTriangle]) -> boo
 fn get_entity_triangles(world: &World, entity: Entity) -> Option<Vec<bsp_csg::CsgTriangle>> {
     let entity_ref = world.get_entity(entity).ok()?;
 
-    // Try all known primitive types
+    // Try all known primitive types (must match get_operand_triangles)
     try_get_primitive_triangles::<crate::plugins::modeling::primitives::BoxPrimitive>(&entity_ref)
         .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::primitives::CylinderPrimitive>(
+                &entity_ref,
+            )
+        })
+        .or_else(|| {
+            try_get_primitive_triangles::<crate::plugins::modeling::primitives::SpherePrimitive>(
                 &entity_ref,
             )
         })
@@ -506,6 +534,7 @@ fn get_entity_triangles(world: &World, entity: Entity) -> Option<Vec<bsp_csg::Cs
                 &entity_ref,
             )
         })
+        // WedgePrimitive does not implement Primitive trait — skip for now
         .or_else(|| {
             try_get_primitive_triangles::<crate::plugins::modeling::profile::ProfileExtrusion>(
                 &entity_ref,
