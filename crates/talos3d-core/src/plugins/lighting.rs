@@ -879,7 +879,13 @@ fn sync_scene_light_object_visibility(
 fn clear_hidden_light_selection(
     mut commands: Commands,
     visibility: Res<SceneLightObjectVisibility>,
-    selected_lights: Query<Entity, (With<crate::plugins::selection::Selected>, With<SceneLightNode>)>,
+    selected_lights: Query<
+        Entity,
+        (
+            With<crate::plugins::selection::Selected>,
+            With<SceneLightNode>,
+        ),
+    >,
 ) {
     if !visibility.is_changed() || visibility.visible {
         return;

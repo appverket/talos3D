@@ -780,7 +780,9 @@ fn draw_dimension_line_labels(
         camera,
         camera_transform,
         window,
-        dimensions.iter().map(|(node, selected)| (node, selected.is_some())),
+        dimensions
+            .iter()
+            .map(|(node, selected)| (node, selected.is_some())),
     );
     if overlays.is_empty() {
         return;
@@ -912,8 +914,9 @@ fn handle_dimension_line_clicks(
             tool_state.start = None;
             tool_state.end = None;
             next_active_tool.set(ActiveTool::PlaceDimensionLine);
-            status_bar_data.hint = "Click a start point, then click an end point, then click to place the offset"
-                .to_string();
+            status_bar_data.hint =
+                "Click a start point, then click an end point, then click to place the offset"
+                    .to_string();
         }
     }
 }
@@ -1085,8 +1088,10 @@ fn default_dimension_extension(start: Vec3, end: Vec3) -> f32 {
 
 fn default_dimension_offset(start: Vec3, end: Vec3) -> f32 {
     let measured_length = start.distance(end);
-    (measured_length * DIMENSION_LINE_DEFAULT_OFFSET_FACTOR)
-        .clamp(DIMENSION_LINE_DEFAULT_OFFSET_MIN, DIMENSION_LINE_DEFAULT_OFFSET_MAX)
+    (measured_length * DIMENSION_LINE_DEFAULT_OFFSET_FACTOR).clamp(
+        DIMENSION_LINE_DEFAULT_OFFSET_MIN,
+        DIMENSION_LINE_DEFAULT_OFFSET_MAX,
+    )
 }
 
 fn stable_offset_direction(axis_dir: Vec3) -> Vec3 {
@@ -1100,8 +1105,9 @@ fn stable_offset_direction(axis_dir: Vec3) -> Vec3 {
 
 fn default_dimension_line_point(start: Vec3, end: Vec3) -> Vec3 {
     let midpoint = (start + end) * 0.5;
-    midpoint + stable_offset_direction((end - start).try_normalize().unwrap_or(Vec3::X))
-        * default_dimension_offset(start, end)
+    midpoint
+        + stable_offset_direction((end - start).try_normalize().unwrap_or(Vec3::X))
+            * default_dimension_offset(start, end)
 }
 
 fn directional_scale(axis_dir: Vec3, factor: Vec3) -> f32 {
@@ -1217,24 +1223,29 @@ impl DimensionGeometry {
     }
 }
 
-fn dimension_geometry(start: Vec3, end: Vec3, line_point: Vec3, extension: f32) -> DimensionGeometry {
+fn dimension_geometry(
+    start: Vec3,
+    end: Vec3,
+    line_point: Vec3,
+    extension: f32,
+) -> DimensionGeometry {
     let axis_dir = (end - start).try_normalize().unwrap_or(Vec3::X);
     let midpoint = (start + end) * 0.5;
     let raw_offset_vec = line_point - midpoint;
     let projected_offset_vec = raw_offset_vec - axis_dir * raw_offset_vec.dot(axis_dir);
-    let (offset_dir, offset_vec) =
-        if let Some(direction) = projected_offset_vec.try_normalize().filter(|_| {
+    let (offset_dir, offset_vec) = if let Some(direction) =
+        projected_offset_vec.try_normalize().filter(|_| {
             projected_offset_vec.length_squared()
                 >= DIMENSION_LINE_MIN_OFFSET * DIMENSION_LINE_MIN_OFFSET
         }) {
-            (direction, projected_offset_vec)
-        } else {
-            let direction = stable_offset_direction(axis_dir);
-            (
-                direction,
-                direction * default_dimension_offset(start, end).max(DIMENSION_LINE_MIN_OFFSET),
-            )
-        };
+        (direction, projected_offset_vec)
+    } else {
+        let direction = stable_offset_direction(axis_dir);
+        (
+            direction,
+            direction * default_dimension_offset(start, end).max(DIMENSION_LINE_MIN_OFFSET),
+        )
+    };
     let dimension_start = start + offset_vec;
     let dimension_end = end + offset_vec;
     let visible_start = dimension_start - axis_dir * extension;
@@ -1251,11 +1262,7 @@ fn dimension_geometry(start: Vec3, end: Vec3, line_point: Vec3, extension: f32) 
     }
 }
 
-fn parse_dimension_line_point_json(
-    value: &Value,
-    start: Vec3,
-    end: Vec3,
-) -> Result<Vec3, String> {
+fn parse_dimension_line_point_json(value: &Value, start: Vec3, end: Vec3) -> Result<Vec3, String> {
     let Some(object) = value.as_object() else {
         return Ok(default_dimension_line_point(start, end));
     };
@@ -1265,11 +1272,8 @@ fn parse_dimension_line_point_json(
     if let Some(offset) = object.get("offset").filter(|value| !value.is_null()) {
         let midpoint = (start + end) * 0.5;
         let offset = scalar_from_json(offset)?.max(DIMENSION_LINE_MIN_OFFSET);
-        return Ok(
-            midpoint
-                + stable_offset_direction((end - start).try_normalize().unwrap_or(Vec3::X))
-                    * offset,
-        );
+        return Ok(midpoint
+            + stable_offset_direction((end - start).try_normalize().unwrap_or(Vec3::X)) * offset);
     }
     Ok(default_dimension_line_point(start, end))
 }
@@ -1290,7 +1294,10 @@ fn dimension_segments(
             geometry.dimension_start - tick_dir,
             geometry.dimension_start + tick_dir,
         ),
-        (geometry.dimension_end - tick_dir, geometry.dimension_end + tick_dir),
+        (
+            geometry.dimension_end - tick_dir,
+            geometry.dimension_end + tick_dir,
+        ),
     ]
 }
 
@@ -1391,9 +1398,7 @@ fn collect_dimension_label_overlays_from_iter<'a>(
         }
         let geometry = snapshot.geometry();
         let line_midpoint = geometry.line_midpoint();
-        let Ok(screen_pos) =
-            camera.world_to_viewport(camera_transform, line_midpoint)
-        else {
+        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, line_midpoint) else {
             continue;
         };
         if screen_pos.x < 0.0
@@ -1406,7 +1411,8 @@ fn collect_dimension_label_overlays_from_iter<'a>(
         let label_center = camera
             .world_to_viewport(
                 camera_transform,
-                line_midpoint + geometry.offset_dir * 0.15_f32.max(snapshot.offset_distance() * 0.15),
+                line_midpoint
+                    + geometry.offset_dir * 0.15_f32.max(snapshot.offset_distance() * 0.15),
             )
             .ok()
             .and_then(|probe| (probe - screen_pos).try_normalize())
