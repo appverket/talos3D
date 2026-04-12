@@ -17,6 +17,9 @@ use crate::{
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         document_properties::DocumentProperties,
         render_pipeline::RenderSettings,
+        section_fill::{
+            extract_section_fills, generate_hatch_lines, HatchPattern, ProjectedSectionFill,
+        },
     },
 };
 
@@ -88,6 +91,7 @@ pub struct DrawingViewport {
 pub struct DrawingGeometry {
     pub edges: Vec<ProjectedEdge>,
     pub dimension_labels: Vec<ProjectedDimensionLabel>,
+    pub section_fills: Vec<ProjectedSectionFill>,
     pub viewport: DrawingViewport,
 }
 
@@ -210,6 +214,45 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
     }
     edges.extend(dim_edges);
 
+    // Section fills: intersect clip planes with meshes, project to 2D
+    let fill_regions = extract_section_fills(world, mesh_assets);
+    let mut section_fills = Vec::new();
+    for region in &fill_regions {
+        let projected: Vec<[f32; 2]> = region
+            .polygon_3d
+            .iter()
+            .filter_map(|p| {
+                let clip = view_proj * p.extend(1.0);
+                if clip.w.abs() < 1e-7 {
+                    return None;
+                }
+                let ndc = clip.truncate() / clip.w;
+                Some([
+                    (ndc.x * 0.5 + 0.5) * vp_width,
+                    (1.0 - (ndc.y * 0.5 + 0.5)) * vp_height,
+                ])
+            })
+            .collect();
+        if projected.len() >= 3 {
+            // Also emit the section cut outline edges
+            for i in 0..projected.len() {
+                let j = (i + 1) % projected.len();
+                edges.push(ProjectedEdge {
+                    x1: projected[i][0],
+                    y1: projected[i][1],
+                    x2: projected[j][0],
+                    y2: projected[j][1],
+                    edge_type: EdgeType::SectionCut,
+                });
+            }
+            section_fills.push(ProjectedSectionFill {
+                polygon: projected,
+                pattern: region.pattern,
+                fill_color: region.fill_color,
+            });
+        }
+    }
+
     let viewport = DrawingViewport {
         width: vp_width,
         height: vp_height,
@@ -221,6 +264,7 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
     Some(DrawingGeometry {
         edges,
         dimension_labels,
+        section_fills,
         viewport,
     })
 }
@@ -239,6 +283,85 @@ pub fn drawing_to_svg(drawing: &DrawingGeometry) -> Vec<u8> {
     )
     .unwrap();
     writeln!(out, r#"  <rect width="100%" height="100%" fill="white"/>"#).unwrap();
+
+    // Section fills (rendered before edges so edges draw on top)
+    let px_per_world = (w / drawing.viewport.world_width).max(0.5);
+    for (i, fill) in drawing.section_fills.iter().enumerate() {
+        // Build clip path from the polygon
+        let clip_id = format!("section-clip-{i}");
+        writeln!(out, r#"  <defs>"#).unwrap();
+        writeln!(out, r#"    <clipPath id="{clip_id}">"#).unwrap();
+        write!(out, r#"      <polygon points=""#).unwrap();
+        for (j, pt) in fill.polygon.iter().enumerate() {
+            if j > 0 {
+                write!(out, " ").unwrap();
+            }
+            write!(out, "{:.2},{:.2}", pt[0], pt[1]).unwrap();
+        }
+        writeln!(out, r#""/>"#).unwrap();
+        writeln!(out, r#"    </clipPath>"#).unwrap();
+        writeln!(out, r#"  </defs>"#).unwrap();
+
+        let [r, g, b, a] = fill.fill_color;
+        let fill_rgba = format!(
+            "rgba({},{},{},{:.2})",
+            (r * 255.0) as u8,
+            (g * 255.0) as u8,
+            (b * 255.0) as u8,
+            a
+        );
+
+        // Solid fill background
+        if matches!(fill.pattern, HatchPattern::SolidFill) {
+            write!(out, r#"  <polygon points=""#).unwrap();
+            for (j, pt) in fill.polygon.iter().enumerate() {
+                if j > 0 {
+                    write!(out, " ").unwrap();
+                }
+                write!(out, "{:.2},{:.2}", pt[0], pt[1]).unwrap();
+            }
+            writeln!(out, r#"" fill="{fill_rgba}" stroke="none"/>"#).unwrap();
+        } else if !matches!(fill.pattern, HatchPattern::NoFill) {
+            // Light tinted background
+            write!(out, r#"  <polygon points=""#).unwrap();
+            for (j, pt) in fill.polygon.iter().enumerate() {
+                if j > 0 {
+                    write!(out, " ").unwrap();
+                }
+                write!(out, "{:.2},{:.2}", pt[0], pt[1]).unwrap();
+            }
+            writeln!(
+                out,
+                r#"" fill="rgba({},{},{},0.08)" stroke="none"/>"#,
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8
+            )
+            .unwrap();
+
+            // Hatch lines clipped to polygon
+            let hatch_lines = generate_hatch_lines(&fill.polygon, fill.pattern, px_per_world);
+            if !hatch_lines.is_empty() {
+                let hatch_weight = 0.18 * px_per_world;
+                writeln!(
+                    out,
+                    r#"  <g class="section-hatch-{i}" clip-path="url(#{clip_id})" stroke="{fill_rgba}" stroke-width="{hatch_weight:.2}" fill="none">"#
+                )
+                .unwrap();
+                write!(out, r#"    <path d=""#).unwrap();
+                for line in &hatch_lines {
+                    write!(
+                        out,
+                        "M{:.2},{:.2}L{:.2},{:.2}",
+                        line[0], line[1], line[2], line[3]
+                    )
+                    .unwrap();
+                }
+                writeln!(out, r#""/>"#).unwrap();
+                writeln!(out, "  </g>").unwrap();
+            }
+        }
+    }
 
     // Group edges by type for consistent line weights
     let edge_groups: &[(EdgeType, &str)] = &[
@@ -322,6 +445,64 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
     // White background
     writeln!(content, "1 1 1 rg").unwrap();
     writeln!(content, "0 0 {w} {h} re f").unwrap();
+
+    // Section fills (rendered before edges so edges draw on top)
+    let pdf_px_per_world = (w / drawing.viewport.world_width).max(0.5);
+    for fill in &drawing.section_fills {
+        if matches!(fill.pattern, HatchPattern::NoFill) {
+            continue;
+        }
+
+        let [r, g, b, _a] = fill.fill_color;
+
+        // Build polygon clip path
+        if fill.polygon.len() >= 3 {
+            // Save graphics state
+            writeln!(content, "q").unwrap();
+
+            // Construct clip path
+            let first = &fill.polygon[0];
+            writeln!(content, "{:.2} {:.2} m", first[0], h - first[1]).unwrap();
+            for pt in &fill.polygon[1..] {
+                writeln!(content, "{:.2} {:.2} l", pt[0], h - pt[1]).unwrap();
+            }
+            writeln!(content, "h W n").unwrap(); // close, clip, no-op paint
+
+            if matches!(fill.pattern, HatchPattern::SolidFill) {
+                // Solid fill
+                writeln!(content, "{r:.3} {g:.3} {b:.3} rg").unwrap();
+                let first = &fill.polygon[0];
+                writeln!(content, "{:.2} {:.2} m", first[0], h - first[1]).unwrap();
+                for pt in &fill.polygon[1..] {
+                    writeln!(content, "{:.2} {:.2} l", pt[0], h - pt[1]).unwrap();
+                }
+                writeln!(content, "h f").unwrap();
+            } else {
+                // Hatch lines within clip
+                let hatch_lines =
+                    generate_hatch_lines(&fill.polygon, fill.pattern, pdf_px_per_world);
+                if !hatch_lines.is_empty() {
+                    writeln!(content, "{r:.3} {g:.3} {b:.3} RG").unwrap();
+                    let hatch_w = 0.18 * (72.0 / 25.4); // 0.18mm in points
+                    writeln!(content, "{hatch_w:.3} w").unwrap();
+                    for line in &hatch_lines {
+                        writeln!(
+                            content,
+                            "{:.2} {:.2} m {:.2} {:.2} l S",
+                            line[0],
+                            h - line[1],
+                            line[2],
+                            h - line[3]
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+
+            // Restore graphics state
+            writeln!(content, "Q").unwrap();
+        }
+    }
 
     // Draw edges grouped by line weight
     writeln!(content, "0 0 0 RG").unwrap(); // black stroke
@@ -982,6 +1163,7 @@ mod tests {
                 text: "2.50m".to_string(),
                 font_size_pt: 10.0,
             }],
+            section_fills: vec![],
             viewport: DrawingViewport {
                 width: 100.0,
                 height: 100.0,
@@ -1011,6 +1193,7 @@ mod tests {
                 edge_type: EdgeType::Silhouette,
             }],
             dimension_labels: vec![],
+            section_fills: vec![],
             viewport: DrawingViewport {
                 width: 595.0,
                 height: 842.0,
