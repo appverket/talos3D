@@ -120,3 +120,5 @@ must remain authored, visible, and exportable from the same viewport.
   need continued refinement on more complex topology.
 - Paper presentation and lookdev now share renderer state, so defaults and UX
   must clearly distinguish modeling from drawing tasks.
+- SVG and PDF export embeds raster images rather than true vector geometry.
+  See ADR-036 for the vector drawing export pipeline that addresses this.

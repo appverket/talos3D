@@ -12,10 +12,11 @@ use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     document_state::DocumentState,
     ui::StatusBarData,
+    vector_drawing,
 };
 
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
-const DEFAULT_EXPORT_FILE_NAME: &str = "drawing.png";
+const DEFAULT_EXPORT_FILE_STEM: &str = "drawing";
 
 pub struct DrawingExportPlugin;
 
@@ -38,6 +39,60 @@ impl Plugin for DrawingExportPlugin {
                 capability_id: None,
             },
             execute_export_drawing,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "core.export_drawing_png".to_string(),
+                label: "Export Drawing as PNG...".to_string(),
+                description: "Export the current drawing viewport as a PNG image.".to_string(),
+                category: CommandCategory::File,
+                parameters: None,
+                version: 1,
+                default_shortcut: None,
+                icon: Some("icon.export".to_string()),
+                hint: Some("Export the cropped drawing viewport as PNG".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                activates_tool: None,
+                capability_id: None,
+            },
+            execute_export_drawing_png,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "core.export_drawing_pdf".to_string(),
+                label: "Export Drawing as PDF...".to_string(),
+                description: "Export the current drawing viewport as a PDF document.".to_string(),
+                category: CommandCategory::File,
+                parameters: None,
+                version: 1,
+                default_shortcut: None,
+                icon: Some("icon.export".to_string()),
+                hint: Some("Export the cropped drawing viewport as PDF".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                activates_tool: None,
+                capability_id: None,
+            },
+            execute_export_drawing_pdf,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "core.export_drawing_svg".to_string(),
+                label: "Export Drawing as SVG...".to_string(),
+                description: "Export the current drawing viewport as an SVG document.".to_string(),
+                category: CommandCategory::File,
+                parameters: None,
+                version: 1,
+                default_shortcut: None,
+                icon: Some("icon.export".to_string()),
+                hint: Some("Export the cropped drawing viewport as SVG".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                activates_tool: None,
+                capability_id: None,
+            },
+            execute_export_drawing_svg,
         );
     }
 }
@@ -114,6 +169,7 @@ impl ViewportCapture {
     }
 }
 
+#[cfg(feature = "model-api")]
 pub(crate) fn default_drawing_export_path() -> String {
     "/tmp/talos_drawing.png".to_string()
 }
@@ -157,13 +213,47 @@ pub(crate) fn viewport_export_format_from_path(
 }
 
 pub fn export_drawing_now(world: &mut World) -> Result<Option<PathBuf>, String> {
+    export_drawing_now_with_format(world, None)
+}
+
+pub(crate) fn export_drawing_now_with_format(
+    world: &mut World,
+    preferred_format: Option<ViewportExportFormat>,
+) -> Result<Option<PathBuf>, String> {
     let current_path = world.resource::<DocumentState>().current_path.clone();
-    let mut dialog = rfd::FileDialog::new()
-        .add_filter("Drawing Export", &["png", "pdf", "svg"])
-        .add_filter("PNG Image", &["png"])
-        .add_filter("PDF Document", &["pdf"])
-        .add_filter("SVG Drawing", &["svg"])
-        .set_file_name(default_export_file_name(current_path.as_deref()));
+    let mut dialog = rfd::FileDialog::new();
+    dialog = match preferred_format {
+        Some(ViewportExportFormat::Raster(image::ImageFormat::Png)) => dialog
+            .add_filter("PNG Image", &["png"])
+            .set_file_name(default_export_file_name(
+                current_path.as_deref(),
+                Some(ViewportExportFormat::Raster(image::ImageFormat::Png)),
+            )),
+        Some(ViewportExportFormat::Pdf) => dialog
+            .add_filter("PDF Document", &["pdf"])
+            .set_file_name(default_export_file_name(
+                current_path.as_deref(),
+                Some(ViewportExportFormat::Pdf),
+            )),
+        Some(ViewportExportFormat::Svg) => dialog
+            .add_filter("SVG Drawing", &["svg"])
+            .set_file_name(default_export_file_name(
+                current_path.as_deref(),
+                Some(ViewportExportFormat::Svg),
+            )),
+        Some(ViewportExportFormat::Raster(other)) => dialog
+            .add_filter("Drawing Export", &[other.extensions_str()[0]])
+            .set_file_name(default_export_file_name(
+                current_path.as_deref(),
+                Some(ViewportExportFormat::Raster(other)),
+            )),
+        None => dialog
+            .add_filter("Drawing Export", &["png", "pdf", "svg"])
+            .add_filter("PNG Image", &["png"])
+            .add_filter("PDF Document", &["pdf"])
+            .add_filter("SVG Drawing", &["svg"])
+            .set_file_name(default_export_file_name(current_path.as_deref(), None)),
+    };
     if let Some(ref path) = current_path {
         if let Some(parent) = path.parent() {
             dialog = dialog.set_directory(parent);
@@ -181,8 +271,37 @@ pub fn export_drawing_now(world: &mut World) -> Result<Option<PathBuf>, String> 
 
 pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
     let path = normalize_export_path(path);
-    queue_viewport_export(world, &path)?;
+    let format = viewport_export_format_from_path(&path)?;
+    match format {
+        ViewportExportFormat::Svg | ViewportExportFormat::Pdf => {
+            export_vector_drawing(world, &path, format)?;
+        }
+        ViewportExportFormat::Raster(_) => {
+            queue_viewport_export(world, &path)?;
+        }
+    }
     Ok(path)
+}
+
+fn export_vector_drawing(
+    world: &World,
+    path: &Path,
+    format: ViewportExportFormat,
+) -> Result<(), String> {
+    let drawing = vector_drawing::extract_drawing_geometry(world)
+        .ok_or_else(|| "Cannot extract drawing geometry — is a camera active?".to_string())?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let bytes = match format {
+        ViewportExportFormat::Svg => vector_drawing::drawing_to_svg(&drawing),
+        ViewportExportFormat::Pdf => vector_drawing::drawing_to_pdf(&drawing),
+        ViewportExportFormat::Raster(_) => unreachable!(),
+    };
+
+    std::fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
 pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<(), String> {
@@ -366,24 +485,73 @@ fn write_pdf_object(
     Ok(())
 }
 
-fn default_export_file_name(current_path: Option<&Path>) -> String {
+fn default_export_file_stem(current_path: Option<&Path>) -> String {
     current_path
         .and_then(|path| path.file_stem())
-        .map(|stem| format!("{}-drawing.png", stem.to_string_lossy()))
-        .unwrap_or_else(|| DEFAULT_EXPORT_FILE_NAME.to_string())
+        .map(|stem| format!("{}-drawing", stem.to_string_lossy()))
+        .unwrap_or_else(|| DEFAULT_EXPORT_FILE_STEM.to_string())
+}
+
+fn default_export_file_name(
+    current_path: Option<&Path>,
+    preferred_format: Option<ViewportExportFormat>,
+) -> String {
+    let stem = default_export_file_stem(current_path);
+    match preferred_format {
+        Some(ViewportExportFormat::Raster(image::ImageFormat::Png)) => format!("{stem}.png"),
+        Some(ViewportExportFormat::Pdf) => format!("{stem}.pdf"),
+        Some(ViewportExportFormat::Svg) => format!("{stem}.svg"),
+        Some(ViewportExportFormat::Raster(other)) => {
+            let extension = other.extensions_str().first().copied().unwrap_or("png");
+            format!("{stem}.{extension}")
+        }
+        None => stem,
+    }
 }
 
 fn execute_export_drawing(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     let Some(path) = export_drawing_now(world)? else {
         return Ok(CommandResult::empty());
     };
+    set_export_feedback(world, &path);
+    Ok(CommandResult::empty())
+}
+
+fn execute_export_drawing_png(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    let Some(path) = export_drawing_now_with_format(
+        world,
+        Some(ViewportExportFormat::Raster(image::ImageFormat::Png)),
+    )?
+    else {
+        return Ok(CommandResult::empty());
+    };
+    set_export_feedback(world, &path);
+    Ok(CommandResult::empty())
+}
+
+fn execute_export_drawing_pdf(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    let Some(path) = export_drawing_now_with_format(world, Some(ViewportExportFormat::Pdf))? else {
+        return Ok(CommandResult::empty());
+    };
+    set_export_feedback(world, &path);
+    Ok(CommandResult::empty())
+}
+
+fn execute_export_drawing_svg(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    let Some(path) = export_drawing_now_with_format(world, Some(ViewportExportFormat::Svg))? else {
+        return Ok(CommandResult::empty());
+    };
+    set_export_feedback(world, &path);
+    Ok(CommandResult::empty())
+}
+
+fn set_export_feedback(world: &mut World, path: &Path) {
     if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
         status_bar_data.set_feedback(
             format!("Exporting drawing to {}", path.display()),
             STATUS_MESSAGE_DURATION_SECONDS,
         );
     }
-    Ok(CommandResult::empty())
 }
 
 #[cfg(test)]
@@ -433,6 +601,40 @@ mod tests {
         assert_eq!(
             viewport_export_format_from_path(Path::new("/tmp/drawing.svd")),
             Ok(ViewportExportFormat::Svg)
+        );
+    }
+
+    #[test]
+    fn generic_export_file_name_uses_extensionless_stem() {
+        assert_eq!(default_export_file_name(None, None), "drawing");
+        assert_eq!(
+            default_export_file_name(Some(Path::new("/tmp/model.talos3d")), None),
+            "model-drawing"
+        );
+    }
+
+    #[test]
+    fn format_specific_export_file_names_use_requested_extension() {
+        assert_eq!(
+            default_export_file_name(
+                Some(Path::new("/tmp/model.talos3d")),
+                Some(ViewportExportFormat::Pdf)
+            ),
+            "model-drawing.pdf"
+        );
+        assert_eq!(
+            default_export_file_name(
+                Some(Path::new("/tmp/model.talos3d")),
+                Some(ViewportExportFormat::Svg)
+            ),
+            "model-drawing.svg"
+        );
+        assert_eq!(
+            default_export_file_name(
+                Some(Path::new("/tmp/model.talos3d")),
+                Some(ViewportExportFormat::Raster(image::ImageFormat::Png))
+            ),
+            "model-drawing.png"
         );
     }
 
