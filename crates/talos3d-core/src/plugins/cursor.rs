@@ -1,5 +1,5 @@
-use bevy::{ecs::system::SystemParam, picking::prelude::*, prelude::*};
 use bevy::window::PrimaryWindow;
+use bevy::{ecs::system::SystemParam, picking::prelude::*, prelude::*};
 
 use super::document_properties::DocumentProperties;
 use crate::plugins::egui_chrome::EguiWantsInput;
@@ -7,9 +7,7 @@ use crate::plugins::egui_chrome::EguiWantsInput;
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::plugins::scene_ray;
 use crate::plugins::{
-    identity::ElementId,
-    modeling::profile_feature::FaceProfileFeature,
-    tools::ActiveTool,
+    identity::ElementId, modeling::profile_feature::FaceProfileFeature, tools::ActiveTool,
 };
 
 const CROSSHAIR_HALF_SIZE: f32 = 0.15;

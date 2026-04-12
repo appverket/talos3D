@@ -9,9 +9,7 @@ use serde_json::Value;
 
 use crate::authored_entity::EntityBounds;
 use crate::plugins::{
-    command_registry::{
-        CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
-    },
+    command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     cursor::ViewportUiInset,
     egui_chrome::EguiWantsInput,
     input_ownership::InputPhase,
@@ -94,7 +92,9 @@ impl Plugin for CameraPlugin {
                     parameters: None,
                     default_shortcut: None,
                     icon: Some("icon.view_orthographic".to_string()),
-                    hint: Some("Use orthographic projection for drawing and drafting views".to_string()),
+                    hint: Some(
+                        "Use orthographic projection for drawing and drafting views".to_string(),
+                    ),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
