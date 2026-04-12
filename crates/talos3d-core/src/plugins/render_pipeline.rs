@@ -490,7 +490,9 @@ fn sync_paper_fill_materials(
             (false, Some(state)) => {
                 material_handle.0 = state.original.clone();
                 materials.remove(state.override_handle.id());
-                commands.entity(entity).remove::<PaperFillMaterialOverride>();
+                commands
+                    .entity(entity)
+                    .remove::<PaperFillMaterialOverride>();
             }
             _ => {}
         }
@@ -797,7 +799,9 @@ fn collect_visible_feature_segments(
         let world_a = mesh_transform.transform_point(Vec3::from(local_a));
         let world_b = mesh_transform.transform_point(Vec3::from(local_b));
         let world_c = mesh_transform.transform_point(Vec3::from(local_c));
-        let normal = (world_b - world_a).cross(world_c - world_a).normalize_or_zero();
+        let normal = (world_b - world_a)
+            .cross(world_c - world_a)
+            .normalize_or_zero();
         if normal.length_squared() <= f32::EPSILON {
             continue;
         }
@@ -809,9 +813,33 @@ fn collect_visible_feature_segments(
         };
         let front_facing = normal.dot(view_to_camera) >= 0.0;
 
-        register_feature_edge(&mut edges, local_a, local_b, world_a, world_b, normal, front_facing);
-        register_feature_edge(&mut edges, local_b, local_c, world_b, world_c, normal, front_facing);
-        register_feature_edge(&mut edges, local_c, local_a, world_c, world_a, normal, front_facing);
+        register_feature_edge(
+            &mut edges,
+            local_a,
+            local_b,
+            world_a,
+            world_b,
+            normal,
+            front_facing,
+        );
+        register_feature_edge(
+            &mut edges,
+            local_b,
+            local_c,
+            world_b,
+            world_c,
+            normal,
+            front_facing,
+        );
+        register_feature_edge(
+            &mut edges,
+            local_c,
+            local_a,
+            world_c,
+            world_a,
+            normal,
+            front_facing,
+        );
     }
 
     edges
@@ -907,11 +935,16 @@ fn point_is_visible(
     let ray = Ray3d::new(ray_origin, ray_direction);
     !scene_triangles.iter().any(|triangle| {
         if triangle.entity == owner_entity {
-            return ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c)
-                .is_some_and(|distance| distance > EDGE_VISIBILITY_EPSILON && distance < max_distance - EDGE_VISIBILITY_EPSILON);
+            return ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c).is_some_and(
+                |distance| {
+                    distance > EDGE_VISIBILITY_EPSILON
+                        && distance < max_distance - EDGE_VISIBILITY_EPSILON
+                },
+            );
         }
-        ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c)
-            .is_some_and(|distance| distance > EDGE_VISIBILITY_EPSILON && distance < max_distance - EDGE_VISIBILITY_EPSILON)
+        ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c).is_some_and(|distance| {
+            distance > EDGE_VISIBILITY_EPSILON && distance < max_distance - EDGE_VISIBILITY_EPSILON
+        })
     })
 }
 
@@ -955,7 +988,9 @@ fn collect_contour_segments(
         let world_a = mesh_transform.transform_point(Vec3::from(local_a));
         let world_b = mesh_transform.transform_point(Vec3::from(local_b));
         let world_c = mesh_transform.transform_point(Vec3::from(local_c));
-        let normal = (world_b - world_a).cross(world_c - world_a).normalize_or_zero();
+        let normal = (world_b - world_a)
+            .cross(world_c - world_a)
+            .normalize_or_zero();
         if normal.length_squared() <= f32::EPSILON {
             continue;
         }

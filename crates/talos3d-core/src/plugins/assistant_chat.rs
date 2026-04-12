@@ -143,9 +143,7 @@ impl AssistantProtocolKind {
             (AssistantProviderKind::OpenAi, Self::OpenAiResponses) => DEFAULT_OPENAI_RESPONSES_URL,
             (AssistantProviderKind::OpenAi, Self::OpenAiChatCompletions) => DEFAULT_OPENAI_CHAT_URL,
             (AssistantProviderKind::Anthropic, Self::AnthropicMessages) => DEFAULT_ANTHROPIC_URL,
-            (AssistantProviderKind::Gemini, Self::GeminiGenerateContent) => {
-                DEFAULT_GEMINI_API_BASE
-            }
+            (AssistantProviderKind::Gemini, Self::GeminiGenerateContent) => DEFAULT_GEMINI_API_BASE,
             (AssistantProviderKind::OpenAiCompatible, Self::OpenAiChatCompletions) => {
                 DEFAULT_LM_STUDIO_CHAT_URL
             }
@@ -682,16 +680,14 @@ pub fn draw_assistant_window(
             ui.separator();
 
             match sidebar_state.active_tab {
-                RightSidebarTab::Assistant => {
-                    match state.preferences.active_panel_tab {
-                        AssistantPanelTab::Chat => {
-                            draw_assistant_chat_panel(ui, state, &mut send_now);
-                        }
-                        AssistantPanelTab::Settings => {
-                            draw_assistant_settings_panel(ui, state);
-                        }
+                RightSidebarTab::Assistant => match state.preferences.active_panel_tab {
+                    AssistantPanelTab::Chat => {
+                        draw_assistant_chat_panel(ui, state, &mut send_now);
                     }
-                }
+                    AssistantPanelTab::Settings => {
+                        draw_assistant_settings_panel(ui, state);
+                    }
+                },
             }
         });
     sidebar_state.width = (panel_response.response.rect.width() * pixels_per_point)
@@ -711,7 +707,9 @@ fn draw_assistant_chat_panel(
     state: &mut AssistantChatState,
     send_now: &mut bool,
 ) {
-    if let Err(error) = state.runtime_config().and_then(|config| validate_assistant_config(&config))
+    if let Err(error) = state
+        .runtime_config()
+        .and_then(|config| validate_assistant_config(&config))
     {
         egui::Frame::group(ui.style())
             .fill(egui::Color32::from_rgb(88, 34, 34))
@@ -774,8 +772,8 @@ fn draw_assistant_chat_panel(
                         .desired_rows(2)
                         .hint_text("Ask about your scene..."),
                 );
-                let enter_to_send =
-                    input.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                let enter_to_send = input.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
                 if assistant_icon_button(
                     ui,
                     AssistantUiIcon::Send,
@@ -1029,11 +1027,17 @@ fn assistant_icon_button(
     match icon {
         AssistantUiIcon::Close => {
             ui.painter().line_segment(
-                [rect.left_top() + egui::vec2(8.0, 8.0), rect.right_bottom() - egui::vec2(8.0, 8.0)],
+                [
+                    rect.left_top() + egui::vec2(8.0, 8.0),
+                    rect.right_bottom() - egui::vec2(8.0, 8.0),
+                ],
                 stroke,
             );
             ui.painter().line_segment(
-                [rect.right_top() + egui::vec2(-8.0, 8.0), rect.left_bottom() + egui::vec2(8.0, -8.0)],
+                [
+                    rect.right_top() + egui::vec2(-8.0, 8.0),
+                    rect.left_bottom() + egui::vec2(8.0, -8.0),
+                ],
                 stroke,
             );
         }
@@ -1345,10 +1349,7 @@ fn assistant_system_prompt(mcp_url: &str) -> String {
     )
 }
 
-fn emit_assistant_message(
-    sender: &mpsc::Sender<AssistantJobEvent>,
-    message: AssistantChatMessage,
-) {
+fn emit_assistant_message(sender: &mpsc::Sender<AssistantJobEvent>, message: AssistantChatMessage) {
     let _ = sender.send(AssistantJobEvent::Message(message));
 }
 
@@ -1402,12 +1403,15 @@ fn run_openai_turn(
             for function_call in function_calls {
                 let result =
                     execute_assistant_tool(bridge, &function_call.name, &function_call.arguments)?;
-                emit_assistant_message(sender, AssistantChatMessage::tool(format!(
-                    "{} {} -> {}",
-                    function_call.name,
-                    compact_json(&function_call.arguments),
-                    compact_json(&result)
-                )));
+                emit_assistant_message(
+                    sender,
+                    AssistantChatMessage::tool(format!(
+                        "{} {} -> {}",
+                        function_call.name,
+                        compact_json(&function_call.arguments),
+                        compact_json(&result)
+                    )),
+                );
                 tool_outputs.push(json!({
                     "type": "function_call_output",
                     "call_id": function_call.call_id,
@@ -1437,7 +1441,8 @@ fn run_openai_chat_completions_turn(
     api_key: &str,
     model: &str,
 ) -> Result<(), String> {
-    let mut messages = build_openai_chat_messages(conversation, &assistant_system_prompt(&bridge.base_url));
+    let mut messages =
+        build_openai_chat_messages(conversation, &assistant_system_prompt(&bridge.base_url));
 
     for _ in 0..ASSISTANT_TOOL_STEPS {
         let body = json!({
@@ -1449,7 +1454,11 @@ fn run_openai_chat_completions_turn(
         let response = post_json_with_optional_bearer(
             client,
             endpoint,
-            if api_key.trim().is_empty() { None } else { Some(api_key) },
+            if api_key.trim().is_empty() {
+                None
+            } else {
+                Some(api_key)
+            },
             &body,
         )?;
         let message = response
@@ -1458,7 +1467,9 @@ fn run_openai_chat_completions_turn(
             .and_then(|choices| choices.first())
             .and_then(|choice| choice.get("message"))
             .cloned()
-            .ok_or_else(|| "OpenAI chat completion response did not contain a message".to_string())?;
+            .ok_or_else(|| {
+                "OpenAI chat completion response did not contain a message".to_string()
+            })?;
 
         let tool_calls = message
             .get("tool_calls")
@@ -1579,12 +1590,15 @@ fn run_anthropic_turn(
                     .ok_or_else(|| "Anthropic tool_use missing id".to_string())?;
                 let arguments = tool_use.get("input").cloned().unwrap_or_else(|| json!({}));
                 let result = execute_assistant_tool(bridge, tool_name, &arguments)?;
-                emit_assistant_message(sender, AssistantChatMessage::tool(format!(
-                    "{} {} -> {}",
-                    tool_name,
-                    compact_json(&arguments),
-                    compact_json(&result)
-                )));
+                emit_assistant_message(
+                    sender,
+                    AssistantChatMessage::tool(format!(
+                        "{} {} -> {}",
+                        tool_name,
+                        compact_json(&arguments),
+                        compact_json(&result)
+                    )),
+                );
                 tool_results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
@@ -1638,13 +1652,8 @@ fn run_gemini_turn(
                 "functionDeclarations": build_gemini_function_declarations()
             }],
         });
-        let response = post_json_with_query_and_headers(
-            client,
-            &endpoint,
-            &[("key", api_key)],
-            &[],
-            &body,
-        )?;
+        let response =
+            post_json_with_query_and_headers(client, &endpoint, &[("key", api_key)], &[], &body)?;
         let content = response
             .get("candidates")
             .and_then(Value::as_array)
@@ -1669,7 +1678,10 @@ fn run_gemini_turn(
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "Gemini functionCall missing name".to_string())?;
-                let arguments = function_call.get("args").cloned().unwrap_or_else(|| json!({}));
+                let arguments = function_call
+                    .get("args")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 let result = execute_assistant_tool(bridge, tool_name, &arguments)?;
                 emit_assistant_message(
                     sender,
@@ -1805,22 +1817,29 @@ fn build_openai_input_messages(conversation: &[AssistantChatMessage]) -> Vec<Val
         .collect()
 }
 
-fn build_openai_chat_messages(conversation: &[AssistantChatMessage], system_prompt: &str) -> Vec<Value> {
+fn build_openai_chat_messages(
+    conversation: &[AssistantChatMessage],
+    system_prompt: &str,
+) -> Vec<Value> {
     let mut messages = vec![json!({
         "role": "system",
         "content": system_prompt,
     })];
-    messages.extend(conversation.iter().filter_map(|message| match message.role {
-        AssistantChatRole::User => Some(json!({
-            "role": "user",
-            "content": message.content,
-        })),
-        AssistantChatRole::Assistant => Some(json!({
-            "role": "assistant",
-            "content": message.content,
-        })),
-        AssistantChatRole::Tool | AssistantChatRole::Error => None,
-    }));
+    messages.extend(
+        conversation
+            .iter()
+            .filter_map(|message| match message.role {
+                AssistantChatRole::User => Some(json!({
+                    "role": "user",
+                    "content": message.content,
+                })),
+                AssistantChatRole::Assistant => Some(json!({
+                    "role": "assistant",
+                    "content": message.content,
+                })),
+                AssistantChatRole::Tool | AssistantChatRole::Error => None,
+            }),
+    );
     messages
 }
 

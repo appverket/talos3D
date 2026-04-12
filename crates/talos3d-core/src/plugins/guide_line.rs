@@ -26,8 +26,8 @@ use crate::{
         identity::{ElementId, ElementIdAllocator},
         inference::{InferenceEngine, ReferenceEdge},
         scene_ray,
-        snap::SnapResult,
         snap::SnapKind,
+        snap::SnapResult,
         toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
         tools::ActiveTool,
         ui::StatusBarData,
@@ -483,16 +483,16 @@ impl AuthoredEntityFactory for GuideLineFactory {
             .map(vec3_from_json)
             .transpose()?
             .unwrap_or(Vec3::ZERO);
-        let direction = obj
-            .get("direction")
-            .map(vec3_from_json)
-            .transpose()?;
+        let direction = obj.get("direction").map(vec3_from_json).transpose()?;
         let through = obj.get("through").map(vec3_from_json).transpose()?;
         let reference_direction = obj
             .get("reference_direction")
             .map(vec3_from_json)
             .transpose()?;
-        let angle_degrees = obj.get("angle_degrees").and_then(|v| v.as_f64()).map(|v| v as f32);
+        let angle_degrees = obj
+            .get("angle_degrees")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
         let plane_normal = obj
             .get("plane_normal")
             .or_else(|| obj.get("host_normal"))
@@ -729,16 +729,16 @@ fn project_direction_to_plane(direction: Vec3, plane_normal: Vec3) -> Option<Vec
 }
 
 fn selected_guide_reference(world: &mut World) -> Option<(Vec3, String)> {
-    let mut query = world.query_filtered::<&GuideLineNode, With<crate::plugins::selection::Selected>>();
-    query
-        .iter(world)
-        .next()
-        .map(|node| {
-            (
-                node.direction.normalize_or_zero(),
-                node.label.clone().unwrap_or_else(|| "Guide Line".to_string()),
-            )
-        })
+    let mut query =
+        world.query_filtered::<&GuideLineNode, With<crate::plugins::selection::Selected>>();
+    query.iter(world).next().map(|node| {
+        (
+            node.direction.normalize_or_zero(),
+            node.label
+                .clone()
+                .unwrap_or_else(|| "Guide Line".to_string()),
+        )
+    })
 }
 
 fn nearest_face_edge_reference(
@@ -962,19 +962,22 @@ fn resolve_preview_state(
         .and_then(|direction| project_direction_to_plane(direction, host_plane.normal))
         .or_else(|| host_plane.tangent.try_normalize());
 
-    let numeric_angle_radians = parse_numeric_angle_degrees(&tool_state.numeric_buffer)
-        .map(|degrees| degrees.to_radians());
+    let numeric_angle_radians =
+        parse_numeric_angle_degrees(&tool_state.numeric_buffer).map(|degrees| degrees.to_radians());
     let use_protractor = base_direction.is_some()
-        && (numeric_angle_radians.is_some() || control_pressed || tool_state.reference_direction.is_some());
+        && (numeric_angle_radians.is_some()
+            || control_pressed
+            || tool_state.reference_direction.is_some());
 
     if let (true, Some(base_direction)) = (use_protractor, base_direction) {
-        let mut angle_radians = numeric_angle_radians
-            .unwrap_or_else(|| signed_angle_on_plane(base_direction, projected_direction, host_plane.normal));
+        let mut angle_radians = numeric_angle_radians.unwrap_or_else(|| {
+            signed_angle_on_plane(base_direction, projected_direction, host_plane.normal)
+        });
         if control_pressed && numeric_angle_radians.is_none() {
             angle_radians = snap_angle(angle_radians, GUIDE_PROTRACTOR_SNAP_INCREMENT_RADIANS);
         }
-        let direction =
-            Quat::from_axis_angle(host_plane.normal, angle_radians) * base_direction.normalize_or_zero();
+        let direction = Quat::from_axis_angle(host_plane.normal, angle_radians)
+            * base_direction.normalize_or_zero();
         return Some(GuidePreviewState {
             anchor,
             direction: direction.normalize_or_zero(),
@@ -993,7 +996,11 @@ fn resolve_preview_state(
     })
 }
 
-fn guide_tool_hint(tool_state: &GuideLineToolState, drawing_plane: &DrawingPlane, control_pressed: bool) -> String {
+fn guide_tool_hint(
+    tool_state: &GuideLineToolState,
+    drawing_plane: &DrawingPlane,
+    control_pressed: bool,
+) -> String {
     if tool_state.anchor.is_none() {
         return "Click an anchor point or edge · X/Y/Z lock · Drag from face edit to host on the selected face"
             .to_string();
@@ -1043,9 +1050,8 @@ fn resolve_guide_request_direction(
             .ok_or_else(|| "through point must differ from anchor".to_string());
     }
 
-    let angle_degrees = angle_degrees.ok_or_else(|| {
-        "guide_line requires direction, through, or angle_degrees".to_string()
-    })?;
+    let angle_degrees = angle_degrees
+        .ok_or_else(|| "guide_line requires direction, through, or angle_degrees".to_string())?;
     let plane_normal = plane_normal
         .and_then(|normal| normal.try_normalize())
         .unwrap_or(Vec3::Y);
@@ -1165,12 +1171,15 @@ fn handle_guide_line_tool(world: &mut World) {
         let mut tool_state = world.resource_mut::<GuideLineToolState>();
         for key in just_pressed_keys {
             match key {
-                KeyCode::KeyX => tool_state.axis_lock =
-                    toggle_axis_lock(tool_state.axis_lock, GuideAxisLock::X),
-                KeyCode::KeyY => tool_state.axis_lock =
-                    toggle_axis_lock(tool_state.axis_lock, GuideAxisLock::Y),
-                KeyCode::KeyZ => tool_state.axis_lock =
-                    toggle_axis_lock(tool_state.axis_lock, GuideAxisLock::Z),
+                KeyCode::KeyX => {
+                    tool_state.axis_lock = toggle_axis_lock(tool_state.axis_lock, GuideAxisLock::X)
+                }
+                KeyCode::KeyY => {
+                    tool_state.axis_lock = toggle_axis_lock(tool_state.axis_lock, GuideAxisLock::Y)
+                }
+                KeyCode::KeyZ => {
+                    tool_state.axis_lock = toggle_axis_lock(tool_state.axis_lock, GuideAxisLock::Z)
+                }
                 KeyCode::Digit0 | KeyCode::Numpad0 => {
                     push_numeric_char(&mut tool_state.numeric_buffer, '0')
                 }
@@ -1247,9 +1256,8 @@ fn handle_guide_line_tool(world: &mut World) {
                     };
                     tool_state.anchor = Some(anchor);
                     tool_state.host_plane = Some(hover_state.host_plane.clone());
-                    tool_state.reference_direction = hover_state
-                        .reference_direction
-                        .and_then(|direction| {
+                    tool_state.reference_direction =
+                        hover_state.reference_direction.and_then(|direction| {
                             project_direction_to_plane(direction, hover_state.host_plane.normal)
                         });
                     tool_state.reference_label = hover_state.reference_label.clone();
@@ -1316,7 +1324,8 @@ fn draw_guide_line_tool_preview(
         GUIDE_LINE_SELECTED_COLOR,
     );
 
-    if let (Some(base_direction), Some(angle_degrees)) = (preview.base_direction, preview.angle_degrees)
+    if let (Some(base_direction), Some(angle_degrees)) =
+        (preview.base_direction, preview.angle_degrees)
     {
         let radius = camera_query
             .iter()
@@ -1387,7 +1396,8 @@ fn draw_guide_line_tool_overlay(
     let Ok(ctx_ref) = contexts.ctx_mut() else {
         return;
     };
-    let radius = (camera_transform.translation().distance(preview.anchor) * GUIDE_PROTRACTOR_SCREEN_FACTOR)
+    let radius = (camera_transform.translation().distance(preview.anchor)
+        * GUIDE_PROTRACTOR_SCREEN_FACTOR)
         .clamp(GUIDE_PROTRACTOR_MIN_RADIUS, GUIDE_PROTRACTOR_MAX_RADIUS);
     let label_direction = Quat::from_axis_angle(
         preview.host_plane.normal,
@@ -1603,7 +1613,12 @@ mod tests {
             .as_any()
             .downcast_ref::<GuideLineSnapshot>()
             .expect("snapshot should downcast");
-        assert!(angled_snapshot.direction.distance(Vec3::new(0.0, 0.0, -1.0)) < 1e-5);
+        assert!(
+            angled_snapshot
+                .direction
+                .distance(Vec3::new(0.0, 0.0, -1.0))
+                < 1e-5
+        );
     }
 
     #[test]
