@@ -39,6 +39,7 @@ pub mod persistence;
 pub mod property_edit;
 pub mod render_pipeline;
 pub mod scene_ray;
+pub mod section_fill;
 pub mod selection;
 pub mod shading;
 pub mod snap;
