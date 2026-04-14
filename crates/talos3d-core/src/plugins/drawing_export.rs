@@ -4,7 +4,10 @@ use std::{
 };
 
 use base64::Engine;
-use bevy::{prelude::*, render::view::screenshot::Screenshot};
+use bevy::{
+    prelude::*,
+    render::{render_resource::TextureFormat, view::screenshot::Screenshot},
+};
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, RgbImage};
 use serde_json::Value;
 
@@ -333,9 +336,13 @@ pub(crate) fn save_viewport_export_to_disk(
 ) -> impl FnMut(bevy::prelude::On<bevy::render::view::screenshot::ScreenshotCaptured>) {
     move |screenshot_captured| {
         let img = screenshot_captured.image.clone();
+        let source_format = img.texture_descriptor.format;
         match img.try_into_dynamic() {
             Ok(dynamic) => {
-                let rgb = crop_dynamic_to_viewport(dynamic, viewport_capture);
+                let mut rgb = crop_dynamic_to_viewport(dynamic, viewport_capture);
+                if is_linear_texture_format(source_format) {
+                    encode_linear_to_srgb(&mut rgb);
+                }
                 if let Err(error) = write_rgb_to_path(&path, &rgb) {
                     error!("Cannot save drawing export '{}': {error}", path.display());
                 }
@@ -345,6 +352,47 @@ pub(crate) fn save_viewport_export_to_disk(
             }
         }
     }
+}
+
+/// Whether the captured swapchain pixels are already in the sRGB transfer
+/// function. Linear formats store gamma-decoded values and must be re-encoded
+/// before being handed to a viewer that expects sRGB.
+fn is_linear_texture_format(format: TextureFormat) -> bool {
+    matches!(
+        format,
+        TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm
+    )
+}
+
+/// Apply the sRGB OETF (linear → encoded) to every channel of `rgb`.
+///
+/// Bevy's screenshot system returns the raw swapchain bytes. On surfaces whose
+/// format lacks the `Srgb` suffix (e.g. `Bgra8Unorm`), those bytes are still in
+/// the linear working space the tonemapper wrote, so saving them to a PNG
+/// without encoding produces an image that looks roughly two stops darker than
+/// what the display shows. Image viewers (and the `image` crate's PNG encoder)
+/// assume 8-bit RGB is sRGB, so we apply the standard OETF here.
+fn encode_linear_to_srgb(rgb: &mut RgbImage) {
+    let table = build_linear_to_srgb_lut();
+    for pixel in rgb.pixels_mut() {
+        pixel[0] = table[pixel[0] as usize];
+        pixel[1] = table[pixel[1] as usize];
+        pixel[2] = table[pixel[2] as usize];
+    }
+}
+
+fn build_linear_to_srgb_lut() -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    for (i, slot) in lut.iter_mut().enumerate() {
+        let linear = (i as f32) / 255.0;
+        let srgb = if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        };
+        *slot = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    lut
 }
 
 fn crop_dynamic_to_viewport(
@@ -661,5 +709,41 @@ mod tests {
         assert!(text.contains("/MediaBox [0 0 4 3]"));
         assert!(text.contains("/Filter /DCTDecode"));
         assert!(text.contains("startxref"));
+    }
+
+    #[test]
+    fn linear_to_srgb_lut_matches_reference_points() {
+        let lut = build_linear_to_srgb_lut();
+        // 0 and 255 must be preserved (endpoints).
+        assert_eq!(lut[0], 0);
+        assert_eq!(lut[255], 255);
+        // Mid-grey in linear (0.5) should map to roughly 0.735 in sRGB
+        // (standard OETF reference value) — i.e. 187 ± 1.
+        let mid = lut[128];
+        assert!(
+            (186..=188).contains(&mid),
+            "expected mid-grey ~187, got {mid}"
+        );
+    }
+
+    #[test]
+    fn encode_linear_to_srgb_brightens_midtones() {
+        let mut rgb = RgbImage::from_pixel(1, 1, Rgb([64, 64, 64]));
+        encode_linear_to_srgb(&mut rgb);
+        let pixel = rgb.get_pixel(0, 0);
+        // Linear 64/255 ≈ 0.251 encodes to ~0.539 in sRGB ≈ 137.
+        assert!(
+            (135..=139).contains(&pixel[0]),
+            "expected ~137 after sRGB encoding, got {}",
+            pixel[0]
+        );
+    }
+
+    #[test]
+    fn linear_format_detection_matches_wgpu_conventions() {
+        assert!(is_linear_texture_format(TextureFormat::Rgba8Unorm));
+        assert!(is_linear_texture_format(TextureFormat::Bgra8Unorm));
+        assert!(!is_linear_texture_format(TextureFormat::Rgba8UnormSrgb));
+        assert!(!is_linear_texture_format(TextureFormat::Bgra8UnormSrgb));
     }
 }
