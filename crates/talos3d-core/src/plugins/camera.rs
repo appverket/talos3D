@@ -26,6 +26,11 @@ const MAX_FOCAL_LENGTH_MM: f32 = 200.0;
 const FULL_FRAME_SENSOR_HEIGHT_MM: f32 = 24.0;
 const ORTHOGRAPHIC_VIEWPORT_HEIGHT: f32 = 2.0;
 const TRUE_ISOMETRIC_PITCH: f32 = -0.615_479_7; // -atan(1 / sqrt(2))
+const MIN_PERSPECTIVE_RADIUS: f32 = 0.5;
+const MIN_ORTHOGRAPHIC_SCALE: f32 = 0.05;
+const MAX_CAMERA_ZOOM: f32 = 500.0;
+const FRAME_RADIUS_PADDING: f32 = 1.25;
+const FRAME_ORTHOGRAPHIC_PADDING: f32 = 1.15;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
@@ -223,6 +228,7 @@ impl Default for CameraControlsState {
 pub struct OrbitCamera {
     pub focus: Vec3,
     pub radius: f32,
+    pub orthographic_scale: f32,
     pub yaw: f32,
     pub pitch: f32,
     pub projection_mode: CameraProjectionMode,
@@ -234,6 +240,7 @@ impl Default for OrbitCamera {
         Self {
             focus: Vec3::ZERO,
             radius: 15.0,
+            orthographic_scale: default_orthographic_scale(),
             yaw: std::f32::consts::FRAC_PI_4,
             pitch: -std::f32::consts::FRAC_PI_6, // negative = above the grid
             projection_mode: CameraProjectionMode::Perspective,
@@ -328,9 +335,9 @@ fn orbit_camera(mut input: OrbitCameraInput) {
         if panning {
             let right = transform.rotation * Vec3::X;
             let up = transform.rotation * Vec3::Y;
-            let radius = orbit.radius;
-            orbit.focus -= right * ev.delta.x * radius * 0.001;
-            orbit.focus += up * ev.delta.y * radius * 0.001;
+            let navigation_scale = orbit.navigation_scale();
+            orbit.focus -= right * ev.delta.x * navigation_scale * 0.001;
+            orbit.focus += up * ev.delta.y * navigation_scale * 0.001;
         }
     }
 
@@ -340,7 +347,15 @@ fn orbit_camera(mut input: OrbitCameraInput) {
             MouseScrollUnit::Line => ev.y * 0.5,
             MouseScrollUnit::Pixel => ev.y * 0.002,
         };
-        orbit.radius = (orbit.radius - delta * orbit.radius * 0.1).clamp(0.5, 500.0);
+        match orbit.projection_mode {
+            CameraProjectionMode::Perspective => {
+                orbit.radius = zoom_with_scroll(orbit.radius, delta, MIN_PERSPECTIVE_RADIUS);
+            }
+            CameraProjectionMode::Isometric => {
+                orbit.orthographic_scale =
+                    zoom_with_scroll(orbit.orthographic_scale, delta, MIN_ORTHOGRAPHIC_SCALE);
+            }
+        }
     }
 
     apply_orbit_state(&orbit, &mut transform, &mut projection);
@@ -351,7 +366,7 @@ pub fn orbit_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 }
 
 fn orbit_transform(orbit: &OrbitCamera) -> Transform {
-    let rotation = Quat::from_euler(EulerRot::YXZ, orbit.yaw, orbit.pitch, 0.0);
+    let rotation = orbit.rotation();
     let offset = rotation * Vec3::new(0.0, 0.0, orbit.radius);
     let translation = orbit.focus + offset;
     let forward = (orbit.focus - translation).normalize_or_zero();
@@ -367,33 +382,42 @@ pub(crate) fn frame_orbit_camera(
     orbit: &mut OrbitCamera,
     transform: &mut Transform,
     projection: &mut Projection,
-    focus: Vec3,
-    radius: f32,
+    bounds: EntityBounds,
+    aspect_ratio: f32,
 ) {
-    orbit.focus = focus;
-    orbit.radius = radius.max(0.5);
+    orbit.focus = bounds.center();
+    orbit.radius = orbit_frame_radius(bounds);
+    orbit.orthographic_scale = match orbit.projection_mode {
+        CameraProjectionMode::Perspective => {
+            perspective_distance_to_orthographic_scale(orbit.radius, orbit.focal_length_mm)
+        }
+        CameraProjectionMode::Isometric => {
+            orthographic_scale_for_bounds(bounds, orbit, aspect_ratio)
+        }
+    };
     apply_orbit_state(orbit, transform, projection);
 }
 
 pub fn focus_orbit_camera_on_bounds(world: &mut World, bounds: EntityBounds) -> bool {
-    let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
-    let Some((mut orbit, mut transform, mut projection)) = query.iter_mut(world).next() else {
+    let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection, &Camera)>();
+    let Some((mut orbit, mut transform, mut projection, camera)) = query.iter_mut(world).next()
+    else {
         return false;
     };
-    let radius = orbit_frame_radius(bounds);
+    let aspect_ratio = camera_aspect_ratio(camera, &projection);
     frame_orbit_camera(
         &mut orbit,
         &mut transform,
         &mut projection,
-        bounds.center(),
-        radius,
+        bounds,
+        aspect_ratio,
     );
     true
 }
 
 pub fn orbit_frame_radius(bounds: EntityBounds) -> f32 {
     let extents = bounds.max - bounds.min;
-    extents.length().max(10.0) * 1.25
+    extents.length().max(10.0) * FRAME_RADIUS_PADDING
 }
 
 fn apply_camera_controls(
@@ -413,7 +437,7 @@ fn apply_camera_controls(
         changed = true;
     }
     if orbit.projection_mode != controls.projection_mode {
-        orbit.projection_mode = controls.projection_mode;
+        orbit.transition_projection_mode(controls.projection_mode);
         changed = true;
     }
     if let Some(preset) = controls.pending_view_preset.take() {
@@ -439,7 +463,11 @@ pub(crate) fn apply_orbit_state(
 }
 
 fn sync_projection_from_orbit(orbit: &OrbitCamera, projection: &mut Projection) {
-    let required_far = (orbit.radius * 8.0).max(1_000.0);
+    let required_far = (orbit
+        .radius
+        .max(orthographic_visible_height(orbit.orthographic_scale))
+        * 8.0)
+        .max(1_000.0);
     match orbit.projection_mode {
         CameraProjectionMode::Perspective => {
             let aspect_ratio = match projection {
@@ -462,7 +490,7 @@ fn sync_projection_from_orbit(orbit: &OrbitCamera, projection: &mut Projection) 
                 scaling_mode: ScalingMode::FixedVertical {
                     viewport_height: ORTHOGRAPHIC_VIEWPORT_HEIGHT,
                 },
-                scale: orbit.radius,
+                scale: orbit.orthographic_scale.max(MIN_ORTHOGRAPHIC_SCALE),
                 area: Rect::new(-1.0, -1.0, 1.0, 1.0),
             });
         }
@@ -474,41 +502,141 @@ fn focal_length_to_vertical_fov(focal_length_mm: f32) -> f32 {
     2.0 * (FULL_FRAME_SENSOR_HEIGHT_MM / (2.0 * focal_length_mm)).atan()
 }
 
+pub(crate) fn default_orthographic_scale() -> f32 {
+    perspective_distance_to_orthographic_scale(15.0, DEFAULT_FOCAL_LENGTH_MM)
+}
+
+fn perspective_visible_height(distance: f32, focal_length_mm: f32) -> f32 {
+    2.0 * distance.max(MIN_PERSPECTIVE_RADIUS)
+        * (focal_length_to_vertical_fov(focal_length_mm) * 0.5).tan()
+}
+
+fn orthographic_visible_height(scale: f32) -> f32 {
+    scale.max(MIN_ORTHOGRAPHIC_SCALE) * ORTHOGRAPHIC_VIEWPORT_HEIGHT
+}
+
+pub(crate) fn perspective_distance_to_orthographic_scale(
+    distance: f32,
+    focal_length_mm: f32,
+) -> f32 {
+    (perspective_visible_height(distance, focal_length_mm) / ORTHOGRAPHIC_VIEWPORT_HEIGHT)
+        .max(MIN_ORTHOGRAPHIC_SCALE)
+}
+
+fn orthographic_scale_to_perspective_distance(scale: f32, focal_length_mm: f32) -> f32 {
+    let half_height = orthographic_visible_height(scale) * 0.5;
+    let half_fov_tangent = (focal_length_to_vertical_fov(focal_length_mm) * 0.5).tan();
+    (half_height / half_fov_tangent.max(0.001)).max(MIN_PERSPECTIVE_RADIUS)
+}
+
+fn zoom_with_scroll(current: f32, delta: f32, min_value: f32) -> f32 {
+    (current - delta * current * 0.1).clamp(min_value, MAX_CAMERA_ZOOM)
+}
+
+fn camera_aspect_ratio(camera: &Camera, projection: &Projection) -> f32 {
+    camera
+        .logical_viewport_size()
+        .map(|size| (size.x / size.y.max(1.0)).max(0.1))
+        .or_else(|| match projection {
+            Projection::Perspective(current) => Some(current.aspect_ratio.max(0.1)),
+            Projection::Orthographic(current) => {
+                let width = (current.area.max.x - current.area.min.x).abs();
+                let height = (current.area.max.y - current.area.min.y).abs();
+                Some((width / height.max(0.001)).max(0.1))
+            }
+            _ => None,
+        })
+        .unwrap_or(1.0)
+}
+
+fn orthographic_scale_for_bounds(
+    bounds: EntityBounds,
+    orbit: &OrbitCamera,
+    aspect_ratio: f32,
+) -> f32 {
+    let view_rotation = orbit.rotation().inverse();
+    let center = bounds.center();
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+
+    for corner in bounds.corners() {
+        let camera_local = view_rotation * (corner - center);
+        min = min.min(camera_local.truncate());
+        max = max.max(camera_local.truncate());
+    }
+
+    let projected_size = (max - min).abs();
+    let visible_height = projected_size
+        .y
+        .max(projected_size.x / aspect_ratio.max(0.1))
+        .max(MIN_ORTHOGRAPHIC_SCALE * ORTHOGRAPHIC_VIEWPORT_HEIGHT);
+
+    (visible_height * FRAME_ORTHOGRAPHIC_PADDING / ORTHOGRAPHIC_VIEWPORT_HEIGHT)
+        .max(MIN_ORTHOGRAPHIC_SCALE)
+}
+
 impl OrbitCamera {
+    fn rotation(&self) -> Quat {
+        Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0)
+    }
+
+    fn navigation_scale(&self) -> f32 {
+        match self.projection_mode {
+            CameraProjectionMode::Perspective => self.radius.max(MIN_PERSPECTIVE_RADIUS),
+            CameraProjectionMode::Isometric => self.orthographic_scale.max(MIN_ORTHOGRAPHIC_SCALE),
+        }
+    }
+
+    fn transition_projection_mode(&mut self, next_mode: CameraProjectionMode) {
+        if self.projection_mode == next_mode {
+            return;
+        }
+
+        match (self.projection_mode, next_mode) {
+            (CameraProjectionMode::Perspective, CameraProjectionMode::Isometric) => {
+                self.orthographic_scale =
+                    perspective_distance_to_orthographic_scale(self.radius, self.focal_length_mm);
+            }
+            (CameraProjectionMode::Isometric, CameraProjectionMode::Perspective) => {
+                self.radius = orthographic_scale_to_perspective_distance(
+                    self.orthographic_scale,
+                    self.focal_length_mm,
+                );
+            }
+            _ => {}
+        }
+
+        self.projection_mode = next_mode;
+    }
+
     fn apply_view_preset(&mut self, preset: CameraViewPreset) {
+        self.transition_projection_mode(CameraProjectionMode::Isometric);
         match preset {
             CameraViewPreset::Isometric => {
-                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = std::f32::consts::FRAC_PI_4;
                 self.pitch = TRUE_ISOMETRIC_PITCH;
             }
             CameraViewPreset::Front => {
-                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = 0.0;
                 self.pitch = 0.0;
             }
             CameraViewPreset::Back => {
-                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = std::f32::consts::PI;
                 self.pitch = 0.0;
             }
             CameraViewPreset::Top => {
-                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = 0.0;
                 self.pitch = -std::f32::consts::FRAC_PI_2;
             }
             CameraViewPreset::Left => {
-                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = -std::f32::consts::FRAC_PI_2;
                 self.pitch = 0.0;
             }
             CameraViewPreset::Right => {
-                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = std::f32::consts::FRAC_PI_2;
                 self.pitch = 0.0;
             }
             CameraViewPreset::Bottom => {
-                self.projection_mode = CameraProjectionMode::Isometric;
                 self.yaw = 0.0;
                 self.pitch = std::f32::consts::FRAC_PI_2;
             }
@@ -629,10 +757,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn isometric_projection_uses_radius_for_orthographic_scale() {
+    fn isometric_projection_uses_explicit_orthographic_scale() {
         let orbit = OrbitCamera {
             projection_mode: CameraProjectionMode::Isometric,
             radius: 18.0,
+            orthographic_scale: 4.5,
             ..Default::default()
         };
         let mut projection = Projection::Perspective(PerspectiveProjection::default());
@@ -640,10 +769,36 @@ mod tests {
 
         match projection {
             Projection::Orthographic(orthographic) => {
-                assert_eq!(orthographic.scale, 18.0);
+                assert_eq!(orthographic.scale, 4.5);
             }
             _ => panic!("expected orthographic projection"),
         }
+    }
+
+    #[test]
+    fn switching_to_orthographic_preserves_visible_height() {
+        let mut orbit = OrbitCamera::default();
+        let before = perspective_visible_height(orbit.radius, orbit.focal_length_mm);
+
+        orbit.transition_projection_mode(CameraProjectionMode::Isometric);
+
+        let after = orthographic_visible_height(orbit.orthographic_scale);
+        assert!((after - before).abs() < 0.001);
+    }
+
+    #[test]
+    fn switching_back_to_perspective_preserves_visible_height() {
+        let mut orbit = OrbitCamera {
+            projection_mode: CameraProjectionMode::Isometric,
+            orthographic_scale: 3.25,
+            ..Default::default()
+        };
+        let before = orthographic_visible_height(orbit.orthographic_scale);
+
+        orbit.transition_projection_mode(CameraProjectionMode::Perspective);
+
+        let after = perspective_visible_height(orbit.radius, orbit.focal_length_mm);
+        assert!((after - before).abs() < 0.001);
     }
 
     #[test]
@@ -666,10 +821,16 @@ mod tests {
     #[test]
     fn top_and_bottom_views_align_to_world_vertical_axis() {
         let mut orbit = OrbitCamera::default();
+        let perspective_visible = perspective_visible_height(orbit.radius, orbit.focal_length_mm);
 
         orbit.apply_view_preset(CameraViewPreset::Front);
         let front = orbit_transform(&orbit);
         assert!((front.translation.z - orbit.radius).abs() < 0.001);
+        assert_eq!(orbit.projection_mode, CameraProjectionMode::Isometric);
+        assert!(
+            (orthographic_visible_height(orbit.orthographic_scale) - perspective_visible).abs()
+                < 0.001
+        );
 
         orbit.apply_view_preset(CameraViewPreset::Back);
         let back = orbit_transform(&orbit);

@@ -7,7 +7,10 @@ use crate::plugins::egui_chrome::EguiWantsInput;
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::plugins::scene_ray;
 use crate::plugins::{
-    identity::ElementId, modeling::profile_feature::FaceProfileFeature, tools::ActiveTool,
+    camera::{CameraProjectionMode, OrbitCamera},
+    identity::ElementId,
+    modeling::profile_feature::FaceProfileFeature,
+    tools::ActiveTool,
 };
 
 const CROSSHAIR_HALF_SIZE: f32 = 0.15;
@@ -28,6 +31,7 @@ impl Plugin for CursorPlugin {
 pub struct CursorWorldPos {
     pub raw: Option<Vec3>,
     pub snapped: Option<Vec3>,
+    pub hovered_element_id: Option<ElementId>,
 }
 
 #[derive(Resource, Default)]
@@ -42,6 +46,7 @@ pub struct ViewportUiInset {
 struct ToolCursorRayCast<'w, 's> {
     ray_cast: MeshRayCast<'w, 's>,
     mesh_selectable_query: Query<'w, 's, (), With<ElementId>>,
+    element_id_query: Query<'w, 's, &'static ElementId>,
     visibility_query: Query<'w, 's, &'static Visibility>,
     face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
@@ -118,6 +123,21 @@ impl DrawingPlane {
     }
 }
 
+pub fn dimension_annotation_plane(
+    drawing_plane: &DrawingPlane,
+    orbit: Option<&OrbitCamera>,
+    camera_transform: Option<&GlobalTransform>,
+) -> DrawingPlane {
+    match (orbit, camera_transform) {
+        (Some(orbit), Some(camera_transform))
+            if orbit.projection_mode == CameraProjectionMode::Isometric =>
+        {
+            DrawingPlane::from_face(orbit.focus, Vec3::from(camera_transform.forward()))
+        }
+        _ => drawing_plane.clone(),
+    }
+}
+
 /// Build an orthonormal tangent frame from a normal vector.
 fn normal_basis(normal: Vec3) -> (Vec3, Vec3) {
     let seed = if normal.y.abs() > 0.9 {
@@ -138,7 +158,7 @@ fn update_cursor_world_pos(
     mut cursor_world_pos: ResMut<CursorWorldPos>,
     drawing_plane: Res<DrawingPlane>,
     window_query: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform, Option<&OrbitCamera>)>,
     egui_wants_input: Res<EguiWantsInput>,
     doc_props: Res<DocumentProperties>,
     active_tool: Res<State<ActiveTool>>,
@@ -149,7 +169,7 @@ fn update_cursor_world_pos(
         return;
     }
 
-    let Some((camera, camera_transform)) = camera_query.iter().next() else {
+    let Some((camera, camera_transform, orbit)) = camera_query.iter().next() else {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
     };
@@ -178,12 +198,19 @@ fn update_cursor_world_pos(
         active_tool.get(),
         ActiveTool::PlaceDimensionLine | ActiveTool::PlaceGuideLine
     );
-    let raw_position = if use_scene_surface_cursor {
-        ray_cast_scene_surface(ray, &mut tool_cursor_ray_cast)
-            .or_else(|| drawing_plane.intersect_ray(ray))
+    let cursor_plane = if *active_tool.get() == ActiveTool::PlaceDimensionLine {
+        dimension_annotation_plane(&drawing_plane, orbit, Some(camera_transform))
     } else {
-        drawing_plane.intersect_ray(ray)
+        drawing_plane.clone()
     };
+    let surface_hit = if use_scene_surface_cursor {
+        ray_cast_scene_surface(ray, &mut tool_cursor_ray_cast)
+    } else {
+        None
+    };
+    let raw_position = surface_hit
+        .map(|(position, _)| position)
+        .or_else(|| cursor_plane.intersect_ray(ray));
     let Some(raw_position) = raw_position else {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
@@ -192,17 +219,24 @@ fn update_cursor_world_pos(
     let snapped_position = if use_scene_surface_cursor {
         raw_position
     } else {
-        let uv = drawing_plane.project_to_2d(raw_position);
+        let uv = cursor_plane.project_to_2d(raw_position);
         let snap = doc_props.snap_increment;
         let snapped_uv = Vec2::new(snap_to_increment(uv.x, snap), snap_to_increment(uv.y, snap));
-        drawing_plane.to_world(snapped_uv)
+        cursor_plane.to_world(snapped_uv)
     };
 
     cursor_world_pos.raw = Some(raw_position);
     cursor_world_pos.snapped = Some(snapped_position);
+    cursor_world_pos.hovered_element_id = surface_hit.and_then(|(_, entity)| {
+        tool_cursor_ray_cast
+            .element_id_query
+            .get(entity)
+            .ok()
+            .copied()
+    });
 }
 
-fn ray_cast_scene_surface(ray: Ray3d, ray_cast: &mut ToolCursorRayCast) -> Option<Vec3> {
+fn ray_cast_scene_surface(ray: Ray3d, ray_cast: &mut ToolCursorRayCast) -> Option<(Vec3, Entity)> {
     ray_cast
         .ray_cast
         .cast_ray(
@@ -217,7 +251,7 @@ fn ray_cast_scene_surface(ray: Ray3d, ray_cast: &mut ToolCursorRayCast) -> Optio
             }),
         )
         .first()
-        .map(|(_, hit)| ray.origin + *ray.direction * hit.distance)
+        .map(|(entity, hit)| (ray.origin + *ray.direction * hit.distance, *entity))
 }
 
 fn draw_cursor_crosshair(
@@ -248,6 +282,7 @@ fn draw_cursor_crosshair(
 fn clear_cursor_world_pos(cursor_world_pos: &mut CursorWorldPos) {
     cursor_world_pos.raw = None;
     cursor_world_pos.snapped = None;
+    cursor_world_pos.hovered_element_id = None;
 }
 
 fn snap_to_increment(value: f32, increment: f32) -> f32 {

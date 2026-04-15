@@ -505,6 +505,58 @@ fn draw_create_polyline(c: &mut Canvas) {
     c.circle(20.0, 5.0, 1.5);
 }
 
+fn draw_create_fillet(c: &mut Canvas) {
+    c.line(5.0, 19.0, 5.0, 7.0);
+    c.line(5.0, 19.0, 17.0, 19.0);
+    c.arc(
+        17.0,
+        7.0,
+        12.0,
+        std::f32::consts::FRAC_PI_2,
+        std::f32::consts::PI,
+    );
+    c.line(10.0, 4.0, 19.0, 4.0);
+}
+
+fn draw_create_chamfer(c: &mut Canvas) {
+    c.line(5.0, 19.0, 5.0, 7.0);
+    c.line(5.0, 19.0, 17.0, 19.0);
+    c.line(11.0, 4.0, 19.0, 4.0);
+    c.line(19.0, 4.0, 19.0, 12.0);
+    c.line(11.0, 4.0, 19.0, 12.0);
+}
+
+fn draw_dimension(c: &mut Canvas) {
+    c.line(4.0, 7.0, 4.0, 18.0);
+    c.line(20.0, 7.0, 20.0, 18.0);
+    c.line(7.0, 12.0, 17.0, 12.0);
+    c.line(7.0, 12.0, 10.0, 10.0);
+    c.line(7.0, 12.0, 10.0, 14.0);
+    c.line(17.0, 12.0, 14.0, 10.0);
+    c.line(17.0, 12.0, 14.0, 14.0);
+}
+
+fn draw_dimensions(c: &mut Canvas) {
+    draw_dimension(c);
+    c.line(8.0, 5.0, 8.0, 9.0);
+    c.line(16.0, 5.0, 16.0, 9.0);
+    c.line(10.0, 7.0, 14.0, 7.0);
+}
+
+fn draw_guide_line(c: &mut Canvas) {
+    c.circle(7.0, 17.0, 1.5);
+    c.line(4.0, 20.0, 10.0, 14.0);
+    c.line(10.0, 14.0, 20.0, 4.0);
+    c.line(13.0, 17.0, 15.0, 15.0);
+    c.line(17.0, 13.0, 19.0, 11.0);
+}
+
+fn draw_guide_lines(c: &mut Canvas) {
+    draw_guide_line(c);
+    c.line(4.0, 11.0, 7.0, 8.0);
+    c.line(9.0, 6.0, 12.0, 3.0);
+}
+
 fn draw_view_perspective(c: &mut Canvas) {
     draw_create_box(c);
 }
@@ -646,6 +698,12 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "create_sphere" => draw_create_sphere(&mut c),
         "create_plane" => draw_create_plane(&mut c),
         "create_polyline" => draw_create_polyline(&mut c),
+        "create_fillet" => draw_create_fillet(&mut c),
+        "create_chamfer" => draw_create_chamfer(&mut c),
+        "dimension" => draw_dimension(&mut c),
+        "dimensions" => draw_dimensions(&mut c),
+        "guide_line" => draw_guide_line(&mut c),
+        "guide_lines" => draw_guide_lines(&mut c),
         "view_perspective" => draw_view_perspective(&mut c),
         "view_orthographic" => draw_view_orthographic(&mut c),
         "view_isometric" => draw_view_isometric(&mut c),
