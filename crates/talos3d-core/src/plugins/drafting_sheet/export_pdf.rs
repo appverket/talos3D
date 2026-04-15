@@ -5,12 +5,11 @@
 //! conversion so the line-weight hierarchy from the sheet is preserved
 //! verbatim on the page.
 
-use std::fmt::Write as _;
 use std::io::Write as IoWrite;
 
 use bevy::math::Vec2;
 
-use crate::plugins::drafting::{DimPrimitive, TextAnchor};
+use crate::plugins::drafting::DimPrimitive;
 use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern};
 
 use super::sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke};

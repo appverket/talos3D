@@ -35,7 +35,7 @@ use crate::plugins::{
     },
 };
 
-use super::sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke, SheetView};
+use super::sheet::{DraftingSheet, SheetHatch, SheetLine, SheetStroke, SheetView};
 
 // ─── Public API ───────────────────────────────────────────────────────────
 
