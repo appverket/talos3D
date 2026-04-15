@@ -20,9 +20,14 @@ The platform is designed so that:
 ## Start Here
 
 - [Product Overview](./PRODUCT.md)
+- [Render UX Stabilization Plan](./PLAN_RENDER_AND_UX_STABILIZATION.md)
+- [ADR 024: Render/View State Coordination](./ADR-024_RENDER_VIEW_STATE_COORDINATION.md)
+- [Drawing Metadata and Section Views Plan](./PLAN_DRAWING_METADATA_AND_SECTION_VIEWS.md)
+- [ADR 025: Drawing Metadata Boundary](./ADR-025_DRAWING_METADATA_BOUNDARY.md)
 - [MCP Model API](./MCP_MODEL_API.md)
 - [Assistant Chat](./ASSISTANT_CHAT.md)
 - [Developer Onboarding](./DEVELOPER_ONBOARDING.md)
+- [Engine Fork Workflow](./ENGINE_FORK_WORKFLOW.md)
 - [Core Principles](./CORE_PRINCIPLES.md)
 - [Platform Architecture](./PLATFORM_ARCHITECTURE.md)
 - [Extension Architecture](./EXTENSION_ARCHITECTURE.md)
