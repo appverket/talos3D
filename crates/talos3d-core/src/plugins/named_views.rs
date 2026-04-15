@@ -1,7 +1,10 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::plugins::camera::{apply_orbit_state, CameraProjectionMode, OrbitCamera};
+use crate::plugins::camera::{
+    apply_orbit_state, default_orthographic_scale, perspective_distance_to_orthographic_scale,
+    CameraProjectionMode, OrbitCamera,
+};
 
 /// A saved camera position with a name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,6 +13,8 @@ pub struct NamedView {
     pub description: Option<String>,
     pub focus: [f32; 3],
     pub radius: f32,
+    #[serde(default)]
+    pub orthographic_scale: Option<f32>,
     pub yaw: f32,
     pub pitch: f32,
     pub projection_mode: CameraProjectionMode,
@@ -24,6 +29,7 @@ impl NamedView {
             description: None,
             focus: orbit.focus.into(),
             radius: orbit.radius,
+            orthographic_scale: Some(orbit.orthographic_scale),
             yaw: orbit.yaw,
             pitch: orbit.pitch,
             projection_mode: orbit.projection_mode,
@@ -36,6 +42,13 @@ impl NamedView {
         OrbitCamera {
             focus: Vec3::from(self.focus),
             radius: self.radius,
+            orthographic_scale: self.orthographic_scale.unwrap_or_else(|| {
+                if self.projection_mode == CameraProjectionMode::Isometric {
+                    self.radius.max(0.05)
+                } else {
+                    perspective_distance_to_orthographic_scale(self.radius, self.focal_length_mm)
+                }
+            }),
             yaw: self.yaw,
             pitch: self.pitch,
             projection_mode: self.projection_mode,
@@ -146,6 +159,7 @@ fn seed_default_named_views(mut registry: ResMut<NamedViewRegistry>) {
         description: Some("Orthographic top-down view.".to_string()),
         focus: [0.0, 0.0, 0.0],
         radius: 15.0,
+        orthographic_scale: Some(default_orthographic_scale()),
         yaw: 0.0,
         pitch: -std::f32::consts::FRAC_PI_2 + 0.01,
         projection_mode: CameraProjectionMode::Isometric,
@@ -158,6 +172,7 @@ fn seed_default_named_views(mut registry: ResMut<NamedViewRegistry>) {
         description: Some("Orthographic front view (along Z axis).".to_string()),
         focus: [0.0, 0.0, 0.0],
         radius: 15.0,
+        orthographic_scale: Some(default_orthographic_scale()),
         yaw: 0.0,
         pitch: 0.0,
         projection_mode: CameraProjectionMode::Isometric,
@@ -170,6 +185,7 @@ fn seed_default_named_views(mut registry: ResMut<NamedViewRegistry>) {
         description: Some("Orthographic right-side view (along X axis).".to_string()),
         focus: [0.0, 0.0, 0.0],
         radius: 15.0,
+        orthographic_scale: Some(default_orthographic_scale()),
         yaw: std::f32::consts::FRAC_PI_2,
         pitch: 0.0,
         projection_mode: CameraProjectionMode::Isometric,
@@ -182,6 +198,7 @@ fn seed_default_named_views(mut registry: ResMut<NamedViewRegistry>) {
         description: Some("Default perspective view.".to_string()),
         focus: [0.0, 0.0, 0.0],
         radius: 15.0,
+        orthographic_scale: Some(default_orthographic_scale()),
         yaw: std::f32::consts::FRAC_PI_4,
         pitch: -std::f32::consts::FRAC_PI_6,
         projection_mode: CameraProjectionMode::Perspective,

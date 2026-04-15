@@ -267,12 +267,21 @@ impl EntityBounds {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityScope {
+    AuthoredModel,
+    DrawingMetadata,
+}
+
 pub trait AuthoredEntity: Send + Sync + 'static {
     fn as_any(&self) -> &dyn Any;
     fn type_name(&self) -> &'static str;
     fn element_id(&self) -> ElementId;
     fn label(&self) -> String;
     fn center(&self) -> Vec3;
+    fn scope(&self) -> EntityScope {
+        EntityScope::AuthoredModel
+    }
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity;
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity;
@@ -377,6 +386,10 @@ impl BoxedEntity {
 
     pub fn center(&self) -> Vec3 {
         self.0.center()
+    }
+
+    pub fn scope(&self) -> EntityScope {
+        self.0.scope()
     }
 
     pub fn translate_by(&self, delta: Vec3) -> Self {

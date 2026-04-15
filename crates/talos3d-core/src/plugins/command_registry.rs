@@ -615,6 +615,12 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.create_sphere", "create_sphere"),
         ("icon.create_plane", "create_plane"),
         ("icon.create_polyline", "create_polyline"),
+        ("icon.create_fillet", "create_fillet"),
+        ("icon.create_chamfer", "create_chamfer"),
+        ("icon.dimension", "dimension"),
+        ("icon.dimensions", "dimensions"),
+        ("icon.guide_line", "guide_line"),
+        ("icon.guide_lines", "guide_lines"),
         ("icon.view_perspective", "view_perspective"),
         ("icon.view_orthographic", "view_orthographic"),
         ("icon.view_isometric", "view_isometric"),
@@ -835,12 +841,27 @@ fn snapshot_bounds_for_entities(
 ) -> Option<crate::authored_entity::EntityBounds> {
     let registry = world.get_resource::<CapabilityRegistry>()?;
     let mut q = world.try_query::<EntityRef>().unwrap();
-    q.iter(world)
+    let snapshots = q
+        .iter(world)
         .filter(|entity_ref| entity_ref.contains::<ElementId>())
         .filter(|entity_ref| !selected_only || entity_ref.contains::<Selected>())
         .filter(|entity_ref| scene_light_object_exposed(entity_ref, world))
         .filter_map(|entity_ref| registry.capture_snapshot(&entity_ref, world))
-        .filter_map(|snapshot: crate::authored_entity::BoxedEntity| snapshot.bounds())
+        .collect::<Vec<_>>();
+
+    let model_snapshots = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.scope() == crate::authored_entity::EntityScope::AuthoredModel)
+        .collect::<Vec<_>>();
+    let bounds_source = if selected_only && model_snapshots.is_empty() {
+        snapshots.iter().collect::<Vec<_>>()
+    } else {
+        model_snapshots
+    };
+
+    bounds_source
+        .into_iter()
+        .filter_map(|snapshot| snapshot.bounds())
         .reduce(|acc, bounds| crate::authored_entity::EntityBounds {
             min: acc.min.min(bounds.min),
             max: acc.max.max(bounds.max),

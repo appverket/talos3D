@@ -7,10 +7,11 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 use crate::plugins::model_api::ModelApiRuntimeInfo;
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{overlay_text as perf_overlay_text, PerfStats};
+use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 use crate::plugins::{
     assistant_chat::{
-        draw_assistant_window, AssistantChatState, PendingAssistantJob, RightSidebarState,
-        ASSISTANT_PANEL_DEFAULT_WIDTH,
+        assistant_panel_max_width, clamp_assistant_panel_width, draw_assistant_window,
+        AssistantChatState, PendingAssistantJob, RightSidebarState, ASSISTANT_PANEL_DEFAULT_WIDTH,
     },
     camera::{
         focal_length_range_mm, CameraControlsState, CameraProjectionMode, CameraViewPreset,
@@ -48,7 +49,10 @@ use crate::plugins::{
         parse_property_value, shared_property_value, PropertyEditState, PropertyPanelData,
         PropertyPanelState,
     },
-    render_pipeline::{RenderSettings, RenderTonemapping},
+    render_pipeline::{
+        paper_drawing_active, paper_drawing_toggle_active, toggle_paper_drawing_mode,
+        PaperDrawingState, RenderSettings, RenderTonemapping,
+    },
     selection::Selected,
     toolbar::{
         apply_toolbar_float, redock_toolbar, set_toolbar_visibility, FloatingToolbarStates,
@@ -59,9 +63,9 @@ use crate::plugins::{
     ui::{coordinate_text, hint_text, StatusBarData},
 };
 
-const CHROME_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(20, 23, 28, 245);
-const CHROME_ACCENT: egui::Color32 = egui::Color32::from_rgba_premultiplied(56, 82, 115, 245);
-const CHROME_HOVER: egui::Color32 = egui::Color32::from_rgba_premultiplied(46, 56, 71, 245);
+const CHROME_BG: egui::Color32 = egui::Color32::from_rgb(20, 23, 28);
+const CHROME_ACCENT: egui::Color32 = egui::Color32::from_rgb(56, 82, 115);
+const CHROME_HOVER: egui::Color32 = egui::Color32::from_rgb(46, 56, 71);
 const CHROME_TEXT: egui::Color32 = egui::Color32::from_rgb(235, 240, 248);
 const CHROME_MUTED: egui::Color32 = egui::Color32::from_rgb(160, 168, 182);
 const TOOLBAR_BUTTON_SIZE: f32 = 32.0;
@@ -100,6 +104,7 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<MaterialsWindowState>()
         .init_resource::<LightingWindowState>()
         .init_resource::<RenderSettingsWindowState>()
+        .init_resource::<ExtensionsWindowState>()
         .add_systems(
             Update,
             (
@@ -132,6 +137,28 @@ pub struct RenderSettingsWindowState {
 #[derive(Resource, Default, Debug, Clone)]
 pub struct LightingWindowState {
     pub visible: bool,
+}
+
+#[derive(Resource, Default, Debug, Clone)]
+pub struct ExtensionsWindowState {
+    pub visible: bool,
+}
+
+/// Returns `true` if a menu/toolbar item for this command should be visible
+/// given the current capability activation state.
+///
+/// Commands without a `capability_id` are always visible (they're part of the
+/// core workspace). Commands with one are hidden when the user has disabled
+/// that capability through the Extensions panel.
+#[inline]
+fn command_capability_enabled(
+    descriptor: &CommandDescriptor,
+    activation: &CapabilityActivation,
+) -> bool {
+    match &descriptor.capability_id {
+        Some(id) => activation.is_enabled(id),
+        None => true,
+    }
 }
 
 /// Describes exactly where a dragged toolbar should land.
@@ -174,6 +201,7 @@ struct ToolbarRenderContext<'a, 'w, 's> {
     drag_state: &'a mut ToolbarDragState,
     selection_count: usize,
     current_tool: &'a str,
+    capability_activation: &'a CapabilityActivation,
 }
 
 #[derive(SystemParam)]
@@ -183,6 +211,9 @@ struct ChromeData<'w, 's> {
     command_registry: Res<'w, CommandRegistry>,
     icon_registry: Res<'w, IconRegistry>,
     toolbar_registry: Res<'w, ToolbarRegistry>,
+    capability_registry: Res<'w, CapabilityRegistry>,
+    capability_activation: ResMut<'w, CapabilityActivation>,
+    extensions_window_state: ResMut<'w, ExtensionsWindowState>,
     toolbar_layout_state: ResMut<'w, ToolbarLayoutState>,
     floating_states: ResMut<'w, FloatingToolbarStates>,
     pending_command_invocations: ResMut<'w, PendingCommandInvocations>,
@@ -208,6 +239,7 @@ struct ChromeData<'w, 's> {
     materials_window_state: ResMut<'w, MaterialsWindowState>,
     material_registry: ResMut<'w, MaterialRegistry>,
     render_settings: ResMut<'w, RenderSettings>,
+    paper_drawing_state: ResMut<'w, PaperDrawingState>,
     render_settings_window_state: ResMut<'w, RenderSettingsWindowState>,
     element_id_allocator: Res<'w, ElementIdAllocator>,
     create_entity_commands: ResMut<'w, Messages<CreateEntityCommand>>,
@@ -285,7 +317,12 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                         ui.menu_button(category.label(), |ui| {
                             for descriptor in
                                 data.command_registry.commands().filter(|descriptor| {
-                                    descriptor.show_in_menu && descriptor.category == category
+                                    descriptor.show_in_menu
+                                        && descriptor.category == category
+                                        && command_capability_enabled(
+                                            descriptor,
+                                            &data.capability_activation,
+                                        )
                                 })
                             {
                                 let enabled = !descriptor.requires_selection || selection_count > 0;
@@ -326,6 +363,11 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 ui.separator();
                                 if ui.button("Renderer...").clicked() {
                                     data.render_settings_window_state.visible = true;
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button("Extensions...").clicked() {
+                                    data.extensions_window_state.visible = true;
                                     ui.close();
                                 }
                                 ui.separator();
@@ -382,6 +424,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 drag_state: &mut data.drag_state,
                 selection_count,
                 current_tool: &current_tool,
+                capability_activation: &data.capability_activation,
             };
             draw_toolbar_row(&ctx, &mut render, &descriptor_refs, dock, row_idx as u32);
         }
@@ -415,6 +458,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             drag_state: &mut data.drag_state,
             selection_count,
             current_tool: &current_tool,
+            capability_activation: &data.capability_activation,
         };
 
         for descriptor in &floating_descriptors {
@@ -451,19 +495,19 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.images,
         &mut data.pending_command_invocations,
     );
-    let assistant_mcp_url = default_assistant_mcp_url(&data).map(str::to_string);
-    draw_assistant_window(
-        &ctx,
-        data.assistant_chat_state.as_mut(),
-        data.assistant_window_state.as_mut(),
-        &data.pending_assistant_job,
-        assistant_mcp_url.as_deref(),
-    );
     draw_lighting_window(&ctx, &mut data);
     draw_render_settings_window(
         &ctx,
         &mut data.render_settings_window_state,
         &mut data.render_settings,
+        &mut data.paper_drawing_state,
+        &mut data.doc_props,
+    );
+    draw_extensions_window(
+        &ctx,
+        &mut data.extensions_window_state,
+        &data.capability_registry,
+        &mut data.capability_activation,
     );
     draw_import_review_window(&ctx, &mut data);
     draw_imported_layers_window(&ctx, &mut data);
@@ -525,6 +569,15 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             });
         });
 
+    let assistant_mcp_url = default_assistant_mcp_url(&data).map(str::to_string);
+    draw_assistant_window(
+        &ctx,
+        data.assistant_chat_state.as_mut(),
+        data.assistant_window_state.as_mut(),
+        &data.pending_assistant_job,
+        assistant_mcp_url.as_deref(),
+    );
+
     let Ok(window) = data.window_query.single() else {
         return;
     };
@@ -581,14 +634,13 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
 
     // Position in top-right of the available area
     let available = ctx.available_rect();
-    let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
     let assistant_offset = if data.assistant_window_state.visible {
-        (data
-            .assistant_window_state
-            .width
-            .max(ASSISTANT_PANEL_DEFAULT_WIDTH)
-            / pixels_per_point)
-            + 12.0
+        clamp_assistant_panel_width(
+            data.assistant_window_state
+                .width
+                .max(ASSISTANT_PANEL_DEFAULT_WIDTH),
+            assistant_panel_max_width(ctx),
+        ) + 12.0
     } else {
         0.0
     };
@@ -772,10 +824,11 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         || ctx.wants_keyboard_input();
 }
 
-fn default_assistant_mcp_url<'a>(data: &'a ChromeData) -> Option<&'a str> {
+fn default_assistant_mcp_url<'a>(_data: &'a ChromeData) -> Option<&'a str> {
     #[cfg(feature = "model-api")]
     {
-        data.model_api_runtime_info
+        _data
+            .model_api_runtime_info
             .as_ref()
             .map(|runtime_info| runtime_info.http_url.as_str())
     }
@@ -1589,6 +1642,7 @@ fn draw_toolbar_content(
                 .command_ids
                 .iter()
                 .filter_map(|command_id| render.command_registry.get(command_id))
+                .filter(|cmd| command_capability_enabled(cmd, render.capability_activation))
                 .collect::<Vec<_>>();
             if available_commands.is_empty() {
                 continue;
@@ -1891,6 +1945,9 @@ fn draw_floating_toolbar(
                             .command_ids
                             .iter()
                             .filter_map(|command_id| render.command_registry.get(command_id))
+                            .filter(|cmd| {
+                                command_capability_enabled(cmd, render.capability_activation)
+                            })
                             .collect::<Vec<_>>();
                         if available_commands.is_empty() {
                             continue;
@@ -2063,10 +2120,79 @@ fn draw_toolbar_visibility_menu(
     }
 }
 
+fn draw_extensions_window(
+    ctx: &egui::Context,
+    state: &mut ExtensionsWindowState,
+    capabilities: &CapabilityRegistry,
+    activation: &mut CapabilityActivation,
+) {
+    if !state.visible {
+        return;
+    }
+
+    egui::Window::new("Extensions")
+        .open(&mut state.visible)
+        .default_width(440.0)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "Extensions bundle optional tools and menu items. \
+                     Disabling one hides its commands and toolbars \
+                     from the UI; authored content (dimensions, \
+                     guide lines, sections) remains in the document.",
+                )
+                .small()
+                .color(CHROME_MUTED),
+            );
+            ui.add_space(8.0);
+
+            let mut capability_ids: Vec<&str> = capabilities
+                .capabilities()
+                .iter()
+                .map(|cap| cap.id.as_str())
+                .collect();
+            capability_ids.sort_unstable();
+
+            if capability_ids.is_empty() {
+                ui.label("No extensions registered.");
+                return;
+            }
+
+            egui::Grid::new("extensions_grid")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    for id in capability_ids {
+                        let Some(descriptor) = capabilities.capability(id) else {
+                            continue;
+                        };
+                        let mut enabled = activation.is_enabled(id);
+                        let checkbox = ui.checkbox(&mut enabled, &descriptor.name);
+                        if checkbox.changed() {
+                            activation.set_enabled(id, enabled);
+                        }
+                        let hover_text = descriptor
+                            .description
+                            .clone()
+                            .unwrap_or_else(|| descriptor.id.clone());
+                        checkbox.on_hover_text(hover_text.clone());
+                        ui.label(
+                            egui::RichText::new(hover_text)
+                                .small()
+                                .color(CHROME_MUTED),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 fn draw_render_settings_window(
     ctx: &egui::Context,
     state: &mut RenderSettingsWindowState,
     settings: &mut RenderSettings,
+    paper_state: &mut PaperDrawingState,
+    doc_props: &mut DocumentProperties,
 ) {
     if !state.visible {
         return;
@@ -2213,14 +2339,17 @@ fn draw_render_settings_window(
             });
 
             ui.collapsing("Drawing Views", |ui| {
-                if ui.button("Apply Paper Drawing Preset").clicked() {
-                    settings.background_rgb = [1.0, 1.0, 1.0];
-                    settings.grid_enabled = false;
-                    settings.paper_fill_enabled = true;
-                    settings.visible_edge_overlay_enabled = true;
-                    settings.contour_overlay_enabled = false;
-                    settings.wireframe_overlay_enabled = false;
+                if ui.button("Toggle Paper Drawing").clicked() {
+                    toggle_paper_drawing_mode(settings, paper_state);
                 }
+                let paper_mode_status = if paper_drawing_toggle_active(paper_state) {
+                    "Paper drawing toggle is active."
+                } else if paper_drawing_active(settings) {
+                    "Paper-style settings are active."
+                } else {
+                    "Paper drawing is inactive."
+                };
+                ui.label(egui::RichText::new(paper_mode_status).small().color(CHROME_MUTED));
                 ui.checkbox(&mut settings.grid_enabled, "Show Grid");
                 ui.checkbox(&mut settings.paper_fill_enabled, "White Paper Fill");
                 ui.checkbox(
@@ -2242,6 +2371,44 @@ fn draw_render_settings_window(
                 ui.label(
                     egui::RichText::new(
                         "Paper fill swaps scene materials to white unlit surfaces. Visible edges keep sharp and silhouette edges while hiding occluded edges. Wireframe remains a full construction overlay.",
+                    )
+                    .small()
+                    .color(CHROME_MUTED),
+                );
+            });
+
+            ui.collapsing("Drawing Metadata", |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Dimensions and similar drawing annotations use these document defaults unless a specific annotation overrides them.",
+                    )
+                    .small()
+                    .color(CHROME_MUTED),
+                );
+                egui::ComboBox::from_id_salt("drawing_display_unit")
+                    .selected_text(doc_props.display_unit.identifier())
+                    .show_ui(ui, |ui| {
+                        for unit in [
+                            crate::plugins::units::DisplayUnit::Millimetres,
+                            crate::plugins::units::DisplayUnit::Centimetres,
+                            crate::plugins::units::DisplayUnit::Metres,
+                            crate::plugins::units::DisplayUnit::Feet,
+                            crate::plugins::units::DisplayUnit::Inches,
+                        ] {
+                            ui.selectable_value(
+                                &mut doc_props.display_unit,
+                                unit,
+                                unit.identifier(),
+                            );
+                        }
+                    });
+                ui.add(
+                    egui::Slider::new(&mut doc_props.precision, 0..=6)
+                        .text("Decimal Places"),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Paper-mode exports use these same unit and precision defaults for dimension labels.",
                     )
                     .small()
                     .color(CHROME_MUTED),

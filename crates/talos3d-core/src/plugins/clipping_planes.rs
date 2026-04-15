@@ -6,7 +6,7 @@
 //! plane.  Geometry that straddles a plane is left visible (approximate but
 //! correct for whole-room architectural cuts).
 
-use std::any::Any;
+use std::{any::Any, collections::HashMap};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -15,15 +15,18 @@ use serde_json::Value;
 use crate::{
     authored_entity::{
         invalid_property_error, property_field_with, AuthoredEntity, BoxedEntity, EntityBounds,
-        HandleInfo, PropertyFieldDef, PropertyValue, PropertyValueKind,
+        EntityScope, HandleInfo, PropertyFieldDef, PropertyValue, PropertyValueKind,
     },
     capability_registry::{AuthoredEntityFactory, FaceId, HitCandidate},
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
+        document_properties::DocumentProperties,
         identity::ElementId,
         modeling::csg::CsgOperand,
     },
 };
+
+pub const SECTION_VIEW_METADATA_KEY: &str = "section_views";
 
 // ---------------------------------------------------------------------------
 // Component
@@ -69,6 +72,11 @@ impl ClipPlaneNode {
 #[derive(Component, Debug, Clone)]
 pub struct ClippedByPlane;
 
+#[derive(Resource, Default)]
+struct SectionViewSyncState {
+    last_serialized: Option<Value>,
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -78,9 +86,13 @@ pub struct ClippingPlanesPlugin;
 
 impl Plugin for ClippingPlanesPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<SectionViewSyncState>().add_systems(
             Update,
-            (apply_clip_plane_visibility, draw_clip_plane_gizmos),
+            (
+                sync_section_views,
+                apply_clip_plane_visibility,
+                draw_clip_plane_gizmos,
+            ),
         );
     }
 }
@@ -135,7 +147,7 @@ fn draw_clip_plane_gizmos(clip_planes: Query<&ClipPlaneNode>, mut gizmos: Gizmos
 // ---------------------------------------------------------------------------
 
 /// Serialisable snapshot of a [`ClipPlaneNode`] entity.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClipPlaneSnapshot {
     pub element_id: ElementId,
     pub node: ClipPlaneNode,
@@ -156,6 +168,10 @@ impl AuthoredEntity for ClipPlaneSnapshot {
 
     fn label(&self) -> String {
         self.node.name.clone()
+    }
+
+    fn scope(&self) -> EntityScope {
+        EntityScope::DrawingMetadata
     }
 
     fn center(&self) -> Vec3 {
@@ -329,7 +345,13 @@ impl AuthoredEntity for ClipPlaneSnapshot {
     }
 
     fn to_json(&self) -> Value {
-        serde_json::to_value(&self.node).unwrap_or(Value::Null)
+        serde_json::json!({
+            "element_id": self.element_id,
+            "name": self.node.name.clone(),
+            "origin": self.node.origin.to_array(),
+            "normal": self.node.normal.to_array(),
+            "active": self.node.active,
+        })
     }
 
     fn apply_to(&self, world: &mut World) {
@@ -375,6 +397,100 @@ impl From<ClipPlaneSnapshot> for BoxedEntity {
     }
 }
 
+fn sync_section_views(world: &mut World) {
+    let saved = {
+        let doc_props = world.resource::<DocumentProperties>();
+        doc_props
+            .domain_defaults
+            .get(SECTION_VIEW_METADATA_KEY)
+            .cloned()
+    };
+    let saved_changed = {
+        let sync_state = world.resource::<SectionViewSyncState>();
+        saved != sync_state.last_serialized
+    };
+
+    if saved_changed {
+        match saved.as_ref() {
+            Some(value) => {
+                let Some(snapshots) = deserialize_section_views(value) else {
+                    world.resource_mut::<SectionViewSyncState>().last_serialized = saved.clone();
+                    return;
+                };
+                apply_section_views_to_world(world, &snapshots);
+            }
+            None => apply_section_views_to_world(world, &[]),
+        }
+        world.resource_mut::<SectionViewSyncState>().last_serialized = saved.clone();
+    }
+
+    let serialized = serialize_section_views_from_world(world);
+    {
+        let mut doc_props = world.resource_mut::<DocumentProperties>();
+        match &serialized {
+            Some(value) => {
+                if doc_props.domain_defaults.get(SECTION_VIEW_METADATA_KEY) != Some(value) {
+                    doc_props
+                        .domain_defaults
+                        .insert(SECTION_VIEW_METADATA_KEY.to_string(), value.clone());
+                }
+            }
+            None => {
+                doc_props.domain_defaults.remove(SECTION_VIEW_METADATA_KEY);
+            }
+        }
+    }
+    world.resource_mut::<SectionViewSyncState>().last_serialized = serialized;
+}
+
+fn serialize_section_views_from_world(world: &mut World) -> Option<Value> {
+    let mut query = world.query::<(&ElementId, &ClipPlaneNode)>();
+    let mut section_views = query
+        .iter(world)
+        .map(|(element_id, node)| ClipPlaneSnapshot {
+            element_id: *element_id,
+            node: node.clone(),
+        })
+        .collect::<Vec<_>>();
+    if section_views.is_empty() {
+        return None;
+    }
+    section_views.sort_by_key(|snapshot| snapshot.element_id.0);
+    serde_json::to_value(section_views).ok()
+}
+
+fn deserialize_section_views(value: &Value) -> Option<Vec<ClipPlaneSnapshot>> {
+    let mut section_views: Vec<ClipPlaneSnapshot> = serde_json::from_value(value.clone()).ok()?;
+    section_views.sort_by_key(|snapshot| snapshot.element_id.0);
+    Some(section_views)
+}
+
+fn apply_section_views_to_world(world: &mut World, snapshots: &[ClipPlaneSnapshot]) {
+    let mut existing_query = world.query::<(Entity, &ElementId, &ClipPlaneNode)>();
+    let mut existing = existing_query
+        .iter(world)
+        .map(|(entity, element_id, node)| (element_id.0, (entity, node.clone())))
+        .collect::<HashMap<_, _>>();
+
+    for snapshot in snapshots {
+        if let Some((entity, existing_node)) = existing.remove(&snapshot.element_id.0) {
+            if existing_node != snapshot.node {
+                world.entity_mut(entity).insert(snapshot.node.clone());
+            }
+        } else {
+            world.spawn((
+                snapshot.element_id,
+                snapshot.node.clone(),
+                Visibility::Visible,
+            ));
+        }
+    }
+
+    for (_, (entity, _)) in existing {
+        let _ = world.despawn(entity);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ClipPlaneFactory — AuthoredEntityFactory
 // ---------------------------------------------------------------------------
@@ -408,9 +524,24 @@ impl AuthoredEntityFactory for ClipPlaneFactory {
                 .and_then(|v| v.as_u64())
                 .ok_or("Missing or invalid element_id")?,
         );
-        let node: ClipPlaneNode =
-            serde_json::from_value(data.clone()).map_err(|e| e.to_string())?;
-        Ok(ClipPlaneSnapshot { element_id, node }.into())
+        let name = data
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("Section")
+            .to_string();
+        let origin = parse_vec3_field(data, "origin").unwrap_or(Vec3::ZERO);
+        let normal = parse_normal_field(data).unwrap_or(Vec3::Y);
+        let active = data.get("active").and_then(Value::as_bool).unwrap_or(true);
+        Ok(ClipPlaneSnapshot {
+            element_id,
+            node: ClipPlaneNode {
+                name,
+                origin,
+                normal,
+                active,
+            },
+        }
+        .into())
     }
 
     fn from_create_request(&self, world: &World, request: &Value) -> Result<BoxedEntity, String> {
@@ -529,4 +660,46 @@ fn parse_normal_field(request: &Value) -> Option<Vec3> {
     }
 
     parse_vec3_field(request, "normal")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn section_views_restore_from_document_metadata() {
+        let snapshot = ClipPlaneSnapshot {
+            element_id: ElementId(9),
+            node: ClipPlaneNode {
+                name: "Section A-A".to_string(),
+                origin: Vec3::new(0.0, 2.0, 0.0),
+                normal: Vec3::Y,
+                active: true,
+            },
+        };
+        let serialized =
+            serde_json::to_value(vec![snapshot.clone()]).expect("section view should serialize");
+
+        let mut app = App::new();
+        let mut doc_props = DocumentProperties::default();
+        doc_props
+            .domain_defaults
+            .insert(SECTION_VIEW_METADATA_KEY.to_string(), serialized);
+        app.insert_resource(doc_props)
+            .init_resource::<SectionViewSyncState>()
+            .add_systems(Update, sync_section_views);
+
+        app.update();
+
+        let world = app.world_mut();
+        let mut query = world.query::<(&ElementId, &ClipPlaneNode)>();
+        let restored = query
+            .iter(world)
+            .next()
+            .expect("section view should be restored from metadata");
+        assert_eq!(*restored.0, ElementId(9));
+        assert_eq!(restored.1.name, "Section A-A");
+        assert_eq!(restored.1.origin, Vec3::new(0.0, 2.0, 0.0));
+        assert!(restored.1.active);
+    }
 }

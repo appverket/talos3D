@@ -575,7 +575,11 @@ fn evaluated_array_to_mesh(evaluated: &EvaluatedArray) -> Mesh {
 }
 
 fn editable_mesh_asset(editable: &EditableMesh) -> Mesh {
-    let (positions, triangles, normals) = editable.triangulate_all();
+    let (positions, triangles, normals) = if editable.smooth_normals {
+        editable.triangulate_all_smooth()
+    } else {
+        editable.triangulate_all()
+    };
     let pos_arr: Vec<[f32; 3]> = positions.iter().map(|v| [v.x, v.y, v.z]).collect();
     let norm_arr: Vec<[f32; 3]> = normals.iter().map(|n| [n.x, n.y, n.z]).collect();
     let indices: Vec<u32> = triangles.iter().flat_map(|t| t.iter().copied()).collect();

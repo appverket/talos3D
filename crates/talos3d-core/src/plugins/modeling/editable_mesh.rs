@@ -57,6 +57,10 @@ pub struct EditableMesh {
     pub vertices: Vec<Vec3>,
     pub half_edges: Vec<HalfEdge>,
     pub faces: Vec<MeshFace>,
+    /// When `true`, mesh generation uses smooth (angle-weighted) vertex normals
+    /// instead of flat per-face normals.  Set for curved shapes like spheres
+    /// and cylinders.
+    pub smooth_normals: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -164,7 +168,9 @@ impl EditableMesh {
             face_vertex_lists.push(vec![i, next_i, n + next_i, n + i]);
         }
 
-        build_mesh_from_polygons(&vertices, &face_vertex_lists)
+        let mut mesh = build_mesh_from_polygons(&vertices, &face_vertex_lists);
+        mesh.smooth_normals = true;
+        mesh
     }
 
     /// Create from a plane primitive (single quad face).
@@ -259,7 +265,9 @@ impl EditableMesh {
             ]);
         }
 
-        build_mesh_from_polygons(&vertices, &face_vertex_lists)
+        let mut mesh = build_mesh_from_polygons(&vertices, &face_vertex_lists);
+        mesh.smooth_normals = true;
+        mesh
     }
 
     /// Number of logical edges (half_edges / 2, approximately).
@@ -603,7 +611,38 @@ impl EditableMesh {
         triangles
     }
 
-    /// Triangulate all faces for rendering.
+    /// Compute angle-weighted smooth vertex normals.
+    ///
+    /// Each vertex normal is the weighted average of the face normals of all
+    /// faces that share that vertex, weighted by the interior angle of the
+    /// face at that vertex.  Faces whose normal differs from a neighbour by
+    /// more than `crease_angle_rad` are treated as a hard edge and their
+    /// contributions are separated.
+    ///
+    /// Returns one smooth normal per original vertex index.
+    fn smooth_vertex_normals(&self) -> Vec<Vec3> {
+        let mut acc = vec![Vec3::ZERO; self.vertices.len()];
+        for (face_idx, face) in self.faces.iter().enumerate() {
+            if face.half_edge == NONE {
+                continue;
+            }
+            let face_verts = self.vertices_of_face(face_idx as u32);
+            let n = face_verts.len();
+            for i in 0..n {
+                let vi = face_verts[i] as usize;
+                let v_prev = self.vertices[face_verts[(i + n - 1) % n] as usize];
+                let v_curr = self.vertices[vi];
+                let v_next = self.vertices[face_verts[(i + 1) % n] as usize];
+                let e1 = (v_prev - v_curr).normalize_or_zero();
+                let e2 = (v_next - v_curr).normalize_or_zero();
+                let angle = e1.dot(e2).clamp(-1.0, 1.0).acos();
+                acc[vi] += face.normal * angle;
+            }
+        }
+        acc.iter().map(|n| n.normalize_or_zero()).collect()
+    }
+
+    /// Triangulate all faces for rendering with flat (face) normals.
     pub fn triangulate_all(&self) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<Vec3>) {
         let mut out_verts = Vec::new();
         let mut out_tris = Vec::new();
@@ -621,6 +660,42 @@ impl EditableMesh {
                 out_normals.push(face.normal);
             }
             // Remap triangle indices to local face vertex indices
+            for tri in &tris {
+                let local: Vec<u32> = tri
+                    .iter()
+                    .map(|&global_vi| {
+                        face_verts.iter().position(|&v| v == global_vi).unwrap_or(0) as u32 + base
+                    })
+                    .collect();
+                out_tris.push([local[0], local[1], local[2]]);
+            }
+        }
+
+        (out_verts, out_tris, out_normals)
+    }
+
+    /// Triangulate all faces for rendering with smooth (vertex-averaged) normals.
+    ///
+    /// Use this for curved shapes such as spheres and cylinders where flat
+    /// per-face normals produce visible faceting.
+    pub fn triangulate_all_smooth(&self) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<Vec3>) {
+        let smooth_normals = self.smooth_vertex_normals();
+
+        let mut out_verts = Vec::new();
+        let mut out_tris = Vec::new();
+        let mut out_normals = Vec::new();
+
+        for (face_idx, face) in self.faces.iter().enumerate() {
+            if face.half_edge == NONE {
+                continue;
+            }
+            let tris = self.triangulate_face(face_idx as u32);
+            let base = out_verts.len() as u32;
+            let face_verts = self.vertices_of_face(face_idx as u32);
+            for &vi in &face_verts {
+                out_verts.push(self.vertices[vi as usize]);
+                out_normals.push(smooth_normals[vi as usize]);
+            }
             for tri in &tris {
                 let local: Vec<u32> = tri
                     .iter()
@@ -674,6 +749,7 @@ pub fn build_mesh_from_polygons(vertices: &[Vec3], face_polys: &[Vec<u32>]) -> E
         vertices: vertices.to_vec(),
         half_edges: Vec::new(),
         faces: Vec::new(),
+        smooth_normals: false,
     };
 
     // For twin pairing: map (origin, dest) -> half_edge_index

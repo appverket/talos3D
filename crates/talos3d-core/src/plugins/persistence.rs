@@ -278,6 +278,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         .into_iter()
         .filter_map(|entity| world.get_entity(entity).ok())
         .filter_map(|entity_ref| registry.capture_snapshot(&entity_ref, world))
+        .filter(|snapshot| snapshot.scope() == crate::authored_entity::EntityScope::AuthoredModel)
         .map(|snapshot| PersistedEntityRecord {
             type_name: snapshot.type_name().to_string(),
             data: snapshot.to_persisted_json(),
@@ -333,7 +334,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     } else {
         Some(named_view_registry)
     };
-    let lighting = Some(world.resource::<SceneLightingSettings>().clone());
+    let lighting = world.get_resource::<SceneLightingSettings>().cloned();
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
@@ -374,9 +375,22 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     let registry = world.resource::<CapabilityRegistry>();
     let mut recognized = Vec::new();
     let mut opaque = Vec::new();
+    let mut legacy_dimension_annotations = Vec::new();
+    let mut legacy_section_views = Vec::new();
 
     for mut record in entities {
         upgrade_legacy_entity_record(&mut record, &mut next_element_id);
+        if matches!(record.type_name.as_str(), "dimension_line" | "clip_plane") {
+            ensure_metadata_record_element_id(&mut record.data, &mut next_element_id);
+        }
+        if record.type_name == "dimension_line" {
+            legacy_dimension_annotations.push(record.data);
+            continue;
+        }
+        if record.type_name == "clip_plane" {
+            legacy_section_views.push(record.data);
+            continue;
+        }
         if let Some(factory) = registry.factory_for(&record.type_name) {
             let snapshot = factory.from_persisted_json(&record.data)?;
             recognized.push(snapshot);
@@ -397,6 +411,27 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
             props
         }
     };
+    let mut doc_props = doc_props;
+    if !legacy_dimension_annotations.is_empty()
+        && !doc_props
+            .domain_defaults
+            .contains_key(crate::plugins::dimension_line::DIMENSION_ANNOTATIONS_KEY)
+    {
+        doc_props.domain_defaults.insert(
+            crate::plugins::dimension_line::DIMENSION_ANNOTATIONS_KEY.to_string(),
+            Value::Array(legacy_dimension_annotations),
+        );
+    }
+    if !legacy_section_views.is_empty()
+        && !doc_props
+            .domain_defaults
+            .contains_key(crate::plugins::clipping_planes::SECTION_VIEW_METADATA_KEY)
+    {
+        doc_props.domain_defaults.insert(
+            crate::plugins::clipping_planes::SECTION_VIEW_METADATA_KEY.to_string(),
+            Value::Array(legacy_section_views),
+        );
+    }
     world.insert_resource(doc_props);
     world.insert_resource(layers.unwrap_or_default());
     world.insert_resource(materials.unwrap_or_default());
@@ -469,6 +504,16 @@ fn upgrade_legacy_entity_record(record: &mut PersistedEntityRecord, next_element
     });
 }
 
+fn ensure_metadata_record_element_id(data: &mut Value, next_element_id: &mut u64) {
+    let Some(object) = data.as_object_mut() else {
+        return;
+    };
+    if !object.contains_key("element_id") {
+        object.insert("element_id".to_string(), Value::from(*next_element_id));
+        *next_element_id += 1;
+    }
+}
+
 fn is_legacy_primitive_record_type(type_name: &str) -> bool {
     matches!(
         type_name,
@@ -533,12 +578,17 @@ mod tests {
     use super::*;
     use crate::plugins::{
         bundled_definition_libraries::apply_bundled_definition_libraries,
+        history::{History, PendingCommandQueue},
         layers::LayerRegistry,
+        lighting::SceneLightingSettings,
         materials::{
             ensure_builtin_materials, BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80,
             BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO,
         },
         modeling::definition::{DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope},
+        property_edit::PropertyEditState,
+        tools::ActiveTool,
+        transform::TransformState,
     };
 
     #[test]
@@ -610,6 +660,67 @@ mod tests {
                 .name,
             "Project Material"
         );
+    }
+
+    #[test]
+    fn load_project_promotes_legacy_drawing_metadata_entities() {
+        let mut world = World::new();
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(bevy::prelude::Assets::<bevy::prelude::Mesh>::default());
+        world.insert_resource(MaterialRegistry::default());
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(DefinitionLibraryRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+        world.insert_resource(History::default());
+        world.insert_resource(PendingCommandQueue::default());
+        world.insert_resource(PropertyEditState::default());
+        world.insert_resource(TransformState::default());
+        world.insert_resource(State::new(ActiveTool::Select));
+        world.insert_resource(NextState::<ActiveTool>::default());
+
+        let project = ProjectFile {
+            version: PROJECT_FILE_VERSION,
+            next_element_id: 100,
+            document_properties: Some(DocumentProperties::default()),
+            layers: None,
+            materials: None,
+            definitions: None,
+            definition_libraries: None,
+            named_views: None,
+            lighting: Some(SceneLightingSettings::default()),
+            entities: vec![
+                PersistedEntityRecord {
+                    type_name: "dimension_line".to_string(),
+                    data: serde_json::json!({
+                        "start": [0.0, 0.0, 0.0],
+                        "end": [2.0, 0.0, 0.0],
+                        "line_point": [1.0, 0.0, -0.5],
+                        "visible": true
+                    }),
+                },
+                PersistedEntityRecord {
+                    type_name: "clip_plane".to_string(),
+                    data: serde_json::json!({
+                        "name": "Section",
+                        "origin": [0.0, 2.0, 0.0],
+                        "normal": [0.0, 1.0, 0.0],
+                        "active": true
+                    }),
+                },
+            ],
+        };
+
+        load_project(&mut world, project).expect("project should load");
+
+        let doc_props = world.resource::<DocumentProperties>();
+        assert!(doc_props
+            .domain_defaults
+            .contains_key(crate::plugins::dimension_line::DIMENSION_ANNOTATIONS_KEY));
+        assert!(doc_props
+            .domain_defaults
+            .contains_key(crate::plugins::clipping_planes::SECTION_VIEW_METADATA_KEY));
     }
 }
 

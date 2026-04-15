@@ -118,13 +118,13 @@ impl Plugin for ModelingPlugin {
             .register_command(
                 CommandDescriptor {
                     id: "modeling.clip_plane_create".to_string(),
-                    label: "Add Clipping Plane".to_string(),
-                    description: "Add a horizontal clipping plane at height 2m for architectural section views".to_string(),
+                    label: "Add Section View".to_string(),
+                    description: "Add a horizontal section-view clipping plane at height 2m as drawing metadata".to_string(),
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: None,
                     icon: None,
-                    hint: Some("Cut the viewport horizontally to see inside the model".to_string()),
+                    hint: Some("Add a section-view cut without changing the authored model".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    marker::PhantomData,
+    sync::Arc,
+};
 
 use bevy::{app::App, ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -551,6 +555,55 @@ fn validate_capability_dependencies(registry: Res<CapabilityRegistry>) {
     }
 }
 
+/// Runtime activation state for registered capabilities.
+///
+/// Capability descriptors ([`CapabilityDescriptor`]) describe *what* a plugin
+/// provides; this resource tracks *whether* the user currently wants that
+/// functionality surfaced in the UI.
+///
+/// Menu and toolbar renderers consult [`CapabilityActivation::is_enabled`] to
+/// decide whether a command tagged with a `capability_id` should be visible.
+/// Capabilities are enabled by default — disabling is opt-in, so newly
+/// registered plugins remain discoverable.
+///
+/// This is intentionally a session-scoped resource (not persisted with the
+/// document), mirroring the way toolbar visibility is treated: a workspace
+/// preference, not part of the authored model.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct CapabilityActivation {
+    disabled: HashSet<String>,
+}
+
+impl CapabilityActivation {
+    pub fn is_enabled(&self, capability_id: &str) -> bool {
+        !self.disabled.contains(capability_id)
+    }
+
+    pub fn is_disabled(&self, capability_id: &str) -> bool {
+        self.disabled.contains(capability_id)
+    }
+
+    pub fn set_enabled(&mut self, capability_id: &str, enabled: bool) {
+        if enabled {
+            self.disabled.remove(capability_id);
+        } else {
+            self.disabled.insert(capability_id.to_string());
+        }
+    }
+
+    pub fn toggle(&mut self, capability_id: &str) -> bool {
+        let now_enabled = self.disabled.remove(capability_id);
+        if !now_enabled {
+            self.disabled.insert(capability_id.to_string());
+        }
+        now_enabled
+    }
+
+    pub fn disabled_ids(&self) -> impl Iterator<Item = &str> {
+        self.disabled.iter().map(String::as_str)
+    }
+}
+
 pub trait CapabilityRegistryAppExt {
     fn register_capability(&mut self, descriptor: CapabilityDescriptor) -> &mut Self;
 
@@ -572,6 +625,9 @@ impl CapabilityRegistryAppExt for App {
     fn register_capability(&mut self, descriptor: CapabilityDescriptor) -> &mut Self {
         if !self.world().contains_resource::<CapabilityRegistry>() {
             self.init_resource::<CapabilityRegistry>();
+        }
+        if !self.world().contains_resource::<CapabilityActivation>() {
+            self.init_resource::<CapabilityActivation>();
         }
         if !self
             .world()

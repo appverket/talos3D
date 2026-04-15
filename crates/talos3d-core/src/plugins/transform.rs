@@ -977,7 +977,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                         let rotated = snapshot.rotate_by(rotation);
                         let offset = snapshot.center() - center;
                         let orbited_offset = rotation * offset;
-                        let translation = (center + orbited_offset) - snapshot.center();
+                        let translation = (center + orbited_offset) - rotated.center();
                         rotated.translate_by(translation)
                     })
                     .collect(),

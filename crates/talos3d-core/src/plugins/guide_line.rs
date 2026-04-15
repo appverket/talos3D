@@ -1478,7 +1478,7 @@ impl Plugin for GuideLinePlugin {
                     category: CommandCategory::Create,
                     parameters: None,
                     default_shortcut: Some("G".to_string()),
-                    icon: None,
+                    icon: Some("icon.guide_line".to_string()),
                     hint: Some(
                         "Click anchor or edge, then drag/click to place the guide · X/Y/Z locks axis · type angle + Enter"
                             .to_string(),
@@ -1487,7 +1487,7 @@ impl Plugin for GuideLinePlugin {
                     show_in_menu: true,
                     version: 1,
                     activates_tool: Some("PlaceGuideLine".to_string()),
-                    capability_id: Some("guide_lines".to_string()),
+                    capability_id: Some(crate::plugins::drawing_export::DRAFTING_CAPABILITY_ID.to_string()),
                 },
                 execute_place_guide_line,
             )
@@ -1499,13 +1499,13 @@ impl Plugin for GuideLinePlugin {
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: Some("Shift+G".to_string()),
-                    icon: None,
+                    icon: Some("icon.guide_lines".to_string()),
                     hint: Some("Toggle visibility of construction guide lines".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
                     activates_tool: None,
-                    capability_id: Some("guide_lines".to_string()),
+                    capability_id: Some(crate::plugins::drawing_export::DRAFTING_CAPABILITY_ID.to_string()),
                 },
                 execute_toggle_guide_line_visibility,
             )
@@ -1516,7 +1516,10 @@ impl Plugin for GuideLinePlugin {
                 default_visible: true,
                 sections: vec![ToolbarSection {
                     label: "Construction".to_string(),
-                    command_ids: vec!["guide_lines.place".to_string()],
+                    command_ids: vec![
+                        "guide_lines.place".to_string(),
+                        "view.toggle_guide_lines".to_string(),
+                    ],
                 }],
             })
             .add_systems(OnEnter(ActiveTool::PlaceGuideLine), initialize_guide_line_tool)
