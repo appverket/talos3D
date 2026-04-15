@@ -24,16 +24,17 @@ demonstrates the public platform model.
 
 1. [README.md](../README.md)
 2. [AGENTS.md](../AGENTS.md)
-3. [MCP Model API](./MCP_MODEL_API.md)
-4. [Governance](../GOVERNANCE.md)
-5. [Support](../SUPPORT.md)
-6. [Core Principles](./CORE_PRINCIPLES.md)
-7. [Platform Architecture](./PLATFORM_ARCHITECTURE.md)
-8. [Extension Architecture](./EXTENSION_ARCHITECTURE.md)
-9. [Capability Plugin API](./CAPABILITY_PLUGIN_API.md)
-10. [System Architecture](./SYSTEM_ARCHITECTURE.md)
-11. [Domain Model](./DOMAIN_MODEL.md)
-12. [Glossary](./GLOSSARY.md)
+3. [Engine Fork Workflow](./ENGINE_FORK_WORKFLOW.md)
+4. [MCP Model API](./MCP_MODEL_API.md)
+5. [Governance](../GOVERNANCE.md)
+6. [Support](../SUPPORT.md)
+7. [Core Principles](./CORE_PRINCIPLES.md)
+8. [Platform Architecture](./PLATFORM_ARCHITECTURE.md)
+9. [Extension Architecture](./EXTENSION_ARCHITECTURE.md)
+10. [Capability Plugin API](./CAPABILITY_PLUGIN_API.md)
+11. [System Architecture](./SYSTEM_ARCHITECTURE.md)
+12. [Domain Model](./DOMAIN_MODEL.md)
+13. [Glossary](./GLOSSARY.md)
 
 ## Workspace Shape
 
@@ -88,6 +89,25 @@ cargo test
 cargo run
 cargo run --features model-api
 ```
+
+## Engine Dependency Work
+
+If your task touches:
+
+- Bevy
+- egui
+- `bevy_egui`
+- editor panel sizing behavior
+- engine upgrades or dependency tracking
+
+read [Engine Fork Workflow](./ENGINE_FORK_WORKFLOW.md) before making changes.
+
+That document defines:
+
+- which repository should own which kind of fix
+- which branches are allowed to track upstream `main`
+- how local path-based builds should be wired
+- how to refresh forks without increasing project confusion
 
 ## Documentation Workflow
 
