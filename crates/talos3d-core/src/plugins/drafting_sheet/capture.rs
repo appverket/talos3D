@@ -30,8 +30,8 @@ use crate::plugins::{
     },
     section_fill::{extract_section_fills, SectionFillRegion},
     vector_drawing::{
-        collect_classified_visible_edges, collect_scene_triangles, drawing_overlay_excluded,
-        EdgeType, MeshSubject,
+        collect_active_clip_planes, collect_classified_visible_edges, collect_scene_triangles,
+        drawing_overlay_excluded, EdgeType, MeshSubject,
     },
 };
 
@@ -93,6 +93,11 @@ pub fn capture_sheet(world: &World, view: &SheetView) -> Option<DraftingSheet> {
         });
     }
     let scene_triangles = collect_scene_triangles(&subjects, mesh_assets);
+    // Active clip planes make "elevation beyond" visible — without
+    // them, trusses and other geometry on the visible side of the
+    // section are wrongly culled as occluded by the parts of the
+    // enclosing meshes that have been cut away.
+    let clip_planes = collect_active_clip_planes(world);
 
     let mut sheet = DraftingSheet::new(view.scale_denominator);
 
@@ -109,6 +114,7 @@ pub fn capture_sheet(world: &World, view: &SheetView) -> Option<DraftingSheet> {
             camera_forward,
             true, // orthographic
             &scene_triangles,
+            &clip_planes,
         );
         for (a_world, b_world, edge_type) in classified {
             if let (Some(a), Some(b)) = (

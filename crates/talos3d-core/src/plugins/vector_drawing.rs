@@ -165,6 +165,7 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
     }
 
     let scene_triangles = collect_scene_triangles(&subjects, mesh_assets);
+    let clip_planes = collect_active_clip_planes(world);
 
     let mut edges = Vec::new();
     for subject in &subjects {
@@ -179,6 +180,7 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
             camera_forward,
             orthographic,
             &scene_triangles,
+            &clip_planes,
         );
         for (start_3d, end_3d, edge_type) in classified {
             if let Some(edge) =
@@ -1405,6 +1407,21 @@ fn viewport_dimensions(orbit: &OrbitCamera, projection: &Projection) -> (f32, f3
     }
 }
 
+/// Snapshot every currently-active `ClipPlaneNode` into the simple
+/// `(origin, normal)` form that the edge-visibility pass expects.
+/// Inactive planes are skipped — they do not bound the section.
+pub(crate) fn collect_active_clip_planes(world: &World) -> Vec<ClipPlane> {
+    let Some(mut query) = world.try_query::<&crate::plugins::clipping_planes::ClipPlaneNode>()
+    else {
+        return Vec::new();
+    };
+    query
+        .iter(world)
+        .filter(|plane| plane.active)
+        .map(|plane| (plane.origin, plane.normal))
+        .collect()
+}
+
 pub(crate) fn collect_scene_triangles(
     subjects: &[MeshSubject],
     mesh_assets: &Assets<Mesh>,
@@ -1442,6 +1459,15 @@ pub(crate) fn collect_scene_triangles(
     triangles
 }
 
+/// Active clip planes as simple (origin, normal) pairs. Follows the
+/// `ClipPlaneNode` convention: the **normal points toward the visible
+/// side**, so a point `p` is *clipped* when `(p - origin) · normal < 0`
+/// (strictly less than). Passing these into the edge-visibility test
+/// lets occluders on the clipped side be ignored — so a section view
+/// correctly shows "elevation beyond" geometry that would otherwise be
+/// culled as occluded by the now-invisible enclosing meshes.
+pub(crate) type ClipPlane = (Vec3, Vec3);
+
 pub(crate) fn collect_classified_visible_edges(
     mesh: &Mesh,
     mesh_transform: &GlobalTransform,
@@ -1450,6 +1476,7 @@ pub(crate) fn collect_classified_visible_edges(
     camera_forward: Vec3,
     orthographic: bool,
     scene_triangles: &[SceneTriangle],
+    clip_planes: &[ClipPlane],
 ) -> Vec<(Vec3, Vec3, EdgeType)> {
     let Some(positions) = mesh_positions(mesh) else {
         return Vec::new();
@@ -1496,6 +1523,9 @@ pub(crate) fn collect_classified_visible_edges(
     edges
         .into_values()
         .filter(|edge| edge.is_visible_candidate())
+        // Edges whose whole extent is on the clipped side of any active
+        // plane are hidden by the section — skip them entirely.
+        .filter(|edge| !edge_fully_clipped(edge.start_world, edge.end_world, clip_planes))
         .filter(|edge| {
             edge_is_visible(
                 edge.start_world,
@@ -1505,6 +1535,7 @@ pub(crate) fn collect_classified_visible_edges(
                 camera_forward,
                 orthographic,
                 scene_triangles,
+                clip_planes,
             )
         })
         .map(|edge| (edge.start_world, edge.end_world, edge.classify()))
@@ -1641,6 +1672,7 @@ fn edge_is_visible(
     camera_forward: Vec3,
     orthographic: bool,
     scene_triangles: &[SceneTriangle],
+    clip_planes: &[ClipPlane],
 ) -> bool {
     use crate::plugins::modeling::snapshots::ray_triangle_intersection;
 
@@ -1667,6 +1699,12 @@ fn edge_is_visible(
             };
             let ray = Ray3d::new(ray_origin, ray_direction);
             !scene_triangles.iter().any(|triangle| {
+                // Skip triangles that are entirely on the clipped side
+                // of any active plane — they are hidden by the section
+                // and must not occlude "elevation beyond" geometry.
+                if triangle_fully_clipped(triangle, clip_planes) {
+                    return false;
+                }
                 if triangle.entity == owner_entity {
                     return ray_triangle_intersection(ray, triangle.a, triangle.b, triangle.c)
                         .is_some_and(|d| {
@@ -1679,6 +1717,26 @@ fn edge_is_visible(
                 )
             })
         })
+}
+
+/// True iff every vertex of the triangle is on the *clipped* side of at
+/// least one active plane (i.e. the whole triangle is hidden by that
+/// plane's section). `ClipPlaneNode`'s `normal` points toward the
+/// visible side, so the clipped half-space is `signed < 0`.
+fn triangle_fully_clipped(triangle: &SceneTriangle, clip_planes: &[ClipPlane]) -> bool {
+    clip_planes.iter().any(|(origin, normal)| {
+        let signed = |p: Vec3| (p - *origin).dot(*normal);
+        signed(triangle.a) < 0.0 && signed(triangle.b) < 0.0 && signed(triangle.c) < 0.0
+    })
+}
+
+/// True iff both endpoints of the edge are strictly on the clipped side
+/// of at least one active plane.
+fn edge_fully_clipped(start: Vec3, end: Vec3, clip_planes: &[ClipPlane]) -> bool {
+    clip_planes.iter().any(|(origin, normal)| {
+        let signed = |p: Vec3| (p - *origin).dot(*normal);
+        signed(start) < 0.0 && signed(end) < 0.0
+    })
 }
 
 fn mesh_positions(mesh: &Mesh) -> Option<Vec<[f32; 3]>> {
