@@ -1288,6 +1288,11 @@ enum ModelApiRequest {
         path: String,
         response: oneshot::Sender<ApiResult<String>>,
     },
+    ExportDraftingSheet {
+        path: String,
+        scale_denominator: Option<f32>,
+        response: oneshot::Sender<ApiResult<String>>,
+    },
     SaveProject {
         path: String,
         response: oneshot::Sender<ApiResult<String>>,
@@ -1792,6 +1797,13 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::ExportDrawing { path, response } => {
             let _ = response.send(handle_export_drawing(world, &path));
+        }
+        ModelApiRequest::ExportDraftingSheet {
+            path,
+            scale_denominator,
+            response,
+        } => {
+            let _ = response.send(handle_export_drafting_sheet(world, &path, scale_denominator));
         }
         ModelApiRequest::SaveProject { path, response } => {
             let _ = response.send(handle_save_project(world, &path));
@@ -3235,6 +3247,27 @@ impl ModelApiServer {
         Ok(saved_path)
     }
 
+    async fn request_export_drafting_sheet(
+        &self,
+        path: String,
+        scale_denominator: Option<f32>,
+    ) -> ApiResult<String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ExportDraftingSheet {
+                path,
+                scale_denominator,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        let saved_path = receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())??;
+
+        wait_for_written_file(&saved_path).await?;
+        Ok(saved_path)
+    }
+
     async fn request_save_project(&self, path: String) -> ApiResult<String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -4165,6 +4198,19 @@ struct ExportDrawingRequest {
     /// File path to save the exported drawing. Supports PNG, PDF, SVG, and the `svd` alias.
     #[serde(default = "crate::plugins::drawing_export::default_drawing_export_path")]
     path: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExportDraftingSheetRequest {
+    /// File path to save the drafting sheet. Extension decides the format
+    /// (svg, pdf, dxf, png).
+    pub path: String,
+    /// Architectural drawing scale denominator (e.g. 50 for a 1:50 plan).
+    /// Defaults to 50 if omitted.
+    #[serde(default)]
+    pub scale_denominator: Option<f32>,
 }
 
 #[cfg(feature = "model-api")]
@@ -5519,6 +5565,21 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let path = self
             .request_export_drawing(params.path)
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(serde_json::json!({ "path": path }))
+    }
+
+    #[tool(
+        name = "export_drafting_sheet",
+        description = "Capture the current orthographic camera into a paper-mm DraftingSheet and export it. Extension selects the writer: .svg (paper-mm native), .pdf, .dxf (mm), or .png. Optional `scale_denominator` sets the drawing scale (1:N), defaulting to 1:50. Refuses perspective cameras."
+    )]
+    async fn export_drafting_sheet_tool(
+        &self,
+        Parameters(params): Parameters<ExportDraftingSheetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self
+            .request_export_drafting_sheet(params.path, params.scale_denominator)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(serde_json::json!({ "path": path }))
@@ -7908,6 +7969,20 @@ fn handle_export_drawing(world: &mut World, path: &str) -> Result<String, String
     let path_buf = crate::plugins::drawing_export::export_drawing_to_path(
         world,
         std::path::PathBuf::from(path),
+    )?;
+    Ok(path_buf.to_string_lossy().to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_export_drafting_sheet(
+    world: &mut World,
+    path: &str,
+    scale_denominator: Option<f32>,
+) -> Result<String, String> {
+    let path_buf = crate::plugins::drafting_sheet::export_sheet_to_path(
+        world,
+        std::path::PathBuf::from(path),
+        scale_denominator,
     )?;
     Ok(path_buf.to_string_lossy().to_string())
 }
