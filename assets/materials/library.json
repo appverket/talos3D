@@ -1,0 +1,237 @@
+{
+  "version": "1.0",
+  "generated": "2026-04-13",
+  "materials": [
+    {
+      "id": "concrete_wall",
+      "name": "Concrete Wall",
+      "description": "Rough weathered concrete wall surface",
+      "source": "polyhaven.com",
+      "source_id": "concrete_wall_008",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "concrete_wall/diffuse.png",
+        "normal": "concrete_wall/normal_opengl.png",
+        "roughness": "concrete_wall/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.85
+      }
+    },
+    {
+      "id": "concrete_smooth",
+      "name": "Concrete Smooth",
+      "description": "Smooth cast concrete surface",
+      "source": "ambientcg.com",
+      "source_id": "Concrete021",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "concrete_smooth/diffuse.png",
+        "normal": "concrete_smooth/normal_opengl.png",
+        "roughness": "concrete_smooth/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.75
+      }
+    },
+    {
+      "id": "wood_planks",
+      "name": "Wood Planks",
+      "description": "Wooden table/plank surface with natural grain",
+      "source": "polyhaven.com",
+      "source_id": "wood_table_001",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "wood_planks/diffuse.png",
+        "normal": "wood_planks/normal_opengl.png",
+        "roughness": "wood_planks/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.7
+      }
+    },
+    {
+      "id": "wood_floor",
+      "name": "Wood Floor",
+      "description": "Hardwood floor planks, finished surface",
+      "source": "ambientcg.com",
+      "source_id": "WoodFloor030",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "wood_floor/diffuse.png",
+        "normal": "wood_floor/normal_opengl.png",
+        "roughness": "wood_floor/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.45
+      }
+    },
+    {
+      "id": "marble",
+      "name": "Marble",
+      "description": "White/grey veined marble surface",
+      "source": "polyhaven.com",
+      "source_id": "marble_01",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "marble/diffuse.png",
+        "normal": "marble/normal_opengl.png",
+        "roughness": "marble/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.2
+      }
+    },
+    {
+      "id": "granite_tile",
+      "name": "Granite Tile",
+      "description": "Polished granite floor tile",
+      "source": "polyhaven.com",
+      "source_id": "granite_tile",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "granite_tile/diffuse.png",
+        "normal": "granite_tile/normal_opengl.png",
+        "roughness": "granite_tile/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.3
+      }
+    },
+    {
+      "id": "metal_plate",
+      "name": "Metal Plate",
+      "description": "Bare metal plate with subtle surface detail",
+      "source": "polyhaven.com",
+      "source_id": "metal_plate",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "metal_plate/diffuse.png",
+        "normal": "metal_plate/normal_opengl.png",
+        "roughness": "metal_plate/roughness.png",
+        "metallic": "metal_plate/metallic.png"
+      },
+      "pbr_defaults": {
+        "metallic": 1.0,
+        "perceptual_roughness": 0.3
+      }
+    },
+    {
+      "id": "metal_galvanized",
+      "name": "Metal Galvanized",
+      "description": "Galvanized steel with characteristic spangle pattern",
+      "source": "ambientcg.com",
+      "source_id": "Metal023",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "metal_galvanized/diffuse.png",
+        "normal": "metal_galvanized/normal_opengl.png",
+        "roughness": "metal_galvanized/roughness.png",
+        "metallic": "metal_galvanized/metallic.png"
+      },
+      "pbr_defaults": {
+        "metallic": 1.0,
+        "perceptual_roughness": 0.35
+      }
+    },
+    {
+      "id": "copper",
+      "name": "Copper",
+      "description": "Worn/dirty copper metal surface",
+      "source": "ambientcg.com",
+      "source_id": "Metal047B",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "copper/diffuse.png",
+        "normal": "copper/normal_opengl.png",
+        "roughness": "copper/roughness.png",
+        "metallic": "copper/metallic.png"
+      },
+      "pbr_defaults": {
+        "metallic": 1.0,
+        "perceptual_roughness": 0.55
+      }
+    },
+    {
+      "id": "stone_wall",
+      "name": "Stone Wall",
+      "description": "Plastered stone wall with visible texture",
+      "source": "polyhaven.com",
+      "source_id": "plastered_stone_wall",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "stone_wall/diffuse.png",
+        "normal": "stone_wall/normal_opengl.png",
+        "roughness": "stone_wall/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.8
+      }
+    },
+    {
+      "id": "rough_plaster",
+      "name": "Rough Plaster",
+      "description": "Rough block/plaster wall with heavy surface texture",
+      "source": "polyhaven.com",
+      "source_id": "rough_block_wall",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "rough_plaster/diffuse.png",
+        "normal": "rough_plaster/normal_opengl.png",
+        "roughness": "rough_plaster/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.9
+      }
+    },
+    {
+      "id": "rock_face",
+      "name": "Rock Face",
+      "description": "Natural exposed rock/stone face",
+      "source": "polyhaven.com",
+      "source_id": "rock_face",
+      "license": "CC0",
+      "resolution": "1K",
+      "format": "PNG",
+      "files": {
+        "diffuse": "rock_face/diffuse.png",
+        "normal": "rock_face/normal_opengl.png",
+        "roughness": "rock_face/roughness.png"
+      },
+      "pbr_defaults": {
+        "metallic": 0.0,
+        "perceptual_roughness": 0.9
+      }
+    }
+  ]
+}
