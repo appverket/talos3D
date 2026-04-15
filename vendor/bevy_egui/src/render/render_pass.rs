@@ -176,13 +176,6 @@ impl Node for EguiPassNode {
                 min: viewport.physical_position,
                 max: viewport.physical_position + viewport.physical_size,
             });
-            // Clamp to the actual GPU surface to avoid wgpu validation errors
-            // when camera dimensions are stale (macOS first frame).
-            let scissor_rect = if let Some(target_size) = camera.physical_target_size {
-                scissor_rect.intersect(URect { min: UVec2::ZERO, max: target_size })
-            } else {
-                scissor_rect
-            };
             if scissor_rect.is_empty() {
                 continue;
             }
