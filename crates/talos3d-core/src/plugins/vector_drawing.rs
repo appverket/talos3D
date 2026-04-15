@@ -73,7 +73,10 @@ pub struct ProjectedEdge {
 
 #[derive(Debug, Clone)]
 pub struct ProjectedDimensionLabel {
+    /// Absolute viewport-pixel x coordinate (same coord space as
+    /// [`ProjectedEdge`] and [`ProjectedSectionFill`]).
     pub x: f32,
+    /// Absolute viewport-pixel y coordinate, +y down.
     pub y: f32,
     pub text: String,
     pub font_size_pt: f32,
@@ -86,6 +89,12 @@ pub struct DrawingViewport {
     pub world_width: f32,
     pub world_height: f32,
     pub scale: f32,
+    /// Canvas units per paper millimetre. Used by every exporter to size
+    /// edge strokes, hatch strokes, and any mm-typed attribute so that
+    /// geometry outlines, dimension strokes, and text all share one
+    /// scale and the conventional arch-drafting proportions
+    /// (section-cut > object > dimension) survive the export.
+    pub paper_mm_to_canvas: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -205,11 +214,17 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
 
             let geometry = dimension_geometry(node.start, node.end, node.line_point, node.extension);
             let midpoint = geometry.line_midpoint();
-            if let Some(screen_pos) = camera.world_to_viewport(camera_gt, midpoint).ok() {
+            // Project via the same view_proj path as edges so the label
+            // sits on its dimension line. `Camera::world_to_viewport`
+            // returns *window* pixels which differ from the export
+            // viewport pixel space, leading to mis-placed labels.
+            if let Some(label_px) =
+                project_point_to_pixels(midpoint, &view_proj, vp_width, vp_height)
+            {
                 let text = dimension_display_text(node, doc_props);
                 dimension_labels.push(ProjectedDimensionLabel {
-                    x: screen_pos.x / vp_width,
-                    y: screen_pos.y / vp_height,
+                    x: label_px.x,
+                    y: label_px.y,
                     text,
                     font_size_pt: 10.0,
                 });
@@ -257,27 +272,172 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
         }
     }
 
-    let viewport = DrawingViewport {
-        width: vp_width,
-        height: vp_height,
-        world_width,
-        world_height,
-        scale: 1.0,
-    };
-
     // Drafting plugin dimensions: render each annotation into paper-space
     // primitives using the viewport's pixels-per-world scale, then flip y so
     // primitives are in the same y-down pixel frame as the other edges.
-    let drafting_primitives =
+    let (drafting_primitives, paper_mm_to_canvas) =
         extract_drafting_primitives(world, &view_proj, vp_width, vp_height);
 
-    Some(DrawingGeometry {
+    // Fit the export canvas to the actual content. The camera-derived
+    // viewport gives us a paper *resolution*, but dimension lines and
+    // their offsets typically extend outside the camera frustum. If we
+    // ship those raw pixel coords with `viewport.{width,height}`, every
+    // downstream writer (SVG viewBox, PDF MediaBox, DXF $EXTMAX) clips
+    // the annotations off the page.
+    //
+    // Translate everything so the bounding box of all emitted content
+    // starts at `MARGIN` and grow `viewport.{width,height}` to match.
+    // World scale stays proportional so hatch density is unchanged.
+    let mut geometry = DrawingGeometry {
         edges,
         dimension_labels,
         section_fills,
         drafting_primitives,
-        viewport,
-    })
+        viewport: DrawingViewport {
+            width: vp_width,
+            height: vp_height,
+            world_width,
+            world_height,
+            scale: 1.0,
+            paper_mm_to_canvas,
+        },
+    };
+    fit_canvas_to_content(&mut geometry);
+    Some(geometry)
+}
+
+/// Margin (in viewport pixels) added around the content bbox when the
+/// canvas is auto-fit. Roughly 1cm at 96 DPI.
+const CONTENT_MARGIN_PX: f32 = 40.0;
+
+/// Translate every projected primitive so the bounding box of the
+/// drawing's content sits at `(CONTENT_MARGIN_PX, CONTENT_MARGIN_PX)`,
+/// then resize the viewport to encompass it (plus the margin on the
+/// opposite side). The world scale (`world_width` / `world_height`) is
+/// scaled by the same ratio as the viewport so pixels-per-world stays
+/// constant — important for hatch line density.
+fn fit_canvas_to_content(geometry: &mut DrawingGeometry) {
+    let Some((min, max)) = content_bbox(geometry) else {
+        return;
+    };
+
+    let dx = CONTENT_MARGIN_PX - min.x;
+    let dy = CONTENT_MARGIN_PX - min.y;
+    let new_w = (max.x - min.x) + CONTENT_MARGIN_PX * 2.0;
+    let new_h = (max.y - min.y) + CONTENT_MARGIN_PX * 2.0;
+
+    if dx.abs() < 0.5
+        && dy.abs() < 0.5
+        && (new_w - geometry.viewport.width).abs() < 0.5
+        && (new_h - geometry.viewport.height).abs() < 0.5
+    {
+        return;
+    }
+
+    for edge in &mut geometry.edges {
+        edge.x1 += dx;
+        edge.y1 += dy;
+        edge.x2 += dx;
+        edge.y2 += dy;
+    }
+    for fill in &mut geometry.section_fills {
+        for pt in &mut fill.polygon {
+            pt[0] += dx;
+            pt[1] += dy;
+        }
+    }
+    for label in &mut geometry.dimension_labels {
+        label.x += dx;
+        label.y += dy;
+    }
+    let translate = bevy::math::Vec2::new(dx, dy);
+    for dim in &mut geometry.drafting_primitives {
+        for prim in dim.iter_mut() {
+            translate_primitive_in_place(prim, translate);
+        }
+    }
+
+    // Preserve pixels-per-world so hatch density is consistent.
+    let old_w = geometry.viewport.width.max(1.0);
+    let old_h = geometry.viewport.height.max(1.0);
+    let new_world_w = geometry.viewport.world_width * (new_w / old_w);
+    let new_world_h = geometry.viewport.world_height * (new_h / old_h);
+    geometry.viewport.width = new_w;
+    geometry.viewport.height = new_h;
+    geometry.viewport.world_width = new_world_w;
+    geometry.viewport.world_height = new_world_h;
+}
+
+fn content_bbox(
+    geometry: &DrawingGeometry,
+) -> Option<(bevy::math::Vec2, bevy::math::Vec2)> {
+    let mut min = bevy::math::Vec2::splat(f32::INFINITY);
+    let mut max = bevy::math::Vec2::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    let mut update = |x: f32, y: f32| {
+        if x.is_finite() && y.is_finite() {
+            min.x = min.x.min(x);
+            min.y = min.y.min(y);
+            max.x = max.x.max(x);
+            max.y = max.y.max(y);
+        }
+    };
+    for edge in &geometry.edges {
+        update(edge.x1, edge.y1);
+        update(edge.x2, edge.y2);
+        any = true;
+    }
+    for fill in &geometry.section_fills {
+        for pt in &fill.polygon {
+            update(pt[0], pt[1]);
+            any = true;
+        }
+    }
+    for label in &geometry.dimension_labels {
+        update(label.x, label.y);
+        any = true;
+    }
+    for dim in &geometry.drafting_primitives {
+        for prim in dim {
+            for p in primitive_extents(prim) {
+                update(p.x, p.y);
+                any = true;
+            }
+        }
+    }
+    if any {
+        Some((min, max))
+    } else {
+        None
+    }
+}
+
+fn primitive_extents(prim: &DimPrimitive) -> Vec<bevy::math::Vec2> {
+    match prim {
+        DimPrimitive::LineSegment { a, b, .. } => vec![*a, *b],
+        DimPrimitive::Tick { pos, .. } | DimPrimitive::Dot { pos, .. } => vec![*pos],
+        DimPrimitive::Arrow { tip, tail, .. } => vec![*tip, *tail],
+        DimPrimitive::Text { anchor, .. } => vec![*anchor],
+    }
+}
+
+fn translate_primitive_in_place(prim: &mut DimPrimitive, t: bevy::math::Vec2) {
+    match prim {
+        DimPrimitive::LineSegment { a, b, .. } => {
+            *a += t;
+            *b += t;
+        }
+        DimPrimitive::Tick { pos, .. } | DimPrimitive::Dot { pos, .. } => {
+            *pos += t;
+        }
+        DimPrimitive::Arrow { tip, tail, .. } => {
+            *tip += t;
+            *tail += t;
+        }
+        DimPrimitive::Text { anchor, .. } => {
+            *anchor += t;
+        }
+    }
 }
 
 /// Extract drafting plugin dimensions and project them into viewport-pixel
@@ -287,30 +447,37 @@ fn extract_drafting_primitives(
     view_proj: &Mat4,
     vp_width: f32,
     vp_height: f32,
-) -> Vec<Vec<DimPrimitive>> {
+) -> (Vec<Vec<DimPrimitive>>, f32) {
+    // Viewport-pixel canvas unit per paper millimetre. Every exporter
+    // will use this to size edge strokes and hatch strokes, so the
+    // section-cut > object > dimension weight hierarchy holds up.
+    // Start with a dimensionless fallback; override below once we've
+    // seen the real projection scale for the first dim.
+    let mut paper_mm_to_canvas = paper_mm_to_canvas_fallback(vp_width);
+
     let Some(registry) = world.get_resource::<DimensionStyleRegistry>() else {
-        return Vec::new();
+        return (Vec::new(), paper_mm_to_canvas);
     };
     let visibility = world
         .get_resource::<DraftingVisibility>()
         .cloned()
         .unwrap_or_default();
     if !visibility.show_all {
-        return Vec::new();
+        return (Vec::new(), paper_mm_to_canvas);
     }
     let Some(mut q) = world.try_query::<&DimensionAnnotationNode>() else {
-        return Vec::new();
+        return (Vec::new(), paper_mm_to_canvas);
     };
     let mut out = Vec::new();
+    let mut learned_scale = false;
     for node in q.iter(world) {
         if !node.visible
             || !visibility.is_visible(&node.style_name, node.kind.tag())
         {
             continue;
         }
-        // Project the dimension's two key endpoints through the camera to get
-        // a local world_to_paper scale near the annotation. Use distance
-        // between projected a,b vs world distance between a,b.
+        // Project the dimension's two key endpoints to learn how far
+        // one world metre stretches on the current canvas.
         let a_px = project_point_to_pixels(node.a, view_proj, vp_width, vp_height);
         let b_px = project_point_to_pixels(node.b, view_proj, vp_width, vp_height);
         let (Some(a_px), Some(b_px)) = (a_px, b_px) else {
@@ -318,31 +485,120 @@ fn extract_drafting_primitives(
         };
         let world_len = (node.a - node.b).length().max(1e-6);
         let pixel_len = (a_px - b_px).length().max(1e-6);
-        let scale = pixel_len / world_len;
+        let canvas_px_per_world_m = pixel_len / world_len;
+        // At arch scale 1:50, 1m world = 20mm paper. So 1mm paper =
+        // `canvas_px_per_world_m / 20` canvas units.
+        let px_per_paper_mm = (canvas_px_per_world_m / PAPER_MM_PER_WORLD_M).max(1.0);
+        if !learned_scale {
+            paper_mm_to_canvas = px_per_paper_mm;
+            learned_scale = true;
+        }
 
-        let primitives = drafting::render_annotation(node, registry, scale);
+        // Render the annotation in pure paper-millimetre space: positions
+        // and mm-sized attributes (stroke, tick length, text height,
+        // extension gap, overrun) all share the same unit. Uniform scale
+        // then faithfully converts them into canvas pixels.
+        let primitives = drafting::render_annotation(node, registry, PAPER_MM_PER_WORLD_M);
+        let primitives: Vec<_> = primitives
+            .into_iter()
+            .map(|p| scale_primitive_uniform(p, px_per_paper_mm))
+            .collect();
 
-        // The renderer assumes world-origin inputs and produces primitives
-        // around world * scale = feature position in pixel-space but from
-        // world origin. Our viewport is y-down with an offset. We need to
-        // translate the primitives so the feature ends up at `a_px`/`b_px`.
-        //
-        // The renderer takes inputs in WORLD units and scales them internally
-        // by `world_to_paper`. A feature at world (wx, wy) maps to paper
-        // (wx*scale, wy*scale). But the viewport's pixel origin is different:
-        // we need an additional translation `a_px - a*scale` (which equals
-        // any other feature point by linearity).
-        let translate = a_px - bevy::math::Vec2::new(node.a.x * scale, node.a.y * scale);
-
-        // Additionally, the renderer works in +y-up paper space; viewport is
-        // +y-down. Flip y component of the translated primitives.
+        // After uniform scale, primitive positions are in canvas units
+        // relative to the world origin (node.a.xy in world metres →
+        // node.a.xy * canvas_px_per_world_m in canvas units). Translate
+        // so `node.a` lands on `a_px` — with a +y-up → +y-down flip:
+        //   viewport = (paper.x + Tx, -paper.y + Ty)
+        //   Tx = a_px.x - node.a.x * canvas_px_per_world_m
+        //   Ty = a_px.y + node.a.y * canvas_px_per_world_m
+        let translate = bevy::math::Vec2::new(
+            a_px.x - node.a.x * canvas_px_per_world_m,
+            a_px.y + node.a.y * canvas_px_per_world_m,
+        );
         let translated = primitives
             .into_iter()
-            .map(|prim| transform_prim(prim, translate, vp_height))
+            .map(|prim| transform_prim(prim, translate))
             .collect();
         out.push(translated);
     }
-    out
+    (out, paper_mm_to_canvas)
+}
+
+/// Best-effort default when the scene has no rich dimensions yet. Assumes
+/// the canvas width is meant to be a ~200-unit-wide 1:50 print of the
+/// model; edges drawn at typical arch mm-weights will then fall in
+/// roughly sensible absolute sizes without bespoke tuning.
+fn paper_mm_to_canvas_fallback(vp_width: f32) -> f32 {
+    (vp_width / 200.0).max(1.0)
+}
+
+/// Architectural paper scale denominator: 1:50. One world metre becomes
+/// `1000 / 50 = 20` paper millimetres on the drawing. This is what the
+/// rich drafting renderer is handed as `world_to_paper`, so that every
+/// primitive — positions *and* millimetre sizes (ticks, text, stroke,
+/// extension gaps, dimension-line overruns) — lives in the same paper-mm
+/// coordinate system from the renderer's point of view.
+const PAPER_MM_PER_WORLD_M: f32 = 20.0;
+
+/// Multiply every spatial attribute of a primitive — position *and* size —
+/// by a single scalar. Used to rescale the renderer's paper-mm output into
+/// the canvas's viewport-pixel units so dimension line thickness, text
+/// height, tick length, and extension-line gaps all share the same
+/// per-millimetre factor (and therefore preserve their mutual
+/// proportions).
+fn scale_primitive_uniform(prim: DimPrimitive, factor: f32) -> DimPrimitive {
+    match prim {
+        DimPrimitive::LineSegment { a, b, stroke_mm } => DimPrimitive::LineSegment {
+            a: a * factor,
+            b: b * factor,
+            stroke_mm: stroke_mm * factor,
+        },
+        DimPrimitive::Tick {
+            pos,
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        } => DimPrimitive::Tick {
+            pos: pos * factor,
+            rotation_rad,
+            length_mm: length_mm * factor,
+            stroke_mm: stroke_mm * factor,
+        },
+        DimPrimitive::Arrow {
+            tip,
+            tail,
+            width_mm,
+            filled,
+            stroke_mm,
+        } => DimPrimitive::Arrow {
+            tip: tip * factor,
+            tail: tail * factor,
+            width_mm: width_mm * factor,
+            filled,
+            stroke_mm: stroke_mm * factor,
+        },
+        DimPrimitive::Dot { pos, radius_mm } => DimPrimitive::Dot {
+            pos: pos * factor,
+            radius_mm: radius_mm * factor,
+        },
+        DimPrimitive::Text {
+            anchor,
+            content,
+            height_mm,
+            rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        } => DimPrimitive::Text {
+            anchor: anchor * factor,
+            content,
+            height_mm: height_mm * factor,
+            rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        },
+    }
 }
 
 fn project_point_to_pixels(
@@ -362,19 +618,13 @@ fn project_point_to_pixels(
     ))
 }
 
-/// Translate a primitive's geometry into viewport pixel space with a y-flip
-/// relative to `vp_height`. Primitive input is paper space (+y up); viewport
-/// uses +y down.
-fn transform_prim(
-    prim: DimPrimitive,
-    translate: bevy::math::Vec2,
-    vp_height: f32,
-) -> DimPrimitive {
+/// Map a paper-space primitive (+y up) into viewport pixel space (+y down)
+/// via `viewport = (paper.x + Tx, -paper.y + Ty)`. The caller computes
+/// `translate = (Tx, Ty)` so that the primitive's anchor lands on the
+/// projected anchor pixel — see `extract_drafting_primitives`.
+fn transform_prim(prim: DimPrimitive, translate: bevy::math::Vec2) -> DimPrimitive {
     let map_point = |p: bevy::math::Vec2| {
-        // Apply translate first (still +y up paper coords), then flip y so the
-        // result is in viewport's +y-down pixel frame.
-        let q = p + translate;
-        bevy::math::Vec2::new(q.x, vp_height - q.y)
+        bevy::math::Vec2::new(p.x + translate.x, -p.y + translate.y)
     };
     match prim {
         DimPrimitive::LineSegment { a, b, stroke_mm } => DimPrimitive::LineSegment {
@@ -446,6 +696,7 @@ pub fn drawing_to_svg(drawing: &DrawingGeometry) -> Vec<u8> {
     .unwrap();
     writeln!(out, r#"  <rect width="100%" height="100%" fill="white"/>"#).unwrap();
 
+    let mm_to_canvas = drawing.viewport.paper_mm_to_canvas.max(0.5);
     // Section fills (rendered before edges so edges draw on top)
     let px_per_world = (w / drawing.viewport.world_width).max(0.5);
     for (i, fill) in drawing.section_fills.iter().enumerate() {
@@ -464,16 +715,14 @@ pub fn drawing_to_svg(drawing: &DrawingGeometry) -> Vec<u8> {
         writeln!(out, r#"    </clipPath>"#).unwrap();
         writeln!(out, r#"  </defs>"#).unwrap();
 
-        let [r, g, b, a] = fill.fill_color;
-        let fill_rgba = format!(
-            "rgba({},{},{},{:.2})",
-            (r * 255.0) as u8,
-            (g * 255.0) as u8,
-            (b * 255.0) as u8,
-            a
-        );
+        // Architectural drafting convention: cut surfaces use SOLID BLACK
+        // poché or pure-black hatching against the white paper. No tinted
+        // greys or rgba backgrounds — those read as 3D shading and
+        // contradict the line-drawing aesthetic. The per-material
+        // `fill_color` is ignored for paper output; only the *pattern*
+        // matters (solid vs. hatch type).
 
-        // Solid fill background
+        // Solid fill background — solid black poché.
         if matches!(fill.pattern, HatchPattern::SolidFill) {
             write!(out, r#"  <polygon points=""#).unwrap();
             for (j, pt) in fill.polygon.iter().enumerate() {
@@ -482,32 +731,19 @@ pub fn drawing_to_svg(drawing: &DrawingGeometry) -> Vec<u8> {
                 }
                 write!(out, "{:.2},{:.2}", pt[0], pt[1]).unwrap();
             }
-            writeln!(out, r#"" fill="{fill_rgba}" stroke="none"/>"#).unwrap();
+            writeln!(out, r#"" fill="black" stroke="none"/>"#).unwrap();
         } else if !matches!(fill.pattern, HatchPattern::NoFill) {
-            // Light tinted background
-            write!(out, r#"  <polygon points=""#).unwrap();
-            for (j, pt) in fill.polygon.iter().enumerate() {
-                if j > 0 {
-                    write!(out, " ").unwrap();
-                }
-                write!(out, "{:.2},{:.2}", pt[0], pt[1]).unwrap();
-            }
-            writeln!(
-                out,
-                r#"" fill="rgba({},{},{},0.08)" stroke="none"/>"#,
-                (r * 255.0) as u8,
-                (g * 255.0) as u8,
-                (b * 255.0) as u8
-            )
-            .unwrap();
-
-            // Hatch lines clipped to polygon
+            // Hatch lines clipped to polygon — solid black, no background
+            // fill. The unfilled polygon stays paper-white between hatch
+            // lines, which is the standard arch-drafting look.
             let hatch_lines = generate_hatch_lines(&fill.polygon, fill.pattern, px_per_world);
             if !hatch_lines.is_empty() {
-                let hatch_weight = 0.18 * px_per_world;
+                // Hatch lines are the thinnest stroke on the drawing — the
+                // lightest classic arch weight, same as a dimension line.
+                let hatch_weight = 0.18 * mm_to_canvas;
                 writeln!(
                     out,
-                    r#"  <g class="section-hatch-{i}" clip-path="url(#{clip_id})" stroke="{fill_rgba}" stroke-width="{hatch_weight:.2}" fill="none">"#
+                    r#"  <g class="section-hatch-{i}" clip-path="url(#{clip_id})" stroke="black" stroke-width="{hatch_weight:.2}" fill="none">"#
                 )
                 .unwrap();
                 write!(out, r#"    <path d=""#).unwrap();
@@ -535,7 +771,11 @@ pub fn drawing_to_svg(drawing: &DrawingGeometry) -> Vec<u8> {
     ];
 
     for (edge_type, class_name) in edge_groups {
-        let weight_px = edge_type.default_weight_mm() * (w / drawing.viewport.world_width).max(0.5);
+        // All edge strokes, section-cut hatches, and rich dimensions share
+        // the same `paper_mm_to_canvas` conversion, so the weight
+        // hierarchy (section-cut > object > dimension) survives the
+        // export with its classical arch proportions intact.
+        let weight_px = edge_type.default_weight_mm() * mm_to_canvas;
         let type_edges: Vec<_> = drawing
             .edges
             .iter()
@@ -563,20 +803,21 @@ pub fn drawing_to_svg(drawing: &DrawingGeometry) -> Vec<u8> {
         writeln!(out, "  </g>").unwrap();
     }
 
-    // Dimension labels
+    // Dimension labels — coordinates are absolute viewport pixels.
     if !drawing.dimension_labels.is_empty() {
+        let _ = w; // silence unused-binding warning if introduced later
         writeln!(
             out,
             r#"  <g class="dimension-labels" font-family="Helvetica, Arial, sans-serif" text-anchor="middle">"#
         )
         .unwrap();
         for label in &drawing.dimension_labels {
-            let x = label.x * w;
-            let y = label.y * h;
             let fs = label.font_size_pt;
             writeln!(
                 out,
-                r#"    <text x="{x:.1}" y="{y:.1}" font-size="{fs}" fill="black">{}</text>"#,
+                r#"    <text x="{:.1}" y="{:.1}" font-size="{fs}" fill="black">{}</text>"#,
+                label.x,
+                label.y,
                 svg_escape(&label.text)
             )
             .unwrap();
@@ -803,6 +1044,9 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
     writeln!(content, "1 1 1 rg").unwrap();
     writeln!(content, "0 0 {w} {h} re f").unwrap();
 
+    // PDF user-unit page is sized in the same canvas units as SVG, so
+    // `paper_mm_to_canvas` IS the mm-to-PDF-points factor here.
+    let mm_to_pt = drawing.viewport.paper_mm_to_canvas.max(0.5);
     // Section fills (rendered before edges so edges draw on top)
     let pdf_px_per_world = (w / drawing.viewport.world_width).max(0.5);
     for fill in &drawing.section_fills {
@@ -810,9 +1054,9 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
             continue;
         }
 
-        let [r, g, b, _a] = fill.fill_color;
-
-        // Build polygon clip path
+        // Architectural drafting convention: solid black poché OR pure
+        // black hatching. The per-material `fill_color` is ignored on
+        // paper output (would read as 3D shading).
         if fill.polygon.len() >= 3 {
             // Save graphics state
             writeln!(content, "q").unwrap();
@@ -826,8 +1070,8 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
             writeln!(content, "h W n").unwrap(); // close, clip, no-op paint
 
             if matches!(fill.pattern, HatchPattern::SolidFill) {
-                // Solid fill
-                writeln!(content, "{r:.3} {g:.3} {b:.3} rg").unwrap();
+                // Solid black poché
+                writeln!(content, "0 0 0 rg").unwrap();
                 let first = &fill.polygon[0];
                 writeln!(content, "{:.2} {:.2} m", first[0], h - first[1]).unwrap();
                 for pt in &fill.polygon[1..] {
@@ -835,12 +1079,12 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
                 }
                 writeln!(content, "h f").unwrap();
             } else {
-                // Hatch lines within clip
+                // Black hatch lines on paper-white background
                 let hatch_lines =
                     generate_hatch_lines(&fill.polygon, fill.pattern, pdf_px_per_world);
                 if !hatch_lines.is_empty() {
-                    writeln!(content, "{r:.3} {g:.3} {b:.3} RG").unwrap();
-                    let hatch_w = 0.18 * (72.0 / 25.4); // 0.18mm in points
+                    writeln!(content, "0 0 0 RG").unwrap();
+                    let hatch_w = 0.18 * mm_to_pt;
                     writeln!(content, "{hatch_w:.3} w").unwrap();
                     for line in &hatch_lines {
                         writeln!(
@@ -882,8 +1126,7 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
         if type_edges.is_empty() {
             continue;
         }
-        // Convert mm to points: mm * (72pt / 25.4mm)
-        let weight_pt = edge_type.default_weight_mm() * (72.0 / 25.4);
+        let weight_pt = edge_type.default_weight_mm() * mm_to_pt;
         writeln!(content, "{weight_pt:.3} w").unwrap();
         for edge in &type_edges {
             // PDF coordinates: origin at bottom-left, Y up
@@ -898,16 +1141,18 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
         }
     }
 
-    // Dimension labels as text
+    // Dimension labels as text. Coordinates are absolute viewport pixels.
     if !drawing.dimension_labels.is_empty() {
         writeln!(content, "BT").unwrap();
         writeln!(content, "/F1 10 Tf").unwrap();
         writeln!(content, "0 0 0 rg").unwrap();
+        // PDF Td is *relative*; emit an absolute matrix per label so each
+        // is positioned independently regardless of order.
         for label in &drawing.dimension_labels {
-            let x = label.x * w;
-            let y = h - (label.y * h); // flip Y for PDF
+            let x = label.x;
+            let y = h - label.y; // flip Y for PDF
             let escaped = pdf_escape_text(&label.text);
-            writeln!(content, "{x:.1} {y:.1} Td ({escaped}) Tj").unwrap();
+            writeln!(content, "1 0 0 1 {x:.1} {y:.1} Tm ({escaped}) Tj").unwrap();
         }
         writeln!(content, "ET").unwrap();
     }
@@ -999,7 +1244,10 @@ fn write_pdf_drafting_primitive(
 ) {
     match prim {
         DimPrimitive::LineSegment { a, b, stroke_mm } => {
-            let w_pt = stroke_mm * (72.0 / 25.4);
+            // Primitive arrives already in canvas units (which equal PDF
+            // points in this writer) after `scale_primitive_uniform` in
+            // `extract_drafting_primitives`. No further unit conversion.
+            let w_pt = *stroke_mm;
             writeln!(content, "{w_pt:.3} w").unwrap();
             writeln!(
                 content,
@@ -1020,7 +1268,10 @@ fn write_pdf_drafting_primitive(
             let half = length_mm * 0.5;
             let c = rotation_rad.cos();
             let s = rotation_rad.sin();
-            let w_pt = stroke_mm * (72.0 / 25.4);
+            // Primitive arrives already in canvas units (which equal PDF
+            // points in this writer) after `scale_primitive_uniform` in
+            // `extract_drafting_primitives`. No further unit conversion.
+            let w_pt = *stroke_mm;
             writeln!(content, "{w_pt:.3} w").unwrap();
             let x1 = pos.x - half * c;
             let y1 = pos.y - half * s;
@@ -1086,7 +1337,8 @@ fn write_pdf_drafting_primitive(
             font_family: _,
             color_hex: _,
         } => {
-            let size_pt = height_mm * (72.0 / 25.4);
+            // Already in canvas units (= PDF points on this page).
+            let size_pt = *height_mm;
             let cos_r = rotation_rad.cos();
             let sin_r = rotation_rad.sin();
             let x = anchor.x;
@@ -1114,21 +1366,21 @@ fn pdf_escape_text(s: &str) -> String {
 
 // ─── Internal geometry helpers ───────────────────────────────────────────────
 
-struct MeshSubject {
-    entity: Entity,
-    mesh_handle: Handle<Mesh>,
-    mesh_transform: GlobalTransform,
+pub(crate) struct MeshSubject {
+    pub(crate) entity: Entity,
+    pub(crate) mesh_handle: Handle<Mesh>,
+    pub(crate) mesh_transform: GlobalTransform,
 }
 
 #[derive(Clone, Copy)]
-struct SceneTriangle {
-    entity: Entity,
-    a: Vec3,
-    b: Vec3,
-    c: Vec3,
+pub(crate) struct SceneTriangle {
+    pub(crate) entity: Entity,
+    pub(crate) a: Vec3,
+    pub(crate) b: Vec3,
+    pub(crate) c: Vec3,
 }
 
-fn drawing_overlay_excluded(type_name: &str) -> bool {
+pub(crate) fn drawing_overlay_excluded(type_name: &str) -> bool {
     matches!(
         type_name,
         "dimension_line" | "guide_line" | "scene_light" | "clipping_plane" | "group"
@@ -1153,7 +1405,7 @@ fn viewport_dimensions(orbit: &OrbitCamera, projection: &Projection) -> (f32, f3
     }
 }
 
-fn collect_scene_triangles(
+pub(crate) fn collect_scene_triangles(
     subjects: &[MeshSubject],
     mesh_assets: &Assets<Mesh>,
 ) -> Vec<SceneTriangle> {
@@ -1190,7 +1442,7 @@ fn collect_scene_triangles(
     triangles
 }
 
-fn collect_classified_visible_edges(
+pub(crate) fn collect_classified_visible_edges(
     mesh: &Mesh,
     mesh_transform: &GlobalTransform,
     entity: Entity,
@@ -1655,6 +1907,7 @@ mod tests {
                 world_width: 10.0,
                 world_height: 10.0,
                 scale: 1.0,
+                paper_mm_to_canvas: 1.0,
             },
         };
         let svg = String::from_utf8(drawing_to_svg(&drawing)).unwrap();
@@ -1686,6 +1939,7 @@ mod tests {
                 world_width: 10.0,
                 world_height: 14.14,
                 scale: 1.0,
+                paper_mm_to_canvas: 1.0,
             },
         };
         let pdf = drawing_to_pdf(&drawing);

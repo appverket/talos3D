@@ -166,7 +166,7 @@ impl DimensionStyle {
             stack_spacing_mm: 9.5, // 3/8"
             text_placement: TextPlacement::Above { gap_mm: 1.0 },
             text_height_mm: 3.2, // 1/8"
-            text_font: "Architects Daughter, 'CountryBlueprint', Arial, sans-serif".to_string(),
+            text_font: "'Futura Light', 'Futura', 'Futura PT Light', Helvetica, Arial, sans-serif".to_string(),
             text_color_hex: "000000".to_string(),
             number_format: NumberFormat::FeetInchesFractional { denominator: 2 },
             prefix: None,
@@ -190,7 +190,7 @@ impl DimensionStyle {
             stack_spacing_mm: 10.0,
             text_placement: TextPlacement::Above { gap_mm: 1.0 },
             text_height_mm: 2.5,
-            text_font: "Architects Daughter, 'CountryBlueprint', Arial, sans-serif".to_string(),
+            text_font: "'Futura Light', 'Futura', 'Futura PT Light', Helvetica, Arial, sans-serif".to_string(),
             text_color_hex: "000000".to_string(),
             number_format: NumberFormat::MetricArchitectural {
                 thousands_separator: false,
