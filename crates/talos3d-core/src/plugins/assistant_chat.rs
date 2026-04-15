@@ -51,14 +51,6 @@ pub enum RightSidebarTab {
     Assistant,
 }
 
-impl RightSidebarTab {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Assistant => "Assistant",
-        }
-    }
-}
-
 #[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RightSidebarState {
     pub visible: bool,

@@ -13,14 +13,13 @@ use bevy::prelude::*;
 use serde_json::Value;
 
 use crate::{
-    capability_registry::{
-        CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity, CapabilityRegistryAppExt,
-    },
+    capability_registry::CapabilityRegistryAppExt,
     plugins::{
         command_registry::{
             CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
         },
         document_properties::DocumentProperties,
+        drawing_export::DRAFTING_CAPABILITY_ID as DRAWING_EXPORT_CAPABILITY_ID,
         identity::ElementId,
     },
 };
@@ -33,9 +32,12 @@ use super::{
     visibility::DraftingVisibility,
 };
 
-/// Capability ID for this plugin. Distinct from the legacy `dimensions`
-/// capability so both can be active simultaneously during migration.
-pub const DRAFTING_CAPABILITY_ID: &str = "drafting";
+/// Capability ID the drafting plugin's commands attach to. Re-exports the
+/// existing id registered by `drawing_export.rs` so dimension authoring and
+/// vector export share the "2D Drafting" workbench. The plugin does NOT
+/// register its own capability descriptor to avoid the double-registration
+/// panic in `CapabilityRegistry`.
+pub const DRAFTING_CAPABILITY_ID: &str = DRAWING_EXPORT_CAPABILITY_ID;
 
 /// Domain_defaults key under which drafting annotations persist. Distinct from
 /// the legacy `dimension_annotations` key used by `dimension_line.rs`.
@@ -54,26 +56,10 @@ impl Plugin for DraftingPlugin {
             .init_resource::<DraftingVisibility>()
             .init_resource::<DraftingAnnotationSyncState>()
             .register_authored_entity_factory(DimensionAnnotationFactory)
-            .register_capability(CapabilityDescriptor {
-                id: DRAFTING_CAPABILITY_ID.to_string(),
-                name: "Drafting".to_string(),
-                version: 1,
-                api_version: crate::capability_registry::CAPABILITY_API_VERSION,
-                description: Some(
-                    "Professional architectural and engineering dimensioning \
-                     with style presets (arch tick, mech arrow), configurable \
-                     number formatting (feet-inches, decimal mm, ASME inch), \
-                     and export to SVG, PDF, and DXF."
-                        .to_string(),
-                ),
-                dependencies: vec![],
-                optional_dependencies: vec![],
-                conflicts: vec![],
-                maturity: CapabilityMaturity::Preview,
-                distribution: CapabilityDistribution::Bundled,
-                license: None,
-                repository: None,
-            })
+            // The "drafting" capability descriptor is owned by
+            // drawing_export.rs. This plugin attaches commands to that same
+            // capability rather than registering a duplicate, which would
+            // panic at startup.
             .register_command(
                 CommandDescriptor {
                     id: "drafting.toggle_visibility".to_string(),
@@ -164,10 +150,19 @@ impl Plugin for DraftingPlugin {
                 },
                 |world, _| execute_set_preset(world, "engineering_inch"),
             )
-            .add_systems(Update, sync_drafting_annotations)
-            // Startup migration: seed drafting_annotations from any legacy
-            // dimension_annotations the project might have.
-            .add_systems(Startup, super::migration::migrate_legacy_dimensions);
+            // Run the legacy migration BEFORE the sync system each frame:
+            // if a project has just been loaded carrying legacy
+            // dimension_annotations, this seeds the new key so the sync
+            // system picks it up in the same frame. The migration is
+            // idempotent, and tolerates missing DocumentProperties gracefully.
+            .add_systems(
+                Update,
+                (
+                    super::migration::migrate_legacy_dimensions,
+                    sync_drafting_annotations,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -193,6 +188,11 @@ fn execute_set_preset(world: &mut World, preset: &str) -> Result<CommandResult, 
 /// and `DocumentProperties.domain_defaults[DRAFTING_ANNOTATIONS_KEY]`.
 /// Mirrors the pattern in `dimension_line.rs::sync_dimension_annotations`.
 fn sync_drafting_annotations(world: &mut World) {
+    // DocumentProperties is owned by the persistence/document_state plugins;
+    // during early boot before those init, skip quietly.
+    if !world.contains_resource::<DocumentProperties>() {
+        return;
+    }
     let saved = {
         let doc_props = world.resource::<DocumentProperties>();
         doc_props
