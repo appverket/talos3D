@@ -119,7 +119,7 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
 
     let mut camera_query =
         world.try_query::<(&OrbitCamera, &GlobalTransform, &Projection, &Camera)>()?;
-    let (orbit, camera_gt, projection, camera) = camera_query.iter(world).next()?;
+    let (orbit, camera_gt, projection, _camera) = camera_query.iter(world).next()?;
 
     let orthographic = matches!(orbit.projection_mode, CameraProjectionMode::Isometric);
     let camera_position = camera_gt.translation();

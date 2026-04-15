@@ -18,7 +18,6 @@ use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     document_state::DocumentState,
     ui::StatusBarData,
-    vector_drawing,
 };
 
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
@@ -329,9 +328,24 @@ pub(crate) fn export_drawing_now_with_format(
 pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
     let path = normalize_export_path(path);
     let format = viewport_export_format_from_path(&path)?;
+    // Vector formats go through the PP69 paper-mm DraftingSheet
+    // pipeline so that output is unit-consistent and free of viewport
+    // chrome. PNG also goes through the sheet when an orthographic
+    // camera is active, falling back to the legacy viewport-screenshot
+    // raster path when drafting is not well-defined (e.g. the user is
+    // in a perspective 3D view and just wants a snapshot).
+    let active_ortho_view = crate::plugins::drafting_sheet::sheet_view_from_active_camera(
+        world,
+        crate::plugins::drafting_sheet::DEFAULT_SCALE_DENOMINATOR,
+        crate::plugins::drafting_sheet::DEFAULT_MARGIN_MM,
+    )
+    .is_some();
     match format {
         ViewportExportFormat::Svg | ViewportExportFormat::Pdf | ViewportExportFormat::Dxf => {
-            export_vector_drawing(world, &path, format)?;
+            export_sheet_drawing(world, &path)?;
+        }
+        ViewportExportFormat::Raster(image::ImageFormat::Png) if active_ortho_view => {
+            export_sheet_drawing(world, &path)?;
         }
         ViewportExportFormat::Raster(_) => {
             queue_viewport_export(world, &path)?;
@@ -340,26 +354,9 @@ pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBu
     Ok(path)
 }
 
-fn export_vector_drawing(
-    world: &World,
-    path: &Path,
-    format: ViewportExportFormat,
-) -> Result<(), String> {
-    let drawing = vector_drawing::extract_drawing_geometry(world)
-        .ok_or_else(|| "Cannot extract drawing geometry — is a camera active?".to_string())?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-
-    let bytes = match format {
-        ViewportExportFormat::Svg => vector_drawing::drawing_to_svg(&drawing),
-        ViewportExportFormat::Pdf => vector_drawing::drawing_to_pdf(&drawing),
-        ViewportExportFormat::Dxf => vector_drawing::drawing_to_dxf(&drawing).into_bytes(),
-        ViewportExportFormat::Raster(_) => unreachable!(),
-    };
-
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+fn export_sheet_drawing(world: &World, path: &Path) -> Result<(), String> {
+    crate::plugins::drafting_sheet::export_sheet_to_path(world, path.to_path_buf(), None)
+        .map(|_| ())
 }
 
 pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<(), String> {

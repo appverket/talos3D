@@ -18,7 +18,7 @@
 
 use image::{Rgb, RgbImage};
 
-use super::sheet::{DraftingSheet, SheetBounds, SheetLine, SheetStroke};
+use super::sheet::{DraftingSheet, SheetBounds, SheetStroke};
 use bevy::math::Vec2;
 
 /// Render the sheet as an RGB PNG at the given DPI (dots per inch on

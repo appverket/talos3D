@@ -15,7 +15,7 @@
 //!   decide format from the path extension, write. Used by the MCP tool
 //!   `export_drafting_sheet`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bevy::prelude::World;
 
