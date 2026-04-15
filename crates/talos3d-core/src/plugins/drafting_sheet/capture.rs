@@ -365,6 +365,38 @@ fn capture_annotations(
     out
 }
 
+// ─── Paper-mm → world inverse projection ──────────────────────────────────
+
+/// Map a paper-millimetre 2D point on a captured sheet back to a 3D
+/// world point that projects to it. Because the projection is
+/// orthographic, any point along the camera forward axis works; we
+/// return the one that sits on the plane through `view.target` with
+/// normal = camera forward. That means "same depth as what the view is
+/// focused on", which is the right default for sheet-local annotation
+/// authoring.
+///
+/// Returns `None` if the view is degenerate (zero-sized frustum or
+/// zero-vector forward direction).
+pub fn sheet_paper_to_world(view: &SheetView, paper: Vec2) -> Option<Vec3> {
+    let paper_w = view.frustum_width_mm();
+    let paper_h = view.frustum_height_mm();
+    if paper_w <= 0.0 || paper_h <= 0.0 {
+        return None;
+    }
+    // Paper → NDC (same +y-up convention the capture uses).
+    let ndc = Vec2::new(paper.x / paper_w * 2.0 - 1.0, paper.y / paper_h * 2.0 - 1.0);
+
+    let forward = (view.target - view.eye).try_normalize()?;
+    let right = forward.cross(view.up).try_normalize()?;
+    let up = right.cross(forward).try_normalize()?;
+    let half_h = view.ortho_height_m * 0.5;
+    let half_w = half_h * view.aspect;
+
+    // Point on the focal plane (through `view.target`, perpendicular to
+    // `forward`) that projects to `ndc`.
+    Some(view.target + right * (ndc.x * half_w) + up * (ndc.y * half_h))
+}
+
 /// Compute the measured length (in world metres) that a dimension
 /// annotation represents, using its authored kind and 3D endpoints.
 /// This is the number the user expects to see — independent of how we

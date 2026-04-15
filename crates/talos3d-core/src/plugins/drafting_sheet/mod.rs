@@ -27,7 +27,7 @@ pub mod export_svg;
 pub mod preview;
 pub mod sheet;
 
-pub use capture::{capture_sheet, sheet_view_from_active_camera};
+pub use capture::{capture_sheet, sheet_paper_to_world, sheet_view_from_active_camera};
 pub use export_dxf::sheet_to_dxf;
 pub use export_pdf::sheet_to_pdf;
 pub use export_png::sheet_to_png;

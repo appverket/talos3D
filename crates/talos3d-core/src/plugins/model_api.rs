@@ -1293,6 +1293,10 @@ enum ModelApiRequest {
         scale_denominator: Option<f32>,
         response: oneshot::Sender<ApiResult<String>>,
     },
+    PlaceSheetDimension {
+        request: PlaceSheetDimensionRequest,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
     SaveProject {
         path: String,
         response: oneshot::Sender<ApiResult<String>>,
@@ -1804,6 +1808,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_export_drafting_sheet(world, &path, scale_denominator));
+        }
+        ModelApiRequest::PlaceSheetDimension { request, response } => {
+            let _ = response.send(handle_place_sheet_dimension(world, request));
         }
         ModelApiRequest::SaveProject { path, response } => {
             let _ = response.send(handle_save_project(world, &path));
@@ -3268,6 +3275,19 @@ impl ModelApiServer {
         Ok(saved_path)
     }
 
+    async fn request_place_sheet_dimension(
+        &self,
+        request: PlaceSheetDimensionRequest,
+    ) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PlaceSheetDimension { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_save_project(&self, path: String) -> ApiResult<String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -4209,6 +4229,30 @@ struct ExportDraftingSheetRequest {
     pub path: String,
     /// Architectural drawing scale denominator (e.g. 50 for a 1:50 plan).
     /// Defaults to 50 if omitted.
+    #[serde(default)]
+    pub scale_denominator: Option<f32>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlaceSheetDimensionRequest {
+    /// Paper-mm endpoint A in the current sheet's 2D frame.
+    pub a: [f32; 2],
+    /// Paper-mm endpoint B.
+    pub b: [f32; 2],
+    /// Paper-mm offset vector from the midpoint of a..b to the dim line.
+    /// Use e.g. `[0, -15]` for "15 mm below" or `[15, 0]` for "15 mm right".
+    pub offset: [f32; 2],
+    /// Optional dim style name. Defaults to the registry's current default.
+    #[serde(default)]
+    pub style: Option<String>,
+    /// Optional text override. If unset, the dim renders the measured value
+    /// using the style's number format.
+    #[serde(default)]
+    pub text_override: Option<String>,
+    /// Drawing scale denominator used to interpret the paper-mm inputs.
+    /// Defaults to 50 (i.e. 1:50).
     #[serde(default)]
     pub scale_denominator: Option<f32>,
 }
@@ -5583,6 +5627,21 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(serde_json::json!({ "path": path }))
+    }
+
+    #[tool(
+        name = "place_sheet_dimension",
+        description = "Place a linear dimension in paper-millimetre coordinates on the DraftingSheet captured from the current orthographic view. `a`, `b`, and `offset` are 2D paper-mm vectors in the sheet's frame; they are inverse-projected to world-space and stored as a regular drafting_dimension. Refuses perspective cameras. Returns the created element id."
+    )]
+    async fn place_sheet_dimension_tool(
+        &self,
+        Parameters(params): Parameters<PlaceSheetDimensionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_place_sheet_dimension(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
     }
 
     #[tool(
@@ -7985,6 +8044,57 @@ fn handle_export_drafting_sheet(
         scale_denominator,
     )?;
     Ok(path_buf.to_string_lossy().to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_place_sheet_dimension(
+    world: &mut World,
+    request: PlaceSheetDimensionRequest,
+) -> Result<u64, String> {
+    use crate::plugins::drafting_sheet::{
+        sheet_paper_to_world, sheet_view_from_active_camera, DEFAULT_MARGIN_MM,
+        DEFAULT_SCALE_DENOMINATOR,
+    };
+    let scale = request.scale_denominator.unwrap_or(DEFAULT_SCALE_DENOMINATOR);
+    let view = sheet_view_from_active_camera(world, scale, DEFAULT_MARGIN_MM)
+        .ok_or_else(|| {
+            "no active orthographic camera — sheet dims require an ortho view".to_string()
+        })?;
+
+    let a_paper = Vec2::new(request.a[0], request.a[1]);
+    let b_paper = Vec2::new(request.b[0], request.b[1]);
+    let offset_paper = Vec2::new(request.offset[0], request.offset[1]);
+    let midpoint_paper = (a_paper + b_paper) * 0.5;
+
+    let a_world = sheet_paper_to_world(&view, a_paper)
+        .ok_or_else(|| "degenerate sheet view — cannot inverse-project A".to_string())?;
+    let b_world = sheet_paper_to_world(&view, b_paper)
+        .ok_or_else(|| "degenerate sheet view — cannot inverse-project B".to_string())?;
+    let mid_world = sheet_paper_to_world(&view, midpoint_paper)
+        .ok_or_else(|| "degenerate sheet view — cannot inverse-project midpoint".to_string())?;
+    let mid_plus_offset_world = sheet_paper_to_world(&view, midpoint_paper + offset_paper)
+        .ok_or_else(|| "degenerate sheet view — cannot inverse-project offset".to_string())?;
+    let offset_world = mid_plus_offset_world - mid_world;
+
+    let direction = (b_world - a_world).try_normalize().unwrap_or(Vec3::X);
+    let style = request
+        .style
+        .unwrap_or_else(|| "architectural_metric".to_string());
+
+    let mut body = serde_json::json!({
+        "type": "drafting_dimension",
+        "kind": "linear",
+        "direction": [direction.x, direction.y, direction.z],
+        "a": [a_world.x, a_world.y, a_world.z],
+        "b": [b_world.x, b_world.y, b_world.z],
+        "offset": [offset_world.x, offset_world.y, offset_world.z],
+        "style": style,
+    });
+    if let Some(text) = request.text_override {
+        body["text_override"] = serde_json::Value::String(text);
+    }
+
+    handle_create_entity(world, body)
 }
 
 #[cfg(feature = "model-api")]
