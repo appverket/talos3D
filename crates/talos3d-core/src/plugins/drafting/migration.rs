@@ -25,10 +25,19 @@ use super::plugin::DRAFTING_ANNOTATIONS_KEY;
 /// One-shot migration: populate `drafting_annotations` from any legacy
 /// `dimension_annotations` the document might carry. Idempotent: does nothing
 /// if a `drafting_annotations` entry already exists.
+///
+/// `DocumentProperties` is managed by `persistence`/`document_state` plugins
+/// which may init after this one. `Option<ResMut<_>>` lets the system run
+/// gracefully on boot before the resource exists, and again after the project
+/// loads -- at which point the idempotence check still prevents double
+/// migration.
 pub fn migrate_legacy_dimensions(
-    mut props: ResMut<DocumentProperties>,
-    allocator: Res<ElementIdAllocator>,
+    props: Option<ResMut<DocumentProperties>>,
+    allocator: Option<Res<ElementIdAllocator>>,
 ) {
+    let (Some(mut props), Some(allocator)) = (props, allocator) else {
+        return;
+    };
     if props.domain_defaults.contains_key(DRAFTING_ANNOTATIONS_KEY) {
         return;
     }
@@ -140,7 +149,7 @@ mod tests {
                 json!([{"already": "here"}]),
             );
         }
-        app.add_systems(Startup, migrate_legacy_dimensions);
+        app.add_systems(Update, migrate_legacy_dimensions);
         app.update();
         let props = app.world().resource::<DocumentProperties>();
         assert_eq!(
