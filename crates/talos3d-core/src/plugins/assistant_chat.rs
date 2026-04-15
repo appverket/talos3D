@@ -8,11 +8,18 @@ use serde_json::{json, Value};
 
 use crate::plugins::document_properties::DocumentProperties;
 
-pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 320.0;
-pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 280.0;
-pub const ASSISTANT_PANEL_MAX_WIDTH: f32 = 520.0;
+pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 440.0;
+pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 360.0;
+const ASSISTANT_PANEL_ID: &str = "assistant_chat_sidebar";
 const ASSISTANT_TOOL_STEPS: usize = 12;
 const ASSISTANT_MAX_TOKENS: u32 = 1600;
+const ASSISTANT_PANEL_SURFACE: egui::Color32 = egui::Color32::from_rgb(26, 30, 36);
+const ASSISTANT_PANEL_BORDER: egui::Color32 = egui::Color32::from_rgb(66, 76, 90);
+const ASSISTANT_PANEL_CARD: egui::Color32 = egui::Color32::from_rgb(34, 40, 49);
+const ASSISTANT_PANEL_CARD_ALT: egui::Color32 = egui::Color32::from_rgb(30, 35, 43);
+const ASSISTANT_PANEL_MUTED: egui::Color32 = egui::Color32::from_rgb(164, 174, 188);
+const ASSISTANT_PANEL_SAVED: egui::Color32 = egui::Color32::from_rgb(186, 214, 224);
+const ASSISTANT_PANEL_WARNING: egui::Color32 = egui::Color32::from_rgb(255, 196, 132);
 
 const DEFAULT_OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_OPENAI_CHAT_URL: &str = "https://api.openai.com/v1/chat/completions";
@@ -62,9 +69,34 @@ pub struct RightSidebarState {
 impl Default for RightSidebarState {
     fn default() -> Self {
         Self {
-            visible: true,
+            visible: false,
             width: ASSISTANT_PANEL_DEFAULT_WIDTH,
             active_tab: RightSidebarTab::Assistant,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct PersistedRightSidebarState {
+    visible: bool,
+    active_tab: RightSidebarTab,
+}
+
+impl From<&RightSidebarState> for PersistedRightSidebarState {
+    fn from(state: &RightSidebarState) -> Self {
+        Self {
+            visible: state.visible,
+            active_tab: state.active_tab,
+        }
+    }
+}
+
+impl PersistedRightSidebarState {
+    fn into_runtime_state(self) -> RightSidebarState {
+        RightSidebarState {
+            visible: self.visible,
+            width: ASSISTANT_PANEL_DEFAULT_WIDTH,
+            active_tab: self.active_tab,
         }
     }
 }
@@ -181,7 +213,7 @@ impl AssistantPanelTab {
     fn label(self) -> &'static str {
         match self {
             Self::Chat => "Chat",
-            Self::Settings => "Configs",
+            Self::Settings => "Settings",
         }
     }
 }
@@ -276,6 +308,32 @@ pub struct AssistantPreferences {
     pub mcp_url: String,
     pub active_profile_id: String,
     pub profiles: Vec<AssistantConnectionProfile>,
+}
+
+#[derive(Debug, Clone)]
+struct AssistantSettingsEditorState {
+    draft: AssistantPreferences,
+    dirty: bool,
+}
+
+impl AssistantSettingsEditorState {
+    fn new(preferences: &AssistantPreferences) -> Self {
+        Self {
+            draft: preferences.clone(),
+            dirty: false,
+        }
+    }
+
+    fn sync_from_preferences(&mut self, preferences: &AssistantPreferences) {
+        self.draft = preferences.clone();
+        self.draft.normalize();
+        self.dirty = false;
+    }
+
+    fn mark_dirty(&mut self, preferences: &AssistantPreferences) {
+        self.draft.normalize();
+        self.dirty = self.draft != *preferences;
+    }
 }
 
 impl AssistantPreferences {
@@ -477,12 +535,18 @@ fn sync_assistant_preferences(
         {
             if state.preferences != saved_preferences {
                 state.preferences = saved_preferences;
+                state.sync_editor_if_clean();
             }
+        } else if saved.is_none() && last_serialized.is_some() {
+            let preferences = default_assistant_preferences();
+            state.preferences = preferences.clone();
+            state.settings_editor.sync_from_preferences(&preferences);
         }
         *last_serialized = saved.clone();
     }
 
     state.preferences.normalize();
+    state.sync_editor_if_clean();
     let serialized = serialize_assistant_preferences(&state.preferences);
     if doc_props.domain_defaults.get(ASSISTANT_PREFERENCES_KEY) != Some(&serialized) {
         doc_props
@@ -552,6 +616,7 @@ enum AssistantJobEvent {
 #[derive(Resource)]
 pub struct AssistantChatState {
     pub preferences: AssistantPreferences,
+    settings_editor: AssistantSettingsEditorState,
     pub draft: String,
     pub messages: Vec<AssistantChatMessage>,
     pub pending: bool,
@@ -563,8 +628,10 @@ pub struct PendingAssistantJob(Mutex<Option<mpsc::Receiver<AssistantJobEvent>>>)
 
 impl AssistantChatState {
     pub fn from_environment() -> Self {
+        let preferences = default_assistant_preferences();
         Self {
-            preferences: default_assistant_preferences(),
+            settings_editor: AssistantSettingsEditorState::new(&preferences),
+            preferences,
             draft: String::new(),
             messages: Vec::new(),
             pending: false,
@@ -573,15 +640,110 @@ impl AssistantChatState {
     }
 
     fn runtime_config(&self) -> Result<AssistantRuntimeConfig, String> {
-        let profile = self
-            .preferences
-            .active_profile()
-            .cloned()
-            .ok_or_else(|| "Assistant profile list is empty".to_string())?;
-        Ok(AssistantRuntimeConfig {
-            profile,
-            mcp_url: self.preferences.mcp_url.trim().to_string(),
-        })
+        runtime_config_from_preferences(&self.preferences)
+    }
+
+    fn sync_editor_if_clean(&mut self) {
+        if !self.settings_editor.dirty {
+            self.settings_editor
+                .sync_from_preferences(&self.preferences);
+        }
+    }
+
+    fn save_settings_changes(&mut self) {
+        self.settings_editor.draft.normalize();
+        self.preferences = self.settings_editor.draft.clone();
+        self.settings_editor
+            .sync_from_preferences(&self.preferences);
+    }
+
+    fn discard_settings_changes(&mut self) {
+        self.settings_editor
+            .sync_from_preferences(&self.preferences);
+    }
+}
+
+fn runtime_config_from_preferences(
+    preferences: &AssistantPreferences,
+) -> Result<AssistantRuntimeConfig, String> {
+    let profile = preferences
+        .active_profile()
+        .cloned()
+        .ok_or_else(|| "Assistant profile list is empty".to_string())?;
+    Ok(AssistantRuntimeConfig {
+        profile,
+        mcp_url: preferences.mcp_url.trim().to_string(),
+    })
+}
+
+fn validate_assistant_preferences(preferences: &AssistantPreferences) -> Result<(), String> {
+    let config = runtime_config_from_preferences(preferences)?;
+    validate_assistant_config(&config)
+}
+
+fn assistant_field_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .small()
+            .color(ASSISTANT_PANEL_MUTED),
+    );
+}
+
+fn assistant_section_frame(
+    ui: &mut egui::Ui,
+    title: &str,
+    description: &str,
+    fill: egui::Color32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    egui::Frame::group(ui.style())
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, ASSISTANT_PANEL_BORDER))
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(title).strong());
+            if !description.is_empty() {
+                ui.label(
+                    egui::RichText::new(description)
+                        .small()
+                        .color(ASSISTANT_PANEL_MUTED),
+                );
+                ui.add_space(8.0);
+            }
+            add_contents(ui);
+        });
+}
+
+fn assistant_full_width_text_edit(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    hint: &str,
+    password: bool,
+) -> egui::Response {
+    ui.add_sized(
+        [ui.available_width(), 0.0],
+        egui::TextEdit::singleline(value)
+            .hint_text(hint)
+            .password(password),
+    )
+}
+
+fn assistant_footer_status(
+    preferences: &AssistantPreferences,
+    dirty: bool,
+) -> (String, egui::Color32) {
+    match validate_assistant_preferences(preferences) {
+        Ok(()) if dirty => (
+            "Unsaved changes. Save to use this configuration in the assistant.".to_string(),
+            ASSISTANT_PANEL_WARNING,
+        ),
+        Ok(()) => (
+            "Saved to this document. The active profile is ready to use.".to_string(),
+            ASSISTANT_PANEL_SAVED,
+        ),
+        Err(error) if dirty => (format!("Unsaved changes. {error}"), ASSISTANT_PANEL_WARNING),
+        Err(error) => (error, ASSISTANT_PANEL_WARNING),
     }
 }
 
@@ -602,9 +764,7 @@ pub fn draw_assistant_window(
     }
 
     state.preferences.normalize();
-    let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
-    let min_width_points = ASSISTANT_PANEL_MIN_WIDTH / pixels_per_point;
-    let max_width_points = ASSISTANT_PANEL_MAX_WIDTH / pixels_per_point;
+    state.sync_editor_if_clean();
 
     let mut send_now = false;
     let profile_badge = state
@@ -612,16 +772,23 @@ pub fn draw_assistant_window(
         .active_profile()
         .map(AssistantConnectionProfile::badge_label)
         .unwrap_or_else(|| "Assistant".to_string());
-    let panel_response = egui::SidePanel::right("assistant_chat_sidebar")
+    let max_panel_width = ctx.viewport_rect().width() * 0.8;
+    let requested_width = clamp_assistant_panel_width(sidebar_state.width, max_panel_width);
+    egui::SidePanel::right(ASSISTANT_PANEL_ID)
         .resizable(true)
-        .default_width(sidebar_state.width / pixels_per_point)
-        .width_range(min_width_points..=max_width_points)
+        .frame(
+            egui::Frame::new()
+                .fill(ASSISTANT_PANEL_SURFACE)
+                .stroke(egui::Stroke::new(1.0, ASSISTANT_PANEL_BORDER))
+                .inner_margin(egui::Margin::same(8)),
+        )
+        .default_width(requested_width)
+        .min_width(ASSISTANT_PANEL_MIN_WIDTH)
+        .max_width(max_panel_width)
         .show(ctx, |ui| {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
-                ui.heading(sidebar_state.active_tab.label());
-                ui.add_space(6.0);
                 ui.selectable_value(
                     &mut state.preferences.active_panel_tab,
                     AssistantPanelTab::Chat,
@@ -690,8 +857,12 @@ pub fn draw_assistant_window(
                 },
             }
         });
-    sidebar_state.width = (panel_response.response.rect.width() * pixels_per_point)
-        .clamp(ASSISTANT_PANEL_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH);
+    sidebar_state.width = egui::containers::panel::PanelState::load(
+        ctx,
+        egui::Id::new(ASSISTANT_PANEL_ID),
+    )
+    .map(|panel_state| clamp_assistant_panel_width(panel_state.rect.width(), max_panel_width))
+    .unwrap_or(requested_width);
 
     if send_now {
         let trimmed = state.draft.trim().to_string();
@@ -720,7 +891,7 @@ fn draw_assistant_chat_panel(
                             .color(egui::Color32::from_rgb(255, 220, 220))
                             .small(),
                     );
-                    if ui.link("Open Configs").clicked() {
+                    if ui.link("Open Settings").clicked() {
                         state.preferences.active_panel_tab = AssistantPanelTab::Settings;
                     }
                 });
@@ -759,6 +930,9 @@ fn draw_assistant_chat_panel(
             if let Some(error) = &state.last_error {
                 ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
             }
+            // Claim the full remaining space so the panel doesn't auto-shrink
+            // (see egui docs: "Auto-sizing panels and windows")
+            ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
         });
 
     ui.separator();
@@ -795,182 +969,210 @@ fn draw_assistant_chat_panel(
 }
 
 fn draw_assistant_settings_panel(ui: &mut egui::Ui, state: &mut AssistantChatState) {
+    let mut save_changes = false;
+    let mut discard_changes = false;
+    state.settings_editor.mark_dirty(&state.preferences);
+    let (status_text, status_color) =
+        assistant_footer_status(&state.settings_editor.draft, state.settings_editor.dirty);
+
+    // Reserve footer height, then give the rest to the scroll area.
+    let footer_height = 52.0;
+    let scroll_height = (ui.available_height() - footer_height).max(80.0);
+
     egui::ScrollArea::vertical()
         .id_salt("assistant_settings_panel")
+        .max_height(scroll_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Saved configurations persist with the editor state. Use them for Claude, Gemini, OpenAI, and local OpenAI-compatible runtimes such as LM Studio or Ollama.",
-                )
-                .small()
-                .color(egui::Color32::from_rgb(160, 170, 184)),
-            );
-            ui.add_space(8.0);
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
 
-            let selected_profile_name = state
-                .preferences
-                .active_profile()
-                .map(|profile| profile.name.clone())
-                .unwrap_or_else(|| "No profile".to_string());
-            let mut add_profile = false;
-            let mut duplicate_profile = false;
-            let mut delete_profile = false;
-            ui.horizontal(|ui| {
-                ui.label("Profile");
-                egui::ComboBox::from_id_salt("assistant_profile_select")
-                    .selected_text(selected_profile_name)
-                    .show_ui(ui, |ui| {
-                        for profile in &state.preferences.profiles {
-                            ui.selectable_value(
-                                &mut state.preferences.active_profile_id,
-                                profile.id.clone(),
-                                profile.name.as_str(),
-                            );
+            assistant_section_frame(
+                ui,
+                "Profile",
+                "Choose which saved connection this document should use.",
+                ASSISTANT_PANEL_CARD,
+                |ui| {
+                    let draft = &mut state.settings_editor.draft;
+                    let selected_profile_name = draft
+                        .active_profile()
+                        .map(|profile| profile.name.clone())
+                        .unwrap_or_else(|| "No profile".to_string());
+                    assistant_field_label(ui, "Active profile");
+                    egui::ComboBox::from_id_salt("assistant_profile_select")
+                        .selected_text(selected_profile_name)
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for profile in &draft.profiles {
+                                ui.selectable_value(
+                                    &mut draft.active_profile_id,
+                                    profile.id.clone(),
+                                    profile.name.as_str(),
+                                );
+                            }
+                        });
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("New").clicked() {
+                            draft.add_blank_profile();
+                        }
+                        if ui.button("Duplicate").clicked() {
+                            draft.duplicate_active_profile();
+                        }
+                        if ui
+                            .add_enabled(draft.profiles.len() > 1, egui::Button::new("Delete"))
+                            .clicked()
+                        {
+                            draft.delete_active_profile();
                         }
                     });
-                if ui.button("New").clicked() {
-                    add_profile = true;
-                }
-                if ui.button("Duplicate").clicked() {
-                    duplicate_profile = true;
-                }
-                if ui
-                    .add_enabled(
-                        state.preferences.profiles.len() > 1,
-                        egui::Button::new("Delete"),
-                    )
-                    .clicked()
-                {
-                    delete_profile = true;
-                }
-            });
-            if add_profile {
-                state.preferences.add_blank_profile();
-            }
-            if duplicate_profile {
-                state.preferences.duplicate_active_profile();
-            }
-            if delete_profile {
-                state.preferences.delete_active_profile();
-            }
+                },
+            );
 
-            ui.separator();
-            egui::Frame::group(ui.style())
-                .fill(egui::Color32::from_rgb(30, 35, 44))
-                .show(ui, |ui| {
-                    egui::Grid::new("assistant_settings_mcp_grid")
-                        .num_columns(2)
-                        .spacing([8.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("MCP URL");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut state.preferences.mcp_url)
-                                    .desired_width(ui.available_width()),
-                            );
-                            ui.end_row();
-                        });
-                    ui.separator();
-                    if let Some(profile) = state.preferences.active_profile_mut() {
-                        egui::Grid::new("assistant_settings_grid")
-                            .num_columns(2)
-                            .spacing([8.0, 6.0])
-                            .show(ui, |ui| {
-                                ui.label("Name");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut profile.name)
-                                        .desired_width(ui.available_width()),
+            assistant_section_frame(
+                ui,
+                "Workspace",
+                "Scene MCP endpoint used for model-aware assistant tools.",
+                ASSISTANT_PANEL_CARD_ALT,
+                |ui| {
+                    assistant_field_label(ui, "MCP URL");
+                    let _ = assistant_full_width_text_edit(
+                        ui,
+                        &mut state.settings_editor.draft.mcp_url,
+                        "http://127.0.0.1:24842/mcp",
+                        false,
+                    );
+                },
+            );
+
+            if let Some(profile) = state.settings_editor.draft.active_profile_mut() {
+                assistant_section_frame(
+                    ui,
+                    "Connection",
+                    "Provider, transport, model, endpoint, and credentials for the active profile.",
+                    ASSISTANT_PANEL_CARD,
+                    |ui| {
+                        assistant_field_label(ui, "Profile name");
+                        let _ =
+                            assistant_full_width_text_edit(ui, &mut profile.name, "OpenAI", false);
+
+                        let previous_provider = profile.provider;
+                        assistant_field_label(ui, "Provider");
+                        egui::ComboBox::from_id_salt("assistant_provider")
+                            .selected_text(profile.provider.label())
+                            .width(ui.available_width())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut profile.provider,
+                                    AssistantProviderKind::ManagedRelay,
+                                    AssistantProviderKind::ManagedRelay.label(),
                                 );
-                                ui.end_row();
-
-                                let previous_provider = profile.provider;
-                                ui.label("Provider");
-                                egui::ComboBox::from_id_salt("assistant_provider")
-                                    .selected_text(profile.provider.label())
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut profile.provider,
-                                            AssistantProviderKind::ManagedRelay,
-                                            AssistantProviderKind::ManagedRelay.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut profile.provider,
-                                            AssistantProviderKind::OpenAi,
-                                            AssistantProviderKind::OpenAi.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut profile.provider,
-                                            AssistantProviderKind::Anthropic,
-                                            AssistantProviderKind::Anthropic.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut profile.provider,
-                                            AssistantProviderKind::Gemini,
-                                            AssistantProviderKind::Gemini.label(),
-                                        );
-                                        ui.selectable_value(
-                                            &mut profile.provider,
-                                            AssistantProviderKind::OpenAiCompatible,
-                                            AssistantProviderKind::OpenAiCompatible.label(),
-                                        );
-                                    });
-                                if profile.provider != previous_provider {
-                                    profile.retarget_provider(profile.provider);
-                                }
-                                ui.end_row();
-
-                                let previous_protocol = profile.protocol;
-                                let supported_protocols = profile.provider.supported_protocols();
-                                ui.label("Protocol");
-                                egui::ComboBox::from_id_salt("assistant_protocol")
-                                    .selected_text(profile.protocol.label())
-                                    .show_ui(ui, |ui| {
-                                        for protocol in supported_protocols {
-                                            ui.selectable_value(
-                                                &mut profile.protocol,
-                                                *protocol,
-                                                protocol.label(),
-                                            );
-                                        }
-                                    });
-                                if profile.protocol != previous_protocol {
-                                    profile.retarget_protocol(profile.protocol);
-                                }
-                                ui.end_row();
-
-                                ui.label("Model");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut profile.model)
-                                        .desired_width(ui.available_width()),
+                                ui.selectable_value(
+                                    &mut profile.provider,
+                                    AssistantProviderKind::OpenAi,
+                                    AssistantProviderKind::OpenAi.label(),
                                 );
-                                ui.end_row();
-
-                                ui.label(profile.protocol.endpoint_label());
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut profile.endpoint)
-                                        .desired_width(ui.available_width()),
+                                ui.selectable_value(
+                                    &mut profile.provider,
+                                    AssistantProviderKind::Anthropic,
+                                    AssistantProviderKind::Anthropic.label(),
                                 );
-                                ui.end_row();
-
-                                ui.label(profile.protocol.api_key_label(profile.provider));
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut profile.api_key)
-                                        .desired_width(ui.available_width())
-                                        .password(true),
+                                ui.selectable_value(
+                                    &mut profile.provider,
+                                    AssistantProviderKind::Gemini,
+                                    AssistantProviderKind::Gemini.label(),
                                 );
-                                ui.end_row();
+                                ui.selectable_value(
+                                    &mut profile.provider,
+                                    AssistantProviderKind::OpenAiCompatible,
+                                    AssistantProviderKind::OpenAiCompatible.label(),
+                                );
                             });
-                    }
-                });
-            if let Some(profile) = state.preferences.active_profile() {
-                ui.add_space(6.0);
+                        if profile.provider != previous_provider {
+                            profile.retarget_provider(profile.provider);
+                        }
+
+                        let previous_protocol = profile.protocol;
+                        let supported_protocols = profile.provider.supported_protocols();
+                        assistant_field_label(ui, "Protocol");
+                        egui::ComboBox::from_id_salt("assistant_protocol")
+                            .selected_text(profile.protocol.label())
+                            .width(ui.available_width())
+                            .show_ui(ui, |ui| {
+                                for protocol in supported_protocols {
+                                    ui.selectable_value(
+                                        &mut profile.protocol,
+                                        *protocol,
+                                        protocol.label(),
+                                    );
+                                }
+                            });
+                        if profile.protocol != previous_protocol {
+                            profile.retarget_protocol(profile.protocol);
+                        }
+
+                        assistant_field_label(ui, "Model");
+                        let _ = assistant_full_width_text_edit(
+                            ui,
+                            &mut profile.model,
+                            "gpt-5.4-mini",
+                            false,
+                        );
+
+                        assistant_field_label(ui, profile.protocol.endpoint_label());
+                        let _ = assistant_full_width_text_edit(
+                            ui,
+                            &mut profile.endpoint,
+                            profile.protocol.default_endpoint(profile.provider),
+                            false,
+                        );
+
+                        assistant_field_label(ui, profile.protocol.api_key_label(profile.provider));
+                        let _ = assistant_full_width_text_edit(
+                            ui,
+                            &mut profile.api_key,
+                            "Enter a credential or leave blank if optional",
+                            true,
+                        );
+                    },
+                );
+
                 ui.label(
                     egui::RichText::new(profile_runtime_hint(profile))
                         .small()
-                        .color(egui::Color32::from_rgb(150, 160, 172)),
+                        .color(ASSISTANT_PANEL_MUTED),
                 );
             }
+            ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
         });
+
+    // Sticky footer: status + Save / Discard actions.
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(status_text).small().color(status_color));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(state.settings_editor.dirty, egui::Button::new("Save"))
+                .clicked()
+            {
+                save_changes = true;
+            }
+            if ui
+                .add_enabled(state.settings_editor.dirty, egui::Button::new("Discard"))
+                .clicked()
+            {
+                discard_changes = true;
+            }
+        });
+    });
+
+    if discard_changes {
+        state.discard_settings_changes();
+    }
+    if save_changes {
+        state.save_settings_changes();
+    }
 }
 
 fn profile_runtime_hint(profile: &AssistantConnectionProfile) -> &'static str {
@@ -1099,15 +1301,26 @@ fn sync_right_sidebar_state(
 }
 
 fn serialize_right_sidebar_state(state: &RightSidebarState) -> serde_json::Value {
-    serde_json::to_value(state).unwrap_or_else(|_| json!({}))
+    serde_json::to_value(PersistedRightSidebarState::from(state)).unwrap_or_else(|_| json!({}))
 }
 
 fn deserialize_right_sidebar_state(value: &serde_json::Value) -> Option<RightSidebarState> {
-    let mut state: RightSidebarState = serde_json::from_value(value.clone()).ok()?;
-    state.width = state
-        .width
-        .clamp(ASSISTANT_PANEL_MIN_WIDTH, ASSISTANT_PANEL_MAX_WIDTH);
-    Some(state)
+    serde_json::from_value::<PersistedRightSidebarState>(value.clone())
+        .ok()
+        .map(PersistedRightSidebarState::into_runtime_state)
+}
+
+pub(crate) fn assistant_panel_max_width(ctx: &egui::Context) -> f32 {
+    ctx.content_rect().width().max(1.0)
+}
+
+pub(crate) fn clamp_assistant_panel_width(width: f32, max_width: f32) -> f32 {
+    let viewport_max = max_width.max(1.0);
+    if viewport_max <= ASSISTANT_PANEL_MIN_WIDTH {
+        viewport_max
+    } else {
+        width.max(ASSISTANT_PANEL_MIN_WIDTH).min(viewport_max)
+    }
 }
 
 fn draw_message_bubble(ui: &mut egui::Ui, message: &AssistantChatMessage) {
@@ -2114,11 +2327,18 @@ mod tests {
 
         let decoded = deserialize_right_sidebar_state(&serialize_right_sidebar_state(&state))
             .expect("sidebar state should deserialize");
-        assert_eq!(decoded, state);
+        assert_eq!(
+            decoded,
+            RightSidebarState {
+                visible: false,
+                width: ASSISTANT_PANEL_DEFAULT_WIDTH,
+                active_tab: RightSidebarTab::Assistant,
+            }
+        );
     }
 
     #[test]
-    fn right_sidebar_state_clamps_persisted_width() {
+    fn legacy_sidebar_state_ignores_persisted_width() {
         let decoded = deserialize_right_sidebar_state(&json!({
             "visible": true,
             "width": 9999.0,
@@ -2126,7 +2346,73 @@ mod tests {
         }))
         .expect("sidebar state should deserialize");
 
-        assert_eq!(decoded.width, ASSISTANT_PANEL_MAX_WIDTH);
+        assert_eq!(decoded.width, ASSISTANT_PANEL_DEFAULT_WIDTH);
+        assert!(decoded.visible);
+    }
+
+    #[test]
+    fn serialized_sidebar_state_omits_width() {
+        let serialized = serialize_right_sidebar_state(&RightSidebarState {
+            visible: true,
+            width: 9999.0,
+            active_tab: RightSidebarTab::Assistant,
+        });
+
+        assert!(serialized.get("width").is_none());
+        assert_eq!(serialized.get("visible"), Some(&json!(true)));
+        assert_eq!(serialized.get("active_tab"), Some(&json!("assistant")));
+    }
+
+    #[test]
+    fn static_sidebar_width_clamps_to_live_viewport() {
+        assert_eq!(
+            clamp_assistant_panel_width(ASSISTANT_PANEL_DEFAULT_WIDTH, 840.0),
+            ASSISTANT_PANEL_DEFAULT_WIDTH
+        );
+        assert_eq!(
+            clamp_assistant_panel_width(ASSISTANT_PANEL_DEFAULT_WIDTH, 300.0),
+            300.0
+        );
+    }
+
+    #[test]
+    fn sync_right_sidebar_state_rewrites_legacy_widthless_payload() {
+        let mut app = App::new();
+        let mut doc_props = DocumentProperties::default();
+        doc_props.domain_defaults.insert(
+            RIGHT_SIDEBAR_STATE_KEY.to_string(),
+            json!({
+                "visible": false,
+                "width": 9999.0,
+                "active_tab": "assistant"
+            }),
+        );
+
+        app.insert_resource(RightSidebarState::default())
+            .insert_resource(doc_props)
+            .add_systems(Update, sync_right_sidebar_state);
+
+        app.update();
+
+        let sidebar_state = app.world().resource::<RightSidebarState>();
+        assert_eq!(
+            *sidebar_state,
+            RightSidebarState {
+                visible: false,
+                width: ASSISTANT_PANEL_DEFAULT_WIDTH,
+                active_tab: RightSidebarTab::Assistant,
+            }
+        );
+
+        let persisted = app
+            .world()
+            .resource::<DocumentProperties>()
+            .domain_defaults
+            .get(RIGHT_SIDEBAR_STATE_KEY)
+            .cloned()
+            .expect("sidebar state should be written back");
+        assert!(persisted.get("width").is_none());
+        assert_eq!(persisted.get("visible"), Some(&json!(false)));
     }
 
     #[test]
@@ -2156,6 +2442,28 @@ mod tests {
             AssistantProtocolKind::OpenAiChatCompletions
         );
         assert_eq!(decoded.profiles[0].endpoint, DEFAULT_LM_STUDIO_CHAT_URL);
+    }
+
+    #[test]
+    fn assistant_settings_editor_saves_and_discards_draft_changes() {
+        let mut state = AssistantChatState::from_environment();
+        let original = state.preferences.clone();
+
+        state.settings_editor.draft.mcp_url = "http://127.0.0.1:3000/mcp".to_string();
+        state.settings_editor.mark_dirty(&state.preferences);
+        assert!(state.settings_editor.dirty);
+
+        state.discard_settings_changes();
+        assert_eq!(state.settings_editor.draft, original);
+        assert!(!state.settings_editor.dirty);
+
+        state.settings_editor.draft.mcp_url = "http://127.0.0.1:4000/mcp".to_string();
+        state.settings_editor.mark_dirty(&state.preferences);
+        state.save_settings_changes();
+
+        assert_eq!(state.preferences.mcp_url, "http://127.0.0.1:4000/mcp");
+        assert_eq!(state.settings_editor.draft, state.preferences);
+        assert!(!state.settings_editor.dirty);
     }
 
     #[test]

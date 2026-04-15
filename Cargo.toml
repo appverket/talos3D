@@ -65,3 +65,19 @@ opt-level = 3
 # Fix bevy_egui scissor-rect crash on macOS first frame:
 # clamp scissor to physical_target_size, not just viewport size.
 bevy_egui = { path = "vendor/bevy_egui" }
+egui = { path = "vendor/egui-0.33.3/egui" }
+epaint = { path = "vendor/egui-0.33.3/epaint" }
+emath = { path = "vendor/egui-0.33.3/emath" }
+ecolor = { path = "vendor/egui-0.33.3/ecolor" }
+
+# Local engine workflow notes:
+# - Keep this vendored bevy_egui patch unless the bridge has been migrated.
+# - Talos currently vendors the egui 0.33.3 line because bevy_egui still targets it.
+# - When the bridge is upgraded, replace these vendored overrides with the newer bridge stack.
+#
+# - If you need local Bevy main, do that only on a dedicated Talos branch and
+#   replace versioned `bevy = "0.18"` dependencies with path dependencies to:
+#   /Users/torstenek/dev/bevy
+#
+# Full workflow:
+# docs/ENGINE_FORK_WORKFLOW.md

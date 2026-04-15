@@ -1310,6 +1310,7 @@ fn build_sweep_editable_mesh(sweep: &ProfileSweep) -> EditableMesh {
             vertices: vec![],
             half_edges: vec![],
             faces: vec![],
+            smooth_normals: false,
         };
     }
 
@@ -1710,6 +1711,7 @@ fn build_revolve_editable_mesh(revolve: &ProfileRevolve) -> EditableMesh {
             vertices: vec![],
             half_edges: vec![],
             faces: vec![],
+            smooth_normals: false,
         };
     }
 

@@ -135,6 +135,7 @@ Start here:
 - [MCP Model API](./docs/MCP_MODEL_API.md)
 - [Assistant Chat](./docs/ASSISTANT_CHAT.md)
 - [Developer Onboarding](./docs/DEVELOPER_ONBOARDING.md)
+- [Engine Fork Workflow](./docs/ENGINE_FORK_WORKFLOW.md)
 - [Product Overview](./docs/PRODUCT.md)
 - [Platform Architecture](./docs/PLATFORM_ARCHITECTURE.md)
 - [Extension Architecture](./docs/EXTENSION_ARCHITECTURE.md)

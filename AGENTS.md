@@ -7,11 +7,12 @@ contributors use.
 ## Read First
 
 1. [README.md](./README.md)
-2. [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md)
-3. [docs/DEVELOPER_ONBOARDING.md](./docs/DEVELOPER_ONBOARDING.md)
-4. [docs/PLATFORM_ARCHITECTURE.md](./docs/PLATFORM_ARCHITECTURE.md)
-5. [docs/EXTENSION_ARCHITECTURE.md](./docs/EXTENSION_ARCHITECTURE.md)
-6. [docs/CAPABILITY_PLUGIN_API.md](./docs/CAPABILITY_PLUGIN_API.md)
+2. [docs/ENGINE_FORK_WORKFLOW.md](./docs/ENGINE_FORK_WORKFLOW.md)
+3. [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md)
+4. [docs/DEVELOPER_ONBOARDING.md](./docs/DEVELOPER_ONBOARDING.md)
+5. [docs/PLATFORM_ARCHITECTURE.md](./docs/PLATFORM_ARCHITECTURE.md)
+6. [docs/EXTENSION_ARCHITECTURE.md](./docs/EXTENSION_ARCHITECTURE.md)
+7. [docs/CAPABILITY_PLUGIN_API.md](./docs/CAPABILITY_PLUGIN_API.md)
 
 ## Public Architecture Rules
 
@@ -28,6 +29,9 @@ contributors use.
 - Prefer explicit capability boundaries over hidden cross-module coupling.
 - Update public docs when architecture or user-facing behavior changes.
 - Do not treat the `private/` directory as public project content.
+- If a task touches Bevy, egui, `bevy_egui`, engine upgrades, or panel sizing
+  regressions, read [docs/ENGINE_FORK_WORKFLOW.md](./docs/ENGINE_FORK_WORKFLOW.md)
+  before changing dependencies or proposing branch structure.
 
 ## MCP Guidance
 
