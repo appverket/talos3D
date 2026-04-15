@@ -11,6 +11,9 @@ use bevy::{
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, RgbImage};
 use serde_json::Value;
 
+use crate::capability_registry::{
+    CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity, CapabilityRegistryAppExt,
+};
 use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     document_state::DocumentState,
@@ -21,11 +24,33 @@ use crate::plugins::{
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
 const DEFAULT_EXPORT_FILE_STEM: &str = "drawing";
 
+/// Capability id for the "2D drafting" extension that surfaces vector-paper
+/// output (PDF/SVG) in the UI.
+///
+/// PNG export stays global — rasterising any viewport is always meaningful.
+/// Vector formats are gated because they only make architectural sense when
+/// the user is producing a 2D drafting artefact (plans, sections, elevations
+/// with dimensions and line-weight conventions); from a shaded 3D view they
+/// degrade to "raster wrapped in a PDF envelope", misleading the user about
+/// what they will get.
+pub const DRAFTING_CAPABILITY_ID: &str = "drafting";
+
 pub struct DrawingExportPlugin;
 
 impl Plugin for DrawingExportPlugin {
     fn build(&self, app: &mut App) {
-        app.register_command(
+        app.register_capability(
+            CapabilityDescriptor::new(DRAFTING_CAPABILITY_ID, "2D Drafting")
+                .with_description(
+                    "Vector-paper output and drafting annotations \
+                     (PDF/SVG export, dimensions, guide lines). \
+                     Turn on for plan/section/elevation work; leave off for \
+                     pure 3D modelling.",
+                )
+                .with_distribution(CapabilityDistribution::Bundled)
+                .with_maturity(CapabilityMaturity::Stable),
+        )
+        .register_command(
             CommandDescriptor {
                 id: "core.export_drawing".to_string(),
                 label: "Export Drawing...".to_string(),
@@ -39,7 +64,7 @@ impl Plugin for DrawingExportPlugin {
                 requires_selection: false,
                 show_in_menu: true,
                 activates_tool: None,
-                capability_id: None,
+                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
             },
             execute_export_drawing,
         )
@@ -57,6 +82,8 @@ impl Plugin for DrawingExportPlugin {
                 requires_selection: false,
                 show_in_menu: true,
                 activates_tool: None,
+                // PNG is always legitimate — rasterising a shaded 3D view
+                // is not misleading, so leave it ungated.
                 capability_id: None,
             },
             execute_export_drawing_png,
@@ -75,7 +102,7 @@ impl Plugin for DrawingExportPlugin {
                 requires_selection: false,
                 show_in_menu: true,
                 activates_tool: None,
-                capability_id: None,
+                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
             },
             execute_export_drawing_pdf,
         )
@@ -93,9 +120,27 @@ impl Plugin for DrawingExportPlugin {
                 requires_selection: false,
                 show_in_menu: true,
                 activates_tool: None,
-                capability_id: None,
+                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
             },
             execute_export_drawing_svg,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "core.export_drawing_dxf".to_string(),
+                label: "Export Drawing as DXF...".to_string(),
+                description: "Export the current drawing viewport as a DXF file (AC1027).".to_string(),
+                category: CommandCategory::File,
+                parameters: None,
+                version: 1,
+                default_shortcut: None,
+                icon: Some("icon.export".to_string()),
+                hint: Some("Export the cropped drawing viewport as DXF".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                activates_tool: None,
+                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+            },
+            execute_export_drawing_dxf,
         );
     }
 }
@@ -105,6 +150,7 @@ pub(crate) enum ViewportExportFormat {
     Raster(image::ImageFormat),
     Pdf,
     Svg,
+    Dxf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -204,11 +250,12 @@ pub(crate) fn viewport_export_format_from_path(
         None => Ok(ViewportExportFormat::Raster(image::ImageFormat::Png)),
         Some("pdf") => Ok(ViewportExportFormat::Pdf),
         Some("svg") | Some("svd") => Ok(ViewportExportFormat::Svg),
+        Some("dxf") => Ok(ViewportExportFormat::Dxf),
         _ => image::ImageFormat::from_path(path)
             .map(ViewportExportFormat::Raster)
             .map_err(|_| {
                 format!(
-                    "Unsupported export format for '{}'. Use PNG, PDF, or SVG.",
+                    "Unsupported export format for '{}'. Use PNG, PDF, SVG, or DXF.",
                     path.display()
                 )
             }),
@@ -244,6 +291,12 @@ pub(crate) fn export_drawing_now_with_format(
                 current_path.as_deref(),
                 Some(ViewportExportFormat::Svg),
             )),
+        Some(ViewportExportFormat::Dxf) => dialog
+            .add_filter("DXF Drawing", &["dxf"])
+            .set_file_name(default_export_file_name(
+                current_path.as_deref(),
+                Some(ViewportExportFormat::Dxf),
+            )),
         Some(ViewportExportFormat::Raster(other)) => dialog
             .add_filter("Drawing Export", &[other.extensions_str()[0]])
             .set_file_name(default_export_file_name(
@@ -251,10 +304,11 @@ pub(crate) fn export_drawing_now_with_format(
                 Some(ViewportExportFormat::Raster(other)),
             )),
         None => dialog
-            .add_filter("Drawing Export", &["png", "pdf", "svg"])
+            .add_filter("Drawing Export", &["png", "pdf", "svg", "dxf"])
             .add_filter("PNG Image", &["png"])
             .add_filter("PDF Document", &["pdf"])
             .add_filter("SVG Drawing", &["svg"])
+            .add_filter("DXF Drawing", &["dxf"])
             .set_file_name(default_export_file_name(current_path.as_deref(), None)),
     };
     if let Some(ref path) = current_path {
@@ -276,7 +330,7 @@ pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBu
     let path = normalize_export_path(path);
     let format = viewport_export_format_from_path(&path)?;
     match format {
-        ViewportExportFormat::Svg | ViewportExportFormat::Pdf => {
+        ViewportExportFormat::Svg | ViewportExportFormat::Pdf | ViewportExportFormat::Dxf => {
             export_vector_drawing(world, &path, format)?;
         }
         ViewportExportFormat::Raster(_) => {
@@ -301,6 +355,7 @@ fn export_vector_drawing(
     let bytes = match format {
         ViewportExportFormat::Svg => vector_drawing::drawing_to_svg(&drawing),
         ViewportExportFormat::Pdf => vector_drawing::drawing_to_pdf(&drawing),
+        ViewportExportFormat::Dxf => vector_drawing::drawing_to_dxf(&drawing).into_bytes(),
         ViewportExportFormat::Raster(_) => unreachable!(),
     };
 
@@ -420,6 +475,19 @@ fn write_rgb_to_path(path: &Path, rgb: &RgbImage) -> Result<(), String> {
         ViewportExportFormat::Pdf => {
             let document = pdf_document(rgb)?;
             std::fs::write(path, document).map_err(|error| error.to_string())
+        }
+        ViewportExportFormat::Dxf => {
+            // Fallback when we only have a raster: DXF has no sensible raster
+            // encoding, so emit an empty DXF with the drawing extents so
+            // downstream consumers see something valid.
+            let stub = crate::plugins::drafting::export_dxf(
+                crate::plugins::drafting::DxfUnit::Millimetres,
+                (0.0, 0.0),
+                (rgb.width() as f32, rgb.height() as f32),
+                &[],
+                &[],
+            );
+            std::fs::write(path, stub).map_err(|error| error.to_string())
         }
     }
 }
@@ -549,6 +617,7 @@ fn default_export_file_name(
         Some(ViewportExportFormat::Raster(image::ImageFormat::Png)) => format!("{stem}.png"),
         Some(ViewportExportFormat::Pdf) => format!("{stem}.pdf"),
         Some(ViewportExportFormat::Svg) => format!("{stem}.svg"),
+        Some(ViewportExportFormat::Dxf) => format!("{stem}.dxf"),
         Some(ViewportExportFormat::Raster(other)) => {
             let extension = other.extensions_str().first().copied().unwrap_or("png");
             format!("{stem}.{extension}")
@@ -587,6 +656,14 @@ fn execute_export_drawing_pdf(world: &mut World, _: &Value) -> Result<CommandRes
 
 fn execute_export_drawing_svg(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     let Some(path) = export_drawing_now_with_format(world, Some(ViewportExportFormat::Svg))? else {
+        return Ok(CommandResult::empty());
+    };
+    set_export_feedback(world, &path);
+    Ok(CommandResult::empty())
+}
+
+fn execute_export_drawing_dxf(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    let Some(path) = export_drawing_now_with_format(world, Some(ViewportExportFormat::Dxf))? else {
         return Ok(CommandResult::empty());
     };
     set_export_feedback(world, &path);

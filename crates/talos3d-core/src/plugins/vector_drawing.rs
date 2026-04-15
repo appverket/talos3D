@@ -16,6 +16,7 @@ use crate::{
         camera::{CameraProjectionMode, OrbitCamera},
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         document_properties::DocumentProperties,
+        drafting::{self, DimPrimitive, DimensionAnnotationNode, DimensionStyleRegistry, DraftingVisibility},
         render_pipeline::RenderSettings,
         section_fill::{
             extract_section_fills, generate_hatch_lines, HatchPattern, ProjectedSectionFill,
@@ -92,6 +93,9 @@ pub struct DrawingGeometry {
     pub edges: Vec<ProjectedEdge>,
     pub dimension_labels: Vec<ProjectedDimensionLabel>,
     pub section_fills: Vec<ProjectedSectionFill>,
+    /// Rich drafting-dimension primitives produced by the drafting plugin.
+    /// Already in viewport-pixel coordinates — writers consume directly.
+    pub drafting_primitives: Vec<Vec<DimPrimitive>>,
     pub viewport: DrawingViewport,
 }
 
@@ -261,12 +265,170 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
         scale: 1.0,
     };
 
+    // Drafting plugin dimensions: render each annotation into paper-space
+    // primitives using the viewport's pixels-per-world scale, then flip y so
+    // primitives are in the same y-down pixel frame as the other edges.
+    let drafting_primitives =
+        extract_drafting_primitives(world, &view_proj, vp_width, vp_height);
+
     Some(DrawingGeometry {
         edges,
         dimension_labels,
         section_fills,
+        drafting_primitives,
         viewport,
     })
+}
+
+/// Extract drafting plugin dimensions and project them into viewport-pixel
+/// space. Returns one primitive list per visible annotation.
+fn extract_drafting_primitives(
+    world: &World,
+    view_proj: &Mat4,
+    vp_width: f32,
+    vp_height: f32,
+) -> Vec<Vec<DimPrimitive>> {
+    let Some(registry) = world.get_resource::<DimensionStyleRegistry>() else {
+        return Vec::new();
+    };
+    let visibility = world
+        .get_resource::<DraftingVisibility>()
+        .cloned()
+        .unwrap_or_default();
+    if !visibility.show_all {
+        return Vec::new();
+    }
+    let Some(mut q) = world.try_query::<&DimensionAnnotationNode>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for node in q.iter(world) {
+        if !node.visible
+            || !visibility.is_visible(&node.style_name, node.kind.tag())
+        {
+            continue;
+        }
+        // Project the dimension's two key endpoints through the camera to get
+        // a local world_to_paper scale near the annotation. Use distance
+        // between projected a,b vs world distance between a,b.
+        let a_px = project_point_to_pixels(node.a, view_proj, vp_width, vp_height);
+        let b_px = project_point_to_pixels(node.b, view_proj, vp_width, vp_height);
+        let (Some(a_px), Some(b_px)) = (a_px, b_px) else {
+            continue;
+        };
+        let world_len = (node.a - node.b).length().max(1e-6);
+        let pixel_len = (a_px - b_px).length().max(1e-6);
+        let scale = pixel_len / world_len;
+
+        let primitives = drafting::render_annotation(node, registry, scale);
+
+        // The renderer assumes world-origin inputs and produces primitives
+        // around world * scale = feature position in pixel-space but from
+        // world origin. Our viewport is y-down with an offset. We need to
+        // translate the primitives so the feature ends up at `a_px`/`b_px`.
+        //
+        // The renderer takes inputs in WORLD units and scales them internally
+        // by `world_to_paper`. A feature at world (wx, wy) maps to paper
+        // (wx*scale, wy*scale). But the viewport's pixel origin is different:
+        // we need an additional translation `a_px - a*scale` (which equals
+        // any other feature point by linearity).
+        let translate = a_px - bevy::math::Vec2::new(node.a.x * scale, node.a.y * scale);
+
+        // Additionally, the renderer works in +y-up paper space; viewport is
+        // +y-down. Flip y component of the translated primitives.
+        let translated = primitives
+            .into_iter()
+            .map(|prim| transform_prim(prim, translate, vp_height))
+            .collect();
+        out.push(translated);
+    }
+    out
+}
+
+fn project_point_to_pixels(
+    point: Vec3,
+    view_proj: &Mat4,
+    vp_width: f32,
+    vp_height: f32,
+) -> Option<bevy::math::Vec2> {
+    let clip = *view_proj * point.extend(1.0);
+    if clip.w.abs() < 1e-7 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    Some(bevy::math::Vec2::new(
+        (ndc.x * 0.5 + 0.5) * vp_width,
+        (1.0 - (ndc.y * 0.5 + 0.5)) * vp_height,
+    ))
+}
+
+/// Translate a primitive's geometry into viewport pixel space with a y-flip
+/// relative to `vp_height`. Primitive input is paper space (+y up); viewport
+/// uses +y down.
+fn transform_prim(
+    prim: DimPrimitive,
+    translate: bevy::math::Vec2,
+    vp_height: f32,
+) -> DimPrimitive {
+    let map_point = |p: bevy::math::Vec2| {
+        // Apply translate first (still +y up paper coords), then flip y so the
+        // result is in viewport's +y-down pixel frame.
+        let q = p + translate;
+        bevy::math::Vec2::new(q.x, vp_height - q.y)
+    };
+    match prim {
+        DimPrimitive::LineSegment { a, b, stroke_mm } => DimPrimitive::LineSegment {
+            a: map_point(a),
+            b: map_point(b),
+            stroke_mm,
+        },
+        DimPrimitive::Tick {
+            pos,
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        } => DimPrimitive::Tick {
+            pos: map_point(pos),
+            // Flipping y also flips the sign of rotation angles (about the z axis).
+            rotation_rad: -rotation_rad,
+            length_mm,
+            stroke_mm,
+        },
+        DimPrimitive::Arrow {
+            tip,
+            tail,
+            width_mm,
+            filled,
+            stroke_mm,
+        } => DimPrimitive::Arrow {
+            tip: map_point(tip),
+            tail: map_point(tail),
+            width_mm,
+            filled,
+            stroke_mm,
+        },
+        DimPrimitive::Dot { pos, radius_mm } => DimPrimitive::Dot {
+            pos: map_point(pos),
+            radius_mm,
+        },
+        DimPrimitive::Text {
+            anchor,
+            content,
+            height_mm,
+            rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        } => DimPrimitive::Text {
+            anchor: map_point(anchor),
+            content,
+            height_mm,
+            rotation_rad: -rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        },
+    }
 }
 
 // ─── SVG generation ──────────────────────────────────────────────────────────
@@ -422,8 +584,112 @@ pub fn drawing_to_svg(drawing: &DrawingGeometry) -> Vec<u8> {
         writeln!(out, "  </g>").unwrap();
     }
 
+    // Drafting plugin dimensions (rich primitives in viewport pixel coords).
+    // Each annotation's primitives are wrapped in a <g class="dim-drafting">.
+    for dim in &drawing.drafting_primitives {
+        writeln!(out, r#"  <g class="dim-drafting">"#).unwrap();
+        for prim in dim {
+            write_drafting_primitive(&mut out, prim);
+        }
+        writeln!(out, "  </g>").unwrap();
+    }
+
     writeln!(out, "</svg>").unwrap();
     out
+}
+
+fn write_drafting_primitive(out: &mut Vec<u8>, prim: &DimPrimitive) {
+    match prim {
+        DimPrimitive::LineSegment { a, b, stroke_mm } => {
+            writeln!(
+                out,
+                r##"    <line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}" stroke="#000" stroke-width="{:.2}" stroke-linecap="round" fill="none"/>"##,
+                a.x, a.y, b.x, b.y, stroke_mm
+            )
+            .unwrap();
+        }
+        DimPrimitive::Tick {
+            pos,
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        } => {
+            let half = length_mm * 0.5;
+            let c = rotation_rad.cos();
+            let s = rotation_rad.sin();
+            let x1 = pos.x - half * c;
+            let y1 = pos.y - half * s;
+            let x2 = pos.x + half * c;
+            let y2 = pos.y + half * s;
+            writeln!(
+                out,
+                r##"    <line x1="{:.2}" y1="{:.2}" x2="{:.2}" y2="{:.2}" stroke="#000" stroke-width="{:.2}" stroke-linecap="round" fill="none"/>"##,
+                x1, y1, x2, y2, stroke_mm
+            )
+            .unwrap();
+        }
+        DimPrimitive::Arrow {
+            tip,
+            tail,
+            width_mm,
+            filled,
+            stroke_mm,
+        } => {
+            let axis = *tail - *tip;
+            let len = axis.length().max(1e-5);
+            let axis_u = axis / len;
+            let perp = bevy::math::Vec2::new(-axis_u.y, axis_u.x);
+            let half_w = width_mm * 0.5;
+            let base_l = *tail + perp * half_w;
+            let base_r = *tail - perp * half_w;
+            let fill = if *filled { "#000" } else { "none" };
+            writeln!(
+                out,
+                r##"    <polygon points="{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}" fill="{}" stroke="#000" stroke-width="{:.2}" stroke-linejoin="miter"/>"##,
+                tip.x, tip.y, base_l.x, base_l.y, base_r.x, base_r.y, fill, stroke_mm
+            )
+            .unwrap();
+        }
+        DimPrimitive::Dot { pos, radius_mm } => {
+            writeln!(
+                out,
+                r##"    <circle cx="{:.2}" cy="{:.2}" r="{:.2}" fill="#000"/>"##,
+                pos.x, pos.y, radius_mm
+            )
+            .unwrap();
+        }
+        DimPrimitive::Text {
+            anchor,
+            content,
+            height_mm,
+            rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        } => {
+            let (ta, db) = match anchor_mode {
+                crate::plugins::drafting::TextAnchor::CenterBaseline => ("middle", "alphabetic"),
+                crate::plugins::drafting::TextAnchor::Center => ("middle", "middle"),
+            };
+            let rot_deg = rotation_rad.to_degrees();
+            writeln!(
+                out,
+                r##"    <text x="{:.2}" y="{:.2}" transform="rotate({:.2} {:.2} {:.2})" text-anchor="{}" dominant-baseline="{}" font-family="{}" font-size="{:.2}" fill="#{}">{}</text>"##,
+                anchor.x,
+                anchor.y,
+                rot_deg,
+                anchor.x,
+                anchor.y,
+                ta,
+                db,
+                svg_escape(font_family),
+                height_mm,
+                color_hex,
+                svg_escape(content)
+            )
+            .unwrap();
+        }
+    }
 }
 
 fn svg_escape(s: &str) -> String {
@@ -431,6 +697,97 @@ fn svg_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+// ─── DXF generation ──────────────────────────────────────────────────────────
+
+/// Export a drawing (walls + dimensions) to DXF AC1027 text format. The DXF
+/// uses viewport pixel coordinates with y flipped so +y is up (DXF native).
+pub fn drawing_to_dxf(drawing: &DrawingGeometry) -> String {
+    use crate::plugins::drafting::export_dxf::{export_dxf, DxfUnit};
+    let h = drawing.viewport.height;
+
+    // Convert regular drawing edges to DimPrimitives so the DXF writer can
+    // handle them uniformly. Apply y-flip here (viewport is +y-down, DXF +y-up).
+    let mut drawing_primitives = Vec::new();
+    for edge in &drawing.edges {
+        drawing_primitives.push(DimPrimitive::LineSegment {
+            a: bevy::math::Vec2::new(edge.x1, h - edge.y1),
+            b: bevy::math::Vec2::new(edge.x2, h - edge.y2),
+            stroke_mm: edge.edge_type.default_weight_mm(),
+        });
+    }
+
+    // Flip dimensions the same way so they line up with the drawing.
+    let flipped_dims: Vec<Vec<DimPrimitive>> = drawing
+        .drafting_primitives
+        .iter()
+        .map(|dim| dim.iter().cloned().map(|p| flip_y(p, h)).collect())
+        .collect();
+
+    export_dxf(
+        DxfUnit::Millimetres,
+        (0.0, 0.0),
+        (drawing.viewport.width, drawing.viewport.height),
+        &drawing_primitives,
+        &flipped_dims,
+    )
+}
+
+fn flip_y(prim: DimPrimitive, h: f32) -> DimPrimitive {
+    let flip = |p: bevy::math::Vec2| bevy::math::Vec2::new(p.x, h - p.y);
+    match prim {
+        DimPrimitive::LineSegment { a, b, stroke_mm } => DimPrimitive::LineSegment {
+            a: flip(a),
+            b: flip(b),
+            stroke_mm,
+        },
+        DimPrimitive::Tick {
+            pos,
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        } => DimPrimitive::Tick {
+            pos: flip(pos),
+            rotation_rad: -rotation_rad,
+            length_mm,
+            stroke_mm,
+        },
+        DimPrimitive::Arrow {
+            tip,
+            tail,
+            width_mm,
+            filled,
+            stroke_mm,
+        } => DimPrimitive::Arrow {
+            tip: flip(tip),
+            tail: flip(tail),
+            width_mm,
+            filled,
+            stroke_mm,
+        },
+        DimPrimitive::Dot { pos, radius_mm } => DimPrimitive::Dot {
+            pos: flip(pos),
+            radius_mm,
+        },
+        DimPrimitive::Text {
+            anchor,
+            content,
+            height_mm,
+            rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        } => DimPrimitive::Text {
+            anchor: flip(anchor),
+            content,
+            height_mm,
+            rotation_rad: -rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        },
+    }
 }
 
 // ─── PDF generation ──────────────────────────────────────────────────────────
@@ -555,6 +912,17 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
         writeln!(content, "ET").unwrap();
     }
 
+    // Drafting plugin dimensions: stroke lines/ticks, fill arrows, draw text.
+    // All primitives arrive in viewport pixel coords (+y down), which we flip
+    // to PDF's +y up by mapping y → (h - y).
+    writeln!(content, "0 0 0 RG").unwrap();
+    writeln!(content, "0 0 0 rg").unwrap();
+    for dim in &drawing.drafting_primitives {
+        for prim in dim {
+            write_pdf_drafting_primitive(&mut content, prim, h);
+        }
+    }
+
     let content_bytes = content;
 
     // Build PDF structure
@@ -620,6 +988,122 @@ fn write_pdf_obj(out: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, content
     write!(out, "{id} 0 obj\n").unwrap();
     out.extend_from_slice(content);
     out.extend_from_slice(b"\nendobj\n");
+}
+
+/// Append a single drafting DimPrimitive to a PDF content stream. `h` is the
+/// page height used for the +y-down → +y-up flip.
+fn write_pdf_drafting_primitive(
+    content: &mut Vec<u8>,
+    prim: &DimPrimitive,
+    h: f32,
+) {
+    match prim {
+        DimPrimitive::LineSegment { a, b, stroke_mm } => {
+            let w_pt = stroke_mm * (72.0 / 25.4);
+            writeln!(content, "{w_pt:.3} w").unwrap();
+            writeln!(
+                content,
+                "{:.2} {:.2} m {:.2} {:.2} l S",
+                a.x,
+                h - a.y,
+                b.x,
+                h - b.y
+            )
+            .unwrap();
+        }
+        DimPrimitive::Tick {
+            pos,
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        } => {
+            let half = length_mm * 0.5;
+            let c = rotation_rad.cos();
+            let s = rotation_rad.sin();
+            let w_pt = stroke_mm * (72.0 / 25.4);
+            writeln!(content, "{w_pt:.3} w").unwrap();
+            let x1 = pos.x - half * c;
+            let y1 = pos.y - half * s;
+            let x2 = pos.x + half * c;
+            let y2 = pos.y + half * s;
+            writeln!(
+                content,
+                "{:.2} {:.2} m {:.2} {:.2} l S",
+                x1,
+                h - y1,
+                x2,
+                h - y2
+            )
+            .unwrap();
+        }
+        DimPrimitive::Arrow {
+            tip,
+            tail,
+            width_mm,
+            filled,
+            stroke_mm: _,
+        } => {
+            let axis = *tail - *tip;
+            let len = axis.length().max(1e-5);
+            let axis_u = axis / len;
+            let perp = bevy::math::Vec2::new(-axis_u.y, axis_u.x);
+            let half_w = width_mm * 0.5;
+            let base_l = *tail + perp * half_w;
+            let base_r = *tail - perp * half_w;
+            writeln!(
+                content,
+                "{:.2} {:.2} m {:.2} {:.2} l {:.2} {:.2} l h {}",
+                tip.x,
+                h - tip.y,
+                base_l.x,
+                h - base_l.y,
+                base_r.x,
+                h - base_r.y,
+                if *filled { "f" } else { "S" }
+            )
+            .unwrap();
+        }
+        DimPrimitive::Dot { pos, radius_mm } => {
+            // PDF has no first-class circle; approximate with a filled
+            // square (close enough at the sizes used by dot terminators).
+            let r = *radius_mm;
+            writeln!(
+                content,
+                "{:.2} {:.2} {:.2} {:.2} re f",
+                pos.x - r,
+                (h - pos.y) - r,
+                r * 2.0,
+                r * 2.0
+            )
+            .unwrap();
+        }
+        DimPrimitive::Text {
+            anchor,
+            content: text,
+            height_mm,
+            rotation_rad,
+            anchor_mode: _,
+            font_family: _,
+            color_hex: _,
+        } => {
+            let size_pt = height_mm * (72.0 / 25.4);
+            let cos_r = rotation_rad.cos();
+            let sin_r = rotation_rad.sin();
+            let x = anchor.x;
+            let y = h - anchor.y;
+            writeln!(content, "BT").unwrap();
+            writeln!(content, "/F1 {size_pt:.2} Tf").unwrap();
+            writeln!(
+                content,
+                "{cos_r:.4} {sin_r:.4} {:.4} {cos_r:.4} {x:.2} {y:.2} Tm",
+                -sin_r
+            )
+            .unwrap();
+            let escaped = pdf_escape_text(text);
+            writeln!(content, "({escaped}) Tj").unwrap();
+            writeln!(content, "ET").unwrap();
+        }
+    }
 }
 
 fn pdf_escape_text(s: &str) -> String {
@@ -1164,6 +1648,7 @@ mod tests {
                 font_size_pt: 10.0,
             }],
             section_fills: vec![],
+            drafting_primitives: vec![],
             viewport: DrawingViewport {
                 width: 100.0,
                 height: 100.0,
@@ -1194,6 +1679,7 @@ mod tests {
             }],
             dimension_labels: vec![],
             section_fills: vec![],
+            drafting_primitives: vec![],
             viewport: DrawingViewport {
                 width: 595.0,
                 height: 842.0,
