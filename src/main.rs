@@ -20,6 +20,7 @@ use talos3d_core::plugins::{
     commands::CommandPlugin,
     cursor::CursorPlugin,
     dimension_line::DimensionLinePlugin,
+    drafting::DraftingPlugin,
     document_properties::DocumentProperties,
     document_state::DocumentStatePlugin,
     drawing_export::DrawingExportPlugin,
@@ -98,6 +99,7 @@ fn main() {
     .add_plugins(MaterialPlugin)
     .add_plugins(GuideLinePlugin)
     .add_plugins(DimensionLinePlugin)
+    .add_plugins(DraftingPlugin)
     .add_plugins(LightingPlugin)
     .add_plugins(ModelingPlugin)
     .add_plugins(BundledDefinitionLibrariesPlugin)

@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod definition_authoring;
 pub mod definition_browser;
 pub mod dimension_line;
+pub mod drafting;
 pub mod document_properties;
 pub mod document_state;
 pub mod drawing_export;
