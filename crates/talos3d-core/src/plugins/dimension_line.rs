@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, collections::HashMap};
 
 use bevy::{prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts};
@@ -8,19 +8,20 @@ use serde_json::{json, Value};
 use crate::{
     authored_entity::{
         invalid_property_error, property_field, property_field_with, read_only_property_field,
-        scalar_from_json, vec3_from_json, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo,
-        HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
+        scalar_from_json, vec3_from_json, AuthoredEntity, BoxedEntity, EntityBounds, EntityScope,
+        HandleInfo, HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
     },
     capability_registry::{
         AuthoredEntityFactory, CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity,
         CapabilityRegistryAppExt, HitCandidate, ModelSummaryAccumulator, SnapPoint,
     },
     plugins::{
+        camera::OrbitCamera,
         command_registry::{
             CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
         },
         commands::{despawn_by_element_id, find_entity_by_element_id, CreateEntityCommand},
-        cursor::CursorWorldPos,
+        cursor::{dimension_annotation_plane, CursorWorldPos, DrawingPlane},
         document_properties::DocumentProperties,
         egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
@@ -48,6 +49,7 @@ const DIMENSION_LINE_DEFAULT_OFFSET_MIN: f32 = 0.2;
 const DIMENSION_LINE_DEFAULT_OFFSET_MAX: f32 = 0.8;
 const DIMENSION_LINE_DEFAULT_OFFSET_FACTOR: f32 = 0.18;
 const DIMENSION_LINE_MIN_OFFSET: f32 = 0.001;
+pub const DIMENSION_ANNOTATIONS_KEY: &str = "dimension_annotations";
 
 pub struct DimensionLinePlugin;
 
@@ -69,7 +71,7 @@ impl Default for DimensionLineVisibility {
     }
 }
 
-#[derive(Component, Clone, Debug, Serialize, Deserialize)]
+#[derive(Component, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DimensionLineNode {
     pub start: Vec3,
     pub end: Vec3,
@@ -100,9 +102,15 @@ impl Default for DimensionLineNode {
 struct DimensionLineToolState {
     start: Option<Vec3>,
     end: Option<Vec3>,
+    host_element_id: Option<ElementId>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Resource, Default)]
+struct DimensionAnnotationSyncState {
+    last_serialized: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DimensionLineSnapshot {
     pub element_id: ElementId,
     pub start: Vec3,
@@ -222,6 +230,10 @@ impl AuthoredEntity for DimensionLineSnapshot {
 
     fn center(&self) -> Vec3 {
         self.line_midpoint()
+    }
+
+    fn scope(&self) -> EntityScope {
+        EntityScope::DrawingMetadata
     }
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
@@ -576,6 +588,9 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .transpose()?
             .ok_or_else(|| "dimension_line requires end".to_string())?;
         let line_point = parse_dimension_line_point_json(request, start, end)?;
+        let line_point = current_dimension_plane(world)
+            .map(|plane| resolved_dimension_line_point(start, end, line_point, &plane, None))
+            .unwrap_or(line_point);
         let extension = object
             .get("extension")
             .map(scalar_from_json)
@@ -679,15 +694,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
     }
 
     fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
-        let Some(mut query) = world.try_query::<&DimensionLineNode>() else {
-            return;
-        };
-        for _ in query.iter(world) {
-            *summary
-                .entity_counts
-                .entry("dimension_line".to_string())
-                .or_default() += 1;
-        }
+        let _ = (world, summary);
     }
 }
 
@@ -864,6 +871,13 @@ fn handle_dimension_line_clicks(
     cursor_world_pos: Res<CursorWorldPos>,
     mut tool_state: ResMut<DimensionLineToolState>,
     allocator: Res<ElementIdAllocator>,
+    drawing_plane: Res<DrawingPlane>,
+    camera_query: Query<(&GlobalTransform, &OrbitCamera), With<Camera3d>>,
+    host_bounds_query: Query<(
+        &ElementId,
+        Option<&bevy::camera::primitives::Aabb>,
+        Option<&GlobalTransform>,
+    )>,
     mut create_entity: MessageWriter<CreateEntityCommand>,
     mut status_bar_data: ResMut<StatusBarData>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
@@ -880,6 +894,7 @@ fn handle_dimension_line_clicks(
         None => {
             tool_state.start = Some(cursor_position);
             tool_state.end = None;
+            tool_state.host_element_id = cursor_world_pos.hovered_element_id;
             status_bar_data.hint =
                 "Click the end point, then drag away from the edge to place the dimension line"
                     .to_string();
@@ -890,6 +905,13 @@ fn handle_dimension_line_clicks(
             }
 
             tool_state.end = Some(cursor_position);
+            tool_state.host_element_id = match (
+                tool_state.host_element_id,
+                cursor_world_pos.hovered_element_id,
+            ) {
+                (Some(left), Some(right)) if left == right => Some(left),
+                _ => None,
+            };
             status_bar_data.hint =
                 "Click to place the offset dimension line outside the geometry".to_string();
         }
@@ -897,11 +919,29 @@ fn handle_dimension_line_clicks(
             let end = tool_state
                 .end
                 .expect("dimension tool end point should exist in offset placement stage");
+            let active_plane = camera_query
+                .single()
+                .ok()
+                .map(|(camera_transform, orbit)| {
+                    dimension_annotation_plane(&drawing_plane, Some(orbit), Some(camera_transform))
+                })
+                .unwrap_or_else(|| drawing_plane.clone());
+            let host_bounds = host_entity_projected_bounds(
+                tool_state.host_element_id,
+                &active_plane,
+                &host_bounds_query,
+            );
             let snapshot = DimensionLineSnapshot {
                 element_id: allocator.next_id(),
                 start,
                 end,
-                line_point: cursor_position,
+                line_point: resolved_dimension_line_point(
+                    start,
+                    end,
+                    cursor_position,
+                    &active_plane,
+                    host_bounds,
+                ),
                 extension: default_dimension_extension(start, end),
                 visible: true,
                 label: None,
@@ -913,6 +953,7 @@ fn handle_dimension_line_clicks(
             });
             tool_state.start = None;
             tool_state.end = None;
+            tool_state.host_element_id = None;
             next_active_tool.set(ActiveTool::PlaceDimensionLine);
             status_bar_data.hint =
                 "Click a start point, then click an end point, then click to place the offset"
@@ -924,6 +965,13 @@ fn handle_dimension_line_clicks(
 fn draw_dimension_line_tool_preview(
     cursor_world_pos: Res<CursorWorldPos>,
     tool_state: Option<Res<DimensionLineToolState>>,
+    drawing_plane: Res<DrawingPlane>,
+    camera_query: Query<(&GlobalTransform, &OrbitCamera), With<Camera3d>>,
+    host_bounds_query: Query<(
+        &ElementId,
+        Option<&bevy::camera::primitives::Aabb>,
+        Option<&GlobalTransform>,
+    )>,
     render_settings: Res<RenderSettings>,
     mut gizmos: Gizmos,
 ) {
@@ -937,6 +985,13 @@ fn draw_dimension_line_tool_preview(
         return;
     };
     let preview_color = dimension_line_color(Some(&render_settings), true);
+    let active_plane = camera_query
+        .single()
+        .ok()
+        .map(|(camera_transform, orbit)| {
+            dimension_annotation_plane(&drawing_plane, Some(orbit), Some(camera_transform))
+        })
+        .unwrap_or_else(|| drawing_plane.clone());
     match tool_state.end {
         None => {
             if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
@@ -953,11 +1008,22 @@ fn draw_dimension_line_tool_preview(
             );
         }
         Some(end) => {
+            let host_bounds = host_entity_projected_bounds(
+                tool_state.host_element_id,
+                &active_plane,
+                &host_bounds_query,
+            );
             draw_dimension_line_gizmo(
                 &mut gizmos,
                 start,
                 end,
-                cursor_position,
+                resolved_dimension_line_point(
+                    start,
+                    end,
+                    cursor_position,
+                    &active_plane,
+                    host_bounds,
+                ),
                 default_dimension_extension(start, end),
                 preview_color,
             );
@@ -965,9 +1031,138 @@ fn draw_dimension_line_tool_preview(
     }
 }
 
+fn current_dimension_plane(world: &World) -> Option<DrawingPlane> {
+    let fallback = world
+        .get_resource::<DrawingPlane>()
+        .cloned()
+        .unwrap_or_default();
+    let mut query = world.try_query::<(&GlobalTransform, &OrbitCamera)>()?;
+    query
+        .single(world)
+        .ok()
+        .map(|(camera_transform, orbit)| {
+            dimension_annotation_plane(&fallback, Some(orbit), Some(camera_transform))
+        })
+        .or(Some(fallback))
+}
+
+fn sync_dimension_annotations(world: &mut World) {
+    let saved = {
+        let doc_props = world.resource::<DocumentProperties>();
+        doc_props
+            .domain_defaults
+            .get(DIMENSION_ANNOTATIONS_KEY)
+            .cloned()
+    };
+    let saved_changed = {
+        let sync_state = world.resource::<DimensionAnnotationSyncState>();
+        saved != sync_state.last_serialized
+    };
+
+    if saved_changed {
+        match saved.as_ref() {
+            Some(value) => {
+                let Some(snapshots) = deserialize_dimension_annotations(value) else {
+                    world
+                        .resource_mut::<DimensionAnnotationSyncState>()
+                        .last_serialized = saved.clone();
+                    return;
+                };
+                apply_dimension_annotations_to_world(world, &snapshots);
+            }
+            None => apply_dimension_annotations_to_world(world, &[]),
+        }
+        world
+            .resource_mut::<DimensionAnnotationSyncState>()
+            .last_serialized = saved.clone();
+    }
+
+    let serialized = serialize_dimension_annotations_from_world(world);
+    {
+        let mut doc_props = world.resource_mut::<DocumentProperties>();
+        match &serialized {
+            Some(value) => {
+                if doc_props.domain_defaults.get(DIMENSION_ANNOTATIONS_KEY) != Some(value) {
+                    doc_props
+                        .domain_defaults
+                        .insert(DIMENSION_ANNOTATIONS_KEY.to_string(), value.clone());
+                }
+            }
+            None => {
+                doc_props.domain_defaults.remove(DIMENSION_ANNOTATIONS_KEY);
+            }
+        }
+    }
+    world
+        .resource_mut::<DimensionAnnotationSyncState>()
+        .last_serialized = serialized;
+}
+
+fn serialize_dimension_annotations_from_world(world: &mut World) -> Option<Value> {
+    let mut query = world.query::<(&ElementId, &DimensionLineNode)>();
+    let mut annotations = query
+        .iter(world)
+        .map(|(element_id, node)| DimensionLineSnapshot {
+            element_id: *element_id,
+            start: node.start,
+            end: node.end,
+            line_point: node.line_point,
+            extension: node.extension,
+            visible: node.visible,
+            label: node.label.clone(),
+            display_unit: node.display_unit,
+            precision: node.precision,
+        })
+        .collect::<Vec<_>>();
+    if annotations.is_empty() {
+        return None;
+    }
+    annotations.sort_by_key(|snapshot| snapshot.element_id.0);
+    serde_json::to_value(annotations).ok()
+}
+
+fn deserialize_dimension_annotations(value: &Value) -> Option<Vec<DimensionLineSnapshot>> {
+    let mut snapshots: Vec<DimensionLineSnapshot> = serde_json::from_value(value.clone()).ok()?;
+    snapshots.sort_by_key(|snapshot| snapshot.element_id.0);
+    Some(snapshots)
+}
+
+fn apply_dimension_annotations_to_world(world: &mut World, snapshots: &[DimensionLineSnapshot]) {
+    let mut existing_query = world.query::<(Entity, &ElementId, &DimensionLineNode)>();
+    let mut existing = existing_query
+        .iter(world)
+        .map(|(entity, element_id, node)| (element_id.0, (entity, node.clone())))
+        .collect::<HashMap<_, _>>();
+
+    for snapshot in snapshots {
+        let node = DimensionLineNode {
+            start: snapshot.start,
+            end: snapshot.end,
+            line_point: snapshot.line_point,
+            extension: snapshot.extension,
+            visible: snapshot.visible,
+            label: snapshot.label.clone(),
+            display_unit: snapshot.display_unit,
+            precision: snapshot.precision,
+        };
+        if let Some((entity, existing_node)) = existing.remove(&snapshot.element_id.0) {
+            if existing_node != node {
+                world.entity_mut(entity).insert(node);
+            }
+        } else {
+            world.spawn((snapshot.element_id, node));
+        }
+    }
+
+    for (_, (entity, _)) in existing {
+        let _ = world.despawn(entity);
+    }
+}
+
 impl Plugin for DimensionLinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DimensionLineVisibility>()
+            .init_resource::<DimensionAnnotationSyncState>()
             .register_authored_entity_factory(DimensionLineFactory)
             .register_capability(CapabilityDescriptor {
                 id: "dimensions".to_string(),
@@ -975,7 +1170,7 @@ impl Plugin for DimensionLinePlugin {
                 version: 1,
                 api_version: crate::capability_registry::CAPABILITY_API_VERSION,
                 description: Some(
-                    "Authored drafting dimensions with witness lines, dragged offset placement, configurable units, and measured labels."
+                    "Drawing metadata for orthographic dimensions with witness lines, offset placement, configurable units, and measured labels."
                         .to_string(),
                 ),
                 dependencies: vec![],
@@ -994,7 +1189,7 @@ impl Plugin for DimensionLinePlugin {
                     category: CommandCategory::Create,
                     parameters: None,
                     default_shortcut: Some("D".to_string()),
-                    icon: None,
+                    icon: Some("icon.dimension".to_string()),
                     hint: Some(
                         "Click a start point, click an end point, then click to place the offset dimension line."
                             .to_string(),
@@ -1003,7 +1198,7 @@ impl Plugin for DimensionLinePlugin {
                     show_in_menu: true,
                     version: 1,
                     activates_tool: Some("PlaceDimensionLine".to_string()),
-                    capability_id: Some("dimensions".to_string()),
+                    capability_id: Some(crate::plugins::drawing_export::DRAFTING_CAPABILITY_ID.to_string()),
                 },
                 execute_place_dimension_line,
             )
@@ -1015,13 +1210,13 @@ impl Plugin for DimensionLinePlugin {
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: None,
-                    icon: None,
+                    icon: Some("icon.dimensions".to_string()),
                     hint: Some("Toggle visibility of dimension annotations".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
                     activates_tool: None,
-                    capability_id: Some("dimensions".to_string()),
+                    capability_id: Some(crate::plugins::drawing_export::DRAFTING_CAPABILITY_ID.to_string()),
                 },
                 execute_toggle_dimension_line_visibility,
             )
@@ -1045,6 +1240,10 @@ impl Plugin for DimensionLinePlugin {
             .add_systems(
                 OnExit(ActiveTool::PlaceDimensionLine),
                 cleanup_dimension_line_tool,
+            )
+            .add_systems(
+                Update,
+                sync_dimension_annotations,
             )
             .add_systems(
                 Update,
@@ -1223,6 +1422,26 @@ impl DimensionGeometry {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ProjectedBounds2d {
+    min: Vec2,
+    max: Vec2,
+}
+
+impl ProjectedBounds2d {
+    fn max_along(self, axis: Vec2) -> f32 {
+        [
+            Vec2::new(self.min.x, self.min.y),
+            Vec2::new(self.min.x, self.max.y),
+            Vec2::new(self.max.x, self.max.y),
+            Vec2::new(self.max.x, self.min.y),
+        ]
+        .into_iter()
+        .map(|corner| corner.dot(axis))
+        .fold(f32::NEG_INFINITY, f32::max)
+    }
+}
+
 fn dimension_geometry(
     start: Vec3,
     end: Vec3,
@@ -1260,6 +1479,93 @@ fn dimension_geometry(
         visible_start,
         visible_end,
     }
+}
+
+fn resolved_dimension_line_point(
+    start: Vec3,
+    end: Vec3,
+    requested_line_point: Vec3,
+    plane: &DrawingPlane,
+    host_bounds: Option<ProjectedBounds2d>,
+) -> Vec3 {
+    let start_2d = plane.project_to_2d(start);
+    let end_2d = plane.project_to_2d(end);
+    let request_2d = plane.project_to_2d(requested_line_point);
+    let axis_2d = end_2d - start_2d;
+    let Some(axis_dir_2d) = axis_2d.try_normalize() else {
+        return requested_line_point;
+    };
+    let midpoint_2d = (start_2d + end_2d) * 0.5;
+    let mut offset_axis = Vec2::new(-axis_dir_2d.y, axis_dir_2d.x);
+    let requested_offset = request_2d - midpoint_2d;
+    if requested_offset.dot(offset_axis) < 0.0 {
+        offset_axis = -offset_axis;
+    }
+
+    let midpoint_projection = midpoint_2d.dot(offset_axis);
+    let requested_projection = request_2d.dot(offset_axis);
+    let minimum_projection = host_bounds
+        .map(|bounds| bounds.max_along(offset_axis))
+        .unwrap_or(midpoint_projection)
+        + default_dimension_offset(start, end);
+    let final_projection = requested_projection.max(minimum_projection);
+    let resolved_midpoint = midpoint_2d + offset_axis * (final_projection - midpoint_projection);
+    plane.to_world(resolved_midpoint)
+}
+
+fn host_entity_projected_bounds(
+    host_element_id: Option<ElementId>,
+    plane: &DrawingPlane,
+    query: &Query<(
+        &ElementId,
+        Option<&bevy::camera::primitives::Aabb>,
+        Option<&GlobalTransform>,
+    )>,
+) -> Option<ProjectedBounds2d> {
+    let host_element_id = host_element_id?;
+    let (_, aabb, transform) = query
+        .iter()
+        .find(|(element_id, _, _)| **element_id == host_element_id)?;
+    let bounds = aabb_to_world_bounds(aabb?, transform?);
+    Some(projected_bounds_from_world_bounds(bounds, plane))
+}
+
+fn projected_bounds_from_world_bounds(
+    bounds: EntityBounds,
+    plane: &DrawingPlane,
+) -> ProjectedBounds2d {
+    let mut min = Vec2::splat(f32::MAX);
+    let mut max = Vec2::splat(f32::MIN);
+    for corner in bounds.corners() {
+        let projected = plane.project_to_2d(corner);
+        min = min.min(projected);
+        max = max.max(projected);
+    }
+    ProjectedBounds2d { min, max }
+}
+
+fn aabb_to_world_bounds(
+    aabb: &bevy::camera::primitives::Aabb,
+    transform: &GlobalTransform,
+) -> EntityBounds {
+    let center = Vec3::from(aabb.center);
+    let half = Vec3::from(aabb.half_extents);
+    let local_corners = [
+        center + Vec3::new(-half.x, -half.y, -half.z),
+        center + Vec3::new(-half.x, -half.y, half.z),
+        center + Vec3::new(half.x, -half.y, half.z),
+        center + Vec3::new(half.x, -half.y, -half.z),
+        center + Vec3::new(-half.x, half.y, -half.z),
+        center + Vec3::new(-half.x, half.y, half.z),
+        center + Vec3::new(half.x, half.y, half.z),
+        center + Vec3::new(half.x, half.y, -half.z),
+    ];
+    bounds_from_points(
+        &local_corners
+            .into_iter()
+            .map(|corner| transform.transform_point(corner))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn parse_dimension_line_point_json(value: &Value, start: Vec3, end: Vec3) -> Result<Vec3, String> {
@@ -1514,6 +1820,64 @@ mod tests {
         assert_eq!(geometry.dimension_end, Vec3::new(2.0, -0.5, 0.0));
         assert_eq!(geometry.visible_start, Vec3::new(-0.25, -0.5, 0.0));
         assert_eq!(geometry.visible_end, Vec3::new(2.25, -0.5, 0.0));
+    }
+
+    #[test]
+    fn resolved_dimension_line_point_pushes_dimension_outside_host_projection() {
+        let plane = DrawingPlane::ground();
+        let resolved = resolved_dimension_line_point(
+            Vec3::ZERO,
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, -0.05),
+            &plane,
+            Some(ProjectedBounds2d {
+                min: Vec2::new(0.0, -0.4),
+                max: Vec2::new(2.0, 0.4),
+            }),
+        );
+
+        assert!(
+            (resolved.z + 0.76).abs() < 1e-3,
+            "resolved point was {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn dimension_annotations_restore_from_document_metadata() {
+        let snapshot = DimensionLineSnapshot {
+            element_id: ElementId(42),
+            start: Vec3::ZERO,
+            end: Vec3::new(2.0, 0.0, 0.0),
+            line_point: Vec3::new(1.0, 0.0, -0.5),
+            extension: 0.24,
+            visible: true,
+            label: Some("Width".to_string()),
+            display_unit: Some(DisplayUnit::Centimetres),
+            precision: Some(1),
+        };
+        let serialized = serde_json::to_value(vec![snapshot.clone()]).expect("serialize snapshot");
+
+        let mut app = App::new();
+        let mut doc_props = DocumentProperties::default();
+        doc_props
+            .domain_defaults
+            .insert(DIMENSION_ANNOTATIONS_KEY.to_string(), serialized);
+        app.insert_resource(doc_props)
+            .init_resource::<DimensionAnnotationSyncState>()
+            .add_systems(Update, sync_dimension_annotations);
+
+        app.update();
+
+        let world = app.world_mut();
+        let mut query = world.query::<(&ElementId, &DimensionLineNode)>();
+        let restored = query
+            .iter(world)
+            .next()
+            .expect("dimension should be restored from metadata");
+        assert_eq!(*restored.0, ElementId(42));
+        assert_eq!(restored.1.label.as_deref(), Some("Width"));
+        assert_eq!(restored.1.display_unit, Some(DisplayUnit::Centimetres));
+        assert_eq!(restored.1.precision, Some(1));
     }
 
     #[test]
