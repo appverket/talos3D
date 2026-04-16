@@ -1,5 +1,7 @@
 <h1><img src="./docs/assets/talos3d-logo.svg" alt="Talos3D logo" width="36" /> Talos3D Core</h1>
 
+[![CI](https://github.com/appverket/talos3D/actions/workflows/ci.yml/badge.svg)](https://github.com/appverket/talos3D/actions/workflows/ci.yml)
+
 Talos3D is a 3D platform for authored geometry, AI-assisted design workflows,
 and capability-based extensibility.
 
