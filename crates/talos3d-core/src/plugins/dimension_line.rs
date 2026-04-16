@@ -759,6 +759,7 @@ fn draw_dimension_line_labels(
     mut contexts: EguiContexts,
     doc_props: Res<DocumentProperties>,
     visibility: Res<DimensionLineVisibility>,
+    viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
     render_settings: Res<RenderSettings>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     window_query: Query<&Window, With<PrimaryWindow>>,
@@ -767,7 +768,7 @@ fn draw_dimension_line_labels(
         Option<&crate::plugins::selection::Selected>,
     )>,
 ) {
-    if !visibility.show_all {
+    if viewport_export_state.ui_suppressed() || !visibility.show_all {
         return;
     }
     let Ok(ctx_ref) = contexts.ctx_mut() else {

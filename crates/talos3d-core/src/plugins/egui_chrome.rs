@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
+use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 #[cfg(feature = "model-api")]
 use crate::plugins::model_api::ModelApiRuntimeInfo;
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{overlay_text as perf_overlay_text, PerfStats};
-use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 use crate::plugins::{
     assistant_chat::{
         assistant_panel_max_width, clamp_assistant_panel_width, draw_assistant_window,
@@ -31,6 +31,7 @@ use crate::plugins::{
         DefinitionsWindowState,
     },
     document_properties::DocumentProperties,
+    drawing_export::ViewportExportState,
     identity::{ElementId, ElementIdAllocator},
     import::{
         apply_import_review_to_pending, DocumentImportPlacementState, ImportOriginMode,
@@ -79,6 +80,157 @@ const CAMERA_LENS_SLIDER_WIDTH: f32 = 140.0;
 const CAMERA_VERTICAL_SLIDER_HEIGHT: f32 = 120.0;
 #[cfg(feature = "perf-stats")]
 const PERF_OVERLAY_WIDTH: f32 = 168.0;
+
+struct MenuSubmenuSpec {
+    label: &'static str,
+    command_ids: &'static [&'static str],
+}
+
+const FILE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
+    MenuSubmenuSpec {
+        label: "Document",
+        command_ids: &["core.new", "core.open", "core.save", "core.save_as"],
+    },
+    MenuSubmenuSpec {
+        label: "Exchange",
+        command_ids: &[
+            "core.import",
+            "core.export_drawing",
+            "core.export_drawing_png",
+            "core.export_drawing_pdf",
+            "core.export_drawing_svg",
+            "core.export_drawing_dxf",
+        ],
+    },
+];
+
+const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
+    MenuSubmenuSpec {
+        label: "History",
+        command_ids: &["core.undo", "core.redo"],
+    },
+    MenuSubmenuSpec {
+        label: "Selection",
+        command_ids: &[
+            "core.select_tool",
+            "core.select_all",
+            "core.deselect",
+            "core.delete",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Transform",
+        command_ids: &[
+            "modeling.move",
+            "modeling.rotate",
+            "modeling.scale",
+            "core.clear_pivot",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Structure",
+        command_ids: &["modeling.group", "modeling.ungroup"],
+    },
+];
+
+const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
+    MenuSubmenuSpec {
+        label: "Primitives",
+        command_ids: &[
+            "modeling.create_box",
+            "modeling.create_cylinder",
+            "modeling.create_sphere",
+            "modeling.create_plane",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Drafting & Reference",
+        command_ids: &[
+            "modeling.create_polyline",
+            "guide_lines.place",
+            "dimensions.place",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Booleans",
+        command_ids: &[
+            "modeling.boolean_union",
+            "modeling.boolean_difference",
+            "modeling.boolean_intersection",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Patterning",
+        command_ids: &[
+            "modeling.mirror_create",
+            "modeling.mirror_copy",
+            "modeling.linear_array",
+            "modeling.polar_array",
+        ],
+    },
+];
+
+const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
+    MenuSubmenuSpec {
+        label: "Zoom",
+        command_ids: &["core.zoom_to_extents", "core.zoom_to_selection"],
+    },
+    MenuSubmenuSpec {
+        label: "Projection",
+        command_ids: &[
+            "view.projection_perspective",
+            "view.projection_orthographic",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Standard Views",
+        command_ids: &[
+            "view.isometric",
+            "view.front",
+            "view.back",
+            "view.top",
+            "view.bottom",
+            "view.left",
+            "view.right",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Display",
+        command_ids: &[
+            "view.toggle_grid",
+            "view.toggle_outline",
+            "view.toggle_wireframe",
+            "view.toggle_guide_lines",
+            "view.toggle_dimensions",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Sections",
+        command_ids: &[
+            "modeling.clip_plane_create",
+            "drafting.toggle_sheet_preview",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Drafting",
+        command_ids: &[
+            "view.apply_paper_preset",
+            "drafting.toggle_visibility",
+            "drafting.set_preset_arch_imperial",
+            "drafting.set_preset_arch_metric",
+            "drafting.set_preset_eng_mm",
+            "drafting.set_preset_eng_inch",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Panels",
+        command_ids: &[
+            "modeling.toggle_definitions_browser",
+            "materials.toggle_browser",
+            "lighting.toggle_browser",
+        ],
+    },
+];
 
 pub struct EguiChromePlugin;
 
@@ -158,6 +310,302 @@ fn command_capability_enabled(
     match &descriptor.capability_id {
         Some(id) => activation.is_enabled(id),
         None => true,
+    }
+}
+
+fn category_menu_groups(
+    category: &crate::plugins::command_registry::CommandCategory,
+) -> &'static [MenuSubmenuSpec] {
+    use crate::plugins::command_registry::CommandCategory;
+
+    match category {
+        CommandCategory::File => FILE_MENU_GROUPS,
+        CommandCategory::Edit => EDIT_MENU_GROUPS,
+        CommandCategory::Create => CREATE_MENU_GROUPS,
+        CommandCategory::View => VIEW_MENU_GROUPS,
+        CommandCategory::Custom(_) => &[],
+    }
+}
+
+fn ordered_menu_categories_for_bar(
+    registry: &CommandRegistry,
+) -> Vec<crate::plugins::command_registry::CommandCategory> {
+    use crate::plugins::command_registry::CommandCategory;
+
+    let discovered = ordered_menu_categories(registry);
+    let mut ordered = Vec::new();
+
+    for preferred in [
+        CommandCategory::File,
+        CommandCategory::Edit,
+        CommandCategory::Create,
+        CommandCategory::View,
+    ] {
+        if discovered.iter().any(|category| category == &preferred) {
+            ordered.push(preferred);
+        }
+    }
+
+    for category in discovered {
+        if !ordered
+            .iter()
+            .any(|ordered_category| ordered_category == &category)
+        {
+            ordered.push(category);
+        }
+    }
+    ordered
+}
+
+fn visible_menu_commands_for_category<'a>(
+    registry: &'a CommandRegistry,
+    category: &crate::plugins::command_registry::CommandCategory,
+    activation: &CapabilityActivation,
+) -> Vec<&'a CommandDescriptor> {
+    registry
+        .commands()
+        .filter(|descriptor| {
+            descriptor.show_in_menu
+                && descriptor.category == *category
+                && command_capability_enabled(descriptor, activation)
+        })
+        .collect()
+}
+
+fn draw_command_menu_button(
+    ui: &mut egui::Ui,
+    descriptor: &CommandDescriptor,
+    selection_count: usize,
+    pending_command_invocations: &mut PendingCommandInvocations,
+    hovered_menu_hint: &mut Option<String>,
+) {
+    let enabled = !descriptor.requires_selection || selection_count > 0;
+    let label = if let Some(shortcut) = &descriptor.default_shortcut {
+        format!("{}    {shortcut}", descriptor.label)
+    } else {
+        descriptor.label.clone()
+    };
+    let response = ui
+        .add_enabled(enabled, egui::Button::new(label))
+        .on_hover_text(command_tooltip_text(descriptor));
+    if enabled && response.contains_pointer() {
+        *hovered_menu_hint = descriptor.hint.clone();
+    }
+    if enabled && response.clicked() {
+        queue_command_invocation_resource(
+            pending_command_invocations,
+            descriptor.id.clone(),
+            serde_json::json!({}),
+        );
+        ui.close();
+    }
+}
+
+fn draw_command_submenu(
+    ui: &mut egui::Ui,
+    label: &str,
+    command_ids: &[&str],
+    category_commands: &[&CommandDescriptor],
+    selection_count: usize,
+    pending_command_invocations: &mut PendingCommandInvocations,
+    hovered_menu_hint: &mut Option<String>,
+    rendered_ids: &mut HashSet<String>,
+) -> bool {
+    let descriptors: Vec<&CommandDescriptor> = command_ids
+        .iter()
+        .filter_map(|id| {
+            category_commands
+                .iter()
+                .copied()
+                .find(|descriptor| descriptor.id == *id)
+        })
+        .collect();
+
+    if descriptors.is_empty() {
+        return false;
+    }
+
+    rendered_ids.extend(descriptors.iter().map(|descriptor| descriptor.id.clone()));
+    ui.menu_button(label, |ui| {
+        for descriptor in &descriptors {
+            draw_command_menu_button(
+                ui,
+                descriptor,
+                selection_count,
+                pending_command_invocations,
+                hovered_menu_hint,
+            );
+        }
+    });
+    true
+}
+
+fn draw_view_workspace_submenu(
+    ui: &mut egui::Ui,
+    hovered_menu_hint: &mut Option<String>,
+    assistant_window_state: &mut RightSidebarState,
+    lighting_window_state: &mut LightingWindowState,
+    render_settings_window_state: &mut RenderSettingsWindowState,
+    extensions_window_state: &mut ExtensionsWindowState,
+    toolbar_registry: &ToolbarRegistry,
+    toolbar_layout_state: &mut ToolbarLayoutState,
+    doc_props: &mut DocumentProperties,
+) {
+    ui.menu_button("Workspace", |ui| {
+        let assistant = ui
+            .button("Assistant...")
+            .on_hover_text("Open the assistant side panel");
+        if assistant.contains_pointer() {
+            *hovered_menu_hint = Some("Open the assistant side panel".to_string());
+        }
+        if assistant.clicked() {
+            assistant_window_state.visible = true;
+            ui.close();
+        }
+
+        let lights = ui
+            .button("Lights...")
+            .on_hover_text("Open the scene lighting panel");
+        if lights.contains_pointer() {
+            *hovered_menu_hint = Some("Open the scene lighting panel".to_string());
+        }
+        if lights.clicked() {
+            lighting_window_state.visible = true;
+            ui.close();
+        }
+
+        let renderer = ui
+            .button("Renderer...")
+            .on_hover_text("Adjust renderer, tonemapping, and paper drawing settings");
+        if renderer.contains_pointer() {
+            *hovered_menu_hint =
+                Some("Adjust renderer, tonemapping, and paper drawing settings".to_string());
+        }
+        if renderer.clicked() {
+            render_settings_window_state.visible = true;
+            ui.close();
+        }
+
+        let extensions = ui
+            .button("Extensions...")
+            .on_hover_text("Enable or disable optional extensions");
+        if extensions.contains_pointer() {
+            *hovered_menu_hint = Some("Enable or disable optional extensions".to_string());
+        }
+        if extensions.clicked() {
+            extensions_window_state.visible = true;
+            ui.close();
+        }
+
+        ui.separator();
+        ui.menu_button("Toolbars", |ui| {
+            draw_toolbar_visibility_menu(ui, toolbar_registry, toolbar_layout_state, doc_props);
+        });
+    });
+}
+
+fn draw_about_menu(ui: &mut egui::Ui) {
+    ui.set_min_width(260.0);
+    ui.label(egui::RichText::new("Talos3D").strong());
+    ui.label(
+        egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+            .small()
+            .color(CHROME_MUTED),
+    );
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(
+            "AI-authorable 3D design platform for authored geometry, drafting, and public automation surfaces.",
+        )
+        .small(),
+    );
+    ui.separator();
+    ui.hyperlink_to("Project site", "https://talos3d.com/");
+    ui.hyperlink_to("GitHub repository", "https://github.com/appverket/talos3D");
+    ui.hyperlink_to(
+        "Model API documentation",
+        "https://github.com/appverket/talos3D/blob/main/talos3d-core/docs/MCP_MODEL_API.md",
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_category_menu_contents(
+    ui: &mut egui::Ui,
+    category: &crate::plugins::command_registry::CommandCategory,
+    category_commands: &[&CommandDescriptor],
+    selection_count: usize,
+    pending_command_invocations: &mut PendingCommandInvocations,
+    hovered_menu_hint: &mut Option<String>,
+    assistant_window_state: &mut RightSidebarState,
+    lighting_window_state: &mut LightingWindowState,
+    render_settings_window_state: &mut RenderSettingsWindowState,
+    extensions_window_state: &mut ExtensionsWindowState,
+    toolbar_registry: &ToolbarRegistry,
+    toolbar_layout_state: &mut ToolbarLayoutState,
+    doc_props: &mut DocumentProperties,
+) {
+    let groups = category_menu_groups(category);
+    if groups.is_empty() {
+        for descriptor in category_commands {
+            draw_command_menu_button(
+                ui,
+                descriptor,
+                selection_count,
+                pending_command_invocations,
+                hovered_menu_hint,
+            );
+        }
+        return;
+    }
+
+    let mut rendered_ids = HashSet::new();
+    for group in groups {
+        draw_command_submenu(
+            ui,
+            group.label,
+            group.command_ids,
+            category_commands,
+            selection_count,
+            pending_command_invocations,
+            hovered_menu_hint,
+            &mut rendered_ids,
+        );
+    }
+
+    if matches!(
+        category,
+        crate::plugins::command_registry::CommandCategory::View
+    ) {
+        draw_view_workspace_submenu(
+            ui,
+            hovered_menu_hint,
+            assistant_window_state,
+            lighting_window_state,
+            render_settings_window_state,
+            extensions_window_state,
+            toolbar_registry,
+            toolbar_layout_state,
+            doc_props,
+        );
+    }
+
+    let leftovers: Vec<&CommandDescriptor> = category_commands
+        .iter()
+        .copied()
+        .filter(|descriptor| !rendered_ids.contains(&descriptor.id))
+        .collect();
+    if !leftovers.is_empty() {
+        ui.menu_button("More", |ui| {
+            for descriptor in leftovers {
+                draw_command_menu_button(
+                    ui,
+                    descriptor,
+                    selection_count,
+                    pending_command_invocations,
+                    hovered_menu_hint,
+                );
+            }
+        });
     }
 }
 
@@ -273,6 +721,7 @@ struct ChromeData<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     menu_bar_state: ResMut<'w, MenuBarState>,
+    viewport_export_state: Res<'w, ViewportExportState>,
     viewport_ui_inset: ResMut<'w, ViewportUiInset>,
     egui_wants_input: ResMut<'w, EguiWantsInput>,
     drag_state: ResMut<'w, ToolbarDragState>,
@@ -300,6 +749,22 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         ctx.memory_mut(|memory| memory.close_all_popups());
     }
 
+    if data.viewport_export_state.ui_suppressed() {
+        egui::Popup::close_all(&ctx);
+        data.drag_state.toolbar_rects.clear();
+        data.viewport_context_menu.open = false;
+        data.viewport_context_menu.just_opened = false;
+        data.egui_wants_input.pointer = false;
+        data.egui_wants_input.keyboard = false;
+        if let Ok(_window) = data.window_query.single() {
+            data.viewport_ui_inset.top = 0.0;
+            data.viewport_ui_inset.bottom = 0.0;
+            data.viewport_ui_inset.left = 0.0;
+            data.viewport_ui_inset.right = 0.0;
+        }
+        return;
+    }
+
     let selection_count = data.selected_query.iter().count();
     let current_tool = format!("{:?}", data.active_tool.get());
     let mut hovered_menu_hint = None;
@@ -313,75 +778,31 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             .resizable(false)
             .show(&ctx, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
-                    for category in ordered_menu_categories(&data.command_registry) {
+                    for category in ordered_menu_categories_for_bar(&data.command_registry) {
+                        let category_commands = visible_menu_commands_for_category(
+                            &data.command_registry,
+                            &category,
+                            &data.capability_activation,
+                        );
                         ui.menu_button(category.label(), |ui| {
-                            for descriptor in
-                                data.command_registry.commands().filter(|descriptor| {
-                                    descriptor.show_in_menu
-                                        && descriptor.category == category
-                                        && command_capability_enabled(
-                                            descriptor,
-                                            &data.capability_activation,
-                                        )
-                                })
-                            {
-                                let enabled = !descriptor.requires_selection || selection_count > 0;
-                                let label = if let Some(shortcut) = &descriptor.default_shortcut {
-                                    format!("{}    {shortcut}", descriptor.label)
-                                } else {
-                                    descriptor.label.clone()
-                                };
-                                let response = ui
-                                    .add_enabled(enabled, egui::Button::new(label))
-                                    .on_hover_text(command_tooltip_text(descriptor));
-                                if enabled && response.contains_pointer() {
-                                    hovered_menu_hint = descriptor.hint.clone();
-                                }
-                                if enabled
-                                    && response.contains_pointer()
-                                    && ui.ctx().input(|i| i.pointer.primary_released())
-                                {
-                                    queue_command_invocation_resource(
-                                        &mut data.pending_command_invocations,
-                                        descriptor.id.clone(),
-                                        serde_json::json!({}),
-                                    );
-                                    ui.close();
-                                }
-                            }
-                            if category.label() == "View" {
-                                ui.separator();
-                                if ui.button("Assistant...").clicked() {
-                                    data.assistant_window_state.visible = true;
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button("Lights...").clicked() {
-                                    data.lighting_window_state.visible = true;
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button("Renderer...").clicked() {
-                                    data.render_settings_window_state.visible = true;
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button("Extensions...").clicked() {
-                                    data.extensions_window_state.visible = true;
-                                    ui.close();
-                                }
-                                ui.separator();
-                                ui.menu_button("Toolbars", |ui| {
-                                    draw_toolbar_visibility_menu(
-                                        ui,
-                                        &data.toolbar_registry,
-                                        &mut data.toolbar_layout_state,
-                                        &mut data.doc_props,
-                                    );
-                                });
-                            }
+                            draw_category_menu_contents(
+                                ui,
+                                &category,
+                                &category_commands,
+                                selection_count,
+                                &mut data.pending_command_invocations,
+                                &mut hovered_menu_hint,
+                                &mut data.assistant_window_state,
+                                &mut data.lighting_window_state,
+                                &mut data.render_settings_window_state,
+                                &mut data.extensions_window_state,
+                                &data.toolbar_registry,
+                                &mut data.toolbar_layout_state,
+                                &mut data.doc_props,
+                            );
                         });
                     }
+                    ui.menu_button("About", draw_about_menu);
                 });
             });
     }
@@ -2176,11 +2597,7 @@ fn draw_extensions_window(
                             .clone()
                             .unwrap_or_else(|| descriptor.id.clone());
                         checkbox.on_hover_text(hover_text.clone());
-                        ui.label(
-                            egui::RichText::new(hover_text)
-                                .small()
-                                .color(CHROME_MUTED),
-                        );
+                        ui.label(egui::RichText::new(hover_text).small().color(CHROME_MUTED));
                         ui.end_row();
                     }
                 });
