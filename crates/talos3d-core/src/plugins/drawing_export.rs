@@ -38,109 +38,121 @@ pub struct DrawingExportPlugin;
 
 impl Plugin for DrawingExportPlugin {
     fn build(&self, app: &mut App) {
-        app.register_capability(
-            CapabilityDescriptor::new(DRAFTING_CAPABILITY_ID, "2D Drafting")
-                .with_description(
-                    "Vector-paper output and drafting annotations \
+        app.init_resource::<ViewportExportState>()
+            .add_systems(
+                Update,
+                process_pending_viewport_export
+                    .after(crate::plugins::egui_chrome::EguiChromeSystems),
+            )
+            .register_capability(
+                CapabilityDescriptor::new(DRAFTING_CAPABILITY_ID, "2D Drafting")
+                    .with_description(
+                        "Vector-paper output and drafting annotations \
                      (PDF/SVG export, dimensions, guide lines). \
                      Turn on for plan/section/elevation work; leave off for \
                      pure 3D modelling.",
-                )
-                .with_distribution(CapabilityDistribution::Bundled)
-                .with_maturity(CapabilityMaturity::Stable),
-        )
-        .register_command(
-            CommandDescriptor {
-                id: "core.export_drawing".to_string(),
-                label: "Export Drawing...".to_string(),
-                description: "Export the current drawing viewport as PNG, PDF, or SVG.".to_string(),
-                category: CommandCategory::File,
-                parameters: None,
-                version: 1,
-                default_shortcut: Some("Ctrl/Cmd+Shift+E".to_string()),
-                icon: Some("icon.export".to_string()),
-                hint: Some("Export the cropped drawing viewport as PNG, PDF, or SVG".to_string()),
-                requires_selection: false,
-                show_in_menu: true,
-                activates_tool: None,
-                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
-            },
-            execute_export_drawing,
-        )
-        .register_command(
-            CommandDescriptor {
-                id: "core.export_drawing_png".to_string(),
-                label: "Export Drawing as PNG...".to_string(),
-                description: "Export the current drawing viewport as a PNG image.".to_string(),
-                category: CommandCategory::File,
-                parameters: None,
-                version: 1,
-                default_shortcut: None,
-                icon: Some("icon.export".to_string()),
-                hint: Some("Export the cropped drawing viewport as PNG".to_string()),
-                requires_selection: false,
-                show_in_menu: true,
-                activates_tool: None,
-                // PNG is always legitimate — rasterising a shaded 3D view
-                // is not misleading, so leave it ungated.
-                capability_id: None,
-            },
-            execute_export_drawing_png,
-        )
-        .register_command(
-            CommandDescriptor {
-                id: "core.export_drawing_pdf".to_string(),
-                label: "Export Drawing as PDF...".to_string(),
-                description: "Export the current drawing viewport as a PDF document.".to_string(),
-                category: CommandCategory::File,
-                parameters: None,
-                version: 1,
-                default_shortcut: None,
-                icon: Some("icon.export".to_string()),
-                hint: Some("Export the cropped drawing viewport as PDF".to_string()),
-                requires_selection: false,
-                show_in_menu: true,
-                activates_tool: None,
-                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
-            },
-            execute_export_drawing_pdf,
-        )
-        .register_command(
-            CommandDescriptor {
-                id: "core.export_drawing_svg".to_string(),
-                label: "Export Drawing as SVG...".to_string(),
-                description: "Export the current drawing viewport as an SVG document.".to_string(),
-                category: CommandCategory::File,
-                parameters: None,
-                version: 1,
-                default_shortcut: None,
-                icon: Some("icon.export".to_string()),
-                hint: Some("Export the cropped drawing viewport as SVG".to_string()),
-                requires_selection: false,
-                show_in_menu: true,
-                activates_tool: None,
-                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
-            },
-            execute_export_drawing_svg,
-        )
-        .register_command(
-            CommandDescriptor {
-                id: "core.export_drawing_dxf".to_string(),
-                label: "Export Drawing as DXF...".to_string(),
-                description: "Export the current drawing viewport as a DXF file (AC1027).".to_string(),
-                category: CommandCategory::File,
-                parameters: None,
-                version: 1,
-                default_shortcut: None,
-                icon: Some("icon.export".to_string()),
-                hint: Some("Export the cropped drawing viewport as DXF".to_string()),
-                requires_selection: false,
-                show_in_menu: true,
-                activates_tool: None,
-                capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
-            },
-            execute_export_drawing_dxf,
-        );
+                    )
+                    .with_distribution(CapabilityDistribution::Bundled)
+                    .with_maturity(CapabilityMaturity::Stable),
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "core.export_drawing".to_string(),
+                    label: "Export Drawing...".to_string(),
+                    description: "Export the current drawing viewport as PNG, PDF, or SVG."
+                        .to_string(),
+                    category: CommandCategory::File,
+                    parameters: None,
+                    version: 1,
+                    default_shortcut: Some("Ctrl/Cmd+Shift+E".to_string()),
+                    icon: Some("icon.export".to_string()),
+                    hint: Some(
+                        "Export the cropped drawing viewport as PNG, PDF, or SVG".to_string(),
+                    ),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                execute_export_drawing,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "core.export_drawing_png".to_string(),
+                    label: "Export Drawing as PNG...".to_string(),
+                    description: "Export the current drawing viewport as a PNG image.".to_string(),
+                    category: CommandCategory::File,
+                    parameters: None,
+                    version: 1,
+                    default_shortcut: None,
+                    icon: Some("icon.export".to_string()),
+                    hint: Some("Export the cropped drawing viewport as PNG".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    activates_tool: None,
+                    // PNG is always legitimate — rasterising a shaded 3D view
+                    // is not misleading, so leave it ungated.
+                    capability_id: None,
+                },
+                execute_export_drawing_png,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "core.export_drawing_pdf".to_string(),
+                    label: "Export Drawing as PDF...".to_string(),
+                    description: "Export the current drawing viewport as a PDF document."
+                        .to_string(),
+                    category: CommandCategory::File,
+                    parameters: None,
+                    version: 1,
+                    default_shortcut: None,
+                    icon: Some("icon.export".to_string()),
+                    hint: Some("Export the cropped drawing viewport as PDF".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                execute_export_drawing_pdf,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "core.export_drawing_svg".to_string(),
+                    label: "Export Drawing as SVG...".to_string(),
+                    description: "Export the current drawing viewport as an SVG document."
+                        .to_string(),
+                    category: CommandCategory::File,
+                    parameters: None,
+                    version: 1,
+                    default_shortcut: None,
+                    icon: Some("icon.export".to_string()),
+                    hint: Some("Export the cropped drawing viewport as SVG".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                execute_export_drawing_svg,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "core.export_drawing_dxf".to_string(),
+                    label: "Export Drawing as DXF...".to_string(),
+                    description: "Export the current drawing viewport as a DXF file (AC1027)."
+                        .to_string(),
+                    category: CommandCategory::File,
+                    parameters: None,
+                    version: 1,
+                    default_shortcut: None,
+                    icon: Some("icon.export".to_string()),
+                    hint: Some("Export the cropped drawing viewport as DXF".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                execute_export_drawing_dxf,
+            );
     }
 }
 
@@ -150,6 +162,38 @@ pub(crate) enum ViewportExportFormat {
     Pdf,
     Svg,
     Dxf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingViewportExportStage {
+    FlushUiFrame,
+    CaptureNextFrame,
+}
+
+impl PendingViewportExportStage {
+    fn advance(self) -> Option<Self> {
+        match self {
+            Self::FlushUiFrame => Some(Self::CaptureNextFrame),
+            Self::CaptureNextFrame => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingViewportExport {
+    path: PathBuf,
+    stage: PendingViewportExportStage,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub(crate) struct ViewportExportState {
+    pub(crate) pending: Option<PendingViewportExport>,
+}
+
+impl ViewportExportState {
+    pub(crate) fn ui_suppressed(&self) -> bool {
+        self.pending.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -361,7 +405,9 @@ fn export_sheet_drawing(world: &World, path: &Path) -> Result<(), String> {
 
 pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<(), String> {
     let _ = viewport_export_format_from_path(path)?;
-    let viewport_capture = capture_viewport(world);
+    if world.resource::<ViewportExportState>().pending.is_some() {
+        return Err("A viewport export is already in progress.".to_string());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -371,15 +417,35 @@ pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<()
         Err(error) => return Err(error.to_string()),
     }
 
+    world.resource_mut::<ViewportExportState>().pending = Some(PendingViewportExport {
+        path: path.to_path_buf(),
+        stage: PendingViewportExportStage::FlushUiFrame,
+    });
+    Ok(())
+}
+
+fn process_pending_viewport_export(world: &mut World) {
+    let pending = {
+        let Some(mut export_state) = world.get_resource_mut::<ViewportExportState>() else {
+            return;
+        };
+        let Some(mut pending) = export_state.pending.take() else {
+            return;
+        };
+        if let Some(next_stage) = pending.stage.advance() {
+            pending.stage = next_stage;
+            export_state.pending = Some(pending);
+            return;
+        }
+        pending
+    };
+
+    let viewport_capture = capture_viewport(world);
     world
         .commands()
         .spawn(Screenshot::primary_window())
-        .observe(save_viewport_export_to_disk(
-            path.to_path_buf(),
-            viewport_capture,
-        ));
+        .observe(save_viewport_export_to_disk(pending.path, viewport_capture));
     world.flush();
-    Ok(())
 }
 
 pub(crate) fn save_viewport_export_to_disk(
@@ -819,5 +885,14 @@ mod tests {
         assert!(is_linear_texture_format(TextureFormat::Bgra8Unorm));
         assert!(!is_linear_texture_format(TextureFormat::Rgba8UnormSrgb));
         assert!(!is_linear_texture_format(TextureFormat::Bgra8UnormSrgb));
+    }
+
+    #[test]
+    fn pending_viewport_export_waits_one_ui_flush_frame() {
+        assert_eq!(
+            PendingViewportExportStage::FlushUiFrame.advance(),
+            Some(PendingViewportExportStage::CaptureNextFrame)
+        );
+        assert_eq!(PendingViewportExportStage::CaptureNextFrame.advance(), None);
     }
 }

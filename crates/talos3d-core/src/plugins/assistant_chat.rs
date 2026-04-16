@@ -11,6 +11,8 @@ use crate::plugins::document_properties::DocumentProperties;
 pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 440.0;
 pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 360.0;
 const ASSISTANT_PANEL_ID: &str = "assistant_chat_sidebar";
+const ASSISTANT_CHAT_COMPOSER_HEIGHT: f32 = 120.0;
+const ASSISTANT_CHAT_MIN_TRANSCRIPT_HEIGHT: f32 = 160.0;
 const ASSISTANT_TOOL_STEPS: usize = 12;
 const ASSISTANT_MAX_TOKENS: u32 = 1600;
 const ASSISTANT_PANEL_SURFACE: egui::Color32 = egui::Color32::from_rgb(26, 30, 36);
@@ -764,9 +766,10 @@ pub fn draw_assistant_window(
         .active_profile()
         .map(AssistantConnectionProfile::badge_label)
         .unwrap_or_else(|| "Assistant".to_string());
-    let max_panel_width = ctx.viewport_rect().width() * 0.8;
+    let max_panel_width = assistant_panel_max_width(ctx);
     let requested_width = clamp_assistant_panel_width(sidebar_state.width, max_panel_width);
-    egui::SidePanel::right(ASSISTANT_PANEL_ID)
+    seed_assistant_panel_state(ctx, requested_width);
+    egui::SidePanel::right(assistant_panel_id())
         .resizable(true)
         .frame(
             egui::Frame::new()
@@ -849,12 +852,9 @@ pub fn draw_assistant_window(
                 },
             }
         });
-    sidebar_state.width = egui::containers::panel::PanelState::load(
-        ctx,
-        egui::Id::new(ASSISTANT_PANEL_ID),
-    )
-    .map(|panel_state| clamp_assistant_panel_width(panel_state.rect.width(), max_panel_width))
-    .unwrap_or(requested_width);
+    sidebar_state.width = assistant_panel_width_from_ctx(ctx)
+        .map(|width| clamp_assistant_panel_width(width, max_panel_width))
+        .unwrap_or(requested_width);
 
     if send_now {
         let trimmed = state.draft.trim().to_string();
@@ -891,73 +891,50 @@ fn draw_assistant_chat_panel(
         ui.add_space(8.0);
     }
 
-    egui::ScrollArea::vertical()
-        .id_salt("assistant_chat_messages")
-        .stick_to_bottom(true)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if state.messages.is_empty() && !state.pending {
-                ui.add_space(40.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "Ask me to inspect, create, modify, or explain objects in your scene.",
-                        )
-                        .italics()
-                        .color(egui::Color32::from_rgb(140, 150, 165)),
-                    );
+    let transcript_height = (ui.available_height() - ASSISTANT_CHAT_COMPOSER_HEIGHT)
+        .max(ASSISTANT_CHAT_MIN_TRANSCRIPT_HEIGHT);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), transcript_height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("assistant_chat_messages")
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if state.messages.is_empty() && !state.pending {
+                        ui.add_space(40.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Ask me to inspect, create, modify, or explain objects in your scene.",
+                                )
+                                .italics()
+                                .color(egui::Color32::from_rgb(140, 150, 165)),
+                            );
+                        });
+                        ui.add_space(40.0);
+                    }
+                    for message in &state.messages {
+                        draw_message_bubble(ui, message);
+                        ui.add_space(6.0);
+                    }
+                    if state.pending {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(egui::RichText::new("Working...").italics());
+                        });
+                    }
+                    if let Some(error) = &state.last_error {
+                        ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
+                    }
+                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
                 });
-                ui.add_space(40.0);
-            }
-            for message in &state.messages {
-                draw_message_bubble(ui, message);
-                ui.add_space(6.0);
-            }
-            if state.pending {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(egui::RichText::new("Working...").italics());
-                });
-            }
-            if let Some(error) = &state.last_error {
-                ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
-            }
-            // Claim the full remaining space so the panel doesn't auto-shrink
-            // (see egui docs: "Auto-sizing panels and windows")
-            ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
-        });
+        },
+    );
 
     ui.separator();
-    egui::Frame::group(ui.style())
-        .fill(egui::Color32::from_rgb(25, 30, 38))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let input = ui.add(
-                    egui::TextEdit::multiline(&mut state.draft)
-                        .desired_width((ui.available_width() - 40.0).max(120.0))
-                        .desired_rows(2)
-                        .hint_text("Ask about your scene..."),
-                );
-                let enter_to_send = input.has_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-                if assistant_icon_button(
-                    ui,
-                    AssistantUiIcon::Send,
-                    "Send prompt (Enter). Use Shift+Enter for a newline.",
-                    false,
-                )
-                .on_hover_text("Send prompt (Enter). Use Shift+Enter for a newline.")
-                .clicked()
-                    && !state.pending
-                    && !state.draft.trim().is_empty()
-                {
-                    *send_now = true;
-                }
-                if enter_to_send && !state.pending && !state.draft.trim().is_empty() {
-                    *send_now = true;
-                }
-            });
-        });
+    draw_assistant_chat_composer(ui, state, send_now);
 }
 
 fn draw_assistant_settings_panel(ui: &mut egui::Ui, state: &mut AssistantChatState) {
@@ -1306,6 +1283,37 @@ pub(crate) fn assistant_panel_max_width(ctx: &egui::Context) -> f32 {
     ctx.content_rect().width().max(1.0)
 }
 
+fn assistant_panel_id() -> egui::Id {
+    egui::Id::new(ASSISTANT_PANEL_ID)
+}
+
+fn assistant_panel_rect(ctx: &egui::Context, width: f32) -> egui::Rect {
+    let content_rect = ctx.content_rect();
+    let clamped_width = clamp_assistant_panel_width(width, assistant_panel_max_width(ctx));
+    egui::Rect::from_min_max(
+        egui::pos2(
+            (content_rect.max.x - clamped_width).max(content_rect.min.x),
+            content_rect.min.y,
+        ),
+        content_rect.max,
+    )
+}
+
+fn seed_assistant_panel_state(ctx: &egui::Context, width: f32) {
+    let rect = assistant_panel_rect(ctx, width);
+    ctx.data_mut(|data| {
+        data.insert_persisted(
+            assistant_panel_id(),
+            egui::containers::panel::PanelState { rect },
+        );
+    });
+}
+
+fn assistant_panel_width_from_ctx(ctx: &egui::Context) -> Option<f32> {
+    egui::containers::panel::PanelState::load(ctx, assistant_panel_id())
+        .map(|panel_state| panel_state.rect.width())
+}
+
 pub(crate) fn clamp_assistant_panel_width(width: f32, max_width: f32) -> f32 {
     let viewport_max = max_width.max(1.0);
     if viewport_max <= ASSISTANT_PANEL_MIN_WIDTH {
@@ -1313,6 +1321,52 @@ pub(crate) fn clamp_assistant_panel_width(width: f32, max_width: f32) -> f32 {
     } else {
         width.max(ASSISTANT_PANEL_MIN_WIDTH).min(viewport_max)
     }
+}
+
+fn draw_assistant_chat_composer(
+    ui: &mut egui::Ui,
+    state: &mut AssistantChatState,
+    send_now: &mut bool,
+) {
+    egui::Frame::group(ui.style())
+        .fill(egui::Color32::from_rgb(25, 30, 38))
+        .stroke(egui::Stroke::new(1.0, ASSISTANT_PANEL_BORDER))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                let input_width = (ui.available_width() - 44.0).max(120.0);
+                ui.vertical(|ui| {
+                    let input = ui.add_sized(
+                        [input_width, 68.0],
+                        egui::TextEdit::multiline(&mut state.draft)
+                            .desired_width(input_width)
+                            .desired_rows(3)
+                            .hint_text("Ask about your scene..."),
+                    );
+                    let enter_to_send = input.has_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                    if enter_to_send && !state.pending && !state.draft.trim().is_empty() {
+                        *send_now = true;
+                    }
+                    ui.label(
+                        egui::RichText::new("Enter to send. Shift+Enter inserts a newline.")
+                            .small()
+                            .color(ASSISTANT_PANEL_MUTED),
+                    );
+                });
+
+                let response = assistant_icon_button(
+                    ui,
+                    AssistantUiIcon::Send,
+                    "Send prompt (Enter). Use Shift+Enter for a newline.",
+                    false,
+                );
+                if response.clicked() && !state.pending && !state.draft.trim().is_empty() {
+                    *send_now = true;
+                }
+            });
+        });
 }
 
 fn draw_message_bubble(ui: &mut egui::Ui, message: &AssistantChatMessage) {
@@ -2365,6 +2419,30 @@ mod tests {
             clamp_assistant_panel_width(ASSISTANT_PANEL_DEFAULT_WIDTH, 300.0),
             300.0
         );
+    }
+
+    #[test]
+    fn assistant_panel_state_is_seeded_from_runtime_width() {
+        egui::__run_test_ctx(|ctx| {
+            ctx.data_mut(|data| {
+                data.insert_persisted(
+                    assistant_panel_id(),
+                    egui::containers::panel::PanelState {
+                        rect: egui::Rect::from_min_max(
+                            egui::pos2(0.0, 0.0),
+                            egui::pos2(4000.0, 1200.0),
+                        ),
+                    },
+                );
+            });
+
+            seed_assistant_panel_state(ctx, ASSISTANT_PANEL_DEFAULT_WIDTH);
+
+            assert_eq!(
+                assistant_panel_width_from_ctx(ctx),
+                Some(ASSISTANT_PANEL_DEFAULT_WIDTH)
+            );
+        });
     }
 
     #[test]

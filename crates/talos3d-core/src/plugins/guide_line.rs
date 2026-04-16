@@ -1367,11 +1367,15 @@ fn draw_guide_line_tool_preview(
 fn draw_guide_line_tool_overlay(
     mut contexts: EguiContexts,
     guide_line_tool_state: Option<Res<GuideLineToolState>>,
+    viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
     drawing_plane: Res<DrawingPlane>,
     keys: Res<ButtonInput<KeyCode>>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     window_query: Query<&Window, With<PrimaryWindow>>,
 ) {
+    if viewport_export_state.ui_suppressed() {
+        return;
+    }
     let Some(guide_line_tool_state) = guide_line_tool_state else {
         return;
     };

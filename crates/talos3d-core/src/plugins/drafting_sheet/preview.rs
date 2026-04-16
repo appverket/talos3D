@@ -24,9 +24,7 @@ use bevy_egui::{egui, EguiContexts};
 use serde_json::Value;
 
 use crate::plugins::{
-    command_registry::{
-        CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
-    },
+    command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     drafting::DraftingVisibility,
     drawing_export::DRAFTING_CAPABILITY_ID,
 };
@@ -75,8 +73,7 @@ impl Plugin for DraftingSheetPreviewPlugin {
                     default_shortcut: None,
                     icon: Some("icon.dimensions".to_string()),
                     hint: Some(
-                        "Show a floating window with the captured drafting sheet"
-                            .to_string(),
+                        "Show a floating window with the captured drafting sheet".to_string(),
                     ),
                     requires_selection: false,
                     show_in_menu: true,
@@ -142,11 +139,9 @@ fn refresh_preview_sheet(world: &mut World) {
         return;
     }
 
-    let Some(view) = sheet_view_from_active_camera(
-        world,
-        DEFAULT_SCALE_DENOMINATOR,
-        DEFAULT_MARGIN_MM,
-    ) else {
+    let Some(view) =
+        sheet_view_from_active_camera(world, DEFAULT_SCALE_DENOMINATOR, DEFAULT_MARGIN_MM)
+    else {
         // Non-orthographic camera or no scene → drop the cached sheet.
         if let Some(mut state) = world.get_resource_mut::<SheetPreviewState>() {
             state.sheet = None;
@@ -199,8 +194,9 @@ fn refresh_preview_sheet(world: &mut World) {
 fn show_preview_egui_window(
     mut contexts: EguiContexts,
     mut state: ResMut<SheetPreviewState>,
+    viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
 ) {
-    if !state.enabled {
+    if viewport_export_state.ui_suppressed() || !state.enabled {
         return;
     }
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -210,10 +206,8 @@ fn show_preview_egui_window(
 
     // Lazily upload the PNG to an egui texture.
     if state.texture.is_none() {
-        if let (Some([w, h]), Ok(img)) = (
-            state.png_dims,
-            image::load_from_memory(&state.png_bytes),
-        ) {
+        if let (Some([w, h]), Ok(img)) = (state.png_dims, image::load_from_memory(&state.png_bytes))
+        {
             let rgba = img.to_rgba8();
             let pixels: Vec<u8> = rgba.into_raw();
             let colour_image = egui::ColorImage::from_rgba_unmultiplied([w, h], &pixels);
@@ -248,7 +242,10 @@ fn show_preview_egui_window(
             let w = avail.x.max(1.0);
             let h = (w / aspect.max(0.01)).min(avail.y).max(1.0);
             let display_w = if h * aspect <= avail.x { h * aspect } else { w };
-            ui.image((texture.id(), egui::Vec2::new(display_w, display_w / aspect.max(0.01))));
+            ui.image((
+                texture.id(),
+                egui::Vec2::new(display_w, display_w / aspect.max(0.01)),
+            ));
         });
     state.enabled = open;
 }
