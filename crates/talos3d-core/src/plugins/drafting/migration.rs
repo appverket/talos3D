@@ -15,8 +15,7 @@ use bevy::prelude::*;
 use serde_json::{json, Value};
 
 use crate::plugins::{
-    dimension_line::DIMENSION_ANNOTATIONS_KEY,
-    document_properties::DocumentProperties,
+    dimension_line::DIMENSION_ANNOTATIONS_KEY, document_properties::DocumentProperties,
     identity::ElementIdAllocator,
 };
 
@@ -41,7 +40,11 @@ pub fn migrate_legacy_dimensions(
     if props.domain_defaults.contains_key(DRAFTING_ANNOTATIONS_KEY) {
         return;
     }
-    let Some(legacy) = props.domain_defaults.get(DIMENSION_ANNOTATIONS_KEY).cloned() else {
+    let Some(legacy) = props
+        .domain_defaults
+        .get(DIMENSION_ANNOTATIONS_KEY)
+        .cloned()
+    else {
         return;
     };
     let Some(new_list) = translate_legacy_list(&legacy, &allocator) else {
@@ -76,10 +79,7 @@ fn translate_legacy_one(legacy: &Value, allocator: &ElementIdAllocator) -> Optio
     let end = obj.get("end")?.clone();
     // Legacy `offset` is a scalar distance; our new model uses Vec3.
     // Convert to a +y offset of the requested magnitude as a best guess.
-    let offset_scalar = obj
-        .get("offset")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.5) as f32;
+    let offset_scalar = obj.get("offset").and_then(Value::as_f64).unwrap_or(0.5) as f32;
 
     // Use a fresh ID rather than colliding with the legacy one. Both keys
     // will continue to coexist and both sync systems will drive their own

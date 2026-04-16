@@ -52,7 +52,7 @@ pub use plugin::{
     visible_annotations, DraftingPlugin, DRAFTING_ANNOTATIONS_KEY, DRAFTING_CAPABILITY_ID,
 };
 pub use render::{render_dimension, DimPrimitive, DimensionInput, TextAnchor};
-pub use style::{DimensionStyle, DimensionStyleRegistry, TextPlacement, Terminator};
+pub use style::{DimensionStyle, DimensionStyleRegistry, Terminator, TextPlacement};
 pub use visibility::DraftingVisibility;
 
 #[cfg(test)]
