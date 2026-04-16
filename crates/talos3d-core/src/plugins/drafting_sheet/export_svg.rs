@@ -82,14 +82,7 @@ fn stroke_class(stroke: SheetStroke) -> &'static str {
 }
 
 fn write_lines_grouped(out: &mut String, lines: &[SheetLine]) {
-    let order = [
-        SheetStroke::SectionCut,
-        SheetStroke::Silhouette,
-        SheetStroke::Crease,
-        SheetStroke::Boundary,
-        SheetStroke::Dimension,
-    ];
-    for stroke in order {
+    for stroke in SheetStroke::PAINTER_ORDER {
         let group: Vec<&SheetLine> = lines.iter().filter(|l| l.stroke == stroke).collect();
         if group.is_empty() {
             continue;
@@ -155,12 +148,11 @@ fn write_hatches(out: &mut String, sheet: &DraftingSheet) {
 }
 
 fn write_hatch_pattern(out: &mut String, hatch: &SheetHatch, i: usize, clip_id: &str) {
-    // Paper-mm polygon → paper-mm hatch lines. The hatch generator takes
-    // a `pixels_per_world` density knob — here, one "unit" is one paper
-    // mm, so 1.0 produces ~1 hatch line per mm. Scale to 0.33 → hatch
-    // spacing ~3 mm (classic arch).
+    // Paper-mm polygon → paper-mm hatch lines. The generator expects a
+    // scale factor in "output units per paper millimetre"; sheet SVG uses
+    // paper millimetres directly, so that factor is exactly 1.0.
     let polygon: Vec<[f32; 2]> = hatch.polygon.iter().map(|p| [p.x, p.y]).collect();
-    let hatch_lines = generate_hatch_lines(&polygon, hatch.pattern, 0.333);
+    let hatch_lines = generate_hatch_lines(&polygon, hatch.pattern, 1.0);
     if hatch_lines.is_empty() {
         return;
     }
@@ -372,5 +364,63 @@ mod tests {
     fn scale_appears_in_title() {
         let svg = String::from_utf8(sheet_to_svg(&tiny_sheet())).unwrap();
         assert!(svg.contains("1:50"));
+    }
+
+    #[test]
+    fn section_cut_group_renders_after_silhouette_group() {
+        let mut s = DraftingSheet::new(50.0);
+        s.lines.push(SheetLine {
+            a: Vec2::new(0.0, 0.0),
+            b: Vec2::new(10.0, 0.0),
+            stroke: SheetStroke::Silhouette,
+        });
+        s.lines.push(SheetLine {
+            a: Vec2::new(0.0, 1.0),
+            b: Vec2::new(10.0, 1.0),
+            stroke: SheetStroke::SectionCut,
+        });
+        s.bounds = SheetBounds {
+            min: Vec2::ZERO,
+            max: Vec2::new(10.0, 2.0),
+        };
+        let svg = String::from_utf8(sheet_to_svg(&s)).unwrap();
+        let silhouette = svg.find(r#"class="silhouette""#).unwrap();
+        let section_cut = svg.find(r#"class="section-cut""#).unwrap();
+        assert!(
+            section_cut > silhouette,
+            "section cut should render over silhouette"
+        );
+    }
+
+    #[test]
+    fn hatch_spacing_uses_pattern_spacing_in_paper_mm() {
+        let mut s = DraftingSheet::new(50.0);
+        s.hatches.push(SheetHatch {
+            polygon: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(20.0, 0.0),
+                Vec2::new(20.0, 20.0),
+                Vec2::new(0.0, 20.0),
+            ],
+            pattern: HatchPattern::DiagonalLines {
+                angle_deg: 45.0,
+                spacing_mm: 10.0,
+            },
+        });
+        s.bounds = SheetBounds {
+            min: Vec2::ZERO,
+            max: Vec2::new(20.0, 20.0),
+        };
+        let svg = String::from_utf8(sheet_to_svg(&s)).unwrap();
+        let hatch_m_count = svg
+            .split(r#"class="section-hatch-0""#)
+            .nth(1)
+            .unwrap()
+            .matches('M')
+            .count();
+        assert!(
+            hatch_m_count <= 4,
+            "expected sparse hatch, got {hatch_m_count} segments"
+        );
     }
 }

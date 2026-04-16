@@ -19,6 +19,7 @@
 use image::{Rgb, RgbImage};
 
 use super::sheet::{DraftingSheet, SheetBounds, SheetStroke};
+use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern};
 use bevy::math::Vec2;
 
 /// Render the sheet as an RGB PNG at the given DPI (dots per inch on
@@ -47,32 +48,24 @@ pub fn sheet_to_png(sheet: &DraftingSheet, dpi: f32) -> Vec<u8> {
         (x, y)
     };
 
-    // Hatch: draw the fill polygon (solid black for poché only; hatch
-    // lines are drawn below as regular strokes).
+    // Hatch: draw the fill polygon (solid black for poché only) and the
+    // hatch lines so the live preview matches the vector exports.
     for hatch in &sheet.hatches {
-        if matches!(
-            hatch.pattern,
-            crate::plugins::section_fill::HatchPattern::SolidFill
-        ) {
+        if matches!(hatch.pattern, HatchPattern::SolidFill) {
             let pts: Vec<(f32, f32)> = hatch.polygon.iter().map(|p| to_px(*p)).collect();
             fill_polygon(&mut img, &pts, Rgb([0, 0, 0]));
         }
-        // For non-solid patterns, generate_hatch_lines would be called
-        // upstream, but the sheet writers themselves own that in the
-        // SVG/PDF paths. For raster MVP we approximate by leaving the
-        // polygon uncoloured; the outline (section-cut stroke) is
-        // already on the sheet and will be rendered below.
+        let polygon: Vec<[f32; 2]> = hatch.polygon.iter().map(|p| [p.x, p.y]).collect();
+        for line in generate_hatch_lines(&polygon, hatch.pattern, 1.0) {
+            let (ax, ay) = to_px(Vec2::new(line[0], line[1]));
+            let (bx, by) = to_px(Vec2::new(line[2], line[3]));
+            let w = (SheetStroke::Hatch.weight_mm() * px_per_mm).max(1.0);
+            draw_line(&mut img, ax, ay, bx, by, w, Rgb([0, 0, 0]));
+        }
     }
 
     // Lines grouped by stroke weight.
-    let order = [
-        SheetStroke::SectionCut,
-        SheetStroke::Silhouette,
-        SheetStroke::Crease,
-        SheetStroke::Boundary,
-        SheetStroke::Dimension,
-    ];
-    for stroke in order {
+    for stroke in SheetStroke::PAINTER_ORDER {
         let weight_px = (stroke.weight_mm() * px_per_mm).max(1.0);
         for line in sheet.lines.iter().filter(|l| l.stroke == stroke) {
             let (ax, ay) = to_px(line.a);
@@ -233,7 +226,7 @@ fn fill_polygon(img: &mut RgbImage, pts: &[(f32, f32)], c: Rgb<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::drafting_sheet::sheet::{SheetBounds, SheetLine, SheetStroke};
+    use crate::plugins::drafting_sheet::sheet::{SheetBounds, SheetHatch, SheetLine, SheetStroke};
 
     #[test]
     fn png_is_non_empty_and_correct_size_for_100mm_at_96dpi() {
@@ -255,6 +248,37 @@ mod tests {
             (img.width() as i32 - 378).abs() <= 2,
             "expected width ~378 px, got {}",
             img.width()
+        );
+    }
+
+    #[test]
+    fn png_renders_non_solid_hatch_lines() {
+        let mut s = DraftingSheet::new(50.0);
+        s.hatches.push(SheetHatch {
+            polygon: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(20.0, 0.0),
+                Vec2::new(20.0, 20.0),
+                Vec2::new(0.0, 20.0),
+            ],
+            pattern: HatchPattern::DiagonalLines {
+                angle_deg: 45.0,
+                spacing_mm: 5.0,
+            },
+        });
+        s.bounds = SheetBounds {
+            min: Vec2::ZERO,
+            max: Vec2::new(20.0, 20.0),
+        };
+        let bytes = sheet_to_png(&s, 96.0);
+        let img = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        let dark_pixels = img
+            .pixels()
+            .filter(|px| px[0] < 250 || px[1] < 250 || px[2] < 250)
+            .count();
+        assert!(
+            dark_pixels > 0,
+            "expected visible hatch lines in PNG preview"
         );
     }
 }

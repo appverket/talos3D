@@ -43,6 +43,7 @@ pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
     let _ = writeln!(content, "1 1 1 rg");
     let _ = writeln!(content, "0 0 {w_pt} {h_pt} re f");
     let _ = writeln!(content, "0 0 0 RG");
+    let _ = writeln!(content, "0 0 0 rg");
     let _ = writeln!(content, "1 J"); // round line caps
 
     // Hatches (black against white).
@@ -51,14 +52,7 @@ pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
     }
 
     // Lines grouped by stroke so we issue one `w` operator per weight.
-    let order = [
-        SheetStroke::SectionCut,
-        SheetStroke::Silhouette,
-        SheetStroke::Crease,
-        SheetStroke::Boundary,
-        SheetStroke::Dimension,
-    ];
-    for stroke in order {
+    for stroke in SheetStroke::PAINTER_ORDER {
         let group: Vec<&SheetLine> = sheet.lines.iter().filter(|l| l.stroke == stroke).collect();
         if group.is_empty() {
             continue;
@@ -162,7 +156,7 @@ fn write_hatch(content: &mut Vec<u8>, hatch: &SheetHatch, to_pt: &impl Fn(Vec2) 
         HatchPattern::NoFill => {}
         _ => {
             let polygon: Vec<[f32; 2]> = hatch.polygon.iter().map(|p| [p.x, p.y]).collect();
-            let hatch_lines = generate_hatch_lines(&polygon, hatch.pattern, 0.333);
+            let hatch_lines = generate_hatch_lines(&polygon, hatch.pattern, 1.0);
             if !hatch_lines.is_empty() {
                 let weight_pt = SheetStroke::Hatch.weight_mm() * MM_TO_PT;
                 let _ = writeln!(content, "{weight_pt:.3} w");
@@ -252,14 +246,25 @@ fn write_dim_primitive(
             content: text,
             height_mm,
             rotation_rad,
-            anchor_mode: _,
+            anchor_mode,
             font_family: _,
             color_hex: _,
         } => {
             let size_pt = height_mm * MM_TO_PT;
             let cr = rotation_rad.cos();
             let sr = rotation_rad.sin();
-            let (x, y) = to_pt(*anchor);
+            let (anchor_x, anchor_y) = to_pt(*anchor);
+            let estimated_width = estimate_pdf_text_width_pt(text, size_pt);
+            let (offset_x, offset_y) = match anchor_mode {
+                crate::plugins::drafting::TextAnchor::CenterBaseline => {
+                    (-estimated_width * 0.5, 0.0)
+                }
+                crate::plugins::drafting::TextAnchor::Center => {
+                    (-estimated_width * 0.5, -size_pt * 0.35)
+                }
+            };
+            let x = anchor_x + offset_x * cr - offset_y * sr;
+            let y = anchor_y + offset_x * sr + offset_y * cr;
             let _ = writeln!(content, "BT");
             let _ = writeln!(content, "/F1 {size_pt:.2} Tf");
             let _ = writeln!(
@@ -272,6 +277,21 @@ fn write_dim_primitive(
             let _ = writeln!(content, "ET");
         }
     }
+}
+
+fn estimate_pdf_text_width_pt(text: &str, size_pt: f32) -> f32 {
+    let glyph_units: f32 = text
+        .chars()
+        .map(|ch| match ch {
+            '0'..='9' => 0.56,
+            '\'' | '"' => 0.28,
+            ' ' => 0.25,
+            '-' => 0.33,
+            '.' | ',' => 0.25,
+            _ => 0.6,
+        })
+        .sum();
+    glyph_units * size_pt
 }
 
 fn pdf_escape_text(s: &str) -> String {
@@ -332,6 +352,44 @@ mod tests {
         assert!(
             text.contains("0.992 w"),
             "expected silhouette 0.992 pt, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn centered_text_offsets_left_of_anchor_in_pdf_stream() {
+        let mut s = DraftingSheet::new(50.0);
+        s.annotations.push(vec![DimPrimitive::Text {
+            anchor: Vec2::new(50.0, 10.0),
+            content: "6000".to_string(),
+            height_mm: 2.5,
+            rotation_rad: 0.0,
+            anchor_mode: crate::plugins::drafting::TextAnchor::CenterBaseline,
+            font_family: "Helvetica".to_string(),
+            color_hex: "000000".to_string(),
+        }]);
+        s.bounds = SheetBounds {
+            min: Vec2::ZERO,
+            max: Vec2::new(100.0, 20.0),
+        };
+        let bytes = sheet_to_pdf(&s);
+        let text = String::from_utf8_lossy(&bytes);
+        let expected_anchor_x = 50.0 * MM_TO_PT;
+        let matrix_line = text
+            .lines()
+            .find(|line| line.contains(" Tm"))
+            .expect("text matrix line");
+        let x = matrix_line
+            .split_whitespace()
+            .nth(4)
+            .and_then(|value| value.parse::<f32>().ok())
+            .expect("x translation");
+        assert!(
+            x < expected_anchor_x,
+            "text should shift left for centering: {matrix_line}"
+        );
+        assert!(
+            text.contains("0 0 0 rg"),
+            "PDF should restore black fill before text"
         );
     }
 }

@@ -425,6 +425,24 @@ fn direction_paper(kind: &DimensionKind, a: Vec2, b: Vec2) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        capability_registry::CapabilityRegistry,
+        plugins::{
+            clipping_planes::ClipPlaneNode,
+            drafting::{
+                DimensionAnnotationNode, DimensionKind, DimensionStyleRegistry, DraftingVisibility,
+            },
+            drafting_sheet::{sheet_to_dxf, sheet_to_pdf, sheet_to_svg},
+            identity::ElementId,
+            materials::MaterialAssignment,
+            modeling::{
+                generic_factory::PrimitiveFactory,
+                primitive_trait::{MeshGenerator, Primitive},
+                primitives::{BoxPrimitive, ShapeRotation},
+            },
+        },
+    };
+    use bevy::{asset::Assets, prelude::Mesh3d};
 
     #[test]
     fn ndc_to_paper_maps_corners_to_paper_extents() {
@@ -482,5 +500,115 @@ mod tests {
             "ground y = {}",
             ground.y
         );
+    }
+
+    #[test]
+    fn sectioned_box_exports_dimensioned_sheet_to_svg_pdf_and_dxf() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+        world.insert_resource(DimensionStyleRegistry::default());
+        world.insert_resource(DraftingVisibility::default());
+
+        let mut meshes = Assets::<Mesh>::default();
+        let primitive = BoxPrimitive {
+            centre: Vec3::new(0.0, 1.5, 0.0),
+            half_extents: Vec3::new(3.0, 1.5, 1.0),
+        };
+        let mesh_handle = meshes.add(primitive.to_bevy_mesh(Quat::IDENTITY));
+        world.insert_resource(meshes);
+        world.spawn((
+            ElementId(1),
+            primitive.clone(),
+            ShapeRotation::default(),
+            Mesh3d(mesh_handle),
+            primitive.entity_transform(Quat::IDENTITY),
+            GlobalTransform::from(primitive.entity_transform(Quat::IDENTITY)),
+            Visibility::Visible,
+            MaterialAssignment::new("default"),
+        ));
+        world.spawn((ClipPlaneNode {
+            name: "Section A-A".to_string(),
+            origin: Vec3::ZERO,
+            normal: Vec3::Z,
+            active: true,
+        },));
+        world.spawn((DimensionAnnotationNode {
+            kind: DimensionKind::Linear { direction: Vec3::X },
+            a: Vec3::new(-3.0, 0.0, 0.0),
+            b: Vec3::new(3.0, 0.0, 0.0),
+            offset: Vec3::new(0.0, -0.6, 0.0),
+            style_name: "architectural_metric".to_string(),
+            text_override: None,
+            visible: true,
+        },));
+        world.spawn((DimensionAnnotationNode {
+            kind: DimensionKind::Linear { direction: Vec3::Y },
+            a: Vec3::new(3.0, 0.0, 0.0),
+            b: Vec3::new(3.0, 3.0, 0.0),
+            offset: Vec3::new(0.6, 0.0, 0.0),
+            style_name: "architectural_metric".to_string(),
+            text_override: None,
+            visible: true,
+        },));
+
+        let view = SheetView {
+            eye: Vec3::new(0.0, 1.5, 12.0),
+            target: Vec3::new(0.0, 1.5, 0.0),
+            up: Vec3::Y,
+            ortho_height_m: 6.0,
+            aspect: 1.6,
+            scale_denominator: 50.0,
+            margin_mm: 10.0,
+        };
+        let sheet = capture_sheet(&world, &view).expect("captured drafting sheet");
+
+        assert!(
+            !sheet.lines.is_empty(),
+            "section should include visible geometry"
+        );
+        assert!(!sheet.hatches.is_empty(), "section should include cut fill");
+        assert_eq!(
+            sheet.annotations.len(),
+            2,
+            "two dimensions should be captured"
+        );
+
+        let svg = String::from_utf8(sheet_to_svg(&sheet)).expect("svg utf-8");
+        let pdf = String::from_utf8_lossy(&sheet_to_pdf(&sheet)).into_owned();
+        let dxf = sheet_to_dxf(&sheet);
+
+        assert!(svg.contains("6000"), "width dimension should appear in SVG");
+        assert!(
+            svg.contains("3000"),
+            "height dimension should appear in SVG"
+        );
+        assert!(
+            svg.contains("section-hatch"),
+            "SVG should include section hatch geometry"
+        );
+        assert!(
+            pdf.contains("6000"),
+            "width dimension should appear in PDF stream"
+        );
+        assert!(
+            pdf.contains("3000"),
+            "height dimension should appear in PDF stream"
+        );
+        assert!(dxf.contains("6000"), "width dimension should appear in DXF");
+        assert!(
+            dxf.contains("3000"),
+            "height dimension should appear in DXF"
+        );
+        assert!(
+            dxf.matches("\nLINE\n").count() > 6,
+            "DXF should include outline plus hatch geometry"
+        );
+
+        let base = "/tmp/talos3d_sheet_section_box";
+        std::fs::write(format!("{base}.svg"), &svg).expect("write svg");
+        std::fs::write(format!("{base}.pdf"), sheet_to_pdf(&sheet)).expect("write pdf");
+        std::fs::write(format!("{base}.dxf"), &dxf).expect("write dxf");
     }
 }

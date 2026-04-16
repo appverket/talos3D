@@ -55,6 +55,18 @@ impl SheetStroke {
             Self::Dimension | Self::Hatch => 0.18,
         }
     }
+
+    /// Painter's order for renderers that draw the sheet back-to-front.
+    ///
+    /// Light object edges go down first, section cuts sit on top of them,
+    /// and dimensions stay uppermost.
+    pub const PAINTER_ORDER: [Self; 5] = [
+        Self::Silhouette,
+        Self::Crease,
+        Self::Boundary,
+        Self::SectionCut,
+        Self::Dimension,
+    ];
 }
 
 // ─── Primitives ───────────────────────────────────────────────────────────
@@ -272,6 +284,24 @@ mod tests {
         assert!(SheetStroke::Silhouette.weight_mm() >= SheetStroke::Dimension.weight_mm());
         assert!(SheetStroke::Crease.weight_mm() >= SheetStroke::Dimension.weight_mm());
         assert!(SheetStroke::Boundary.weight_mm() >= SheetStroke::Dimension.weight_mm());
+    }
+
+    #[test]
+    fn painter_order_keeps_section_cut_above_object_lines() {
+        let section_cut = SheetStroke::PAINTER_ORDER
+            .iter()
+            .position(|stroke| *stroke == SheetStroke::SectionCut)
+            .unwrap();
+        let silhouette = SheetStroke::PAINTER_ORDER
+            .iter()
+            .position(|stroke| *stroke == SheetStroke::Silhouette)
+            .unwrap();
+        let dimension = SheetStroke::PAINTER_ORDER
+            .iter()
+            .position(|stroke| *stroke == SheetStroke::Dimension)
+            .unwrap();
+        assert!(section_cut > silhouette);
+        assert!(dimension > section_cut);
     }
 
     #[test]

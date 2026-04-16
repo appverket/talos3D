@@ -180,14 +180,14 @@ fn write_entities(out: &mut String, drawing: &[DimPrimitive], dimensions: &[Vec<
 
 fn write_primitive(out: &mut String, prim: &DimPrimitive, layer: &str) {
     match prim {
-        DimPrimitive::LineSegment { a, b, stroke_mm: _ } => {
-            write_line(out, layer, a.x, a.y, b.x, b.y);
+        DimPrimitive::LineSegment { a, b, stroke_mm } => {
+            write_line(out, layer, a.x, a.y, b.x, b.y, Some(*stroke_mm));
         }
         DimPrimitive::Tick {
             pos,
             rotation_rad,
             length_mm,
-            stroke_mm: _,
+            stroke_mm,
         } => {
             let half = length_mm * 0.5;
             let c = rotation_rad.cos();
@@ -199,6 +199,7 @@ fn write_primitive(out: &mut String, prim: &DimPrimitive, layer: &str) {
                 pos.y - half * s,
                 pos.x + half * c,
                 pos.y + half * s,
+                Some(*stroke_mm),
             );
         }
         DimPrimitive::Arrow {
@@ -206,7 +207,7 @@ fn write_primitive(out: &mut String, prim: &DimPrimitive, layer: &str) {
             tail,
             width_mm,
             filled,
-            stroke_mm: _,
+            stroke_mm,
         } => {
             let axis = *tail - *tip;
             let len = axis.length().max(1e-5);
@@ -234,9 +235,33 @@ fn write_primitive(out: &mut String, prim: &DimPrimitive, layer: &str) {
                 write_group(out, 33, "0.0");
             } else {
                 // Open triangle: 3 LINE entities.
-                write_line(out, layer, tip.x, tip.y, base_l.x, base_l.y);
-                write_line(out, layer, base_l.x, base_l.y, base_r.x, base_r.y);
-                write_line(out, layer, base_r.x, base_r.y, tip.x, tip.y);
+                write_line(
+                    out,
+                    layer,
+                    tip.x,
+                    tip.y,
+                    base_l.x,
+                    base_l.y,
+                    Some(*stroke_mm),
+                );
+                write_line(
+                    out,
+                    layer,
+                    base_l.x,
+                    base_l.y,
+                    base_r.x,
+                    base_r.y,
+                    Some(*stroke_mm),
+                );
+                write_line(
+                    out,
+                    layer,
+                    base_r.x,
+                    base_r.y,
+                    tip.x,
+                    tip.y,
+                    Some(*stroke_mm),
+                );
             }
         }
         DimPrimitive::Dot { pos, radius_mm } => {
@@ -291,9 +316,21 @@ fn write_primitive(out: &mut String, prim: &DimPrimitive, layer: &str) {
     }
 }
 
-fn write_line(out: &mut String, layer: &str, x1: f32, y1: f32, x2: f32, y2: f32) {
+fn write_line(
+    out: &mut String,
+    layer: &str,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    stroke_mm: Option<f32>,
+) {
     write_group(out, 0, "LINE");
     write_group(out, 8, layer);
+    if let Some(stroke_mm) = stroke_mm {
+        let lineweight = (stroke_mm * 100.0).round() as i32;
+        write_group(out, 370, &lineweight.max(0).to_string());
+    }
     write_group(out, 10, &dxf_num(x1));
     write_group(out, 20, &dxf_num(y1));
     write_group(out, 30, "0.0");
@@ -411,5 +448,24 @@ mod tests {
         // Group code 72 (horizontal alignment) or 73 (vertical) should appear
         // somewhere in the TEXT entity output.
         assert!(dxf.contains("\n72\n") || dxf.contains("\n73\n"));
+    }
+
+    #[test]
+    fn dxf_lines_emit_entity_lineweights_from_stroke_mm() {
+        let dxf = export_dxf(
+            DxfUnit::Millimetres,
+            (0.0, 0.0),
+            (100.0, 100.0),
+            &[DimPrimitive::LineSegment {
+                a: bevy::math::Vec2::ZERO,
+                b: bevy::math::Vec2::new(10.0, 0.0),
+                stroke_mm: 0.35,
+            }],
+            &[],
+        );
+        assert!(
+            dxf.contains("\n370\n35\n"),
+            "expected DXF lineweight 35 hundredths of a mm"
+        );
     }
 }
