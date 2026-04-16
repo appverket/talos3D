@@ -1807,7 +1807,11 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             scale_denominator,
             response,
         } => {
-            let _ = response.send(handle_export_drafting_sheet(world, &path, scale_denominator));
+            let _ = response.send(handle_export_drafting_sheet(
+                world,
+                &path,
+                scale_denominator,
+            ));
         }
         ModelApiRequest::PlaceSheetDimension { request, response } => {
             let _ = response.send(handle_place_sheet_dimension(world, request));
@@ -5344,11 +5348,7 @@ impl ModelApiServer {
         Parameters(params): Parameters<BooleanOperationRequest>,
     ) -> Result<CallToolResult, McpError> {
         let element_id = self
-            .request_create_entity(boolean_request_json(
-                params.base,
-                params.tool,
-                "union",
-            ))
+            .request_create_entity(boolean_request_json(params.base, params.tool, "union"))
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(element_id)
@@ -5363,11 +5363,7 @@ impl ModelApiServer {
         Parameters(params): Parameters<BooleanOperationRequest>,
     ) -> Result<CallToolResult, McpError> {
         let element_id = self
-            .request_create_entity(boolean_request_json(
-                params.base,
-                params.tool,
-                "difference",
-            ))
+            .request_create_entity(boolean_request_json(params.base, params.tool, "difference"))
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(element_id)
@@ -8055,11 +8051,12 @@ fn handle_place_sheet_dimension(
         sheet_paper_to_world, sheet_view_from_active_camera, DEFAULT_MARGIN_MM,
         DEFAULT_SCALE_DENOMINATOR,
     };
-    let scale = request.scale_denominator.unwrap_or(DEFAULT_SCALE_DENOMINATOR);
-    let view = sheet_view_from_active_camera(world, scale, DEFAULT_MARGIN_MM)
-        .ok_or_else(|| {
-            "no active orthographic camera — sheet dims require an ortho view".to_string()
-        })?;
+    let scale = request
+        .scale_denominator
+        .unwrap_or(DEFAULT_SCALE_DENOMINATOR);
+    let view = sheet_view_from_active_camera(world, scale, DEFAULT_MARGIN_MM).ok_or_else(|| {
+        "no active orthographic camera — sheet dims require an ortho view".to_string()
+    })?;
 
     let a_paper = Vec2::new(request.a[0], request.a[1]);
     let b_paper = Vec2::new(request.b[0], request.b[1]);

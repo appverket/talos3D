@@ -30,20 +30,11 @@ use crate::plugins::{
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum HatchPattern {
     /// Diagonal lines at a given angle. Standard for concrete.
-    DiagonalLines {
-        angle_deg: f32,
-        spacing_mm: f32,
-    },
+    DiagonalLines { angle_deg: f32, spacing_mm: f32 },
     /// Two sets of diagonal lines crossing. Standard for steel/metal.
-    Crosshatch {
-        angle_deg: f32,
-        spacing_mm: f32,
-    },
+    Crosshatch { angle_deg: f32, spacing_mm: f32 },
     /// Parallel lines with alternating wide/narrow gaps. Standard for wood grain.
-    WoodGrain {
-        angle_deg: f32,
-        spacing_mm: f32,
-    },
+    WoodGrain { angle_deg: f32, spacing_mm: f32 },
     /// Solid fill colour. For generic materials or when pattern is not needed.
     SolidFill,
     /// Outline only — no fill. Standard for glass.
@@ -377,10 +368,7 @@ fn chain_segments_into_loops(segments: Vec<(Vec3, Vec3)>) -> Vec<Vec<Vec3>> {
 // ─── Section fill extraction from ECS ────────────────────────────────────────
 
 /// Extract section fill regions from the world for all active clip planes.
-pub fn extract_section_fills(
-    world: &World,
-    mesh_assets: &Assets<Mesh>,
-) -> Vec<SectionFillRegion> {
+pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<SectionFillRegion> {
     let material_registry = world.get_resource::<MaterialRegistry>();
 
     let clip_query = world.try_query::<&ClipPlaneNode>();
@@ -420,22 +408,15 @@ pub fn extract_section_fills(
         };
 
         // Resolve material → hatch pattern
-        let (pattern, fill_color, mat_name) = resolve_entity_section_style(
-            mat_assign,
-            material_registry,
-        );
+        let (pattern, fill_color, mat_name) =
+            resolve_entity_section_style(mat_assign, material_registry);
 
         if matches!(pattern, HatchPattern::NoFill) {
             continue;
         }
 
         for plane in &active_planes {
-            let loops = intersect_plane_mesh(
-                plane.origin,
-                plane.normal,
-                mesh,
-                mesh_transform,
-            );
+            let loops = intersect_plane_mesh(plane.origin, plane.normal, mesh, mesh_transform);
             for polygon in loops {
                 if polygon.len() >= 3 {
                     fills.push(SectionFillRegion {
@@ -487,7 +468,8 @@ pub fn generate_hatch_lines(
             angle_deg,
             spacing_mm,
         } => {
-            let mut lines = generate_parallel_hatch(polygon, angle_deg, spacing_mm * viewport_scale);
+            let mut lines =
+                generate_parallel_hatch(polygon, angle_deg, spacing_mm * viewport_scale);
             lines.extend(generate_parallel_hatch(
                 polygon,
                 angle_deg + 90.0,
@@ -508,11 +490,7 @@ pub fn generate_hatch_lines(
 }
 
 /// Generate parallel hatch lines through a polygon at a given angle and spacing.
-fn generate_parallel_hatch(
-    polygon: &[[f32; 2]],
-    angle_deg: f32,
-    spacing: f32,
-) -> Vec<[f32; 4]> {
+fn generate_parallel_hatch(polygon: &[[f32; 2]], angle_deg: f32, spacing: f32) -> Vec<[f32; 4]> {
     if polygon.len() < 3 || spacing <= 0.0 {
         return Vec::new();
     }
@@ -530,7 +508,10 @@ fn generate_parallel_hatch(
         .map(|v| v[0] * perp[0] + v[1] * perp[1])
         .collect();
     let min_proj = projections.iter().copied().fold(f32::INFINITY, f32::min);
-    let max_proj = projections.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let max_proj = projections
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
 
     // Hatch line direction
     let dir = [-sin_a, cos_a];
@@ -570,7 +551,10 @@ fn generate_alternating_hatch(
         .map(|v| v[0] * perp[0] + v[1] * perp[1])
         .collect();
     let min_proj = projections.iter().copied().fold(f32::INFINITY, f32::min);
-    let max_proj = projections.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let max_proj = projections
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
 
     let mut lines = Vec::new();
     let mut d = min_proj + narrow * 0.5;
@@ -718,7 +702,9 @@ mod tests {
     #[test]
     fn infer_hatch_concrete() {
         let p = infer_hatch_from_name("Reinforced Concrete");
-        assert!(matches!(p, HatchPattern::DiagonalLines { angle_deg, .. } if (angle_deg - 45.0).abs() < 0.01));
+        assert!(
+            matches!(p, HatchPattern::DiagonalLines { angle_deg, .. } if (angle_deg - 45.0).abs() < 0.01)
+        );
     }
 
     #[test]
@@ -742,7 +728,9 @@ mod tests {
     #[test]
     fn infer_hatch_insulation() {
         let p = infer_hatch_from_name("Mineral Wool Insulation");
-        assert!(matches!(p, HatchPattern::Crosshatch { angle_deg, .. } if (angle_deg - 30.0).abs() < 0.01));
+        assert!(
+            matches!(p, HatchPattern::Crosshatch { angle_deg, .. } if (angle_deg - 30.0).abs() < 0.01)
+        );
     }
 
     #[test]
@@ -753,12 +741,7 @@ mod tests {
 
     #[test]
     fn parallel_hatch_generates_lines_in_square() {
-        let square = vec![
-            [0.0, 0.0],
-            [10.0, 0.0],
-            [10.0, 10.0],
-            [0.0, 10.0],
-        ];
+        let square = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
         let lines = generate_parallel_hatch(&square, 0.0, 2.0);
         // Should generate ~5 horizontal lines across the 10-unit square
         assert!(lines.len() >= 4);
@@ -767,12 +750,7 @@ mod tests {
 
     #[test]
     fn crosshatch_generates_double_lines() {
-        let square = vec![
-            [0.0, 0.0],
-            [10.0, 0.0],
-            [10.0, 10.0],
-            [0.0, 10.0],
-        ];
+        let square = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
         let diagonal_only = generate_parallel_hatch(&square, 45.0, 3.0);
         let crosshatch = generate_hatch_lines(
             &square,
