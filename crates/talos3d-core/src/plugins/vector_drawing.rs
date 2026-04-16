@@ -16,7 +16,9 @@ use crate::{
         camera::{CameraProjectionMode, OrbitCamera},
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         document_properties::DocumentProperties,
-        drafting::{self, DimPrimitive, DimensionAnnotationNode, DimensionStyleRegistry, DraftingVisibility},
+        drafting::{
+            self, DimPrimitive, DimensionAnnotationNode, DimensionStyleRegistry, DraftingVisibility,
+        },
         render_pipeline::RenderSettings,
         section_fill::{
             extract_section_fills, generate_hatch_lines, HatchPattern, ProjectedSectionFill,
@@ -200,7 +202,8 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
             if !node.visible {
                 continue;
             }
-            let segments = dimension_segments(node.start, node.end, node.line_point, node.extension);
+            let segments =
+                dimension_segments(node.start, node.end, node.line_point, node.extension);
             for (seg_start, seg_end) in segments {
                 if let Some(edge) = project_edge(
                     seg_start,
@@ -214,7 +217,8 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
                 }
             }
 
-            let geometry = dimension_geometry(node.start, node.end, node.line_point, node.extension);
+            let geometry =
+                dimension_geometry(node.start, node.end, node.line_point, node.extension);
             let midpoint = geometry.line_midpoint();
             // Project via the same view_proj path as edges so the label
             // sits on its dimension line. `Camera::world_to_viewport`
@@ -370,9 +374,7 @@ fn fit_canvas_to_content(geometry: &mut DrawingGeometry) {
     geometry.viewport.world_height = new_world_h;
 }
 
-fn content_bbox(
-    geometry: &DrawingGeometry,
-) -> Option<(bevy::math::Vec2, bevy::math::Vec2)> {
+fn content_bbox(geometry: &DrawingGeometry) -> Option<(bevy::math::Vec2, bevy::math::Vec2)> {
     let mut min = bevy::math::Vec2::splat(f32::INFINITY);
     let mut max = bevy::math::Vec2::splat(f32::NEG_INFINITY);
     let mut any = false;
@@ -473,9 +475,7 @@ fn extract_drafting_primitives(
     let mut out = Vec::new();
     let mut learned_scale = false;
     for node in q.iter(world) {
-        if !node.visible
-            || !visibility.is_visible(&node.style_name, node.kind.tag())
-        {
+        if !node.visible || !visibility.is_visible(&node.style_name, node.kind.tag()) {
             continue;
         }
         // Project the dimension's two key endpoints to learn how far
@@ -625,9 +625,8 @@ fn project_point_to_pixels(
 /// `translate = (Tx, Ty)` so that the primitive's anchor lands on the
 /// projected anchor pixel — see `extract_drafting_primitives`.
 fn transform_prim(prim: DimPrimitive, translate: bevy::math::Vec2) -> DimPrimitive {
-    let map_point = |p: bevy::math::Vec2| {
-        bevy::math::Vec2::new(p.x + translate.x, -p.y + translate.y)
-    };
+    let map_point =
+        |p: bevy::math::Vec2| bevy::math::Vec2::new(p.x + translate.x, -p.y + translate.y);
     match prim {
         DimPrimitive::LineSegment { a, b, stroke_mm } => DimPrimitive::LineSegment {
             a: map_point(a),
@@ -1204,10 +1203,7 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     );
     // Obj 5: Content stream
-    let stream_obj = format!(
-        "<< /Length {} >>\nstream\n",
-        content_bytes.len()
-    );
+    let stream_obj = format!("<< /Length {} >>\nstream\n", content_bytes.len());
     offsets.push(out.len());
     write!(out, "5 0 obj\n{stream_obj}").unwrap();
     out.extend_from_slice(&content_bytes);
@@ -1239,11 +1235,7 @@ fn write_pdf_obj(out: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, content
 
 /// Append a single drafting DimPrimitive to a PDF content stream. `h` is the
 /// page height used for the +y-down → +y-up flip.
-fn write_pdf_drafting_primitive(
-    content: &mut Vec<u8>,
-    prim: &DimPrimitive,
-    h: f32,
-) {
+fn write_pdf_drafting_primitive(content: &mut Vec<u8>, prim: &DimPrimitive, h: f32) {
     match prim {
         DimPrimitive::LineSegment { a, b, stroke_mm } => {
             // Primitive arrives already in canvas units (which equal PDF
@@ -1515,9 +1507,33 @@ pub(crate) fn collect_classified_visible_edges(
         };
         let front_facing = normal.dot(view_to_camera) >= 0.0;
 
-        register_feature_edge(&mut edges, local_a, local_b, world_a, world_b, normal, front_facing);
-        register_feature_edge(&mut edges, local_b, local_c, world_b, world_c, normal, front_facing);
-        register_feature_edge(&mut edges, local_c, local_a, world_c, world_a, normal, front_facing);
+        register_feature_edge(
+            &mut edges,
+            local_a,
+            local_b,
+            world_a,
+            world_b,
+            normal,
+            front_facing,
+        );
+        register_feature_edge(
+            &mut edges,
+            local_b,
+            local_c,
+            world_b,
+            world_c,
+            normal,
+            front_facing,
+        );
+        register_feature_edge(
+            &mut edges,
+            local_c,
+            local_a,
+            world_c,
+            world_a,
+            normal,
+            front_facing,
+        );
     }
 
     edges
@@ -1774,22 +1790,26 @@ impl DimensionGeometry {
     }
 }
 
-fn dimension_geometry(start: Vec3, end: Vec3, line_point: Vec3, extension: f32) -> DimensionGeometry {
+fn dimension_geometry(
+    start: Vec3,
+    end: Vec3,
+    line_point: Vec3,
+    extension: f32,
+) -> DimensionGeometry {
     let axis_dir = (end - start).try_normalize().unwrap_or(Vec3::X);
     let midpoint = (start + end) * 0.5;
     let raw_offset_vec = line_point - midpoint;
     let projected_offset_vec = raw_offset_vec - axis_dir * raw_offset_vec.dot(axis_dir);
     let min_offset = 0.2_f32;
-    let (offset_dir, offset_vec) =
-        if let Some(direction) = projected_offset_vec
-            .try_normalize()
-            .filter(|_| projected_offset_vec.length_squared() >= min_offset * min_offset)
-        {
-            (direction, projected_offset_vec)
-        } else {
-            let direction = stable_offset_direction(axis_dir);
-            (direction, direction * min_offset)
-        };
+    let (offset_dir, offset_vec) = if let Some(direction) = projected_offset_vec
+        .try_normalize()
+        .filter(|_| projected_offset_vec.length_squared() >= min_offset * min_offset)
+    {
+        (direction, projected_offset_vec)
+    } else {
+        let direction = stable_offset_direction(axis_dir);
+        (direction, direction * min_offset)
+    };
 
     let dimension_start = start + offset_vec;
     let dimension_end = end + offset_vec;
@@ -1848,9 +1868,7 @@ fn dimension_segments(
 }
 
 fn dimension_display_text(node: &DimensionLineNode, doc_props: &DocumentProperties) -> String {
-    let unit = node
-        .display_unit
-        .unwrap_or(doc_props.display_unit);
+    let unit = node.display_unit.unwrap_or(doc_props.display_unit);
     let precision = node.precision.unwrap_or(doc_props.precision);
     let length = (node.end - node.start).length();
     let value = unit.format_value(length, precision);
@@ -1868,7 +1886,9 @@ mod tests {
 
     #[test]
     fn edge_type_weights_follow_iso_conventions() {
-        assert!(EdgeType::SectionCut.default_weight_mm() > EdgeType::Silhouette.default_weight_mm());
+        assert!(
+            EdgeType::SectionCut.default_weight_mm() > EdgeType::Silhouette.default_weight_mm()
+        );
         assert!(EdgeType::Silhouette.default_weight_mm() > EdgeType::Dimension.default_weight_mm());
     }
 
@@ -2008,7 +2028,7 @@ mod tests {
         assert!(text.contains(" m "));
         assert!(text.contains(" l S"));
         assert!(text.contains(" w\n")); // line width operator
-        // Should NOT contain DCTDecode (JPEG image)
+                                        // Should NOT contain DCTDecode (JPEG image)
         assert!(!text.contains("/DCTDecode"));
     }
 
