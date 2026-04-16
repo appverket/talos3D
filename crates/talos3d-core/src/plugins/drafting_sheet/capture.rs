@@ -64,14 +64,13 @@ pub fn capture_sheet(world: &World, view: &SheetView) -> Option<DraftingSheet> {
     let ndc_to_paper = NdcToPaper { paper_w, paper_h };
 
     // 1) Collect visible mesh subjects and their triangles.
-    let mut subject_query = world
-        .try_query::<(
-            Entity,
-            &crate::plugins::identity::ElementId,
-            &Mesh3d,
-            &GlobalTransform,
-            Option<&Visibility>,
-        )>()?;
+    let mut subject_query = world.try_query::<(
+        Entity,
+        &crate::plugins::identity::ElementId,
+        &Mesh3d,
+        &GlobalTransform,
+        Option<&Visibility>,
+    )>()?;
     let mut subjects = Vec::new();
     for (entity, _eid, mesh_handle, mesh_transform, visibility) in subject_query.iter(world) {
         if visibility.is_some_and(|v| *v == Visibility::Hidden) {
@@ -171,8 +170,7 @@ pub fn sheet_view_from_active_camera(
 ) -> Option<SheetView> {
     use crate::plugins::camera::{CameraProjectionMode, OrbitCamera};
 
-    let mut camera_query =
-        world.try_query::<(&OrbitCamera, &GlobalTransform, &Projection)>()?;
+    let mut camera_query = world.try_query::<(&OrbitCamera, &GlobalTransform, &Projection)>()?;
     let (orbit, transform, projection) = camera_query.iter(world).next()?;
 
     // Drafting requires orthographic.
@@ -240,11 +238,7 @@ impl NdcToPaper {
     }
 }
 
-fn project_world_to_paper(
-    point: Vec3,
-    view_proj: &Mat4,
-    map: &NdcToPaper,
-) -> Option<Vec2> {
+fn project_world_to_paper(point: Vec3, view_proj: &Mat4, map: &NdcToPaper) -> Option<Vec2> {
     let clip = *view_proj * point.extend(1.0);
     if clip.w.abs() < 1e-7 {
         return None;
@@ -346,9 +340,10 @@ fn capture_annotations(
         // pass it as a pre-formatted text override.
         let style = registry.resolve(Some(&node.style_name));
         let measured_metres = measure_world_length(node);
-        let text = node.text_override.clone().unwrap_or_else(|| {
-            style.number_format.format_metres(measured_metres)
-        });
+        let text = node
+            .text_override
+            .clone()
+            .unwrap_or_else(|| style.number_format.format_metres(measured_metres));
 
         let input = DimensionInput {
             kind: mapped_kind,

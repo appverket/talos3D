@@ -83,7 +83,12 @@ pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"%PDF-1.4\n%\xC7\xEC\x8F\xA2\n");
     let mut offsets = Vec::new();
-    write_obj(&mut out, &mut offsets, 1, b"<< /Type /Catalog /Pages 2 0 R >>");
+    write_obj(
+        &mut out,
+        &mut offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    );
     write_obj(
         &mut out,
         &mut offsets,
@@ -134,7 +139,7 @@ fn write_hatch(content: &mut Vec<u8>, hatch: &SheetHatch, to_pt: &impl Fn(Vec2) 
         return;
     }
     let _ = writeln!(content, "q"); // save state
-    // Clip path.
+                                    // Clip path.
     let (x, y) = to_pt(hatch.polygon[0]);
     let _ = writeln!(content, "{x:.2} {y:.2} m");
     for p in &hatch.polygon[1..] {
@@ -156,8 +161,7 @@ fn write_hatch(content: &mut Vec<u8>, hatch: &SheetHatch, to_pt: &impl Fn(Vec2) 
         }
         HatchPattern::NoFill => {}
         _ => {
-            let polygon: Vec<[f32; 2]> =
-                hatch.polygon.iter().map(|p| [p.x, p.y]).collect();
+            let polygon: Vec<[f32; 2]> = hatch.polygon.iter().map(|p| [p.x, p.y]).collect();
             let hatch_lines = generate_hatch_lines(&polygon, hatch.pattern, 0.333);
             if !hatch_lines.is_empty() {
                 let weight_pt = SheetStroke::Hatch.weight_mm() * MM_TO_PT;
@@ -304,7 +308,10 @@ mod tests {
         let bytes = sheet_to_pdf(&s);
         let text = String::from_utf8_lossy(&bytes);
         // 100 mm × 72/25.4 = 283.46 pt ; 50 mm = 141.73 pt
-        assert!(text.contains("/MediaBox [0 0 283.46 141.73]"), "mediabox missing, got:\n{text}");
+        assert!(
+            text.contains("/MediaBox [0 0 283.46 141.73]"),
+            "mediabox missing, got:\n{text}"
+        );
     }
 
     #[test]
@@ -322,6 +329,9 @@ mod tests {
         let bytes = sheet_to_pdf(&s);
         let text = String::from_utf8_lossy(&bytes);
         // 0.35 mm * 72/25.4 = 0.992 pt
-        assert!(text.contains("0.992 w"), "expected silhouette 0.992 pt, got:\n{text}");
+        assert!(
+            text.contains("0.992 w"),
+            "expected silhouette 0.992 pt, got:\n{text}"
+        );
     }
 }

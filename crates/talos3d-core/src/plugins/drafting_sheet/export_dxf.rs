@@ -19,11 +19,7 @@ use super::sheet::{DraftingSheet, SheetLine};
 /// coordinates.
 #[must_use]
 pub fn sheet_to_dxf(sheet: &DraftingSheet) -> String {
-    let drawing: Vec<DimPrimitive> = sheet
-        .lines
-        .iter()
-        .map(line_to_primitive)
-        .collect();
+    let drawing: Vec<DimPrimitive> = sheet.lines.iter().map(line_to_primitive).collect();
     let annotations: Vec<Vec<DimPrimitive>> = sheet.annotations.clone();
 
     let (min, max) = if sheet.bounds.is_valid() {

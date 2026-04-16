@@ -22,7 +22,9 @@ use crate::{
         scalar_from_json, vec3_from_json, AuthoredEntity, BoxedEntity, EntityBounds, EntityScope,
         HandleInfo, HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
     },
-    capability_registry::{AuthoredEntityFactory, HitCandidate, ModelSummaryAccumulator, SnapPoint},
+    capability_registry::{
+        AuthoredEntityFactory, HitCandidate, ModelSummaryAccumulator, SnapPoint,
+    },
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
@@ -182,8 +184,16 @@ impl AuthoredEntity for DimensionAnnotationSnapshot {
                 PropertyValueKind::Text,
                 Some(PropertyValue::Text(self.kind.tag().as_str().to_string())),
             ),
-            property_field("a", PropertyValueKind::Vec3, Some(PropertyValue::Vec3(self.a))),
-            property_field("b", PropertyValueKind::Vec3, Some(PropertyValue::Vec3(self.b))),
+            property_field(
+                "a",
+                PropertyValueKind::Vec3,
+                Some(PropertyValue::Vec3(self.a)),
+            ),
+            property_field(
+                "b",
+                PropertyValueKind::Vec3,
+                Some(PropertyValue::Vec3(self.b)),
+            ),
             property_field_with(
                 "offset",
                 "Offset",

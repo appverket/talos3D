@@ -219,7 +219,10 @@ fn shed_15x15_arch_imperial_renders_and_dumps_svg() {
 
     // Compose: shift walls and dims so they sit inside a padded SVG viewBox.
     let walls = shed_walls(world_to_paper, pad_mm, pad_mm);
-    let shifted_dims: Vec<_> = dims.into_iter().map(|d| shift_dim(d, pad_mm, pad_mm)).collect();
+    let shifted_dims: Vec<_> = dims
+        .into_iter()
+        .map(|d| shift_dim(d, pad_mm, pad_mm))
+        .collect();
 
     let printed_w = w * world_to_paper;
     let svg_size = printed_w + 2.0 * pad_mm;
@@ -228,7 +231,10 @@ fn shed_15x15_arch_imperial_renders_and_dumps_svg() {
     // Structural assertions
     assert!(svg.contains("15'-0\""), "overall 15'-0\" dimension present");
     assert!(svg.contains("7'-0\""), "7'-0\" dim present");
-    assert!(svg.contains("7'-8 1/2\""), "7'-8 1/2\" partition dim present");
+    assert!(
+        svg.contains("7'-8 1/2\""),
+        "7'-8 1/2\" partition dim present"
+    );
     assert!(svg.contains("4'-0\""), "4'-0\" inner-string dim present");
     assert!(
         svg.matches("<line").count() >= 50,
@@ -280,7 +286,10 @@ fn same_shed_rendered_in_arch_metric_and_eng() {
             render_dimension(&vert(0.0, 0.0, w, -offs), &style, world_to_paper),
         ];
         let walls = shed_walls(world_to_paper, pad_mm, pad_mm);
-        let shifted_dims: Vec<_> = dims.into_iter().map(|d| shift_dim(d, pad_mm, pad_mm)).collect();
+        let shifted_dims: Vec<_> = dims
+            .into_iter()
+            .map(|d| shift_dim(d, pad_mm, pad_mm))
+            .collect();
         let svg = render_dimensions_svg_document(
             w * world_to_paper + 2.0 * pad_mm,
             w * world_to_paper + 2.0 * pad_mm,
@@ -295,7 +304,10 @@ fn same_shed_rendered_in_arch_metric_and_eng() {
         let dxf = export_dxf(
             DxfUnit::Millimetres,
             (0.0, 0.0),
-            (w * world_to_paper + 2.0 * pad_mm, w * world_to_paper + 2.0 * pad_mm),
+            (
+                w * world_to_paper + 2.0 * pad_mm,
+                w * world_to_paper + 2.0 * pad_mm,
+            ),
             &walls,
             &shifted_dims,
         );

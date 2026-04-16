@@ -47,9 +47,9 @@ use crate::plugins::drafting::render::{DimPrimitive, TextAnchor};
 /// DXF units codes (`$INSUNITS` header):
 #[derive(Debug, Clone, Copy)]
 pub enum DxfUnit {
-    Inches,       // 1
-    Millimetres,  // 4
-    Metres,       // 6
+    Inches,      // 1
+    Millimetres, // 4
+    Metres,      // 6
 }
 
 impl DxfUnit {
@@ -159,11 +159,7 @@ fn write_tables(out: &mut String) {
     write_group(out, 0, "ENDSEC");
 }
 
-fn write_entities(
-    out: &mut String,
-    drawing: &[DimPrimitive],
-    dimensions: &[Vec<DimPrimitive>],
-) {
+fn write_entities(out: &mut String, drawing: &[DimPrimitive], dimensions: &[Vec<DimPrimitive>]) {
     write_group(out, 0, "SECTION");
     write_group(out, 2, "ENTITIES");
 
@@ -324,8 +320,7 @@ fn dxf_num(n: f32) -> String {
 fn dxf_escape_text(s: &str) -> String {
     // DXF TEXT (group code 1) disallows line breaks. Keep special chars as-is
     // except newlines, which we strip.
-    s.replace('\n', " ")
-        .replace('\r', " ")
+    s.replace('\n', " ").replace('\r', " ")
 }
 
 #[cfg(test)]
