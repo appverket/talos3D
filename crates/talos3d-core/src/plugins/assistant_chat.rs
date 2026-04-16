@@ -638,6 +638,7 @@ impl AssistantChatState {
     }
 
     fn sync_editor_if_clean(&mut self) {
+        self.settings_editor.mark_dirty(&self.preferences);
         if !self.settings_editor.dirty {
             self.settings_editor
                 .sync_from_preferences(&self.preferences);
@@ -940,9 +941,6 @@ fn draw_assistant_chat_panel(
 fn draw_assistant_settings_panel(ui: &mut egui::Ui, state: &mut AssistantChatState) {
     let mut save_changes = false;
     let mut discard_changes = false;
-    state.settings_editor.mark_dirty(&state.preferences);
-    let (status_text, status_color) =
-        assistant_footer_status(&state.settings_editor.draft, state.settings_editor.dirty);
 
     // Reserve footer height, then give the rest to the scroll area.
     let footer_height = 52.0;
@@ -1113,6 +1111,10 @@ fn draw_assistant_settings_panel(ui: &mut egui::Ui, state: &mut AssistantChatSta
             }
             ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
         });
+
+    state.settings_editor.mark_dirty(&state.preferences);
+    let (status_text, status_color) =
+        assistant_footer_status(&state.settings_editor.draft, state.settings_editor.dirty);
 
     // Sticky footer: status + Save / Discard actions.
     ui.add_space(4.0);
@@ -2534,6 +2536,51 @@ mod tests {
         assert_eq!(state.preferences.mcp_url, "http://127.0.0.1:4000/mcp");
         assert_eq!(state.settings_editor.draft, state.preferences);
         assert!(!state.settings_editor.dirty);
+    }
+
+    #[test]
+    fn assistant_settings_editor_preserves_unsaved_api_key_edits_across_sync() {
+        let mut state = AssistantChatState::from_environment();
+        let original_key = state
+            .preferences
+            .active_profile()
+            .map(|profile| profile.api_key.clone())
+            .unwrap_or_default();
+        let edited_key = if original_key.is_empty() {
+            "test-api-key".to_string()
+        } else {
+            format!("{original_key}-edited")
+        };
+
+        state
+            .settings_editor
+            .draft
+            .active_profile_mut()
+            .expect("assistant profile should exist")
+            .api_key = edited_key.clone();
+
+        assert!(!state.settings_editor.dirty);
+
+        state.sync_editor_if_clean();
+
+        assert!(state.settings_editor.dirty);
+        assert_eq!(
+            state
+                .settings_editor
+                .draft
+                .active_profile()
+                .expect("assistant profile should exist")
+                .api_key,
+            edited_key
+        );
+        assert_eq!(
+            state
+                .preferences
+                .active_profile()
+                .expect("assistant profile should exist")
+                .api_key,
+            original_key
+        );
     }
 
     #[test]
