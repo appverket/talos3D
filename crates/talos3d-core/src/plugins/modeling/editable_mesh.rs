@@ -312,6 +312,9 @@ impl EditableMesh {
     /// Get all half-edge indices bounding a face, in order.
     pub fn edges_of_face(&self, face_idx: u32) -> Vec<u32> {
         let start = self.faces[face_idx as usize].half_edge;
+        if start == NONE {
+            return Vec::new();
+        }
         let mut result = vec![start];
         let mut current = self.half_edges[start as usize].next;
         while current != start {
@@ -340,6 +343,10 @@ impl EditableMesh {
 
     /// Recompute the normal for a face from its vertices.
     pub fn recompute_face_normal(&mut self, face_idx: u32) {
+        if self.faces[face_idx as usize].half_edge == NONE {
+            self.faces[face_idx as usize].normal = Vec3::ZERO;
+            return;
+        }
         let verts = self.vertices_of_face(face_idx);
         if verts.len() < 3 {
             return;

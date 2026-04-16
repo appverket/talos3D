@@ -19,6 +19,12 @@ pub fn scale_point_around_center(point: Vec3, center: Vec3, factor: Vec3) -> Vec
     center + (point - center) * factor
 }
 
+pub fn project_direction_to_plane(direction: Vec3, plane_normal: Vec3) -> Option<Vec3> {
+    let plane_normal = plane_normal.normalize_or_zero();
+    let projected = direction - plane_normal * direction.dot(plane_normal);
+    projected.try_normalize()
+}
+
 pub fn rectangle_corners(
     center: Vec3,
     horizontal_offset: Vec3,

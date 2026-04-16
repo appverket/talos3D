@@ -12,11 +12,12 @@ use crate::{
     },
     capability_registry::{
         AuthoredEntityFactory, CapabilityRegistry, FaceHitCandidate, FaceId, HitCandidate,
-        ModelSummaryAccumulator,
+        ModelSummaryAccumulator, SnapPoint,
     },
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
+        inference::{InferenceEngine, ReferenceEdge, ReferenceFacePlane},
         layers::LayerAssignment,
         math::scale_point_around_center,
         modeling::{
@@ -27,6 +28,7 @@ use crate::{
                 ShapeRotation, SpherePrimitive, TriangleMesh,
             },
         },
+        snap::SnapKind,
     },
 };
 
@@ -645,6 +647,35 @@ impl AuthoredEntityFactory for PolylineFactory {
         }
 
         best_hit
+    }
+
+    fn collect_snap_points(&self, world: &World, out: &mut Vec<SnapPoint>) {
+        let mut __q = world.try_query::<EntityRef>().unwrap();
+        for entity_ref in __q.iter(world) {
+            let Some(polyline) = entity_ref.get::<Polyline>() else {
+                continue;
+            };
+            collect_polyline_snap_points(polyline, out);
+        }
+    }
+
+    fn collect_inference_geometry(&self, world: &World, engine: &mut InferenceEngine) {
+        let mut __q = world.try_query::<EntityRef>().unwrap();
+        for entity_ref in __q.iter(world) {
+            let (Some(element_id), Some(polyline)) =
+                (entity_ref.get::<ElementId>(), entity_ref.get::<Polyline>())
+            else {
+                continue;
+            };
+            for segment in polyline.points.windows(2) {
+                engine.add_reference_edge(ReferenceEdge {
+                    start: segment[0],
+                    end: segment[1],
+                    entity_label: "Polyline".to_string(),
+                    element_id: *element_id,
+                });
+            }
+        }
     }
 
     fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
@@ -1498,6 +1529,24 @@ impl AuthoredEntityFactory for EditableMeshFactory {
         })
     }
 
+    fn collect_snap_points(&self, world: &World, out: &mut Vec<SnapPoint>) {
+        let Some(mut query) = world.try_query::<&EditableMesh>() else {
+            return;
+        };
+        for mesh in query.iter(world) {
+            collect_editable_mesh_snap_points(mesh, out);
+        }
+    }
+
+    fn collect_inference_geometry(&self, world: &World, engine: &mut InferenceEngine) {
+        let Some(mut query) = world.try_query::<(&ElementId, &EditableMesh)>() else {
+            return;
+        };
+        for (element_id, mesh) in query.iter(world) {
+            collect_editable_mesh_reference_geometry(mesh, *element_id, "Mesh", engine);
+        }
+    }
+
     fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
         let mut __q = world.try_query::<EntityRef>().unwrap();
         for entity_ref in __q.iter(world) {
@@ -1512,6 +1561,89 @@ impl AuthoredEntityFactory for EditableMeshFactory {
             summary.bounding_points.push((min + max) * 0.5);
         }
     }
+}
+
+fn collect_polyline_snap_points(polyline: &Polyline, out: &mut Vec<SnapPoint>) {
+    for segment in polyline.points.windows(2) {
+        out.push(SnapPoint {
+            position: segment[0],
+            kind: SnapKind::Endpoint,
+        });
+        out.push(SnapPoint {
+            position: segment[1],
+            kind: SnapKind::Endpoint,
+        });
+        out.push(SnapPoint {
+            position: (segment[0] + segment[1]) * 0.5,
+            kind: SnapKind::Midpoint,
+        });
+    }
+}
+
+fn collect_editable_mesh_snap_points(mesh: &EditableMesh, out: &mut Vec<SnapPoint>) {
+    for (start, end, _) in unique_editable_mesh_edges(mesh) {
+        out.push(SnapPoint {
+            position: start,
+            kind: SnapKind::Endpoint,
+        });
+        out.push(SnapPoint {
+            position: end,
+            kind: SnapKind::Endpoint,
+        });
+        out.push(SnapPoint {
+            position: (start + end) * 0.5,
+            kind: SnapKind::Midpoint,
+        });
+    }
+}
+
+fn collect_editable_mesh_reference_geometry(
+    mesh: &EditableMesh,
+    element_id: ElementId,
+    label: &str,
+    engine: &mut InferenceEngine,
+) {
+    for (start, end, _) in unique_editable_mesh_edges(mesh) {
+        engine.add_reference_edge(ReferenceEdge {
+            start,
+            end,
+            entity_label: label.to_string(),
+            element_id,
+        });
+    }
+
+    for (face_idx, face) in mesh.faces.iter().enumerate() {
+        if face.half_edge == u32::MAX {
+            continue;
+        }
+        engine.add_reference_face_plane(ReferenceFacePlane {
+            point_on_plane: mesh.face_centroid(face_idx as u32),
+            normal: face.normal,
+            entity_label: label.to_string(),
+            element_id,
+        });
+    }
+}
+
+fn unique_editable_mesh_edges(mesh: &EditableMesh) -> Vec<(Vec3, Vec3, u32)> {
+    let mut edges = Vec::new();
+    for (half_edge_idx, half_edge) in mesh.half_edges.iter().enumerate() {
+        if half_edge.face == u32::MAX {
+            continue;
+        }
+        if half_edge.twin != u32::MAX && (half_edge.twin as usize) < half_edge_idx {
+            continue;
+        }
+        let Some(next) = mesh.half_edges.get(half_edge.next as usize) else {
+            continue;
+        };
+        edges.push((
+            mesh.vertices[half_edge.origin as usize],
+            mesh.vertices[next.origin as usize],
+            half_edge_idx as u32,
+        ));
+    }
+    edges
 }
 
 #[cfg(test)]

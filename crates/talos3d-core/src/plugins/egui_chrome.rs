@@ -356,7 +356,6 @@ fn ordered_menu_categories_for_bar(
     }
     ordered
 }
-
 fn visible_menu_commands_for_category<'a>(
     registry: &'a CommandRegistry,
     category: &crate::plugins::command_registry::CommandCategory,
@@ -473,7 +472,6 @@ fn draw_view_workspace_submenu(
             lighting_window_state.visible = true;
             ui.close();
         }
-
         let renderer = ui
             .button("Renderer...")
             .on_hover_text("Adjust renderer, tonemapping, and paper drawing settings");
@@ -527,7 +525,6 @@ fn draw_about_menu(ui: &mut egui::Ui) {
         "https://github.com/appverket/talos3D/blob/main/talos3d-core/docs/MCP_MODEL_API.md",
     );
 }
-
 #[allow(clippy::too_many_arguments)]
 fn draw_category_menu_contents(
     ui: &mut egui::Ui,
@@ -778,6 +775,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             .resizable(false)
             .show(&ctx, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
+                    for category in ordered_menu_categories_for_bar(&data.command_registry) {
                     for category in ordered_menu_categories_for_bar(&data.command_registry) {
                         let category_commands = visible_menu_commands_for_category(
                             &data.command_registry,

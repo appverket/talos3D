@@ -134,6 +134,11 @@ impl InferenceEngine {
     pub fn add_reference_distance(&mut self, distance: f32, label: String) {
         self.cached_distances.push((distance, label));
     }
+
+    #[cfg(test)]
+    pub(crate) fn reference_edges(&self) -> &[ReferenceEdge] {
+        &self.cached_edges
+    }
 }
 
 fn update_inference(world: &mut World) {

@@ -4,16 +4,18 @@ use bevy::window::PrimaryWindow;
 use crate::plugins::modeling::editable_mesh::EditableMesh;
 use crate::plugins::modeling::primitive_trait::Primitive;
 use crate::{
-    authored_entity::{PushPullAffordance, PushPullBlockReason},
+    authored_entity::{AuthoredEntity, BoxedEntity, PushPullAffordance, PushPullBlockReason},
     capability_registry::{CapabilityRegistry, FaceHitCandidate, FaceId, GeneratedFaceRef},
     plugins::{
-        commands::CreateEntityCommand,
+        commands::{ApplyEntityChangesCommand, CreateEntityCommand},
         cursor::{CursorWorldPos, DrawingPlane},
         egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
         input_ownership::{InputOwnership, InputPhase},
+        math::project_direction_to_plane,
         modeling::{
             csg::{csg_face_hit_test, CsgNode, CsgParentMap},
+            editable_mesh::{MeshOp, OperationLog, OperationOrigin},
             primitives::{
                 BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation, SpherePrimitive,
             },
@@ -24,9 +26,11 @@ use crate::{
             },
             semantics::semantic_push_pull_affordance,
             snapshots::ray_triangle_intersection,
+            snapshots::EditableMeshSnapshot,
         },
         scene_ray,
         selection::Selected,
+        snap::SnapResult,
         tools::ActiveTool,
         transform::{
             start_transform_mode_with_options, AxisConstraint, TransformMode, TransformShortcuts,
@@ -45,6 +49,8 @@ const DRAWING_CLOSE_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 const MIN_DRAWING_SEGMENT: f32 = 0.05;
 const CLOSE_THRESHOLD_PIXELS: f32 = 15.0;
 const FACE_CLICK_SLOP_PX: f32 = 6.0;
+const FACE_PARTITION_TOLERANCE: f32 = 0.05;
+const FACE_PARTITION_VERTEX_EPSILON: f32 = 1e-3;
 
 pub struct FaceEditPlugin;
 
@@ -214,6 +220,36 @@ pub struct FaceDrawingContext {
     pub segment_is_arc: Vec<bool>,
     /// Whether to use arc mode for the next segment.
     pub arc_mode: bool,
+    /// Optional world-axis lock for the next segment.
+    axis_lock: FaceDrawingAxisLock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FaceDrawingAxisLock {
+    #[default]
+    None,
+    X,
+    Y,
+    Z,
+}
+
+impl FaceDrawingAxisLock {
+    fn label(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::X => Some("X"),
+            Self::Y => Some("Y"),
+            Self::Z => Some("Z"),
+        }
+    }
+
+    fn toggled(self, next: Self) -> Self {
+        if self == next {
+            Self::None
+        } else {
+            next
+        }
+    }
 }
 
 /// Tracks which face the cursor is currently hovering over.
@@ -951,13 +987,22 @@ fn update_face_edit_status(world: &mut World) {
     if drawing.active {
         let n = drawing.points.len();
         let mode = if drawing.arc_mode { "arc" } else { "line" };
+        let axis_hint = drawing
+            .axis_lock
+            .label()
+            .map(|axis| format!(" · {axis}-locked"))
+            .unwrap_or_default();
         if n >= 3 {
             parts.push(format!(
-                "Drawing ({mode}) {n} pts · close near start · A: arc · Enter to finish · Esc to cancel"
+                "Drawing ({mode}) {n} pts{axis_hint} · close near start · X/Y/Z: axis lock · A: arc · Enter to finish · Esc to cancel"
+            ));
+        } else if n == 2 {
+            parts.push(format!(
+                "Drawing ({mode}) {n} pts{axis_hint} · Enter partitions the face if both points land on the boundary · X/Y/Z: axis lock · Esc to cancel"
             ));
         } else {
             parts.push(format!(
-                "Drawing ({mode}) {n} pts · click to add · A: arc · Esc to cancel"
+                "Drawing ({mode}) {n} pts{axis_hint} · click to add · X/Y/Z: axis lock · A: arc · Esc to cancel"
             ));
         }
     } else if let Some(selected) = &face_context.selected_face {
@@ -998,6 +1043,51 @@ fn not_drawing(drawing: Res<FaceDrawingContext>) -> bool {
     !drawing.active
 }
 
+fn clear_face_drawing_state(drawing: &mut FaceDrawingContext) {
+    drawing.active = false;
+    drawing.points.clear();
+    drawing.segment_is_arc.clear();
+    drawing.arc_mode = false;
+    drawing.axis_lock = FaceDrawingAxisLock::None;
+}
+
+fn apply_face_drawing_axis_lock(
+    anchor: Vec3,
+    candidate: Vec3,
+    drawing_plane: &DrawingPlane,
+    axis_lock: FaceDrawingAxisLock,
+) -> Vec3 {
+    let axis = match axis_lock {
+        FaceDrawingAxisLock::None => return candidate,
+        FaceDrawingAxisLock::X => Vec3::X,
+        FaceDrawingAxisLock::Y => Vec3::Y,
+        FaceDrawingAxisLock::Z => Vec3::Z,
+    };
+    let Some(direction) = project_direction_to_plane(axis, drawing_plane.normal) else {
+        return candidate;
+    };
+    anchor + direction * (candidate - anchor).dot(direction)
+}
+
+fn face_drawing_cursor_position(world: &World) -> Option<Vec3> {
+    let snap_result = world.resource::<SnapResult>();
+    let cursor_world_pos = world.resource::<CursorWorldPos>();
+    let cursor = snap_result
+        .position
+        .or(cursor_world_pos.snapped)
+        .or(cursor_world_pos.raw)?;
+    let drawing_plane = world.resource::<DrawingPlane>();
+    let drawing = world.resource::<FaceDrawingContext>();
+    drawing
+        .points
+        .last()
+        .copied()
+        .map(|anchor| {
+            apply_face_drawing_axis_lock(anchor, cursor, &drawing_plane, drawing.axis_lock)
+        })
+        .or(Some(cursor))
+}
+
 // ---------------------------------------------------------------------------
 // Face drawing sub-mode — draw a profile on the selected face
 // ---------------------------------------------------------------------------
@@ -1020,6 +1110,7 @@ fn handle_face_drawing_start(
         drawing.points.clear();
         drawing.segment_is_arc.clear();
         drawing.arc_mode = false;
+        drawing.axis_lock = FaceDrawingAxisLock::None;
     }
 }
 
@@ -1036,13 +1127,26 @@ fn handle_face_drawing_input(world: &mut World) {
         return;
     }
 
+    if !egui.keyboard && keys.just_pressed(KeyCode::KeyX) {
+        let mut drawing = world.resource_mut::<FaceDrawingContext>();
+        drawing.axis_lock = drawing.axis_lock.toggled(FaceDrawingAxisLock::X);
+        return;
+    }
+    if !egui.keyboard && keys.just_pressed(KeyCode::KeyY) {
+        let mut drawing = world.resource_mut::<FaceDrawingContext>();
+        drawing.axis_lock = drawing.axis_lock.toggled(FaceDrawingAxisLock::Y);
+        return;
+    }
+    if !egui.keyboard && keys.just_pressed(KeyCode::KeyZ) {
+        let mut drawing = world.resource_mut::<FaceDrawingContext>();
+        drawing.axis_lock = drawing.axis_lock.toggled(FaceDrawingAxisLock::Z);
+        return;
+    }
+
     // Escape cancels drawing
     if !egui.keyboard && keys.just_pressed(KeyCode::Escape) {
         let mut drawing = world.resource_mut::<FaceDrawingContext>();
-        drawing.active = false;
-        drawing.points.clear();
-        drawing.segment_is_arc.clear();
-        drawing.arc_mode = false;
+        clear_face_drawing_state(drawing.as_mut());
         return;
     }
 
@@ -1051,15 +1155,19 @@ fn handle_face_drawing_input(world: &mut World) {
         && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
     {
         let n = world.resource::<FaceDrawingContext>().points.len();
-        if n >= 3 {
-            finish_face_drawing(world);
+        if n >= 2 {
+            if let Err(error) = finish_face_drawing(world) {
+                world
+                    .resource_mut::<StatusBarData>()
+                    .set_feedback(error, 3.0);
+            }
         }
         return;
     }
 
     // Left click adds a point
     if !egui.pointer && mouse.just_pressed(MouseButton::Left) {
-        let cursor_pos = world.resource::<CursorWorldPos>().snapped;
+        let cursor_pos = face_drawing_cursor_position(world);
         let Some(cursor_pos) = cursor_pos else {
             return;
         };
@@ -1071,7 +1179,11 @@ fn handle_face_drawing_input(world: &mut World) {
             let start = points_clone[0];
             let threshold = face_drawing_close_threshold(world, start);
             if cursor_pos.distance(start) < threshold {
-                finish_face_drawing(world);
+                if let Err(error) = finish_face_drawing(world) {
+                    world
+                        .resource_mut::<StatusBarData>()
+                        .set_feedback(error, 3.0);
+                }
                 return;
             }
         }
@@ -1103,18 +1215,205 @@ fn face_drawing_close_threshold(world: &mut World, target: Vec3) -> f32 {
     (dist * CLOSE_THRESHOLD_PIXELS / 1000.0).clamp(0.05, 2.0)
 }
 
-/// Finish face drawing: create ProfileExtrusion and start push/pull.
-fn finish_face_drawing(world: &mut World) {
-    let drawing = world.resource::<FaceDrawingContext>().clone();
-    let plane = world.resource::<DrawingPlane>().clone();
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BoundaryPointProbe {
+    half_edge_idx: u32,
+    edge_key: (u32, u32),
+    point_on_edge: Vec3,
+    t: f32,
+}
 
-    if drawing.points.len() < 3 {
-        let mut d = world.resource_mut::<FaceDrawingContext>();
-        d.active = false;
-        d.points.clear();
-        d.segment_is_arc.clear();
-        return;
+fn partition_selected_face_with_segment(
+    world: &mut World,
+    point_a: Vec3,
+    point_b: Vec3,
+) -> Result<(), String> {
+    let face_context = world.resource::<FaceEditContext>().clone();
+    let target_entity = face_context
+        .csg_operand_target
+        .map(|(entity, _)| entity)
+        .or(face_context.entity)
+        .ok_or_else(|| "No selected face to partition".to_string())?;
+    let selected_face = face_context
+        .selected_face
+        .as_ref()
+        .ok_or_else(|| "Select a face before partitioning it".to_string())?;
+
+    let registry = world.resource::<CapabilityRegistry>();
+    let entity_ref = world
+        .get_entity(target_entity)
+        .map_err(|error| error.to_string())?;
+    let before = registry
+        .capture_snapshot(&entity_ref, world)
+        .ok_or_else(|| "Could not capture the selected entity".to_string())?;
+    let mut after = promoted_editable_mesh_snapshot(world, target_entity, &before)?;
+
+    partition_face_mesh(&mut after.mesh, selected_face.face_id.0, point_a, point_b)?;
+
+    let mut operation_log = after.operation_log.unwrap_or_else(|| OperationLog {
+        origin: OperationOrigin {
+            type_name: before.type_name().to_string(),
+            params: before.to_json(),
+        },
+        ops: Vec::new(),
+    });
+    operation_log.ops.push(MeshOp::SubdivideFace {
+        face_id: selected_face.face_id.0,
+        point_a: point_a.to_array(),
+        point_b: point_b.to_array(),
+    });
+    after.operation_log = Some(operation_log);
+
+    let after_boxed = BoxedEntity::from(after);
+    after_boxed.apply_to(world);
+    world
+        .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+        .write(ApplyEntityChangesCommand {
+            label: "Partition face",
+            before: vec![before],
+            after: vec![after_boxed],
+        });
+    Ok(())
+}
+
+fn promoted_editable_mesh_snapshot(
+    world: &World,
+    entity: Entity,
+    before: &BoxedEntity,
+) -> Result<EditableMeshSnapshot, String> {
+    let entity_ref = world
+        .get_entity(entity)
+        .map_err(|error| error.to_string())?;
+    if let Some(mesh) = entity_ref.get::<EditableMesh>() {
+        return Ok(EditableMeshSnapshot {
+            element_id: before.element_id(),
+            mesh: mesh.clone(),
+            operation_log: entity_ref.get::<OperationLog>().cloned(),
+        });
     }
+
+    let rotation = entity_ref
+        .get::<ShapeRotation>()
+        .copied()
+        .unwrap_or_default()
+        .0;
+    let mesh = try_editable_mesh::<BoxPrimitive>(&entity_ref, rotation)
+        .or_else(|| try_editable_mesh::<CylinderPrimitive>(&entity_ref, rotation))
+        .or_else(|| try_editable_mesh::<SpherePrimitive>(&entity_ref, rotation))
+        .or_else(|| try_editable_mesh::<PlanePrimitive>(&entity_ref, rotation))
+        .or_else(|| try_editable_mesh::<ProfileExtrusion>(&entity_ref, rotation))
+        .or_else(|| try_editable_mesh::<ProfileSweep>(&entity_ref, rotation))
+        .or_else(|| try_editable_mesh::<ProfileRevolve>(&entity_ref, rotation))
+        .ok_or_else(|| {
+            "This face cannot yet be partitioned into explicit mesh topology".to_string()
+        })?;
+
+    Ok(EditableMeshSnapshot {
+        element_id: before.element_id(),
+        mesh,
+        operation_log: Some(OperationLog {
+            origin: OperationOrigin {
+                type_name: before.type_name().to_string(),
+                params: before.to_json(),
+            },
+            ops: Vec::new(),
+        }),
+    })
+}
+
+fn partition_face_mesh(
+    mesh: &mut EditableMesh,
+    face_idx: u32,
+    point_a: Vec3,
+    point_b: Vec3,
+) -> Result<(), String> {
+    let probe_a = probe_face_boundary_point(mesh, face_idx, point_a)?;
+    let probe_b = probe_face_boundary_point(mesh, face_idx, point_b)?;
+
+    if probe_a.edge_key == probe_b.edge_key {
+        return Err("Partition endpoints must lie on different face edges".to_string());
+    }
+    if probe_a.point_on_edge.distance(probe_b.point_on_edge) <= MIN_DRAWING_SEGMENT {
+        return Err("Partition line is too short".to_string());
+    }
+
+    let vertex_a = materialize_boundary_vertex(mesh, probe_a);
+    let vertex_b = materialize_boundary_vertex(mesh, probe_b);
+    if vertex_a == vertex_b {
+        return Err("Partition endpoints resolved to the same mesh vertex".to_string());
+    }
+
+    mesh.subdivide_face(face_idx, vertex_a, vertex_b)
+        .ok_or_else(|| {
+            "The selected segment does not produce a valid planar face split".to_string()
+        })?;
+    mesh.recompute_all_normals();
+    Ok(())
+}
+
+fn probe_face_boundary_point(
+    mesh: &EditableMesh,
+    face_idx: u32,
+    point: Vec3,
+) -> Result<BoundaryPointProbe, String> {
+    let (half_edge_idx, t, point_on_edge) =
+        mesh.nearest_edge_on_face(face_idx, point).ok_or_else(|| {
+            "The selected face has no boundary edge under the drawn point".to_string()
+        })?;
+    if point.distance(point_on_edge) > FACE_PARTITION_TOLERANCE {
+        return Err("Partition points must land on the selected face boundary".to_string());
+    }
+
+    let half_edge = &mesh.half_edges[half_edge_idx as usize];
+    let next = &mesh.half_edges[half_edge.next as usize];
+    let start = half_edge.origin.min(next.origin);
+    let end = half_edge.origin.max(next.origin);
+
+    Ok(BoundaryPointProbe {
+        half_edge_idx,
+        edge_key: (start, end),
+        point_on_edge,
+        t,
+    })
+}
+
+fn materialize_boundary_vertex(mesh: &mut EditableMesh, probe: BoundaryPointProbe) -> u32 {
+    let half_edge = mesh.half_edges[probe.half_edge_idx as usize];
+    let destination = mesh.half_edges[half_edge.next as usize].origin;
+    if probe.t <= FACE_PARTITION_VERTEX_EPSILON {
+        half_edge.origin
+    } else if probe.t >= 1.0 - FACE_PARTITION_VERTEX_EPSILON {
+        destination
+    } else {
+        mesh.split_edge(probe.half_edge_idx, probe.t)
+    }
+}
+
+/// Finish face drawing.
+///
+/// A closed loop authors a face profile feature. A 2-point boundary-to-boundary
+/// segment partitions the selected face and records the split in the mesh
+/// operation log.
+fn finish_face_drawing(world: &mut World) -> Result<(), String> {
+    let drawing = world.resource::<FaceDrawingContext>().clone();
+    if drawing.points.len() < 2 {
+        return Err("Draw at least two points on the selected face".to_string());
+    }
+
+    if drawing.points.len() == 2 {
+        partition_selected_face_with_segment(world, drawing.points[0], drawing.points[1])?;
+        clear_face_drawing_state(world.resource_mut::<FaceDrawingContext>().as_mut());
+        let entity = world.resource::<FaceEditContext>().entity;
+        world.resource_mut::<FaceEditContext>().exit();
+        if let Some(entity) = entity {
+            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+                entity_mut.insert(Selected);
+            }
+        }
+        return Ok(());
+    }
+
+    let plane = world.resource::<DrawingPlane>().clone();
 
     // Convert world points to plane 2D
     let points_2d: Vec<Vec2> = drawing
@@ -1174,7 +1473,6 @@ fn finish_face_drawing(world: &mut World) {
     );
 
     // Apply immediately so the entity exists this frame
-    use crate::authored_entity::AuthoredEntity;
     snapshot.apply_to(world);
 
     // Find the new entity
@@ -1193,13 +1491,7 @@ fn finish_face_drawing(world: &mut World) {
         });
 
     // Clear drawing state
-    {
-        let mut d = world.resource_mut::<FaceDrawingContext>();
-        d.active = false;
-        d.points.clear();
-        d.segment_is_arc.clear();
-        d.arc_mode = false;
-    }
+    clear_face_drawing_state(world.resource_mut::<FaceDrawingContext>().as_mut());
 
     // Exit face-edit on the original entity, select the new one.
     // The user can double-click it to face-edit and push/pull to adjust height.
@@ -1210,12 +1502,15 @@ fn finish_face_drawing(world: &mut World) {
             e.insert(Selected);
         }
     }
+    Ok(())
 }
 
 /// Draw preview lines for face drawing mode.
 fn draw_face_drawing_preview(
     drawing: Res<FaceDrawingContext>,
+    snap_result: Res<SnapResult>,
     cursor_world_pos: Res<CursorWorldPos>,
+    drawing_plane: Res<DrawingPlane>,
     camera_query: Query<(&Camera, &GlobalTransform)>,
     mut gizmos: Gizmos,
 ) {
@@ -1228,9 +1523,21 @@ fn draw_face_drawing_preview(
         gizmos.line(seg[0], seg[1], DRAWING_PREVIEW_COLOR);
     }
 
-    let Some(cursor_pos) = cursor_world_pos.snapped else {
+    let Some(raw_cursor_pos) = snap_result
+        .position
+        .or(cursor_world_pos.snapped)
+        .or(cursor_world_pos.raw)
+    else {
         return;
     };
+    let cursor_pos = drawing
+        .points
+        .last()
+        .copied()
+        .map(|anchor| {
+            apply_face_drawing_axis_lock(anchor, raw_cursor_pos, &drawing_plane, drawing.axis_lock)
+        })
+        .unwrap_or(raw_cursor_pos);
 
     // Line from last point to cursor
     if let Some(&last) = drawing.points.last() {
@@ -1265,5 +1572,92 @@ fn draw_face_drawing_preview(
             0.04,
             DRAWING_PREVIEW_COLOR,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::modeling::primitives::PlanePrimitive;
+
+    #[test]
+    fn axis_lock_projects_candidate_onto_locked_world_axis() {
+        let anchor = Vec3::new(1.0, 2.0, 3.0);
+        let candidate = Vec3::new(4.0, 7.0, 9.0);
+        let drawing_plane = DrawingPlane::from_face(Vec3::ZERO, Vec3::Z);
+
+        assert_eq!(
+            apply_face_drawing_axis_lock(anchor, candidate, &drawing_plane, FaceDrawingAxisLock::X,),
+            Vec3::new(4.0, 2.0, 3.0)
+        );
+        assert_eq!(
+            apply_face_drawing_axis_lock(anchor, candidate, &drawing_plane, FaceDrawingAxisLock::Y,),
+            Vec3::new(1.0, 7.0, 3.0)
+        );
+        assert_eq!(
+            apply_face_drawing_axis_lock(anchor, candidate, &drawing_plane, FaceDrawingAxisLock::Z,),
+            candidate
+        );
+    }
+
+    #[test]
+    fn axis_lock_keeps_constrained_points_on_the_face_plane() {
+        let drawing_plane = DrawingPlane::from_face(Vec3::ZERO, Vec3::new(1.0, 1.0, 0.0));
+        let constrained = apply_face_drawing_axis_lock(
+            Vec3::ZERO,
+            Vec3::new(2.0, 3.0, 4.0),
+            &drawing_plane,
+            FaceDrawingAxisLock::Y,
+        );
+
+        assert!(constrained.dot(drawing_plane.normal).abs() < 1e-5);
+    }
+
+    #[test]
+    fn partition_face_mesh_splits_plane_between_opposite_midpoints() {
+        let mut mesh = EditableMesh::from_plane(&PlanePrimitive {
+            corner_a: Vec2::new(-2.0, -2.0),
+            corner_b: Vec2::new(2.0, 2.0),
+            elevation: 0.0,
+        });
+
+        partition_face_mesh(
+            &mut mesh,
+            0,
+            Vec3::new(0.0, 0.0, -2.0),
+            Vec3::new(0.0, 0.0, 2.0),
+        )
+        .expect("partition should succeed");
+
+        assert_eq!(mesh.active_face_count(), 2);
+        assert_eq!(
+            mesh.vertices.len(),
+            6,
+            "two midpoint vertices should be inserted"
+        );
+        assert!(mesh
+            .faces
+            .iter()
+            .filter(|face| face.half_edge != u32::MAX)
+            .all(|face| face.normal.length() > 0.99));
+    }
+
+    #[test]
+    fn partition_face_mesh_rejects_same_edge_points() {
+        let mut mesh = EditableMesh::from_plane(&PlanePrimitive {
+            corner_a: Vec2::new(-2.0, -2.0),
+            corner_b: Vec2::new(2.0, 2.0),
+            elevation: 0.0,
+        });
+
+        let error = partition_face_mesh(
+            &mut mesh,
+            0,
+            Vec3::new(-1.0, 0.0, -2.0),
+            Vec3::new(1.0, 0.0, -2.0),
+        )
+        .expect_err("same-edge split should be rejected");
+
+        assert!(error.contains("different face edges"));
     }
 }

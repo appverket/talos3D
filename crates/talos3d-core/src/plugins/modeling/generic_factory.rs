@@ -7,12 +7,18 @@ use crate::{
     authored_entity::BoxedEntity,
     capability_registry::{
         AuthoredEntityFactory, FaceHitCandidate, FaceId, HitCandidate, ModelSummaryAccumulator,
+        SnapPoint,
     },
-    plugins::{identity::ElementId, modeling::primitives::ShapeRotation},
+    plugins::{
+        identity::ElementId,
+        inference::{InferenceEngine, ReferenceEdge, ReferenceFacePlane},
+        modeling::primitives::ShapeRotation,
+        snap::SnapKind,
+    },
 };
 
 use super::{
-    generic_snapshot::PrimitiveSnapshot, primitive_trait::Primitive,
+    editable_mesh::EditableMesh, generic_snapshot::PrimitiveSnapshot, primitive_trait::Primitive,
     snapshots::ray_triangle_intersection,
 };
 
@@ -187,6 +193,33 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
         })
     }
 
+    fn collect_snap_points(&self, world: &World, out: &mut Vec<SnapPoint>) {
+        let Some(mut query) = world.try_query::<(&P, Option<&ShapeRotation>)>() else {
+            return;
+        };
+        for (primitive, rotation) in query.iter(world) {
+            let rotation = rotation.copied().unwrap_or_default();
+            let Some(mesh) = primitive.to_editable_mesh(rotation.0) else {
+                continue;
+            };
+            collect_mesh_edge_snap_points(&mesh, out);
+        }
+    }
+
+    fn collect_inference_geometry(&self, world: &World, engine: &mut InferenceEngine) {
+        let Some(mut query) = world.try_query::<(&ElementId, &P, Option<&ShapeRotation>)>() else {
+            return;
+        };
+        for (element_id, primitive, rotation) in query.iter(world) {
+            let rotation = rotation.copied().unwrap_or_default();
+            let Some(mesh) = primitive.to_editable_mesh(rotation.0) else {
+                continue;
+            };
+            let label = primitive.label();
+            collect_mesh_reference_geometry(&mesh, *element_id, &label, engine);
+        }
+    }
+
     fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
         let mut query = world.try_query::<EntityRef>().unwrap();
         for entity_ref in query.iter(world) {
@@ -199,5 +232,119 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
                 .or_insert(0) += 1;
             summary.bounding_points.push(primitive.centre());
         }
+    }
+}
+
+fn collect_mesh_edge_snap_points(mesh: &EditableMesh, out: &mut Vec<SnapPoint>) {
+    for (start, end, _half_edge_idx) in unique_mesh_edges(mesh) {
+        out.push(SnapPoint {
+            position: start,
+            kind: SnapKind::Endpoint,
+        });
+        out.push(SnapPoint {
+            position: end,
+            kind: SnapKind::Endpoint,
+        });
+        out.push(SnapPoint {
+            position: (start + end) * 0.5,
+            kind: SnapKind::Midpoint,
+        });
+    }
+}
+
+fn collect_mesh_reference_geometry(
+    mesh: &EditableMesh,
+    element_id: ElementId,
+    label: &str,
+    engine: &mut InferenceEngine,
+) {
+    for (start, end, _half_edge_idx) in unique_mesh_edges(mesh) {
+        engine.add_reference_edge(ReferenceEdge {
+            start,
+            end,
+            entity_label: label.to_string(),
+            element_id,
+        });
+    }
+
+    for (face_idx, face) in mesh.faces.iter().enumerate() {
+        if face.half_edge == u32::MAX {
+            continue;
+        }
+        engine.add_reference_face_plane(ReferenceFacePlane {
+            point_on_plane: mesh.face_centroid(face_idx as u32),
+            normal: face.normal,
+            entity_label: label.to_string(),
+            element_id,
+        });
+    }
+}
+
+fn unique_mesh_edges(mesh: &EditableMesh) -> Vec<(Vec3, Vec3, u32)> {
+    let mut edges = Vec::new();
+    for (half_edge_idx, half_edge) in mesh.half_edges.iter().enumerate() {
+        if half_edge.face == u32::MAX {
+            continue;
+        }
+        if half_edge.twin != u32::MAX && (half_edge.twin as usize) < half_edge_idx {
+            continue;
+        }
+        let next = mesh.half_edges.get(half_edge.next as usize);
+        let Some(next) = next else {
+            continue;
+        };
+        let start = mesh.vertices[half_edge.origin as usize];
+        let end = mesh.vertices[next.origin as usize];
+        edges.push((start, end, half_edge_idx as u32));
+    }
+    edges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::modeling::primitives::{BoxPrimitive, ShapeRotation};
+
+    #[test]
+    fn primitive_factory_exposes_box_edge_midpoints_as_snap_points() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(7),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::ONE,
+            },
+            ShapeRotation::default(),
+        ));
+
+        let mut snap_points = Vec::new();
+        PrimitiveFactory::<BoxPrimitive>::new().collect_snap_points(&world, &mut snap_points);
+
+        assert!(snap_points.iter().any(|snap_point| {
+            snap_point.kind == SnapKind::Midpoint
+                && snap_point.position.distance(Vec3::new(0.0, 1.0, -1.0)) < 1e-5
+        }));
+    }
+
+    #[test]
+    fn primitive_factory_contributes_reference_edges_from_editable_mesh() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(11),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::ONE,
+            },
+            ShapeRotation::default(),
+        ));
+
+        let mut engine = InferenceEngine::default();
+        PrimitiveFactory::<BoxPrimitive>::new().collect_inference_geometry(&world, &mut engine);
+
+        assert!(!engine.reference_edges().is_empty());
+        assert!(engine
+            .reference_edges()
+            .iter()
+            .any(|edge| edge.start.distance(Vec3::new(-1.0, 1.0, -1.0)) < 1e-5));
     }
 }
