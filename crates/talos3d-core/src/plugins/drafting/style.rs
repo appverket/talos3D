@@ -101,7 +101,10 @@ pub enum Terminator {
 
     /// Filled or open triangular arrow with `length : width = ratio : 1`.
     /// ASME Y14.5 closed-filled arrows use ratio 3, filled = true.
-    Arrow { length_to_width_ratio: f32, filled: bool },
+    Arrow {
+        length_to_width_ratio: f32,
+        filled: bool,
+    },
 
     /// Solid disc centred on the intersection. Used when extension lines are
     /// very close.
@@ -156,17 +159,18 @@ impl DimensionStyle {
         Self {
             name: "architectural_imperial".to_string(),
             terminator: Terminator::arch_tick(),
-            terminator_size_mm: 3.2, // 1/8"
+            terminator_size_mm: 3.2,           // 1/8"
             dim_line_extend_past_tick_mm: 1.6, // 1/16" past the tick
-            extension_gap_mm: 1.6, // 1/16"
-            extension_past_mm: 3.2, // 1/8"
+            extension_gap_mm: 1.6,             // 1/16"
+            extension_past_mm: 3.2,            // 1/8"
             extension_stroke_mm: 0.18,
             dim_line_stroke_mm: 0.18,
             first_offset_mm: 12.7, // 1/2"
             stack_spacing_mm: 9.5, // 3/8"
             text_placement: TextPlacement::Above { gap_mm: 1.0 },
             text_height_mm: 3.2, // 1/8"
-            text_font: "'Futura Light', 'Futura', 'Futura PT Light', Helvetica, Arial, sans-serif".to_string(),
+            text_font: "'Futura Light', 'Futura', 'Futura PT Light', Helvetica, Arial, sans-serif"
+                .to_string(),
             text_color_hex: "000000".to_string(),
             number_format: NumberFormat::FeetInchesFractional { denominator: 2 },
             prefix: None,
@@ -190,7 +194,8 @@ impl DimensionStyle {
             stack_spacing_mm: 10.0,
             text_placement: TextPlacement::Above { gap_mm: 1.0 },
             text_height_mm: 2.5,
-            text_font: "'Futura Light', 'Futura', 'Futura PT Light', Helvetica, Arial, sans-serif".to_string(),
+            text_font: "'Futura Light', 'Futura', 'Futura PT Light', Helvetica, Arial, sans-serif"
+                .to_string(),
             text_color_hex: "000000".to_string(),
             number_format: NumberFormat::MetricArchitectural {
                 thousands_separator: false,

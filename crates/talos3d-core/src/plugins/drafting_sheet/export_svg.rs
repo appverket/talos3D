@@ -39,11 +39,12 @@ pub fn sheet_to_svg(sheet: &DraftingSheet) -> Vec<u8> {
         out,
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w_mm}mm" height="{h_mm}mm" viewBox="0 0 {w_mm} {h_mm}">"#
     );
-    let _ = writeln!(out, r#"  <title>Talos3D drafting sheet (1:{scale})</title>"#, scale = fmt_num(sheet.scale_denominator));
     let _ = writeln!(
         out,
-        r#"  <rect width="100%" height="100%" fill="white"/>"#
+        r#"  <title>Talos3D drafting sheet (1:{scale})</title>"#,
+        scale = fmt_num(sheet.scale_denominator)
     );
+    let _ = writeln!(out, r#"  <rect width="100%" height="100%" fill="white"/>"#);
 
     // Content group: paper +y-up → SVG +y-down by translate+scale(1,-1).
     // Also shift the bounds.min corner to (0,0) so the viewBox starts

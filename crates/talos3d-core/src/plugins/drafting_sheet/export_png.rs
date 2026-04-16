@@ -50,7 +50,10 @@ pub fn sheet_to_png(sheet: &DraftingSheet, dpi: f32) -> Vec<u8> {
     // Hatch: draw the fill polygon (solid black for poché only; hatch
     // lines are drawn below as regular strokes).
     for hatch in &sheet.hatches {
-        if matches!(hatch.pattern, crate::plugins::section_fill::HatchPattern::SolidFill) {
+        if matches!(
+            hatch.pattern,
+            crate::plugins::section_fill::HatchPattern::SolidFill
+        ) {
             let pts: Vec<(f32, f32)> = hatch.polygon.iter().map(|p| to_px(*p)).collect();
             fill_polygon(&mut img, &pts, Rgb([0, 0, 0]));
         }
@@ -132,7 +135,15 @@ fn render_dim_prim(
         DimPrimitive::Arrow { tip, tail, .. } => {
             let (tx, ty) = to_px(*tip);
             let (bx, by) = to_px(*tail);
-            draw_line(img, tx, ty, bx, by, 1.0_f32.max(px_per_mm * 0.18), Rgb([0, 0, 0]));
+            draw_line(
+                img,
+                tx,
+                ty,
+                bx,
+                by,
+                1.0_f32.max(px_per_mm * 0.18),
+                Rgb([0, 0, 0]),
+            );
         }
         DimPrimitive::Dot { pos, .. } => {
             let (x, y) = to_px(*pos);
@@ -183,7 +194,11 @@ fn fill_polygon(img: &mut RgbImage, pts: &[(f32, f32)], c: Rgb<u8>) {
     if pts.len() < 3 {
         return;
     }
-    let y_min = pts.iter().map(|p| p.1).fold(f32::INFINITY, f32::min).floor() as i32;
+    let y_min = pts
+        .iter()
+        .map(|p| p.1)
+        .fold(f32::INFINITY, f32::min)
+        .floor() as i32;
     let y_max = pts
         .iter()
         .map(|p| p.1)

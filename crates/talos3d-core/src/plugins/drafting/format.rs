@@ -63,9 +63,7 @@ impl NumberFormat {
             Self::FeetInchesFractional { denominator } => {
                 format_feet_inches_fractional(metres, *denominator)
             }
-            Self::FeetInchesDecimal { precision } => {
-                format_feet_inches_decimal(metres, *precision)
-            }
+            Self::FeetInchesDecimal { precision } => format_feet_inches_decimal(metres, *precision),
             Self::Decimal {
                 unit,
                 precision,
@@ -127,7 +125,11 @@ fn reduce_fraction(num: u32, den: u32) -> (u32, u32) {
 }
 
 fn gcd(a: u32, b: u32) -> u32 {
-    if b == 0 { a } else { gcd(b, a % b) }
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 // ─── Feet-inches (decimal) ───────────────────────────────────────────────────
@@ -147,11 +149,7 @@ fn format_feet_inches_decimal(metres: f32, precision: u8) -> String {
     if (rounded - 12.0).abs() < f32::EPSILON {
         return format!("{sign}{}'-0\"", feet + 1);
     }
-    format!(
-        "{sign}{feet}'-{:.*}\"",
-        precision as usize,
-        rounded
-    )
+    format!("{sign}{feet}'-{:.*}\"", precision as usize, rounded)
 }
 
 // ─── Decimal (mechanical) ────────────────────────────────────────────────────

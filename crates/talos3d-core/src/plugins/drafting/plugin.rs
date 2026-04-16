@@ -82,7 +82,8 @@ impl Plugin for DraftingPlugin {
                 CommandDescriptor {
                     id: "drafting.set_preset_arch_imperial".to_string(),
                     label: "Arch (imperial)".to_string(),
-                    description: "Set architectural imperial as the default drafting style".to_string(),
+                    description: "Set architectural imperial as the default drafting style"
+                        .to_string(),
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: None,
@@ -100,7 +101,8 @@ impl Plugin for DraftingPlugin {
                 CommandDescriptor {
                     id: "drafting.set_preset_arch_metric".to_string(),
                     label: "Arch (metric)".to_string(),
-                    description: "Set architectural metric as the default drafting style".to_string(),
+                    description: "Set architectural metric as the default drafting style"
+                        .to_string(),
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: None,
@@ -274,8 +276,7 @@ fn deserialize_annotations(value: &Value) -> Option<Vec<DimensionAnnotationSnaps
 }
 
 fn apply_annotations_to_world(world: &mut World, snapshots: &[DimensionAnnotationSnapshot]) {
-    let mut existing_query =
-        world.query::<(Entity, &ElementId, &DimensionAnnotationNode)>();
+    let mut existing_query = world.query::<(Entity, &ElementId, &DimensionAnnotationNode)>();
     let mut existing = existing_query
         .iter(world)
         .map(|(entity, element_id, node)| (element_id.0, (entity, node.clone())))

@@ -24,7 +24,7 @@ use bevy::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 use super::kind::DimensionKind;
-use super::style::{DimensionStyle, TextPlacement, Terminator};
+use super::style::{DimensionStyle, Terminator, TextPlacement};
 
 /// Minimal, fully-serializable dimension description for rendering. This is
 /// distinct from the authored-entity snapshot so the renderer can be exercised
@@ -57,11 +57,7 @@ pub struct DimensionInput {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DimPrimitive {
     /// Straight stroked line.
-    LineSegment {
-        a: Vec2,
-        b: Vec2,
-        stroke_mm: f32,
-    },
+    LineSegment { a: Vec2, b: Vec2, stroke_mm: f32 },
 
     /// Architectural tick — a short oblique line centred on `pos`, oriented so
     /// its midpoint falls on the dimension line and it makes `angle_deg` with
@@ -138,9 +134,7 @@ pub fn render_dimension(
             render_linear(input, style, direction.truncate2d(), world_to_paper)
         }
         DimensionKind::Aligned => render_aligned(input, style, world_to_paper),
-        DimensionKind::Angular { vertex } => {
-            render_angular(input, style, *vertex, world_to_paper)
-        }
+        DimensionKind::Angular { vertex } => render_angular(input, style, *vertex, world_to_paper),
         DimensionKind::Radial { center } => {
             render_radial_or_diameter(input, style, *center, world_to_paper, false)
         }
@@ -174,9 +168,9 @@ fn render_linear(
     let b = input.b.truncate2d() * world_to_paper;
     let offset = input.offset.truncate2d() * world_to_paper;
 
-    let dir = direction.try_normalize().unwrap_or_else(|| {
-        (b - a).try_normalize().unwrap_or(Vec2::X)
-    });
+    let dir = direction
+        .try_normalize()
+        .unwrap_or_else(|| (b - a).try_normalize().unwrap_or(Vec2::X));
 
     // The dimension line lies parallel to `dir`, offset perpendicularly from
     // the feature by the signed component of `offset` along the normal.
@@ -501,10 +495,13 @@ fn render_radial_or_diameter(
 
     let text = {
         let base = style.number_format.format_metres(measured_metres);
-        let prefix = style
-            .prefix
-            .clone()
-            .unwrap_or_else(|| if is_diameter { "Ø".to_string() } else { "R".to_string() });
+        let prefix = style.prefix.clone().unwrap_or_else(|| {
+            if is_diameter {
+                "Ø".to_string()
+            } else {
+                "R".to_string()
+            }
+        });
         let suffix = style.suffix.as_deref().unwrap_or("");
         let inner = input
             .text_override
@@ -607,7 +604,10 @@ fn emit_radial_terminator(
             });
         }
         Terminator::Dot { radius_mm } => {
-            out.push(DimPrimitive::Dot { pos: tip, radius_mm });
+            out.push(DimPrimitive::Dot {
+                pos: tip,
+                radius_mm,
+            });
         }
         Terminator::None => {}
     }
@@ -633,8 +633,14 @@ fn render_angular(
     let dir_b = (b_px - v_px).try_normalize().unwrap_or(Vec2::Y);
 
     // Angle in world: use the original (world) vectors to avoid scale skew.
-    let va = (input.a - vertex).truncate2d().try_normalize().unwrap_or(Vec2::X);
-    let vb = (input.b - vertex).truncate2d().try_normalize().unwrap_or(Vec2::Y);
+    let va = (input.a - vertex)
+        .truncate2d()
+        .try_normalize()
+        .unwrap_or(Vec2::X);
+    let vb = (input.b - vertex)
+        .truncate2d()
+        .try_normalize()
+        .unwrap_or(Vec2::Y);
     let dot = va.dot(vb);
     let angle_rad = dot.clamp(-1.0, 1.0).acos();
     let angle_deg = angle_rad.to_degrees();
@@ -693,14 +699,12 @@ fn render_angular(
 
     // Terminators at each arc endpoint.
     let start_pt = v_px + dir_a * radius;
-    let end_pt = v_px + Vec2::new(
-        (start_angle + delta).cos(),
-        (start_angle + delta).sin(),
-    ) * radius;
+    let end_pt =
+        v_px + Vec2::new((start_angle + delta).cos(), (start_angle + delta).sin()) * radius;
     // Tangent direction at each endpoint (perpendicular to radius).
     let tan_a = Vec2::new(-dir_a.y, dir_a.x) * delta.signum();
-    let dir_b_tan = Vec2::new(-(start_angle + delta).sin(), (start_angle + delta).cos())
-        * delta.signum();
+    let dir_b_tan =
+        Vec2::new(-(start_angle + delta).sin(), (start_angle + delta).cos()) * delta.signum();
     emit_radial_terminator(&mut out, start_pt, -tan_a, style);
     emit_radial_terminator(&mut out, end_pt, dir_b_tan, style);
 
@@ -773,7 +777,10 @@ fn render_leader(
     let in_dir = (a - landing_start).try_normalize().unwrap_or(Vec2::X);
     emit_radial_terminator(&mut out, a, -in_dir, style);
 
-    let content = input.text_override.clone().unwrap_or_else(|| text.to_string());
+    let content = input
+        .text_override
+        .clone()
+        .unwrap_or_else(|| text.to_string());
     out.push(DimPrimitive::Text {
         anchor: landing_end + Vec2::new(1.0, 0.0),
         content,
@@ -786,7 +793,6 @@ fn render_leader(
 
     out
 }
-
 
 // ─── Vec3 → Vec2 helper ──────────────────────────────────────────────────────
 
@@ -894,9 +900,7 @@ mod tests {
     fn radial_emits_R_prefix_text() {
         let style = DimensionStyle::engineering_mm();
         let input = DimensionInput {
-            kind: DimensionKind::Radial {
-                center: Vec3::ZERO,
-            },
+            kind: DimensionKind::Radial { center: Vec3::ZERO },
             a: Vec3::new(0.025, 0.0, 0.0), // 25 mm radius
             b: Vec3::ZERO,
             offset: Vec3::new(0.01, 0.0, 0.0),
@@ -917,9 +921,7 @@ mod tests {
     fn diameter_emits_phi_prefix_text() {
         let style = DimensionStyle::engineering_mm();
         let input = DimensionInput {
-            kind: DimensionKind::Diameter {
-                center: Vec3::ZERO,
-            },
+            kind: DimensionKind::Diameter { center: Vec3::ZERO },
             a: Vec3::new(0.025, 0.0, 0.0),
             b: Vec3::new(-0.025, 0.0, 0.0),
             offset: Vec3::new(0.015, 0.0, 0.0),

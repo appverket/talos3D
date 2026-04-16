@@ -36,10 +36,7 @@ pub fn render_dimensions_svg_document(
     dimensions: &[Vec<DimPrimitive>],
 ) -> String {
     let mut out = String::with_capacity(4096);
-    let _ = writeln!(
-        out,
-        r#"<?xml version="1.0" encoding="UTF-8"?>"#
-    );
+    let _ = writeln!(out, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     let _ = writeln!(
         out,
         r#"<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="{w}mm" height="{h}mm" viewBox="0 0 {w} {h}">"#,
