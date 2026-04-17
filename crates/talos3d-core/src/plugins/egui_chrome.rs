@@ -776,7 +776,6 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             .show(&ctx, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
                     for category in ordered_menu_categories_for_bar(&data.command_registry) {
-                    for category in ordered_menu_categories_for_bar(&data.command_registry) {
                         let category_commands = visible_menu_commands_for_category(
                             &data.command_registry,
                             &category,
