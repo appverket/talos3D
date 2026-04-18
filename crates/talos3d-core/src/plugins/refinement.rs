@@ -525,8 +525,11 @@ pub fn apply_promote_refinement(
         .collect();
 
     // Invoke the recipe's `generate` function if we have one.
-    // Returns (obligation_id, child_element_id) satisfaction links.
-    let satisfaction_links: Vec<(ObligationId, u64)> = if let Some(ref recipe_id) = effective_recipe_id {
+    // Returns (obligation_id, child_element_id) satisfaction links and grounding updates.
+    let (satisfaction_links, grounding_updates): (
+        Vec<(ObligationId, u64)>,
+        HashMap<ClaimPath, crate::plugins::refinement::ClaimRecord>,
+    ) = if let Some(ref recipe_id) = effective_recipe_id {
         // Build parameter map from overrides (request.overrides).
         let parameters: std::collections::HashMap<String, serde_json::Value> = request
             .overrides
@@ -550,14 +553,14 @@ pub fn apply_promote_refinement(
 
         if let Some(generate_fn) = generate_fn {
             match generate_fn(input, world) {
-                Ok(output) => output.satisfaction_links,
+                Ok(output) => (output.satisfaction_links, output.grounding_updates),
                 Err(e) => return Err(format!("Recipe generate failed: {e}")),
             }
         } else {
-            Vec::new()
+            (Vec::new(), HashMap::new())
         }
     } else {
-        Vec::new()
+        (Vec::new(), HashMap::new())
     };
 
     // Re-locate entity after possible world mutations from generate.
@@ -577,11 +580,88 @@ pub fn apply_promote_refinement(
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Cross-entity bears_on obligation resolution (PP72).
+    //
+    // For any obligation with id "bears_on" that is still Unresolved, search
+    // for a SemanticRelation with relation_type == "bears_on" whose source is
+    // this entity. If found, check whether the target is at Constructible or
+    // higher AND has a top_datum_mm ClaimGrounding entry. If so, mark the
+    // obligation SatisfiedBy the target entity and add a claim grounding entry
+    // on this entity for "bears_on".
+    //
+    // This logic is intentionally generic — it applies to any class with a
+    // bears_on obligation, not just walls.
+    // TODO(PP76): replace the target-readiness check with a GenerationPriorDescriptor query.
+    {
+        // Collect bears_on SemanticRelation targets for this entity.
+        let bears_on_targets: Vec<ElementId> = {
+            let mut q = world.try_query::<(EntityRef,)>().unwrap();
+            q.iter(world)
+                .filter_map(|(entity_ref,)| {
+                    let rel = entity_ref.get::<SemanticRelation>()?;
+                    if rel.relation_type == "bears_on" && rel.source == eid {
+                        Some(rel.target)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for target_eid in bears_on_targets {
+            // Check target readiness: must be Constructible+ and have top_datum_mm claim.
+            let target_ready = {
+                let mut q = world.try_query::<(EntityRef,)>().unwrap();
+                q.iter(world).any(|(entity_ref,)| {
+                    if entity_ref.get::<ElementId>().copied() != Some(target_eid) {
+                        return false;
+                    }
+                    let state = entity_ref
+                        .get::<RefinementStateComponent>()
+                        .map(|c| c.state)
+                        .unwrap_or_default();
+                    let has_claim = entity_ref
+                        .get::<ClaimGrounding>()
+                        .is_some_and(|cg| {
+                            cg.claims.contains_key(&ClaimPath("top_datum_mm".into()))
+                        });
+                    state >= RefinementState::Constructible && has_claim
+                })
+            };
+
+            if target_ready {
+                // Satisfy the bears_on obligation with the target entity id.
+                if let Some(ob) =
+                    obligations.iter_mut().find(|o| o.id.0 == "bears_on")
+                {
+                    if ob.status == ObligationStatus::Unresolved {
+                        ob.status = ObligationStatus::SatisfiedBy(target_eid.0);
+                    }
+                }
+            }
+        }
+    }
+
     // Install ObligationSet on the entity (replace any existing one).
     if !obligations.is_empty() {
         world
             .entity_mut(entity)
             .insert(ObligationSet { entries: obligations });
+    }
+
+    // Apply grounding updates from the generate output.
+    // Updates are merged into any existing ClaimGrounding component (or a new one).
+    if !grounding_updates.is_empty() {
+        if let Some(mut cg) = world.get_mut::<ClaimGrounding>(entity) {
+            for (path, record) in grounding_updates {
+                cg.claims.insert(path, record);
+            }
+        } else {
+            world.entity_mut(entity).insert(ClaimGrounding {
+                claims: grounding_updates,
+            });
+        }
     }
 
     // Update the ElementClassAssignment to record the active recipe.

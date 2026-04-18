@@ -194,7 +194,7 @@ fn select_recipe_returns_empty_for_unsupported_state() {
 }
 
 #[test]
-fn promote_to_constructible_populates_obligation_set_with_six_entries_all_satisfied() {
+fn promote_to_constructible_populates_obligation_set_with_seven_entries() {
     let mut world = init_recipe_test_world();
     let wall_eid = create_wall_entity(&mut world);
 
@@ -224,11 +224,11 @@ fn promote_to_constructible_populates_obligation_set_with_six_entries_all_satisf
         })
         .expect("entity should have ObligationSet after promotion");
 
-    // 5 class-minimum + 1 recipe specialisation = 6 total.
+    // 6 class-minimum (envelope layers + bears_on) + 1 recipe specialisation = 7 total.
     assert_eq!(
         obligation_set.entries.len(),
-        6,
-        "expected 6 obligations (5 class-min + 1 recipe lateral_bracing); got: {:?}",
+        7,
+        "expected 7 obligations (6 class-min + 1 recipe lateral_bracing); got: {:?}",
         obligation_set
             .entries
             .iter()
@@ -236,14 +236,24 @@ fn promote_to_constructible_populates_obligation_set_with_six_entries_all_satisf
             .collect::<Vec<_>>()
     );
 
-    // All must be SatisfiedBy a child entity.
+    // All envelope/recipe obligations must be SatisfiedBy a child entity.
+    // bears_on is expected Unresolved since this test does not spawn a
+    // foundation target; PP72 covers the bears_on satisfaction path.
     for obligation in &obligation_set.entries {
-        assert!(
-            matches!(obligation.status, ObligationStatus::SatisfiedBy(_)),
-            "obligation '{}' should be SatisfiedBy, got: {:?}",
-            obligation.id.0,
-            obligation.status
-        );
+        if obligation.id.0 == "bears_on" {
+            assert!(
+                matches!(obligation.status, ObligationStatus::Unresolved),
+                "bears_on should be Unresolved without a relation target, got: {:?}",
+                obligation.status
+            );
+        } else {
+            assert!(
+                matches!(obligation.status, ObligationStatus::SatisfiedBy(_)),
+                "obligation '{}' should be SatisfiedBy, got: {:?}",
+                obligation.id.0,
+                obligation.status
+            );
+        }
     }
 
     let ids: Vec<&str> = obligation_set
@@ -257,6 +267,7 @@ fn promote_to_constructible_populates_obligation_set_with_six_entries_all_satisf
     assert!(ids.contains(&"interior_finish"));
     assert!(ids.contains(&"exterior_finish"));
     assert!(ids.contains(&"lateral_bracing"));
+    assert!(ids.contains(&"bears_on"));
 }
 
 #[test]
