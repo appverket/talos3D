@@ -22,6 +22,7 @@ use crate::{
     recipes::{
         foundation_pier::pier_foundation_recipe,
         foundation_slab_on_grade::{foundation_system_class, slab_on_grade_recipe},
+        roof_shed_framing::{roof_system_class, shed_roof_framing_recipe},
         wall_light_frame_exterior::{light_frame_exterior_wall_recipe, wall_assembly_class},
     },
     snapshots::{OpeningFactory, WallFactory},
@@ -173,6 +174,9 @@ impl Plugin for ArchitecturalPlugin {
         .register_element_class(foundation_system_class())
         .register_recipe_family(slab_on_grade_recipe())
         .register_recipe_family(pier_foundation_recipe())
+        // PP73: roof element class and recipe family
+        .register_element_class(roof_system_class())
+        .register_recipe_family(shed_roof_framing_recipe())
         .register_defaults_contributor(ArchitecturalDefaultsContributor)
         .register_command(
             CommandDescriptor {
