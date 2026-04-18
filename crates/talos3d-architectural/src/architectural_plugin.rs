@@ -19,6 +19,9 @@ use talos3d_capability_api::{
 use crate::{
     create_commands::ArchitecturalCreateCommandPlugin,
     mesh_generation, rules,
+    recipes::wall_light_frame_exterior::{
+        light_frame_exterior_wall_recipe, wall_assembly_class,
+    },
     snapshots::{OpeningFactory, WallFactory},
     tools,
 };
@@ -161,6 +164,9 @@ impl Plugin for ArchitecturalPlugin {
             parameter_schema: serde_json::json!({}),
             participates_in_dependency_graph: false,
         })
+        // PP71: element class and recipe family descriptors
+        .register_element_class(wall_assembly_class())
+        .register_recipe_family(light_frame_exterior_wall_recipe())
         .register_defaults_contributor(ArchitecturalDefaultsContributor)
         .register_command(
             CommandDescriptor {

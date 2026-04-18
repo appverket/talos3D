@@ -12,6 +12,7 @@ use crate::authored_entity::BoxedEntity;
 use crate::plugins::document_properties::DocumentProperties;
 use crate::plugins::identity::ElementId;
 use crate::plugins::modeling::primitives::TriangleMesh;
+use crate::plugins::refinement::{ClaimPath, ObligationId, RefinementState, SemanticRole};
 
 pub const CAPABILITY_API_VERSION: u32 = 1;
 
@@ -153,6 +154,192 @@ pub struct RelationTypeDescriptor {
     /// Most semantic relations (adjacent_to, bounds) are query/validation-only.
     /// Some (hosted_on) may drive re-evaluation when the target changes.
     pub participates_in_dependency_graph: bool,
+}
+
+// ---------------------------------------------------------------------------
+// PP71: ElementClassDescriptor and RecipeFamilyDescriptor
+// ---------------------------------------------------------------------------
+
+/// Newtype identifier for an element class (e.g. `"wall_assembly"`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ElementClassId(pub String);
+
+/// Newtype identifier for a recipe family (e.g. `"light_frame_exterior_wall"`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RecipeFamilyId(pub String);
+
+/// An obligation template — same shape as `Obligation` but without a live
+/// status. When materialized on a concrete entity at promote-time the status
+/// defaults to `Unresolved`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ObligationTemplate {
+    pub id: ObligationId,
+    pub role: SemanticRole,
+    pub required_by_state: RefinementState,
+}
+
+/// Describes an element class contributed by a domain capability.
+///
+/// An element class names a category of designed element (e.g. `wall_assembly`)
+/// and declares the semantic contract — roles, class-minimum obligations per
+/// refinement state, and class-minimum promotion-critical claim paths — that any
+/// recipe targeting the class must honour. Concrete content (recipes, catalog
+/// rows, rule packs) registers separately; the descriptor is only the schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElementClassDescriptor {
+    /// Stable machine-readable identifier.
+    pub id: ElementClassId,
+    /// Human-readable name.
+    pub label: String,
+    /// Short description shown in MCP discovery tools.
+    pub description: String,
+    /// Semantic roles that entities of this class may play in assemblies.
+    pub semantic_roles: Vec<SemanticRole>,
+    /// Minimum set of obligations at each refinement state.
+    /// Recipe specializations may *add* obligations; they may not *remove*
+    /// class-minimum ones (except via `Waived` on a concrete instance).
+    pub class_min_obligations: HashMap<RefinementState, Vec<ObligationTemplate>>,
+    /// Claim paths that are promotion-critical at each refinement state.
+    /// Consulted by `get_claim_grounding` to populate `is_promotion_critical`.
+    pub class_min_promotion_critical_paths: HashMap<RefinementState, Vec<ClaimPath>>,
+    /// JSON Schema describing the parameters understood by all recipes
+    /// targeting this class.  May be extended by individual recipes.
+    pub parameter_schema: serde_json::Value,
+}
+
+/// A parameter declared by a `RecipeFamilyDescriptor`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RecipeParameter {
+    pub name: String,
+    /// JSON Schema for the value (e.g. `{"type":"number","minimum":0}`).
+    pub value_schema: serde_json::Value,
+    /// Default value applied when the caller omits this parameter.
+    pub default: Option<serde_json::Value>,
+}
+
+/// Input supplied to a recipe's `generate` function.
+#[derive(Debug, Clone)]
+pub struct GenerateInput {
+    /// The entity being promoted (identified by element-id).
+    pub element_id: u64,
+    /// The refinement state the recipe is generating for.
+    pub target_state: RefinementState,
+    /// Merged parameter values (caller overrides + recipe defaults).
+    pub parameters: HashMap<String, serde_json::Value>,
+}
+
+/// Output produced by a recipe's `generate` function.
+#[derive(Debug, Default)]
+pub struct GenerateOutput {
+    /// Obligation satisfaction links: `(obligation_id, child_element_id)`.
+    /// The promote machinery installs these as `SatisfiedBy(child_id)` on the
+    /// parent entity's `ObligationSet`.
+    pub satisfaction_links: Vec<(ObligationId, u64)>,
+    /// Additional `ClaimGrounding` entries to install on the parent entity.
+    pub grounding_updates: HashMap<ClaimPath, crate::plugins::refinement::ClaimRecord>,
+}
+
+/// A boxed recipe generation function.
+///
+/// Receives the `GenerateInput` and a `&mut World` so it can spawn child
+/// entities and create refinement-linkage relations. Returns a `GenerateOutput`
+/// mapping obligation ids to the child entity-ids that satisfy them.
+pub type GenerateFn =
+    Arc<dyn Fn(GenerateInput, &mut World) -> Result<GenerateOutput, String> + Send + Sync>;
+
+/// Describes a recipe family: a parametric authoring contract for an element
+/// class. A recipe family declares parameters, which refinement levels it
+/// supports, how it specialises the class-minimum obligations, and a `generate`
+/// function that materialises child entities on promotion.
+pub struct RecipeFamilyDescriptor {
+    /// Stable machine-readable identifier.
+    pub id: RecipeFamilyId,
+    /// The element class this recipe targets.
+    pub target_class: ElementClassId,
+    /// Human-readable name.
+    pub label: String,
+    /// Short description shown in MCP discovery tools.
+    pub description: String,
+    /// Parameters accepted by this recipe.
+    pub parameters: Vec<RecipeParameter>,
+    /// Which refinement states this recipe can generate for.
+    pub supported_refinement_levels: Vec<RefinementState>,
+    /// Additional obligation templates beyond the class minimum, keyed by state.
+    pub obligation_specializations: HashMap<RefinementState, Vec<ObligationTemplate>>,
+    /// Additional promotion-critical paths beyond the class minimum, keyed by state.
+    pub promotion_critical_path_specializations: HashMap<RefinementState, Vec<ClaimPath>>,
+    /// The generation function invoked at promote-time.
+    pub generate: GenerateFn,
+}
+
+impl std::fmt::Debug for RecipeFamilyDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecipeFamilyDescriptor")
+            .field("id", &self.id)
+            .field("target_class", &self.target_class)
+            .field("label", &self.label)
+            .field("supported_refinement_levels", &self.supported_refinement_levels)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Compute the effective merged obligation list for a given target state,
+/// combining class-minimum obligations with recipe specialisations.
+///
+/// The class-minimum obligations are always included first; recipe
+/// specialisations are appended. No de-duplication by id — callers must ensure
+/// ids are unique across the two sets.
+pub fn effective_obligations(
+    class: &ElementClassDescriptor,
+    recipe: Option<&RecipeFamilyDescriptor>,
+    target_state: RefinementState,
+) -> Vec<ObligationTemplate> {
+    let mut out: Vec<ObligationTemplate> = class
+        .class_min_obligations
+        .get(&target_state)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(recipe) = recipe {
+        if let Some(specializations) = recipe.obligation_specializations.get(&target_state) {
+            out.extend_from_slice(specializations);
+        }
+    }
+    out
+}
+
+/// Compute the effective merged promotion-critical paths for a given target
+/// state, combining class-minimum paths with recipe specialisations.
+pub fn effective_promotion_critical_paths(
+    class: &ElementClassDescriptor,
+    recipe: Option<&RecipeFamilyDescriptor>,
+    target_state: RefinementState,
+) -> Vec<ClaimPath> {
+    let mut out: Vec<ClaimPath> = class
+        .class_min_promotion_critical_paths
+        .get(&target_state)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(recipe) = recipe {
+        if let Some(specializations) = recipe
+            .promotion_critical_path_specializations
+            .get(&target_state)
+        {
+            out.extend_from_slice(specializations);
+        }
+    }
+    out
+}
+
+/// ECS component that tags an entity with an element class and (optionally) the
+/// active recipe family that generated it.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ElementClassAssignment {
+    pub element_class: ElementClassId,
+    pub active_recipe: Option<RecipeFamilyId>,
 }
 
 #[allow(clippy::wrong_self_convention)]
@@ -397,6 +584,11 @@ pub struct CapabilityRegistry {
     factories_by_type: HashMap<&'static str, Arc<dyn AuthoredEntityFactory>>,
     assembly_type_descriptors: Vec<AssemblyTypeDescriptor>,
     relation_type_descriptors: Vec<RelationTypeDescriptor>,
+    // PP71
+    element_class_descriptors: Vec<ElementClassDescriptor>,
+    element_class_index: HashMap<String, usize>,
+    recipe_family_descriptors: Vec<RecipeFamilyDescriptor>,
+    recipe_family_index: HashMap<String, usize>,
 }
 
 impl CapabilityRegistry {
@@ -546,6 +738,70 @@ impl CapabilityRegistry {
     pub fn relation_type_descriptors(&self) -> &[RelationTypeDescriptor] {
         &self.relation_type_descriptors
     }
+
+    // --- PP71: Element class descriptors ---
+
+    /// Register an element class descriptor. Panics if the id is already registered.
+    pub fn register_element_class(&mut self, descriptor: ElementClassDescriptor) {
+        assert!(
+            !self.element_class_index.contains_key(descriptor.id.0.as_str()),
+            "ElementClass '{}' was registered more than once",
+            descriptor.id.0
+        );
+        let index = self.element_class_descriptors.len();
+        self.element_class_index
+            .insert(descriptor.id.0.clone(), index);
+        self.element_class_descriptors.push(descriptor);
+    }
+
+    /// Return all registered element class descriptors.
+    pub fn element_class_descriptors(&self) -> &[ElementClassDescriptor] {
+        &self.element_class_descriptors
+    }
+
+    /// Look up a single element class descriptor by id.
+    pub fn element_class_descriptor(&self, id: &ElementClassId) -> Option<&ElementClassDescriptor> {
+        self.element_class_index
+            .get(id.0.as_str())
+            .and_then(|&i| self.element_class_descriptors.get(i))
+    }
+
+    // --- PP71: Recipe family descriptors ---
+
+    /// Register a recipe family descriptor. Panics if the id is already registered.
+    pub fn register_recipe_family(&mut self, descriptor: RecipeFamilyDescriptor) {
+        assert!(
+            !self.recipe_family_index.contains_key(descriptor.id.0.as_str()),
+            "RecipeFamily '{}' was registered more than once",
+            descriptor.id.0
+        );
+        let index = self.recipe_family_descriptors.len();
+        self.recipe_family_index
+            .insert(descriptor.id.0.clone(), index);
+        self.recipe_family_descriptors.push(descriptor);
+    }
+
+    /// Return recipe family descriptors, optionally filtered to those targeting
+    /// a specific element class.
+    pub fn recipe_family_descriptors(
+        &self,
+        element_class: Option<&ElementClassId>,
+    ) -> Vec<&RecipeFamilyDescriptor> {
+        self.recipe_family_descriptors
+            .iter()
+            .filter(|d| element_class.is_none_or(|cls| &d.target_class == cls))
+            .collect()
+    }
+
+    /// Look up a single recipe family descriptor by id.
+    pub fn recipe_family_descriptor(
+        &self,
+        id: &RecipeFamilyId,
+    ) -> Option<&RecipeFamilyDescriptor> {
+        self.recipe_family_index
+            .get(id.0.as_str())
+            .and_then(|&i| self.recipe_family_descriptors.get(i))
+    }
 }
 
 fn validate_capability_dependencies(registry: Res<CapabilityRegistry>) {
@@ -616,6 +872,14 @@ pub trait CapabilityRegistryAppExt {
     fn register_assembly_type(&mut self, descriptor: AssemblyTypeDescriptor) -> &mut Self;
 
     fn register_relation_type(&mut self, descriptor: RelationTypeDescriptor) -> &mut Self;
+
+    /// Register an `ElementClassDescriptor` (PP71). Initialises the
+    /// `CapabilityRegistry` resource if it does not yet exist.
+    fn register_element_class(&mut self, descriptor: ElementClassDescriptor) -> &mut Self;
+
+    /// Register a `RecipeFamilyDescriptor` (PP71). Initialises the
+    /// `CapabilityRegistry` resource if it does not yet exist.
+    fn register_recipe_family(&mut self, descriptor: RecipeFamilyDescriptor) -> &mut Self;
 }
 
 #[derive(Resource)]
@@ -687,6 +951,28 @@ impl CapabilityRegistryAppExt for App {
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_relation_type(descriptor);
+        self
+    }
+
+    fn register_element_class(&mut self, descriptor: ElementClassDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_element_class(descriptor);
+        self
+    }
+
+    fn register_recipe_family(&mut self, descriptor: RecipeFamilyDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_recipe_family(descriptor);
         self
     }
 }
@@ -811,5 +1097,188 @@ where
             "Required workbench resource '{}' is missing",
             std::any::type_name::<T>()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for PP71 registry additions
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pp71_tests {
+    use super::*;
+
+    fn make_wall_class() -> ElementClassDescriptor {
+        let mut class_min_obligations = HashMap::new();
+        class_min_obligations.insert(
+            RefinementState::Constructible,
+            vec![
+                ObligationTemplate {
+                    id: ObligationId("structure".into()),
+                    role: SemanticRole("primary_structure".into()),
+                    required_by_state: RefinementState::Constructible,
+                },
+                ObligationTemplate {
+                    id: ObligationId("thermal_layer".into()),
+                    role: SemanticRole("thermal".into()),
+                    required_by_state: RefinementState::Constructible,
+                },
+            ],
+        );
+        let mut class_min_promotion_critical_paths = HashMap::new();
+        class_min_promotion_critical_paths.insert(
+            RefinementState::Constructible,
+            vec![
+                ClaimPath("height_mm".into()),
+                ClaimPath("length_mm".into()),
+            ],
+        );
+        ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "A wall assembly".into(),
+            semantic_roles: vec![SemanticRole("exterior_envelope".into())],
+            class_min_obligations,
+            class_min_promotion_critical_paths,
+            parameter_schema: serde_json::json!({}),
+        }
+    }
+
+    fn make_recipe(class_id: ElementClassId) -> RecipeFamilyDescriptor {
+        let mut obligation_specializations = HashMap::new();
+        obligation_specializations.insert(
+            RefinementState::Constructible,
+            vec![ObligationTemplate {
+                id: ObligationId("lateral_bracing".into()),
+                role: SemanticRole("bracing".into()),
+                required_by_state: RefinementState::Constructible,
+            }],
+        );
+        let mut promotion_critical_path_specializations = HashMap::new();
+        promotion_critical_path_specializations.insert(
+            RefinementState::Constructible,
+            vec![ClaimPath("stud_spacing_mm".into())],
+        );
+        RecipeFamilyDescriptor {
+            id: RecipeFamilyId("light_frame_exterior_wall".into()),
+            target_class: class_id,
+            label: "Light Frame Exterior Wall".into(),
+            description: "Light-frame wall recipe".into(),
+            parameters: vec![RecipeParameter {
+                name: "length_mm".into(),
+                value_schema: serde_json::json!({"type":"number","minimum":0}),
+                default: None,
+            }],
+            supported_refinement_levels: vec![
+                RefinementState::Conceptual,
+                RefinementState::Schematic,
+                RefinementState::Constructible,
+            ],
+            obligation_specializations,
+            promotion_critical_path_specializations,
+            generate: Arc::new(|_input, _world| Ok(GenerateOutput::default())),
+        }
+    }
+
+    #[test]
+    fn register_and_retrieve_element_class() {
+        let mut registry = CapabilityRegistry::default();
+        let descriptor = make_wall_class();
+        registry.register_element_class(descriptor);
+
+        let all = registry.element_class_descriptors();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id.0, "wall_assembly");
+
+        let found = registry.element_class_descriptor(&ElementClassId("wall_assembly".into()));
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().label, "Wall Assembly");
+
+        assert!(registry
+            .element_class_descriptor(&ElementClassId("unknown".into()))
+            .is_none());
+    }
+
+    #[test]
+    fn register_and_retrieve_recipe_family() {
+        let mut registry = CapabilityRegistry::default();
+        registry.register_element_class(make_wall_class());
+        registry.register_recipe_family(make_recipe(ElementClassId("wall_assembly".into())));
+
+        // Unfiltered
+        let all = registry.recipe_family_descriptors(None);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id.0, "light_frame_exterior_wall");
+
+        // Filtered to correct class
+        let filtered = registry
+            .recipe_family_descriptors(Some(&ElementClassId("wall_assembly".into())));
+        assert_eq!(filtered.len(), 1);
+
+        // Filtered to nonexistent class returns empty
+        let empty = registry
+            .recipe_family_descriptors(Some(&ElementClassId("roof_system".into())));
+        assert!(empty.is_empty());
+
+        // Direct lookup
+        let found = registry
+            .recipe_family_descriptor(&RecipeFamilyId("light_frame_exterior_wall".into()));
+        assert!(found.is_some());
+
+        assert!(registry
+            .recipe_family_descriptor(&RecipeFamilyId("unknown".into()))
+            .is_none());
+    }
+
+    #[test]
+    fn effective_obligations_merges_class_min_and_recipe() {
+        let class = make_wall_class();
+        let recipe = make_recipe(ElementClassId("wall_assembly".into()));
+
+        let obligations =
+            effective_obligations(&class, Some(&recipe), RefinementState::Constructible);
+        // class min has 2 + recipe adds 1
+        assert_eq!(obligations.len(), 3);
+        assert!(obligations.iter().any(|o| o.id.0 == "structure"));
+        assert!(obligations.iter().any(|o| o.id.0 == "lateral_bracing"));
+    }
+
+    #[test]
+    fn effective_obligations_without_recipe_returns_class_min_only() {
+        let class = make_wall_class();
+        let obligations =
+            effective_obligations(&class, None, RefinementState::Constructible);
+        assert_eq!(obligations.len(), 2);
+    }
+
+    #[test]
+    fn effective_promotion_critical_paths_merges_class_and_recipe() {
+        let class = make_wall_class();
+        let recipe = make_recipe(ElementClassId("wall_assembly".into()));
+
+        let paths =
+            effective_promotion_critical_paths(&class, Some(&recipe), RefinementState::Constructible);
+        // class has 2 + recipe adds 1
+        assert_eq!(paths.len(), 3);
+        assert!(paths.iter().any(|p| p.0 == "stud_spacing_mm"));
+    }
+
+    #[test]
+    #[should_panic(expected = "ElementClass 'wall_assembly' was registered more than once")]
+    fn register_duplicate_element_class_panics() {
+        let mut registry = CapabilityRegistry::default();
+        registry.register_element_class(make_wall_class());
+        registry.register_element_class(make_wall_class());
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "RecipeFamily 'light_frame_exterior_wall' was registered more than once"
+    )]
+    fn register_duplicate_recipe_family_panics() {
+        let mut registry = CapabilityRegistry::default();
+        registry.register_element_class(make_wall_class());
+        registry.register_recipe_family(make_recipe(ElementClassId("wall_assembly".into())));
+        registry.register_recipe_family(make_recipe(ElementClassId("wall_assembly".into())));
     }
 }

@@ -1533,6 +1533,55 @@ enum ModelApiRequest {
         active: bool,
         response: oneshot::Sender<ApiResult<ClipPlaneInfo>>,
     },
+    // --- Refinement (PP70) ---
+    GetRefinementState {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<RefinementStateInfo>>,
+    },
+    GetObligations {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Vec<ObligationInfo>>>,
+    },
+    GetAuthoringProvenance {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<AuthoringProvenanceInfo>>,
+    },
+    GetClaimGrounding {
+        element_id: u64,
+        path: Option<String>,
+        response: oneshot::Sender<ApiResult<Vec<ClaimGroundingEntry>>>,
+    },
+    PromoteRefinement {
+        element_id: u64,
+        target_state: String,
+        recipe_id: Option<String>,
+        overrides: serde_json::Value,
+        response: oneshot::Sender<ApiResult<PromoteRefinementResult>>,
+    },
+    DemoteRefinement {
+        element_id: u64,
+        target_state: String,
+        response: oneshot::Sender<ApiResult<DemoteRefinementResult>>,
+    },
+    RunValidation {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Vec<ValidationFindingInfo>>>,
+    },
+    ExplainFinding {
+        finding_id: String,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
+    // --- Descriptor discovery (PP71) ---
+    ListElementClasses(oneshot::Sender<Vec<ElementClassInfo>>),
+    ListRecipeFamilies {
+        element_class: Option<String>,
+        response: oneshot::Sender<Vec<RecipeFamilyInfo>>,
+    },
+    SelectRecipe {
+        element_class: String,
+        context: serde_json::Value,
+        response: oneshot::Sender<ApiResult<Vec<RecipeRankingInfo>>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -2131,6 +2180,83 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_clip_plane_toggle(world, element_id, active));
+        }
+        // --- Refinement (PP70) ---
+        ModelApiRequest::GetRefinementState {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_refinement_state(world, element_id));
+        }
+        ModelApiRequest::GetObligations {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_obligations(world, element_id));
+        }
+        ModelApiRequest::GetAuthoringProvenance {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_authoring_provenance(world, element_id));
+        }
+        ModelApiRequest::GetClaimGrounding {
+            element_id,
+            path,
+            response,
+        } => {
+            let _ = response.send(handle_get_claim_grounding(world, element_id, path));
+        }
+        ModelApiRequest::PromoteRefinement {
+            element_id,
+            target_state,
+            recipe_id,
+            overrides,
+            response,
+        } => {
+            let _ = response.send(handle_promote_refinement(
+                world,
+                element_id,
+                target_state,
+                recipe_id,
+                overrides,
+            ));
+        }
+        ModelApiRequest::DemoteRefinement {
+            element_id,
+            target_state,
+            response,
+        } => {
+            let _ = response.send(handle_demote_refinement(world, element_id, target_state));
+        }
+        ModelApiRequest::RunValidation {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_run_validation(world, element_id));
+        }
+        ModelApiRequest::ExplainFinding {
+            finding_id,
+            response,
+        } => {
+            let _ = response.send(handle_explain_finding(world, finding_id));
+        }
+        // --- Descriptor discovery (PP71) ---
+        ModelApiRequest::ListElementClasses(response) => {
+            let _ = response.send(handle_list_element_classes(world));
+        }
+        ModelApiRequest::ListRecipeFamilies {
+            element_class,
+            response,
+        } => {
+            let _ = response.send(handle_list_recipe_families(world, element_class));
+        }
+        ModelApiRequest::SelectRecipe {
+            element_class,
+            context,
+            response,
+        } => {
+            let _ = response.send(handle_select_recipe(world, element_class, context));
         }
     }
 }
@@ -3419,6 +3545,188 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    // --- Refinement requests (PP70) ---
+
+    async fn request_get_refinement_state(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<RefinementStateInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetRefinementState {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_obligations(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<Vec<ObligationInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetObligations {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_authoring_provenance(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<AuthoringProvenanceInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetAuthoringProvenance {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_claim_grounding(
+        &self,
+        element_id: u64,
+        path: Option<String>,
+    ) -> ApiResult<Vec<ClaimGroundingEntry>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetClaimGrounding {
+                element_id,
+                path,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_promote_refinement(
+        &self,
+        element_id: u64,
+        target_state: String,
+        recipe_id: Option<String>,
+        overrides: serde_json::Value,
+    ) -> ApiResult<PromoteRefinementResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PromoteRefinement {
+                element_id,
+                target_state,
+                recipe_id,
+                overrides,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_demote_refinement(
+        &self,
+        element_id: u64,
+        target_state: String,
+    ) -> ApiResult<DemoteRefinementResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DemoteRefinement {
+                element_id,
+                target_state,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_run_validation(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<Vec<ValidationFindingInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::RunValidation {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_explain_finding(
+        &self,
+        finding_id: String,
+    ) -> ApiResult<serde_json::Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ExplainFinding {
+                finding_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    // --- Descriptor discovery requests (PP71) ---
+
+    async fn request_list_element_classes(&self) -> Vec<ElementClassInfo> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(ModelApiRequest::ListElementClasses(response));
+        receiver.await.unwrap_or_default()
+    }
+
+    async fn request_list_recipe_families(
+        &self,
+        element_class: Option<String>,
+    ) -> Vec<RecipeFamilyInfo> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(ModelApiRequest::ListRecipeFamilies {
+                element_class,
+                response,
+            });
+        receiver.await.unwrap_or_default()
+    }
+
+    async fn request_select_recipe(
+        &self,
+        element_class: String,
+        context: serde_json::Value,
+    ) -> ApiResult<Vec<RecipeRankingInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SelectRecipe {
+                element_class,
+                context,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_list_definitions(&self) -> Result<Vec<DefinitionEntry>, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -4403,6 +4711,176 @@ pub struct HandleInfo {
     position: HandlePosition,
     kind: String,
     label: String,
+}
+
+// --- Element class / recipe family types (PP71) ---
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ElementClassInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub semantic_roles: Vec<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeParameterInfo {
+    pub name: String,
+    pub value_schema: serde_json::Value,
+    pub default: Option<serde_json::Value>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeFamilyInfo {
+    pub id: String,
+    pub target_class: String,
+    pub label: String,
+    pub description: String,
+    pub supported_refinement_levels: Vec<String>,
+    pub parameters: Vec<RecipeParameterInfo>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeRankingInfo {
+    pub id: String,
+    pub target_class: String,
+    pub label: String,
+    /// Tie weight — 1.0 for all viable recipes in PP71 (real priors land in PP76).
+    pub weight: f32,
+}
+
+// --- Refinement types (PP70) ---
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementStateInfo {
+    pub element_id: u64,
+    pub state: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ObligationInfo {
+    pub id: String,
+    pub role: String,
+    pub required_by_state: String,
+    /// `"Unresolved"`, `"SatisfiedBy:<id>"`, `"Deferred:<reason>"`, or `"Waived:<rationale>"`.
+    pub status: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuthoringProvenanceInfo {
+    pub element_id: u64,
+    /// `"Freeform"`, `"ViaRecipe:<id>"`, `"Imported:<ref>"`, or `"Refined:<id>"`.
+    pub mode: String,
+    pub rationale: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClaimGroundingEntry {
+    pub path: String,
+    /// JSON-encoded `Grounding` variant.
+    pub grounding: serde_json::Value,
+    pub set_at: i64,
+    pub set_by: Option<String>,
+    /// Always `false` in PP70; PP74 wires in element-class descriptor merge.
+    pub is_promotion_critical: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ValidationFindingInfo {
+    pub finding_id: String,
+    pub entity_element_id: u64,
+    pub validator: String,
+    pub severity: String,
+    pub message: String,
+    pub rationale: String,
+    pub obligation_id: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromoteRefinementResult {
+    pub element_id: u64,
+    pub previous_state: String,
+    pub new_state: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DemoteRefinementResult {
+    pub element_id: u64,
+    pub previous_state: String,
+    pub new_state: String,
+}
+
+// --- Refinement request types (PP70) ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RefinementEntityRequest {
+    element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaimGroundingRequest {
+    element_id: u64,
+    path: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PromoteRefinementRequest {
+    element_id: u64,
+    target_state: String,
+    recipe_id: Option<String>,
+    overrides: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DemoteRefinementRequest {
+    element_id: u64,
+    target_state: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExplainFindingRequest {
+    finding_id: String,
+}
+
+// --- PP71 request parameter structs ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListRecipeFamiliesRequest {
+    /// Filter to this element class id, or omit for all families.
+    element_class: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SelectRecipeRequest {
+    element_class: String,
+    /// Context object — expected keys: `target_state` (required), `jurisdiction` (optional).
+    #[serde(default)]
+    context: serde_json::Value,
 }
 
 // --- Assembly / Relation request types ---
@@ -5781,6 +6259,179 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(members)
+    }
+
+    // --- Refinement tools (PP70) ---
+
+    #[tool(
+        name = "get_refinement_state",
+        description = "Get the declared refinement maturity of an entity. Returns one of: Conceptual, Schematic, Constructible, Detailed, FabricationReady."
+    )]
+    async fn get_refinement_state_tool(
+        &self,
+        Parameters(params): Parameters<RefinementEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_get_refinement_state(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(info)
+    }
+
+    #[tool(
+        name = "get_obligations",
+        description = "Get the obligation list for an entity, showing what sub-elements or claims must be resolved at each refinement state."
+    )]
+    async fn get_obligations_tool(
+        &self,
+        Parameters(params): Parameters<RefinementEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let obligations = self
+            .request_get_obligations(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(obligations)
+    }
+
+    #[tool(
+        name = "get_authoring_provenance",
+        description = "Get the authoring provenance for an entity — how it was created (Freeform, ViaRecipe, Imported, or Refined from a coarser entity)."
+    )]
+    async fn get_authoring_provenance_tool(
+        &self,
+        Parameters(params): Parameters<RefinementEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let provenance = self
+            .request_get_authoring_provenance(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(provenance)
+    }
+
+    #[tool(
+        name = "get_claim_grounding",
+        description = "Get per-claim grounding for an entity, optionally filtered to a specific claim path. The is_promotion_critical flag is false in PP70 (element-class descriptors land in PP74)."
+    )]
+    async fn get_claim_grounding_tool(
+        &self,
+        Parameters(params): Parameters<ClaimGroundingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let entries = self
+            .request_get_claim_grounding(params.element_id, params.path)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entries)
+    }
+
+    #[tool(
+        name = "promote_refinement",
+        description = "Promote an entity to a higher refinement state. Recipe instantiation is a no-op in PP70 (no recipes registered yet). The promotion is undoable."
+    )]
+    async fn promote_refinement_tool(
+        &self,
+        Parameters(params): Parameters<PromoteRefinementRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_promote_refinement(
+                params.element_id,
+                params.target_state,
+                params.recipe_id,
+                params.overrides.unwrap_or_default(),
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "demote_refinement",
+        description = "Demote an entity to a lower refinement state. Removes any refined_into relation links. The demotion is undoable."
+    )]
+    async fn demote_refinement_tool(
+        &self,
+        Parameters(params): Parameters<DemoteRefinementRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_demote_refinement(params.element_id, params.target_state)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "run_validation",
+        description = "Run the registered validators against an entity and return findings. In PP70 this runs only the DeclaredStateRequiresResolvedObligations validator."
+    )]
+    async fn run_validation_tool(
+        &self,
+        Parameters(params): Parameters<RefinementEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let findings = self
+            .request_run_validation(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(findings)
+    }
+
+    #[tool(
+        name = "explain_finding",
+        description = "Return the rationale for a specific validator finding by finding_id."
+    )]
+    async fn explain_finding_tool(
+        &self,
+        Parameters(params): Parameters<ExplainFindingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let explanation = self
+            .request_explain_finding(params.finding_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(explanation)
+    }
+
+    // --- Descriptor discovery tools (PP71) ---
+
+    #[tool(
+        name = "list_element_classes",
+        description = "List all registered element classes (e.g. wall_assembly, foundation_system). \
+            Each entry includes the id, label, description, and semantic roles."
+    )]
+    async fn list_element_classes_tool(&self) -> Result<CallToolResult, McpError> {
+        let classes = self.request_list_element_classes().await;
+        json_tool_result(classes)
+    }
+
+    #[tool(
+        name = "list_recipe_families",
+        description = "List registered recipe families. Pass element_class to filter to a specific \
+            class (e.g. 'wall_assembly'). Each entry includes the id, label, parameters, and \
+            supported refinement levels."
+    )]
+    async fn list_recipe_families_tool(
+        &self,
+        Parameters(params): Parameters<ListRecipeFamiliesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let families = self
+            .request_list_recipe_families(params.element_class)
+            .await;
+        json_tool_result(families)
+    }
+
+    #[tool(
+        name = "select_recipe",
+        description = "Return viable recipe families for an element class, ranked by weight. \
+            In PP71 all viable recipes tie at 1.0 (real priors land in PP76). \
+            Viable means the recipe's supported_refinement_levels includes the target_state. \
+            Context schema: { target_state: string, jurisdiction?: string }."
+    )]
+    async fn select_recipe_tool(
+        &self,
+        Parameters(params): Parameters<SelectRecipeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let ranking = self
+            .request_select_recipe(params.element_class, params.context)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(ranking)
     }
 
     #[tool(
@@ -11463,6 +12114,464 @@ fn required_f32(object: &serde_json::Map<String, Value>, field: &str) -> ApiResu
 #[cfg(feature = "model-api")]
 fn send_event<E: Message>(world: &mut World, event: E) {
     world.resource_mut::<Messages<E>>().write(event);
+}
+
+// ---------------------------------------------------------------------------
+// Refinement handlers (PP70)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn handle_get_refinement_state(world: &World, element_id: u64) -> ApiResult<RefinementStateInfo> {
+    use crate::plugins::refinement::RefinementStateComponent;
+
+    let eid = ElementId(element_id);
+    ensure_entity_exists(world, eid)?;
+
+    let state = {
+        let mut q = world.try_query::<(EntityRef,)>().unwrap();
+        q.iter(world)
+            .find_map(|(entity_ref,)| {
+                if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                    return None;
+                }
+                Some(
+                    entity_ref
+                        .get::<RefinementStateComponent>()
+                        .map(|c| c.state)
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default()
+    };
+
+    Ok(RefinementStateInfo {
+        element_id,
+        state: state.as_str().to_string(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_obligations(world: &World, element_id: u64) -> ApiResult<Vec<ObligationInfo>> {
+    use crate::plugins::refinement::{ObligationSet, ObligationStatus};
+
+    let eid = ElementId(element_id);
+    ensure_entity_exists(world, eid)?;
+
+    let mut q = world.try_query::<(EntityRef,)>().unwrap();
+    let entry = q.iter(world).find_map(|(entity_ref,)| {
+        if entity_ref.get::<ElementId>().copied() != Some(eid) {
+            return None;
+        }
+        let set = entity_ref.get::<ObligationSet>()?;
+        Some(
+            set.entries
+                .iter()
+                .map(|o| ObligationInfo {
+                    id: o.id.0.clone(),
+                    role: o.role.0.clone(),
+                    required_by_state: o.required_by_state.as_str().to_string(),
+                    status: match &o.status {
+                        ObligationStatus::Unresolved => "Unresolved".to_string(),
+                        ObligationStatus::SatisfiedBy(id) => format!("SatisfiedBy:{id}"),
+                        ObligationStatus::Deferred(reason) => format!("Deferred:{reason}"),
+                        ObligationStatus::Waived(rationale) => format!("Waived:{rationale}"),
+                    },
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+
+    Ok(entry.unwrap_or_default())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_authoring_provenance(
+    world: &World,
+    element_id: u64,
+) -> ApiResult<AuthoringProvenanceInfo> {
+    use crate::plugins::refinement::{AuthoringMode, AuthoringProvenance};
+
+    let eid = ElementId(element_id);
+    ensure_entity_exists(world, eid)?;
+
+    let mut q = world.try_query::<(EntityRef,)>().unwrap();
+    let entry = q
+        .iter(world)
+        .find_map(|(entity_ref,)| {
+            if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                return None;
+            }
+            let prov = entity_ref.get::<AuthoringProvenance>()?;
+            let mode_str = match &prov.mode {
+                AuthoringMode::Freeform => "Freeform".to_string(),
+                AuthoringMode::ViaRecipe(id) => format!("ViaRecipe:{}", id.0),
+                AuthoringMode::Imported(src) => format!("Imported:{}", src.0),
+                AuthoringMode::Refined(parent_id) => format!("Refined:{parent_id}"),
+            };
+            Some(AuthoringProvenanceInfo {
+                element_id,
+                mode: mode_str,
+                rationale: prov.rationale.clone(),
+            })
+        })
+        .unwrap_or_else(|| AuthoringProvenanceInfo {
+            element_id,
+            mode: "Freeform".to_string(),
+            rationale: None,
+        });
+
+    Ok(entry)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_claim_grounding(
+    world: &World,
+    element_id: u64,
+    path_filter: Option<String>,
+) -> ApiResult<Vec<ClaimGroundingEntry>> {
+    use crate::capability_registry::{
+        effective_promotion_critical_paths, ElementClassAssignment,
+    };
+    use crate::plugins::refinement::{ClaimGrounding, RefinementStateComponent};
+
+    let eid = ElementId(element_id);
+    ensure_entity_exists(world, eid)?;
+
+    // Compute the effective promotion-critical paths for this entity (PP71).
+    // If no class assignment exists, falls back to an empty set (PP70 behaviour).
+    let critical_paths: std::collections::HashSet<String> = {
+        let mut q = world.try_query::<(EntityRef,)>().unwrap();
+        q.iter(world)
+            .find_map(|(entity_ref,)| {
+                if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                    return None;
+                }
+                let assignment = entity_ref.get::<ElementClassAssignment>()?;
+                let state = entity_ref
+                    .get::<RefinementStateComponent>()
+                    .map(|c| c.state)
+                    .unwrap_or_default();
+                let registry = world.get_resource::<CapabilityRegistry>()?;
+                let class_desc = registry.element_class_descriptor(&assignment.element_class)?;
+                let recipe_desc = assignment
+                    .active_recipe
+                    .as_ref()
+                    .and_then(|rid| registry.recipe_family_descriptor(rid));
+                let paths = effective_promotion_critical_paths(class_desc, recipe_desc, state);
+                Some(paths.into_iter().map(|p| p.0).collect())
+            })
+            .unwrap_or_default()
+    };
+
+    let mut q = world.try_query::<(EntityRef,)>().unwrap();
+    let entries = q
+        .iter(world)
+        .find_map(|(entity_ref,)| {
+            if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                return None;
+            }
+            let grounding = entity_ref.get::<ClaimGrounding>()?;
+            let iter = grounding.claims.iter().filter_map(|(path, record)| {
+                if let Some(ref filter) = path_filter {
+                    if &path.0 != filter {
+                        return None;
+                    }
+                }
+                let grounding_json = serde_json::to_value(&record.grounding).unwrap_or_default();
+                let is_promotion_critical = critical_paths.contains(&path.0);
+                Some(ClaimGroundingEntry {
+                    path: path.0.clone(),
+                    grounding: grounding_json,
+                    set_at: record.set_at,
+                    set_by: record.set_by.as_ref().map(|a| a.0.clone()),
+                    is_promotion_critical,
+                })
+            });
+            Some(iter.collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    Ok(entries)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_promote_refinement(
+    world: &mut World,
+    element_id: u64,
+    target_state_str: String,
+    recipe_id: Option<String>,
+    overrides: serde_json::Value,
+) -> ApiResult<PromoteRefinementResult> {
+    use crate::plugins::refinement::{
+        apply_promote_refinement, ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState,
+        RefinementStateComponent,
+    };
+
+    let target_state = RefinementState::from_str(&target_state_str)
+        .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
+
+    let eid = ElementId(element_id);
+    ensure_entity_exists(world, eid)?;
+
+    // Capture current state before promote.
+    let previous_state = {
+        let mut q = world.try_query::<(EntityRef,)>().unwrap();
+        q.iter(world)
+            .find_map(|(entity_ref,)| {
+                if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                    return None;
+                }
+                Some(
+                    entity_ref
+                        .get::<RefinementStateComponent>()
+                        .map(|c| c.state)
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default()
+    };
+
+    let overrides_map: std::collections::HashMap<ClaimPath, serde_json::Value> = overrides
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (ClaimPath(k.clone()), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let request = PromoteRefinementRequest {
+        entity_element_id: element_id,
+        target_state,
+        recipe_id: recipe_id.map(RecipeId),
+        overrides: overrides_map,
+    };
+
+    let new_state = apply_promote_refinement(world, request)?;
+    flush_model_api_write_pipeline(world);
+
+    Ok(PromoteRefinementResult {
+        element_id,
+        previous_state: previous_state.as_str().to_string(),
+        new_state: new_state.as_str().to_string(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_demote_refinement(
+    world: &mut World,
+    element_id: u64,
+    target_state_str: String,
+) -> ApiResult<DemoteRefinementResult> {
+    use crate::plugins::refinement::{
+        apply_demote_refinement, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
+    };
+
+    let target_state = RefinementState::from_str(&target_state_str)
+        .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
+
+    let eid = ElementId(element_id);
+    ensure_entity_exists(world, eid)?;
+
+    let previous_state = {
+        let mut q = world.try_query::<(EntityRef,)>().unwrap();
+        q.iter(world)
+            .find_map(|(entity_ref,)| {
+                if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                    return None;
+                }
+                Some(
+                    entity_ref
+                        .get::<RefinementStateComponent>()
+                        .map(|c| c.state)
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default()
+    };
+
+    let request = DemoteRefinementRequest {
+        entity_element_id: element_id,
+        target_state,
+    };
+
+    let new_state = apply_demote_refinement(world, request)?;
+    flush_model_api_write_pipeline(world);
+
+    Ok(DemoteRefinementResult {
+        element_id,
+        previous_state: previous_state.as_str().to_string(),
+        new_state: new_state.as_str().to_string(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_run_validation(
+    world: &World,
+    element_id: u64,
+) -> ApiResult<Vec<ValidationFindingInfo>> {
+    use crate::plugins::refinement::{
+        validate_declared_state_obligations, ObligationSet, RefinementStateComponent,
+    };
+
+    let eid = ElementId(element_id);
+    ensure_entity_exists(world, eid)?;
+
+    let (state, obligations) = {
+        let mut q = world.try_query::<(EntityRef,)>().unwrap();
+        q.iter(world)
+            .find_map(|(entity_ref,)| {
+                if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                    return None;
+                }
+                let state = entity_ref
+                    .get::<RefinementStateComponent>()
+                    .map(|c| c.state)
+                    .unwrap_or_default();
+                let obligations = entity_ref
+                    .get::<ObligationSet>()
+                    .cloned()
+                    .unwrap_or_default();
+                Some((state, obligations))
+            })
+            .unwrap_or_default()
+    };
+
+    let findings = validate_declared_state_obligations(element_id, state, &obligations);
+
+    Ok(findings
+        .into_iter()
+        .map(|f| ValidationFindingInfo {
+            finding_id: f.finding_id,
+            entity_element_id: f.entity_element_id,
+            validator: f.validator,
+            severity: f.severity.as_str().to_string(),
+            message: f.message,
+            rationale: f.rationale,
+            obligation_id: f.obligation_id.map(|id| id.0),
+        })
+        .collect())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_explain_finding(
+    _world: &World,
+    finding_id: String,
+) -> ApiResult<serde_json::Value> {
+    // PP70 scaffold: derive rationale from the finding_id prefix.
+    // The richer per-finding lookup with caching lands in PP74.
+    if finding_id.starts_with("declared_state_obligations:") {
+        Ok(serde_json::json!({
+            "finding_id": finding_id,
+            "validator": "DeclaredStateRequiresResolvedObligations",
+            "rationale": "Entities at Schematic state must have primary-structure obligations \
+                          resolved or at least flagged. At Constructible or higher, all \
+                          obligations must be in a terminal status (SatisfiedBy, Deferred, \
+                          or Waived). This ensures that design intent is captured before \
+                          geometry generation proceeds.",
+            "source": "ADR-038 §11 / PP70 acceptance criteria"
+        }))
+    } else {
+        Err(format!("Unknown finding_id '{finding_id}'. Only findings produced by run_validation are known to this endpoint."))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor discovery handlers (PP71)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_element_classes(world: &World) -> Vec<ElementClassInfo> {
+    use crate::capability_registry::CapabilityRegistry;
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return Vec::new();
+    };
+    registry
+        .element_class_descriptors()
+        .iter()
+        .map(|d| ElementClassInfo {
+            id: d.id.0.clone(),
+            label: d.label.clone(),
+            description: d.description.clone(),
+            semantic_roles: d.semantic_roles.iter().map(|r| r.0.clone()).collect(),
+        })
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_recipe_families(
+    world: &World,
+    element_class: Option<String>,
+) -> Vec<RecipeFamilyInfo> {
+    use crate::capability_registry::{CapabilityRegistry, ElementClassId};
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return Vec::new();
+    };
+    let filter = element_class.as_deref().map(|s| ElementClassId(s.to_string()));
+    registry
+        .recipe_family_descriptors(filter.as_ref())
+        .into_iter()
+        .map(|d| RecipeFamilyInfo {
+            id: d.id.0.clone(),
+            target_class: d.target_class.0.clone(),
+            label: d.label.clone(),
+            description: d.description.clone(),
+            supported_refinement_levels: d
+                .supported_refinement_levels
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
+            parameters: d
+                .parameters
+                .iter()
+                .map(|p| RecipeParameterInfo {
+                    name: p.name.clone(),
+                    value_schema: p.value_schema.clone(),
+                    default: p.default.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_select_recipe(
+    world: &World,
+    element_class: String,
+    context: serde_json::Value,
+) -> ApiResult<Vec<RecipeRankingInfo>> {
+    use crate::capability_registry::{CapabilityRegistry, ElementClassId};
+    use crate::plugins::refinement::RefinementState;
+
+    let registry = world
+        .get_resource::<CapabilityRegistry>()
+        .ok_or_else(|| "CapabilityRegistry not found".to_string())?;
+
+    let class_id = ElementClassId(element_class);
+
+    // Optionally filter by target_state from the context object.
+    let target_state: Option<RefinementState> = context
+        .get("target_state")
+        .and_then(|v| v.as_str())
+        .and_then(RefinementState::from_str);
+
+    let viable: Vec<RecipeRankingInfo> = registry
+        .recipe_family_descriptors(Some(&class_id))
+        .into_iter()
+        .filter(|d| {
+            // Viable = supports the requested state (or all states if no filter).
+            target_state.is_none_or(|ts| d.supported_refinement_levels.contains(&ts))
+        })
+        .map(|d| RecipeRankingInfo {
+            id: d.id.0.clone(),
+            target_class: d.target_class.0.clone(),
+            label: d.label.clone(),
+            // PP71: flat 1.0 weight — real priors land in PP76.
+            weight: 1.0,
+        })
+        .collect();
+
+    Ok(viable)
 }
 
 #[cfg(test)]
