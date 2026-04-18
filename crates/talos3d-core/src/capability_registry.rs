@@ -532,6 +532,151 @@ impl Clone for CatalogProviderDescriptor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PP76: Generation priors
+// ---------------------------------------------------------------------------
+
+/// Stable identifier for a registered generation prior.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PriorId(pub String);
+
+/// Scope of a generation prior: what it ranks or defaults.
+///
+/// `RecipeSelection` priors contribute a weight for a specific recipe family
+/// when `select_recipe` is called for the given element class.
+/// `ParameterDefaulting` priors suggest a value for a specific claim path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum PriorScope {
+    /// Ranks a specific recipe family for the given element class.
+    /// `recipe_family: None` means the prior targets *all* families for the class;
+    /// supply `Some(id)` to narrow to one family.
+    RecipeSelection {
+        element_class: ElementClassId,
+        recipe_family: Option<RecipeFamilyId>,
+    },
+    /// Suggests a default value for a typed claim path on the given element class.
+    ParameterDefaulting {
+        element_class: ElementClassId,
+        claim_path: ClaimPath,
+    },
+}
+
+/// Runtime context passed to a prior's evaluation function.
+///
+/// Derived from the caller's JSON context object (e.g. `select_recipe`'s
+/// `context` argument). `extras` carries any additional fields not explicitly
+/// modelled here, preserving forward-compatibility.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PriorContext {
+    /// ISO 3166-1 jurisdiction code, e.g. `"SE"` or `"US"`.
+    pub jurisdiction: Option<String>,
+    /// Design-intent style token, e.g. `"modern_pavilion"`.
+    pub style_intent: Option<String>,
+    /// Site terrain slope as a percentage (rise/run × 100).
+    pub terrain_slope_pct: Option<f64>,
+    /// Catch-all for caller-supplied keys not yet modelled explicitly.
+    #[serde(default)]
+    pub extras: serde_json::Value,
+}
+
+impl PriorContext {
+    /// Construct a `PriorContext` from a raw JSON object produced by a caller.
+    ///
+    /// Known fields are extracted; any remaining keys flow into `extras`.
+    pub fn from_json(value: &serde_json::Value) -> Self {
+        Self {
+            jurisdiction: value.get("jurisdiction").and_then(|v| v.as_str()).map(str::to_owned),
+            style_intent: value.get("style_intent").and_then(|v| v.as_str()).map(str::to_owned),
+            terrain_slope_pct: value.get("terrain_slope_pct").and_then(|v| v.as_f64()),
+            extras: value.clone(),
+        }
+    }
+}
+
+/// The outcome of evaluating a prior against a context.
+///
+/// `weight` is in `[0.0, 1.0]` where 1.0 = strong preference, 0.0 = veto.
+/// `suggestion` carries an optional parameter value for `ParameterDefaulting`
+/// priors. `rationale` is a short human-readable explanation for MCP callers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorEvaluation {
+    /// Preference weight in \[0.0, 1.0\].
+    pub weight: f32,
+    /// Optional parameter suggestion (for `ParameterDefaulting` priors).
+    pub suggestion: Option<serde_json::Value>,
+    /// Human-readable explanation of why this weight was assigned.
+    pub rationale: String,
+}
+
+impl PriorEvaluation {
+    /// Neutral evaluation: weight 1.0, no suggestion.
+    pub fn neutral(rationale: impl Into<String>) -> Self {
+        Self {
+            weight: 1.0,
+            suggestion: None,
+            rationale: rationale.into(),
+        }
+    }
+}
+
+/// A prior function: takes the evaluation context, returns a `PriorEvaluation`.
+///
+/// For `RecipeSelection` priors the function is called once per candidate
+/// recipe family; for `ParameterDefaulting` priors it is called once per
+/// entity whose parameter is being defaulted.
+///
+/// The `Arc` wrapper makes the descriptor cheaply `Clone`-able without
+/// duplicating the closure allocation.
+pub type PriorFn = Arc<dyn Fn(&PriorContext) -> PriorEvaluation + Send + Sync>;
+
+/// Describes a registered generation prior.
+///
+/// A prior scores recipe families during `select_recipe` or supplies default
+/// parameter values during recipe instantiation. Priors are separate from
+/// validators: they run *before* entity creation to guide the authoring agent,
+/// not *after* to check compliance.
+///
+/// Not `Serialize`/`Deserialize` — holds a `PriorFn` closure.
+/// Use `GenerationPriorInfo` (in `model_api`) for serialisable summaries.
+pub struct GenerationPriorDescriptor {
+    /// Stable machine-readable identifier.
+    pub id: PriorId,
+    /// Short human-readable name.
+    pub label: String,
+    /// Full description shown in `list_generation_priors`.
+    pub description: String,
+    /// What this prior applies to (recipe selection or parameter defaulting).
+    pub scope: PriorScope,
+    /// Provenance of the knowledge encoded in this prior.
+    pub source_provenance: CorpusProvenance,
+    /// The evaluation function.
+    pub prior_fn: PriorFn,
+}
+
+impl std::fmt::Debug for GenerationPriorDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenerationPriorDescriptor")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("scope", &self.scope)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for GenerationPriorDescriptor {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            description: self.description.clone(),
+            scope: self.scope.clone(),
+            source_provenance: self.source_provenance.clone(),
+            prior_fn: Arc::clone(&self.prior_fn),
+        }
+    }
+}
+
 /// Describes a recipe family: a parametric authoring contract for an element
 /// class. A recipe family declares parameters, which refinement levels it
 /// supports, how it specialises the class-minimum obligations, and a `generate`
@@ -876,6 +1021,9 @@ pub struct CapabilityRegistry {
     // PP75
     catalog_providers: Vec<CatalogProviderDescriptor>,
     catalog_provider_index: HashMap<String, usize>,
+    // PP76
+    generation_priors: Vec<GenerationPriorDescriptor>,
+    generation_prior_index: HashMap<String, usize>,
 }
 
 impl CapabilityRegistry {
@@ -1146,6 +1294,50 @@ impl CapabilityRegistry {
             .get(id.0.as_str())
             .and_then(|&i| self.catalog_providers.get(i))
     }
+
+    // --- PP76: Generation prior descriptors ---
+
+    /// Register a generation prior descriptor. Panics if the id is already registered.
+    pub fn register_generation_prior(&mut self, descriptor: GenerationPriorDescriptor) {
+        assert!(
+            !self.generation_prior_index.contains_key(descriptor.id.0.as_str()),
+            "GenerationPrior '{}' was registered more than once",
+            descriptor.id.0
+        );
+        let index = self.generation_priors.len();
+        self.generation_prior_index
+            .insert(descriptor.id.0.clone(), index);
+        self.generation_priors.push(descriptor);
+    }
+
+    /// Return all registered generation prior descriptors, optionally filtered
+    /// to those matching the given scope element class.
+    ///
+    /// Pass `element_class: None` to return all priors.
+    pub fn generation_prior_descriptors(
+        &self,
+        element_class: Option<&ElementClassId>,
+    ) -> Vec<&GenerationPriorDescriptor> {
+        self.generation_priors
+            .iter()
+            .filter(|d| {
+                let Some(cls) = element_class else {
+                    return true;
+                };
+                match &d.scope {
+                    PriorScope::RecipeSelection { element_class: ec, .. } => ec == cls,
+                    PriorScope::ParameterDefaulting { element_class: ec, .. } => ec == cls,
+                }
+            })
+            .collect()
+    }
+
+    /// Look up a single generation prior descriptor by id.
+    pub fn generation_prior_descriptor(&self, id: &PriorId) -> Option<&GenerationPriorDescriptor> {
+        self.generation_prior_index
+            .get(id.0.as_str())
+            .and_then(|&i| self.generation_priors.get(i))
+    }
 }
 
 fn validate_capability_dependencies(registry: Res<CapabilityRegistry>) {
@@ -1232,6 +1424,10 @@ pub trait CapabilityRegistryAppExt {
     /// Register a `CatalogProviderDescriptor` (PP75). Initialises the
     /// `CapabilityRegistry` resource if it does not yet exist.
     fn register_catalog_provider(&mut self, descriptor: CatalogProviderDescriptor) -> &mut Self;
+
+    /// Register a `GenerationPriorDescriptor` (PP76). Initialises the
+    /// `CapabilityRegistry` resource if it does not yet exist.
+    fn register_generation_prior(&mut self, descriptor: GenerationPriorDescriptor) -> &mut Self;
 }
 
 #[derive(Resource)]
@@ -1347,6 +1543,17 @@ impl CapabilityRegistryAppExt for App {
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_catalog_provider(descriptor);
+        self
+    }
+
+    fn register_generation_prior(&mut self, descriptor: GenerationPriorDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_generation_prior(descriptor);
         self
     }
 }

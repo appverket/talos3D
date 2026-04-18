@@ -1609,6 +1609,12 @@ enum ModelApiRequest {
         filter: serde_json::Value,
         response: oneshot::Sender<ApiResult<Vec<CatalogRowInfo>>>,
     },
+    // --- PP76: Generation priors ---
+    ListGenerationPriors {
+        /// Optional JSON scope-filter object; absent means "all priors".
+        scope_filter: Option<serde_json::Value>,
+        response: oneshot::Sender<Vec<GenerationPriorInfo>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -2325,6 +2331,13 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_catalog_query(world, provider_id, filter));
+        }
+        // --- PP76 ---
+        ModelApiRequest::ListGenerationPriors {
+            scope_filter,
+            response,
+        } => {
+            let _ = response.send(handle_list_generation_priors(world, scope_filter));
         }
     }
 }
@@ -3815,6 +3828,20 @@ impl ModelApiServer {
         receiver.await.unwrap_or_default()
     }
 
+    // --- PP76 requests ---
+
+    async fn request_list_generation_priors(
+        &self,
+        scope_filter: Option<serde_json::Value>,
+    ) -> Vec<GenerationPriorInfo> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.send(ModelApiRequest::ListGenerationPriors {
+            scope_filter,
+            response,
+        });
+        receiver.await.unwrap_or_default()
+    }
+
     async fn request_catalog_query(
         &self,
         provider_id: String,
@@ -5005,6 +5032,26 @@ pub struct CatalogRowInfo {
     pub source_version: String,
 }
 
+// --- PP76 response types ---
+
+/// Summary of a registered generation prior, returned by `list_generation_priors`.
+///
+/// Does not carry the `prior_fn` closure — use the descriptor directly when
+/// you need to evaluate the prior at runtime.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GenerationPriorInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// Serialised `PriorScope` as a JSON object (includes `"kind"` discriminant).
+    pub scope: serde_json::Value,
+    /// `LicenseTag::as_str()` from the descriptor's `source_provenance`.
+    pub license: String,
+    /// Version label from the descriptor's `source_provenance`.
+    pub source_version: String,
+}
+
 /// Result of a `preview_promotion` call.
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -5143,6 +5190,18 @@ struct CatalogQueryRequest {
     /// Arbitrary JSON filter object. PP75: ignored by all providers (all rows returned).
     #[serde(default)]
     filter: serde_json::Value,
+}
+
+// --- PP76 request parameter structs ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ListGenerationPriorsRequest {
+    /// Optional scope filter. Recognised keys: `element_class` (string),
+    /// `claim_path` (string). Absent or empty object returns all priors.
+    #[serde(default)]
+    scope_filter: Option<serde_json::Value>,
 }
 
 // --- Assembly / Relation request types ---
@@ -6776,6 +6835,25 @@ impl ModelApiServer {
     async fn list_catalog_providers_tool(&self) -> Result<CallToolResult, McpError> {
         let providers = self.request_list_catalog_providers().await;
         json_tool_result(providers)
+    }
+
+    // --- PP76: Generation priors ---
+
+    #[tool(
+        name = "list_generation_priors",
+        description = "List all registered generation priors. Each entry includes id, label, \
+            description, scope (as a JSON object with a 'kind' discriminant), license, and \
+            source_version. Pass an optional scope_filter object with 'element_class' or \
+            'claim_path' keys to narrow the results; omit it to return all priors."
+    )]
+    async fn list_generation_priors_tool(
+        &self,
+        Parameters(params): Parameters<ListGenerationPriorsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let priors = self
+            .request_list_generation_priors(params.scope_filter)
+            .await;
+        json_tool_result(priors)
     }
 
     #[tool(
@@ -12929,43 +13007,22 @@ pub fn handle_select_recipe(
         .and_then(|v| v.as_str())
         .and_then(RefinementState::from_str);
 
-    // TODO(PP76): real GenerationPriorDescriptor mechanism.
-    // Stub: read terrain_slope_pct from the context and apply a hardcoded
-    // ranking for foundation_system recipes.
-    // - slope < 5   : slab_on_grade 1.0, pier_foundation 0.2
-    // - slope 5..=15: both 0.7
-    // - slope > 15  : pier_foundation 1.0, slab_on_grade 0.1
-    // All other classes and missing slope → flat 1.0 (original PP71 behaviour).
-    let terrain_slope_pct: Option<f64> = context
-        .get("terrain_slope_pct")
-        .and_then(|v| v.as_f64());
+    // PP76: consult registered GenerationPriorDescriptors scoped to
+    // RecipeSelection for this element class.  Each prior is called with the
+    // evaluation context derived from the request JSON; the resulting weights
+    // are multiplied together (all priors must agree).  If no priors match,
+    // weight defaults to 1.0 (neutral — original PP71 behaviour).
+    //
+    // The terrain_slope_foundation prior registered by talos3d-architecture-core
+    // reproduces the behaviour previously hard-coded here (the PP72 TODO stub).
+    use crate::capability_registry::{PriorContext, PriorScope};
 
-    let slope_weight = |recipe_id: &str| -> f32 {
-        let Some(slope) = terrain_slope_pct else {
-            return 1.0;
-        };
-        match recipe_id {
-            "slab_on_grade" => {
-                if slope < 5.0 {
-                    1.0
-                } else if slope <= 15.0 {
-                    0.7
-                } else {
-                    0.1
-                }
-            }
-            "pier_foundation" => {
-                if slope < 5.0 {
-                    0.2
-                } else if slope <= 15.0 {
-                    0.7
-                } else {
-                    1.0
-                }
-            }
-            _ => 1.0,
-        }
-    };
+    let prior_context = PriorContext::from_json(&context);
+    let recipe_selection_priors: Vec<_> = registry
+        .generation_prior_descriptors(Some(&class_id))
+        .into_iter()
+        .filter(|d| matches!(&d.scope, PriorScope::RecipeSelection { .. }))
+        .collect();
 
     let mut viable: Vec<RecipeRankingInfo> = registry
         .recipe_family_descriptors(Some(&class_id))
@@ -12974,11 +13031,27 @@ pub fn handle_select_recipe(
             // Viable = supports the requested state (or all states if no filter).
             target_state.is_none_or(|ts| d.supported_refinement_levels.contains(&ts))
         })
-        .map(|d| RecipeRankingInfo {
-            id: d.id.0.clone(),
-            target_class: d.target_class.0.clone(),
-            label: d.label.clone(),
-            weight: slope_weight(&d.id.0),
+        .map(|d| {
+            // Evaluate all applicable priors for this recipe family.  A prior
+            // is applicable when its scope matches either "all families for the
+            // class" (recipe_family: None) or exactly this family.
+            let weight = recipe_selection_priors
+                .iter()
+                .filter(|p| match &p.scope {
+                    PriorScope::RecipeSelection { recipe_family, .. } => {
+                        recipe_family.is_none()
+                            || recipe_family.as_ref().map(|rf| rf.0.as_str()) == Some(d.id.0.as_str())
+                    }
+                    _ => false,
+                })
+                .map(|p| (p.prior_fn)(&prior_context).weight)
+                .fold(1.0_f32, |acc, w| acc * w);
+            RecipeRankingInfo {
+                id: d.id.0.clone(),
+                target_class: d.target_class.0.clone(),
+                label: d.label.clone(),
+                weight,
+            }
         })
         .collect();
 
@@ -13293,6 +13366,47 @@ pub fn handle_catalog_query(
             source_version: row.provenance.source_version,
         })
         .collect())
+}
+
+// ---------------------------------------------------------------------------
+// PP76: Generation prior handlers
+// ---------------------------------------------------------------------------
+
+/// Return a summary of every registered generation prior, optionally filtered
+/// by scope.
+///
+/// `scope_filter` may carry keys `element_class` (string) and/or `claim_path`
+/// (string). If absent or empty, all priors are returned.
+#[cfg(feature = "model-api")]
+pub fn handle_list_generation_priors(
+    world: &World,
+    scope_filter: Option<serde_json::Value>,
+) -> Vec<GenerationPriorInfo> {
+    use crate::capability_registry::{CapabilityRegistry, ElementClassId};
+
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return Vec::new();
+    };
+
+    // Derive optional element-class filter from the scope_filter object.
+    let element_class_filter: Option<ElementClassId> = scope_filter
+        .as_ref()
+        .and_then(|v| v.get("element_class"))
+        .and_then(|v| v.as_str())
+        .map(|s| ElementClassId(s.to_owned()));
+
+    registry
+        .generation_prior_descriptors(element_class_filter.as_ref())
+        .into_iter()
+        .map(|d| GenerationPriorInfo {
+            id: d.id.0.clone(),
+            label: d.label.clone(),
+            description: d.description.clone(),
+            scope: serde_json::to_value(&d.scope).unwrap_or_default(),
+            license: d.source_provenance.license.as_str().to_string(),
+            source_version: d.source_provenance.source_version.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

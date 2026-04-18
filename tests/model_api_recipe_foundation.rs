@@ -15,10 +15,13 @@
 
 use bevy::prelude::*;
 use talos3d_architectural::snapshots::WallFactory;
-use talos3d_architecture_core::recipes::{
-    foundation_pier::pier_foundation_recipe,
-    foundation_slab_on_grade::{foundation_system_class, slab_on_grade_recipe},
-    wall_light_frame_exterior::{light_frame_exterior_wall_recipe, wall_assembly_class},
+use talos3d_architecture_core::{
+    priors::terrain::{terrain_slope_pier_prior, terrain_slope_slab_prior},
+    recipes::{
+        foundation_pier::pier_foundation_recipe,
+        foundation_slab_on_grade::{foundation_system_class, slab_on_grade_recipe},
+        wall_light_frame_exterior::{light_frame_exterior_wall_recipe, wall_assembly_class},
+    },
 };
 use talos3d_core::{
     authored_entity::AuthoredEntity,
@@ -77,6 +80,11 @@ fn init_foundation_test_world() -> World {
     registry.register_recipe_family(slab_on_grade_recipe());
     registry.register_recipe_family(pier_foundation_recipe());
     registry.register_recipe_family(light_frame_exterior_wall_recipe());
+
+    // PP76: register terrain priors so slope ranking works via the prior
+    // mechanism rather than the removed hardcoded stub.
+    registry.register_generation_prior(terrain_slope_slab_prior());
+    registry.register_generation_prior(terrain_slope_pier_prior());
 
     // Refinement relation types.
     for (rt, lbl, desc) in [
