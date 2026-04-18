@@ -7,10 +7,6 @@ edition = "2021"
 perf-stats = ["talos3d-core/perf-stats"]
 model-api = ["talos3d-core/model-api"]
 
-[[example]]
-name = "promote_pavilion"
-required-features = ["model-api"]
-
 [dependencies]
 bevy = { version = "0.18", default-features = false, features = [
     "bevy_asset",

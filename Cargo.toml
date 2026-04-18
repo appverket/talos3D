@@ -52,6 +52,7 @@ talos3d-terrain = { path = "crates/talos3d-terrain", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
+talos3d-architecture-core = { path = "../talos3d-architecture/crates/talos3d-architecture-core", features = ["model-api"] }
 
 [profile.release]
 opt-level = "z"
