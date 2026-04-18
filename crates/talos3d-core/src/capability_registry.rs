@@ -251,6 +251,141 @@ pub struct GenerateOutput {
 pub type GenerateFn =
     Arc<dyn Fn(GenerateInput, &mut World) -> Result<GenerateOutput, String> + Send + Sync>;
 
+// ---------------------------------------------------------------------------
+// PP74: Constraint layer — ConstraintDescriptor, ValidatorFn, Finding, Findings
+// ---------------------------------------------------------------------------
+
+/// Opaque stable identifier for a registered constraint.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ConstraintId(pub String);
+
+/// Opaque stable identifier for a single emitted finding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct FindingId(pub String);
+
+/// Severity of a validator finding.
+///
+/// Re-exported alongside the legacy `FindingSeverity` alias in
+/// `talos3d_core::plugins::refinement` for backward compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub enum Severity {
+    /// Informational — consider addressing.
+    Advice,
+    /// Significant concern — should be addressed before advancing.
+    Warning,
+    /// Blocker — must be addressed.
+    Error,
+}
+
+impl Severity {
+    /// Human-readable lowercase label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Advice => "advice",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// References a passage in a corpus document (e.g. `"BBR/9:2/table-1"`).
+///
+/// Re-exported from `refinement.rs`; this alias keeps imports tidy for PP74
+/// code that only needs the constraint layer.
+pub use crate::plugins::refinement::PassageRef;
+
+/// A single finding produced by a validator function.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct Finding {
+    /// Unique stable identifier for this finding instance.
+    pub id: FindingId,
+    /// The constraint that produced this finding.
+    pub constraint_id: ConstraintId,
+    /// The element-id of the entity this finding applies to (stored as `u64`).
+    pub subject: u64,
+    /// Severity of this finding (may differ from the descriptor's
+    /// `default_severity` if the validator overrides it).
+    pub severity: Severity,
+    /// Human-readable message.
+    pub message: String,
+    /// Rationale explaining why this rule exists.
+    pub rationale: String,
+    /// Back-reference to a corpus passage (PP77 populates this; `None` for now).
+    pub backlink: Option<PassageRef>,
+    /// Unix timestamp (seconds) when this finding was emitted.
+    pub emitted_at: i64,
+}
+
+/// Specifies which entities a validator applies to.
+///
+/// Both filters must match. An empty `element_classes` list matches all
+/// classes. A `None` `required_state` matches any refinement state.
+#[derive(Debug, Clone, Default)]
+pub struct Applicability {
+    /// Entity must have one of these element classes (empty = any class).
+    pub element_classes: Vec<ElementClassId>,
+    /// Entity must be at this state or higher (`None` = any state).
+    pub required_state: Option<crate::plugins::refinement::RefinementState>,
+}
+
+impl Applicability {
+    /// Matches any entity.
+    pub fn any() -> Self {
+        Self {
+            element_classes: Vec::new(),
+            required_state: None,
+        }
+    }
+}
+
+/// A validator function.
+///
+/// Receives the Bevy `Entity` of the subject and a shared `&World` reference.
+/// The validator may walk `SemanticRelation`s, `ObligationSet`, or any other
+/// component by querying the world directly — there is no separate accessor
+/// struct (F4 from MCP validation notes).
+pub type ValidatorFn = Arc<dyn Fn(Entity, &World) -> Vec<Finding> + Send + Sync>;
+
+/// A registered constraint: a validator with its metadata.
+///
+/// Registered via `CapabilityRegistryAppExt::register_constraint` or
+/// `CapabilityRegistry::register_constraint`. The orchestration engine
+/// (`validation_sweep_system`) iterates registered constraints on each
+/// `PostUpdate` pass.
+pub struct ConstraintDescriptor {
+    /// Stable machine-readable identifier.
+    pub id: ConstraintId,
+    /// Short human-readable name.
+    pub label: String,
+    /// Full description shown in `list_constraints`.
+    pub description: String,
+    /// Which entities this constraint applies to.
+    pub applicability: Applicability,
+    /// Default severity for findings emitted by this constraint. Validators
+    /// may override the severity per-finding (F9 from MCP validation notes).
+    pub default_severity: Severity,
+    /// Rationale explaining why this constraint exists.
+    pub rationale: String,
+    /// Back-reference to the source corpus passage (`None` in PP74; PP77 fills in).
+    pub source_backlink: Option<PassageRef>,
+    /// The validator function.
+    pub validator: ValidatorFn,
+}
+
+impl std::fmt::Debug for ConstraintDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConstraintDescriptor")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("default_severity", &self.default_severity)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Describes a recipe family: a parametric authoring contract for an element
 /// class. A recipe family declares parameters, which refinement levels it
 /// supports, how it specialises the class-minimum obligations, and a `generate`
@@ -589,6 +724,9 @@ pub struct CapabilityRegistry {
     element_class_index: HashMap<String, usize>,
     recipe_family_descriptors: Vec<RecipeFamilyDescriptor>,
     recipe_family_index: HashMap<String, usize>,
+    // PP74
+    constraint_descriptors: Vec<ConstraintDescriptor>,
+    constraint_index: HashMap<String, usize>,
 }
 
 impl CapabilityRegistry {
@@ -802,6 +940,33 @@ impl CapabilityRegistry {
             .get(id.0.as_str())
             .and_then(|&i| self.recipe_family_descriptors.get(i))
     }
+
+    // --- PP74: Constraint descriptors ---
+
+    /// Register a constraint descriptor. Panics if the id is already registered.
+    pub fn register_constraint(&mut self, descriptor: ConstraintDescriptor) {
+        assert!(
+            !self.constraint_index.contains_key(descriptor.id.0.as_str()),
+            "Constraint '{}' was registered more than once",
+            descriptor.id.0
+        );
+        let index = self.constraint_descriptors.len();
+        self.constraint_index
+            .insert(descriptor.id.0.clone(), index);
+        self.constraint_descriptors.push(descriptor);
+    }
+
+    /// Return all registered constraint descriptors.
+    pub fn constraint_descriptors(&self) -> &[ConstraintDescriptor] {
+        &self.constraint_descriptors
+    }
+
+    /// Look up a single constraint descriptor by id.
+    pub fn constraint_descriptor(&self, id: &ConstraintId) -> Option<&ConstraintDescriptor> {
+        self.constraint_index
+            .get(id.0.as_str())
+            .and_then(|&i| self.constraint_descriptors.get(i))
+    }
 }
 
 fn validate_capability_dependencies(registry: Res<CapabilityRegistry>) {
@@ -880,6 +1045,10 @@ pub trait CapabilityRegistryAppExt {
     /// Register a `RecipeFamilyDescriptor` (PP71). Initialises the
     /// `CapabilityRegistry` resource if it does not yet exist.
     fn register_recipe_family(&mut self, descriptor: RecipeFamilyDescriptor) -> &mut Self;
+
+    /// Register a `ConstraintDescriptor` (PP74). Initialises the
+    /// `CapabilityRegistry` resource if it does not yet exist.
+    fn register_constraint(&mut self, descriptor: ConstraintDescriptor) -> &mut Self;
 }
 
 #[derive(Resource)]
@@ -973,6 +1142,17 @@ impl CapabilityRegistryAppExt for App {
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_recipe_family(descriptor);
+        self
+    }
+
+    fn register_constraint(&mut self, descriptor: ConstraintDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_constraint(descriptor);
         self
     }
 }

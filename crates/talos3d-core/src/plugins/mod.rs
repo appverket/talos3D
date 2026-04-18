@@ -52,4 +52,5 @@ pub mod tools;
 pub mod transform;
 pub mod ui;
 pub mod units;
+pub mod validation;
 pub mod vector_drawing;
