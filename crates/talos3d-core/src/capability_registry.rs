@@ -386,6 +386,152 @@ impl std::fmt::Debug for ConstraintDescriptor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PP75: Catalog provider layer
+// ---------------------------------------------------------------------------
+
+/// Stable identifier for a registered catalog provider.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CatalogProviderId(pub String);
+
+/// Broad category of material or product in a catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum CatalogCategory {
+    DimensionalLumber,
+    StructuralSheetGoods,
+    Other(String),
+}
+
+impl CatalogCategory {
+    /// Human-readable lowercase string for serialising to MCP responses.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::DimensionalLumber => "dimensional_lumber",
+            Self::StructuralSheetGoods => "structural_sheet_goods",
+            Self::Other(s) => s.as_str(),
+        }
+    }
+}
+
+/// License or provenance tag attached to a catalog row or provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum LicenseTag {
+    /// Creative Commons Zero (public domain dedication).
+    Cc0,
+    /// Boverket public-sector data (Swedish Building Regulations corpus).
+    BoverketPublic,
+    /// ICC document: citation only — must not reproduce text.
+    IccCiteOnly,
+    /// Vendor-specific EULA; the enclosed string names the vendor.
+    VendorEula(String),
+    /// Officially published public record.
+    PublicRecord,
+    /// Standards body (e.g. ISO, EN): citation permissible, reproduction requires license.
+    StandardsBodyCitationOnly,
+}
+
+impl LicenseTag {
+    /// Short machine-readable label for MCP responses.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Cc0 => "cc0",
+            Self::BoverketPublic => "boverket_public",
+            Self::IccCiteOnly => "icc_cite_only",
+            Self::VendorEula(_) => "vendor_eula",
+            Self::PublicRecord => "public_record",
+            Self::StandardsBodyCitationOnly => "standards_body_citation_only",
+        }
+    }
+}
+
+/// Provenance metadata shared by a batch of rows ingested from one source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CorpusProvenance {
+    /// Human-readable source description (e.g. `"generic public knowledge"`).
+    pub source: String,
+    /// Version label for the source corpus (e.g. `"2026-Q1"`).
+    pub source_version: String,
+    /// ISO 3166-1 alpha-2 country or regional code (e.g. `"SE_EU"`), if applicable.
+    pub jurisdiction: Option<String>,
+    /// Unix timestamp (seconds) when this batch was ingested; `0` for static/built-in data.
+    pub ingested_at: i64,
+    /// License governing use of this data.
+    pub license: LicenseTag,
+    /// Back-reference to the specific corpus passage this row was derived from.
+    pub backlink: Option<PassageRef>,
+    /// Row IDs (in string form) this entry supersedes; empty for new rows.
+    pub supersedes: Vec<String>,
+}
+
+/// A single row returned by a catalog provider query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogRow {
+    /// Stable identifier for this row within the provider's namespace.
+    pub row_id: crate::plugins::refinement::CatalogRowId,
+    /// Category of this row.
+    pub category: CatalogCategory,
+    /// Arbitrary JSON payload: dimensions, grades, cost, etc.
+    pub data: serde_json::Value,
+    /// Provenance for this row.
+    pub provenance: CorpusProvenance,
+}
+
+/// A boxed catalog query function.
+///
+/// Receives a raw JSON filter (PP75: no-op filter accepted) and returns all
+/// matching rows. Real filtering and schema validation are follow-on work.
+pub type CatalogQueryFn = Arc<dyn Fn(&serde_json::Value) -> Vec<CatalogRow> + Send + Sync>;
+
+/// A registered catalog provider: metadata + the live query function.
+///
+/// Not `Serialize`/`Deserialize` — holds a function pointer (`CatalogQueryFn`).
+/// Use `CatalogProviderInfo` (in `model_api`) for serialisable summaries.
+pub struct CatalogProviderDescriptor {
+    /// Stable machine-readable identifier.
+    pub id: CatalogProviderId,
+    /// Human-readable name.
+    pub label: String,
+    /// Short description shown in MCP discovery tools.
+    pub description: String,
+    /// Category of products this provider covers.
+    pub category: CatalogCategory,
+    /// Regional or jurisdictional scope (e.g. `"SE_EU"`), if applicable.
+    pub region: Option<String>,
+    /// License governing use of data from this provider.
+    pub license: LicenseTag,
+    /// Version label for the underlying source corpus.
+    pub source_version: String,
+    /// The query function: takes a JSON filter, returns matching rows.
+    pub query_fn: CatalogQueryFn,
+}
+
+impl std::fmt::Debug for CatalogProviderDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CatalogProviderDescriptor")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("category", &self.category)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for CatalogProviderDescriptor {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            label: self.label.clone(),
+            description: self.description.clone(),
+            category: self.category.clone(),
+            region: self.region.clone(),
+            license: self.license.clone(),
+            source_version: self.source_version.clone(),
+            query_fn: Arc::clone(&self.query_fn),
+        }
+    }
+}
+
 /// Describes a recipe family: a parametric authoring contract for an element
 /// class. A recipe family declares parameters, which refinement levels it
 /// supports, how it specialises the class-minimum obligations, and a `generate`
@@ -727,6 +873,9 @@ pub struct CapabilityRegistry {
     // PP74
     constraint_descriptors: Vec<ConstraintDescriptor>,
     constraint_index: HashMap<String, usize>,
+    // PP75
+    catalog_providers: Vec<CatalogProviderDescriptor>,
+    catalog_provider_index: HashMap<String, usize>,
 }
 
 impl CapabilityRegistry {
@@ -967,6 +1116,36 @@ impl CapabilityRegistry {
             .get(id.0.as_str())
             .and_then(|&i| self.constraint_descriptors.get(i))
     }
+
+    // --- PP75: Catalog provider descriptors ---
+
+    /// Register a catalog provider descriptor. Panics if the id is already registered.
+    pub fn register_catalog_provider(&mut self, descriptor: CatalogProviderDescriptor) {
+        assert!(
+            !self.catalog_provider_index.contains_key(descriptor.id.0.as_str()),
+            "CatalogProvider '{}' was registered more than once",
+            descriptor.id.0
+        );
+        let index = self.catalog_providers.len();
+        self.catalog_provider_index
+            .insert(descriptor.id.0.clone(), index);
+        self.catalog_providers.push(descriptor);
+    }
+
+    /// Return all registered catalog provider descriptors.
+    pub fn catalog_provider_descriptors(&self) -> &[CatalogProviderDescriptor] {
+        &self.catalog_providers
+    }
+
+    /// Look up a single catalog provider descriptor by id.
+    pub fn catalog_provider_descriptor(
+        &self,
+        id: &CatalogProviderId,
+    ) -> Option<&CatalogProviderDescriptor> {
+        self.catalog_provider_index
+            .get(id.0.as_str())
+            .and_then(|&i| self.catalog_providers.get(i))
+    }
 }
 
 fn validate_capability_dependencies(registry: Res<CapabilityRegistry>) {
@@ -1049,6 +1228,10 @@ pub trait CapabilityRegistryAppExt {
     /// Register a `ConstraintDescriptor` (PP74). Initialises the
     /// `CapabilityRegistry` resource if it does not yet exist.
     fn register_constraint(&mut self, descriptor: ConstraintDescriptor) -> &mut Self;
+
+    /// Register a `CatalogProviderDescriptor` (PP75). Initialises the
+    /// `CapabilityRegistry` resource if it does not yet exist.
+    fn register_catalog_provider(&mut self, descriptor: CatalogProviderDescriptor) -> &mut Self;
 }
 
 #[derive(Resource)]
@@ -1153,6 +1336,17 @@ impl CapabilityRegistryAppExt for App {
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_constraint(descriptor);
+        self
+    }
+
+    fn register_catalog_provider(&mut self, descriptor: CatalogProviderDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_catalog_provider(descriptor);
         self
     }
 }

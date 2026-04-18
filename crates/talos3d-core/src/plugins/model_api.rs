@@ -1602,6 +1602,13 @@ enum ModelApiRequest {
         overrides: serde_json::Value,
         response: oneshot::Sender<ApiResult<PreviewPromotionResult>>,
     },
+    // --- PP75: Catalog providers ---
+    ListCatalogProviders(oneshot::Sender<Vec<CatalogProviderInfo>>),
+    CatalogQuery {
+        provider_id: String,
+        filter: serde_json::Value,
+        response: oneshot::Sender<ApiResult<Vec<CatalogRowInfo>>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -2307,6 +2314,17 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
                 recipe_id,
                 overrides,
             ));
+        }
+        // --- PP75 ---
+        ModelApiRequest::ListCatalogProviders(response) => {
+            let _ = response.send(handle_list_catalog_providers(world));
+        }
+        ModelApiRequest::CatalogQuery {
+            provider_id,
+            filter,
+            response,
+        } => {
+            let _ = response.send(handle_catalog_query(world, provider_id, filter));
         }
     }
 }
@@ -3787,6 +3805,32 @@ impl ModelApiServer {
         receiver.await.unwrap_or_default()
     }
 
+    // --- PP75 requests ---
+
+    async fn request_list_catalog_providers(&self) -> Vec<CatalogProviderInfo> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(ModelApiRequest::ListCatalogProviders(response));
+        receiver.await.unwrap_or_default()
+    }
+
+    async fn request_catalog_query(
+        &self,
+        provider_id: String,
+        filter: serde_json::Value,
+    ) -> ApiResult<Vec<CatalogRowInfo>> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.send(ModelApiRequest::CatalogQuery {
+            provider_id,
+            filter,
+            response,
+        });
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_run_validation_v2(
         &self,
         element_id: Option<u64>,
@@ -4931,6 +4975,36 @@ pub struct ConstraintInfo {
     pub required_state: Option<String>,
 }
 
+// --- PP75 response types ---
+
+/// Summary of a registered catalog provider, returned by `list_catalog_providers`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CatalogProviderInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// `CatalogCategory::as_str()` — e.g. `"dimensional_lumber"`.
+    pub category: String,
+    pub region: Option<String>,
+    /// `LicenseTag::as_str()` — e.g. `"cc0"`.
+    pub license: String,
+    pub source_version: String,
+}
+
+/// A single row returned by `catalog_query`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CatalogRowInfo {
+    pub row_id: String,
+    /// `CatalogCategory::as_str()`.
+    pub category: String,
+    pub data: serde_json::Value,
+    /// `LicenseTag::as_str()`.
+    pub license: String,
+    pub source_version: String,
+}
+
 /// Result of a `preview_promotion` call.
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -5056,6 +5130,19 @@ struct PreviewPromotionRequest {
     recipe_id: Option<String>,
     #[serde(default)]
     overrides: serde_json::Value,
+}
+
+// --- PP75 request parameter structs ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CatalogQueryRequest {
+    /// Id of the provider to query (as returned by `list_catalog_providers`).
+    provider_id: String,
+    /// Arbitrary JSON filter object. PP75: ignored by all providers (all rows returned).
+    #[serde(default)]
+    filter: serde_json::Value,
 }
 
 // --- Assembly / Relation request types ---
@@ -6677,6 +6764,35 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
+    }
+
+    // --- PP75: Catalog providers ---
+
+    #[tool(
+        name = "list_catalog_providers",
+        description = "List all registered catalog providers. Each entry includes the id, label, \
+            description, category, region, license, and source_version."
+    )]
+    async fn list_catalog_providers_tool(&self) -> Result<CallToolResult, McpError> {
+        let providers = self.request_list_catalog_providers().await;
+        json_tool_result(providers)
+    }
+
+    #[tool(
+        name = "catalog_query",
+        description = "Query a catalog provider by id and return matching rows. Pass an empty \
+            filter object `{}` to retrieve all rows. PP75: filter is accepted but not yet \
+            interpreted — all rows are returned regardless."
+    )]
+    async fn catalog_query_tool(
+        &self,
+        Parameters(params): Parameters<CatalogQueryRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let rows = self
+            .request_catalog_query(params.provider_id, params.filter)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(rows)
     }
 
     #[tool(
@@ -13115,6 +13231,68 @@ fn handle_preview_promotion(
         obligation_set: obligation_infos,
         findings,
     })
+}
+
+// ---------------------------------------------------------------------------
+// PP75: Catalog provider handlers
+// ---------------------------------------------------------------------------
+
+/// Return a summary of every registered catalog provider.
+#[cfg(feature = "model-api")]
+pub fn handle_list_catalog_providers(world: &World) -> Vec<CatalogProviderInfo> {
+    use crate::capability_registry::CapabilityRegistry;
+
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return Vec::new();
+    };
+    registry
+        .catalog_provider_descriptors()
+        .iter()
+        .map(|d| CatalogProviderInfo {
+            id: d.id.0.clone(),
+            label: d.label.clone(),
+            description: d.description.clone(),
+            category: d.category.as_str().to_string(),
+            region: d.region.clone(),
+            license: d.license.as_str().to_string(),
+            source_version: d.source_version.clone(),
+        })
+        .collect()
+}
+
+/// Query a catalog provider by id, passing the raw JSON filter through.
+///
+/// PP75: every registered provider's `query_fn` ignores the filter and returns
+/// all rows. Real filtering is a follow-on.
+#[cfg(feature = "model-api")]
+pub fn handle_catalog_query(
+    world: &World,
+    provider_id: String,
+    filter: serde_json::Value,
+) -> ApiResult<Vec<CatalogRowInfo>> {
+    use crate::capability_registry::{CapabilityRegistry, CatalogProviderId};
+
+    let registry = world
+        .get_resource::<CapabilityRegistry>()
+        .ok_or_else(|| "CapabilityRegistry not found".to_string())?;
+
+    let pid = CatalogProviderId(provider_id.clone());
+    let descriptor = registry
+        .catalog_provider_descriptor(&pid)
+        .ok_or_else(|| format!("Unknown catalog provider '{provider_id}'"))?;
+
+    let rows = (descriptor.query_fn)(&filter);
+
+    Ok(rows
+        .into_iter()
+        .map(|row| CatalogRowInfo {
+            row_id: row.row_id.0,
+            category: row.category.as_str().to_string(),
+            data: row.data,
+            license: row.provenance.license.as_str().to_string(),
+            source_version: row.provenance.source_version,
+        })
+        .collect())
 }
 
 #[cfg(test)]
