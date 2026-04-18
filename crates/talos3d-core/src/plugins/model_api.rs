@@ -12889,20 +12889,74 @@ pub fn handle_run_validation(
             .unwrap_or_default()
     };
 
-    let findings = validate_declared_state_obligations(element_id, state, &obligations);
+    let mut infos: Vec<ValidationFindingInfo> =
+        validate_declared_state_obligations(element_id, state, &obligations)
+            .into_iter()
+            .map(|f| ValidationFindingInfo {
+                finding_id: f.finding_id,
+                entity_element_id: f.entity_element_id,
+                validator: f.validator,
+                severity: f.severity.as_str().to_string(),
+                message: f.message,
+                rationale: f.rationale,
+                obligation_id: f.obligation_id.map(|id| id.0),
+            })
+            .collect();
 
-    Ok(findings
-        .into_iter()
-        .map(|f| ValidationFindingInfo {
-            finding_id: f.finding_id,
-            entity_element_id: f.entity_element_id,
-            validator: f.validator,
-            severity: f.severity.as_str().to_string(),
-            message: f.message,
-            rationale: f.rationale,
-            obligation_id: f.obligation_id.map(|id| id.0),
-        })
-        .collect())
+    // PP74: also dispatch to every registered ConstraintDescriptor whose
+    // applicability matches this entity. No dirty-propagation cache yet —
+    // validators are invoked directly each call. A system-scheduled cache
+    // with change-detection lives behind `validation_sweep_system` and is
+    // a follow-on from here.
+    use crate::capability_registry::{CapabilityRegistry, ElementClassAssignment};
+    if let Some(registry) = world.get_resource::<CapabilityRegistry>() {
+        let mut q = world
+            .try_query::<(bevy::prelude::Entity, &ElementId)>()
+            .unwrap();
+        if let Some(entity) = q
+            .iter(world)
+            .find_map(|(e, id)| if *id == eid { Some(e) } else { None })
+        {
+            let entity_class = world
+                .get::<ElementClassAssignment>(entity)
+                .map(|a| a.element_class.clone());
+            let entity_state = world
+                .get::<RefinementStateComponent>(entity)
+                .map(|c| c.state)
+                .unwrap_or_default();
+
+            for descriptor in registry.constraint_descriptors() {
+                if !descriptor.applicability.element_classes.is_empty() {
+                    let matches = entity_class
+                        .as_ref()
+                        .map(|c| descriptor.applicability.element_classes.contains(c))
+                        .unwrap_or(false);
+                    if !matches {
+                        continue;
+                    }
+                }
+                if let Some(required) = descriptor.applicability.required_state {
+                    if entity_state < required {
+                        continue;
+                    }
+                }
+                let raw_findings = (descriptor.validator)(entity, world);
+                for f in raw_findings {
+                    infos.push(ValidationFindingInfo {
+                        finding_id: f.id.0,
+                        entity_element_id: f.subject,
+                        validator: f.constraint_id.0,
+                        severity: f.severity.as_str().to_string(),
+                        message: f.message,
+                        rationale: f.rationale,
+                        obligation_id: None,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(infos)
 }
 
 #[cfg(feature = "model-api")]
