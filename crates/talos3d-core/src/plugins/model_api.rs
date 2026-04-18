@@ -1615,6 +1615,25 @@ enum ModelApiRequest {
         scope_filter: Option<serde_json::Value>,
         response: oneshot::Sender<Vec<GenerationPriorInfo>>,
     },
+    // --- PP78: Corpus operations ---
+    ListCorpusGaps(oneshot::Sender<Vec<CorpusGapInfo>>),
+    RequestCorpusExpansion {
+        element_class: Option<String>,
+        jurisdiction: Option<String>,
+        kind: String,
+        rationale: String,
+        response: oneshot::Sender<CorpusGapInfo>,
+    },
+    LookupSourcePassage {
+        passage_ref: String,
+        response: oneshot::Sender<ApiResult<PassageLookupInfo>>,
+    },
+    DraftRulePack {
+        chunk_id: String,
+        element_class: String,
+        response: oneshot::Sender<ApiResult<DraftRulePackInfo>>,
+    },
+    CheckRulePackBacklinks(oneshot::Sender<BacklinkCheckReportInfo>),
 }
 
 #[cfg(feature = "model-api")]
@@ -2338,6 +2357,41 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_list_generation_priors(world, scope_filter));
+        }
+        // --- PP78 ---
+        ModelApiRequest::ListCorpusGaps(response) => {
+            let _ = response.send(handle_list_corpus_gaps(world));
+        }
+        ModelApiRequest::RequestCorpusExpansion {
+            element_class,
+            jurisdiction,
+            kind,
+            rationale,
+            response,
+        } => {
+            let _ = response.send(handle_request_corpus_expansion(
+                world,
+                element_class,
+                jurisdiction,
+                kind,
+                rationale,
+            ));
+        }
+        ModelApiRequest::LookupSourcePassage {
+            passage_ref,
+            response,
+        } => {
+            let _ = response.send(handle_lookup_source_passage(world, passage_ref));
+        }
+        ModelApiRequest::DraftRulePack {
+            chunk_id,
+            element_class,
+            response,
+        } => {
+            let _ = response.send(handle_draft_rule_pack(world, chunk_id, element_class));
+        }
+        ModelApiRequest::CheckRulePackBacklinks(response) => {
+            let _ = response.send(handle_check_rule_pack_backlinks(world));
         }
     }
 }
@@ -3842,6 +3896,77 @@ impl ModelApiServer {
         receiver.await.unwrap_or_default()
     }
 
+    // --- PP78 requests ---
+
+    async fn request_list_corpus_gaps(&self) -> Vec<CorpusGapInfo> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.send(ModelApiRequest::ListCorpusGaps(response));
+        receiver.await.unwrap_or_default()
+    }
+
+    async fn request_request_corpus_expansion(
+        &self,
+        element_class: Option<String>,
+        jurisdiction: Option<String>,
+        kind: String,
+        rationale: String,
+    ) -> CorpusGapInfo {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.send(ModelApiRequest::RequestCorpusExpansion {
+            element_class,
+            jurisdiction,
+            kind,
+            rationale,
+            response,
+        });
+        receiver.await.unwrap_or_else(|_| CorpusGapInfo {
+            id: String::new(),
+            element_class: None,
+            jurisdiction: None,
+            missing_artifact_kind: String::new(),
+            context: serde_json::Value::Null,
+            reported_by: String::new(),
+            reported_at: 0,
+        })
+    }
+
+    async fn request_lookup_source_passage(
+        &self,
+        passage_ref: String,
+    ) -> ApiResult<PassageLookupInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::LookupSourcePassage { passage_ref, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_draft_rule_pack(
+        &self,
+        chunk_id: String,
+        element_class: String,
+    ) -> ApiResult<DraftRulePackInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DraftRulePack { chunk_id, element_class, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_check_rule_pack_backlinks(&self) -> BacklinkCheckReportInfo {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.send(ModelApiRequest::CheckRulePackBacklinks(response));
+        receiver.await.unwrap_or_else(|_| BacklinkCheckReportInfo {
+            total: 0,
+            resolved: 0,
+            broken: Vec::new(),
+        })
+    }
+
     async fn request_catalog_query(
         &self,
         provider_id: String,
@@ -5052,6 +5177,64 @@ pub struct GenerationPriorInfo {
     pub source_version: String,
 }
 
+// --- PP78 response types ---
+
+/// Serialisable summary of a [`CorpusGap`] entry, returned by corpus-ops MCP tools.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CorpusGapInfo {
+    pub id: String,
+    pub element_class: Option<String>,
+    pub jurisdiction: Option<String>,
+    pub missing_artifact_kind: String,
+    pub context: serde_json::Value,
+    pub reported_by: String,
+    pub reported_at: i64,
+}
+
+/// Serialisable passage lookup result, returned by `lookup_source_passage`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PassageLookupInfo {
+    pub passage_ref: String,
+    pub text: String,
+    pub source: String,
+    pub source_version: String,
+    pub jurisdiction: Option<String>,
+    /// `LicenseTag::as_str()` label.
+    pub license: String,
+}
+
+/// Scaffolded rule-pack draft, returned by `draft_rule_pack`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DraftRulePackInfo {
+    /// Rust source skeleton (not compilable as-is — human must fill in the
+    /// validator body).
+    pub rust_skeleton: String,
+    /// The passage ref used as the backlink in the skeleton.
+    pub backlink: String,
+    /// Human-readable notes for the author.
+    pub notes: Vec<String>,
+}
+
+/// Backlink check summary, returned by `check_rule_pack_backlinks`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BacklinkCheckReportInfo {
+    pub total: usize,
+    pub resolved: usize,
+    pub broken: Vec<BrokenBacklinkInfo>,
+}
+
+/// A single unresolvable backlink entry in a [`BacklinkCheckReportInfo`].
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrokenBacklinkInfo {
+    pub constraint_id: String,
+    pub passage_ref: String,
+}
+
 /// Result of a `preview_promotion` call.
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -5202,6 +5385,37 @@ struct ListGenerationPriorsRequest {
     /// `claim_path` (string). Absent or empty object returns all priors.
     #[serde(default)]
     scope_filter: Option<serde_json::Value>,
+}
+
+// --- PP78 request parameter structs ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RequestCorpusExpansionRequest {
+    element_class: Option<String>,
+    jurisdiction: Option<String>,
+    /// What kind of artifact is missing: `"rule_pack"`, `"catalog"`, `"passage"`, …
+    kind: String,
+    /// Free-form rationale for the request.
+    rationale: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LookupSourcePassageRequest {
+    passage_ref: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DraftRulePackRequest {
+    /// The passage ref / chunk id to anchor the skeleton.
+    chunk_id: String,
+    /// The element class the validator will apply to.
+    element_class: String,
 }
 
 // --- Assembly / Relation request types ---
@@ -6871,6 +7085,87 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(rows)
+    }
+
+    // --- PP78: Corpus operations ---
+
+    #[tool(
+        name = "list_corpus_gaps",
+        description = "List all unresolved corpus gaps. Each entry names the element class, \
+            jurisdiction, the kind of missing artifact, and who reported it. Gaps are pushed \
+            by agents via request_corpus_expansion or automatically by validators."
+    )]
+    async fn list_corpus_gaps_tool(&self) -> Result<CallToolResult, McpError> {
+        let gaps = self.request_list_corpus_gaps().await;
+        json_tool_result(gaps)
+    }
+
+    #[tool(
+        name = "request_corpus_expansion",
+        description = "Push a corpus-gap record requesting new coverage. Returns the created \
+            CorpusGapInfo record. element_class and jurisdiction are optional; kind is required \
+            (e.g. 'rule_pack', 'catalog', 'passage'); rationale is a free-form explanation."
+    )]
+    async fn request_corpus_expansion_tool(
+        &self,
+        Parameters(params): Parameters<RequestCorpusExpansionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let gap = self
+            .request_request_corpus_expansion(
+                params.element_class,
+                params.jurisdiction,
+                params.kind,
+                params.rationale,
+            )
+            .await;
+        json_tool_result(gap)
+    }
+
+    #[tool(
+        name = "lookup_source_passage",
+        description = "Look up the text and provenance of a corpus passage by its passage_ref \
+            (e.g. 'BBR_8:22_riser_max'). Returns an error if the passage is not registered."
+    )]
+    async fn lookup_source_passage_tool(
+        &self,
+        Parameters(params): Parameters<LookupSourcePassageRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_lookup_source_passage(params.passage_ref)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(info)
+    }
+
+    #[tool(
+        name = "draft_rule_pack",
+        description = "Scaffold a Rust validator skeleton anchored to a corpus passage. \
+            chunk_id must match a passage registered in CorpusPassageRegistry; \
+            element_class names the ECS element class the validator will target. \
+            Returns a rust_skeleton string (template — human must fill in the body), \
+            a backlink ref, and editorial notes."
+    )]
+    async fn draft_rule_pack_tool(
+        &self,
+        Parameters(params): Parameters<DraftRulePackRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_draft_rule_pack(params.chunk_id, params.element_class)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "check_rule_pack_backlinks",
+        description = "Check whether every registered constraint's source_backlink resolves \
+            against the CorpusPassageRegistry. Returns total, resolved, and broken counts. \
+            Intended as a CI validation step — broken backlinks mean a passage was removed \
+            or never ingested."
+    )]
+    async fn check_rule_pack_backlinks_tool(&self) -> Result<CallToolResult, McpError> {
+        let report = self.request_check_rule_pack_backlinks().await;
+        json_tool_result(report)
     }
 
     #[tool(
@@ -13461,6 +13756,189 @@ pub fn handle_list_generation_priors(
             source_version: d.source_provenance.source_version.clone(),
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// PP78: Corpus operations handlers
+// ---------------------------------------------------------------------------
+
+/// Return summaries of all unresolved corpus gaps.
+#[cfg(feature = "model-api")]
+pub fn handle_list_corpus_gaps(world: &World) -> Vec<CorpusGapInfo> {
+    use crate::plugins::corpus_gap::CorpusGapQueue;
+
+    let Some(queue) = world.get_resource::<CorpusGapQueue>() else {
+        return Vec::new();
+    };
+    queue.list().iter().map(corpus_gap_to_info).collect()
+}
+
+/// Push a new corpus gap and return the created entry.
+#[cfg(feature = "model-api")]
+pub fn handle_request_corpus_expansion(
+    world: &mut World,
+    element_class: Option<String>,
+    jurisdiction: Option<String>,
+    kind: String,
+    rationale: String,
+) -> CorpusGapInfo {
+    use crate::plugins::corpus_gap::{CorpusGap, CorpusGapId, CorpusGapQueue};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let reported_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let gap = CorpusGap {
+        id: CorpusGapId(String::new()), // overwritten by queue.push
+        element_class: element_class.clone(),
+        jurisdiction: jurisdiction.clone(),
+        missing_artifact_kind: kind.clone(),
+        context: serde_json::json!({ "rationale": rationale }),
+        reported_by: "agent".into(),
+        reported_at,
+    };
+
+    if !world.contains_resource::<CorpusGapQueue>() {
+        world.insert_resource(CorpusGapQueue::default());
+    }
+    let id = world.resource_mut::<CorpusGapQueue>().push(gap);
+
+    // Re-borrow to read back the just-inserted gap.
+    let queue = world.resource::<CorpusGapQueue>();
+    let gap = queue.list().iter().find(|g| g.id == id).unwrap();
+    corpus_gap_to_info(gap)
+}
+
+/// Look up a passage in the `CorpusPassageRegistry`.
+#[cfg(feature = "model-api")]
+pub fn handle_lookup_source_passage(
+    world: &World,
+    passage_ref: String,
+) -> ApiResult<PassageLookupInfo> {
+    use crate::capability_registry::PassageRef;
+    use crate::plugins::corpus_gap::CorpusPassageRegistry;
+
+    let registry = world
+        .get_resource::<CorpusPassageRegistry>()
+        .ok_or_else(|| "CorpusPassageRegistry not found in world".to_string())?;
+
+    let pref = PassageRef(passage_ref.clone());
+    let entry = registry
+        .get(&pref)
+        .ok_or_else(|| format!("passage '{passage_ref}' not found in CorpusPassageRegistry"))?;
+
+    Ok(PassageLookupInfo {
+        passage_ref,
+        text: entry.text.clone(),
+        source: entry.provenance.source.clone(),
+        source_version: entry.provenance.source_version.clone(),
+        jurisdiction: entry.provenance.jurisdiction.clone(),
+        license: entry.provenance.license.as_str().to_string(),
+    })
+}
+
+/// Produce a Rust validator skeleton anchored to a corpus passage.
+#[cfg(feature = "model-api")]
+pub fn handle_draft_rule_pack(
+    world: &World,
+    chunk_id: String,
+    element_class: String,
+) -> ApiResult<DraftRulePackInfo> {
+    use crate::capability_registry::PassageRef;
+    use crate::plugins::corpus_gap::CorpusPassageRegistry;
+
+    let registry = world
+        .get_resource::<CorpusPassageRegistry>()
+        .ok_or_else(|| "CorpusPassageRegistry not found in world".to_string())?;
+
+    let pref = PassageRef(chunk_id.clone());
+    let entry = registry
+        .get(&pref)
+        .ok_or_else(|| format!("chunk_id '{chunk_id}' not found in CorpusPassageRegistry"))?;
+
+    // Sanitise the passage ref into a valid Rust identifier fragment.
+    let ident = chunk_id.replace([':', '-', '/'], "_").to_lowercase();
+    let class_ident = element_class.replace(['-', '/'], "_").to_lowercase();
+
+    let passage_preview: String = entry.text.chars().take(120).collect();
+
+    let rust_skeleton = format!(
+        r#"// Auto-scaffolded by draft_rule_pack (PP78). Fill in the validator body.
+// Source passage: {chunk_id}
+// "{passage_preview}..."
+
+use std::sync::Arc;
+use talos3d_core::capability_registry::{{
+    Applicability, ConstraintDescriptor, ConstraintId, ElementClassId, Finding, FindingId,
+    PassageRef, Severity,
+}};
+
+pub fn {ident}_constraint() -> ConstraintDescriptor {{
+    ConstraintDescriptor {{
+        id: ConstraintId("{ident}".into()),
+        label: "TODO: short label".into(),
+        description: "TODO: full description".into(),
+        applicability: Applicability {{
+            element_classes: vec![ElementClassId("{class_ident}".into())],
+            required_state: None,
+        }},
+        default_severity: Severity::Error,
+        rationale: "TODO: rationale".into(),
+        source_backlink: Some(PassageRef("{chunk_id}".into())),
+        validator: Arc::new(|entity, world| {{
+            // TODO: implement validation logic
+            // Read parameters from entity components and return findings.
+            vec![]
+        }}),
+    }}
+}}
+"#
+    );
+
+    Ok(DraftRulePackInfo {
+        rust_skeleton,
+        backlink: chunk_id,
+        notes: vec![
+            "Fill in the validator body — the skeleton returns no findings as-is.".into(),
+            "Replace TODO placeholders in label, description, and rationale.".into(),
+            "Add the new constraint to your Plugin::build via app.register_constraint(…).".into(),
+        ],
+    })
+}
+
+/// Check all registered constraint backlinks against the `CorpusPassageRegistry`.
+#[cfg(feature = "model-api")]
+pub fn handle_check_rule_pack_backlinks(world: &World) -> BacklinkCheckReportInfo {
+    use crate::plugins::corpus_gap::resolve_all_rule_pack_backlinks;
+
+    let report = resolve_all_rule_pack_backlinks(world);
+    BacklinkCheckReportInfo {
+        total: report.total,
+        resolved: report.resolved,
+        broken: report
+            .broken
+            .into_iter()
+            .map(|b| BrokenBacklinkInfo {
+                constraint_id: b.constraint_id,
+                passage_ref: b.passage_ref,
+            })
+            .collect(),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn corpus_gap_to_info(gap: &crate::plugins::corpus_gap::CorpusGap) -> CorpusGapInfo {
+    CorpusGapInfo {
+        id: gap.id.0.clone(),
+        element_class: gap.element_class.clone(),
+        jurisdiction: gap.jurisdiction.clone(),
+        missing_artifact_kind: gap.missing_artifact_kind.clone(),
+        context: gap.context.clone(),
+        reported_by: gap.reported_by.clone(),
+        reported_at: gap.reported_at,
+    }
 }
 
 #[cfg(test)]
