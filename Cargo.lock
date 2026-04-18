@@ -5523,6 +5523,7 @@ dependencies = [
  "serde_json",
  "talos3d-architectural",
  "talos3d-architecture-core",
+ "talos3d-architecture-se",
  "talos3d-core",
  "talos3d-terrain",
 ]
@@ -5545,6 +5546,17 @@ dependencies = [
  "bevy",
  "serde",
  "serde_json",
+ "talos3d-core",
+]
+
+[[package]]
+name = "talos3d-architecture-se"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
+ "serde_json",
+ "talos3d-architecture-core",
  "talos3d-core",
 ]
 
