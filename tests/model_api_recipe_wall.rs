@@ -11,9 +11,9 @@
 #![cfg(feature = "model-api")]
 
 use bevy::prelude::*;
-use talos3d_architectural::{
-    recipes::wall_light_frame_exterior::{light_frame_exterior_wall_recipe, wall_assembly_class},
-    snapshots::WallFactory,
+use talos3d_architectural::snapshots::WallFactory;
+use talos3d_architecture_core::recipes::wall_light_frame_exterior::{
+    light_frame_exterior_wall_recipe, wall_assembly_class,
 };
 use talos3d_core::{
     capability_registry::{

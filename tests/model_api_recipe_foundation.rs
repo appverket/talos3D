@@ -14,13 +14,11 @@
 #![cfg(feature = "model-api")]
 
 use bevy::prelude::*;
-use talos3d_architectural::{
-    recipes::{
-        foundation_pier::pier_foundation_recipe,
-        foundation_slab_on_grade::{foundation_system_class, slab_on_grade_recipe},
-        wall_light_frame_exterior::{light_frame_exterior_wall_recipe, wall_assembly_class},
-    },
-    snapshots::WallFactory,
+use talos3d_architectural::snapshots::WallFactory;
+use talos3d_architecture_core::recipes::{
+    foundation_pier::pier_foundation_recipe,
+    foundation_slab_on_grade::{foundation_system_class, slab_on_grade_recipe},
+    wall_light_frame_exterior::{light_frame_exterior_wall_recipe, wall_assembly_class},
 };
 use talos3d_core::{
     authored_entity::AuthoredEntity,
