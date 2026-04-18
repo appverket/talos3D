@@ -62,6 +62,13 @@ pub fn wall_assembly_class() -> ElementClassDescriptor {
                 role: SemanticRole("exterior_surface".into()),
                 required_by_state: RefinementState::Constructible,
             },
+            // PP72: bears_on is a class-min obligation satisfied via an existing
+            // `bears_on` SemanticRelation into a Constructible+ target.
+            ObligationTemplate {
+                id: ObligationId("bears_on".into()),
+                role: SemanticRole("load_path".into()),
+                required_by_state: RefinementState::Constructible,
+            },
         ],
     );
 
@@ -321,19 +328,20 @@ mod tests {
     };
 
     #[test]
-    fn wall_class_has_five_constructible_class_min_obligations() {
+    fn wall_class_has_six_constructible_class_min_obligations() {
         let class = wall_assembly_class();
         let obligations = class
             .class_min_obligations
             .get(&RefinementState::Constructible)
             .expect("obligations at Constructible");
-        assert_eq!(obligations.len(), 5, "expected 5 class-min obligations");
+        assert_eq!(obligations.len(), 6, "expected 6 class-min obligations");
         let ids: Vec<&str> = obligations.iter().map(|o| o.id.0.as_str()).collect();
         assert!(ids.contains(&"structure"));
         assert!(ids.contains(&"thermal_layer"));
         assert!(ids.contains(&"weather_control"));
         assert!(ids.contains(&"interior_finish"));
         assert!(ids.contains(&"exterior_finish"));
+        assert!(ids.contains(&"bears_on"));
     }
 
     #[test]
@@ -380,12 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn effective_obligations_yields_six_at_constructible() {
+    fn effective_obligations_yields_seven_at_constructible() {
         let class = wall_assembly_class();
         let recipe = light_frame_exterior_wall_recipe();
         let obligations =
             effective_obligations(&class, Some(&recipe), RefinementState::Constructible);
-        assert_eq!(obligations.len(), 6, "5 class-min + 1 recipe specialisation");
+        assert_eq!(obligations.len(), 7, "6 class-min + 1 recipe specialisation");
     }
 
     #[test]

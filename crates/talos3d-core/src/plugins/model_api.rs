@@ -11978,6 +11978,19 @@ fn ensure_entity_exists(world: &World, element_id: ElementId) -> ApiResult<()> {
     }
 }
 
+// PP70/PP71/PP72 refinement handlers operate on any entity carrying an
+// `ElementId`, whether or not a factory is registered for it (e.g. foundation
+// entities registered as descriptor-driven recipes without a bespoke factory).
+#[cfg(feature = "model-api")]
+fn ensure_refinable_entity_exists(world: &World, element_id: ElementId) -> ApiResult<()> {
+    let mut q = world.try_query::<&ElementId>().unwrap();
+    if q.iter(world).any(|id| *id == element_id) {
+        Ok(())
+    } else {
+        Err(format!("Entity not found: {}", element_id.0))
+    }
+}
+
 #[cfg(feature = "model-api")]
 fn apply_transform_request(
     snapshots: &[(ElementId, BoxedEntity)],
@@ -12125,7 +12138,7 @@ fn handle_get_refinement_state(world: &World, element_id: u64) -> ApiResult<Refi
     use crate::plugins::refinement::RefinementStateComponent;
 
     let eid = ElementId(element_id);
-    ensure_entity_exists(world, eid)?;
+    ensure_refinable_entity_exists(world, eid)?;
 
     let state = {
         let mut q = world.try_query::<(EntityRef,)>().unwrap();
@@ -12155,7 +12168,7 @@ fn handle_get_obligations(world: &World, element_id: u64) -> ApiResult<Vec<Oblig
     use crate::plugins::refinement::{ObligationSet, ObligationStatus};
 
     let eid = ElementId(element_id);
-    ensure_entity_exists(world, eid)?;
+    ensure_refinable_entity_exists(world, eid)?;
 
     let mut q = world.try_query::<(EntityRef,)>().unwrap();
     let entry = q.iter(world).find_map(|(entity_ref,)| {
@@ -12192,7 +12205,7 @@ fn handle_get_authoring_provenance(
     use crate::plugins::refinement::{AuthoringMode, AuthoringProvenance};
 
     let eid = ElementId(element_id);
-    ensure_entity_exists(world, eid)?;
+    ensure_refinable_entity_exists(world, eid)?;
 
     let mut q = world.try_query::<(EntityRef,)>().unwrap();
     let entry = q
@@ -12235,7 +12248,7 @@ pub fn handle_get_claim_grounding(
     use crate::plugins::refinement::{ClaimGrounding, RefinementStateComponent};
 
     let eid = ElementId(element_id);
-    ensure_entity_exists(world, eid)?;
+    ensure_refinable_entity_exists(world, eid)?;
 
     // Compute the effective promotion-critical paths for this entity (PP71).
     // If no class assignment exists, falls back to an empty set (PP70 behaviour).
@@ -12311,7 +12324,7 @@ pub fn handle_promote_refinement(
         .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
 
     let eid = ElementId(element_id);
-    ensure_entity_exists(world, eid)?;
+    ensure_refinable_entity_exists(world, eid)?;
 
     // Capture current state before promote.
     let previous_state = {
@@ -12371,7 +12384,7 @@ fn handle_demote_refinement(
         .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
 
     let eid = ElementId(element_id);
-    ensure_entity_exists(world, eid)?;
+    ensure_refinable_entity_exists(world, eid)?;
 
     let previous_state = {
         let mut q = world.try_query::<(EntityRef,)>().unwrap();
@@ -12406,7 +12419,7 @@ fn handle_demote_refinement(
 }
 
 #[cfg(feature = "model-api")]
-fn handle_run_validation(
+pub fn handle_run_validation(
     world: &World,
     element_id: u64,
 ) -> ApiResult<Vec<ValidationFindingInfo>> {
@@ -12415,7 +12428,7 @@ fn handle_run_validation(
     };
 
     let eid = ElementId(element_id);
-    ensure_entity_exists(world, eid)?;
+    ensure_refinable_entity_exists(world, eid)?;
 
     let (state, obligations) = {
         let mut q = world.try_query::<(EntityRef,)>().unwrap();
@@ -12555,7 +12568,45 @@ pub fn handle_select_recipe(
         .and_then(|v| v.as_str())
         .and_then(RefinementState::from_str);
 
-    let viable: Vec<RecipeRankingInfo> = registry
+    // TODO(PP76): real GenerationPriorDescriptor mechanism.
+    // Stub: read terrain_slope_pct from the context and apply a hardcoded
+    // ranking for foundation_system recipes.
+    // - slope < 5   : slab_on_grade 1.0, pier_foundation 0.2
+    // - slope 5..=15: both 0.7
+    // - slope > 15  : pier_foundation 1.0, slab_on_grade 0.1
+    // All other classes and missing slope → flat 1.0 (original PP71 behaviour).
+    let terrain_slope_pct: Option<f64> = context
+        .get("terrain_slope_pct")
+        .and_then(|v| v.as_f64());
+
+    let slope_weight = |recipe_id: &str| -> f32 {
+        let Some(slope) = terrain_slope_pct else {
+            return 1.0;
+        };
+        match recipe_id {
+            "slab_on_grade" => {
+                if slope < 5.0 {
+                    1.0
+                } else if slope <= 15.0 {
+                    0.7
+                } else {
+                    0.1
+                }
+            }
+            "pier_foundation" => {
+                if slope < 5.0 {
+                    0.2
+                } else if slope <= 15.0 {
+                    0.7
+                } else {
+                    1.0
+                }
+            }
+            _ => 1.0,
+        }
+    };
+
+    let mut viable: Vec<RecipeRankingInfo> = registry
         .recipe_family_descriptors(Some(&class_id))
         .into_iter()
         .filter(|d| {
@@ -12566,10 +12617,12 @@ pub fn handle_select_recipe(
             id: d.id.0.clone(),
             target_class: d.target_class.0.clone(),
             label: d.label.clone(),
-            // PP71: flat 1.0 weight — real priors land in PP76.
-            weight: 1.0,
+            weight: slope_weight(&d.id.0),
         })
         .collect();
+
+    // Sort descending by weight so the highest-weight recipe comes first.
+    viable.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(viable)
 }
