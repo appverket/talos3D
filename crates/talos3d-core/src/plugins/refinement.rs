@@ -245,6 +245,16 @@ pub enum Grounding {
     Imported(SourceRef),
     /// Inherited from a parent entity during refinement (element-id as `u64`).
     Refined(u64),
+    /// Generated locally by a recipe's `generate` function (PP74 / F6).
+    ///
+    /// Use this when the claim is computed by the recipe itself (e.g. a slab
+    /// computing its own `top_datum_mm` from `floor_datum_mm`). Stored as the
+    /// recipe family id string to avoid a circular dependency between
+    /// `refinement` and `capability_registry`.
+    ///
+    /// The `RecipeFamilyId` newtype in `capability_registry` converts to/from
+    /// this via `RecipeFamilyId(String)`.
+    GeneratedByRecipe(String),
     /// Derived from LLM implicit knowledge; requires rationale + tag.
     LLMHeuristic {
         rationale: String,

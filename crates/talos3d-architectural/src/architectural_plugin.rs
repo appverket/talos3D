@@ -27,6 +27,11 @@ use crate::{
     },
     snapshots::{OpeningFactory, WallFactory},
     tools,
+    validators::{
+        assembly_completeness::assembly_completeness_constraint,
+        host_opening::host_opening_constraint,
+        support_path::support_path_constraint,
+    },
 };
 
 pub struct ArchitecturalPlugin;
@@ -177,6 +182,10 @@ impl Plugin for ArchitecturalPlugin {
         // PP73: roof element class and recipe family
         .register_element_class(roof_system_class())
         .register_recipe_family(shed_roof_framing_recipe())
+        // PP74: architectural constraint validators
+        .register_constraint(support_path_constraint())
+        .register_constraint(host_opening_constraint())
+        .register_constraint(assembly_completeness_constraint())
         .register_defaults_contributor(ArchitecturalDefaultsContributor)
         .register_command(
             CommandDescriptor {

@@ -1582,6 +1582,26 @@ enum ModelApiRequest {
         context: serde_json::Value,
         response: oneshot::Sender<ApiResult<Vec<RecipeRankingInfo>>>,
     },
+    // --- Constraint engine (PP74) ---
+    ListConstraints {
+        scope: Option<String>,
+        response: oneshot::Sender<Vec<ConstraintInfo>>,
+    },
+    RunValidationV2 {
+        element_id: Option<u64>,
+        response: oneshot::Sender<Vec<ValidationFindingInfo>>,
+    },
+    ExplainFindingV2 {
+        finding_id: String,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
+    PreviewPromotion {
+        element_id: u64,
+        target_state: String,
+        recipe_id: Option<String>,
+        overrides: serde_json::Value,
+        response: oneshot::Sender<ApiResult<PreviewPromotionResult>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -2257,6 +2277,36 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_select_recipe(world, element_class, context));
+        }
+        // --- PP74 ---
+        ModelApiRequest::ListConstraints { scope, response } => {
+            let _ = response.send(handle_list_constraints(world, scope));
+        }
+        ModelApiRequest::RunValidationV2 { element_id, response } => {
+            // Force a fresh sweep, then read from the Findings resource.
+            crate::plugins::validation::validation_sweep_system(world);
+            let _ = response.send(handle_run_validation_v2(world, element_id));
+        }
+        ModelApiRequest::ExplainFindingV2 {
+            finding_id,
+            response,
+        } => {
+            let _ = response.send(handle_explain_finding_v2(world, finding_id));
+        }
+        ModelApiRequest::PreviewPromotion {
+            element_id,
+            target_state,
+            recipe_id,
+            overrides,
+            response,
+        } => {
+            let _ = response.send(handle_preview_promotion(
+                world,
+                element_id,
+                target_state,
+                recipe_id,
+                overrides,
+            ));
         }
     }
 }
@@ -3727,6 +3777,65 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    // --- PP74 requests ---
+
+    async fn request_list_constraints(&self, scope: Option<String>) -> Vec<ConstraintInfo> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(ModelApiRequest::ListConstraints { scope, response });
+        receiver.await.unwrap_or_default()
+    }
+
+    async fn request_run_validation_v2(
+        &self,
+        element_id: Option<u64>,
+    ) -> Vec<ValidationFindingInfo> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(ModelApiRequest::RunValidationV2 { element_id, response });
+        receiver.await.unwrap_or_default()
+    }
+
+    async fn request_explain_finding_v2(
+        &self,
+        finding_id: String,
+    ) -> ApiResult<serde_json::Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ExplainFindingV2 {
+                finding_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_preview_promotion(
+        &self,
+        element_id: u64,
+        target_state: String,
+        recipe_id: Option<String>,
+        overrides: serde_json::Value,
+    ) -> ApiResult<PreviewPromotionResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PreviewPromotion {
+                element_id,
+                target_state,
+                recipe_id,
+                overrides,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_list_definitions(&self) -> Result<Vec<DefinitionEntry>, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -4805,6 +4914,36 @@ pub struct ValidationFindingInfo {
     pub obligation_id: Option<String>,
 }
 
+// --- PP74 response types ---
+
+/// Info for a single registered constraint, returned by `list_constraints`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConstraintInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub default_severity: String,
+    pub rationale: String,
+    /// Element classes this constraint applies to (empty = all).
+    pub element_classes: Vec<String>,
+    /// Required refinement state filter (`None` = any state).
+    pub required_state: Option<String>,
+}
+
+/// Result of a `preview_promotion` call.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PreviewPromotionResult {
+    pub element_id: u64,
+    pub would_transition_to: String,
+    /// Obligations that would be present after promotion.
+    pub obligation_set: Vec<ObligationInfo>,
+    /// Validator findings that would be produced after promotion.
+    pub findings: Vec<ValidationFindingInfo>,
+}
+
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PromoteRefinementResult {
@@ -4881,6 +5020,42 @@ struct SelectRecipeRequest {
     /// Context object — expected keys: `target_state` (required), `jurisdiction` (optional).
     #[serde(default)]
     context: serde_json::Value,
+}
+
+// --- PP74 request parameter structs ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ListConstraintsRequest {
+    /// Optional scope filter. Currently ignored in PP74 (all constraints returned).
+    scope: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RunValidationV2Request {
+    /// Element id to validate, or omit / `null` for whole model.
+    element_id: Option<u64>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExplainFindingV2Request {
+    finding_id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PreviewPromotionRequest {
+    element_id: u64,
+    target_state: String,
+    recipe_id: Option<String>,
+    #[serde(default)]
+    overrides: serde_json::Value,
 }
 
 // --- Assembly / Relation request types ---
@@ -6432,6 +6607,76 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(ranking)
+    }
+
+    // --- PP74: Constraint layer tools ---
+
+    #[tool(
+        name = "list_constraints",
+        description = "List all registered constraint descriptors. Each entry includes the id, \
+            label, description, default_severity, rationale, and applicability filter. Pass \
+            scope to filter (not yet interpreted in PP74 — all constraints returned)."
+    )]
+    async fn list_constraints_tool(
+        &self,
+        Parameters(params): Parameters<ListConstraintsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let constraints = self.request_list_constraints(params.scope).await;
+        json_tool_result(constraints)
+    }
+
+    #[tool(
+        name = "run_validation_v2",
+        description = "Run all registered constraints against an entity (or the whole model if \
+            element_id is omitted). Returns findings from the PP74 orchestration engine. \
+            Forces a fresh sweep before returning."
+    )]
+    async fn run_validation_v2_tool(
+        &self,
+        Parameters(params): Parameters<RunValidationV2Request>,
+    ) -> Result<CallToolResult, McpError> {
+        let findings = self.request_run_validation_v2(params.element_id).await;
+        json_tool_result(findings)
+    }
+
+    #[tool(
+        name = "explain_finding_v2",
+        description = "Look up a finding by its finding_id and return the full rationale, \
+            constraint id, subject entity, and backlink. Reads from the Findings cache \
+            populated by the last validation sweep."
+    )]
+    async fn explain_finding_v2_tool(
+        &self,
+        Parameters(params): Parameters<ExplainFindingV2Request>,
+    ) -> Result<CallToolResult, McpError> {
+        let explanation = self
+            .request_explain_finding_v2(params.finding_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(explanation)
+    }
+
+    #[tool(
+        name = "preview_promotion",
+        description = "Preview the obligation set and validation findings that would result from \
+            promoting an entity to a target state, without permanently mutating the world. \
+            Implementation: promotes, captures result, then demotes to restore previous state. \
+            True read-only simulation is a follow-on (PP75+)."
+    )]
+    async fn preview_promotion_tool(
+        &self,
+        Parameters(params): Parameters<PreviewPromotionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_preview_promotion(
+                params.element_id,
+                params.target_state,
+                params.recipe_id,
+                params.overrides,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
     }
 
     #[tool(
@@ -12625,6 +12870,251 @@ pub fn handle_select_recipe(
     viable.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(viable)
+}
+
+// ---------------------------------------------------------------------------
+// PP74: Constraint layer handlers
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn handle_list_constraints(
+    world: &World,
+    _scope: Option<String>,
+) -> Vec<ConstraintInfo> {
+    use crate::capability_registry::CapabilityRegistry;
+
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return Vec::new();
+    };
+    registry
+        .constraint_descriptors()
+        .iter()
+        .map(|d| ConstraintInfo {
+            id: d.id.0.clone(),
+            label: d.label.clone(),
+            description: d.description.clone(),
+            default_severity: d.default_severity.as_str().to_string(),
+            rationale: d.rationale.clone(),
+            element_classes: d
+                .applicability
+                .element_classes
+                .iter()
+                .map(|c| c.0.clone())
+                .collect(),
+            required_state: d
+                .applicability
+                .required_state
+                .map(|s| s.as_str().to_string()),
+        })
+        .collect()
+}
+
+/// Read findings from the `Findings` resource (populated by the last sweep).
+///
+/// Called after `validation_sweep_system` runs in the dispatch path.
+#[cfg(feature = "model-api")]
+fn handle_run_validation_v2(
+    world: &World,
+    element_id: Option<u64>,
+) -> Vec<ValidationFindingInfo> {
+    use crate::plugins::validation::Findings;
+
+    let Some(findings) = world.get_resource::<Findings>() else {
+        return Vec::new();
+    };
+
+    let iter: Box<dyn Iterator<Item = &crate::capability_registry::Finding>> =
+        if let Some(eid) = element_id {
+            Box::new(
+                findings
+                    .cache
+                    .iter()
+                    .filter(move |((_, e), _)| *e == eid)
+                    .flat_map(|(_, v)| v.iter()),
+            )
+        } else {
+            Box::new(findings.all())
+        };
+
+    iter.map(finding_to_info).collect()
+}
+
+/// Convert a `Finding` to the MCP-facing `ValidationFindingInfo`.
+#[cfg(feature = "model-api")]
+fn finding_to_info(f: &crate::capability_registry::Finding) -> ValidationFindingInfo {
+    ValidationFindingInfo {
+        finding_id: f.id.0.clone(),
+        entity_element_id: f.subject,
+        validator: f.constraint_id.0.clone(),
+        severity: f.severity.as_str().to_string(),
+        message: f.message.clone(),
+        rationale: f.rationale.clone(),
+        // obligation_id not carried on PP74 Finding; left None here.
+        // The finding_id encodes obligation identity in its string format.
+        obligation_id: None,
+    }
+}
+
+/// Look up a finding by `FindingId` in the `Findings` index and return a rich
+/// explanation JSON object.
+#[cfg(feature = "model-api")]
+fn handle_explain_finding_v2(
+    world: &World,
+    finding_id: String,
+) -> ApiResult<serde_json::Value> {
+    use crate::capability_registry::{CapabilityRegistry, FindingId};
+    use crate::plugins::validation::Findings;
+
+    let fid = FindingId(finding_id.clone());
+
+    let Some(findings) = world.get_resource::<Findings>() else {
+        return Err("Findings resource not initialised; run a validation sweep first".into());
+    };
+
+    let Some(finding) = findings.index.get(&fid) else {
+        return Err(format!("Unknown finding_id '{finding_id}'"));
+    };
+
+    let constraint_rationale = world
+        .get_resource::<CapabilityRegistry>()
+        .and_then(|r| r.constraint_descriptor(&finding.constraint_id))
+        .map(|c| c.rationale.clone())
+        .unwrap_or_else(|| finding.rationale.clone());
+
+    Ok(serde_json::json!({
+        "finding_id": finding.id.0,
+        "constraint_id": finding.constraint_id.0,
+        "subject_element_id": finding.subject,
+        "severity": finding.severity.as_str(),
+        "message": finding.message,
+        "rationale": constraint_rationale,
+        "backlink": finding.backlink.as_ref().map(|p| &p.0),
+        "emitted_at": finding.emitted_at,
+    }))
+}
+
+/// Transactional simulation of a promotion: promote → sweep → capture → demote.
+///
+/// This is NOT a true read-only preview — it mutates the world and restores.
+/// A fully read-only sandbox simulation is a follow-on (post-PP74).
+/// Mark: this is a transactional simulation; true read-only preview is a follow-on.
+#[cfg(feature = "model-api")]
+fn handle_preview_promotion(
+    world: &mut World,
+    element_id: u64,
+    target_state_str: String,
+    recipe_id: Option<String>,
+    overrides: serde_json::Value,
+) -> ApiResult<PreviewPromotionResult> {
+    use crate::plugins::refinement::{
+        apply_demote_refinement, ClaimPath, DemoteRefinementRequest, RefinementState,
+        RefinementStateComponent,
+    };
+    use crate::plugins::refinement::{apply_promote_refinement, PromoteRefinementRequest, RecipeId};
+
+    let target_state = RefinementState::from_str(&target_state_str)
+        .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
+
+    let eid = ElementId(element_id);
+    ensure_refinable_entity_exists(world, eid)?;
+
+    let previous_state = {
+        let mut q = world.try_query::<(EntityRef,)>().unwrap();
+        q.iter(world)
+            .find_map(|(entity_ref,)| {
+                if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                    return None;
+                }
+                Some(
+                    entity_ref
+                        .get::<RefinementStateComponent>()
+                        .map(|c| c.state)
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default()
+    };
+
+    // 1. Promote.
+    let overrides_map: std::collections::HashMap<ClaimPath, serde_json::Value> = overrides
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (ClaimPath(k.clone()), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    apply_promote_refinement(
+        world,
+        PromoteRefinementRequest {
+            entity_element_id: element_id,
+            target_state,
+            recipe_id: recipe_id.map(RecipeId),
+            overrides: overrides_map,
+        },
+    )?;
+
+    // 2. Run validation sweep to populate findings after promotion.
+    crate::plugins::validation::validation_sweep_system(world);
+
+    // 3. Capture obligation set and findings.
+    let obligation_set = {
+        use crate::plugins::refinement::ObligationSet;
+        let mut q = world.try_query::<(EntityRef,)>().unwrap();
+        q.iter(world)
+            .find_map(|(entity_ref,)| {
+                if entity_ref.get::<ElementId>().copied() != Some(eid) {
+                    return None;
+                }
+                entity_ref.get::<ObligationSet>().cloned()
+            })
+            .unwrap_or_default()
+    };
+
+    let findings = handle_run_validation_v2(world, Some(element_id));
+
+    let obligation_infos: Vec<ObligationInfo> = obligation_set
+        .entries
+        .iter()
+        .map(|ob| ObligationInfo {
+            id: ob.id.0.clone(),
+            role: ob.role.0.clone(),
+            required_by_state: ob.required_by_state.as_str().to_string(),
+            status: match &ob.status {
+                crate::plugins::refinement::ObligationStatus::Unresolved => {
+                    "Unresolved".to_string()
+                }
+                crate::plugins::refinement::ObligationStatus::SatisfiedBy(id) => {
+                    format!("SatisfiedBy:{id}")
+                }
+                crate::plugins::refinement::ObligationStatus::Deferred(reason) => {
+                    format!("Deferred:{reason}")
+                }
+                crate::plugins::refinement::ObligationStatus::Waived(rationale) => {
+                    format!("Waived:{rationale}")
+                }
+            },
+        })
+        .collect();
+
+    // 4. Demote back to previous state.
+    apply_demote_refinement(
+        world,
+        DemoteRefinementRequest {
+            entity_element_id: element_id,
+            target_state: previous_state,
+        },
+    )?;
+
+    flush_model_api_write_pipeline(world);
+
+    Ok(PreviewPromotionResult {
+        element_id,
+        would_transition_to: target_state_str,
+        obligation_set: obligation_infos,
+        findings,
+    })
 }
 
 #[cfg(test)]

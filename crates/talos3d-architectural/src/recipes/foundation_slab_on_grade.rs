@@ -268,10 +268,13 @@ fn build_slab_generate_fn() -> GenerateFn {
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
 
+                // Use GeneratedByRecipe grounding (PP74 / F6) — these claims
+                // are computed by the recipe's own generate function, not
+                // inherited from a parent entity.
                 output.grounding_updates.insert(
                     ClaimPath("top_datum_mm".into()),
                     ClaimRecord {
-                        grounding: Grounding::Refined(input.element_id),
+                        grounding: Grounding::GeneratedByRecipe("slab_on_grade".into()),
                         set_at: now,
                         set_by: None,
                     },
@@ -279,7 +282,7 @@ fn build_slab_generate_fn() -> GenerateFn {
                 output.grounding_updates.insert(
                     ClaimPath("slab_thickness_mm".into()),
                     ClaimRecord {
-                        grounding: Grounding::Refined(input.element_id),
+                        grounding: Grounding::GeneratedByRecipe("slab_on_grade".into()),
                         set_at: now,
                         set_by: None,
                     },
