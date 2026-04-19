@@ -74,6 +74,11 @@ pub struct ModelingWorkbench;
 
 impl Plugin for ModelingPlugin {
     fn build(&self, app: &mut App) {
+        // PP70: domain-neutral refinement-linkage relations are the core
+        // vocabulary for cross-state identity; register them here so any
+        // app that boots ModelingPlugin has the full relation discovery
+        // surface without needing to touch the architectural capability.
+        crate::plugins::refinement::register_refinement_relations(app);
         app.init_resource::<ModelingWorkbench>()
             .init_resource::<GroupEditContext>()
             .init_resource::<DefinitionsWindowState>()
