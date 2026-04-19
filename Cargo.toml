@@ -48,6 +48,7 @@ bevy = { version = "0.18", default-features = false, features = [
 ] }
 talos3d-core = { path = "crates/talos3d-core" }
 talos3d-architectural = { path = "crates/talos3d-architectural" }
+talos3d-architecture-core = { path = "../talos3d-architecture/crates/talos3d-architecture-core" }
 talos3d-terrain = { path = "crates/talos3d-terrain", optional = true }
 
 [dev-dependencies]
