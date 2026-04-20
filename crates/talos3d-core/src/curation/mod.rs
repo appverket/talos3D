@@ -33,8 +33,8 @@ pub use publication::{
     evidence_resolution_report, PublicationFinding, PublicationFindingSeverity,
 };
 pub use recipes::{
-    NativeFnId, RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest,
-    RECIPE_ARTIFACT_KIND,
+    mirror_recipe_descriptors_to_artifacts, recipe_artifact_from_descriptor, NativeFnId,
+    RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest, RECIPE_ARTIFACT_KIND,
 };
 
 pub use compat_shim::corpus_provenance_to_registry_entry;

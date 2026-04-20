@@ -25,13 +25,17 @@ use std::collections::{BTreeMap, HashMap};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use crate::capability_registry::RecipeFamilyId;
-use crate::plugins::refinement::RefinementState;
+use crate::capability_registry::{
+    CapabilityRegistry, RecipeFamilyDescriptor, RecipeFamilyId,
+};
+use crate::plugins::refinement::{AgentId, RefinementState};
 
 use super::identity::{AssetId, AssetKindId};
 use super::meta::CurationMeta;
+use super::provenance::{Confidence, Lineage, Provenance};
+use super::scope_trust::{Scope, Trust};
 
 /// Kind id for recipe artifacts.
 pub const RECIPE_ARTIFACT_KIND: &str = "recipe.v1";
@@ -171,7 +175,9 @@ impl RecipeArtifactRegistry {
     }
 
     pub fn get_by_family(&self, family_id: &RecipeFamilyId) -> Option<&RecipeArtifact> {
-        self.by_family_id.get(family_id).and_then(|id| self.entries.get(id))
+        self.by_family_id
+            .get(family_id)
+            .and_then(|id| self.entries.get(id))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &RecipeArtifact> {
@@ -185,6 +191,81 @@ impl RecipeArtifactRegistry {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Apply a batch of shipped descriptors to the registry, wrapping
+    /// each in a `Shipped / Published` `RecipeArtifact` with a
+    /// `NativeFnRef` body. Existing entries for a family are refreshed
+    /// in place (idempotent — safe to call on every Startup).
+    pub fn mirror_descriptors<'a, I>(&mut self, descriptors: I)
+    where
+        I: IntoIterator<Item = &'a RecipeFamilyDescriptor>,
+    {
+        for descriptor in descriptors {
+            let artifact = recipe_artifact_from_descriptor(descriptor);
+            self.insert(artifact);
+        }
+    }
+}
+
+/// Build a shipped `RecipeArtifact` from a `RecipeFamilyDescriptor`.
+/// Produces `scope: Shipped, trust: Published, body: NativeFnRef`.
+pub fn recipe_artifact_from_descriptor(descriptor: &RecipeFamilyDescriptor) -> RecipeArtifact {
+    let parameter_schema = parameters_to_json_schema(&descriptor.parameters);
+    let meta = CurationMeta::new(
+        RecipeArtifact::asset_id_for(&descriptor.id),
+        RecipeArtifact::kind(),
+        Provenance {
+            author: AgentId("shipped".into()),
+            confidence: Confidence::High,
+            lineage: Lineage::Freeform,
+            rationale: Some(descriptor.description.clone()),
+            jurisdiction: None,
+            catalog_dependencies: Vec::new(),
+            evidence: Vec::new(),
+        },
+    )
+    .with_scope(Scope::Shipped)
+    .with_trust(Trust::Published);
+
+    RecipeArtifact {
+        meta,
+        body: RecipeBody::native(descriptor.id.clone()),
+        parameter_schema,
+        target_class: descriptor.target_class.0.clone(),
+        supported_refinement_states: descriptor.supported_refinement_levels.clone(),
+        tests: Vec::new(),
+    }
+}
+
+fn parameters_to_json_schema(
+    parameters: &[crate::capability_registry::RecipeParameter],
+) -> Value {
+    let mut properties = Map::new();
+    let mut defaults = Map::new();
+    for param in parameters {
+        properties.insert(param.name.clone(), param.value_schema.clone());
+        if let Some(default) = &param.default {
+            defaults.insert(param.name.clone(), default.clone());
+        }
+    }
+    let mut schema = Map::new();
+    schema.insert("type".into(), Value::String("object".into()));
+    schema.insert("properties".into(), Value::Object(properties));
+    if !defaults.is_empty() {
+        schema.insert("defaults".into(), Value::Object(defaults));
+    }
+    Value::Object(schema)
+}
+
+/// Startup system: walks the `CapabilityRegistry.recipe_family_
+/// descriptors` and mirrors every descriptor into
+/// `RecipeArtifactRegistry`. Runs after all plugin-registration systems
+/// so the capability registry is fully populated.
+pub fn mirror_recipe_descriptors_to_artifacts(
+    registry: Res<CapabilityRegistry>,
+    mut artifacts: ResMut<RecipeArtifactRegistry>,
+) {
+    artifacts.mirror_descriptors(registry.recipe_family_descriptors(None));
 }
 
 #[cfg(test)]
@@ -316,5 +397,89 @@ mod tests {
         let raw: serde_json::Value = serde_json::from_str(&round_tripped).unwrap();
         assert_eq!(raw["target_class"], "foundation_system");
         let _cls = ElementClassId("foundation_system".into()); // just reference the type
+    }
+
+    #[test]
+    fn recipe_artifact_from_descriptor_produces_shipped_published_native() {
+        use crate::capability_registry::{
+            GenerateFn, GenerateInput, GenerateOutput, ObligationTemplate, RecipeFamilyDescriptor,
+            RecipeParameter,
+        };
+        use std::sync::Arc;
+
+        let generate: GenerateFn =
+            Arc::new(|_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
+                Ok(GenerateOutput::default())
+            });
+        let descriptor = RecipeFamilyDescriptor {
+            id: RecipeFamilyId("wall_light_frame_exterior".into()),
+            target_class: ElementClassId("wall_assembly".into()),
+            label: "Test wall recipe".into(),
+            description: "shipped test descriptor".into(),
+            parameters: vec![
+                RecipeParameter {
+                    name: "thickness_mm".into(),
+                    value_schema: serde_json::json!({"type":"number","minimum":50}),
+                    default: Some(serde_json::json!(200)),
+                },
+                RecipeParameter {
+                    name: "studs_per_m".into(),
+                    value_schema: serde_json::json!({"type":"integer"}),
+                    default: None,
+                },
+            ],
+            supported_refinement_levels: vec![RefinementState::Constructible],
+            obligation_specializations: HashMap::<RefinementState, Vec<ObligationTemplate>>::new(),
+            promotion_critical_path_specializations: HashMap::new(),
+            generate,
+        };
+        let art = recipe_artifact_from_descriptor(&descriptor);
+        assert_eq!(art.meta.scope, Scope::Shipped);
+        assert_eq!(art.meta.trust, Trust::Published);
+        assert_eq!(art.target_class, "wall_assembly");
+        assert!(art.body.is_native());
+        assert_eq!(
+            art.body.family_id().map(|f| f.0.as_str()),
+            Some("wall_light_frame_exterior")
+        );
+        // Parameter schema includes properties + defaults.
+        let schema = &art.parameter_schema;
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["thickness_mm"].is_object());
+        assert_eq!(schema["defaults"]["thickness_mm"], 200);
+        // No default for studs_per_m so it should not appear in defaults.
+        assert!(schema["defaults"].get("studs_per_m").is_none());
+    }
+
+    #[test]
+    fn mirror_descriptors_is_idempotent() {
+        use crate::capability_registry::{
+            GenerateFn, GenerateInput, GenerateOutput, ObligationTemplate, RecipeFamilyDescriptor,
+            RecipeParameter,
+        };
+        use std::sync::Arc;
+
+        let make_descriptor = |family: &str| RecipeFamilyDescriptor {
+            id: RecipeFamilyId(family.into()),
+            target_class: ElementClassId("foundation_system".into()),
+            label: family.into(),
+            description: String::new(),
+            parameters: Vec::<RecipeParameter>::new(),
+            supported_refinement_levels: vec![RefinementState::Constructible],
+            obligation_specializations: HashMap::<RefinementState, Vec<ObligationTemplate>>::new(),
+            promotion_critical_path_specializations: HashMap::new(),
+            generate: Arc::new(
+                |_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
+                    Ok(GenerateOutput::default())
+                },
+            ),
+        };
+
+        let descriptors = vec![make_descriptor("pier_foundation"), make_descriptor("slab_on_grade")];
+        let mut reg = RecipeArtifactRegistry::default();
+        reg.mirror_descriptors(descriptors.iter());
+        let first = reg.len();
+        reg.mirror_descriptors(descriptors.iter());
+        assert_eq!(reg.len(), first, "mirror must be idempotent");
     }
 }
