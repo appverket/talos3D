@@ -15,6 +15,7 @@ pub mod api;
 pub mod authoring_script;
 pub mod compat_shim;
 pub mod compatibility;
+pub mod replay;
 pub mod dependencies;
 pub mod identity;
 pub mod meta;
@@ -34,6 +35,10 @@ pub use authoring_script::{
     Postcondition, Predicate, Step, StepId, AUTHORING_SCRIPT_SCHEMA_VERSION,
 };
 pub use plugin::CurationPlugin;
+pub use replay::{
+    replay, InvocationError, InvocationReport, PostconditionOracle, PostconditionResult,
+    PostconditionVerdict, ResolvedPostcondition, ToolCall, ToolDispatchError, ToolDispatcher,
+};
 pub use publication::{
     evidence_resolution_report, PublicationFinding, PublicationFindingSeverity,
 };
