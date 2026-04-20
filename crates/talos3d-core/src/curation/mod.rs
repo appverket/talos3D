@@ -11,6 +11,7 @@
 //! product entries, code rule packs, future vertical kinds). Domain-specific
 //! bodies, validators, and authoring MCP surfaces live in capability crates.
 
+pub mod api;
 pub mod compat_shim;
 pub mod compatibility;
 pub mod dependencies;
