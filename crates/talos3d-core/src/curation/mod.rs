@@ -11,10 +11,15 @@
 //! product entries, code rule packs, future vertical kinds). Domain-specific
 //! bodies, validators, and authoring MCP surfaces live in capability crates.
 
+pub mod compatibility;
+pub mod dependencies;
 pub mod identity;
 pub mod provenance;
 pub mod scope_trust;
+pub mod source;
 
+pub use compatibility::{CapabilityCompat, CompatibilityRef, SchemaVersion, VersionReq};
+pub use dependencies::{DependencyRef, DependencyRole};
 pub use identity::{
     AssetId, AssetKindId, AssetRevision, ContentHash, PackId, PackRevision, SourceId,
     SourceRevision,
@@ -24,3 +29,4 @@ pub use provenance::{
     Provenance,
 };
 pub use scope_trust::{Scope, Trust, ValidationStatus};
+pub use source::{SourceLicense, SourceRegistryEntry, SourceStatus, SourceTier};
