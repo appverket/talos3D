@@ -8771,19 +8771,7 @@ fn handle_set_material_assignment(
     world: &mut World,
     request: SetMaterialAssignmentRequest,
 ) -> Result<Vec<EntityMaterialAssignmentInfo>, String> {
-    for material_id in request.assignment.explicit_render_material_ids() {
-        if !world.resource::<MaterialRegistry>().contains(&material_id) {
-            return Err(format!("Material '{material_id}' not found"));
-        }
-    }
-    for spec_id in request.assignment.referenced_spec_ids() {
-        let registry = world
-            .get_resource::<crate::curation::MaterialSpecRegistry>()
-            .ok_or_else(|| "MaterialSpecRegistry not installed".to_string())?;
-        if registry.get(&spec_id).is_none() {
-            return Err(format!("MaterialSpec '{}' not found", spec_id));
-        }
-    }
+    crate::plugins::materials::validate_material_assignment(world, &request.assignment)?;
 
     let mut updated = Vec::new();
     for element_id in request.element_ids {

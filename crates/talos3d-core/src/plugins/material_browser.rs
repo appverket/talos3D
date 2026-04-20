@@ -16,7 +16,8 @@ use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 use crate::plugins::{
     command_registry::{queue_command_invocation_resource, PendingCommandInvocations},
     materials::{
-        normalize_material_textures, MaterialAlphaMode, MaterialDef, MaterialRegistry, TextureRef,
+        material_assignment_from_value, material_assignment_to_value, normalize_material_textures,
+        MaterialAlphaMode, MaterialAssignment, MaterialDef, MaterialRegistry, TextureRef,
         TextureRegistry,
     },
     ui::{tool_window_max_size, tool_window_rect},
@@ -37,6 +38,7 @@ pub struct MaterialsWindowState {
     pub selected_id: Option<String>,
     // Inline editor buffers (so we don't mutate the registry on every keypress)
     pub name_buf: String,
+    pub spec_ref_buf: String,
     pub base_color: [f32; 4],
     pub roughness: f32,
     pub metallic: f32,
@@ -70,6 +72,10 @@ pub struct MaterialsWindowState {
     preview_texture_handles: HashMap<String, Handle<Image>>,
     pub editor_tab: EditorTab,
     pub dirty: bool,
+    pub selection_assignment_json: String,
+    pub selection_assignment_signature: u64,
+    pub selection_assignment_mixed: bool,
+    pub selection_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -77,12 +83,18 @@ pub enum EditorTab {
     #[default]
     Properties,
     Textures,
+    Selection,
 }
 
 impl MaterialsWindowState {
     /// Load editor buffers from a `MaterialDef`.
     pub fn load_def(&mut self, def: &MaterialDef) {
         self.name_buf = def.name.clone();
+        self.spec_ref_buf = def
+            .spec_ref
+            .as_ref()
+            .map(|id| id.as_str().to_string())
+            .unwrap_or_default();
         self.base_color = def.base_color;
         self.roughness = def.perceptual_roughness;
         self.metallic = def.metallic;
@@ -123,6 +135,8 @@ impl MaterialsWindowState {
     /// Write editor buffers back into a `MaterialDef`.
     pub fn flush_to_def(&self, def: &mut MaterialDef) {
         def.name = self.name_buf.clone();
+        def.spec_ref = (!self.spec_ref_buf.trim().is_empty())
+            .then(|| crate::curation::AssetId::new(self.spec_ref_buf.trim().to_string()));
         def.base_color = self.base_color;
         def.perceptual_roughness = self.roughness;
         def.metallic = self.metallic;
@@ -172,6 +186,7 @@ pub fn draw_materials_window(
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
     pending: &mut PendingCommandInvocations,
+    selected_assignments: &[(u64, Option<MaterialAssignment>)],
 ) {
     if !state.visible {
         return;
@@ -197,6 +212,7 @@ pub fn draw_materials_window(
                 asset_server,
                 images,
                 pending,
+                selected_assignments,
             );
         });
 
@@ -214,6 +230,7 @@ fn draw_browser_panel(
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
     pending: &mut PendingCommandInvocations,
+    selected_assignments: &[(u64, Option<MaterialAssignment>)],
 ) {
     ui.horizontal(|ui| {
         // --- Left: list of materials ---
@@ -330,9 +347,22 @@ fn draw_browser_panel(
         ui.vertical(|ui| {
             ui.set_min_width(240.0);
 
-            if let Some(selected_id) = state.selected_id.clone() {
+            draw_editor_tabs(ui, state);
+            ui.separator();
+
+            if state.editor_tab == EditorTab::Selection {
+                let selected_material_id = state.selected_id.clone();
+                sync_selection_assignment_buffer(state, selected_assignments);
+                draw_selection_tab(
+                    ui,
+                    state,
+                    pending,
+                    selected_assignments,
+                    selected_material_id.as_deref(),
+                );
+            } else if let Some(selected_id) = state.selected_id.clone() {
                 if registry.contains(&selected_id) {
-                    draw_editor(
+                    draw_material_editor(
                         ui,
                         contexts,
                         state,
@@ -358,19 +388,7 @@ fn draw_browser_panel(
     });
 }
 
-// ─── Editor panel ─────────────────────────────────────────────────────────────
-
-fn draw_editor(
-    ui: &mut egui::Ui,
-    contexts: &mut EguiContexts,
-    state: &mut MaterialsWindowState,
-    registry: &mut MaterialRegistry,
-    texture_registry: &mut TextureRegistry,
-    asset_server: &AssetServer,
-    images: &mut Assets<Image>,
-    id: &str,
-) {
-    // Tab bar
+fn draw_editor_tabs(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
     ui.horizontal(|ui| {
         if ui
             .selectable_label(state.editor_tab == EditorTab::Properties, "Properties")
@@ -384,14 +402,33 @@ fn draw_editor(
         {
             state.editor_tab = EditorTab::Textures;
         }
+        if ui
+            .selectable_label(state.editor_tab == EditorTab::Selection, "Selection")
+            .clicked()
+        {
+            state.editor_tab = EditorTab::Selection;
+        }
     });
-    ui.separator();
+}
 
+// ─── Editor panel ─────────────────────────────────────────────────────────────
+
+fn draw_material_editor(
+    ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
+    state: &mut MaterialsWindowState,
+    registry: &mut MaterialRegistry,
+    texture_registry: &mut TextureRegistry,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+    id: &str,
+) {
     match state.editor_tab {
         EditorTab::Properties => draw_properties_tab(ui, state),
         EditorTab::Textures => {
             draw_textures_tab(ui, contexts, state, texture_registry, asset_server, images)
         }
+        EditorTab::Selection => {}
     }
 
     ui.add_space(8.0);
@@ -432,6 +469,18 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                     // Name
                     ui.label("Name");
                     if ui.text_edit_singleline(&mut state.name_buf).changed() {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Material Spec");
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut state.spec_ref_buf)
+                                .hint_text("material_spec.v1/slug"),
+                        )
+                        .changed()
+                    {
                         state.dirty = true;
                     }
                     ui.end_row();
@@ -760,6 +809,179 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                     ui.end_row();
                 });
         });
+}
+
+fn draw_selection_tab(
+    ui: &mut egui::Ui,
+    state: &mut MaterialsWindowState,
+    pending: &mut PendingCommandInvocations,
+    selected_assignments: &[(u64, Option<MaterialAssignment>)],
+    selected_material_id: Option<&str>,
+) {
+    let selected_count = selected_assignments.len();
+    ui.label(
+        egui::RichText::new(format!(
+            "Selection assignment editor for {} selected entit{}.",
+            selected_count,
+            if selected_count == 1 { "y" } else { "ies" }
+        ))
+        .small(),
+    );
+    if state.selection_assignment_mixed {
+        ui.label(
+            egui::RichText::new(
+                "The selection currently has mixed assignments. Applying here will overwrite them.",
+            )
+            .italics()
+            .weak(),
+        );
+    } else if selected_count == 0 {
+        ui.label(
+            egui::RichText::new("Select one or more entities to inspect or edit assignments.")
+                .italics()
+                .weak(),
+        );
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                selected_material_id.is_some(),
+                egui::Button::new("Seed Single From Material"),
+            )
+            .clicked()
+        {
+            let assignment = MaterialAssignment::new(
+                selected_material_id.expect("button is disabled when no material is selected"),
+            );
+            state.selection_assignment_json =
+                serde_json::to_string_pretty(&material_assignment_to_value(&assignment))
+                    .unwrap_or_else(|_| "{}".to_string());
+            state.selection_status = None;
+        }
+        if ui.button("New Layer Set").clicked() {
+            let assignment = MaterialAssignment::LayerSet(crate::plugins::materials::MaterialLayerSet {
+                layers: vec![crate::plugins::materials::MaterialLayer::default()],
+            });
+            state.selection_assignment_json =
+                serde_json::to_string_pretty(&material_assignment_to_value(&assignment))
+                    .unwrap_or_else(|_| "{}".to_string());
+            state.selection_status = None;
+        }
+        if ui.button("Reload Selection").clicked() {
+            state.selection_assignment_signature = 0;
+            sync_selection_assignment_buffer(state, selected_assignments);
+        }
+        if ui
+            .add_enabled(selected_count > 0, egui::Button::new("Clear Selection"))
+            .clicked()
+        {
+            queue_command_invocation_resource(
+                pending,
+                "materials.clear_assignment_on_selection".to_string(),
+                serde_json::json!({}),
+            );
+            state.selection_status = None;
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(
+            "Advanced JSON editor. Use `{ \"type\": \"single\", ... }` or `{ \"type\": \"layer_set\", \"layers\": [...] }`.",
+        )
+        .small()
+        .weak(),
+    );
+    ui.add(
+        egui::TextEdit::multiline(&mut state.selection_assignment_json)
+            .desired_rows(14)
+            .code_editor()
+            .hint_text("{\n  \"type\": \"single\",\n  \"render\": \"material_def.v1/oak_finish\"\n}"),
+    );
+
+    if let Some(status) = &state.selection_status {
+        ui.label(egui::RichText::new(status).small().color(egui::Color32::LIGHT_RED));
+    }
+
+    if ui
+        .add_enabled(selected_count > 0, egui::Button::new("Apply To Selection"))
+        .clicked()
+    {
+        match parse_assignment_json(&state.selection_assignment_json) {
+            Ok(value) => {
+                queue_command_invocation_resource(
+                    pending,
+                    "materials.set_assignment_on_selection".to_string(),
+                    serde_json::json!({ "assignment": value }),
+                );
+                state.selection_status = None;
+            }
+            Err(error) => state.selection_status = Some(error),
+        }
+    }
+}
+
+fn sync_selection_assignment_buffer(
+    state: &mut MaterialsWindowState,
+    selected_assignments: &[(u64, Option<MaterialAssignment>)],
+) {
+    let signature = selection_assignment_signature(selected_assignments);
+    if signature == state.selection_assignment_signature {
+        return;
+    }
+
+    state.selection_assignment_signature = signature;
+    state.selection_assignment_mixed = false;
+    state.selection_status = None;
+
+    let Some((_, first_assignment)) = selected_assignments.first() else {
+        state.selection_assignment_json.clear();
+        return;
+    };
+
+    if selected_assignments
+        .iter()
+        .all(|(_, assignment)| assignment == first_assignment)
+    {
+        state.selection_assignment_json = first_assignment
+            .as_ref()
+            .map(|assignment| {
+                serde_json::to_string_pretty(&material_assignment_to_value(assignment))
+                    .unwrap_or_else(|_| "{}".to_string())
+            })
+            .unwrap_or_default();
+    } else {
+        state.selection_assignment_mixed = true;
+        state.selection_assignment_json.clear();
+    }
+}
+
+fn selection_assignment_signature(selected_assignments: &[(u64, Option<MaterialAssignment>)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    selected_assignments.len().hash(&mut hasher);
+    for (element_id, assignment) in selected_assignments {
+        element_id.hash(&mut hasher);
+        assignment
+            .as_ref()
+            .map(|assignment| material_assignment_to_value(assignment).to_string())
+            .unwrap_or_else(|| "null".to_string())
+            .hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn parse_assignment_json(json: &str) -> Result<serde_json::Value, String> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return Err("Assignment JSON is empty. Use Clear Selection to remove assignments.".to_string());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|error| format!("Invalid JSON: {error}"))?;
+    material_assignment_from_value(&value)
+        .ok_or_else(|| "JSON did not decode into a MaterialAssignment".to_string())?;
+    Ok(value)
 }
 
 fn draw_textures_tab(

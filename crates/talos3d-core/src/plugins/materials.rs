@@ -798,6 +798,10 @@ impl MaterialBinding {
             Some(next)
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.spec.is_none() && self.render.is_none()
+    }
 }
 
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
@@ -902,6 +906,15 @@ impl MaterialAssignment {
             }
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Single(binding) => binding.is_empty(),
+            Self::LayerSet(layer_set) => {
+                layer_set.layers.is_empty() || layer_set.layers.iter().all(|layer| layer.binding.is_empty())
+            }
+        }
+    }
 }
 
 pub fn material_assignment_from_value(value: &Value) -> Option<MaterialAssignment> {
@@ -974,6 +987,49 @@ impl Plugin for MaterialPlugin {
                     capability_id: Some("materials".to_string()),
                 },
                 execute_apply_material_to_selection,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "materials.set_assignment_on_selection".to_string(),
+                    label: "Set Material Assignment".to_string(),
+                    description: "Apply a typed material assignment to all selected entities"
+                        .to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "assignment": { "type": "object" }
+                        },
+                        "required": ["assignment"]
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Apply a single-material or layered assignment".to_string()),
+                    requires_selection: true,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("materials".to_string()),
+                },
+                execute_set_material_assignment_to_selection,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "materials.clear_assignment_on_selection".to_string(),
+                    label: "Clear Material Assignment".to_string(),
+                    description: "Remove material assignments from all selected entities".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Clear layered or single material assignments".to_string()),
+                    requires_selection: true,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("materials".to_string()),
+                },
+                execute_clear_material_assignment_on_selection,
             )
             .register_command(
                 CommandDescriptor {
@@ -1105,6 +1161,71 @@ fn execute_apply_material_to_selection(
         output: Some(serde_json::json!({ "applied_to": count })),
         ..Default::default()
     })
+}
+
+fn execute_set_material_assignment_to_selection(
+    world: &mut World,
+    params: &Value,
+) -> Result<crate::plugins::command_registry::CommandResult, String> {
+    let assignment = params
+        .get("assignment")
+        .and_then(material_assignment_from_value)
+        .ok_or("assignment is required")?;
+    validate_material_assignment(world, &assignment)?;
+
+    let selected_entities: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<crate::plugins::selection::Selected>>();
+        q.iter(world).collect()
+    };
+    let count = selected_entities.len();
+    for entity in selected_entities {
+        world.entity_mut(entity).insert(assignment.clone());
+    }
+    Ok(crate::plugins::command_registry::CommandResult {
+        output: Some(serde_json::json!({ "applied_to": count })),
+        ..Default::default()
+    })
+}
+
+fn execute_clear_material_assignment_on_selection(
+    world: &mut World,
+    _params: &Value,
+) -> Result<crate::plugins::command_registry::CommandResult, String> {
+    let selected_entities: Vec<Entity> = {
+        let mut q = world.query_filtered::<Entity, With<crate::plugins::selection::Selected>>();
+        q.iter(world).collect()
+    };
+    let count = selected_entities.len();
+    for entity in selected_entities {
+        world.entity_mut(entity).remove::<MaterialAssignment>();
+    }
+    Ok(crate::plugins::command_registry::CommandResult {
+        output: Some(serde_json::json!({ "cleared": count })),
+        ..Default::default()
+    })
+}
+
+pub fn validate_material_assignment(world: &World, assignment: &MaterialAssignment) -> Result<(), String> {
+    if assignment.is_empty() {
+        return Err("material assignment is empty; clear the assignment instead".to_string());
+    }
+    for material_id in assignment.explicit_render_material_ids() {
+        if !world.resource::<MaterialRegistry>().contains(&material_id) {
+            return Err(format!("Material '{material_id}' not found"));
+        }
+    }
+    let spec_ids = assignment.referenced_spec_ids();
+    if !spec_ids.is_empty() {
+        let registry = world
+            .get_resource::<MaterialSpecRegistry>()
+            .ok_or_else(|| "MaterialSpecRegistry not installed".to_string())?;
+        for spec_id in spec_ids {
+            if registry.get(&spec_id).is_none() {
+                return Err(format!("MaterialSpec '{}' not found", spec_id));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn execute_toggle_materials_browser(
@@ -1327,6 +1448,39 @@ mod tests {
             }
             other => panic!("expected single binding, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn material_assignment_json_round_trips_single_and_layer_set_forms() {
+        let single = MaterialAssignment::Single(MaterialBinding {
+            spec: Some(crate::curation::MaterialSpec::asset_id_for("c24")),
+            render: Some(material_def_asset_id("oak_finish")),
+        });
+        let single_value = material_assignment_to_value(&single);
+        assert_eq!(material_assignment_from_value(&single_value), Some(single));
+
+        let layered = MaterialAssignment::LayerSet(MaterialLayerSet {
+            layers: vec![
+                MaterialLayer {
+                    name: Some("structure".to_string()),
+                    thickness_mm: Some(45.0),
+                    binding: MaterialBinding {
+                        spec: Some(crate::curation::MaterialSpec::asset_id_for("c24")),
+                        render: Some(material_def_asset_id("oak_finish")),
+                    },
+                },
+                MaterialLayer {
+                    name: Some("finish".to_string()),
+                    thickness_mm: Some(12.5),
+                    binding: MaterialBinding {
+                        spec: None,
+                        render: Some(material_def_asset_id("paint_white")),
+                    },
+                },
+            ],
+        });
+        let layered_value = material_assignment_to_value(&layered);
+        assert_eq!(material_assignment_from_value(&layered_value), Some(layered));
     }
 
     #[test]
