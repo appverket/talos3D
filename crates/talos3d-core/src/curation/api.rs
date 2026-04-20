@@ -17,10 +17,13 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::identity::{AssetKindId, SourceId, SourceRevision};
+use super::identity::{AssetId, AssetKindId, SourceId, SourceRevision};
 use super::nomination::{Nomination, NominationId, NominationKind, NominationQueue};
+use super::policy::PublicationPolicy;
 use super::provenance::JurisdictionTag;
+use super::recipes::{RecipeArtifact, RecipeArtifactRegistry, RecipeBody};
 use super::registry::{SourceFilter, SourceRegistry};
+use super::scope_trust::{Scope, Trust};
 use super::source::{SourceLicense, SourceRegistryEntry, SourceTier};
 
 // ---------------------------------------------------------------------------
@@ -341,6 +344,204 @@ pub fn reject_nomination(
             message: e.to_string(),
         }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Recipe-kind handlers (PP81 slice 3)
+// ---------------------------------------------------------------------------
+
+/// Short summary of a recipe artifact for list responses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RecipeInfo {
+    pub asset_id: String,
+    pub family_id: Option<String>,
+    pub target_class: String,
+    pub scope: String,
+    pub trust: String,
+    pub body_kind: String,
+    pub supported_refinement_states: Vec<String>,
+    pub evidence_count: usize,
+    pub validation: String,
+}
+
+impl From<&RecipeArtifact> for RecipeInfo {
+    fn from(a: &RecipeArtifact) -> Self {
+        Self {
+            asset_id: a.meta.id.0.clone(),
+            family_id: a.family_id().map(|f| f.0.clone()),
+            target_class: a.target_class.clone(),
+            scope: format!("{:?}", a.meta.scope).to_lowercase(),
+            trust: format!("{:?}", a.meta.trust).to_lowercase(),
+            body_kind: match &a.body {
+                RecipeBody::NativeFnRef { .. } => "native_fn_ref".into(),
+                RecipeBody::AuthoringScript { .. } => "authoring_script".into(),
+            },
+            supported_refinement_states: a
+                .supported_refinement_states
+                .iter()
+                .map(|s| format!("{s:?}").to_lowercase())
+                .collect(),
+            evidence_count: a.meta.provenance.evidence.len(),
+            validation: match &a.meta.validation {
+                super::scope_trust::ValidationStatus::Unchecked => "unchecked".into(),
+                super::scope_trust::ValidationStatus::Passing => "passing".into(),
+                super::scope_trust::ValidationStatus::Failing { .. } => "failing".into(),
+            },
+        }
+    }
+}
+
+/// Filter parameters for `list_recipes`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ListRecipesFilter {
+    pub scope: Option<String>,
+    pub trust: Option<String>,
+    pub target_class: Option<String>,
+}
+
+fn parse_scope(s: &str) -> Option<Scope> {
+    match s {
+        "session" => Some(Scope::Session),
+        "project" => Some(Scope::Project),
+        "org" => Some(Scope::Org),
+        "shipped" => Some(Scope::Shipped),
+        _ => None,
+    }
+}
+
+fn parse_trust(s: &str) -> Option<Trust> {
+    match s {
+        "draft" => Some(Trust::Draft),
+        "published" => Some(Trust::Published),
+        _ => None,
+    }
+}
+
+/// `list_recipes { scope?, trust?, target_class? }`
+pub fn list_recipes(world: &World, filter: ListRecipesFilter) -> Vec<RecipeInfo> {
+    let Some(registry) = world.get_resource::<RecipeArtifactRegistry>() else {
+        return Vec::new();
+    };
+    let scope = filter.scope.as_deref().and_then(parse_scope);
+    let trust = filter.trust.as_deref().and_then(parse_trust);
+    registry
+        .iter()
+        .filter(|a| scope.map(|s| a.meta.scope == s).unwrap_or(true))
+        .filter(|a| trust.map(|t| a.meta.trust == t).unwrap_or(true))
+        .filter(|a| {
+            filter
+                .target_class
+                .as_deref()
+                .map(|cls| a.target_class == cls)
+                .unwrap_or(true)
+        })
+        .map(RecipeInfo::from)
+        .collect()
+}
+
+/// `get_recipe { asset_id }`
+pub fn get_recipe(world: &World, asset_id: &str) -> ApiResult<RecipeInfo> {
+    let registry = world
+        .get_resource::<RecipeArtifactRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.recipe_registry_missing".into(),
+            message: "RecipeArtifactRegistry not installed".into(),
+        })?;
+    registry
+        .get(&AssetId::new(asset_id))
+        .map(RecipeInfo::from)
+        .ok_or_else(|| ApiFailure {
+            code: "curation.recipe_not_found".into(),
+            message: format!("no recipe artifact with id {asset_id}"),
+        })
+}
+
+/// `save_recipe { asset_id, scope }` — widens (or narrows) the scope of
+/// a project-scope recipe. Shipped-scope artifacts cannot be moved by
+/// MCP: they're code-authored and ride with the binary.
+pub fn save_recipe(world: &mut World, asset_id: &str, scope: &str) -> ApiResult<RecipeInfo> {
+    let target_scope = parse_scope(scope).ok_or_else(|| ApiFailure {
+        code: "curation.invalid_scope".into(),
+        message: format!("unknown scope: {scope}"),
+    })?;
+    let mut registry = world
+        .get_resource_mut::<RecipeArtifactRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.recipe_registry_missing".into(),
+            message: "RecipeArtifactRegistry not installed".into(),
+        })?;
+    let Some(artifact) = registry.entries.get_mut(&AssetId::new(asset_id)) else {
+        return Err(ApiFailure {
+            code: "curation.recipe_not_found".into(),
+            message: format!("no recipe artifact with id {asset_id}"),
+        });
+    };
+    if artifact.meta.scope == Scope::Shipped {
+        return Err(ApiFailure {
+            code: "curation.shipped_scope_immutable".into(),
+            message: "Shipped-scope recipes cannot change scope via MCP".into(),
+        });
+    }
+    artifact.meta.scope = target_scope;
+    Ok(RecipeInfo::from(&*artifact))
+}
+
+/// `publish_recipe { asset_id }` — flips trust Draft → Published if the
+/// publication-policy floor permits. Requires the asset to have either
+/// `tests` declared or `Confidence::Certified` as the explicit
+/// reviewer-sign-off override.
+pub fn publish_recipe(world: &mut World, asset_id: &str) -> ApiResult<RecipeInfo> {
+    // Take the registry out so we can borrow the source-registry read-
+    // only at the same time.
+    let mut recipes = world
+        .remove_resource::<RecipeArtifactRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.recipe_registry_missing".into(),
+            message: "RecipeArtifactRegistry not installed".into(),
+        })?;
+    let id = AssetId::new(asset_id);
+    let Some(artifact) = recipes.entries.get_mut(&id) else {
+        world.insert_resource(recipes);
+        return Err(ApiFailure {
+            code: "curation.recipe_not_found".into(),
+            message: format!("no recipe artifact with id {asset_id}"),
+        });
+    };
+
+    // Recipe-specific gate: tests OR Certified confidence.
+    let has_tests = !artifact.tests.is_empty();
+    let is_certified =
+        artifact.meta.provenance.confidence == super::provenance::Confidence::Certified;
+    if !(has_tests || is_certified) {
+        world.insert_resource(recipes);
+        return Err(ApiFailure {
+            code: "curation.recipe_missing_review".into(),
+            message: "publish_recipe requires tests OR Confidence::Certified".into(),
+        });
+    }
+
+    // Publication-policy floor.
+    let sources = world.resource::<SourceRegistry>();
+    let findings = PublicationPolicy::default().check(&artifact.meta, sources);
+    if findings.iter().any(|f| f.is_error()) {
+        world.insert_resource(recipes);
+        return Err(ApiFailure {
+            code: "curation.publication_floor_rejected".into(),
+            message: findings
+                .iter()
+                .filter(|f| f.is_error())
+                .map(|f| f.message.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
+        });
+    }
+
+    artifact.meta.trust = Trust::Published;
+    let info = RecipeInfo::from(&*artifact);
+    world.insert_resource(recipes);
+    Ok(info)
 }
 
 /// `report_corpus_gap { kind, jurisdiction?, missing_artifact_kind, context, rationale? }`
