@@ -23,6 +23,7 @@ use crate::plugins::{
     clipping_planes::ClipPlaneNode,
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
 };
+use crate::curation::MaterialSpecRegistry;
 
 // ─── Hatch pattern types ─────────────────────────────────────────────────────
 
@@ -409,7 +410,7 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
 
         // Resolve material → hatch pattern
         let (pattern, fill_color, mat_name) =
-            resolve_entity_section_style(mat_assign, material_registry);
+            resolve_entity_section_style(mat_assign, material_registry, world.get_resource());
 
         if matches!(pattern, HatchPattern::NoFill) {
             continue;
@@ -436,12 +437,15 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
 fn resolve_entity_section_style(
     mat_assign: Option<&MaterialAssignment>,
     registry: Option<&MaterialRegistry>,
+    specs: Option<&MaterialSpecRegistry>,
 ) -> (HatchPattern, [f32; 4], Option<String>) {
     if let (Some(assign), Some(reg)) = (mat_assign, registry) {
-        if let Some(mat) = reg.get(&assign.material_id) {
-            let pattern = resolve_hatch_pattern(mat);
-            let color = resolve_fill_color(mat);
-            return (pattern, color, Some(mat.name.clone()));
+        if let Some(material_id) = assign.render_material_id(specs) {
+            if let Some(mat) = reg.get(&material_id) {
+                let pattern = resolve_hatch_pattern(mat);
+                let color = resolve_fill_color(mat);
+                return (pattern, color, Some(mat.name.clone()));
+            }
         }
     }
     let (pattern, color) = default_section_fill();

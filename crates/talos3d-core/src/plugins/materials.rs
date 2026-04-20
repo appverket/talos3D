@@ -15,11 +15,12 @@ use bevy::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::curation::{AssetId, ContentHash, EvidenceRef};
+use crate::curation::{AssetId, ContentHash, EvidenceRef, MaterialSpecRegistry};
 
 pub const BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO: &str =
     "builtin.maibec.red_cedar_light_h2bo";
 pub const BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80: &str = "builtin.glass.blue_tint_glazing_80";
+pub const MATERIAL_DEF_KIND: &str = "material_def.v1";
 
 pub fn is_builtin_material_id(id: &str) -> bool {
     id.starts_with("builtin.")
@@ -469,6 +470,10 @@ impl Default for MaterialDef {
 }
 
 impl MaterialDef {
+    pub fn asset_id(&self) -> AssetId {
+        material_def_asset_id(&self.id)
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -727,19 +732,193 @@ pub fn normalize_material_textures(material: &mut MaterialDef, registry: &mut Te
 
 // ─── MaterialAssignment component ────────────────────────────────────────────
 
-/// ECS component that links an authored entity to a named material in the
-/// `MaterialRegistry`.
+pub fn material_def_asset_id(material_id: &str) -> AssetId {
+    AssetId::new(format!("{MATERIAL_DEF_KIND}/{material_id}"))
+}
+
+pub fn material_id_from_asset_id(asset_id: &AssetId) -> Option<&str> {
+    asset_id
+        .as_str()
+        .strip_prefix(concat!("material_def.v1", "/"))
+}
+
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MaterialBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<AssetId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<AssetId>,
+}
+
+impl MaterialBinding {
+    pub fn render_only(material_id: impl AsRef<str>) -> Self {
+        Self {
+            spec: None,
+            render: Some(material_def_asset_id(material_id.as_ref())),
+        }
+    }
+
+    pub fn render_material_id(&self, specs: Option<&MaterialSpecRegistry>) -> Option<String> {
+        if let Some(render) = &self.render {
+            return material_id_from_asset_id(render).map(str::to_string);
+        }
+        let spec_id = self.spec.as_ref()?;
+        let spec = specs?.get(spec_id)?;
+        spec.body
+            .default_rendering_hint
+            .as_ref()
+            .and_then(material_id_from_asset_id)
+            .map(str::to_string)
+    }
+
+    pub fn explicit_render_material_id(&self) -> Option<String> {
+        self.render
+            .as_ref()
+            .and_then(material_id_from_asset_id)
+            .map(str::to_string)
+    }
+
+    pub fn contains_explicit_render_material_id(&self, material_id: &str) -> bool {
+        self.render
+            .as_ref()
+            .and_then(material_id_from_asset_id)
+            .map(|candidate| candidate == material_id)
+            .unwrap_or(false)
+    }
+
+    pub fn without_explicit_render_material_id(&self, material_id: &str) -> Option<Self> {
+        let mut next = self.clone();
+        if next.contains_explicit_render_material_id(material_id) {
+            next.render = None;
+        }
+        if next.spec.is_none() && next.render.is_none() {
+            None
+        } else {
+            Some(next)
+        }
+    }
+}
+
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MaterialLayer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thickness_mm: Option<f32>,
+    #[serde(default)]
+    pub binding: MaterialBinding,
+}
+
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MaterialLayerSet {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<MaterialLayer>,
+}
+
+/// ECS component carrying authored render/material semantics for an entity.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MaterialAssignment {
-    pub material_id: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MaterialAssignment {
+    Single(MaterialBinding),
+    LayerSet(MaterialLayerSet),
 }
 
 impl MaterialAssignment {
     pub fn new(material_id: impl Into<String>) -> Self {
-        Self {
-            material_id: material_id.into(),
+        Self::Single(MaterialBinding::render_only(material_id.into()))
+    }
+
+    pub fn render_material_id(&self, specs: Option<&MaterialSpecRegistry>) -> Option<String> {
+        match self {
+            Self::Single(binding) => binding.render_material_id(specs),
+            Self::LayerSet(layer_set) => layer_set
+                .layers
+                .iter()
+                .find_map(|layer| layer.binding.render_material_id(specs)),
         }
     }
+
+    pub fn contains_explicit_render_material_id(&self, material_id: &str) -> bool {
+        match self {
+            Self::Single(binding) => binding.contains_explicit_render_material_id(material_id),
+            Self::LayerSet(layer_set) => layer_set
+                .layers
+                .iter()
+                .any(|layer| layer.binding.contains_explicit_render_material_id(material_id)),
+        }
+    }
+
+    pub fn explicit_render_material_ids(&self) -> Vec<String> {
+        match self {
+            Self::Single(binding) => binding.explicit_render_material_id().into_iter().collect(),
+            Self::LayerSet(layer_set) => layer_set
+                .layers
+                .iter()
+                .filter_map(|layer| layer.binding.explicit_render_material_id())
+                .collect(),
+        }
+    }
+
+    pub fn referenced_spec_ids(&self) -> Vec<AssetId> {
+        match self {
+            Self::Single(binding) => binding.spec.iter().cloned().collect(),
+            Self::LayerSet(layer_set) => layer_set
+                .layers
+                .iter()
+                .filter_map(|layer| layer.binding.spec.clone())
+                .collect(),
+        }
+    }
+
+    pub fn without_explicit_render_material_id(&self, material_id: &str) -> Option<Self> {
+        match self {
+            Self::Single(binding) => binding
+                .without_explicit_render_material_id(material_id)
+                .map(Self::Single),
+            Self::LayerSet(layer_set) => {
+                let layers = layer_set
+                    .layers
+                    .iter()
+                    .filter_map(|layer| {
+                        layer
+                            .binding
+                            .without_explicit_render_material_id(material_id)
+                            .map(|binding| MaterialLayer {
+                                name: layer.name.clone(),
+                                thickness_mm: layer.thickness_mm,
+                                binding,
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                if layers.is_empty() {
+                    None
+                } else {
+                    Some(Self::LayerSet(MaterialLayerSet { layers }))
+                }
+            }
+        }
+    }
+}
+
+pub fn material_assignment_from_value(value: &Value) -> Option<MaterialAssignment> {
+    if value.is_null() {
+        return None;
+    }
+    serde_json::from_value::<MaterialAssignment>(value.clone())
+        .ok()
+        .or_else(|| {
+            value.get("material_id")
+                .and_then(Value::as_str)
+                .map(MaterialAssignment::new)
+        })
+}
+
+pub fn material_assignment_to_value(assignment: &MaterialAssignment) -> Value {
+    serde_json::to_value(assignment).unwrap_or(Value::Null)
 }
 
 // ─── Bevy material handles cache ─────────────────────────────────────────────
@@ -950,11 +1129,15 @@ fn seed_builtin_materials(mut registry: ResMut<MaterialRegistry>) {
 fn rebuild_changed_material_handles(
     registry: Res<MaterialRegistry>,
     texture_registry: Res<TextureRegistry>,
+    spec_registry: Option<Res<MaterialSpecRegistry>>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     _images: ResMut<Assets<Image>>,
 ) {
-    if !registry.is_changed() && !texture_registry.is_changed() {
+    if !registry.is_changed()
+        && !texture_registry.is_changed()
+        && !spec_registry.as_ref().is_some_and(|registry| registry.is_changed())
+    {
         return;
     }
     // Remove handles for definitions that have changed or no longer exist.
@@ -989,16 +1172,22 @@ fn apply_material_assignments(
     mut commands: Commands,
     registry: Res<MaterialRegistry>,
     texture_registry: Res<TextureRegistry>,
+    spec_registry: Option<Res<MaterialSpecRegistry>>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
+    primitive_material: Option<Res<crate::plugins::modeling::mesh_generation::PrimitiveMaterial>>,
     changed_query: Query<(Entity, &MaterialAssignment), Changed<MaterialAssignment>>,
     all_query: Query<(Entity, &MaterialAssignment)>,
 ) {
     // Choose the effective iterator: when the registry itself changed we must
     // visit every assigned entity; otherwise only those with a changed component.
-    let registry_changed = registry.is_changed();
+    let registry_changed = registry.is_changed()
+        || texture_registry.is_changed()
+        || spec_registry
+            .as_ref()
+            .is_some_and(|spec_registry| spec_registry.is_changed());
 
     let iter: Box<dyn Iterator<Item = (Entity, &MaterialAssignment)>> = if registry_changed {
         Box::new(all_query.iter())
@@ -1007,22 +1196,27 @@ fn apply_material_assignments(
     };
 
     for (entity, assignment) in iter {
-        let Some(def) = registry.get(&assignment.material_id) else {
-            continue;
-        };
-        let handle = cache
-            .0
-            .entry(assignment.material_id.clone())
-            .or_insert_with(|| {
-                std_materials.add(def.to_standard_material(
-                    &asset_server,
-                    &mut images,
-                    Some(&texture_registry),
-                ))
+        let handle = assignment
+            .render_material_id(spec_registry.as_deref())
+            .and_then(|material_id| {
+                let def = registry.get(&material_id)?;
+                let handle = cache
+                    .0
+                    .entry(material_id.clone())
+                    .or_insert_with(|| {
+                        std_materials.add(def.to_standard_material(
+                            &asset_server,
+                            &mut images,
+                            Some(&texture_registry),
+                        ))
+                    })
+                    .clone();
+                Some(handle)
             })
-            .clone();
+            .or_else(|| primitive_material.as_ref().map(|material| material.0.clone()));
         commands.queue(move |world: &mut World| {
-            if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+            if let (Some(handle), Ok(mut entity_mut)) = (handle.clone(), world.get_entity_mut(entity))
+            {
                 entity_mut.insert(MeshMaterial3d::<StandardMaterial>(handle));
             }
         });
@@ -1079,6 +1273,60 @@ mod tests {
             .expect("cedar builtin should exist");
         assert_eq!(cedar.anisotropy_strength, 0.0);
         assert_eq!(cedar.anisotropy_rotation, 0.0);
+    }
+
+    #[test]
+    fn material_assignment_prefers_explicit_render_then_spec_hint() {
+        let mut specs = MaterialSpecRegistry::default();
+        let spec_id = crate::curation::MaterialSpec::asset_id_for("c24");
+        specs.insert(crate::curation::MaterialSpec::draft(
+            spec_id.clone(),
+            crate::curation::MaterialSpecBody {
+                display_name: "C24".into(),
+                default_rendering_hint: Some(material_def_asset_id("oak_finish")),
+                ..Default::default()
+            },
+            crate::plugins::refinement::AgentId("codex".into()),
+            None,
+        ));
+
+        let hinted = MaterialAssignment::Single(MaterialBinding {
+            spec: Some(spec_id),
+            render: None,
+        });
+        assert_eq!(
+            hinted.render_material_id(Some(&specs)).as_deref(),
+            Some("oak_finish")
+        );
+
+        let explicit = MaterialAssignment::Single(MaterialBinding {
+            spec: None,
+            render: Some(material_def_asset_id("paint_white")),
+        });
+        assert_eq!(
+            explicit.render_material_id(Some(&specs)).as_deref(),
+            Some("paint_white")
+        );
+    }
+
+    #[test]
+    fn removing_explicit_render_keeps_spec_binding_when_present() {
+        let assignment = MaterialAssignment::Single(MaterialBinding {
+            spec: Some(crate::curation::MaterialSpec::asset_id_for("gypsum_board")),
+            render: Some(material_def_asset_id("paint_white")),
+        });
+
+        let stripped = assignment
+            .without_explicit_render_material_id("paint_white")
+            .expect("spec binding should remain");
+
+        match stripped {
+            MaterialAssignment::Single(binding) => {
+                assert!(binding.spec.is_some());
+                assert!(binding.render.is_none());
+            }
+            other => panic!("expected single binding, got {other:?}"),
+        }
     }
 
     #[test]

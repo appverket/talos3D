@@ -18,6 +18,7 @@ use crate::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
         layers::LayerAssignment,
+        materials::{material_assignment_from_value, MaterialAssignment},
         math::scale_point_around_center,
         modeling::{
             editable_mesh::{EditableMesh, OperationLog, OperationOrigin},
@@ -39,6 +40,8 @@ pub struct PolylineSnapshot {
     pub primitive: Polyline,
     pub layer: Option<String>,
     pub elevation_metadata: Option<ElevationMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_assignment: Option<MaterialAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,6 +49,8 @@ pub struct TriangleMeshSnapshot {
     pub element_id: ElementId,
     pub primitive: TriangleMesh,
     pub layer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_assignment: Option<MaterialAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +60,8 @@ pub struct EditableMeshSnapshot {
     /// Operation log preserving parametric provenance. None for meshes created directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_log: Option<super::editable_mesh::OperationLog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_assignment: Option<MaterialAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,6 +140,7 @@ impl AuthoredEntity for PolylineSnapshot {
             },
             layer: self.layer.clone(),
             elevation_metadata: self.elevation_metadata.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -151,6 +159,7 @@ impl AuthoredEntity for PolylineSnapshot {
             },
             layer: self.layer.clone(),
             elevation_metadata: self.elevation_metadata.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -168,6 +177,7 @@ impl AuthoredEntity for PolylineSnapshot {
             },
             layer: self.layer.clone(),
             elevation_metadata: self.elevation_metadata.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -287,6 +297,11 @@ impl AuthoredEntity for PolylineSnapshot {
             } else {
                 entity.remove::<ElevationMetadata>();
             }
+            if let Some(material_assignment) = &self.material_assignment {
+                entity.insert(material_assignment.clone());
+            } else {
+                entity.remove::<MaterialAssignment>();
+            }
         } else {
             let mut entity = world.spawn((
                 self.element_id,
@@ -302,6 +317,9 @@ impl AuthoredEntity for PolylineSnapshot {
             }
             if let Some(metadata) = &self.elevation_metadata {
                 entity.insert(metadata.clone());
+            }
+            if let Some(material_assignment) = &self.material_assignment {
+                entity.insert(material_assignment.clone());
             }
         }
     }
@@ -375,6 +393,7 @@ impl AuthoredEntity for TriangleMeshSnapshot {
                 name: self.primitive.name.clone(),
             },
             layer: self.layer.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -400,6 +419,7 @@ impl AuthoredEntity for TriangleMeshSnapshot {
                 name: self.primitive.name.clone(),
             },
             layer: self.layer.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -419,6 +439,7 @@ impl AuthoredEntity for TriangleMeshSnapshot {
                 name: self.primitive.name.clone(),
             },
             layer: self.layer.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -502,6 +523,11 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             } else {
                 entity.remove::<LayerAssignment>();
             }
+            if let Some(material_assignment) = &self.material_assignment {
+                entity.insert(material_assignment.clone());
+            } else {
+                entity.remove::<MaterialAssignment>();
+            }
         } else {
             let mut entity = world.spawn((
                 self.element_id,
@@ -511,6 +537,9 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             ));
             if let Some(layer) = &self.layer {
                 entity.insert(LayerAssignment::new(layer));
+            }
+            if let Some(material_assignment) = &self.material_assignment {
+                entity.insert(material_assignment.clone());
             }
         }
     }
@@ -554,6 +583,7 @@ impl AuthoredEntityFactory for PolylineFactory {
                 primitive: primitive.clone(),
                 layer: entity_ref.get::<LayerAssignment>().map(|a| a.layer.clone()),
                 elevation_metadata: entity_ref.get::<ElevationMetadata>().cloned(),
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into(),
         )
@@ -591,6 +621,9 @@ impl AuthoredEntityFactory for PolylineFactory {
                 .map(elevation_metadata_from_json)
                 .transpose()?
                 .flatten(),
+            material_assignment: object
+                .get("material_assignment")
+                .and_then(material_assignment_from_value),
         };
         if snapshot.primitive.points.len() < 2 {
             return Err("Polyline must have at least 2 points".to_string());
@@ -665,6 +698,7 @@ impl AuthoredEntityFactory for PolylineFactory {
                     primitive: primitive.clone(),
                     layer: entity_ref.get::<LayerAssignment>().map(|a| a.layer.clone()),
                     elevation_metadata: entity_ref.get::<ElevationMetadata>().cloned(),
+                    material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
                 }
                 .center(),
             );
@@ -685,6 +719,7 @@ impl AuthoredEntityFactory for TriangleMeshFactory {
                 element_id,
                 primitive: primitive.clone(),
                 layer: entity_ref.get::<LayerAssignment>().map(|a| a.layer.clone()),
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into(),
         )
@@ -731,6 +766,9 @@ impl AuthoredEntityFactory for TriangleMeshFactory {
                 .map(layer_from_json)
                 .transpose()?
                 .flatten(),
+            material_assignment: object
+                .get("material_assignment")
+                .and_then(material_assignment_from_value),
         };
         validate_triangle_mesh(&snapshot.primitive)?;
         Ok(snapshot.into())
@@ -815,6 +853,7 @@ impl AuthoredEntityFactory for TriangleMeshFactory {
                     element_id: *element_id,
                     primitive: primitive.clone(),
                     layer: entity_ref.get::<LayerAssignment>().map(|a| a.layer.clone()),
+                    material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
                 }
                 .center(),
             );
@@ -1275,6 +1314,11 @@ impl AuthoredEntity for EditableMeshSnapshot {
             if let Some(log) = &self.operation_log {
                 entity_mut.insert(log.clone());
             }
+            if let Some(material_assignment) = &self.material_assignment {
+                entity_mut.insert(material_assignment.clone());
+            } else {
+                entity_mut.remove::<MaterialAssignment>();
+            }
             // Remove parametric components if this was promoted
             entity_mut.remove::<BoxPrimitive>();
             entity_mut.remove::<CylinderPrimitive>();
@@ -1291,6 +1335,9 @@ impl AuthoredEntity for EditableMeshSnapshot {
             ));
             if let Some(log) = &self.operation_log {
                 entity.insert(log.clone());
+            }
+            if let Some(material_assignment) = &self.material_assignment {
+                entity.insert(material_assignment.clone());
             }
         }
     }
@@ -1335,6 +1382,7 @@ impl AuthoredEntityFactory for EditableMeshFactory {
                 element_id,
                 mesh: mesh.clone(),
                 operation_log: entity_ref.get::<OperationLog>().cloned(),
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into(),
         )
@@ -1433,6 +1481,7 @@ impl AuthoredEntityFactory for EditableMeshFactory {
                 element_id,
                 mesh,
                 operation_log: Some(operation_log),
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into())
         } else {
@@ -1536,6 +1585,7 @@ mod tests {
                 elevation: 0.75,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
 
         let fields = snapshot.property_fields();
@@ -1561,6 +1611,7 @@ mod tests {
                 },
                 layer: None,
                 elevation_metadata: None,
+                material_assignment: None,
             }),
             ModelingSnapshotJson::TriangleMesh(TriangleMeshSnapshot {
                 element_id: ElementId(7),
@@ -1575,6 +1626,7 @@ mod tests {
                     name: Some("Tri".to_string()),
                 },
                 layer: None,
+                material_assignment: None,
             }),
         ];
 
@@ -1596,6 +1648,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 2.0, 3.0),
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
 
         let scaled = snapshot.scale_by(Vec3::new(2.0, 0.5, 3.0), Vec3::new(1.0, 1.0, 1.0));
@@ -1631,6 +1684,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
         let updated = BoxSnapshot {
             element_id: ElementId(1),
@@ -1639,6 +1693,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1672,6 +1727,7 @@ mod tests {
                 half_extents: Vec3::new(1.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
         let updated = BoxSnapshot {
             element_id: ElementId(1),
@@ -1680,6 +1736,7 @@ mod tests {
                 half_extents: Vec3::new(2.0, 0.5, 1.0),
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1712,6 +1769,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
         let updated = CylinderSnapshot {
             element_id: ElementId(2),
@@ -1721,6 +1779,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation(Quat::from_rotation_y(0.25)),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1760,6 +1819,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
         let updated = CylinderSnapshot {
             element_id: ElementId(2),
@@ -1769,6 +1829,7 @@ mod tests {
                 height: 2.0,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1801,6 +1862,7 @@ mod tests {
                 elevation: 0.0,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
         let updated = PlaneSnapshot {
             element_id: ElementId(3),
@@ -1810,6 +1872,7 @@ mod tests {
                 elevation: 0.5,
             },
             rotation: ShapeRotation(Quat::from_rotation_y(0.5)),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1851,6 +1914,7 @@ mod tests {
                 elevation: 0.0,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
         let updated = PlaneSnapshot {
             element_id: ElementId(3),
@@ -1860,6 +1924,7 @@ mod tests {
                 elevation: 0.0,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));

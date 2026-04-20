@@ -21,7 +21,7 @@ use crate::{
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id},
         identity::ElementId,
-        materials::MaterialAssignment,
+        materials::{material_assignment_from_value, MaterialAssignment},
         modeling::{
             definition::{
                 ChildSlotDef, ConstraintSeverity, Definition, DefinitionId, DefinitionRegistry,
@@ -947,21 +947,19 @@ fn clear_occurrence_material_assignment(world: &mut World, entity: Entity) {
 }
 
 fn apply_spawned_material_assignment(entity: &mut EntityWorldMut<'_>, definition: &Definition) {
-    if let Some(material_id) = definition_material_id(definition) {
-        entity.insert(MaterialAssignment::new(material_id));
+    if let Some(assignment) = definition_material_assignment(definition) {
+        entity.insert(assignment);
     } else {
         entity.remove::<MaterialAssignment>();
     }
 }
 
-fn definition_material_id(definition: &Definition) -> Option<String> {
+fn definition_material_assignment(definition: &Definition) -> Option<MaterialAssignment> {
     definition
         .domain_data
         .get("architectural")
         .and_then(|architectural| architectural.get("material_assignment"))
-        .and_then(|assignment| assignment.get("material_id"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+        .and_then(material_assignment_from_value)
 }
 
 fn cleanup_generated_occurrence_parts(world: &mut World, owner: ElementId) {
