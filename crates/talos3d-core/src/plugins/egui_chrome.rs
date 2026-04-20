@@ -679,6 +679,7 @@ struct ChromeData<'w, 's> {
     assistant_chat_state: ResMut<'w, AssistantChatState>,
     assistant_window_state: ResMut<'w, RightSidebarState>,
     pending_assistant_job: Res<'w, PendingAssistantJob>,
+    authoring_guidance: Res<'w, crate::plugins::authoring_guidance::AuthoringGuidance>,
     definitions_window_state: ResMut<'w, DefinitionsWindowState>,
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
     lighting_window_state: ResMut<'w, LightingWindowState>,
@@ -997,6 +998,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         data.assistant_window_state.as_mut(),
         &data.pending_assistant_job,
         assistant_mcp_url.as_deref(),
+        data.authoring_guidance.as_ref(),
     );
 
     let Ok(window) = data.window_query.single() else {

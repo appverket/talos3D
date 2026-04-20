@@ -6,6 +6,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::plugins::authoring_guidance::AuthoringGuidance;
 use crate::plugins::document_properties::DocumentProperties;
 
 pub const ASSISTANT_PANEL_DEFAULT_WIDTH: f32 = 440.0;
@@ -598,6 +599,10 @@ impl AssistantChatMessage {
 struct AssistantRuntimeConfig {
     profile: AssistantConnectionProfile,
     mcp_url: String,
+    /// Snapshot of `AuthoringGuidance::prompt_text` taken on the main thread.
+    /// Threaded `run_assistant_turn` has no World access, so we capture the
+    /// content up-front. Empty when no capability has contributed guidance.
+    guidance_prompt: String,
 }
 
 #[derive(Debug)]
@@ -633,8 +638,11 @@ impl AssistantChatState {
         }
     }
 
-    fn runtime_config(&self) -> Result<AssistantRuntimeConfig, String> {
-        runtime_config_from_preferences(&self.preferences)
+    fn runtime_config(
+        &self,
+        guidance_prompt: String,
+    ) -> Result<AssistantRuntimeConfig, String> {
+        runtime_config_from_preferences(&self.preferences, guidance_prompt)
     }
 
     fn sync_editor_if_clean(&mut self) {
@@ -660,6 +668,7 @@ impl AssistantChatState {
 
 fn runtime_config_from_preferences(
     preferences: &AssistantPreferences,
+    guidance_prompt: String,
 ) -> Result<AssistantRuntimeConfig, String> {
     let profile = preferences
         .active_profile()
@@ -668,11 +677,13 @@ fn runtime_config_from_preferences(
     Ok(AssistantRuntimeConfig {
         profile,
         mcp_url: preferences.mcp_url.trim().to_string(),
+        guidance_prompt,
     })
 }
 
 fn validate_assistant_preferences(preferences: &AssistantPreferences) -> Result<(), String> {
-    let config = runtime_config_from_preferences(preferences)?;
+    // Validation only inspects profile/mcp_url; guidance is optional.
+    let config = runtime_config_from_preferences(preferences, String::new())?;
     validate_assistant_config(&config)
 }
 
@@ -748,6 +759,7 @@ pub fn draw_assistant_window(
     sidebar_state: &mut RightSidebarState,
     pending_job: &PendingAssistantJob,
     default_mcp_url: Option<&str>,
+    authoring_guidance: &AuthoringGuidance,
 ) {
     if !sidebar_state.visible {
         return;
@@ -860,7 +872,7 @@ pub fn draw_assistant_window(
     if send_now {
         let trimmed = state.draft.trim().to_string();
         state.draft = trimmed;
-        if let Err(error) = start_assistant_job(state, pending_job) {
+        if let Err(error) = start_assistant_job(state, pending_job, authoring_guidance) {
             state.last_error = Some(error);
         }
     }
@@ -872,7 +884,7 @@ fn draw_assistant_chat_panel(
     send_now: &mut bool,
 ) {
     if let Err(error) = state
-        .runtime_config()
+        .runtime_config(String::new())
         .and_then(|config| validate_assistant_config(&config))
     {
         egui::Frame::group(ui.style())
@@ -1458,6 +1470,7 @@ fn poll_assistant_jobs(
 fn start_assistant_job(
     state: &mut AssistantChatState,
     pending_job: &PendingAssistantJob,
+    authoring_guidance: &AuthoringGuidance,
 ) -> Result<(), String> {
     let prompt = state.draft.trim().to_string();
     if prompt.is_empty() {
@@ -1467,7 +1480,7 @@ fn start_assistant_job(
         return Err("Assistant is already processing a request".to_string());
     }
 
-    let config = state.runtime_config()?;
+    let config = state.runtime_config(authoring_guidance.prompt_text.clone())?;
     validate_assistant_config(&config)?;
 
     state.messages.push(AssistantChatMessage::user(prompt));
@@ -1529,7 +1542,11 @@ fn run_assistant_turn(
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|error| format!("Failed to build assistant HTTP client: {error}"))?;
-    let bridge = AssistantMcpBridge::new(client.clone(), config.mcp_url.clone());
+    let bridge = AssistantMcpBridge::new(
+        client.clone(),
+        config.mcp_url.clone(),
+        config.guidance_prompt.clone(),
+    );
     match config.profile.protocol {
         AssistantProtocolKind::OpenAiResponses => run_openai_turn(
             &client,
@@ -1604,10 +1621,19 @@ fn assistant_tool_defs() -> [AssistantToolDef; 2] {
     ]
 }
 
-fn assistant_system_prompt(mcp_url: &str) -> String {
-    format!(
+fn assistant_system_prompt(mcp_url: &str, guidance_prompt: &str) -> String {
+    let base = format!(
         "You are the Talos3D in-app assistant. Use Talos3D MCP tools for any model inspection, creation, deletion, transform, material, lighting, definition, layer, view, import, screenshot, or persistence action. Never claim an edit succeeded unless a tool result confirms it. Be concise and operational. If you do not know the exact MCP tool name or argument shape, call mcp_list_tools before editing. The configured MCP endpoint is {mcp_url}."
-    )
+    );
+    if guidance_prompt.trim().is_empty() {
+        base
+    } else {
+        // Canonical authoring guidance (COMPONENT_STRUCTURE, Slice A) is
+        // owned by Talos3D and served via the `get_authoring_guidance` MCP
+        // tool. The in-app assistant inlines it here so it does not drift
+        // from the same source external agents consume.
+        format!("{base}\n\n---\n\n{guidance_prompt}")
+    }
 }
 
 fn emit_assistant_message(sender: &mpsc::Sender<AssistantJobEvent>, message: AssistantChatMessage) {
@@ -1637,7 +1663,7 @@ fn run_openai_turn(
         } else {
             json!({
                 "model": model,
-                "instructions": assistant_system_prompt(&bridge.base_url),
+                "instructions": assistant_system_prompt(&bridge.base_url, &bridge.guidance_prompt),
                 "input": next_input,
                 "tools": build_openai_tools(),
             })
@@ -1703,7 +1729,7 @@ fn run_openai_chat_completions_turn(
     model: &str,
 ) -> Result<(), String> {
     let mut messages =
-        build_openai_chat_messages(conversation, &assistant_system_prompt(&bridge.base_url));
+        build_openai_chat_messages(conversation, &assistant_system_prompt(&bridge.base_url, &bridge.guidance_prompt));
 
     for _ in 0..ASSISTANT_TOOL_STEPS {
         let body = json!({
@@ -1812,7 +1838,7 @@ fn run_anthropic_turn(
         let body = json!({
             "model": model,
             "max_tokens": ASSISTANT_MAX_TOKENS,
-            "system": assistant_system_prompt(&bridge.base_url),
+            "system": assistant_system_prompt(&bridge.base_url, &bridge.guidance_prompt),
             "messages": messages,
             "tools": build_anthropic_tools(),
         });
@@ -1906,7 +1932,7 @@ fn run_gemini_turn(
     for _ in 0..ASSISTANT_TOOL_STEPS {
         let body = json!({
             "system_instruction": {
-                "parts": [{ "text": assistant_system_prompt(&bridge.base_url) }]
+                "parts": [{ "text": assistant_system_prompt(&bridge.base_url, &bridge.guidance_prompt) }]
             },
             "contents": contents,
             "tools": [{
@@ -2228,11 +2254,16 @@ fn execute_assistant_tool(
 struct AssistantMcpBridge {
     client: Client,
     base_url: String,
+    guidance_prompt: String,
 }
 
 impl AssistantMcpBridge {
-    fn new(client: Client, base_url: String) -> Self {
-        Self { client, base_url }
+    fn new(client: Client, base_url: String, guidance_prompt: String) -> Self {
+        Self {
+            client,
+            base_url,
+            guidance_prompt,
+        }
     }
 
     fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -2364,6 +2395,32 @@ fn compact_json(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assistant_system_prompt_is_mcp_only_when_guidance_empty() {
+        let prompt = assistant_system_prompt("http://127.0.0.1:24842/mcp", "");
+        assert!(prompt.contains("http://127.0.0.1:24842/mcp"));
+        assert!(!prompt.contains("Rule A"));
+        assert!(!prompt.contains("---"));
+    }
+
+    #[test]
+    fn assistant_system_prompt_inlines_guidance_when_present() {
+        let guidance = "# COMPONENT_STRUCTURE\n\nRule A: reuse Definition.\nRule B: derive.";
+        let prompt = assistant_system_prompt("http://127.0.0.1:24842/mcp", guidance);
+        assert!(prompt.contains("http://127.0.0.1:24842/mcp"));
+        assert!(prompt.contains("Rule A: reuse Definition"));
+        assert!(prompt.contains("Rule B: derive"));
+        // Both the MCP-endpoint preface and the guidance live in one prompt.
+        let endpoint_idx = prompt
+            .find("http://127.0.0.1:24842/mcp")
+            .expect("endpoint should appear");
+        let guidance_idx = prompt.find("Rule A").expect("guidance should appear");
+        assert!(
+            endpoint_idx < guidance_idx,
+            "MCP preface should come before the authoring guidance block"
+        );
+    }
 
     #[test]
     fn right_sidebar_state_round_trips_through_json() {
