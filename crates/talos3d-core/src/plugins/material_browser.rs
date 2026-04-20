@@ -15,7 +15,10 @@ use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 
 use crate::plugins::{
     command_registry::{queue_command_invocation_resource, PendingCommandInvocations},
-    materials::{MaterialAlphaMode, MaterialDef, MaterialRegistry, TextureRef},
+    materials::{
+        normalize_material_textures, MaterialAlphaMode, MaterialDef, MaterialRegistry, TextureRef,
+        TextureRegistry,
+    },
     ui::{tool_window_max_size, tool_window_rect},
 };
 
@@ -165,6 +168,7 @@ pub fn draw_materials_window(
     ctx: &egui::Context,
     state: &mut MaterialsWindowState,
     registry: &mut MaterialRegistry,
+    texture_registry: &mut TextureRegistry,
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
     pending: &mut PendingCommandInvocations,
@@ -184,7 +188,16 @@ pub fn draw_materials_window(
         .constrain_to(ctx.content_rect())
         .open(&mut open)
         .show(ctx, |ui| {
-            draw_browser_panel(ui, contexts, state, registry, asset_server, images, pending);
+            draw_browser_panel(
+                ui,
+                contexts,
+                state,
+                registry,
+                texture_registry,
+                asset_server,
+                images,
+                pending,
+            );
         });
 
     state.visible = open;
@@ -197,6 +210,7 @@ fn draw_browser_panel(
     contexts: &mut EguiContexts,
     state: &mut MaterialsWindowState,
     registry: &mut MaterialRegistry,
+    texture_registry: &mut TextureRegistry,
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
     pending: &mut PendingCommandInvocations,
@@ -254,6 +268,7 @@ fn draw_browser_panel(
                                 contexts,
                                 &mut state.preview_texture_handles,
                                 asset_server,
+                                texture_registry,
                                 images,
                                 def,
                             );
@@ -322,6 +337,7 @@ fn draw_browser_panel(
                         contexts,
                         state,
                         registry,
+                        texture_registry,
                         asset_server,
                         images,
                         &selected_id,
@@ -349,6 +365,7 @@ fn draw_editor(
     contexts: &mut EguiContexts,
     state: &mut MaterialsWindowState,
     registry: &mut MaterialRegistry,
+    texture_registry: &mut TextureRegistry,
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
     id: &str,
@@ -372,7 +389,9 @@ fn draw_editor(
 
     match state.editor_tab {
         EditorTab::Properties => draw_properties_tab(ui, state),
-        EditorTab::Textures => draw_textures_tab(ui, contexts, state, asset_server, images),
+        EditorTab::Textures => {
+            draw_textures_tab(ui, contexts, state, texture_registry, asset_server, images)
+        }
     }
 
     ui.add_space(8.0);
@@ -386,6 +405,7 @@ fn draw_editor(
         if apply.clicked() {
             if let Some(def) = registry.get_mut(id) {
                 state.flush_to_def(def);
+                normalize_material_textures(def, texture_registry);
                 state.dirty = false;
             }
         }
@@ -746,6 +766,7 @@ fn draw_textures_tab(
     ui: &mut egui::Ui,
     contexts: &mut EguiContexts,
     state: &mut MaterialsWindowState,
+    texture_registry: &TextureRegistry,
     asset_server: &AssetServer,
     images: &mut Assets<Image>,
 ) {
@@ -761,6 +782,7 @@ fn draw_textures_tab(
                         contexts,
                         &mut state.preview_texture_handles,
                         asset_server,
+                        texture_registry,
                         images,
                         "Base Color",
                         &mut state.base_color_tex,
@@ -771,6 +793,7 @@ fn draw_textures_tab(
                         contexts,
                         &mut state.preview_texture_handles,
                         asset_server,
+                        texture_registry,
                         images,
                         "Normal Map",
                         &mut state.normal_map_tex,
@@ -781,6 +804,7 @@ fn draw_textures_tab(
                         contexts,
                         &mut state.preview_texture_handles,
                         asset_server,
+                        texture_registry,
                         images,
                         "Metallic/Roughness",
                         &mut state.metallic_roughness_tex,
@@ -791,6 +815,7 @@ fn draw_textures_tab(
                         contexts,
                         &mut state.preview_texture_handles,
                         asset_server,
+                        texture_registry,
                         images,
                         "Emissive",
                         &mut state.emissive_tex,
@@ -801,6 +826,7 @@ fn draw_textures_tab(
                         contexts,
                         &mut state.preview_texture_handles,
                         asset_server,
+                        texture_registry,
                         images,
                         "Occlusion",
                         &mut state.occlusion_tex,
@@ -817,6 +843,7 @@ fn texture_row(
     contexts: &mut EguiContexts,
     preview_texture_handles: &mut HashMap<String, Handle<Image>>,
     asset_server: &AssetServer,
+    texture_registry: &TextureRegistry,
     images: &mut Assets<Image>,
     label: &str,
     slot: &mut Option<TextureRef>,
@@ -830,6 +857,7 @@ fn texture_row(
                 contexts,
                 preview_texture_handles,
                 asset_server,
+                texture_registry,
                 images,
                 Some(texture),
                 TEXTURE_SLOT_THUMBNAIL_SIZE,
@@ -848,7 +876,7 @@ fn texture_row(
         // Show current texture label
         let current = slot
             .as_ref()
-            .map(|t| t.label().to_string())
+            .map(|t| t.label(Some(texture_registry)).to_string())
             .unwrap_or_else(|| "(none)".to_string());
         ui.vertical(|ui| {
             ui.label(egui::RichText::new(&current).weak());
@@ -873,6 +901,7 @@ fn draw_material_list_thumbnail(
     contexts: &mut EguiContexts,
     preview_texture_handles: &mut HashMap<String, Handle<Image>>,
     asset_server: &AssetServer,
+    texture_registry: &TextureRegistry,
     images: &mut Assets<Image>,
     def: &MaterialDef,
 ) {
@@ -888,6 +917,7 @@ fn draw_material_list_thumbnail(
         contexts,
         preview_texture_handles,
         asset_server,
+        texture_registry,
         images,
         preview_texture,
         MATERIAL_LIST_THUMBNAIL_SIZE,
@@ -900,15 +930,20 @@ fn draw_texture_thumbnail(
     contexts: &mut EguiContexts,
     preview_texture_handles: &mut HashMap<String, Handle<Image>>,
     asset_server: &AssetServer,
+    texture_registry: &TextureRegistry,
     images: &mut Assets<Image>,
     texture: Option<&TextureRef>,
     size: f32,
     fallback_fill: egui::Color32,
 ) {
     if let Some(texture) = texture {
-        if let Some(handle) =
-            cached_texture_handle(preview_texture_handles, asset_server, images, texture)
-        {
+        if let Some(handle) = cached_texture_handle(
+            preview_texture_handles,
+            asset_server,
+            texture_registry,
+            images,
+            texture,
+        ) {
             let image = egui_texture_image(contexts, &handle, egui::vec2(size, size));
             ui.add(image);
             return;
@@ -964,20 +999,22 @@ fn egui_texture_image<'a>(
 fn cached_texture_handle(
     preview_texture_handles: &mut HashMap<String, Handle<Image>>,
     asset_server: &AssetServer,
+    texture_registry: &TextureRegistry,
     images: &mut Assets<Image>,
     texture: &TextureRef,
 ) -> Option<Handle<Image>> {
-    let key = texture_preview_key(texture);
+    let key = texture_preview_key(texture, texture_registry);
     if let Some(handle) = preview_texture_handles.get(&key) {
         return Some(handle.clone());
     }
-    let handle = texture.load(asset_server, images)?;
+    let handle = texture.load(asset_server, images, Some(texture_registry))?;
     preview_texture_handles.insert(key, handle.clone());
     Some(handle)
 }
 
-fn texture_preview_key(texture: &TextureRef) -> String {
+fn texture_preview_key(texture: &TextureRef, _texture_registry: &TextureRegistry) -> String {
     match texture {
+        TextureRef::TextureAsset { id } => format!("texture_asset:{}", id.as_str()),
         TextureRef::AssetPath(path) => format!("asset:{path}"),
         TextureRef::Embedded { data, mime } => {
             let mut hasher = DefaultHasher::new();
