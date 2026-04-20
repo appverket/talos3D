@@ -13793,6 +13793,7 @@ pub fn handle_request_corpus_expansion(
     let gap = CorpusGap {
         id: CorpusGapId(String::new()), // overwritten by queue.push
         element_class: element_class.clone(),
+        kind: None,
         jurisdiction: jurisdiction.clone(),
         missing_artifact_kind: kind.clone(),
         context: serde_json::json!({ "rationale": rationale }),
