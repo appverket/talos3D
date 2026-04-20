@@ -59,8 +59,9 @@ impl PublicationFinding {
 impl PublicationPolicy {
     /// Run the policy against the given metadata + source registry.
     ///
-    /// Returns all floor violations. The caller decides what to do with
-    /// them; `publish_asset` MCP tools reject on any `Error` finding.
+    /// Returns all global floor violations. Jurisdiction-specific rules
+    /// are run separately via [`PublicationPolicy::check_with_hooks`]
+    /// once a `HookRegistry` is available.
     ///
     /// Note on `Draft` trust: the floor is informational for drafts —
     /// findings are still returned but a `Draft` asset isn't blocked.
@@ -76,19 +77,49 @@ impl PublicationPolicy {
         for (idx, evidence) in meta.provenance.evidence.iter().enumerate() {
             check_evidence(idx, evidence, meta, floor, registry, &mut findings);
         }
-        // Jurisdiction hook is looked up and invoked in PP85's
-        // HookRegistry plumbing; the policy object only stores the hook
-        // id here.
         findings
     }
 
-    /// Convenience: returns `true` iff there are no `Error` findings.
+    /// Extended check that additionally invokes the jurisdiction hook
+    /// matching `meta.provenance.jurisdiction`, if one is installed.
+    /// Findings are appended after the global-floor findings.
+    pub fn check_with_hooks(
+        &self,
+        meta: &CurationMeta,
+        registry: &SourceRegistry,
+        hooks: &super::policy::HookRegistry,
+    ) -> Vec<PublicationFinding> {
+        let mut findings = self.check(meta, registry);
+        if let Some(jurisdiction) = &meta.provenance.jurisdiction {
+            if let Some(hook) = hooks.get(jurisdiction) {
+                findings.extend(hook.check(meta, registry));
+            }
+        }
+        findings
+    }
+
+    /// Convenience: returns `true` iff there are no `Error` findings
+    /// in the global-floor check.
     pub fn permits(
         &self,
         meta: &CurationMeta,
         registry: &SourceRegistry,
     ) -> bool {
         !self.check(meta, registry).iter().any(|f| f.is_error())
+    }
+
+    /// Convenience: returns `true` iff global-floor + jurisdiction-hook
+    /// check produces no `Error` findings.
+    pub fn permits_with_hooks(
+        &self,
+        meta: &CurationMeta,
+        registry: &SourceRegistry,
+        hooks: &super::policy::HookRegistry,
+    ) -> bool {
+        !self
+            .check_with_hooks(meta, registry, hooks)
+            .iter()
+            .any(|f| f.is_error())
     }
 }
 
@@ -365,5 +396,70 @@ mod tests {
         assert_eq!(report.len(), 2);
         assert!(report[0].1.is_some());
         assert!(report[1].1.is_none());
+    }
+
+    // ---- PP85 check_with_hooks ----
+
+    struct AlwaysRejectHook(JurisdictionTag);
+
+    impl super::super::policy::JurisdictionPolicyHook for AlwaysRejectHook {
+        fn jurisdiction(&self) -> JurisdictionTag {
+            self.0.clone()
+        }
+        fn check(
+            &self,
+            _meta: &CurationMeta,
+            _registry: &SourceRegistry,
+        ) -> Vec<PublicationFinding> {
+            vec![PublicationFinding {
+                code: "jurisdiction.test.always_reject",
+                severity: PublicationFindingSeverity::Error,
+                message: "policy denied".into(),
+                evidence_index: None,
+            }]
+        }
+    }
+
+    #[test]
+    fn check_with_hooks_invokes_matching_jurisdiction_hook() {
+        use super::super::policy::HookRegistry;
+        let mut reg = SourceRegistry::default();
+        registered_entry(&mut reg, "bbr.8", "2011:6");
+        let mut hooks = HookRegistry::default();
+        hooks.install(AlwaysRejectHook(JurisdictionTag::new("SE")));
+        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let findings = PublicationPolicy::default().check_with_hooks(&meta, &reg, &hooks);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "jurisdiction.test.always_reject");
+    }
+
+    #[test]
+    fn check_with_hooks_ignores_hook_for_other_jurisdiction() {
+        use super::super::policy::HookRegistry;
+        let mut reg = SourceRegistry::default();
+        registered_entry(&mut reg, "bbr.8", "2011:6");
+        let mut hooks = HookRegistry::default();
+        hooks.install(AlwaysRejectHook(JurisdictionTag::new("NO")));
+        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        // Asset is SE; hook is NO — should not fire.
+        let findings = PublicationPolicy::default().check_with_hooks(&meta, &reg, &hooks);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn check_with_hooks_concatenates_floor_and_hook_findings() {
+        use super::super::policy::HookRegistry;
+        let reg = SourceRegistry::default(); // empty → unresolved evidence
+        let mut hooks = HookRegistry::default();
+        hooks.install(AlwaysRejectHook(JurisdictionTag::new("SE")));
+        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let findings = PublicationPolicy::default().check_with_hooks(&meta, &reg, &hooks);
+        assert_eq!(findings.len(), 2);
+        assert!(findings
+            .iter()
+            .any(|f| f.code == "curation.publication.evidence_unresolved"));
+        assert!(findings
+            .iter()
+            .any(|f| f.code == "jurisdiction.test.always_reject"));
     }
 }

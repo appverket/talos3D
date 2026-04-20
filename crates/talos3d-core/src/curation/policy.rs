@@ -15,6 +15,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bevy::prelude::*;
+
+use super::provenance::JurisdictionTag;
 use super::source::{SourceLicense, SourceTier};
 
 /// Opaque identifier of a registered `JurisdictionPolicyHook`. PP85
@@ -135,6 +141,81 @@ impl PublicationPolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// JurisdictionPolicyHook trait + HookRegistry (PP85)
+// ---------------------------------------------------------------------------
+
+/// Per-jurisdiction policy extension. Jurisdiction packs implement this
+/// trait and register an instance in `HookRegistry` at plugin build
+/// time. The hook runs *after* the global validity floor and returns
+/// additional `PublicationFinding`s scoped to the jurisdiction's rules.
+///
+/// Lives in core (ADR-040 platform/operator split) — the trait contract
+/// is portable; jurisdiction-specific rule bodies live in the owning
+/// capability pack (e.g. `talos3d-architecture-se`).
+pub trait JurisdictionPolicyHook: Send + Sync {
+    /// Jurisdiction this hook claims. A single hook per jurisdiction is
+    /// enforced by `HookRegistry::install` (last install wins and logs
+    /// a warning — registration order across plugins is not stable).
+    fn jurisdiction(&self) -> JurisdictionTag;
+
+    /// Emit any jurisdiction-specific findings for the given asset
+    /// metadata + source registry snapshot. Called after the global
+    /// validity floor; the caller concatenates findings.
+    fn check(
+        &self,
+        meta: &super::meta::CurationMeta,
+        registry: &super::registry::SourceRegistry,
+    ) -> Vec<super::publication::PublicationFinding>;
+}
+
+/// Bevy resource mapping `JurisdictionTag` → a single registered hook.
+#[derive(Resource, Default, Clone)]
+pub struct HookRegistry {
+    hooks: HashMap<JurisdictionTag, Arc<dyn JurisdictionPolicyHook>>,
+}
+
+impl std::fmt::Debug for HookRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HookRegistry")
+            .field("jurisdictions", &self.hooks.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl HookRegistry {
+    /// Install a jurisdiction hook. Panics on duplicate install (same
+    /// jurisdiction). Returns the installed jurisdiction tag for
+    /// chaining.
+    pub fn install<H: JurisdictionPolicyHook + 'static>(&mut self, hook: H) -> JurisdictionTag {
+        let tag = hook.jurisdiction();
+        if self.hooks.contains_key(&tag) {
+            warn!(
+                "JurisdictionPolicyHook for {:?} already installed — overwriting",
+                tag
+            );
+        }
+        self.hooks.insert(tag.clone(), Arc::new(hook));
+        tag
+    }
+
+    pub fn get(&self, jurisdiction: &JurisdictionTag) -> Option<Arc<dyn JurisdictionPolicyHook>> {
+        self.hooks.get(jurisdiction).cloned()
+    }
+
+    pub fn is_registered(&self, jurisdiction: &JurisdictionTag) -> bool {
+        self.hooks.contains_key(jurisdiction)
+    }
+
+    pub fn len(&self) -> usize {
+        self.hooks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +294,65 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let parsed: PublicationPolicy = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, p);
+    }
+
+    // ---- PP85 hook registry + trait ----
+
+    use super::super::meta::CurationMeta;
+    use super::super::publication::{PublicationFinding, PublicationFindingSeverity};
+    use super::super::registry::SourceRegistry;
+
+    struct TestHook {
+        tag: JurisdictionTag,
+        emit: bool,
+    }
+
+    impl JurisdictionPolicyHook for TestHook {
+        fn jurisdiction(&self) -> JurisdictionTag {
+            self.tag.clone()
+        }
+        fn check(
+            &self,
+            _meta: &CurationMeta,
+            _registry: &SourceRegistry,
+        ) -> Vec<PublicationFinding> {
+            if self.emit {
+                vec![PublicationFinding {
+                    code: "test.finding",
+                    severity: PublicationFindingSeverity::Error,
+                    message: format!("test error from {}", self.tag.as_str()),
+                    evidence_index: None,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    #[test]
+    fn hook_registry_install_and_lookup() {
+        let mut reg = HookRegistry::default();
+        reg.install(TestHook {
+            tag: JurisdictionTag::new("SE"),
+            emit: true,
+        });
+        assert_eq!(reg.len(), 1);
+        assert!(reg.is_registered(&JurisdictionTag::new("SE")));
+        assert!(!reg.is_registered(&JurisdictionTag::new("NO")));
+        assert!(reg.get(&JurisdictionTag::new("SE")).is_some());
+    }
+
+    #[test]
+    fn hook_registry_second_install_same_jurisdiction_overwrites() {
+        let mut reg = HookRegistry::default();
+        reg.install(TestHook {
+            tag: JurisdictionTag::new("SE"),
+            emit: true,
+        });
+        reg.install(TestHook {
+            tag: JurisdictionTag::new("SE"),
+            emit: false,
+        });
+        assert_eq!(reg.len(), 1);
     }
 }
