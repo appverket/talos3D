@@ -15,6 +15,8 @@ use bevy::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::curation::{AssetId, ContentHash, EvidenceRef};
+
 pub const BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO: &str =
     "builtin.maibec.red_cedar_light_h2bo";
 pub const BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80: &str = "builtin.glass.blue_tint_glazing_80";
@@ -48,31 +50,71 @@ impl MaterialAlphaMode {
     }
 }
 
-// ─── TextureRef ──────────────────────────────────────────────────────────────
+// ─── Texture assets ──────────────────────────────────────────────────────────
 
-/// A reference to a texture, either embedded in the project file or pointing to
-/// a bundled app asset.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct TextureAssetId(pub String);
+
+impl TextureAssetId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureSourceFormat {
+    Png,
+    Jpeg,
+    Webp,
+    Hdr,
+    Exr,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureColorSpace {
+    #[default]
+    Srgb,
+    Linear,
+    Data,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureChannelIntent {
+    #[default]
+    BaseColor,
+    Normal,
+    MetallicRoughness,
+    Emissive,
+    Occlusion,
+    Generic,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum TextureRef {
-    /// User-uploaded texture embedded as base64 in the project file.
-    /// `mime` is e.g. `"image/png"`, `"image/jpeg"`.
+pub enum TexturePayload {
     Embedded { data: String, mime: String },
-    /// Path to a bundled app asset, resolved via Bevy's `AssetServer`.
     AssetPath(String),
 }
 
-impl TextureRef {
-    /// Load as a Bevy `Image` handle.  Embedded textures are decoded and inserted
-    /// directly into `images`; asset paths go through the asset server.
-    pub fn load(
+impl TexturePayload {
+    fn load(
         &self,
         asset_server: &AssetServer,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
         match self {
-            TextureRef::AssetPath(path) => Some(asset_server.load(path.clone())),
-            TextureRef::Embedded { data, mime } => {
+            Self::AssetPath(path) => Some(asset_server.load(path.clone())),
+            Self::Embedded { data, mime } => {
                 let bytes = BASE64_STANDARD.decode(data).ok()?;
                 let image_type = match mime.as_str() {
                     "image/png" => ImageType::MimeType("image/png"),
@@ -94,9 +136,218 @@ impl TextureRef {
         }
     }
 
-    /// Returns a short display label (filename or `"<embedded>"`).
-    pub fn label(&self) -> &str {
+    fn label(&self) -> &str {
         match self {
+            Self::AssetPath(path) => path.split('/').last().unwrap_or(path),
+            Self::Embedded { .. } => "<embedded>",
+        }
+    }
+
+    fn source_format(&self) -> TextureSourceFormat {
+        match self {
+            Self::Embedded { mime, .. } => match mime.as_str() {
+                "image/png" => TextureSourceFormat::Png,
+                "image/jpeg" | "image/jpg" => TextureSourceFormat::Jpeg,
+                "image/webp" => TextureSourceFormat::Webp,
+                _ => TextureSourceFormat::Unknown,
+            },
+            Self::AssetPath(path) => {
+                let lower = path.to_lowercase();
+                if lower.ends_with(".png") {
+                    TextureSourceFormat::Png
+                } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                    TextureSourceFormat::Jpeg
+                } else if lower.ends_with(".webp") {
+                    TextureSourceFormat::Webp
+                } else if lower.ends_with(".hdr") {
+                    TextureSourceFormat::Hdr
+                } else if lower.ends_with(".exr") {
+                    TextureSourceFormat::Exr
+                } else {
+                    TextureSourceFormat::Unknown
+                }
+            }
+        }
+    }
+
+    fn content_hash(&self) -> ContentHash {
+        let mut hasher = blake3::Hasher::new();
+        match self {
+            Self::Embedded { data, mime } => {
+                hasher.update(b"embedded:");
+                hasher.update(mime.as_bytes());
+                hasher.update(b":");
+                hasher.update(data.as_bytes());
+            }
+            Self::AssetPath(path) => {
+                hasher.update(b"asset_path:");
+                hasher.update(path.as_bytes());
+            }
+        }
+        ContentHash::new(format!("blake3:{}", hasher.finalize().to_hex()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextureAsset {
+    pub id: TextureAssetId,
+    pub content_hash: ContentHash,
+    pub source_format: TextureSourceFormat,
+    pub color_space: TextureColorSpace,
+    pub channel_intent: TextureChannelIntent,
+    pub dimensions: Option<[u32; 2]>,
+    pub payload: TexturePayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<EvidenceRef>,
+}
+
+#[derive(Resource, Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TextureRegistry {
+    entries: BTreeMap<TextureAssetId, TextureAsset>,
+    by_fingerprint:
+        BTreeMap<(ContentHash, TextureColorSpace, TextureChannelIntent), TextureAssetId>,
+}
+
+impl TextureRegistry {
+    pub fn get(&self, id: &TextureAssetId) -> Option<&TextureAsset> {
+        self.entries.get(id)
+    }
+
+    pub fn insert(&mut self, asset: TextureAsset) -> TextureAssetId {
+        let id = asset.id.clone();
+        self.by_fingerprint.insert(
+            (
+                asset.content_hash.clone(),
+                asset.color_space,
+                asset.channel_intent,
+            ),
+            id.clone(),
+        );
+        self.entries.insert(id.clone(), asset);
+        id
+    }
+
+    pub fn referenced_subset(&self, ids: &std::collections::BTreeSet<TextureAssetId>) -> Self {
+        let mut subset = Self::default();
+        for id in ids {
+            if let Some(asset) = self.entries.get(id) {
+                subset.insert(asset.clone());
+            }
+        }
+        subset
+    }
+
+    pub fn intern_embedded(
+        &mut self,
+        data: String,
+        mime: String,
+        color_space: TextureColorSpace,
+        channel_intent: TextureChannelIntent,
+    ) -> TextureAssetId {
+        self.intern_payload(
+            TexturePayload::Embedded { data, mime },
+            color_space,
+            channel_intent,
+        )
+    }
+
+    pub fn intern_payload(
+        &mut self,
+        payload: TexturePayload,
+        color_space: TextureColorSpace,
+        channel_intent: TextureChannelIntent,
+    ) -> TextureAssetId {
+        fn color_space_key(color_space: TextureColorSpace) -> &'static str {
+            match color_space {
+                TextureColorSpace::Srgb => "srgb",
+                TextureColorSpace::Linear => "linear",
+                TextureColorSpace::Data => "data",
+            }
+        }
+
+        fn channel_intent_key(channel_intent: TextureChannelIntent) -> &'static str {
+            match channel_intent {
+                TextureChannelIntent::BaseColor => "base_color",
+                TextureChannelIntent::Normal => "normal",
+                TextureChannelIntent::MetallicRoughness => "metallic_roughness",
+                TextureChannelIntent::Emissive => "emissive",
+                TextureChannelIntent::Occlusion => "occlusion",
+                TextureChannelIntent::Generic => "generic",
+            }
+        }
+
+        let hash = payload.content_hash();
+        let fingerprint = (hash.clone(), color_space, channel_intent);
+        if let Some(existing) = self.by_fingerprint.get(&fingerprint) {
+            return existing.clone();
+        }
+        let id = TextureAssetId::new(format!(
+            "texture.v1/{}/{}/{}",
+            color_space_key(color_space),
+            channel_intent_key(channel_intent),
+            hash.as_str()
+        ));
+        self.insert(TextureAsset {
+            id: id.clone(),
+            content_hash: hash,
+            source_format: payload.source_format(),
+            color_space,
+            channel_intent,
+            dimensions: None,
+            payload,
+            provenance: None,
+        });
+        id
+    }
+}
+
+// ─── TextureRef ──────────────────────────────────────────────────────────────
+
+/// A reference to a texture, either embedded in the project file or pointing to
+/// a bundled app asset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TextureRef {
+    /// Reference into the shared `TextureRegistry`.
+    TextureAsset { id: TextureAssetId },
+    /// User-uploaded texture embedded as base64 in the project file.
+    /// `mime` is e.g. `"image/png"`, `"image/jpeg"`.
+    Embedded { data: String, mime: String },
+    /// Path to a bundled app asset, resolved via Bevy's `AssetServer`.
+    AssetPath(String),
+}
+
+impl TextureRef {
+    /// Load as a Bevy `Image` handle.  Embedded textures are decoded and inserted
+    /// directly into `images`; asset paths go through the asset server.
+    pub fn load(
+        &self,
+        asset_server: &AssetServer,
+        images: &mut Assets<Image>,
+        registry: Option<&TextureRegistry>,
+    ) -> Option<Handle<Image>> {
+        match self {
+            TextureRef::TextureAsset { id } => registry
+                .and_then(|registry| registry.get(id))
+                .and_then(|asset| asset.payload.load(asset_server, images)),
+            TextureRef::AssetPath(path) => {
+                TexturePayload::AssetPath(path.clone()).load(asset_server, images)
+            }
+            TextureRef::Embedded { data, mime } => TexturePayload::Embedded {
+                data: data.clone(),
+                mime: mime.clone(),
+            }
+            .load(asset_server, images),
+        }
+    }
+
+    /// Returns a short display label (filename or `"<embedded>"`).
+    pub fn label<'a>(&'a self, registry: Option<&'a TextureRegistry>) -> &'a str {
+        match self {
+            TextureRef::TextureAsset { id } => registry
+                .and_then(|registry| registry.get(id))
+                .map(|asset| asset.payload.label())
+                .unwrap_or(id.as_str()),
             TextureRef::AssetPath(p) => p.split('/').last().unwrap_or(p),
             TextureRef::Embedded { .. } => "<embedded>",
         }
@@ -143,6 +394,9 @@ pub struct MaterialDef {
     pub clearcoat_perceptual_roughness: f32,
     /// Strength of anisotropy in tangent space.
     pub anisotropy_strength: f32,
+    /// Optional curated construction-material link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_ref: Option<AssetId>,
 
     // --- Transparency ---
     pub alpha_mode: MaterialAlphaMode,
@@ -195,6 +449,7 @@ impl Default for MaterialDef {
             clearcoat: 0.0,
             clearcoat_perceptual_roughness: 0.5,
             anisotropy_strength: 0.0,
+            spec_ref: None,
             alpha_mode: MaterialAlphaMode::Opaque,
             alpha_cutoff: 0.5,
             base_color_texture: None,
@@ -230,6 +485,7 @@ impl MaterialDef {
         &self,
         asset_server: &AssetServer,
         images: &mut Assets<Image>,
+        texture_registry: Option<&TextureRegistry>,
     ) -> StandardMaterial {
         let [r, g, b, a] = self.base_color;
         let [sr, sg, sb] = self.specular_tint;
@@ -251,28 +507,28 @@ impl MaterialDef {
             base_color_texture: self
                 .base_color_texture
                 .as_ref()
-                .and_then(|t| t.load(asset_server, images)),
+                .and_then(|t| t.load(asset_server, images, texture_registry)),
             emissive: LinearRgba::new(er, eg, eb, self.emissive_exposure_weight),
             emissive_texture: self
                 .emissive_texture
                 .as_ref()
-                .and_then(|t| t.load(asset_server, images)),
+                .and_then(|t| t.load(asset_server, images, texture_registry)),
             perceptual_roughness: self.perceptual_roughness,
             metallic: self.metallic,
             metallic_roughness_texture: self
                 .metallic_roughness_texture
                 .as_ref()
-                .and_then(|t| t.load(asset_server, images)),
+                .and_then(|t| t.load(asset_server, images, texture_registry)),
             reflectance: self.reflectance,
             specular_tint: Color::srgb(sr, sg, sb),
             normal_map_texture: self
                 .normal_map_texture
                 .as_ref()
-                .and_then(|t| t.load(asset_server, images)),
+                .and_then(|t| t.load(asset_server, images, texture_registry)),
             occlusion_texture: self
                 .occlusion_texture
                 .as_ref()
-                .and_then(|t| t.load(asset_server, images)),
+                .and_then(|t| t.load(asset_server, images, texture_registry)),
             diffuse_transmission: self.diffuse_transmission,
             specular_transmission: self.specular_transmission,
             thickness: self.thickness,
@@ -399,6 +655,76 @@ impl MaterialRegistry {
     }
 }
 
+pub fn material_texture_asset_ids(
+    material: &MaterialDef,
+) -> std::collections::BTreeSet<TextureAssetId> {
+    [
+        material.base_color_texture.as_ref(),
+        material.normal_map_texture.as_ref(),
+        material.metallic_roughness_texture.as_ref(),
+        material.emissive_texture.as_ref(),
+        material.occlusion_texture.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|texture| match texture {
+        TextureRef::TextureAsset { id } => Some(id.clone()),
+        TextureRef::Embedded { .. } | TextureRef::AssetPath(_) => None,
+    })
+    .collect()
+}
+
+pub fn normalize_material_textures(material: &mut MaterialDef, registry: &mut TextureRegistry) {
+    fn normalize_slot(
+        slot: &mut Option<TextureRef>,
+        registry: &mut TextureRegistry,
+        color_space: TextureColorSpace,
+        intent: TextureChannelIntent,
+    ) {
+        let Some(texture) = slot.take() else {
+            return;
+        };
+        *slot = Some(match texture {
+            TextureRef::TextureAsset { id } => TextureRef::TextureAsset { id },
+            TextureRef::AssetPath(path) => TextureRef::AssetPath(path),
+            TextureRef::Embedded { data, mime } => TextureRef::TextureAsset {
+                id: registry.intern_embedded(data, mime, color_space, intent),
+            },
+        });
+    }
+
+    normalize_slot(
+        &mut material.base_color_texture,
+        registry,
+        TextureColorSpace::Srgb,
+        TextureChannelIntent::BaseColor,
+    );
+    normalize_slot(
+        &mut material.normal_map_texture,
+        registry,
+        TextureColorSpace::Data,
+        TextureChannelIntent::Normal,
+    );
+    normalize_slot(
+        &mut material.metallic_roughness_texture,
+        registry,
+        TextureColorSpace::Data,
+        TextureChannelIntent::MetallicRoughness,
+    );
+    normalize_slot(
+        &mut material.emissive_texture,
+        registry,
+        TextureColorSpace::Srgb,
+        TextureChannelIntent::Emissive,
+    );
+    normalize_slot(
+        &mut material.occlusion_texture,
+        registry,
+        TextureColorSpace::Data,
+        TextureChannelIntent::Occlusion,
+    );
+}
+
 // ─── MaterialAssignment component ────────────────────────────────────────────
 
 /// ECS component that links an authored entity to a named material in the
@@ -434,6 +760,7 @@ impl Plugin for MaterialPlugin {
         };
 
         app.init_resource::<MaterialRegistry>()
+            .init_resource::<TextureRegistry>()
             .init_resource::<MaterialHandleCache>()
             .add_systems(Startup, seed_builtin_materials)
             .add_systems(
@@ -510,6 +837,7 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         clearcoat: 0.08,
         clearcoat_perceptual_roughness: 0.34,
         anisotropy_strength: 0.0,
+        spec_ref: None,
         alpha_mode: MaterialAlphaMode::Opaque,
         alpha_cutoff: 0.5,
         base_color_texture: Some(TextureRef::AssetPath(
@@ -551,6 +879,7 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         clearcoat: 0.0,
         clearcoat_perceptual_roughness: 0.03,
         anisotropy_strength: 0.0,
+        spec_ref: None,
         alpha_mode: MaterialAlphaMode::Blend,
         alpha_cutoff: 0.5,
         base_color_texture: None,
@@ -620,11 +949,12 @@ fn seed_builtin_materials(mut registry: ResMut<MaterialRegistry>) {
 /// When the registry changes, invalidate cached handles so they are rebuilt.
 fn rebuild_changed_material_handles(
     registry: Res<MaterialRegistry>,
+    texture_registry: Res<TextureRegistry>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     _images: ResMut<Assets<Image>>,
 ) {
-    if !registry.is_changed() {
+    if !registry.is_changed() && !texture_registry.is_changed() {
         return;
     }
     // Remove handles for definitions that have changed or no longer exist.
@@ -658,6 +988,7 @@ fn rebuild_changed_material_handles(
 fn apply_material_assignments(
     mut commands: Commands,
     registry: Res<MaterialRegistry>,
+    texture_registry: Res<TextureRegistry>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -683,7 +1014,11 @@ fn apply_material_assignments(
             .0
             .entry(assignment.material_id.clone())
             .or_insert_with(|| {
-                std_materials.add(def.to_standard_material(&asset_server, &mut images))
+                std_materials.add(def.to_standard_material(
+                    &asset_server,
+                    &mut images,
+                    Some(&texture_registry),
+                ))
             })
             .clone();
         commands.queue(move |world: &mut World| {
@@ -744,5 +1079,76 @@ mod tests {
             .expect("cedar builtin should exist");
         assert_eq!(cedar.anisotropy_strength, 0.0);
         assert_eq!(cedar.anisotropy_rotation, 0.0);
+    }
+
+    #[test]
+    fn normalize_material_textures_reuses_matching_payload_and_binding_metadata() {
+        let mut texture_registry = TextureRegistry::default();
+
+        let mut first = MaterialDef::new("First");
+        first.base_color_texture = Some(TextureRef::Embedded {
+            data: "abc123".to_string(),
+            mime: "image/png".to_string(),
+        });
+        normalize_material_textures(&mut first, &mut texture_registry);
+
+        let mut second = MaterialDef::new("Second");
+        second.base_color_texture = Some(TextureRef::Embedded {
+            data: "abc123".to_string(),
+            mime: "image/png".to_string(),
+        });
+        normalize_material_textures(&mut second, &mut texture_registry);
+
+        let first_id = match first.base_color_texture.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => id.clone(),
+            other => panic!("expected normalized texture asset, got {other:?}"),
+        };
+        let second_id = match second.base_color_texture.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => id.clone(),
+            other => panic!("expected normalized texture asset, got {other:?}"),
+        };
+
+        assert_eq!(first_id, second_id);
+        assert_eq!(texture_registry.entries.len(), 1);
+    }
+
+    #[test]
+    fn normalize_material_textures_keeps_distinct_binding_semantics() {
+        let mut texture_registry = TextureRegistry::default();
+        let shared_texture = TextureRef::Embedded {
+            data: "same-bytes".to_string(),
+            mime: "image/png".to_string(),
+        };
+        let mut material = MaterialDef::new("Semantic Split");
+        material.base_color_texture = Some(shared_texture.clone());
+        material.normal_map_texture = Some(shared_texture);
+
+        normalize_material_textures(&mut material, &mut texture_registry);
+
+        let base_id = match material.base_color_texture.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => id.clone(),
+            other => panic!("expected base color texture asset, got {other:?}"),
+        };
+        let normal_id = match material.normal_map_texture.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => id.clone(),
+            other => panic!("expected normal texture asset, got {other:?}"),
+        };
+
+        assert_ne!(base_id, normal_id);
+        assert_eq!(texture_registry.entries.len(), 2);
+        assert_eq!(
+            texture_registry
+                .get(&base_id)
+                .expect("base texture should exist")
+                .channel_intent,
+            TextureChannelIntent::BaseColor
+        );
+        assert_eq!(
+            texture_registry
+                .get(&normal_id)
+                .expect("normal texture should exist")
+                .color_space,
+            TextureColorSpace::Data
+        );
     }
 }
