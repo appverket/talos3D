@@ -254,6 +254,143 @@ fn list_sources_filter_by_jurisdiction_scopes_to_project_tier_after_approval() {
     assert_eq!(results[0].source_id, "boverket.bbr.8");
 }
 
+// ---------------------------------------------------------------------------
+// PP81: RecipeArtifact — verify all shipped recipes appear via the mirror,
+// and exercise the kind-specific handlers end-to-end.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod recipe_artifacts {
+    use super::*;
+    use talos3d_architecture_core::ArchitectureCorePlugin;
+    use talos3d_core::curation::api::{
+        get_recipe, list_recipes, publish_recipe, save_recipe, ListRecipesFilter,
+    };
+    use talos3d_core::curation::recipes::RecipeArtifactRegistry;
+
+    fn app_with_architecture() -> App {
+        let mut app = App::new();
+        // CapabilityRegistry must exist before ArchitectureCorePlugin registers
+        // descriptors.
+        app.init_resource::<talos3d_core::capability_registry::CapabilityRegistry>();
+        app.add_plugins(CurationPlugin);
+        app.add_plugins(ArchitectureCorePlugin);
+        app.update(); // runs Startup — mirror populates RecipeArtifactRegistry
+        app
+    }
+
+    #[test]
+    fn shipped_recipes_are_mirrored_as_shipped_published_artifacts() {
+        let app = app_with_architecture();
+        let recipes = app.world().resource::<RecipeArtifactRegistry>();
+        // ArchitectureCorePlugin ships at least 6 recipe families.
+        assert!(
+            recipes.len() >= 5,
+            "expected >= 5 shipped recipes, got {}",
+            recipes.len()
+        );
+        for r in recipes.iter() {
+            assert_eq!(r.meta.scope, Scope::Shipped);
+            assert_eq!(r.meta.trust, Trust::Published);
+            assert!(r.body.is_native());
+        }
+    }
+
+    #[test]
+    fn list_recipes_filters_by_target_class() {
+        let app = app_with_architecture();
+        let filter = ListRecipesFilter {
+            target_class: Some("foundation_system".into()),
+            ..Default::default()
+        };
+        let recipes = list_recipes(app.world(), filter);
+        assert!(!recipes.is_empty());
+        assert!(recipes
+            .iter()
+            .all(|r| r.target_class == "foundation_system"));
+        // All shipped recipes are scope=shipped trust=published.
+        for r in &recipes {
+            assert_eq!(r.scope, "shipped");
+            assert_eq!(r.trust, "published");
+            assert_eq!(r.body_kind, "native_fn_ref");
+        }
+    }
+
+    #[test]
+    fn get_recipe_by_asset_id_returns_info() {
+        let app = app_with_architecture();
+        let info = get_recipe(app.world(), "recipe.v1/pier_foundation").unwrap();
+        assert_eq!(info.family_id.as_deref(), Some("pier_foundation"));
+        assert_eq!(info.target_class, "foundation_system");
+    }
+
+    #[test]
+    fn get_recipe_not_found_returns_structured_error() {
+        let app = app_with_architecture();
+        let err = get_recipe(app.world(), "recipe.v1/does_not_exist").unwrap_err();
+        assert_eq!(err.code, "curation.recipe_not_found");
+    }
+
+    #[test]
+    fn save_recipe_refuses_to_demote_shipped_artifacts() {
+        let mut app = app_with_architecture();
+        let err = save_recipe(
+            app.world_mut(),
+            "recipe.v1/pier_foundation",
+            "project",
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "curation.shipped_scope_immutable");
+    }
+
+    #[test]
+    fn publish_recipe_rejects_draft_without_tests_or_certified() {
+        let mut app = app_with_architecture();
+        // Synthesize a session-scope Draft artifact into the registry.
+        let mut synthetic = talos3d_core::curation::recipes::RecipeArtifact {
+            meta: CurationMeta::new(
+                AssetId::new("recipe.v1/test_draft"),
+                AssetKindId::new("recipe.v1"),
+                Provenance {
+                    author: AgentId("test".into()),
+                    confidence: Confidence::Medium,
+                    lineage: Lineage::Freeform,
+                    rationale: None,
+                    jurisdiction: None,
+                    catalog_dependencies: Vec::new(),
+                    evidence: Vec::new(),
+                },
+            )
+            .with_scope(Scope::Session)
+            .with_trust(Trust::Draft),
+            body: talos3d_core::curation::recipes::RecipeBody::native(
+                talos3d_core::capability_registry::RecipeFamilyId("test_draft".into()),
+            ),
+            parameter_schema: serde_json::json!({"type":"object"}),
+            target_class: "test_class".into(),
+            supported_refinement_states: vec![
+                talos3d_core::plugins::refinement::RefinementState::Constructible,
+            ],
+            tests: Vec::new(),
+        };
+        {
+            let mut reg = app.world_mut().resource_mut::<RecipeArtifactRegistry>();
+            reg.insert(synthetic.clone());
+        }
+        let err = publish_recipe(app.world_mut(), "recipe.v1/test_draft").unwrap_err();
+        assert_eq!(err.code, "curation.recipe_missing_review");
+
+        // Now re-install with Certified override.
+        synthetic.meta.provenance.confidence = Confidence::Certified;
+        {
+            let mut reg = app.world_mut().resource_mut::<RecipeArtifactRegistry>();
+            reg.insert(synthetic);
+        }
+        let info = publish_recipe(app.world_mut(), "recipe.v1/test_draft").unwrap();
+        assert_eq!(info.trust, "published");
+    }
+}
+
 #[test]
 fn nomination_ids_increment_without_collision() {
     let mut app = bootstrap();
