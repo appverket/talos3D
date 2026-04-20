@@ -23,6 +23,7 @@ pub mod plugin;
 pub mod policy;
 pub mod provenance;
 pub mod publication;
+pub mod recipes;
 pub mod registry;
 pub mod scope_trust;
 pub mod source;
@@ -30,6 +31,10 @@ pub mod source;
 pub use plugin::CurationPlugin;
 pub use publication::{
     evidence_resolution_report, PublicationFinding, PublicationFindingSeverity,
+};
+pub use recipes::{
+    NativeFnId, RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest,
+    RECIPE_ARTIFACT_KIND,
 };
 
 pub use compat_shim::corpus_provenance_to_registry_entry;
