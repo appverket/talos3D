@@ -113,6 +113,10 @@ fn main() {
     // above no longer registers them. CorpusGapPlugin provides the shared
     // CorpusGapQueue + CorpusPassageRegistry that PP78's MCP tools consume.
     .add_plugins(talos3d_core::plugins::corpus_gap::CorpusGapPlugin)
+    // PP79–PP80 curation substrate: SourceRegistry (seeded with Canonical
+    // ISO 129-1 / ASME Y14.5 / ISO 80000-1) + NominationQueue.
+    // See ADR-040 and the CURATION_SUBSTRATE agreement.
+    .add_plugins(talos3d_core::curation::CurationPlugin)
     .add_plugins(ArchitectureCorePlugin);
 
     #[cfg(feature = "terrain")]
