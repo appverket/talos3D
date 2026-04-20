@@ -1026,6 +1026,7 @@ fn feature_push_pull_snapshot(
                 height,
             },
             rotation: profile.rotation,
+            material_assignment: profile.material_assignment.clone(),
         }
         .into(),
     )
