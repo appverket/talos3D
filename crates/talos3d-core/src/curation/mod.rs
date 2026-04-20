@@ -47,7 +47,10 @@ pub use identity::{
 pub use meta::CurationMeta;
 pub use nomination::{Nomination, NominationError, NominationId, NominationKind, NominationQueue};
 pub use pack::{EntitlementHook, PackManifest, PackRef};
-pub use policy::{JurisdictionPolicyHookId, LicenseMode, PublicationPolicy, ValidityFloor};
+pub use policy::{
+    HookRegistry, JurisdictionPolicyHook, JurisdictionPolicyHookId, LicenseMode,
+    PublicationPolicy, ValidityFloor,
+};
 pub use provenance::{
     CatalogRef, Confidence, EvidenceRef, ExcerptRef, GroundingKind, JurisdictionTag, Lineage,
     Provenance,
