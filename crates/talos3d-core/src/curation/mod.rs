@@ -21,11 +21,15 @@ pub mod pack;
 pub mod plugin;
 pub mod policy;
 pub mod provenance;
+pub mod publication;
 pub mod registry;
 pub mod scope_trust;
 pub mod source;
 
 pub use plugin::CurationPlugin;
+pub use publication::{
+    evidence_resolution_report, PublicationFinding, PublicationFindingSeverity,
+};
 
 pub use compat_shim::corpus_provenance_to_registry_entry;
 pub use compatibility::{CapabilityCompat, CompatibilityRef, SchemaVersion, VersionReq};
