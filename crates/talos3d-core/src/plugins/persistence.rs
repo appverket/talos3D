@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::{
     capability_registry::{CapabilityRegistry, DefaultsRegistry},
+    curation::{SourceRegistry, SourceRegistryEntry, SourceTier},
     plugins::{
         bundled_definition_libraries::apply_bundled_definition_libraries,
         commands::snapshot_dependency_order,
@@ -75,6 +76,11 @@ struct ProjectFile {
     named_views: Option<NamedViewRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lighting: Option<SceneLightingSettings>,
+    /// Project-scope `SourceRegistry` entries (ADR-040 / PP80). Only
+    /// `SourceTier::Project` entries persist here; Canonical and
+    /// Jurisdictional live in code/packs and are rebuilt on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sources: Option<Vec<SourceRegistryEntry>>,
     entities: Vec<PersistedEntityRecord>,
 }
 
@@ -215,6 +221,12 @@ pub fn new_document(world: &mut World) {
     }
     world.insert_resource(NamedViewRegistry::default());
     world.insert_resource(SceneLightingSettings::default());
+    // Curation substrate (ADR-040 / PP80): reset the SourceRegistry's
+    // Project-tier entries on New Document. Canonical seeds and any
+    // pack-loaded Jurisdictional entries stay put.
+    if let Some(mut registry) = world.get_resource_mut::<SourceRegistry>() {
+        registry.replace_project_scope(std::iter::empty());
+    }
     world.resource_mut::<ElementIdAllocator>().set_next(1);
     ensure_default_lighting_scene(world);
     world.resource_mut::<History>().clear();
@@ -335,6 +347,15 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         Some(named_view_registry)
     };
     let lighting = world.get_resource::<SceneLightingSettings>().cloned();
+    let sources = world.get_resource::<SourceRegistry>().and_then(|reg| {
+        let project_entries: Vec<SourceRegistryEntry> =
+            reg.project_scope_entries().cloned().collect();
+        if project_entries.is_empty() {
+            None
+        } else {
+            Some(project_entries)
+        }
+    });
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
@@ -346,6 +367,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         definition_libraries,
         named_views,
         lighting,
+        sources,
         entities,
     })
 }
@@ -361,6 +383,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         definition_libraries,
         named_views,
         lighting,
+        sources,
         entities,
     } = project;
 
@@ -447,6 +470,20 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     world.insert_resource(named_views.unwrap_or_default());
     world.insert_resource(lighting.unwrap_or_default());
+
+    // Curation substrate (ADR-040 / PP80): reload Project-tier sources
+    // into the registry. The registry itself is installed by
+    // `CurationPlugin` and already holds Canonical seeds; here we only
+    // restore the project-persisted tier. Jurisdictional/Organizational
+    // entries live in packs and aren't part of the project file.
+    if let Some(mut registry) = world.get_resource_mut::<SourceRegistry>() {
+        let project_entries: Vec<SourceRegistryEntry> = sources
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.tier == SourceTier::Project)
+            .collect();
+        registry.replace_project_scope(project_entries);
+    }
 
     recognized.sort_by_key(snapshot_dependency_order);
     for snapshot in recognized {
@@ -690,6 +727,7 @@ mod tests {
             definition_libraries: None,
             named_views: None,
             lighting: Some(SceneLightingSettings::default()),
+            sources: None,
             entities: vec![
                 PersistedEntityRecord {
                     type_name: "dimension_line".to_string(),

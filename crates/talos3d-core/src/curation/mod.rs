@@ -16,10 +16,14 @@ pub mod dependencies;
 pub mod identity;
 pub mod meta;
 pub mod pack;
+pub mod plugin;
 pub mod policy;
 pub mod provenance;
+pub mod registry;
 pub mod scope_trust;
 pub mod source;
+
+pub use plugin::CurationPlugin;
 
 pub use compatibility::{CapabilityCompat, CompatibilityRef, SchemaVersion, VersionReq};
 pub use dependencies::{DependencyRef, DependencyRole};
@@ -34,5 +38,6 @@ pub use provenance::{
     CatalogRef, Confidence, EvidenceRef, ExcerptRef, GroundingKind, JurisdictionTag, Lineage,
     Provenance,
 };
+pub use registry::{ensure_canonical_seed, SourceFilter, SourceRegistry};
 pub use scope_trust::{Scope, Trust, ValidationStatus};
 pub use source::{SourceLicense, SourceRegistryEntry, SourceStatus, SourceTier};
