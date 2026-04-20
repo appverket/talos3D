@@ -14,6 +14,9 @@
 pub mod compatibility;
 pub mod dependencies;
 pub mod identity;
+pub mod meta;
+pub mod pack;
+pub mod policy;
 pub mod provenance;
 pub mod scope_trust;
 pub mod source;
@@ -24,6 +27,9 @@ pub use identity::{
     AssetId, AssetKindId, AssetRevision, ContentHash, PackId, PackRevision, SourceId,
     SourceRevision,
 };
+pub use meta::CurationMeta;
+pub use pack::{EntitlementHook, PackManifest, PackRef};
+pub use policy::{JurisdictionPolicyHookId, LicenseMode, PublicationPolicy, ValidityFloor};
 pub use provenance::{
     CatalogRef, Confidence, EvidenceRef, ExcerptRef, GroundingKind, JurisdictionTag, Lineage,
     Provenance,
