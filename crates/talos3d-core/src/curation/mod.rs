@@ -12,6 +12,7 @@
 //! bodies, validators, and authoring MCP surfaces live in capability crates.
 
 pub mod api;
+pub mod authoring_script;
 pub mod compat_shim;
 pub mod compatibility;
 pub mod dependencies;
@@ -28,6 +29,10 @@ pub mod registry;
 pub mod scope_trust;
 pub mod source;
 
+pub use authoring_script::{
+    ArgExpr, AuthoringScript, AuthoringScriptStructuralError, McpToolId, MutationScope, OutputPath,
+    Postcondition, Predicate, Step, StepId, AUTHORING_SCRIPT_SCHEMA_VERSION,
+};
 pub use plugin::CurationPlugin;
 pub use publication::{
     evidence_resolution_report, PublicationFinding, PublicationFindingSeverity,

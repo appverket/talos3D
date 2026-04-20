@@ -27,9 +27,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::capability_registry::{
-    CapabilityRegistry, RecipeFamilyDescriptor, RecipeFamilyId,
-};
+use crate::capability_registry::{CapabilityRegistry, RecipeFamilyDescriptor, RecipeFamilyId};
 use crate::plugins::refinement::{AgentId, RefinementState};
 
 use super::identity::{AssetId, AssetKindId};
@@ -66,18 +64,22 @@ impl NativeFnId {
 
 /// Recipe body union. `NativeFnRef` points at a `GenerateFn` registered
 /// in `CapabilityRegistry`; `AuthoringScript` carries a normalized
-/// parameterized script over the Model API surface (shape filled in by
-/// PP82).
+/// parameterized script over the Model API surface (ADR-041 / PP82).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecipeBody {
     /// Reference to a native `GenerateFn`. `family_id` identifies the
     /// registered closure inside `CapabilityRegistry`.
-    NativeFnRef { family_id: RecipeFamilyId, fn_id: NativeFnId },
-    /// Placeholder for the `AuthoringScript` body format. PP82 replaces
-    /// the `opaque` field with the real typed schema.
-    AuthoringScript { opaque: Value },
+    NativeFnRef {
+        family_id: RecipeFamilyId,
+        fn_id: NativeFnId,
+    },
+    /// Normalized parameterized authoring script (ADR-041 / PP82). The
+    /// script's schema is defined in `curation::authoring_script`.
+    AuthoringScript {
+        script: super::authoring_script::AuthoringScript,
+    },
 }
 
 impl RecipeBody {
@@ -86,14 +88,31 @@ impl RecipeBody {
         Self::NativeFnRef { family_id, fn_id }
     }
 
+    /// Build an `AuthoringScript` body from a pre-built script.
+    pub fn authoring_script(script: super::authoring_script::AuthoringScript) -> Self {
+        Self::AuthoringScript { script }
+    }
+
     pub fn is_native(&self) -> bool {
         matches!(self, Self::NativeFnRef { .. })
+    }
+
+    pub fn is_authoring_script(&self) -> bool {
+        matches!(self, Self::AuthoringScript { .. })
     }
 
     pub fn family_id(&self) -> Option<&RecipeFamilyId> {
         match self {
             Self::NativeFnRef { family_id, .. } => Some(family_id),
             Self::AuthoringScript { .. } => None,
+        }
+    }
+
+    /// Borrow the authoring script, if this body is one.
+    pub fn script(&self) -> Option<&super::authoring_script::AuthoringScript> {
+        match self {
+            Self::AuthoringScript { script } => Some(script),
+            Self::NativeFnRef { .. } => None,
         }
     }
 }
@@ -237,9 +256,7 @@ pub fn recipe_artifact_from_descriptor(descriptor: &RecipeFamilyDescriptor) -> R
     }
 }
 
-fn parameters_to_json_schema(
-    parameters: &[crate::capability_registry::RecipeParameter],
-) -> Value {
+fn parameters_to_json_schema(parameters: &[crate::capability_registry::RecipeParameter]) -> Value {
     let mut properties = Map::new();
     let mut defaults = Map::new();
     for param in parameters {
@@ -332,13 +349,17 @@ mod tests {
     fn recipe_body_is_native_helper() {
         let n = RecipeBody::native(RecipeFamilyId("x".into()));
         assert!(n.is_native());
+        assert!(!n.is_authoring_script());
         assert_eq!(n.family_id().unwrap().0, "x");
 
-        let s = RecipeBody::AuthoringScript {
-            opaque: serde_json::json!({}),
-        };
+        let s =
+            RecipeBody::authoring_script(super::super::authoring_script::AuthoringScript::stub(
+                super::super::authoring_script::MutationScope::None,
+            ));
         assert!(!s.is_native());
+        assert!(s.is_authoring_script());
         assert!(s.family_id().is_none());
+        assert!(s.script().is_some());
     }
 
     #[test]
@@ -407,10 +428,11 @@ mod tests {
         };
         use std::sync::Arc;
 
-        let generate: GenerateFn =
-            Arc::new(|_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
+        let generate: GenerateFn = Arc::new(
+            |_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
                 Ok(GenerateOutput::default())
-            });
+            },
+        );
         let descriptor = RecipeFamilyDescriptor {
             id: RecipeFamilyId("wall_light_frame_exterior".into()),
             target_class: ElementClassId("wall_assembly".into()),
@@ -475,7 +497,10 @@ mod tests {
             ),
         };
 
-        let descriptors = vec![make_descriptor("pier_foundation"), make_descriptor("slab_on_grade")];
+        let descriptors = vec![
+            make_descriptor("pier_foundation"),
+            make_descriptor("slab_on_grade"),
+        ];
         let mut reg = RecipeArtifactRegistry::default();
         reg.mirror_descriptors(descriptors.iter());
         let first = reg.len();
