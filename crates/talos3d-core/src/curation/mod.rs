@@ -16,6 +16,7 @@ pub mod compatibility;
 pub mod dependencies;
 pub mod identity;
 pub mod meta;
+pub mod nomination;
 pub mod pack;
 pub mod plugin;
 pub mod policy;
@@ -34,6 +35,7 @@ pub use identity::{
     SourceRevision,
 };
 pub use meta::CurationMeta;
+pub use nomination::{Nomination, NominationError, NominationId, NominationKind, NominationQueue};
 pub use pack::{EntitlementHook, PackManifest, PackRef};
 pub use policy::{JurisdictionPolicyHookId, LicenseMode, PublicationPolicy, ValidityFloor};
 pub use provenance::{

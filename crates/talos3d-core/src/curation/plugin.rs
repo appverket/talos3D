@@ -7,6 +7,7 @@
 
 use bevy::prelude::*;
 
+use super::nomination::NominationQueue;
 use super::registry::{ensure_canonical_seed, SourceRegistry};
 
 pub struct CurationPlugin;
@@ -14,6 +15,7 @@ pub struct CurationPlugin;
 impl Plugin for CurationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SourceRegistry>()
+            .init_resource::<NominationQueue>()
             .add_systems(Startup, seed_canonical_sources);
     }
 }
