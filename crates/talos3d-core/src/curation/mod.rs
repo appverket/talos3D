@@ -16,6 +16,7 @@ pub mod compat_shim;
 pub mod compatibility;
 pub mod dependencies;
 pub mod identity;
+pub mod material_specs;
 pub mod meta;
 pub mod nomination;
 pub mod pack;
@@ -29,9 +30,7 @@ pub mod scope_trust;
 pub mod source;
 
 pub use plugin::CurationPlugin;
-pub use publication::{
-    evidence_resolution_report, PublicationFinding, PublicationFindingSeverity,
-};
+pub use publication::{evidence_resolution_report, PublicationFinding, PublicationFindingSeverity};
 pub use recipes::{
     mirror_recipe_descriptors_to_artifacts, recipe_artifact_from_descriptor, NativeFnId,
     RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest, RECIPE_ARTIFACT_KIND,
@@ -44,12 +43,17 @@ pub use identity::{
     AssetId, AssetKindId, AssetRevision, ContentHash, PackId, PackRevision, SourceId,
     SourceRevision,
 };
+pub use material_specs::{
+    next_material_spec_asset_id, AcousticProperties, FireProperties, MaterialIdentity,
+    MaterialSpec, MaterialSpecBody, MaterialSpecRegistry, MoistureProperties, StandardRef,
+    StructuralProperties, ThermalProperties, MATERIAL_SPEC_BODY_SCHEMA_VERSION, MATERIAL_SPEC_KIND,
+};
 pub use meta::CurationMeta;
 pub use nomination::{Nomination, NominationError, NominationId, NominationKind, NominationQueue};
 pub use pack::{EntitlementHook, PackManifest, PackRef};
 pub use policy::{
-    HookRegistry, JurisdictionPolicyHook, JurisdictionPolicyHookId, LicenseMode,
-    PublicationPolicy, ValidityFloor,
+    HookRegistry, JurisdictionPolicyHook, JurisdictionPolicyHookId, LicenseMode, PublicationPolicy,
+    ValidityFloor,
 };
 pub use provenance::{
     CatalogRef, Confidence, EvidenceRef, ExcerptRef, GroundingKind, JurisdictionTag, Lineage,
