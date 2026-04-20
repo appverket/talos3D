@@ -12,10 +12,15 @@
 //! bodies, validators, and authoring MCP surfaces live in capability crates.
 
 pub mod identity;
+pub mod provenance;
 pub mod scope_trust;
 
 pub use identity::{
     AssetId, AssetKindId, AssetRevision, ContentHash, PackId, PackRevision, SourceId,
     SourceRevision,
+};
+pub use provenance::{
+    CatalogRef, Confidence, EvidenceRef, ExcerptRef, GroundingKind, JurisdictionTag, Lineage,
+    Provenance,
 };
 pub use scope_trust::{Scope, Trust, ValidationStatus};
