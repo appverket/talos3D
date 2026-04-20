@@ -7,16 +7,34 @@
 
 use bevy::prelude::*;
 
+use crate::capability_registry::CapabilityRegistry;
+
 use super::nomination::NominationQueue;
+use super::recipes::{mirror_recipe_descriptors_to_artifacts, RecipeArtifactRegistry};
 use super::registry::{ensure_canonical_seed, SourceRegistry};
 
 pub struct CurationPlugin;
 
 impl Plugin for CurationPlugin {
     fn build(&self, app: &mut App) {
+        // Ensure the CapabilityRegistry exists; other plugins register
+        // recipe/element/constraint descriptors into it during their own
+        // `build`. We depend on it being present by the time our
+        // Startup system runs.
+        if !app.world().contains_resource::<CapabilityRegistry>() {
+            app.init_resource::<CapabilityRegistry>();
+        }
         app.init_resource::<SourceRegistry>()
             .init_resource::<NominationQueue>()
-            .add_systems(Startup, seed_canonical_sources);
+            .init_resource::<RecipeArtifactRegistry>()
+            .add_systems(
+                Startup,
+                (
+                    seed_canonical_sources,
+                    mirror_recipe_descriptors_to_artifacts,
+                )
+                    .chain(),
+            );
     }
 }
 
