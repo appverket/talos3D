@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::capability_registry::{CorpusProvenance, PassageRef};
+use crate::curation::identity::AssetKindId;
 
 // ---------------------------------------------------------------------------
 // CorpusGapId
@@ -44,7 +45,16 @@ pub struct CorpusGap {
     /// Stable identifier for this gap entry.
     pub id: CorpusGapId,
     /// Optional element class this gap relates to (e.g. `"stair_straight"`).
+    ///
+    /// Architecture-specific. Cross-kind code should prefer the newer
+    /// `kind` field (ADR-040 / PP80); both are populated when a
+    /// recipe-authoring flow emits a gap for a specific element class.
     pub element_class: Option<String>,
+    /// Curated asset kind this gap relates to (e.g. `"recipe.v1"`,
+    /// `"material_spec.v1"`, `"source"`). Added in PP80 to generalize
+    /// the queue beyond architectural element classes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AssetKindId>,
     /// Optional jurisdiction code (e.g. `"SE"`, `"NO"`).
     pub jurisdiction: Option<String>,
     /// What kind of artifact is missing: `"rule_pack"`, `"catalog"`, `"passage"`, …
@@ -97,6 +107,77 @@ impl CorpusGapQueue {
         self.gaps.retain(|g| &g.id != id);
         self.gaps.len() < before
     }
+
+    /// Cross-kind gap constructor (ADR-040 / PP80). Use when the
+    /// reporter does not have an element class in mind — e.g. a
+    /// publication-floor failure on a `MaterialSpec` or `CodeRulePack`.
+    pub fn push_for_kind(
+        &mut self,
+        kind: AssetKindId,
+        jurisdiction: Option<String>,
+        missing_artifact_kind: impl Into<String>,
+        context: serde_json::Value,
+        reported_by: impl Into<String>,
+        reported_at: i64,
+    ) -> CorpusGapId {
+        self.push(CorpusGap {
+            id: CorpusGapId(String::new()), // overwritten by push
+            element_class: None,
+            kind: Some(kind),
+            jurisdiction,
+            missing_artifact_kind: missing_artifact_kind.into(),
+            context,
+            reported_by: reported_by.into(),
+            reported_at,
+        })
+    }
+
+    /// List gaps filtered by kind (cross-kind inspection). Returns
+    /// references into the queue; callers clone as needed.
+    pub fn list_by_kind<'a>(&'a self, kind: &'a AssetKindId) -> impl Iterator<Item = &'a CorpusGap> + 'a {
+        self.gaps
+            .iter()
+            .filter(move |g| g.kind.as_ref() == Some(kind))
+    }
+}
+
+/// Translate a `PublicationFinding` into a `CorpusGap` entry. Used by
+/// `publish_*` paths when policy rejects the attempt because an
+/// evidence row cannot be resolved in the `SourceRegistry`.
+///
+/// Only `evidence_unresolved` findings produce a gap — superseded/
+/// sunset/license findings are operator concerns, not corpus gaps.
+pub fn gap_from_publication_finding(
+    kind: AssetKindId,
+    finding: &crate::curation::publication::PublicationFinding,
+    evidence_source_id: Option<&str>,
+    evidence_revision: Option<&str>,
+    jurisdiction: Option<String>,
+    reported_by: impl Into<String>,
+    reported_at: i64,
+) -> Option<CorpusGap> {
+    if finding.code != "curation.publication.evidence_unresolved" {
+        return None;
+    }
+    let mut context = serde_json::Map::new();
+    context.insert("finding_code".into(), finding.code.into());
+    context.insert("finding_message".into(), finding.message.clone().into());
+    if let Some(s) = evidence_source_id {
+        context.insert("source_id".into(), s.into());
+    }
+    if let Some(r) = evidence_revision {
+        context.insert("revision".into(), r.into());
+    }
+    Some(CorpusGap {
+        id: CorpusGapId(String::new()), // overwritten by push
+        element_class: None,
+        kind: Some(kind),
+        jurisdiction,
+        missing_artifact_kind: "source_entry".into(),
+        context: serde_json::Value::Object(context),
+        reported_by: reported_by.into(),
+        reported_at,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +351,7 @@ mod tests {
         CorpusGap {
             id: CorpusGapId(String::new()), // overwritten by push()
             element_class: Some("stair_straight".into()),
+            kind: None,
             jurisdiction: Some("SE".into()),
             missing_artifact_kind: kind.into(),
             context: serde_json::json!({}),
@@ -347,5 +429,96 @@ mod tests {
         registry.register(pref.clone(), "new text", sample_provenance());
         let entry = registry.get(&pref).unwrap();
         assert_eq!(entry.text, "new text");
+    }
+
+    // --- PP80 cross-kind generalization ---
+
+    #[test]
+    fn push_for_kind_sets_kind_and_leaves_element_class_none() {
+        let mut queue = CorpusGapQueue::default();
+        let id = queue.push_for_kind(
+            AssetKindId::new("material_spec.v1"),
+            Some("SE".into()),
+            "catalog_row",
+            serde_json::json!({"needed_for": "C24 timber stringer"}),
+            "agent:claude",
+            1_700_000_000,
+        );
+        let gap = queue.list().iter().find(|g| g.id == id).unwrap();
+        assert_eq!(gap.kind.as_ref().map(|k| k.as_str()), Some("material_spec.v1"));
+        assert!(gap.element_class.is_none());
+    }
+
+    #[test]
+    fn list_by_kind_filters_by_asset_kind() {
+        let mut queue = CorpusGapQueue::default();
+        queue.push_for_kind(
+            AssetKindId::new("material_spec.v1"),
+            None,
+            "catalog_row",
+            serde_json::json!({}),
+            "agent",
+            0,
+        );
+        queue.push_for_kind(
+            AssetKindId::new("recipe.v1"),
+            None,
+            "body",
+            serde_json::json!({}),
+            "agent",
+            0,
+        );
+        let kind = AssetKindId::new("material_spec.v1");
+        let spec_gaps: Vec<_> = queue.list_by_kind(&kind).collect();
+        assert_eq!(spec_gaps.len(), 1);
+        assert_eq!(spec_gaps[0].missing_artifact_kind, "catalog_row");
+    }
+
+    #[test]
+    fn gap_from_publication_finding_produces_entry_for_unresolved_evidence() {
+        use crate::curation::publication::{PublicationFinding, PublicationFindingSeverity};
+        let finding = PublicationFinding {
+            code: "curation.publication.evidence_unresolved",
+            severity: PublicationFindingSeverity::Error,
+            message: "evidence #0 unresolved".into(),
+            evidence_index: Some(0),
+        };
+        let gap = gap_from_publication_finding(
+            AssetKindId::new("recipe.v1"),
+            &finding,
+            Some("boverket.bbr.8"),
+            Some("2011:6"),
+            Some("SE".into()),
+            "agent:test",
+            0,
+        )
+        .expect("unresolved finding should produce a gap");
+        assert_eq!(gap.missing_artifact_kind, "source_entry");
+        assert_eq!(gap.kind.as_ref().map(|k| k.as_str()), Some("recipe.v1"));
+        assert_eq!(gap.jurisdiction.as_deref(), Some("SE"));
+        let ctx = gap.context.as_object().unwrap();
+        assert_eq!(ctx.get("source_id").and_then(|v| v.as_str()), Some("boverket.bbr.8"));
+        assert_eq!(ctx.get("revision").and_then(|v| v.as_str()), Some("2011:6"));
+    }
+
+    #[test]
+    fn gap_from_publication_finding_returns_none_for_non_unresolved() {
+        use crate::curation::publication::{PublicationFinding, PublicationFindingSeverity};
+        let finding = PublicationFinding {
+            code: "curation.publication.source_sunset",
+            severity: PublicationFindingSeverity::Error,
+            message: "sunset".into(),
+            evidence_index: Some(0),
+        };
+        assert!(gap_from_publication_finding(
+            AssetKindId::new("recipe.v1"),
+            &finding,
+            None,
+            None,
+            None,
+            "agent",
+            0,
+        )
+        .is_none());
     }
 }
