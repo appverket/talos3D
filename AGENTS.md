@@ -45,6 +45,10 @@ If you are integrating an external agent:
 - expect the MCP surface to reflect authored entities and command metadata
 - call `get_instance_info` after connecting to confirm you are talking to the
   intended app instance
+- call `get_authoring_guidance` immediately after connecting, before any
+  model-edit tool; the returned `prompt_text` is the Talos3D-owned
+  `COMPONENT_STRUCTURE` contract for reusable Definitions, derived variants,
+  singletons, and how they compose with progressive refinement
 
 Each MCP-enabled app instance also writes a discovery manifest to
 `/tmp/talos3d-instances/<instance-id>.json` by default. Agents can use that

@@ -14,6 +14,7 @@ use talos3d_core::plugins::model_api::ModelApiPlugin;
 use talos3d_core::plugins::perf_stats::PerfStatsPlugin;
 use talos3d_core::plugins::{
     assistant_chat::AssistantChatPlugin,
+    authoring_guidance::AuthoringGuidancePlugin,
     bundled_definition_libraries::BundledDefinitionLibrariesPlugin,
     camera::CameraPlugin,
     clipping_planes::ClippingPlanesPlugin,
@@ -85,6 +86,7 @@ fn main() {
     .insert_resource(Storage(Box::new(LocalFileBackend)))
     .init_state::<AppMode>()
     .add_plugins(AssistantChatPlugin)
+    .add_plugins(AuthoringGuidancePlugin)
     .add_plugins(CameraPlugin)
     .add_plugins(NamedViewsPlugin)
     .add_plugins(ClippingPlanesPlugin)

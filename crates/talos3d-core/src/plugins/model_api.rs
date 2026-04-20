@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
+use crate::plugins::authoring_guidance::AuthoringGuidance;
 use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
 use crate::plugins::identity::ElementIdAllocator;
@@ -1634,6 +1635,8 @@ enum ModelApiRequest {
         response: oneshot::Sender<ApiResult<DraftRulePackInfo>>,
     },
     CheckRulePackBacklinks(oneshot::Sender<BacklinkCheckReportInfo>),
+    // --- Authoring guidance (Slice A of COMPONENT_STRUCTURE) ---
+    GetAuthoringGuidance(oneshot::Sender<AuthoringGuidance>),
 }
 
 #[cfg(feature = "model-api")]
@@ -2392,6 +2395,13 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::CheckRulePackBacklinks(response) => {
             let _ = response.send(handle_check_rule_pack_backlinks(world));
+        }
+        ModelApiRequest::GetAuthoringGuidance(response) => {
+            let guidance = world
+                .get_resource::<AuthoringGuidance>()
+                .cloned()
+                .unwrap_or_default();
+            let _ = response.send(guidance);
         }
     }
 }
@@ -4539,6 +4549,16 @@ impl ModelApiServer {
         receiver
             .await
             .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_authoring_guidance(&self) -> Result<AuthoringGuidance, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetAuthoringGuidance(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
     }
 }
 
@@ -7711,6 +7731,18 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
+    }
+
+    #[tool(
+        name = "get_authoring_guidance",
+        description = "Return the canonical Talos3D-owned authoring guidance (COMPONENT_STRUCTURE). Call this immediately after connecting so you know how to structure reusable Definitions, derived variants, and singletons, and how they compose with progressive refinement. The `prompt_text` markdown is authoritative; the `component_structure` struct is a supplementary policy view."
+    )]
+    async fn get_authoring_guidance_tool(&self) -> Result<CallToolResult, McpError> {
+        let guidance = self
+            .request_get_authoring_guidance()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(guidance)
     }
 }
 
@@ -14895,6 +14927,114 @@ mod tests {
         assert_eq!(modeling_toolbar.order, 4);
 
         let _ = fs::remove_file(obj_path);
+
+        drop(server);
+        worker_handle.await.expect("worker should stop cleanly");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[tokio::test]
+    async fn get_authoring_guidance_tool_returns_resource_contents() {
+        use crate::plugins::authoring_guidance::{
+            AntiPattern, AuthoringGuidance, ComponentStructurePolicy, DeriveRule,
+            GuidanceReference, ReuseRule, StageExpectation,
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        let worker_handle = tokio::task::spawn_blocking(move || {
+            let mut world = init_model_api_test_world();
+            world.insert_resource(AuthoringGuidance {
+                guidance_id: "test.component_structure".to_string(),
+                version: 7,
+                prompt_text: "Rule A: reuse Definition. Rule B: derive variant.".to_string(),
+                component_structure: ComponentStructurePolicy {
+                    reuse_rule: ReuseRule {
+                        summary: "reuse when role + topology match".to_string(),
+                        placement_override_allowlist: vec!["position".to_string()],
+                        family_parameter_allowlist: vec![],
+                    },
+                    derive_rule: DeriveRule {
+                        summary: "derive on material topology change".to_string(),
+                        variance_threshold: 0.25,
+                    },
+                    stage_expectations: vec![StageExpectation {
+                        refinement_state: "conceptual".to_string(),
+                        guidance: "coarse shells only".to_string(),
+                    }],
+                    anti_patterns: vec![AntiPattern {
+                        id: "repeated_singletons".to_string(),
+                        summary: "same role, no shared Definition".to_string(),
+                    }],
+                },
+                references: vec![GuidanceReference {
+                    kind: "canonical_markdown".to_string(),
+                    target: "private/architecture_knowledge/COMPONENT_STRUCTURE.md".to_string(),
+                    note: None,
+                }],
+            });
+
+            while let Ok(request) = receiver.recv() {
+                handle_model_api_request(&mut world, request);
+            }
+        });
+
+        let server = ModelApiServer::new(sender);
+        let tool_names: std::collections::BTreeSet<_> = server
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert!(
+            tool_names.contains("get_authoring_guidance"),
+            "get_authoring_guidance tool should be registered"
+        );
+
+        let guidance: AuthoringGuidance = server
+            .get_authoring_guidance_tool()
+            .await
+            .expect("get_authoring_guidance tool should succeed")
+            .into_typed()
+            .expect("guidance should deserialize");
+
+        assert_eq!(guidance.guidance_id, "test.component_structure");
+        assert_eq!(guidance.version, 7);
+        assert!(guidance.prompt_text.contains("Rule A"));
+        assert_eq!(guidance.component_structure.anti_patterns.len(), 1);
+        assert_eq!(
+            guidance.component_structure.derive_rule.variance_threshold,
+            0.25
+        );
+        assert_eq!(guidance.references.len(), 1);
+
+        drop(server);
+        worker_handle.await.expect("worker should stop cleanly");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[tokio::test]
+    async fn get_authoring_guidance_tool_returns_default_when_unset() {
+        use crate::plugins::authoring_guidance::AuthoringGuidance;
+
+        let (sender, receiver) = mpsc::channel();
+        let worker_handle = tokio::task::spawn_blocking(move || {
+            let mut world = init_model_api_test_world();
+            // Intentionally do not insert AuthoringGuidance — the handler
+            // should fall back to AuthoringGuidance::default().
+            while let Ok(request) = receiver.recv() {
+                handle_model_api_request(&mut world, request);
+            }
+        });
+
+        let server = ModelApiServer::new(sender);
+        let guidance: AuthoringGuidance = server
+            .get_authoring_guidance_tool()
+            .await
+            .expect("get_authoring_guidance tool should succeed")
+            .into_typed()
+            .expect("default guidance should deserialize");
+        assert!(guidance.is_empty());
+        assert_eq!(guidance.version, 0);
 
         drop(server);
         worker_handle.await.expect("worker should stop cleanly");

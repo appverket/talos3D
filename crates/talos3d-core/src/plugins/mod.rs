@@ -1,4 +1,5 @@
 pub mod assistant_chat;
+pub mod authoring_guidance;
 pub mod corpus_gap;
 pub mod bundled_definition_libraries;
 pub mod camera;
