@@ -30,6 +30,7 @@ pub mod registry;
 pub mod replay;
 pub mod scope_trust;
 pub mod source;
+pub mod synthesis;
 
 pub use authoring_script::{
     ArgExpr, AuthoringScript, AuthoringScriptStructuralError, McpToolId, MutationScope, OutputPath,
@@ -48,6 +49,10 @@ pub use recipes::{
     RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest, RECIPE_ARTIFACT_KIND,
 };
 
+pub use synthesis::{
+    synthesize, EmittedGap, FixtureSynthesisLlm, GapSink, LlmError, McpCall, SynthesisError,
+    SynthesisLlm, SynthesisPrompt, UngroundedFixture, VecGapSink, DEFAULT_MAX_STEPS,
+};
 pub use compat_shim::corpus_provenance_to_registry_entry;
 pub use compatibility::{CapabilityCompat, CompatibilityRef, SchemaVersion, VersionReq};
 pub use dependencies::{DependencyRef, DependencyRole};
