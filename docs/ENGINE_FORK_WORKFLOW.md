@@ -23,11 +23,11 @@ Talos3D currently depends on three layers:
 2. Bevy engine
 3. egui UI library
 
-Current local checkouts:
+Example local checkouts:
 
-- Talos3D: `/Users/torstenek/dev/talos3D/talos3d-core`
-- Bevy fork: `/Users/torstenek/dev/bevy`
-- egui fork: `/Users/torstenek/dev/egui`
+- Talos3D: `/path/to/talos3d-core`
+- Bevy fork: `/path/to/bevy`
+- egui fork: `/path/to/egui`
 
 Current important constraint:
 
@@ -104,7 +104,7 @@ Each fork should have both `origin` and `upstream`.
 ### Bevy
 
 ```bash
-cd /Users/torstenek/dev/bevy
+cd /path/to/bevy
 git remote add upstream https://github.com/bevyengine/bevy.git
 git fetch upstream
 ```
@@ -112,7 +112,7 @@ git fetch upstream
 ### egui
 
 ```bash
-cd /Users/torstenek/dev/egui
+cd /path/to/egui
 git remote add upstream https://github.com/emilk/egui.git
 git fetch upstream
 ```
@@ -126,7 +126,7 @@ This is the normal refresh flow.
 ### Refresh Bevy fork `main`
 
 ```bash
-cd /Users/torstenek/dev/bevy
+cd /path/to/bevy
 git fetch upstream
 git checkout main
 git rebase upstream/main
@@ -135,7 +135,7 @@ git rebase upstream/main
 ### Refresh egui fork `main`
 
 ```bash
-cd /Users/torstenek/dev/egui
+cd /path/to/egui
 git fetch upstream
 git checkout main
 git rebase upstream/main
@@ -170,7 +170,7 @@ Current example:
 Recommended branch:
 
 ```bash
-cd /Users/torstenek/dev/egui
+cd /path/to/egui
 git fetch upstream --tags
 git checkout -b talos/egui-0.33-panel-fix tags/0.33.3
 ```
@@ -187,7 +187,7 @@ Use this when:
 Recommended branch:
 
 ```bash
-cd /Users/torstenek/dev/talos3D/talos3d-core
+cd /path/to/talos3d-core
 git checkout -b talos/bevy-main
 ```
 
@@ -211,10 +211,10 @@ Then temporarily add local egui overrides in Talos3D root `Cargo.toml`:
 ```toml
 [patch.crates-io]
 bevy_egui = { path = "vendor/bevy_egui" }
-egui = { path = "/Users/torstenek/dev/egui/crates/egui" }
-epaint = { path = "/Users/torstenek/dev/egui/crates/epaint" }
-emath = { path = "/Users/torstenek/dev/egui/crates/emath" }
-ecolor = { path = "/Users/torstenek/dev/egui/crates/ecolor" }
+egui = { path = "/path/to/egui/crates/egui" }
+epaint = { path = "/path/to/egui/crates/epaint" }
+emath = { path = "/path/to/egui/crates/emath" }
+ecolor = { path = "/path/to/egui/crates/ecolor" }
 ```
 
 Important:
@@ -227,7 +227,7 @@ Important:
 Then build normally:
 
 ```bash
-cd /Users/torstenek/dev/talos3D/talos3d-core
+cd /path/to/talos3d-core
 cargo build
 cargo test
 cargo run
@@ -242,15 +242,15 @@ versioned dependency with a path dependency to the local Bevy checkout.
 
 The main files are:
 
-- `/Users/torstenek/dev/talos3D/talos3d-core/Cargo.toml`
-- `/Users/torstenek/dev/talos3D/talos3d-core/crates/talos3d-core/Cargo.toml`
-- `/Users/torstenek/dev/talos3D/talos3d-core/crates/talos3d-terrain/Cargo.toml`
-- `/Users/torstenek/dev/talos3D/talos3d-core/crates/talos3d-architectural/Cargo.toml`
+- `/path/to/talos3d-core/Cargo.toml`
+- `/path/to/talos3d-core/crates/talos3d-core/Cargo.toml`
+- `/path/to/talos3d-core/crates/talos3d-terrain/Cargo.toml`
+- `/path/to/talos3d-core/crates/talos3d-architectural/Cargo.toml`
 
 Example shape:
 
 ```toml
-bevy = { path = "/Users/torstenek/dev/bevy", default-features = false, features = [
+bevy = { path = "/path/to/bevy", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_gizmos",
@@ -277,7 +277,7 @@ bevy = { path = "/Users/torstenek/dev/bevy", default-features = false, features 
 Then build Talos3D from the Talos3D repository, not from Bevy:
 
 ```bash
-cd /Users/torstenek/dev/talos3D/talos3d-core
+cd /path/to/talos3d-core
 cargo build
 cargo test
 cargo run
@@ -334,17 +334,17 @@ If Talos3D is actively tracking newer engine work, do this once per week:
 In commands:
 
 ```bash
-cd /Users/torstenek/dev/bevy
+cd /path/to/bevy
 git fetch upstream
 git checkout main
 git rebase upstream/main
 
-cd /Users/torstenek/dev/egui
+cd /path/to/egui
 git fetch upstream
 git checkout main
 git rebase upstream/main
 
-cd /Users/torstenek/dev/talos3D/talos3d-core
+cd /path/to/talos3d-core
 cargo build
 cargo test
 ```

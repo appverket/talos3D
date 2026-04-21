@@ -84,8 +84,21 @@ When enabled, Talos3D exposes MCP endpoints in two forms:
 - stdio transport for local process-based integrations
 - streamable HTTP at `http://127.0.0.1:<port>/mcp`
 
-The repository includes a local `.mcp.json` example that points to the HTTP
-endpoint.
+Create a local `.mcp.json` in the repository root if your MCP client supports
+repository-scoped config:
+
+```json
+{
+  "mcpServers": {
+    "talos3d": {
+      "url": "http://127.0.0.1:24842/mcp"
+    }
+  }
+}
+```
+
+That file is intentionally ignored so local ports and instance choices do not
+end up committed.
 
 ## Instance Discovery
 
