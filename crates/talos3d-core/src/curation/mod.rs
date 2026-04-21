@@ -15,8 +15,8 @@ pub mod api;
 pub mod authoring_script;
 pub mod compat_shim;
 pub mod compatibility;
-pub mod replay;
 pub mod dependencies;
+pub mod entitlement;
 pub mod identity;
 pub mod meta;
 pub mod nomination;
@@ -27,6 +27,7 @@ pub mod provenance;
 pub mod publication;
 pub mod recipes;
 pub mod registry;
+pub mod replay;
 pub mod scope_trust;
 pub mod source;
 
@@ -56,7 +57,15 @@ pub use identity::{
 };
 pub use meta::CurationMeta;
 pub use nomination::{Nomination, NominationError, NominationId, NominationKind, NominationQueue};
-pub use pack::{EntitlementHook, PackManifest, PackRef};
+pub use entitlement::{
+    Actor, AllowAllEntitlements, AlwaysDenyEntitlements, Entitlement, EntitlementError,
+    EntitlementResolver,
+};
+pub use pack::{
+    check_pack_compatibility, detect_cycles, load_pack, load_pack_open, resolve_pack_deps,
+    CompatFinding, CompatFindingSeverity, DepResolverCtx, EntitlementHook, PackError, PackManifest,
+    PackRef, PackRegistry, ResolvedPack,
+};
 pub use policy::{
     HookRegistry, JurisdictionPolicyHook, JurisdictionPolicyHookId, LicenseMode,
     PublicationPolicy, ValidityFloor,
