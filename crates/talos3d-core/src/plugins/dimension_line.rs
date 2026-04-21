@@ -1,6 +1,6 @@
 use std::{any::Any, collections::HashMap};
 
-use bevy::{prelude::*, window::PrimaryWindow};
+use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,10 +23,16 @@ use crate::{
         commands::{despawn_by_element_id, find_entity_by_element_id, CreateEntityCommand},
         cursor::{dimension_annotation_plane, CursorWorldPos, DrawingPlane},
         document_properties::DocumentProperties,
+        drafting::{
+            kind::DimensionKind as DraftDimensionKind,
+            render_dimension,
+            style::{DimensionStyle, TextPlacement},
+            DimPrimitive, DimensionInput,
+        },
         egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
         render_pipeline::RenderSettings,
-        snap::SnapKind,
+        snap::{SnapKind, SnapResult, SnapSystems},
         toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
         tools::ActiveTool,
         ui::StatusBarData,
@@ -34,13 +40,8 @@ use crate::{
     },
 };
 
-const DIMENSION_LINE_COLOR: Color = Color::srgba(0.95, 0.92, 0.42, 0.9);
-const DIMENSION_LINE_SELECTED_COLOR: Color = Color::srgba(1.0, 0.98, 0.66, 1.0);
-const DIMENSION_LINE_PAPER_COLOR: Color = Color::srgba(0.15, 0.15, 0.18, 0.95);
-const DIMENSION_LINE_PAPER_SELECTED_COLOR: Color = Color::srgba(0.08, 0.22, 0.5, 1.0);
 const DIMENSION_LINE_HIT_RADIUS: f32 = 0.18;
 const DIMENSION_LINE_TICK_HALF: f32 = 0.08;
-const DIMENSION_LINE_LABEL_SCREEN_OFFSET: f32 = 18.0;
 const DIMENSION_LINE_MIN_MEASURE_LENGTH: f32 = 0.01;
 const DIMENSION_LINE_DEFAULT_EXTENSION_MIN: f32 = 0.15;
 const DIMENSION_LINE_DEFAULT_EXTENSION_MAX: f32 = 0.4;
@@ -49,16 +50,10 @@ const DIMENSION_LINE_DEFAULT_OFFSET_MIN: f32 = 0.2;
 const DIMENSION_LINE_DEFAULT_OFFSET_MAX: f32 = 0.8;
 const DIMENSION_LINE_DEFAULT_OFFSET_FACTOR: f32 = 0.18;
 const DIMENSION_LINE_MIN_OFFSET: f32 = 0.001;
+pub(crate) const DIMENSION_RENDER_PAPER_MM_PER_WORLD_M: f32 = 20.0;
 pub const DIMENSION_ANNOTATIONS_KEY: &str = "dimension_annotations";
 
 pub struct DimensionLinePlugin;
-
-#[derive(Debug, Clone, PartialEq)]
-struct DimensionLabelOverlayInfo {
-    pub text: String,
-    pub center: Vec2,
-    pub selected: bool,
-}
 
 #[derive(Resource, Debug, Clone)]
 pub struct DimensionLineVisibility {
@@ -456,14 +451,11 @@ impl AuthoredEntity for DimensionLineSnapshot {
     }
 
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
-        draw_dimension_line_gizmo(
-            gizmos,
-            self.start,
-            self.end,
-            self.line_point,
-            self.extension,
-            color,
-        );
+        for (segment_start, segment_end) in
+            dimension_segments(self.start, self.end, self.line_point, self.extension)
+        {
+            gizmos.line(segment_start, segment_end, color);
+        }
     }
 
     fn preview_line_count(&self) -> usize {
@@ -698,77 +690,19 @@ impl AuthoredEntityFactory for DimensionLineFactory {
     }
 }
 
-fn draw_dimension_line_gizmo(
-    gizmos: &mut Gizmos,
-    start: Vec3,
-    end: Vec3,
-    line_point: Vec3,
-    extension: f32,
-    color: Color,
-) {
-    for (segment_start, segment_end) in dimension_segments(start, end, line_point, extension) {
-        gizmos.line(segment_start, segment_end, color);
-    }
-}
-
-fn draw_dimension_line_visuals(
-    visibility: Res<DimensionLineVisibility>,
-    render_settings: Res<RenderSettings>,
-    dimensions: Query<(Entity, &DimensionLineNode), Without<crate::plugins::selection::Selected>>,
-    selected_dimensions: Query<
-        (Entity, &DimensionLineNode),
-        With<crate::plugins::selection::Selected>,
-    >,
-    mut gizmos: Gizmos,
-) {
-    if !visibility.show_all {
-        return;
-    }
-    let regular_color = dimension_line_color(Some(&render_settings), false);
-    let selected_color = dimension_line_color(Some(&render_settings), true);
-    for (_entity, node) in &dimensions {
-        if !node.visible {
-            continue;
-        }
-        draw_dimension_line_gizmo(
-            &mut gizmos,
-            node.start,
-            node.end,
-            node.line_point,
-            node.extension,
-            regular_color,
-        );
-    }
-
-    for (_entity, node) in &selected_dimensions {
-        if !node.visible {
-            continue;
-        }
-        draw_dimension_line_gizmo(
-            &mut gizmos,
-            node.start,
-            node.end,
-            node.line_point,
-            node.extension,
-            selected_color,
-        );
-    }
-}
-
-fn draw_dimension_line_labels(
+fn draw_dimension_line_overlay(
     mut contexts: EguiContexts,
     doc_props: Res<DocumentProperties>,
     visibility: Res<DimensionLineVisibility>,
     viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
     render_settings: Res<RenderSettings>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
-    window_query: Query<&Window, With<PrimaryWindow>>,
     dimensions: Query<(
         &DimensionLineNode,
         Option<&crate::plugins::selection::Selected>,
     )>,
 ) {
-    if viewport_export_state.ui_suppressed() || !visibility.show_all {
+    if viewport_export_state.annotation_overlays_suppressed() || !visibility.show_all {
         return;
     }
     let Ok(ctx_ref) = contexts.ctx_mut() else {
@@ -778,50 +712,24 @@ fn draw_dimension_line_labels(
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
-    let Ok(window) = window_query.single() else {
-        return;
-    };
-
-    let overlays = collect_dimension_label_overlays_from_iter(
-        &doc_props,
-        &visibility,
-        camera,
-        camera_transform,
-        window,
-        dimensions
-            .iter()
-            .map(|(node, selected)| (node, selected.is_some())),
-    );
-    if overlays.is_empty() {
-        return;
-    }
     let paper_style = drawing_annotation_paper_style(&render_settings);
-
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
-        egui::Id::new("dimension_line_labels"),
+        egui::Id::new("dimension_line_overlay"),
     ));
-    for overlay in overlays {
-        let pos = egui::pos2(overlay.center.x, overlay.center.y);
-        let rect = egui::Rect::from_center_size(
-            pos,
-            egui::vec2(overlay.text.chars().count() as f32 * 7.5 + 14.0, 22.0),
-        );
-        let (background, border, foreground) = label_colors(overlay.selected, paper_style);
-        painter.rect_filled(rect, 4.0, background);
-        painter.rect_stroke(
-            rect,
-            4.0,
-            egui::Stroke::new(1.0, border),
-            egui::StrokeKind::Outside,
-        );
-        painter.text(
-            pos,
-            egui::Align2::CENTER_CENTER,
-            overlay.text,
-            egui::FontId::proportional(13.0),
-            foreground,
-        );
+    for (node, selected) in &dimensions {
+        if !node.visible {
+            continue;
+        }
+        let Some(primitives) =
+            project_dimension_line_primitives(node, &doc_props, camera, camera_transform)
+        else {
+            continue;
+        };
+        let color = dimension_overlay_color(selected.is_some(), paper_style);
+        for primitive in &primitives {
+            paint_dimension_primitive(&painter, primitive, color);
+        }
     }
 }
 
@@ -870,6 +778,7 @@ fn handle_dimension_line_clicks(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     egui_wants_input: Res<EguiWantsInput>,
     cursor_world_pos: Res<CursorWorldPos>,
+    snap_result: Res<SnapResult>,
     mut tool_state: ResMut<DimensionLineToolState>,
     allocator: Res<ElementIdAllocator>,
     drawing_plane: Res<DrawingPlane>,
@@ -887,7 +796,8 @@ fn handle_dimension_line_clicks(
         return;
     }
 
-    let Some(cursor_position) = cursor_world_pos.snapped else {
+    let Some(cursor_position) = dimension_tool_cursor_position(&cursor_world_pos, &snap_result)
+    else {
         return;
     };
 
@@ -964,71 +874,60 @@ fn handle_dimension_line_clicks(
 }
 
 fn draw_dimension_line_tool_preview(
+    mut contexts: EguiContexts,
+    doc_props: Res<DocumentProperties>,
+    viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
     cursor_world_pos: Res<CursorWorldPos>,
+    snap_result: Res<SnapResult>,
     tool_state: Option<Res<DimensionLineToolState>>,
     drawing_plane: Res<DrawingPlane>,
-    camera_query: Query<(&GlobalTransform, &OrbitCamera), With<Camera3d>>,
+    camera_query: Query<(&Camera, &GlobalTransform, Option<&OrbitCamera>), With<Camera3d>>,
     host_bounds_query: Query<(
         &ElementId,
         Option<&bevy::camera::primitives::Aabb>,
         Option<&GlobalTransform>,
     )>,
     render_settings: Res<RenderSettings>,
-    mut gizmos: Gizmos,
 ) {
+    if viewport_export_state.annotation_overlays_suppressed() {
+        return;
+    }
     let Some(tool_state) = tool_state else {
         return;
     };
-    let Some(start) = tool_state.start else {
+    let Some(cursor_position) = dimension_tool_cursor_position(&cursor_world_pos, &snap_result)
+    else {
         return;
     };
-    let Some(cursor_position) = cursor_world_pos.snapped else {
+    let Ok(ctx_ref) = contexts.ctx_mut() else {
         return;
     };
-    let preview_color = dimension_line_color(Some(&render_settings), true);
-    let active_plane = camera_query
-        .single()
-        .ok()
-        .map(|(camera_transform, orbit)| {
-            dimension_annotation_plane(&drawing_plane, Some(orbit), Some(camera_transform))
-        })
-        .unwrap_or_else(|| drawing_plane.clone());
-    match tool_state.end {
-        None => {
-            if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
-                return;
-            }
-            let end = cursor_position;
-            draw_dimension_line_gizmo(
-                &mut gizmos,
-                start,
-                end,
-                default_dimension_line_point(start, end),
-                default_dimension_extension(start, end),
-                preview_color,
-            );
-        }
-        Some(end) => {
-            let host_bounds = host_entity_projected_bounds(
-                tool_state.host_element_id,
-                &active_plane,
-                &host_bounds_query,
-            );
-            draw_dimension_line_gizmo(
-                &mut gizmos,
-                start,
-                end,
-                resolved_dimension_line_point(
-                    start,
-                    end,
-                    cursor_position,
-                    &active_plane,
-                    host_bounds,
-                ),
-                default_dimension_extension(start, end),
-                preview_color,
-            );
-        }
+    let ctx = ctx_ref.clone();
+    let Ok((camera, camera_transform, orbit)) = camera_query.single() else {
+        return;
+    };
+    let Some(preview_node) = preview_dimension_line_node(
+        &tool_state,
+        cursor_position,
+        &drawing_plane,
+        orbit,
+        camera_transform,
+        &host_bounds_query,
+    ) else {
+        return;
+    };
+    let Some(primitives) =
+        project_dimension_line_primitives(&preview_node, &doc_props, camera, camera_transform)
+    else {
+        return;
+    };
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("dimension_line_tool_preview"),
+    ));
+    let color = dimension_overlay_color(true, drawing_annotation_paper_style(&render_settings));
+    for primitive in &primitives {
+        paint_dimension_primitive(&painter, primitive, color);
     }
 }
 
@@ -1251,19 +1150,17 @@ impl Plugin for DimensionLinePlugin {
                 (
                     cancel_dimension_line_tool,
                     handle_dimension_line_clicks,
+                    draw_dimension_line_overlay,
                     draw_dimension_line_tool_preview,
-                    draw_dimension_line_visuals,
-                    draw_dimension_line_labels,
                 )
+                    .after(SnapSystems::Resolve)
                     .run_if(in_state(ActiveTool::PlaceDimensionLine)),
             )
             .add_systems(
                 Update,
-                (
-                    draw_dimension_line_visuals
-                        .run_if(not(in_state(ActiveTool::PlaceDimensionLine))),
-                    draw_dimension_line_labels,
-                ),
+                draw_dimension_line_overlay
+                    .after(SnapSystems::Resolve)
+                    .run_if(not(in_state(ActiveTool::PlaceDimensionLine))),
             );
     }
 }
@@ -1640,98 +1537,457 @@ fn drawing_annotation_paper_style(render_settings: &RenderSettings) -> bool {
             >= 0.8
 }
 
-fn dimension_line_color(render_settings: Option<&RenderSettings>, selected: bool) -> Color {
-    if render_settings.is_some_and(drawing_annotation_paper_style) {
-        if selected {
-            DIMENSION_LINE_PAPER_SELECTED_COLOR
-        } else {
-            DIMENSION_LINE_PAPER_COLOR
-        }
-    } else if selected {
-        DIMENSION_LINE_SELECTED_COLOR
-    } else {
-        DIMENSION_LINE_COLOR
-    }
+pub(crate) fn dimension_line_midpoint(node: &DimensionLineNode) -> Vec3 {
+    snapshot_from_node(node).midpoint()
 }
 
-fn label_colors(
-    selected: bool,
-    paper_style: bool,
-) -> (egui::Color32, egui::Color32, egui::Color32) {
-    match (paper_style, selected) {
-        (true, true) => (
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 242),
-            egui::Color32::from_rgb(54, 103, 191),
-            egui::Color32::from_rgb(22, 35, 64),
-        ),
-        (true, false) => (
-            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 236),
-            egui::Color32::from_rgb(54, 54, 64),
-            egui::Color32::from_rgb(28, 28, 34),
-        ),
-        (false, true) => (
-            egui::Color32::from_rgba_unmultiplied(64, 60, 24, 220),
-            egui::Color32::from_rgb(255, 232, 120),
-            egui::Color32::from_rgb(255, 246, 190),
-        ),
-        (false, false) => (
-            egui::Color32::from_rgba_unmultiplied(26, 26, 26, 200),
-            egui::Color32::from_rgb(222, 210, 110),
-            egui::Color32::from_rgb(245, 236, 180),
-        ),
-    }
+pub(crate) fn dimension_line_offset_vector(node: &DimensionLineNode) -> Vec3 {
+    snapshot_from_node(node).geometry().offset_vec
 }
 
-fn collect_dimension_label_overlays_from_iter<'a>(
+pub(crate) fn render_dimension_line_projected_primitives(
+    node: &DimensionLineNode,
     doc_props: &DocumentProperties,
-    visibility: &DimensionLineVisibility,
+    start: Vec2,
+    end: Vec2,
+    offset: Vec2,
+    units_per_paper_mm: f32,
+) -> Vec<DimPrimitive> {
+    let snapshot = snapshot_from_node(node);
+    if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
+        return Vec::new();
+    }
+    let mut style = legacy_dimension_style(snapshot.effective_display_unit(doc_props));
+    scale_dimension_style_in_place(&mut style, units_per_paper_mm);
+    render_dimension(
+        &DimensionInput {
+            kind: DraftDimensionKind::Aligned,
+            a: start.extend(0.0),
+            b: end.extend(0.0),
+            offset: offset.extend(0.0),
+            text_override: Some(snapshot.display_text(doc_props)),
+        },
+        &style,
+        1.0,
+    )
+}
+
+fn legacy_dimension_style(display_unit: DisplayUnit) -> DimensionStyle {
+    let mut style = match display_unit {
+        DisplayUnit::Feet | DisplayUnit::Inches => DimensionStyle::architectural_imperial(),
+        _ => DimensionStyle::architectural_metric(),
+    };
+    style.text_placement = TextPlacement::Centered {
+        break_line: false,
+        gap_mm: 0.0,
+    };
+    style.text_color_hex = "4A4A4E".to_string();
+    style
+}
+
+fn scale_dimension_style_in_place(style: &mut DimensionStyle, factor: f32) {
+    style.terminator_size_mm *= factor;
+    style.dim_line_extend_past_tick_mm *= factor;
+    style.extension_gap_mm *= factor;
+    style.extension_past_mm *= factor;
+    style.extension_stroke_mm *= factor;
+    style.dim_line_stroke_mm *= factor;
+    style.first_offset_mm *= factor;
+    style.stack_spacing_mm *= factor;
+    style.text_height_mm *= factor;
+    style.text_placement = match style.text_placement {
+        TextPlacement::Above { gap_mm } => TextPlacement::Above {
+            gap_mm: gap_mm * factor,
+        },
+        TextPlacement::Centered { break_line, gap_mm } => TextPlacement::Centered {
+            break_line,
+            gap_mm: gap_mm * factor,
+        },
+        TextPlacement::Horizontal { gap_mm } => TextPlacement::Horizontal {
+            gap_mm: gap_mm * factor,
+        },
+    };
+}
+
+fn project_dimension_line_primitives(
+    node: &DimensionLineNode,
+    doc_props: &DocumentProperties,
     camera: &Camera,
     camera_transform: &GlobalTransform,
-    window: &Window,
-    dimensions: impl Iterator<Item = (&'a DimensionLineNode, bool)>,
-) -> Vec<DimensionLabelOverlayInfo> {
-    if !visibility.show_all {
+) -> Option<Vec<DimPrimitive>> {
+    let snapshot = snapshot_from_node(node);
+    if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
+        return None;
+    }
+    let geometry = dimension_geometry(node.start, node.end, node.line_point, node.extension);
+    let project = |point: Vec3| camera.world_to_viewport(camera_transform, point).ok();
+    let p_start = project(node.start)?;
+    let p_end = project(node.end)?;
+    let p_dim_start = project(geometry.dimension_start)?;
+    let p_dim_end = project(geometry.dimension_end)?;
+    let p_visible_start = project(geometry.visible_start)?;
+    let p_visible_end = project(geometry.visible_end)?;
+    let tick_world = (geometry.axis_dir + geometry.offset_dir)
+        .try_normalize()
+        .unwrap_or(geometry.offset_dir)
+        * DIMENSION_LINE_TICK_HALF;
+    let p_tick_start_a = project(geometry.dimension_start - tick_world)?;
+    let p_tick_start_b = project(geometry.dimension_start + tick_world)?;
+    let p_tick_end_a = project(geometry.dimension_end - tick_world)?;
+    let p_tick_end_b = project(geometry.dimension_end + tick_world)?;
+    let pixels_per_world_m =
+        viewport_pixels_per_world_m(camera, camera_transform, snapshot.midpoint())?;
+    let units_per_paper_mm = pixels_per_world_m / DIMENSION_RENDER_PAPER_MM_PER_WORLD_M;
+    let line_midpoint = (p_dim_start + p_dim_end) * 0.5;
+    let projected_segments = [
+        (p_visible_start, p_visible_end),
+        (p_start, p_dim_start),
+        (p_end, p_dim_end),
+        (p_tick_start_a, p_tick_start_b),
+        (p_tick_end_a, p_tick_end_b),
+    ];
+    Some(render_dimension_line_viewport_primitives(
+        node,
+        doc_props,
+        projected_segments,
+        line_midpoint,
+        units_per_paper_mm,
+    ))
+}
+
+fn render_dimension_line_viewport_primitives(
+    node: &DimensionLineNode,
+    doc_props: &DocumentProperties,
+    projected_segments: [(Vec2, Vec2); 5],
+    line_midpoint: Vec2,
+    units_per_paper_mm: f32,
+) -> Vec<DimPrimitive> {
+    let snapshot = snapshot_from_node(node);
+    if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
         return Vec::new();
     }
 
-    let mut overlays = Vec::new();
-    for (node, selected) in dimensions {
-        if !node.visible {
-            continue;
+    let mut style = legacy_dimension_style(snapshot.effective_display_unit(doc_props));
+    scale_dimension_style_in_place(&mut style, units_per_paper_mm);
+
+    let dim_axis = (projected_segments[0].1 - projected_segments[0].0)
+        .try_normalize()
+        .unwrap_or(Vec2::X);
+    let dim_line_angle = dim_axis.y.atan2(dim_axis.x);
+    let feature_midpoint = (projected_segments[1].0 + projected_segments[2].0) * 0.5;
+    let toward_line = (line_midpoint - feature_midpoint)
+        .try_normalize()
+        .unwrap_or(Vec2::new(-dim_axis.y, dim_axis.x));
+    let text = snapshot.display_text(doc_props);
+
+    let mut out = Vec::with_capacity(6);
+    let dim_stroke = style.dim_line_stroke_mm;
+    let ext_stroke = style.extension_stroke_mm;
+
+    match style.text_placement {
+        TextPlacement::Centered {
+            break_line: true,
+            gap_mm,
+        } => {
+            let half_text = dimension_text_half_width(&text, style.text_height_mm);
+            let break_half = half_text + gap_mm;
+            let break_start = line_midpoint - dim_axis * break_half;
+            let break_end = line_midpoint + dim_axis * break_half;
+            out.push(DimPrimitive::LineSegment {
+                a: projected_segments[0].0,
+                b: break_start,
+                stroke_mm: dim_stroke,
+            });
+            out.push(DimPrimitive::LineSegment {
+                a: break_end,
+                b: projected_segments[0].1,
+                stroke_mm: dim_stroke,
+            });
+            out.push(DimPrimitive::Text {
+                anchor: line_midpoint,
+                content: text,
+                height_mm: style.text_height_mm,
+                rotation_rad: upright_dimension_text_angle(dim_line_angle),
+                anchor_mode: crate::plugins::drafting::TextAnchor::Center,
+                font_family: style.text_font,
+                color_hex: style.text_color_hex,
+            });
         }
-        let snapshot = snapshot_from_node(node);
-        if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
-            continue;
+        TextPlacement::Centered {
+            break_line: false, ..
+        } => {
+            out.push(DimPrimitive::LineSegment {
+                a: projected_segments[0].0,
+                b: projected_segments[0].1,
+                stroke_mm: dim_stroke,
+            });
+            out.push(DimPrimitive::Text {
+                anchor: line_midpoint,
+                content: text,
+                height_mm: style.text_height_mm,
+                rotation_rad: upright_dimension_text_angle(dim_line_angle),
+                anchor_mode: crate::plugins::drafting::TextAnchor::Center,
+                font_family: style.text_font,
+                color_hex: style.text_color_hex,
+            });
         }
-        let geometry = snapshot.geometry();
-        let line_midpoint = geometry.line_midpoint();
-        let Ok(screen_pos) = camera.world_to_viewport(camera_transform, line_midpoint) else {
-            continue;
-        };
-        if screen_pos.x < 0.0
-            || screen_pos.y < 0.0
-            || screen_pos.x > window.width()
-            || screen_pos.y > window.height()
-        {
-            continue;
+        TextPlacement::Above { gap_mm } => {
+            out.push(DimPrimitive::LineSegment {
+                a: projected_segments[0].0,
+                b: projected_segments[0].1,
+                stroke_mm: dim_stroke,
+            });
+            out.push(DimPrimitive::Text {
+                anchor: line_midpoint - toward_line * gap_mm,
+                content: text,
+                height_mm: style.text_height_mm,
+                rotation_rad: upright_dimension_text_angle(dim_line_angle),
+                anchor_mode: crate::plugins::drafting::TextAnchor::CenterBaseline,
+                font_family: style.text_font,
+                color_hex: style.text_color_hex,
+            });
         }
-        let label_center = camera
-            .world_to_viewport(
-                camera_transform,
-                line_midpoint
-                    + geometry.offset_dir * 0.15_f32.max(snapshot.offset_distance() * 0.15),
-            )
-            .ok()
-            .and_then(|probe| (probe - screen_pos).try_normalize())
-            .map(|direction| screen_pos + direction * DIMENSION_LINE_LABEL_SCREEN_OFFSET)
-            .unwrap_or(screen_pos);
-        overlays.push(DimensionLabelOverlayInfo {
-            text: snapshot.display_text(doc_props),
-            center: label_center,
-            selected,
-        });
+        TextPlacement::Horizontal { gap_mm } => {
+            out.push(DimPrimitive::LineSegment {
+                a: projected_segments[0].0,
+                b: projected_segments[0].1,
+                stroke_mm: dim_stroke,
+            });
+            out.push(DimPrimitive::Text {
+                anchor: line_midpoint - toward_line * gap_mm,
+                content: text,
+                height_mm: style.text_height_mm,
+                rotation_rad: 0.0,
+                anchor_mode: crate::plugins::drafting::TextAnchor::CenterBaseline,
+                font_family: style.text_font,
+                color_hex: style.text_color_hex,
+            });
+        }
     }
-    overlays
+
+    out.push(DimPrimitive::LineSegment {
+        a: projected_segments[1].0,
+        b: projected_segments[1].1,
+        stroke_mm: ext_stroke,
+    });
+    out.push(DimPrimitive::LineSegment {
+        a: projected_segments[2].0,
+        b: projected_segments[2].1,
+        stroke_mm: ext_stroke,
+    });
+    out.push(DimPrimitive::LineSegment {
+        a: projected_segments[3].0,
+        b: projected_segments[3].1,
+        stroke_mm: dim_stroke,
+    });
+    out.push(DimPrimitive::LineSegment {
+        a: projected_segments[4].0,
+        b: projected_segments[4].1,
+        stroke_mm: dim_stroke,
+    });
+    out
+}
+
+fn upright_dimension_text_angle(angle_rad: f32) -> f32 {
+    let pi = std::f32::consts::PI;
+    let half = pi * 0.5;
+    if angle_rad > half {
+        angle_rad - pi
+    } else if angle_rad < -half {
+        angle_rad + pi
+    } else {
+        angle_rad
+    }
+}
+
+fn dimension_text_half_width(text: &str, height_mm: f32) -> f32 {
+    0.55 * height_mm * text.chars().count() as f32 * 0.5
+}
+
+fn viewport_pixels_per_world_m(
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    anchor: Vec3,
+) -> Option<f32> {
+    let anchor_px = camera.world_to_viewport(camera_transform, anchor).ok()?;
+    let right_px = camera
+        .world_to_viewport(
+            camera_transform,
+            anchor + camera_transform.right().as_vec3(),
+        )
+        .ok()
+        .map(|px| (px - anchor_px).length());
+    let up_px = camera
+        .world_to_viewport(camera_transform, anchor + camera_transform.up().as_vec3())
+        .ok()
+        .map(|px| (px - anchor_px).length());
+    right_px
+        .into_iter()
+        .chain(up_px)
+        .reduce(f32::max)
+        .filter(|length| *length > 0.0)
+}
+
+fn dimension_overlay_color(selected: bool, paper_style: bool) -> egui::Color32 {
+    match (paper_style, selected) {
+        (true, true) => egui::Color32::from_rgb(32, 78, 173),
+        (true, false) => egui::Color32::from_rgb(72, 72, 78),
+        (false, true) => egui::Color32::from_rgb(106, 152, 255),
+        (false, false) => egui::Color32::from_rgb(190, 190, 198),
+    }
+}
+
+fn paint_dimension_primitive(
+    painter: &egui::Painter,
+    primitive: &DimPrimitive,
+    default_color: egui::Color32,
+) {
+    match primitive {
+        DimPrimitive::LineSegment { a, b, stroke_mm } => {
+            painter.line_segment(
+                [egui::pos2(a.x, a.y), egui::pos2(b.x, b.y)],
+                egui::Stroke::new(*stroke_mm, default_color),
+            );
+        }
+        DimPrimitive::Tick {
+            pos,
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        } => {
+            let half = length_mm * 0.5;
+            let c = rotation_rad.cos();
+            let s = rotation_rad.sin();
+            painter.line_segment(
+                [
+                    egui::pos2(pos.x - half * c, pos.y - half * s),
+                    egui::pos2(pos.x + half * c, pos.y + half * s),
+                ],
+                egui::Stroke::new(*stroke_mm, default_color),
+            );
+        }
+        DimPrimitive::Arrow {
+            tip,
+            tail,
+            width_mm,
+            filled,
+            stroke_mm,
+        } => {
+            let axis = *tail - *tip;
+            let len = axis.length().max(1e-5);
+            let axis_u = axis / len;
+            let perp = Vec2::new(-axis_u.y, axis_u.x);
+            let half_w = width_mm * 0.5;
+            let points = vec![
+                egui::pos2(tip.x, tip.y),
+                egui::pos2(tail.x + perp.x * half_w, tail.y + perp.y * half_w),
+                egui::pos2(tail.x - perp.x * half_w, tail.y - perp.y * half_w),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                if *filled {
+                    default_color
+                } else {
+                    egui::Color32::TRANSPARENT
+                },
+                egui::Stroke::new(*stroke_mm, default_color),
+            ));
+        }
+        DimPrimitive::Dot { pos, radius_mm } => {
+            painter.circle_filled(egui::pos2(pos.x, pos.y), *radius_mm, default_color);
+        }
+        DimPrimitive::Text {
+            anchor,
+            content,
+            height_mm,
+            rotation_rad,
+            anchor_mode,
+            ..
+        } => {
+            let text_color = default_color;
+            let galley = painter.layout_no_wrap(
+                content.clone(),
+                egui::FontId::proportional(*height_mm),
+                text_color,
+            );
+            let anchor_align = match anchor_mode {
+                crate::plugins::drafting::TextAnchor::CenterBaseline
+                | crate::plugins::drafting::TextAnchor::Center => egui::Align2::CENTER_CENTER,
+            };
+            painter.add(egui::Shape::Text(
+                egui::epaint::TextShape::new(egui::pos2(anchor.x, anchor.y), galley, text_color)
+                    .with_override_text_color(text_color)
+                    .with_angle_and_anchor(*rotation_rad, anchor_align),
+            ));
+        }
+    }
+}
+
+fn dimension_tool_cursor_position(
+    cursor_world_pos: &CursorWorldPos,
+    snap_result: &SnapResult,
+) -> Option<Vec3> {
+    snap_result
+        .position
+        .or(cursor_world_pos.snapped)
+        .or(cursor_world_pos.raw)
+}
+
+fn preview_dimension_line_node(
+    tool_state: &DimensionLineToolState,
+    cursor_position: Vec3,
+    drawing_plane: &DrawingPlane,
+    orbit: Option<&OrbitCamera>,
+    camera_transform: &GlobalTransform,
+    host_bounds_query: &Query<(
+        &ElementId,
+        Option<&bevy::camera::primitives::Aabb>,
+        Option<&GlobalTransform>,
+    )>,
+) -> Option<DimensionLineNode> {
+    let start = tool_state.start?;
+    let active_plane = dimension_annotation_plane(drawing_plane, orbit, Some(camera_transform));
+    match tool_state.end {
+        None => {
+            if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
+                return None;
+            }
+            let end = cursor_position;
+            Some(DimensionLineNode {
+                start,
+                end,
+                line_point: default_dimension_line_point(start, end),
+                extension: default_dimension_extension(start, end),
+                visible: true,
+                label: None,
+                display_unit: None,
+                precision: None,
+            })
+        }
+        Some(end) => {
+            let host_bounds = host_entity_projected_bounds(
+                tool_state.host_element_id,
+                &active_plane,
+                host_bounds_query,
+            );
+            Some(DimensionLineNode {
+                start,
+                end,
+                line_point: resolved_dimension_line_point(
+                    start,
+                    end,
+                    cursor_position,
+                    &active_plane,
+                    host_bounds,
+                ),
+                extension: default_dimension_extension(start, end),
+                visible: true,
+                label: None,
+                display_unit: None,
+                precision: None,
+            })
+        }
+    }
 }
 
 #[cfg(test)]

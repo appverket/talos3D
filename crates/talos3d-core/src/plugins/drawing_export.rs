@@ -194,6 +194,13 @@ impl ViewportExportState {
     pub(crate) fn ui_suppressed(&self) -> bool {
         self.pending.is_some()
     }
+
+    pub(crate) fn annotation_overlays_suppressed(&self) -> bool {
+        matches!(
+            self.pending.as_ref().map(|pending| pending.stage),
+            Some(PendingViewportExportStage::FlushUiFrame)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -894,5 +901,22 @@ mod tests {
             Some(PendingViewportExportStage::CaptureNextFrame)
         );
         assert_eq!(PendingViewportExportStage::CaptureNextFrame.advance(), None);
+    }
+
+    #[test]
+    fn annotation_overlays_resume_on_capture_frame() {
+        let mut state = ViewportExportState {
+            pending: Some(PendingViewportExport {
+                path: PathBuf::from("/tmp/drawing.png"),
+                stage: PendingViewportExportStage::FlushUiFrame,
+            }),
+        };
+
+        assert!(state.ui_suppressed());
+        assert!(state.annotation_overlays_suppressed());
+
+        state.pending.as_mut().unwrap().stage = PendingViewportExportStage::CaptureNextFrame;
+        assert!(state.ui_suppressed());
+        assert!(!state.annotation_overlays_suppressed());
     }
 }
