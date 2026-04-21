@@ -1373,7 +1373,7 @@ fn draw_guide_line_tool_overlay(
     camera_query: Query<(&Camera, &GlobalTransform)>,
     window_query: Query<&Window, With<PrimaryWindow>>,
 ) {
-    if viewport_export_state.ui_suppressed() {
+    if viewport_export_state.annotation_overlays_suppressed() {
         return;
     }
     let Some(guide_line_tool_state) = guide_line_tool_state else {
