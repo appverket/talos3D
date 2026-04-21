@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use crate::capability_registry::CapabilityRegistry;
 
 use super::nomination::NominationQueue;
+use super::pack::PackRegistry;
 use super::policy::HookRegistry;
 use super::recipes::{mirror_recipe_descriptors_to_artifacts, RecipeArtifactRegistry};
 use super::registry::{ensure_canonical_seed, SourceRegistry};
@@ -29,6 +30,7 @@ impl Plugin for CurationPlugin {
             .init_resource::<NominationQueue>()
             .init_resource::<RecipeArtifactRegistry>()
             .init_resource::<HookRegistry>()
+            .init_resource::<PackRegistry>()
             .add_systems(
                 Startup,
                 (
