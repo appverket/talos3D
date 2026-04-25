@@ -70,10 +70,7 @@ impl LicenseMode {
                 // license postures are accepted when the tier is
                 // Canonical or Jurisdictional (shipped material).
                 !matches!(license, SourceLicense::LicensedExcerpt)
-                    && matches!(
-                        tier,
-                        SourceTier::Canonical | SourceTier::Jurisdictional
-                    )
+                    && matches!(tier, SourceTier::Canonical | SourceTier::Jurisdictional)
             }
         }
     }

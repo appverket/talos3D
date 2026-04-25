@@ -1,10 +1,10 @@
 pub mod assistant_chat;
-pub mod corpus_gap;
 pub mod bundled_definition_libraries;
 pub mod camera;
 pub mod clipping_planes;
 pub mod command_registry;
 pub mod commands;
+pub mod corpus_gap;
 pub mod cursor;
 pub mod definition_authoring;
 pub mod definition_browser;

@@ -116,12 +116,9 @@ fn lookup_source_passage_unknown_ref_returns_error() {
 #[test]
 fn draft_rule_pack_returns_non_empty_skeleton_with_backlink() {
     let world = init_world();
-    let draft = handle_draft_rule_pack(
-        &world,
-        "BBR_8:22_riser_max".into(),
-        "stair_straight".into(),
-    )
-    .expect("draft_rule_pack should succeed for known passage");
+    let draft =
+        handle_draft_rule_pack(&world, "BBR_8:22_riser_max".into(), "stair_straight".into())
+            .expect("draft_rule_pack should succeed for known passage");
 
     assert!(
         !draft.rust_skeleton.is_empty(),

@@ -41,7 +41,9 @@ use talos3d_core::{
             handle_create_entity, handle_promote_refinement, handle_run_validation,
             handle_select_recipe,
         },
-        modeling::assembly::{AssemblyFactory, RelationFactory, RelationSnapshot, SemanticRelation},
+        modeling::assembly::{
+            AssemblyFactory, RelationFactory, RelationSnapshot, SemanticRelation,
+        },
         refinement::{
             ClaimGrounding, ClaimPath, Obligation, ObligationId, ObligationSet, ObligationStatus,
             RefinementState, SemanticRole,
@@ -92,15 +94,17 @@ fn init_foundation_test_world() -> World {
         ("refined_into", "Refined Into", "parent → child"),
         ("bears_on", "Bears On", "structural load path"),
     ] {
-        registry.register_relation_type(talos3d_core::capability_registry::RelationTypeDescriptor {
-            relation_type: rt.into(),
-            label: lbl.into(),
-            description: desc.into(),
-            valid_source_types: vec![],
-            valid_target_types: vec![],
-            parameter_schema: serde_json::json!({}),
-            participates_in_dependency_graph: false,
-        });
+        registry.register_relation_type(
+            talos3d_core::capability_registry::RelationTypeDescriptor {
+                relation_type: rt.into(),
+                label: lbl.into(),
+                description: desc.into(),
+                valid_source_types: vec![],
+                valid_target_types: vec![],
+                parameter_schema: serde_json::json!({}),
+                participates_in_dependency_graph: false,
+            },
+        );
     }
 
     registry.register_factory(WallFactory);
@@ -113,11 +117,7 @@ fn init_foundation_test_world() -> World {
 
 /// Spawn a minimal entity tagged with the given element class and recipe.
 /// Returns the element-id (u64).
-fn spawn_foundation_entity(
-    world: &mut World,
-    class_id: &str,
-    recipe_id: &str,
-) -> u64 {
+fn spawn_foundation_entity(world: &mut World, class_id: &str, recipe_id: &str) -> u64 {
     let eid = world.resource::<ElementIdAllocator>().next_id();
     world.spawn((
         eid,
@@ -193,9 +193,13 @@ fn select_recipe_flat_terrain_ranks_slab_first() {
 
     assert!(!ranking.is_empty(), "must return at least one recipe");
     assert_eq!(
-        ranking[0].id, "slab_on_grade",
+        ranking[0].id,
+        "slab_on_grade",
         "flat terrain (slope 2%) must rank slab_on_grade first; got: {:?}",
-        ranking.iter().map(|r| (&r.id, r.weight)).collect::<Vec<_>>()
+        ranking
+            .iter()
+            .map(|r| (&r.id, r.weight))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -211,23 +215,27 @@ fn select_recipe_steep_terrain_ranks_pier_first() {
 
     assert!(!ranking.is_empty(), "must return at least one recipe");
     assert_eq!(
-        ranking[0].id, "pier_foundation",
+        ranking[0].id,
+        "pier_foundation",
         "steep terrain (slope 18%) must rank pier_foundation first; got: {:?}",
-        ranking.iter().map(|r| (&r.id, r.weight)).collect::<Vec<_>>()
+        ranking
+            .iter()
+            .map(|r| (&r.id, r.weight))
+            .collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn select_recipe_no_slope_all_weight_one() {
     let world = init_foundation_test_world();
-    let ranking = handle_select_recipe(
-        &world,
-        "foundation_system".into(),
-        serde_json::json!({}),
-    )
-    .expect("select_recipe should succeed");
+    let ranking = handle_select_recipe(&world, "foundation_system".into(), serde_json::json!({}))
+        .expect("select_recipe should succeed");
 
-    assert_eq!(ranking.len(), 2, "both foundation recipes should be returned");
+    assert_eq!(
+        ranking.len(),
+        2,
+        "both foundation recipes should be returned"
+    );
     for entry in &ranking {
         assert!(
             (entry.weight - 1.0).abs() < f32::EPSILON,
@@ -281,7 +289,11 @@ fn promote_slab_to_constructible_satisfies_all_obligations() {
         obligation_set.entries.len(),
         3,
         "footing + top_datum + bears_on_terrain; got: {:?}",
-        obligation_set.entries.iter().map(|o| &o.id.0).collect::<Vec<_>>()
+        obligation_set
+            .entries
+            .iter()
+            .map(|o| &o.id.0)
+            .collect::<Vec<_>>()
     );
 
     for obligation in &obligation_set.entries {
@@ -364,8 +376,7 @@ fn wall_bears_on_constructible_foundation_is_satisfied_automatically() {
     let mut world = init_foundation_test_world();
 
     // 1. Create and promote a slab foundation to Constructible.
-    let foundation_eid =
-        spawn_foundation_entity(&mut world, "foundation_system", "slab_on_grade");
+    let foundation_eid = spawn_foundation_entity(&mut world, "foundation_system", "slab_on_grade");
     handle_promote_refinement(
         &mut world,
         foundation_eid,
@@ -384,11 +395,7 @@ fn wall_bears_on_constructible_foundation_is_satisfied_automatically() {
     insert_bears_on_obligation(&mut world, wall_element_id);
 
     // 3. Spawn a bears_on SemanticRelation from wall to foundation.
-    spawn_bears_on_relation(
-        &mut world,
-        wall_element_id,
-        ElementId(foundation_eid),
-    );
+    spawn_bears_on_relation(&mut world, wall_element_id, ElementId(foundation_eid));
 
     // 4. Promote the wall to Constructible.
     handle_promote_refinement(
@@ -436,8 +443,7 @@ fn wall_bears_on_conceptual_foundation_remains_unresolved_with_validator_finding
     let mut world = init_foundation_test_world();
 
     // 1. Create a foundation entity but do NOT promote it (stays Conceptual).
-    let foundation_eid =
-        spawn_foundation_entity(&mut world, "foundation_system", "slab_on_grade");
+    let foundation_eid = spawn_foundation_entity(&mut world, "foundation_system", "slab_on_grade");
     // Foundation stays at Conceptual (default). No ClaimGrounding, no obligations.
 
     // 2. Create a wall entity with a bears_on obligation.
@@ -446,11 +452,7 @@ fn wall_bears_on_conceptual_foundation_remains_unresolved_with_validator_finding
     insert_bears_on_obligation(&mut world, wall_element_id);
 
     // 3. Spawn a bears_on SemanticRelation from wall to foundation.
-    spawn_bears_on_relation(
-        &mut world,
-        wall_element_id,
-        ElementId(foundation_eid),
-    );
+    spawn_bears_on_relation(&mut world, wall_element_id, ElementId(foundation_eid));
 
     // 4. Promote the wall to Constructible. The bears_on target is Conceptual
     //    (no top_datum_mm claim, not Constructible), so the obligation stays Unresolved.
@@ -490,8 +492,7 @@ fn wall_bears_on_conceptual_foundation_remains_unresolved_with_validator_finding
     );
 
     // 6. Verify run_validation emits an Error finding for bears_on.
-    let findings =
-        handle_run_validation(&world, wall_eid).expect("run_validation should succeed");
+    let findings = handle_run_validation(&world, wall_eid).expect("run_validation should succeed");
 
     let bears_on_finding = findings
         .iter()

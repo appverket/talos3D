@@ -8,7 +8,11 @@ use crate::{
     capability_registry::{
         AuthoredEntityFactory, FaceHitCandidate, FaceId, HitCandidate, ModelSummaryAccumulator,
     },
-    plugins::{identity::ElementId, modeling::primitives::ShapeRotation},
+    plugins::{
+        identity::ElementId,
+        materials::{material_assignment_from_value, MaterialAssignment},
+        modeling::primitives::ShapeRotation,
+    },
 };
 
 use super::{
@@ -50,6 +54,7 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
                     .get::<ShapeRotation>()
                     .copied()
                     .unwrap_or_default(),
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into(),
         )
@@ -69,10 +74,14 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             .transpose()
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
+        let material_assignment = data
+            .get("material_assignment")
+            .and_then(material_assignment_from_value);
         Ok(PrimitiveSnapshot {
             element_id,
             primitive,
             rotation,
+            material_assignment,
         }
         .into())
     }
@@ -87,10 +96,14 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             .get("rotation")
             .and_then(|v| serde_json::from_value::<ShapeRotation>(v.clone()).ok())
             .unwrap_or_default();
+        let material_assignment = request
+            .get("material_assignment")
+            .and_then(material_assignment_from_value);
         Ok(PrimitiveSnapshot {
             element_id,
             primitive,
             rotation,
+            material_assignment,
         }
         .into())
     }

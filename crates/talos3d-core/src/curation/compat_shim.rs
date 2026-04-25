@@ -124,7 +124,9 @@ fn derive_publisher(p: &CorpusProvenance) -> String {
     if source.contains("ICC") || source.to_ascii_uppercase().contains("IBC") {
         return "International Code Council".into();
     }
-    if source.starts_with("ISO ") || source.contains("International Organization for Standardization") {
+    if source.starts_with("ISO ")
+        || source.contains("International Organization for Standardization")
+    {
         return "International Organization for Standardization".into();
     }
     if source.starts_with("EN ") || source.contains("CEN") {
@@ -218,10 +220,7 @@ mod tests {
         assert_eq!(entry.publisher, "Boverket");
         assert_eq!(entry.tier, SourceTier::Jurisdictional);
         assert_eq!(entry.license, SourceLicense::OfficialGovernmentPublication);
-        assert_eq!(
-            entry.jurisdiction.as_ref().map(|j| j.as_str()),
-            Some("SE")
-        );
+        assert_eq!(entry.jurisdiction.as_ref().map(|j| j.as_str()), Some("SE"));
         // Ingested-at and backlink land in metadata, not lost.
         let metadata = entry
             .metadata

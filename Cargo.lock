@@ -5575,6 +5575,7 @@ dependencies = [
  "base64",
  "bevy",
  "bevy_egui",
+ "blake3",
  "cadio-dwg",
  "cadio-ir",
  "dxf",
