@@ -67,11 +67,7 @@ impl PublicationPolicy {
     /// findings are still returned but a `Draft` asset isn't blocked.
     /// Enforcement happens at publication time (trust transition
     /// `Draft -> Published`).
-    pub fn check(
-        &self,
-        meta: &CurationMeta,
-        registry: &SourceRegistry,
-    ) -> Vec<PublicationFinding> {
+    pub fn check(&self, meta: &CurationMeta, registry: &SourceRegistry) -> Vec<PublicationFinding> {
         let mut findings = Vec::new();
         let floor = &self.global_validity_floor;
         for (idx, evidence) in meta.provenance.evidence.iter().enumerate() {
@@ -100,11 +96,7 @@ impl PublicationPolicy {
 
     /// Convenience: returns `true` iff there are no `Error` findings
     /// in the global-floor check.
-    pub fn permits(
-        &self,
-        meta: &CurationMeta,
-        registry: &SourceRegistry,
-    ) -> bool {
+    pub fn permits(&self, meta: &CurationMeta, registry: &SourceRegistry) -> bool {
         !self.check(meta, registry).iter().any(|f| f.is_error())
     }
 
@@ -201,7 +193,9 @@ fn check_evidence(
 fn license_finding_code(mode: LicenseMode) -> &'static str {
     match mode {
         LicenseMode::AllowAll => "curation.publication.license_allow_all",
-        LicenseMode::AllowRedistributable => "curation.publication.license_requires_redistributable",
+        LicenseMode::AllowRedistributable => {
+            "curation.publication.license_requires_redistributable"
+        }
         LicenseMode::ForbidExcerpt => "curation.publication.license_forbids_excerpt",
     }
 }
@@ -241,7 +235,9 @@ mod tests {
     use super::*;
     use crate::curation::{
         identity::{AssetId, AssetKindId, SourceId, SourceRevision},
-        provenance::{Confidence, EvidenceRef, GroundingKind, JurisdictionTag, Lineage, Provenance},
+        provenance::{
+            Confidence, EvidenceRef, GroundingKind, JurisdictionTag, Lineage, Provenance,
+        },
         registry::SourceRegistry,
         scope_trust::{Scope, Trust},
         source::{SourceLicense, SourceRegistryEntry, SourceTier},
@@ -262,7 +258,11 @@ mod tests {
         );
     }
 
-    fn meta_with_evidence(refs: Vec<EvidenceRef>, trust: Trust, confidence: Confidence) -> CurationMeta {
+    fn meta_with_evidence(
+        refs: Vec<EvidenceRef>,
+        trust: Trust,
+        confidence: Confidence,
+    ) -> CurationMeta {
         CurationMeta::new(
             AssetId::new("recipe.v1/test"),
             AssetKindId::new("recipe.v1"),
@@ -294,7 +294,11 @@ mod tests {
     fn resolved_evidence_passes_default_floor() {
         let mut reg = SourceRegistry::default();
         registered_entry(&mut reg, "bbr.8", "2011:6");
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         let findings = PublicationPolicy::default().check(&meta, &reg);
         assert!(findings.is_empty(), "findings: {findings:?}");
     }
@@ -302,7 +306,11 @@ mod tests {
     #[test]
     fn unresolved_evidence_is_error_when_published() {
         let reg = SourceRegistry::default();
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         let findings = PublicationPolicy::default().check(&meta, &reg);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "curation.publication.evidence_unresolved");
@@ -312,7 +320,11 @@ mod tests {
     #[test]
     fn unresolved_evidence_is_warning_when_draft() {
         let reg = SourceRegistry::default();
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Draft, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Draft,
+            Confidence::Medium,
+        );
         let findings = PublicationPolicy::default().check(&meta, &reg);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, PublicationFindingSeverity::Warning);
@@ -327,13 +339,21 @@ mod tests {
             &SourceRevision::new("2011:6"),
             Some(SourceId::new("bbr.8.v2025")),
         ));
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         let findings = PublicationPolicy::default().check(&meta, &reg);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "curation.publication.source_superseded");
 
         // Certified confidence overrides superseded.
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Certified);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Certified,
+        );
         let findings = PublicationPolicy::default().check(&meta, &reg);
         assert!(findings.is_empty());
     }
@@ -353,7 +373,11 @@ mod tests {
             Confidence::Certified,
         );
         let findings = PublicationPolicy::default().check(&meta, &reg);
-        assert!(findings.iter().any(|f| f.code == "curation.publication.source_sunset"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "curation.publication.source_sunset")
+        );
     }
 
     #[test]
@@ -367,11 +391,17 @@ mod tests {
             SourceTier::Organizational,
             SourceLicense::LicensedExcerpt,
         ));
-        let meta = meta_with_evidence(vec![ev("vendor.pdf", "v1")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("vendor.pdf", "v1")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         let findings = PublicationPolicy::strict().check(&meta, &reg);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "curation.publication.license_requires_redistributable"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "curation.publication.license_requires_redistributable")
+        );
         assert!(!PublicationPolicy::strict().permits(&meta, &reg));
     }
 
@@ -379,7 +409,11 @@ mod tests {
     fn default_policy_permits_when_resolved_and_active() {
         let mut reg = SourceRegistry::default();
         registered_entry(&mut reg, "bbr.8", "2011:6");
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         assert!(PublicationPolicy::default().permits(&meta, &reg));
     }
 
@@ -427,7 +461,11 @@ mod tests {
         registered_entry(&mut reg, "bbr.8", "2011:6");
         let mut hooks = HookRegistry::default();
         hooks.install(AlwaysRejectHook(JurisdictionTag::new("SE")));
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         let findings = PublicationPolicy::default().check_with_hooks(&meta, &reg, &hooks);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "jurisdiction.test.always_reject");
@@ -440,7 +478,11 @@ mod tests {
         registered_entry(&mut reg, "bbr.8", "2011:6");
         let mut hooks = HookRegistry::default();
         hooks.install(AlwaysRejectHook(JurisdictionTag::new("NO")));
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         // Asset is SE; hook is NO — should not fire.
         let findings = PublicationPolicy::default().check_with_hooks(&meta, &reg, &hooks);
         assert!(findings.is_empty());
@@ -452,14 +494,22 @@ mod tests {
         let reg = SourceRegistry::default(); // empty → unresolved evidence
         let mut hooks = HookRegistry::default();
         hooks.install(AlwaysRejectHook(JurisdictionTag::new("SE")));
-        let meta = meta_with_evidence(vec![ev("bbr.8", "2011:6")], Trust::Published, Confidence::Medium);
+        let meta = meta_with_evidence(
+            vec![ev("bbr.8", "2011:6")],
+            Trust::Published,
+            Confidence::Medium,
+        );
         let findings = PublicationPolicy::default().check_with_hooks(&meta, &reg, &hooks);
         assert_eq!(findings.len(), 2);
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "curation.publication.evidence_unresolved"));
-        assert!(findings
-            .iter()
-            .any(|f| f.code == "jurisdiction.test.always_reject"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "curation.publication.evidence_unresolved")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.code == "jurisdiction.test.always_reject")
+        );
     }
 }

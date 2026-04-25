@@ -81,10 +81,7 @@ impl SourceRegistry {
     pub fn insert(&mut self, entry: SourceRegistryEntry) -> Option<SourceRegistryEntry> {
         let sid = entry.source_id.clone();
         let rev = entry.revision.clone();
-        self.entries
-            .entry(sid)
-            .or_default()
-            .insert(rev, entry)
+        self.entries.entry(sid).or_default().insert(rev, entry)
     }
 
     /// Look up a specific revision.
@@ -236,7 +233,9 @@ fn canonical_seed_entries() -> Vec<SourceRegistryEntry> {
         SourceTier::Canonical,
         SourceLicense::PermissiveCite,
     )
-    .with_canonical_url("https://www.asme.org/codes-standards/find-codes-standards/y14-5-dimensioning-tolerancing");
+    .with_canonical_url(
+        "https://www.asme.org/codes-standards/find-codes-standards/y14-5-dimensioning-tolerancing",
+    );
 
     let iso_80000 = SourceRegistryEntry::new(
         SourceId::new("iso.80000-1"),
@@ -271,8 +270,14 @@ mod tests {
     fn insert_and_get_roundtrips() {
         let mut reg = SourceRegistry::default();
         reg.insert(entry("a", "v1", SourceTier::Canonical));
-        assert!(reg.get(&SourceId::new("a"), &SourceRevision::new("v1")).is_some());
-        assert!(reg.get(&SourceId::new("a"), &SourceRevision::new("v2")).is_none());
+        assert!(
+            reg.get(&SourceId::new("a"), &SourceRevision::new("v1"))
+                .is_some()
+        );
+        assert!(
+            reg.get(&SourceId::new("a"), &SourceRevision::new("v2"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -363,9 +368,10 @@ mod tests {
     fn remove_drops_entry_and_empty_outer_key() {
         let mut reg = SourceRegistry::default();
         reg.insert(entry("a", "v1", SourceTier::Canonical));
-        assert!(reg
-            .remove(&SourceId::new("a"), &SourceRevision::new("v1"))
-            .is_some());
+        assert!(
+            reg.remove(&SourceId::new("a"), &SourceRevision::new("v1"))
+                .is_some()
+        );
         assert!(reg.is_empty());
     }
 
@@ -373,13 +379,18 @@ mod tests {
     fn canonical_seed_inserts_known_entries() {
         let mut reg = SourceRegistry::default();
         ensure_canonical_seed(&mut reg);
-        assert!(reg.get(&SourceId::new("iso.129-1"), &SourceRevision::new("2018")).is_some());
-        assert!(reg
-            .get(&SourceId::new("asme.y14.5"), &SourceRevision::new("2018"))
-            .is_some());
-        assert!(reg
-            .get(&SourceId::new("iso.80000-1"), &SourceRevision::new("2022"))
-            .is_some());
+        assert!(
+            reg.get(&SourceId::new("iso.129-1"), &SourceRevision::new("2018"))
+                .is_some()
+        );
+        assert!(
+            reg.get(&SourceId::new("asme.y14.5"), &SourceRevision::new("2018"))
+                .is_some()
+        );
+        assert!(
+            reg.get(&SourceId::new("iso.80000-1"), &SourceRevision::new("2022"))
+                .is_some()
+        );
 
         // Idempotent: second call does not duplicate or overwrite.
         let before = reg.revision_count();
@@ -399,7 +410,10 @@ mod tests {
         reg.replace_project_scope(vec![entry("proj.other", "v1", SourceTier::Project)]);
         assert_eq!(reg.project_scope_entries().count(), 1);
         // Canonicals intact.
-        assert!(reg.get(&SourceId::new("iso.129-1"), &SourceRevision::new("2018")).is_some());
+        assert!(
+            reg.get(&SourceId::new("iso.129-1"), &SourceRevision::new("2018"))
+                .is_some()
+        );
     }
 
     #[test]

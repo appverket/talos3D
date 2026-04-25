@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Default is `Session`: the artifact lives only for the duration of the
 /// current authoring session unless explicitly saved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default,
+)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum Scope {
     /// Only visible for the current authoring session. Not persisted.
@@ -37,7 +39,9 @@ impl Scope {
 /// Review/trust level of a curated asset. Orthogonal to `Scope` — a
 /// Project-scope asset can be Published, and a Shipped-scope asset can be
 /// Draft during a release candidate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default,
+)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum Trust {
     /// Author-declared; not yet reviewed for reuse. Synthesis-mode
@@ -64,9 +68,7 @@ pub enum ValidationStatus {
     /// Last validation run produced findings. Findings are identified by
     /// opaque strings so this module does not take on the dependency on
     /// `FindingId` from the constraint layer.
-    Failing {
-        findings: Vec<String>,
-    },
+    Failing { findings: Vec<String> },
 }
 
 impl ValidationStatus {

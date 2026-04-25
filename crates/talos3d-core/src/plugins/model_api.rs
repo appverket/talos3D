@@ -4,12 +4,15 @@ use std::collections::HashMap;
 use bevy::window::PrimaryWindow;
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 #[cfg(feature = "model-api")]
 use serde_json::json;
-use serde_json::Value;
 
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
+use crate::curation::MaterialSpecBody;
+#[cfg(feature = "model-api")]
+use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
 use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
 use crate::plugins::identity::ElementIdAllocator;
@@ -18,7 +21,7 @@ use crate::plugins::materials::MaterialDef;
 use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
-use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
+use crate::plugins::modeling::semantics::{GeometrySemantics, geometry_semantics_for_snapshot};
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::RenderSettings;
 #[cfg(feature = "model-api")]
@@ -26,31 +29,31 @@ use crate::plugins::render_pipeline::RenderTonemapping;
 #[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
-        apply_orbit_state, focus_orbit_camera_on_bounds,
-        perspective_distance_to_orthographic_scale, CameraProjectionMode, OrbitCamera,
+        CameraProjectionMode, OrbitCamera, apply_orbit_state, focus_orbit_camera_on_bounds,
+        perspective_distance_to_orthographic_scale,
     },
     commands::{
-        find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
-        BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
-        ResolvedDeleteEntitiesCommand,
+        ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
+        EndCommandGroup, ResolvedDeleteEntitiesCommand, find_entity_by_element_id,
+        queue_command_events,
     },
     document_properties::DocumentProperties,
-    history::{apply_pending_history_commands, HistorySet},
-    import::{import_file_now, ImportRegistry, ImporterDescriptor},
+    history::{HistorySet, apply_pending_history_commands},
+    import::{ImportRegistry, ImporterDescriptor, import_file_now},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     lighting::{
-        create_daylight_rig, scene_light_object_exposed, SceneLightNode, SceneLightingSettings,
+        SceneLightNode, SceneLightingSettings, create_daylight_rig, scene_light_object_exposed,
     },
     materials::{
-        normalize_material_textures, MaterialAssignment, MaterialRegistry, TextureRef,
-        TextureRegistry,
+        MaterialAssignment, MaterialRegistry, TextureRef, TextureRegistry,
+        normalize_material_textures,
     },
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
     selection::Selected,
     toolbar::{
-        update_toolbar_layout_entry, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
-        ToolbarSection,
+        ToolbarDock, ToolbarLayoutState, ToolbarRegistry, ToolbarSection,
+        update_toolbar_layout_entry,
     },
 };
 
@@ -59,28 +62,29 @@ use std::{
     env, fs,
     net::TcpListener as StdTcpListener,
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "model-api")]
 use rmcp::{
+    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     schemars::JsonSchema,
-    tool, tool_handler, tool_router, transport, ErrorData as McpError, ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router, transport,
 };
 
 #[cfg(feature = "model-api")]
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 
 #[cfg(feature = "model-api")]
 use tokio::sync::oneshot;
 #[cfg(feature = "model-api")]
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[cfg(feature = "model-api")]
 pub struct ModelApiPlugin;
@@ -556,6 +560,34 @@ fn default_uv_scale() -> [f32; 2] {
 pub struct ApplyMaterialRequest {
     pub material_id: String,
     pub element_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetMaterialSpecRequest {
+    pub asset_id: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UpdateMaterialSpecRequest {
+    pub asset_id: String,
+    pub body: MaterialSpecBody,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SaveMaterialSpecRequest {
+    pub asset_id: String,
+    pub scope: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeleteMaterialSpecRequest {
+    pub asset_id: String,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -1254,6 +1286,37 @@ enum ModelApiRequest {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    ListMaterialSpecs {
+        filter: ListMaterialSpecsFilter,
+        response: oneshot::Sender<ApiResult<Vec<MaterialSpecInfo>>>,
+    },
+    GetMaterialSpec {
+        asset_id: String,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    CreateMaterialSpec {
+        request: DraftMaterialSpecRequest,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    UpdateMaterialSpec {
+        asset_id: String,
+        body: MaterialSpecBody,
+        rationale: Option<String>,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    SaveMaterialSpec {
+        asset_id: String,
+        scope: String,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    PublishMaterialSpec {
+        asset_id: String,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    DeleteMaterialSpec {
+        asset_id: String,
+        response: oneshot::Sender<ApiResult<String>>,
+    },
     GetLightingScene(oneshot::Sender<LightingSceneInfo>),
     ListLights(oneshot::Sender<Vec<SceneLightInfo>>),
     CreateLight {
@@ -1859,6 +1922,38 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_remove_material(world, element_ids));
+        }
+        ModelApiRequest::ListMaterialSpecs { filter, response } => {
+            let _ = response.send(handle_list_material_specs(world, filter));
+        }
+        ModelApiRequest::GetMaterialSpec { asset_id, response } => {
+            let _ = response.send(handle_get_material_spec(world, &asset_id));
+        }
+        ModelApiRequest::CreateMaterialSpec { request, response } => {
+            let _ = response.send(handle_create_material_spec(world, request));
+        }
+        ModelApiRequest::UpdateMaterialSpec {
+            asset_id,
+            body,
+            rationale,
+            response,
+        } => {
+            let _ = response.send(handle_update_material_spec(
+                world, &asset_id, body, rationale,
+            ));
+        }
+        ModelApiRequest::SaveMaterialSpec {
+            asset_id,
+            scope,
+            response,
+        } => {
+            let _ = response.send(handle_save_material_spec(world, &asset_id, &scope));
+        }
+        ModelApiRequest::PublishMaterialSpec { asset_id, response } => {
+            let _ = response.send(handle_publish_material_spec(world, &asset_id));
+        }
+        ModelApiRequest::DeleteMaterialSpec { asset_id, response } => {
+            let _ = response.send(handle_delete_material_spec(world, &asset_id));
         }
         ModelApiRequest::GetLightingScene(response) => {
             let _ = response.send(handle_get_lighting_scene(world));
@@ -3320,6 +3415,100 @@ impl ModelApiServer {
                 element_ids,
                 response,
             })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_list_material_specs(
+        &self,
+        filter: ListMaterialSpecsFilter,
+    ) -> ApiResult<Vec<MaterialSpecInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListMaterialSpecs { filter, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_material_spec(&self, asset_id: String) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetMaterialSpec { asset_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_material_spec(
+        &self,
+        request: DraftMaterialSpecRequest,
+    ) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateMaterialSpec { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_material_spec(
+        &self,
+        asset_id: String,
+        body: MaterialSpecBody,
+        rationale: Option<String>,
+    ) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateMaterialSpec {
+                asset_id,
+                body,
+                rationale,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_save_material_spec(
+        &self,
+        asset_id: String,
+        scope: String,
+    ) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SaveMaterialSpec {
+                asset_id,
+                scope,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_publish_material_spec(&self, asset_id: String) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PublishMaterialSpec { asset_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_delete_material_spec(&self, asset_id: String) -> ApiResult<String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DeleteMaterialSpec { asset_id, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -6315,6 +6504,111 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "list_material_specs",
+        description = "List curated construction material specs. Optional filters: scope, trust, classification."
+    )]
+    async fn list_material_specs_tool(
+        &self,
+        Parameters(params): Parameters<ListMaterialSpecsFilter>,
+    ) -> Result<CallToolResult, McpError> {
+        let specs = self
+            .request_list_material_specs(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(specs)
+    }
+
+    #[tool(
+        name = "get_material_spec",
+        description = "Get a curated material spec by asset_id."
+    )]
+    async fn get_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<GetMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_get_material_spec(params.asset_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "create_material_spec",
+        description = "Create a project-scope draft MaterialSpec. Provide body plus optional asset_id, author, and rationale."
+    )]
+    async fn create_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<DraftMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_create_material_spec(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "update_material_spec",
+        description = "Replace the body of an existing MaterialSpec draft."
+    )]
+    async fn update_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<UpdateMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_update_material_spec(params.asset_id, params.body, params.rationale)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "save_material_spec",
+        description = "Change the scope of a MaterialSpec draft or project asset."
+    )]
+    async fn save_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<SaveMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_save_material_spec(params.asset_id, params.scope)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "publish_material_spec",
+        description = "Publish a MaterialSpec when its publication-policy floor passes."
+    )]
+    async fn publish_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<GetMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_publish_material_spec(params.asset_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "delete_material_spec",
+        description = "Delete a non-shipped MaterialSpec by asset_id."
+    )]
+    async fn delete_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<DeleteMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let asset_id = self
+            .request_delete_material_spec(params.asset_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(asset_id)
+    }
+
+    #[tool(
         name = "get_lighting_scene",
         description = "Get ambient scene lighting settings and all authored light entities."
     )]
@@ -8348,6 +8642,61 @@ fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Ve
 }
 
 #[cfg(feature = "model-api")]
+fn handle_list_material_specs(
+    world: &World,
+    filter: ListMaterialSpecsFilter,
+) -> Result<Vec<MaterialSpecInfo>, String> {
+    Ok(crate::curation::api::list_material_specs(world, filter))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_material_spec(world: &World, asset_id: &str) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::get_material_spec(world, asset_id).map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_create_material_spec(
+    world: &mut World,
+    request: DraftMaterialSpecRequest,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::create_material_spec(world, request).map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_update_material_spec(
+    world: &mut World,
+    asset_id: &str,
+    body: MaterialSpecBody,
+    rationale: Option<String>,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::update_material_spec(world, asset_id, body, rationale)
+        .map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_save_material_spec(
+    world: &mut World,
+    asset_id: &str,
+    scope: &str,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::save_material_spec(world, asset_id, scope)
+        .map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_publish_material_spec(
+    world: &mut World,
+    asset_id: &str,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::publish_material_spec(world, asset_id).map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_delete_material_spec(world: &mut World, asset_id: &str) -> Result<String, String> {
+    crate::curation::api::delete_material_spec(world, asset_id).map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
 fn ambient_light_info_from_settings(settings: &SceneLightingSettings) -> AmbientLightInfo {
     AmbientLightInfo {
         color: settings.ambient_color,
@@ -9473,8 +9822,8 @@ fn handle_place_sheet_dimension(
     request: PlaceSheetDimensionRequest,
 ) -> Result<u64, String> {
     use crate::plugins::drafting_sheet::{
-        sheet_paper_to_world, sheet_view_from_active_camera, DEFAULT_MARGIN_MM,
-        DEFAULT_SCALE_DENOMINATOR,
+        DEFAULT_MARGIN_MM, DEFAULT_SCALE_DENOMINATOR, sheet_paper_to_world,
+        sheet_view_from_active_camera,
     };
     let scale = request
         .scale_denominator
@@ -13016,7 +13365,7 @@ pub fn handle_get_claim_grounding(
     element_id: u64,
     path_filter: Option<String>,
 ) -> ApiResult<Vec<ClaimGroundingEntry>> {
-    use crate::capability_registry::{effective_promotion_critical_paths, ElementClassAssignment};
+    use crate::capability_registry::{ElementClassAssignment, effective_promotion_critical_paths};
     use crate::plugins::refinement::{ClaimGrounding, RefinementStateComponent};
 
     let eid = ElementId(element_id);
@@ -13088,8 +13437,8 @@ pub fn handle_promote_refinement(
     overrides: serde_json::Value,
 ) -> ApiResult<PromoteRefinementResult> {
     use crate::plugins::refinement::{
-        apply_promote_refinement, ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState,
-        RefinementStateComponent,
+        ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState, RefinementStateComponent,
+        apply_promote_refinement,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -13149,7 +13498,7 @@ fn handle_demote_refinement(
     target_state_str: String,
 ) -> ApiResult<DemoteRefinementResult> {
     use crate::plugins::refinement::{
-        apply_demote_refinement, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
+        DemoteRefinementRequest, RefinementState, RefinementStateComponent, apply_demote_refinement,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -13196,7 +13545,7 @@ pub fn handle_run_validation(
     element_id: u64,
 ) -> ApiResult<Vec<ValidationFindingInfo>> {
     use crate::plugins::refinement::{
-        validate_declared_state_obligations, ObligationSet, RefinementStateComponent,
+        ObligationSet, RefinementStateComponent, validate_declared_state_obligations,
     };
 
     let eid = ElementId(element_id);
@@ -13308,7 +13657,9 @@ fn handle_explain_finding(_world: &World, finding_id: String) -> ApiResult<serde
             "source": "ADR-038 §11 / PP70 acceptance criteria"
         }))
     } else {
-        Err(format!("Unknown finding_id '{finding_id}'. Only findings produced by run_validation are known to this endpoint."))
+        Err(format!(
+            "Unknown finding_id '{finding_id}'. Only findings produced by run_validation are known to this endpoint."
+        ))
     }
 }
 
@@ -13578,11 +13929,11 @@ fn handle_preview_promotion(
     overrides: serde_json::Value,
 ) -> ApiResult<PreviewPromotionResult> {
     use crate::plugins::refinement::{
-        apply_demote_refinement, ClaimPath, DemoteRefinementRequest, RefinementState,
-        RefinementStateComponent,
+        ClaimPath, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
+        apply_demote_refinement,
     };
     use crate::plugins::refinement::{
-        apply_promote_refinement, PromoteRefinementRequest, RecipeId,
+        PromoteRefinementRequest, RecipeId, apply_promote_refinement,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -14019,9 +14370,9 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
-    use serde_json::json;
     #[cfg(feature = "model-api")]
     use serde_json::Value;
+    use serde_json::json;
     #[cfg(feature = "model-api")]
     use std::{
         fs,
@@ -14283,15 +14634,19 @@ mod tests {
         let details = get_entity_details(&world, ElementId(element_id))
             .expect("guide line details should exist");
         assert_eq!(details.entity_type, "guide_line");
-        assert!(details
-            .properties
-            .iter()
-            .any(|property| property.name == "direction"));
+        assert!(
+            details
+                .properties
+                .iter()
+                .any(|property| property.name == "direction")
+        );
 
         let entities = list_entities(&world);
-        assert!(entities
-            .iter()
-            .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line"));
+        assert!(
+            entities
+                .iter()
+                .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line")
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -14365,14 +14720,18 @@ mod tests {
         let details = get_entity_details(&world, ElementId(element_id))
             .expect("dimension line details should exist");
         assert_eq!(details.entity_type, "dimension_line");
-        assert!(details
-            .properties
-            .iter()
-            .any(|property| property.name == "extension"));
-        assert!(details
-            .properties
-            .iter()
-            .any(|property| property.name == "length"));
+        assert!(
+            details
+                .properties
+                .iter()
+                .any(|property| property.name == "extension")
+        );
+        assert!(
+            details
+                .properties
+                .iter()
+                .any(|property| property.name == "length")
+        );
 
         let entities = list_entities(&world);
         assert!(entities.iter().any(|entry| {
@@ -15236,14 +15595,18 @@ mod tests {
                 .unwrap()["default_value"],
             json!(5.0)
         );
-        assert!(explain
-            .local_parameter_names
-            .iter()
-            .any(|name| name == "height"));
-        assert!(explain
-            .inherited_parameter_names
-            .iter()
-            .any(|name| name == "width"));
+        assert!(
+            explain
+                .local_parameter_names
+                .iter()
+                .any(|name| name == "height")
+        );
+        assert!(
+            explain
+                .inherited_parameter_names
+                .iter()
+                .any(|name| name == "width")
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -15542,12 +15905,16 @@ mod tests {
 
         assert_eq!(instantiated.definition_id, definition.definition_id);
         assert_eq!(instantiated.imported_definition_ids.len(), 2);
-        assert!(instantiated
-            .imported_definition_ids
-            .contains(&definition.definition_id));
-        assert!(instantiated
-            .imported_definition_ids
-            .contains(&base_definition.definition_id));
+        assert!(
+            instantiated
+                .imported_definition_ids
+                .contains(&definition.definition_id)
+        );
+        assert!(
+            instantiated
+                .imported_definition_ids
+                .contains(&base_definition.definition_id)
+        );
 
         let resolved = handle_resolve_occurrence(&target_world, instantiated.element_id)
             .expect("instantiated occurrence should resolve");
@@ -15628,9 +15995,11 @@ mod tests {
         assert_eq!(explanation.label, "HostedWindow");
         assert_eq!(explanation.hosting["host_element_id"], json!(host_id));
         assert_eq!(explanation.hosting["opening_element_id"], json!(opening_id));
-        assert!(explanation.hosting["anchors"]
-            .as_array()
-            .is_some_and(|anchors| anchors.len() >= 3));
+        assert!(
+            explanation.hosting["anchors"]
+                .as_array()
+                .is_some_and(|anchors| anchors.len() >= 3)
+        );
 
         let relations = handle_query_relations(
             &world,
