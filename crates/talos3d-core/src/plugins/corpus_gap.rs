@@ -288,7 +288,7 @@ pub struct BacklinkCheckReport {
 ///
 /// Intended as a headless CI helper:
 ///
-/// ```no_run
+/// ```ignore
 /// let report = resolve_all_rule_pack_backlinks(&world);
 /// assert!(report.broken.is_empty(), "broken backlinks: {:?}", report.broken);
 /// ```

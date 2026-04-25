@@ -18,6 +18,7 @@ pub mod compatibility;
 pub mod dependencies;
 pub mod entitlement;
 pub mod identity;
+pub mod manifests;
 pub mod material_specs;
 pub mod meta;
 pub mod nomination;
@@ -58,6 +59,11 @@ pub use entitlement::{
 pub use identity::{
     AssetId, AssetKindId, AssetRevision, ContentHash, PackId, PackRevision, SourceId,
     SourceRevision,
+};
+pub use manifests::{
+    CuratedManifest, CuratedManifestAppExt, CuratedManifestRegistry, ManifestKindDescriptor,
+    ManifestKindId, ManifestKindRegistry, ManifestWalkReport, RefField,
+    CURATED_MANIFEST_ASSET_KIND,
 };
 pub use material_specs::{
     next_material_spec_asset_id, AcousticProperties, FireProperties, MaterialIdentity,

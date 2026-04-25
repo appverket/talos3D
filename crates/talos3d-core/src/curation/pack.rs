@@ -839,7 +839,7 @@ label = "A TOML pack"
             target_kind: AssetKindId::new("pack"),
             target_id: AssetId::new("b"),
             revision: AssetRevision::initial(),
-            role: super::dependencies::DependencyRole::Execution,
+            role: crate::curation::dependencies::DependencyRole::Execution,
             optional: false,
         });
         reg.register(m_a).unwrap();
@@ -855,7 +855,7 @@ label = "A TOML pack"
             target_kind: AssetKindId::new("pack"),
             target_id: AssetId::new("b"),
             revision: AssetRevision::initial(),
-            role: super::dependencies::DependencyRole::Execution,
+            role: crate::curation::dependencies::DependencyRole::Execution,
             optional: false,
         });
         let mut m_b = minimal_manifest("b", "v1");
@@ -863,7 +863,7 @@ label = "A TOML pack"
             target_kind: AssetKindId::new("pack"),
             target_id: AssetId::new("a"),
             revision: AssetRevision::initial(),
-            role: super::dependencies::DependencyRole::Execution,
+            role: crate::curation::dependencies::DependencyRole::Execution,
             optional: false,
         });
         reg.register(m_a).unwrap();

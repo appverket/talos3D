@@ -9,6 +9,7 @@ use bevy::prelude::*;
 
 use crate::capability_registry::CapabilityRegistry;
 
+use super::manifests::{CuratedManifestRegistry, ManifestKindRegistry};
 use super::material_specs::MaterialSpecRegistry;
 use super::nomination::NominationQueue;
 use super::pack::PackRegistry;
@@ -30,6 +31,8 @@ impl Plugin for CurationPlugin {
         app.init_resource::<SourceRegistry>()
             .init_resource::<NominationQueue>()
             .init_resource::<RecipeArtifactRegistry>()
+            .init_resource::<ManifestKindRegistry>()
+            .init_resource::<CuratedManifestRegistry>()
             .init_resource::<MaterialSpecRegistry>()
             .init_resource::<HookRegistry>()
             .init_resource::<PackRegistry>()
