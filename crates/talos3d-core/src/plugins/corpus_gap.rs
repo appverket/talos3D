@@ -229,9 +229,7 @@ pub fn resolve_all_rule_pack_backlinks(world: &World) -> BacklinkCheckReport {
             continue;
         };
         total += 1;
-        let found = passage_registry
-            .and_then(|pr| pr.get(backlink))
-            .is_some();
+        let found = passage_registry.and_then(|pr| pr.get(backlink)).is_some();
         if found {
             resolved += 1;
         } else {
@@ -242,7 +240,11 @@ pub fn resolve_all_rule_pack_backlinks(world: &World) -> BacklinkCheckReport {
         }
     }
 
-    BacklinkCheckReport { total, resolved, broken }
+    BacklinkCheckReport {
+        total,
+        resolved,
+        broken,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +329,11 @@ mod tests {
     fn register_and_get_roundtrip() {
         let mut registry = CorpusPassageRegistry::default();
         let pref = PassageRef("BBR_8:22_riser_max".into());
-        registry.register(pref.clone(), "Stigningen ska vara högst 200 mm.", sample_provenance());
+        registry.register(
+            pref.clone(),
+            "Stigningen ska vara högst 200 mm.",
+            sample_provenance(),
+        );
         let entry = registry.get(&pref).expect("passage should be present");
         assert!(entry.text.contains("200 mm"));
     }

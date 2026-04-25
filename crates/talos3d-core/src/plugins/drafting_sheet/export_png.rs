@@ -21,6 +21,8 @@ use image::{Rgb, RgbImage};
 use super::sheet::{DraftingSheet, SheetBounds, SheetStroke};
 use bevy::math::Vec2;
 
+const DIMENSION_STROKE_RGB: Rgb<u8> = Rgb([74, 74, 78]);
+
 /// Render the sheet as an RGB PNG at the given DPI (dots per inch on
 /// paper). 150–300 DPI is typical for print output; 96 DPI for screen.
 #[must_use]
@@ -114,7 +116,7 @@ fn render_dim_prim(
             let (ax, ay) = to_px(*a);
             let (bx, by) = to_px(*b);
             let w = (stroke_mm * px_per_mm).max(1.0);
-            draw_line(img, ax, ay, bx, by, w, Rgb([0, 0, 0]));
+            draw_line(img, ax, ay, bx, by, w, DIMENSION_STROKE_RGB);
         }
         DimPrimitive::Tick {
             pos,
@@ -130,7 +132,7 @@ fn render_dim_prim(
             let (ax, ay) = to_px(a);
             let (bx, by) = to_px(b);
             let w = (stroke_mm * px_per_mm).max(1.0);
-            draw_line(img, ax, ay, bx, by, w, Rgb([0, 0, 0]));
+            draw_line(img, ax, ay, bx, by, w, DIMENSION_STROKE_RGB);
         }
         DimPrimitive::Arrow { tip, tail, .. } => {
             let (tx, ty) = to_px(*tip);
@@ -142,12 +144,18 @@ fn render_dim_prim(
                 bx,
                 by,
                 1.0_f32.max(px_per_mm * 0.18),
-                Rgb([0, 0, 0]),
+                DIMENSION_STROKE_RGB,
             );
         }
-        DimPrimitive::Dot { pos, .. } => {
+        DimPrimitive::Dot { pos, radius_mm } => {
             let (x, y) = to_px(*pos);
-            plot(img, x as i32, y as i32, Rgb([0, 0, 0]));
+            draw_disk(
+                img,
+                x,
+                y,
+                (radius_mm * px_per_mm).max(0.5),
+                DIMENSION_STROKE_RGB,
+            );
         }
         DimPrimitive::Text { .. } => {
             // Text is rendered by the SVG/PDF writers. For PNG MVP we
@@ -160,28 +168,73 @@ fn render_dim_prim(
 // ─── Minimal line / polygon rasteriser ───────────────────────────────────
 
 fn plot(img: &mut RgbImage, x: i32, y: i32, c: Rgb<u8>) {
+    blend_plot(img, x, y, c, 1.0);
+}
+
+fn blend_plot(img: &mut RgbImage, x: i32, y: i32, c: Rgb<u8>, alpha: f32) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    if alpha <= 0.0 {
+        return;
+    }
     if x >= 0 && y >= 0 && (x as u32) < img.width() && (y as u32) < img.height() {
-        img.put_pixel(x as u32, y as u32, c);
+        let pixel = img.get_pixel_mut(x as u32, y as u32);
+        for channel in 0..3 {
+            let dst = pixel[channel] as f32;
+            let src = c[channel] as f32;
+            pixel[channel] = (dst + (src - dst) * alpha).round().clamp(0.0, 255.0) as u8;
+        }
     }
 }
 
-/// Draw a thick line via "midpoint circle, per pixel on the Bresenham
-/// path". Good enough for arch-weight strokes.
+/// Draw an anti-aliased thick line using per-pixel coverage against the
+/// segment distance field.
 fn draw_line(img: &mut RgbImage, x0: f32, y0: f32, x1: f32, y1: f32, thickness: f32, c: Rgb<u8>) {
-    let radius = (thickness * 0.5).max(0.5) as i32;
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let len = (dx * dx + dy * dy).sqrt().max(1.0);
-    let steps = len.ceil() as i32;
-    for step in 0..=steps {
-        let t = step as f32 / steps as f32;
-        let px = (x0 + dx * t) as i32;
-        let py = (y0 + dy * t) as i32;
-        for oy in -radius..=radius {
-            for ox in -radius..=radius {
-                if ox * ox + oy * oy <= radius * radius {
-                    plot(img, px + ox, py + oy, c);
-                }
+    let radius = (thickness * 0.5).max(0.5);
+    let pad = radius + 1.0;
+    let min_x = (x0.min(x1) - pad).floor() as i32;
+    let max_x = (x0.max(x1) + pad).ceil() as i32;
+    let min_y = (y0.min(y1) - pad).floor() as i32;
+    let max_y = (y0.max(y1) + pad).ceil() as i32;
+    let a = Vec2::new(x0, y0);
+    let b = Vec2::new(x1, y1);
+
+    for y in min_y..=max_y {
+        let py = y as f32 + 0.5;
+        for x in min_x..=max_x {
+            let px = x as f32 + 0.5;
+            let dist = distance_to_segment(Vec2::new(px, py), a, b);
+            let alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
+            if alpha > 0.0 {
+                blend_plot(img, x, y, c, alpha);
+            }
+        }
+    }
+}
+
+fn distance_to_segment(point: Vec2, a: Vec2, b: Vec2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_squared();
+    if len_sq <= f32::EPSILON {
+        return point.distance(a);
+    }
+    let t = ((point - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    point.distance(a + ab * t)
+}
+
+fn draw_disk(img: &mut RgbImage, center_x: f32, center_y: f32, radius: f32, c: Rgb<u8>) {
+    let pad = radius + 1.0;
+    let min_x = (center_x - pad).floor() as i32;
+    let max_x = (center_x + pad).ceil() as i32;
+    let min_y = (center_y - pad).floor() as i32;
+    let max_y = (center_y + pad).ceil() as i32;
+    for y in min_y..=max_y {
+        let py = y as f32 + 0.5;
+        for x in min_x..=max_x {
+            let px = x as f32 + 0.5;
+            let dist = ((px - center_x).powi(2) + (py - center_y).powi(2)).sqrt();
+            let alpha = (radius + 0.5 - dist).clamp(0.0, 1.0);
+            if alpha > 0.0 {
+                blend_plot(img, x, y, c, alpha);
             }
         }
     }

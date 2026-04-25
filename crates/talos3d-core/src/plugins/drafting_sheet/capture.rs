@@ -24,6 +24,11 @@ use bevy::prelude::*;
 
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
+    dimension_line::{
+        dimension_line_midpoint, dimension_line_offset_vector,
+        render_dimension_line_projected_primitives, DimensionLineNode, DimensionLineVisibility,
+    },
+    document_properties::DocumentProperties,
     drafting::{
         self, DimPrimitive, DimensionAnnotationNode, DimensionInput, DimensionKind,
         DimensionStyleRegistry, DraftingVisibility,
@@ -280,21 +285,21 @@ fn capture_annotations(
     view_proj: &Mat4,
     map: &NdcToPaper,
 ) -> Vec<Vec<DimPrimitive>> {
+    let mut out = Vec::new();
+
     let Some(registry) = world.get_resource::<DimensionStyleRegistry>() else {
-        return Vec::new();
+        return capture_legacy_dimension_lines(world, view_proj, map, out);
     };
     let visibility = world
         .get_resource::<DraftingVisibility>()
         .cloned()
         .unwrap_or_default();
     if !visibility.show_all {
-        return Vec::new();
+        return capture_legacy_dimension_lines(world, view_proj, map, out);
     }
     let Some(mut q) = world.try_query::<&DimensionAnnotationNode>() else {
-        return Vec::new();
+        return capture_legacy_dimension_lines(world, view_proj, map, out);
     };
-
-    let mut out = Vec::new();
     for node in q.iter(world) {
         if !node.visible || !visibility.is_visible(&node.style_name, node.kind.tag()) {
             continue;
@@ -356,6 +361,58 @@ fn capture_annotations(
         // `world_to_paper = 1.0` because inputs are already paper-mm.
         let prims = drafting::render_dimension(&input, &style, 1.0);
         out.push(prims);
+    }
+    capture_legacy_dimension_lines(world, view_proj, map, out)
+}
+
+fn capture_legacy_dimension_lines(
+    world: &World,
+    view_proj: &Mat4,
+    map: &NdcToPaper,
+    mut out: Vec<Vec<DimPrimitive>>,
+) -> Vec<Vec<DimPrimitive>> {
+    let visible = world
+        .get_resource::<DimensionLineVisibility>()
+        .map(|visibility| visibility.show_all)
+        .unwrap_or(true);
+    let Some(doc_props) = world.get_resource::<DocumentProperties>() else {
+        return out;
+    };
+    if !visible {
+        return out;
+    }
+    let Some(mut q) = world.try_query::<&DimensionLineNode>() else {
+        return out;
+    };
+    for node in q.iter(world) {
+        if !node.visible {
+            continue;
+        }
+        let Some(start) = project_world_to_paper(node.start, view_proj, map) else {
+            continue;
+        };
+        let Some(end) = project_world_to_paper(node.end, view_proj, map) else {
+            continue;
+        };
+        let midpoint = dimension_line_midpoint(node);
+        let Some(mid) = project_world_to_paper(midpoint, view_proj, map) else {
+            continue;
+        };
+        let Some(mid_plus_offset) = project_world_to_paper(
+            midpoint + dimension_line_offset_vector(node),
+            view_proj,
+            map,
+        ) else {
+            continue;
+        };
+        out.push(render_dimension_line_projected_primitives(
+            node,
+            doc_props,
+            start,
+            end,
+            mid_plus_offset - mid,
+            1.0,
+        ));
     }
     out
 }

@@ -487,16 +487,19 @@ pub fn apply_promote_refinement(
     let target_state = request.target_state;
 
     // Read class/recipe assignment from the entity (if any).
-    let class_assignment: Option<ElementClassAssignment> = world
-        .get::<ElementClassAssignment>(entity)
-        .cloned();
+    let class_assignment: Option<ElementClassAssignment> =
+        world.get::<ElementClassAssignment>(entity).cloned();
 
     // Determine the effective recipe id: request overrides the component.
     let effective_recipe_id: Option<RecipeFamilyId> = request
         .recipe_id
         .as_ref()
         .map(|r| RecipeFamilyId(r.0.clone()))
-        .or_else(|| class_assignment.as_ref().and_then(|a| a.active_recipe.clone()));
+        .or_else(|| {
+            class_assignment
+                .as_ref()
+                .and_then(|a| a.active_recipe.clone())
+        });
 
     // Lookup descriptors from the registry (requires CapabilityRegistry resource).
     let (obligation_templates, _critical_paths) = {
@@ -579,7 +582,12 @@ pub fn apply_promote_refinement(
         q.iter(world)
             .find(|(_, id)| **id == eid)
             .map(|(entity, _)| entity)
-            .ok_or_else(|| format!("Entity {} not found after generate", request.entity_element_id))?
+            .ok_or_else(|| {
+                format!(
+                    "Entity {} not found after generate",
+                    request.entity_element_id
+                )
+            })?
     };
 
     // Apply satisfaction links to the initial obligation set.
@@ -631,20 +639,16 @@ pub fn apply_promote_refinement(
                         .get::<RefinementStateComponent>()
                         .map(|c| c.state)
                         .unwrap_or_default();
-                    let has_claim = entity_ref
-                        .get::<ClaimGrounding>()
-                        .is_some_and(|cg| {
-                            cg.claims.contains_key(&ClaimPath("top_datum_mm".into()))
-                        });
+                    let has_claim = entity_ref.get::<ClaimGrounding>().is_some_and(|cg| {
+                        cg.claims.contains_key(&ClaimPath("top_datum_mm".into()))
+                    });
                     state >= RefinementState::Constructible && has_claim
                 })
             };
 
             if target_ready {
                 // Satisfy the bears_on obligation with the target entity id.
-                if let Some(ob) =
-                    obligations.iter_mut().find(|o| o.id.0 == "bears_on")
-                {
+                if let Some(ob) = obligations.iter_mut().find(|o| o.id.0 == "bears_on") {
                     if ob.status == ObligationStatus::Unresolved {
                         ob.status = ObligationStatus::SatisfiedBy(target_eid.0);
                     }
@@ -655,9 +659,9 @@ pub fn apply_promote_refinement(
 
     // Install ObligationSet on the entity (replace any existing one).
     if !obligations.is_empty() {
-        world
-            .entity_mut(entity)
-            .insert(ObligationSet { entries: obligations });
+        world.entity_mut(entity).insert(ObligationSet {
+            entries: obligations,
+        });
     }
 
     // Apply grounding updates from the generate output.
@@ -692,9 +696,9 @@ pub fn apply_promote_refinement(
     if let Some(mut comp) = world.get_mut::<RefinementStateComponent>(entity) {
         comp.state = target_state;
     } else {
-        world
-            .entity_mut(entity)
-            .insert(RefinementStateComponent { state: target_state });
+        world.entity_mut(entity).insert(RefinementStateComponent {
+            state: target_state,
+        });
     }
 
     // Queue a history entry so the promotion is undoable.
@@ -767,9 +771,9 @@ pub fn apply_demote_refinement(
     if let Some(mut comp) = world.get_mut::<RefinementStateComponent>(entity) {
         comp.state = target_state;
     } else {
-        world
-            .entity_mut(entity)
-            .insert(RefinementStateComponent { state: target_state });
+        world.entity_mut(entity).insert(RefinementStateComponent {
+            state: target_state,
+        });
     }
 
     // Despawn `refined_into` relation entities.
@@ -811,10 +815,10 @@ struct RefinementStateSnapshot {
     state: RefinementState,
 }
 
-use std::any::Any;
 use crate::authored_entity::{
     AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, PropertyFieldDef,
 };
+use std::any::Any;
 
 impl AuthoredEntity for RefinementStateSnapshot {
     fn as_any(&self) -> &dyn Any {
@@ -885,9 +889,9 @@ impl AuthoredEntity for RefinementStateSnapshot {
             if let Some(mut comp) = world.get_mut::<RefinementStateComponent>(entity) {
                 comp.state = self.state;
             } else {
-                world.entity_mut(entity).insert(RefinementStateComponent {
-                    state: self.state,
-                });
+                world
+                    .entity_mut(entity)
+                    .insert(RefinementStateComponent { state: self.state });
             }
         }
     }

@@ -28,6 +28,9 @@ contributors use.
 - Keep changes aligned with the public platform surface.
 - Prefer explicit capability boundaries over hidden cross-module coupling.
 - Update public docs when architecture or user-facing behavior changes.
+- When creating commits in this repository, use only
+  `apphjon <dev@appverket.com>` for both author and committer.
+- Never commit as any other identity or personal email address.
 - Do not treat the `private/` directory as public project content.
 - If a task touches Bevy, egui, `bevy_egui`, engine upgrades, or panel sizing
   regressions, read [docs/ENGINE_FORK_WORKFLOW.md](./docs/ENGINE_FORK_WORKFLOW.md)

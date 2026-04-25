@@ -36,7 +36,9 @@ use talos3d_core::{
             handle_create_entity, handle_list_element_classes, handle_list_recipe_families,
             handle_promote_refinement, handle_run_validation,
         },
-        modeling::assembly::{AssemblyFactory, RelationFactory, RelationSnapshot, SemanticRelation},
+        modeling::assembly::{
+            AssemblyFactory, RelationFactory, RelationSnapshot, SemanticRelation,
+        },
         refinement::{
             ClaimGrounding, ClaimPath, ClaimRecord, Grounding, ObligationSet, ObligationStatus,
             RefinementState, RefinementStateComponent,
@@ -83,15 +85,17 @@ fn init_roof_test_world() -> World {
         ("refined_into", "Refined Into", "parent → child"),
         ("bears_on", "Bears On", "structural load path"),
     ] {
-        registry.register_relation_type(talos3d_core::capability_registry::RelationTypeDescriptor {
-            relation_type: rt.into(),
-            label: lbl.into(),
-            description: desc.into(),
-            valid_source_types: vec![],
-            valid_target_types: vec![],
-            parameter_schema: serde_json::json!({}),
-            participates_in_dependency_graph: false,
-        });
+        registry.register_relation_type(
+            talos3d_core::capability_registry::RelationTypeDescriptor {
+                relation_type: rt.into(),
+                label: lbl.into(),
+                description: desc.into(),
+                valid_source_types: vec![],
+                valid_target_types: vec![],
+                parameter_schema: serde_json::json!({}),
+                participates_in_dependency_graph: false,
+            },
+        );
     }
 
     registry.register_factory(WallFactory);
@@ -104,11 +108,7 @@ fn init_roof_test_world() -> World {
 
 /// Spawn a minimal entity tagged with the given element class and recipe.
 /// Returns the element-id (u64).
-fn spawn_element_entity(
-    world: &mut World,
-    class_id: &str,
-    recipe_id: &str,
-) -> u64 {
+fn spawn_element_entity(world: &mut World, class_id: &str, recipe_id: &str) -> u64 {
     let eid = world.resource::<ElementIdAllocator>().next_id();
     world.spawn((
         eid,
@@ -281,7 +281,11 @@ fn promote_roof_with_bears_on_relation_satisfies_all_five_obligations() {
         obligation_set.entries.len(),
         5,
         "primary_framing + sheathing + underlayment + finish + bears_on; got: {:?}",
-        obligation_set.entries.iter().map(|o| &o.id.0).collect::<Vec<_>>()
+        obligation_set
+            .entries
+            .iter()
+            .map(|o| &o.id.0)
+            .collect::<Vec<_>>()
     );
 
     // All 5 obligations must be satisfied.
@@ -358,9 +362,14 @@ fn promote_roof_without_bears_on_relation_leaves_bears_on_unresolved() {
         .filter(|o| matches!(o.status, ObligationStatus::SatisfiedBy(_)))
         .count();
     assert_eq!(
-        satisfied_count, 4,
+        satisfied_count,
+        4,
         "exactly 4 child-spawned obligations should be SatisfiedBy; got: {:?}",
-        obligation_set.entries.iter().map(|o| (&o.id.0, &o.status)).collect::<Vec<_>>()
+        obligation_set
+            .entries
+            .iter()
+            .map(|o| (&o.id.0, &o.status))
+            .collect::<Vec<_>>()
     );
 
     let bears_on_ob = obligation_set

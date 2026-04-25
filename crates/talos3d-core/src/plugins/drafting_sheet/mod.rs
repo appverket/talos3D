@@ -1,7 +1,7 @@
 //! PP69 — DraftingSheet: a 2D paper-native drawing document derived from
 //! a 3D view.
 //!
-//! See `private/docs/proof_points/PROOF_POINT_69.md`.
+//! This module originated from the paper-native drafting sheet proof-point work.
 //!
 //! Public surface:
 //!

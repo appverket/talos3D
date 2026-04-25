@@ -132,10 +132,63 @@ pub fn dimension_annotation_plane(
         (Some(orbit), Some(camera_transform))
             if orbit.projection_mode == CameraProjectionMode::Isometric =>
         {
-            DrawingPlane::from_face(orbit.focus, Vec3::from(camera_transform.forward()))
+            orthogonal_dimension_plane(orbit.focus, camera_transform)
         }
         _ => drawing_plane.clone(),
     }
+}
+
+fn orthogonal_dimension_plane(origin: Vec3, camera_transform: &GlobalTransform) -> DrawingPlane {
+    let normal = snapped_orthogonal_normal(Vec3::from(camera_transform.forward()));
+    let mut tangent = reject_from_plane(Vec3::from(camera_transform.right()), normal)
+        .try_normalize()
+        .unwrap_or_else(|| orthogonal_plane_basis(normal).0);
+    let bitangent = reject_from_plane(Vec3::from(camera_transform.up()), normal)
+        .try_normalize()
+        .or_else(|| normal.cross(tangent).try_normalize())
+        .unwrap_or_else(|| orthogonal_plane_basis(normal).1);
+    tangent = (tangent - bitangent * tangent.dot(bitangent))
+        .try_normalize()
+        .unwrap_or(tangent);
+    DrawingPlane {
+        origin,
+        normal,
+        tangent,
+        bitangent,
+    }
+}
+
+fn snapped_orthogonal_normal(direction: Vec3) -> Vec3 {
+    let abs = direction.abs();
+    if abs.x >= abs.y && abs.x >= abs.z {
+        Vec3::X * non_zero_sign(direction.x)
+    } else if abs.y >= abs.z {
+        Vec3::Y * non_zero_sign(direction.y)
+    } else {
+        Vec3::Z * non_zero_sign(direction.z)
+    }
+}
+
+fn non_zero_sign(value: f32) -> f32 {
+    if value < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+fn orthogonal_plane_basis(normal: Vec3) -> (Vec3, Vec3) {
+    if normal.x.abs() > 0.9 {
+        (Vec3::Z, Vec3::Y)
+    } else if normal.y.abs() > 0.9 {
+        (Vec3::X, Vec3::Z)
+    } else {
+        (Vec3::X, Vec3::Y)
+    }
+}
+
+fn reject_from_plane(vector: Vec3, normal: Vec3) -> Vec3 {
+    vector - normal * vector.dot(normal)
 }
 
 /// Build an orthonormal tangent frame from a normal vector.

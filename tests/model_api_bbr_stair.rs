@@ -147,7 +147,9 @@ fn noncompliant_riser_fires_bbr_8_22_riser_max() {
 
     let findings = bbr_findings(&world, eid);
     assert!(
-        findings.iter().any(|(id, sev)| id == "BBR_8_22_riser_max" && sev == "error"),
+        findings
+            .iter()
+            .any(|(id, sev)| id == "BBR_8_22_riser_max" && sev == "error"),
         "riser 220 must fire BBR_8_22_riser_max error; got: {findings:?}"
     );
 }
@@ -168,7 +170,9 @@ fn noncompliant_tread_fires_bbr_8_22_tread_min() {
 
     let findings = bbr_findings(&world, eid);
     assert!(
-        findings.iter().any(|(id, sev)| id == "BBR_8_22_tread_min" && sev == "error"),
+        findings
+            .iter()
+            .any(|(id, sev)| id == "BBR_8_22_tread_min" && sev == "error"),
         "tread 220 must fire BBR_8_22_tread_min error; got: {findings:?}"
     );
 }
@@ -189,9 +193,9 @@ fn noncompliant_clear_width_fires_bbr_residential_clear_width() {
 
     let findings = bbr_findings(&world, eid);
     assert!(
-        findings.iter().any(|(id, sev)| {
-            id == "BBR_residential_clear_width" && sev == "error"
-        }),
+        findings
+            .iter()
+            .any(|(id, sev)| { id == "BBR_residential_clear_width" && sev == "error" }),
         "clear width 850 must fire BBR_residential_clear_width error; got: {findings:?}"
     );
 }

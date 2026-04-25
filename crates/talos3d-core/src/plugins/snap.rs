@@ -20,10 +20,18 @@ const SNAP_HALO_RADIUS: f32 = 0.11;
 
 pub struct SnapPlugin;
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SnapSystems {
+    Resolve,
+    Draw,
+}
+
 impl Plugin for SnapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SnapResult>()
-            .add_systems(Update, (update_snap_result, draw_snap_indicator));
+            .configure_sets(Update, (SnapSystems::Resolve, SnapSystems::Draw).chain())
+            .add_systems(Update, update_snap_result.in_set(SnapSystems::Resolve))
+            .add_systems(Update, draw_snap_indicator.in_set(SnapSystems::Draw));
     }
 }
 

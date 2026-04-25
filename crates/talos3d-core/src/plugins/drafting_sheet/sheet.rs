@@ -26,7 +26,7 @@ use crate::plugins::section_fill::HatchPattern;
 /// [`SheetStroke::weight_mm`]). Consumers (SVG/PDF/DXF writers) are free
 /// to pick their own mapping but should preserve the *ordering*:
 ///
-/// `SectionCut ≥ Silhouette ≥ Dimension`
+/// `SectionCut ≥ Silhouette > Crease/Boundary ≥ Dimension`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SheetStroke {
     /// Outline where the section plane slices through solid material.
@@ -51,7 +51,8 @@ impl SheetStroke {
     pub fn weight_mm(self) -> f32 {
         match self {
             Self::SectionCut => 0.70,
-            Self::Silhouette | Self::Crease | Self::Boundary => 0.35,
+            Self::Silhouette => 0.35,
+            Self::Crease | Self::Boundary => 0.25,
             Self::Dimension | Self::Hatch => 0.18,
         }
     }
@@ -272,6 +273,8 @@ mod tests {
         assert!(SheetStroke::Silhouette.weight_mm() >= SheetStroke::Dimension.weight_mm());
         assert!(SheetStroke::Crease.weight_mm() >= SheetStroke::Dimension.weight_mm());
         assert!(SheetStroke::Boundary.weight_mm() >= SheetStroke::Dimension.weight_mm());
+        assert!(SheetStroke::Silhouette.weight_mm() > SheetStroke::Crease.weight_mm());
+        assert!(SheetStroke::Silhouette.weight_mm() > SheetStroke::Boundary.weight_mm());
     }
 
     #[test]
