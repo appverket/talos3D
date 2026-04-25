@@ -282,6 +282,7 @@ fn create_profile_from_closed_polyline(
                 height,
             },
             rotation: ShapeRotation(rotation),
+            material_assignment: None,
         }
         .into()
     };

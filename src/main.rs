@@ -118,6 +118,10 @@ fn main() {
     .add_plugins(talos3d_core::plugins::recipe_drafts::RecipeDraftPlugin)
     .add_plugins(talos3d_core::plugins::assembly_pattern_drafts::AssemblyPatternDraftPlugin)
     .add_plugins(talos3d_core::plugins::session_draft_cache::SessionDraftCachePlugin)
+    // PP79–PP80 curation substrate: SourceRegistry (seeded with Canonical
+    // ISO 129-1 / ASME Y14.5 / ISO 80000-1) + NominationQueue.
+    // See ADR-040 and the CURATION_SUBSTRATE agreement.
+    .add_plugins(talos3d_core::curation::CurationPlugin)
     .add_plugins(ArchitectureCorePlugin);
 
     #[cfg(feature = "terrain")]
