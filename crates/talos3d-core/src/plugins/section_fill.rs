@@ -20,7 +20,6 @@ use bevy::{
 use serde::{Deserialize, Serialize};
 
 use crate::curation::MaterialSpecRegistry;
-use crate::curation::MaterialSpecRegistry;
 use crate::plugins::{
     clipping_planes::ClipPlaneNode,
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
