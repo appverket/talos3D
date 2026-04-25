@@ -12,9 +12,11 @@
 //! bodies, validators, and authoring MCP surfaces live in capability crates.
 
 pub mod api;
+pub mod authoring_script;
 pub mod compat_shim;
 pub mod compatibility;
 pub mod dependencies;
+pub mod entitlement;
 pub mod identity;
 pub mod material_specs;
 pub mod meta;
@@ -26,19 +28,33 @@ pub mod provenance;
 pub mod publication;
 pub mod recipes;
 pub mod registry;
+pub mod replay;
 pub mod scope_trust;
 pub mod source;
+pub mod synthesis;
 
+pub use authoring_script::{
+    ArgExpr, AuthoringScript, AuthoringScriptStructuralError, McpToolId, MutationScope, OutputPath,
+    Postcondition, Predicate, Step, StepId, AUTHORING_SCRIPT_SCHEMA_VERSION,
+};
 pub use plugin::CurationPlugin;
 pub use publication::{evidence_resolution_report, PublicationFinding, PublicationFindingSeverity};
 pub use recipes::{
     mirror_recipe_descriptors_to_artifacts, recipe_artifact_from_descriptor, NativeFnId,
     RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest, RECIPE_ARTIFACT_KIND,
 };
+pub use replay::{
+    replay, InvocationError, InvocationReport, PostconditionOracle, PostconditionResult,
+    PostconditionVerdict, ResolvedPostcondition, ToolCall, ToolDispatchError, ToolDispatcher,
+};
 
 pub use compat_shim::corpus_provenance_to_registry_entry;
 pub use compatibility::{CapabilityCompat, CompatibilityRef, SchemaVersion, VersionReq};
 pub use dependencies::{DependencyRef, DependencyRole};
+pub use entitlement::{
+    Actor, AllowAllEntitlements, AlwaysDenyEntitlements, Entitlement, EntitlementError,
+    EntitlementResolver,
+};
 pub use identity::{
     AssetId, AssetKindId, AssetRevision, ContentHash, PackId, PackRevision, SourceId,
     SourceRevision,
@@ -50,7 +66,11 @@ pub use material_specs::{
 };
 pub use meta::CurationMeta;
 pub use nomination::{Nomination, NominationError, NominationId, NominationKind, NominationQueue};
-pub use pack::{EntitlementHook, PackManifest, PackRef};
+pub use pack::{
+    check_pack_compatibility, detect_cycles, load_pack, load_pack_open, resolve_pack_deps,
+    CompatFinding, CompatFindingSeverity, DepResolverCtx, EntitlementHook, PackError, PackManifest,
+    PackRef, PackRegistry, ResolvedPack,
+};
 pub use policy::{
     HookRegistry, JurisdictionPolicyHook, JurisdictionPolicyHookId, LicenseMode, PublicationPolicy,
     ValidityFloor,
@@ -62,3 +82,7 @@ pub use provenance::{
 pub use registry::{ensure_canonical_seed, SourceFilter, SourceRegistry};
 pub use scope_trust::{Scope, Trust, ValidationStatus};
 pub use source::{SourceLicense, SourceRegistryEntry, SourceStatus, SourceTier};
+pub use synthesis::{
+    synthesize, EmittedGap, FixtureSynthesisLlm, GapSink, LlmError, McpCall, SynthesisError,
+    SynthesisLlm, SynthesisPrompt, UngroundedFixture, VecGapSink, DEFAULT_MAX_STEPS,
+};

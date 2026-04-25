@@ -836,6 +836,183 @@ pub fn report_corpus_gap(
         .0
 }
 
+// ---------------------------------------------------------------------------
+// Pack handlers (PP84)
+// ---------------------------------------------------------------------------
+
+/// Short summary of a pack manifest for list responses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct PackManifestInfo {
+    pub pack_id: String,
+    pub revision: String,
+    pub label: String,
+    pub asset_count: usize,
+    pub source_count: usize,
+    pub dep_count: usize,
+    pub has_entitlement: bool,
+    pub core_api_req: Option<String>,
+}
+
+impl From<&super::pack::PackManifest> for PackManifestInfo {
+    fn from(m: &super::pack::PackManifest) -> Self {
+        Self {
+            pack_id: m.pack_id.0.clone(),
+            revision: m.revision.0.clone(),
+            label: m.label.clone(),
+            asset_count: m.assets.len(),
+            source_count: m.sources.len(),
+            dep_count: m.dependencies.len(),
+            has_entitlement: m.entitlement.is_some(),
+            core_api_req: m.compatibility.core_api.as_ref().map(|r| r.0.clone()),
+        }
+    }
+}
+
+/// Compatibility finding DTO.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct CompatFindingInfo {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+}
+
+impl From<&super::pack::CompatFinding> for CompatFindingInfo {
+    fn from(f: &super::pack::CompatFinding) -> Self {
+        Self {
+            severity: match f.severity {
+                super::pack::CompatFindingSeverity::Advisory => "advisory",
+                super::pack::CompatFindingSeverity::Error => "error",
+            }
+            .into(),
+            code: f.code.to_owned(),
+            message: f.message.clone(),
+        }
+    }
+}
+
+/// `list_packs` — lists all registered packs.
+pub fn list_packs(world: &World) -> Vec<PackManifestInfo> {
+    let Some(registry) = world.get_resource::<super::pack::PackRegistry>() else {
+        return Vec::new();
+    };
+    registry.iter().map(PackManifestInfo::from).collect()
+}
+
+/// `get_pack_manifest { pack_id, revision? }` — returns the full manifest
+/// for the latest (or a specific) revision.
+pub fn get_pack_manifest(
+    world: &World,
+    pack_id: &str,
+    revision: Option<&str>,
+) -> ApiResult<super::pack::PackManifest> {
+    let registry = world
+        .get_resource::<super::pack::PackRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.pack_registry_missing".into(),
+            message: "PackRegistry resource not installed".into(),
+        })?;
+    let pid = super::identity::PackId::new(pack_id);
+    let manifest = if let Some(rev) = revision {
+        registry.get(&pid, &super::identity::PackRevision::new(rev))
+    } else {
+        registry.latest(&pid)
+    };
+    manifest.cloned().ok_or_else(|| ApiFailure {
+        code: "curation.pack_not_found".into(),
+        message: format!(
+            "no pack '{}' revision '{}'",
+            pack_id,
+            revision.unwrap_or("(latest)")
+        ),
+    })
+}
+
+/// `resolve_pack_deps { pack_id, revision? }` — runs dep resolution and
+/// returns the resolved report.
+pub fn resolve_pack_deps_handler(
+    world: &World,
+    pack_id: &str,
+    revision: Option<&str>,
+) -> ApiResult<super::pack::ResolvedPack> {
+    let pack_registry = world
+        .get_resource::<super::pack::PackRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.pack_registry_missing".into(),
+            message: "PackRegistry resource not installed".into(),
+        })?;
+    let recipe_registry = world
+        .get_resource::<RecipeArtifactRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.recipe_registry_missing".into(),
+            message: "RecipeArtifactRegistry not installed".into(),
+        })?;
+    let source_registry = world
+        .get_resource::<SourceRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.source_registry_missing".into(),
+            message: "SourceRegistry resource not installed".into(),
+        })?;
+
+    let pid = super::identity::PackId::new(pack_id);
+    let manifest = if let Some(rev) = revision {
+        pack_registry.get(&pid, &super::identity::PackRevision::new(rev))
+    } else {
+        pack_registry.latest(&pid)
+    }
+    .ok_or_else(|| ApiFailure {
+        code: "curation.pack_not_found".into(),
+        message: format!(
+            "no pack '{}' revision '{}'",
+            pack_id,
+            revision.unwrap_or("(latest)")
+        ),
+    })?;
+
+    let ctx = super::pack::DepResolverCtx {
+        recipes: recipe_registry,
+        sources: source_registry,
+    };
+    super::pack::resolve_pack_deps(manifest, &ctx).map_err(|e| ApiFailure {
+        code: "curation.pack_dep_unresolved".into(),
+        message: e.to_string(),
+    })
+}
+
+/// `check_pack_compatibility { pack_id, revision?, platform_version }` —
+/// returns all compatibility findings for the running platform version.
+pub fn check_pack_compatibility_handler(
+    world: &World,
+    pack_id: &str,
+    revision: Option<&str>,
+    platform_version: &str,
+) -> ApiResult<Vec<CompatFindingInfo>> {
+    let pack_registry = world
+        .get_resource::<super::pack::PackRegistry>()
+        .ok_or_else(|| ApiFailure {
+            code: "curation.pack_registry_missing".into(),
+            message: "PackRegistry resource not installed".into(),
+        })?;
+    let pid = super::identity::PackId::new(pack_id);
+    let manifest = if let Some(rev) = revision {
+        pack_registry.get(&pid, &super::identity::PackRevision::new(rev))
+    } else {
+        pack_registry.latest(&pid)
+    }
+    .ok_or_else(|| ApiFailure {
+        code: "curation.pack_not_found".into(),
+        message: format!(
+            "no pack '{}' revision '{}'",
+            pack_id,
+            revision.unwrap_or("(latest)")
+        ),
+    })?;
+
+    let findings = super::pack::check_pack_compatibility(manifest, platform_version);
+    Ok(findings.iter().map(CompatFindingInfo::from).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

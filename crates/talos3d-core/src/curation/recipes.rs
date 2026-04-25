@@ -18,8 +18,8 @@
 //! `RecipeArtifactRegistry` resource. A later slice installs a startup
 //! mirror that walks `CapabilityRegistry.recipe_family_descriptors` and
 //! fills the artifact registry at `Scope::Shipped, Trust::Published,
-//! body: NativeFnRef`. The `AuthoringScript` body variant gets its
-//! actual schema in PP82; here it's a minimal opaque placeholder.
+//! body: NativeFnRef`. The `AuthoringScript` body variant carries the
+//! typed PP82 authoring-script schema.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -64,8 +64,7 @@ impl NativeFnId {
 
 /// Recipe body union. `NativeFnRef` points at a `GenerateFn` registered
 /// in `CapabilityRegistry`; `AuthoringScript` carries a normalized
-/// parameterized script over the Model API surface (shape filled in by
-/// PP82).
+/// parameterized script over the Model API surface (ADR-041 / PP82).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -76,9 +75,11 @@ pub enum RecipeBody {
         family_id: RecipeFamilyId,
         fn_id: NativeFnId,
     },
-    /// Placeholder for the `AuthoringScript` body format. PP82 replaces
-    /// the `opaque` field with the real typed schema.
-    AuthoringScript { opaque: Value },
+    /// Normalized parameterized authoring script (ADR-041 / PP82). The
+    /// script's schema is defined in `curation::authoring_script`.
+    AuthoringScript {
+        script: super::authoring_script::AuthoringScript,
+    },
 }
 
 impl RecipeBody {
@@ -87,14 +88,31 @@ impl RecipeBody {
         Self::NativeFnRef { family_id, fn_id }
     }
 
+    /// Build an `AuthoringScript` body from a pre-built script.
+    pub fn authoring_script(script: super::authoring_script::AuthoringScript) -> Self {
+        Self::AuthoringScript { script }
+    }
+
     pub fn is_native(&self) -> bool {
         matches!(self, Self::NativeFnRef { .. })
+    }
+
+    pub fn is_authoring_script(&self) -> bool {
+        matches!(self, Self::AuthoringScript { .. })
     }
 
     pub fn family_id(&self) -> Option<&RecipeFamilyId> {
         match self {
             Self::NativeFnRef { family_id, .. } => Some(family_id),
             Self::AuthoringScript { .. } => None,
+        }
+    }
+
+    /// Borrow the authoring script, if this body is one.
+    pub fn script(&self) -> Option<&super::authoring_script::AuthoringScript> {
+        match self {
+            Self::AuthoringScript { script } => Some(script),
+            Self::NativeFnRef { .. } => None,
         }
     }
 }
@@ -331,13 +349,17 @@ mod tests {
     fn recipe_body_is_native_helper() {
         let n = RecipeBody::native(RecipeFamilyId("x".into()));
         assert!(n.is_native());
+        assert!(!n.is_authoring_script());
         assert_eq!(n.family_id().unwrap().0, "x");
 
-        let s = RecipeBody::AuthoringScript {
-            opaque: serde_json::json!({}),
-        };
+        let s =
+            RecipeBody::authoring_script(super::super::authoring_script::AuthoringScript::stub(
+                super::super::authoring_script::MutationScope::None,
+            ));
         assert!(!s.is_native());
+        assert!(s.is_authoring_script());
         assert!(s.family_id().is_none());
+        assert!(s.script().is_some());
     }
 
     #[test]
