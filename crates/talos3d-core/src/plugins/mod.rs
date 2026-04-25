@@ -1,5 +1,5 @@
-pub mod assistant_chat;
 pub mod assembly_pattern_drafts;
+pub mod assistant_chat;
 pub mod authoring_guidance;
 pub mod bundled_definition_libraries;
 pub mod camera;
