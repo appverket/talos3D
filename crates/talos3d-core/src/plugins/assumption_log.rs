@@ -32,7 +32,6 @@ use crate::plugins::refinement::{AgentId, ClaimPath};
 /// architecture-specific names like "building" or "system" as enum
 /// variants in core.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "anchor", rename_all = "snake_case")]
 pub enum AssumptionAnchor {
     /// Whole-project intent. The element id of a project root entity
@@ -74,7 +73,6 @@ impl AssumptionAnchor {
 /// the assumption in plain language ("the agent assumed", "you
 /// chose", "the BBR rule prescribes", etc.).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum AssumptionDefaultSource {
     /// User explicitly provided this value (or locked it).
@@ -99,7 +97,6 @@ pub enum AssumptionDefaultSource {
 /// label assumption families (`"truss_variant"`, `"foundation_choice"`,
 /// `"hull_form"`) without hard-coding them in core.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AssumptionEntry {
     pub kind: String,
     /// Optional vocabulary concept this assumption resolves
@@ -188,7 +185,6 @@ impl AssumptionEntry {
 /// at the project root). The component is attached to the entity that
 /// represents that intent.
 #[derive(Component, Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AssumptionLog {
     pub anchor: Option<AssumptionAnchor>,
     pub entries: Vec<AssumptionEntry>,
