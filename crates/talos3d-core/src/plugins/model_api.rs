@@ -10,9 +10,13 @@ use serde_json::Value;
 
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
+#[cfg(feature = "model-api")]
+use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
+use crate::curation::MaterialSpecBody;
 use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
 use crate::plugins::identity::ElementIdAllocator;
+use crate::plugins::materials::MaterialAssignment;
 #[cfg(feature = "model-api")]
 use crate::plugins::materials::MaterialDef;
 use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
@@ -41,7 +45,7 @@ use crate::plugins::{
     lighting::{
         create_daylight_rig, scene_light_object_exposed, SceneLightNode, SceneLightingSettings,
     },
-    materials::{MaterialAssignment, MaterialRegistry},
+    materials::{normalize_material_textures, MaterialRegistry, TextureRef, TextureRegistry},
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
     selection::Selected,
@@ -308,7 +312,9 @@ pub struct SplitResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MaterialInfo {
     pub id: String,
+    pub asset_id: String,
     pub name: String,
+    pub spec_ref: Option<String>,
     pub base_color: [f32; 4],
     pub perceptual_roughness: f32,
     pub metallic: f32,
@@ -352,18 +358,38 @@ pub struct MaterialInfo {
 
 impl MaterialInfo {
     #[cfg(feature = "model-api")]
-    fn from_def(def: &MaterialDef) -> Self {
-        use crate::plugins::materials::TextureRef;
-
-        fn tex_data(t: &Option<TextureRef>) -> Option<String> {
+    fn from_def(def: &MaterialDef, texture_registry: &TextureRegistry) -> Self {
+        fn tex_data(t: &Option<TextureRef>, texture_registry: &TextureRegistry) -> Option<String> {
             match t {
+                Some(TextureRef::TextureAsset { id }) => {
+                    texture_registry
+                        .get(id)
+                        .and_then(|asset| match &asset.payload {
+                            crate::plugins::materials::TexturePayload::Embedded {
+                                data, ..
+                            } => Some(data.clone()),
+                            crate::plugins::materials::TexturePayload::AssetPath(path) => {
+                                Some(path.clone())
+                            }
+                        })
+                }
                 Some(TextureRef::Embedded { data, .. }) => Some(data.clone()),
                 Some(TextureRef::AssetPath(p)) => Some(p.clone()),
                 None => None,
             }
         }
-        fn tex_mime(t: &Option<TextureRef>) -> Option<String> {
+        fn tex_mime(t: &Option<TextureRef>, texture_registry: &TextureRegistry) -> Option<String> {
             match t {
+                Some(TextureRef::TextureAsset { id }) => {
+                    texture_registry
+                        .get(id)
+                        .and_then(|asset| match &asset.payload {
+                            crate::plugins::materials::TexturePayload::Embedded {
+                                mime, ..
+                            } => Some(mime.clone()),
+                            crate::plugins::materials::TexturePayload::AssetPath(_) => None,
+                        })
+                }
                 Some(TextureRef::Embedded { mime, .. }) => Some(mime.clone()),
                 Some(TextureRef::AssetPath(_)) => None,
                 None => None,
@@ -372,7 +398,9 @@ impl MaterialInfo {
 
         Self {
             id: def.id.clone(),
+            asset_id: def.asset_id().to_string(),
             name: def.name.clone(),
+            spec_ref: def.spec_ref.as_ref().map(|id| id.as_str().to_string()),
             base_color: def.base_color,
             perceptual_roughness: def.perceptual_roughness,
             metallic: def.metallic,
@@ -397,16 +425,19 @@ impl MaterialInfo {
             depth_bias: def.depth_bias,
             uv_scale: def.uv_scale,
             uv_rotation_deg: def.uv_rotation.to_degrees(),
-            base_color_texture: tex_data(&def.base_color_texture),
-            base_color_texture_mime: tex_mime(&def.base_color_texture),
-            normal_map_texture: tex_data(&def.normal_map_texture),
-            normal_map_texture_mime: tex_mime(&def.normal_map_texture),
-            metallic_roughness_texture: tex_data(&def.metallic_roughness_texture),
-            metallic_roughness_texture_mime: tex_mime(&def.metallic_roughness_texture),
-            emissive_texture: tex_data(&def.emissive_texture),
-            emissive_texture_mime: tex_mime(&def.emissive_texture),
-            occlusion_texture: tex_data(&def.occlusion_texture),
-            occlusion_texture_mime: tex_mime(&def.occlusion_texture),
+            base_color_texture: tex_data(&def.base_color_texture, texture_registry),
+            base_color_texture_mime: tex_mime(&def.base_color_texture, texture_registry),
+            normal_map_texture: tex_data(&def.normal_map_texture, texture_registry),
+            normal_map_texture_mime: tex_mime(&def.normal_map_texture, texture_registry),
+            metallic_roughness_texture: tex_data(&def.metallic_roughness_texture, texture_registry),
+            metallic_roughness_texture_mime: tex_mime(
+                &def.metallic_roughness_texture,
+                texture_registry,
+            ),
+            emissive_texture: tex_data(&def.emissive_texture, texture_registry),
+            emissive_texture_mime: tex_mime(&def.emissive_texture, texture_registry),
+            occlusion_texture: tex_data(&def.occlusion_texture, texture_registry),
+            occlusion_texture_mime: tex_mime(&def.occlusion_texture, texture_registry),
         }
     }
 }
@@ -415,6 +446,8 @@ impl MaterialInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateMaterialRequest {
     pub name: String,
+    #[serde(default)]
+    pub spec_ref: Option<String>,
     #[serde(default = "default_base_color")]
     pub base_color: [f32; 4],
     #[serde(default = "default_roughness")]
@@ -526,6 +559,55 @@ fn default_uv_scale() -> [f32; 2] {
 pub struct ApplyMaterialRequest {
     pub material_id: String,
     pub element_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetMaterialAssignmentRequest {
+    pub element_id: u64,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SetMaterialAssignmentRequest {
+    pub element_ids: Vec<u64>,
+    pub assignment: MaterialAssignment,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntityMaterialAssignmentInfo {
+    pub element_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment: Option<MaterialAssignment>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetMaterialSpecRequest {
+    pub asset_id: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UpdateMaterialSpecRequest {
+    pub asset_id: String,
+    pub body: MaterialSpecBody,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SaveMaterialSpecRequest {
+    pub asset_id: String,
+    pub scope: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeleteMaterialSpecRequest {
+    pub asset_id: String,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -1224,6 +1306,45 @@ enum ModelApiRequest {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    GetMaterialAssignment {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<EntityMaterialAssignmentInfo>>,
+    },
+    SetMaterialAssignment {
+        request: SetMaterialAssignmentRequest,
+        response: oneshot::Sender<ApiResult<Vec<EntityMaterialAssignmentInfo>>>,
+    },
+    ListMaterialSpecs {
+        filter: ListMaterialSpecsFilter,
+        response: oneshot::Sender<ApiResult<Vec<MaterialSpecInfo>>>,
+    },
+    GetMaterialSpec {
+        asset_id: String,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    CreateMaterialSpec {
+        request: DraftMaterialSpecRequest,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    UpdateMaterialSpec {
+        asset_id: String,
+        body: MaterialSpecBody,
+        rationale: Option<String>,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    SaveMaterialSpec {
+        asset_id: String,
+        scope: String,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    PublishMaterialSpec {
+        asset_id: String,
+        response: oneshot::Sender<ApiResult<MaterialSpecInfo>>,
+    },
+    DeleteMaterialSpec {
+        asset_id: String,
+        response: oneshot::Sender<ApiResult<String>>,
+    },
     GetLightingScene(oneshot::Sender<LightingSceneInfo>),
     ListLights(oneshot::Sender<Vec<SceneLightInfo>>),
     CreateLight {
@@ -1830,6 +1951,47 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         } => {
             let _ = response.send(handle_remove_material(world, element_ids));
         }
+        ModelApiRequest::GetMaterialAssignment {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_material_assignment(world, element_id));
+        }
+        ModelApiRequest::SetMaterialAssignment { request, response } => {
+            let _ = response.send(handle_set_material_assignment(world, request));
+        }
+        ModelApiRequest::ListMaterialSpecs { filter, response } => {
+            let _ = response.send(handle_list_material_specs(world, filter));
+        }
+        ModelApiRequest::GetMaterialSpec { asset_id, response } => {
+            let _ = response.send(handle_get_material_spec(world, &asset_id));
+        }
+        ModelApiRequest::CreateMaterialSpec { request, response } => {
+            let _ = response.send(handle_create_material_spec(world, request));
+        }
+        ModelApiRequest::UpdateMaterialSpec {
+            asset_id,
+            body,
+            rationale,
+            response,
+        } => {
+            let _ = response.send(handle_update_material_spec(
+                world, &asset_id, body, rationale,
+            ));
+        }
+        ModelApiRequest::SaveMaterialSpec {
+            asset_id,
+            scope,
+            response,
+        } => {
+            let _ = response.send(handle_save_material_spec(world, &asset_id, &scope));
+        }
+        ModelApiRequest::PublishMaterialSpec { asset_id, response } => {
+            let _ = response.send(handle_publish_material_spec(world, &asset_id));
+        }
+        ModelApiRequest::DeleteMaterialSpec { asset_id, response } => {
+            let _ = response.send(handle_delete_material_spec(world, &asset_id));
+        }
         ModelApiRequest::GetLightingScene(response) => {
             let _ = response.send(handle_get_lighting_scene(world));
         }
@@ -2314,7 +2476,10 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::ListConstraints { scope, response } => {
             let _ = response.send(handle_list_constraints(world, scope));
         }
-        ModelApiRequest::RunValidationV2 { element_id, response } => {
+        ModelApiRequest::RunValidationV2 {
+            element_id,
+            response,
+        } => {
             // Force a fresh sweep, then read from the Findings resource.
             crate::plugins::validation::validation_sweep_system(world);
             let _ = response.send(handle_run_validation_v2(world, element_id));
@@ -3293,6 +3458,129 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_get_material_assignment(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<EntityMaterialAssignmentInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetMaterialAssignment {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_set_material_assignment(
+        &self,
+        request: SetMaterialAssignmentRequest,
+    ) -> ApiResult<Vec<EntityMaterialAssignmentInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SetMaterialAssignment { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_list_material_specs(
+        &self,
+        filter: ListMaterialSpecsFilter,
+    ) -> ApiResult<Vec<MaterialSpecInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListMaterialSpecs { filter, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_material_spec(&self, asset_id: String) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetMaterialSpec { asset_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_material_spec(
+        &self,
+        request: DraftMaterialSpecRequest,
+    ) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateMaterialSpec { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_material_spec(
+        &self,
+        asset_id: String,
+        body: MaterialSpecBody,
+        rationale: Option<String>,
+    ) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateMaterialSpec {
+                asset_id,
+                body,
+                rationale,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_save_material_spec(
+        &self,
+        asset_id: String,
+        scope: String,
+    ) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SaveMaterialSpec {
+                asset_id,
+                scope,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_publish_material_spec(&self, asset_id: String) -> ApiResult<MaterialSpecInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PublishMaterialSpec { asset_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_delete_material_spec(&self, asset_id: String) -> ApiResult<String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DeleteMaterialSpec { asset_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_get_lighting_scene(&self) -> Result<LightingSceneInfo, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -3698,10 +3986,7 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
-    async fn request_get_obligations(
-        &self,
-        element_id: u64,
-    ) -> ApiResult<Vec<ObligationInfo>> {
+    async fn request_get_obligations(&self, element_id: u64) -> ApiResult<Vec<ObligationInfo>> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::GetObligations {
@@ -3804,10 +4089,7 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
-    async fn request_explain_finding(
-        &self,
-        finding_id: String,
-    ) -> ApiResult<serde_json::Value> {
+    async fn request_explain_finding(&self, finding_id: String) -> ApiResult<serde_json::Value> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::ExplainFinding {
@@ -3835,12 +4117,10 @@ impl ModelApiServer {
         element_class: Option<String>,
     ) -> Vec<RecipeFamilyInfo> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::ListRecipeFamilies {
-                element_class,
-                response,
-            });
+        let _ = self.sender.send(ModelApiRequest::ListRecipeFamilies {
+            element_class,
+            response,
+        });
         receiver.await.unwrap_or_default()
     }
 
@@ -3936,7 +4216,10 @@ impl ModelApiServer {
     ) -> ApiResult<PassageLookupInfo> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::LookupSourcePassage { passage_ref, response })
+            .send(ModelApiRequest::LookupSourcePassage {
+                passage_ref,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3950,7 +4233,11 @@ impl ModelApiServer {
     ) -> ApiResult<DraftRulePackInfo> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::DraftRulePack { chunk_id, element_class, response })
+            .send(ModelApiRequest::DraftRulePack {
+                chunk_id,
+                element_class,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3959,7 +4246,9 @@ impl ModelApiServer {
 
     async fn request_check_rule_pack_backlinks(&self) -> BacklinkCheckReportInfo {
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::CheckRulePackBacklinks(response));
+        let _ = self
+            .sender
+            .send(ModelApiRequest::CheckRulePackBacklinks(response));
         receiver.await.unwrap_or_else(|_| BacklinkCheckReportInfo {
             total: 0,
             resolved: 0,
@@ -3988,16 +4277,14 @@ impl ModelApiServer {
         element_id: Option<u64>,
     ) -> Vec<ValidationFindingInfo> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::RunValidationV2 { element_id, response });
+        let _ = self.sender.send(ModelApiRequest::RunValidationV2 {
+            element_id,
+            response,
+        });
         receiver.await.unwrap_or_default()
     }
 
-    async fn request_explain_finding_v2(
-        &self,
-        finding_id: String,
-    ) -> ApiResult<serde_json::Value> {
+    async fn request_explain_finding_v2(&self, finding_id: String) -> ApiResult<serde_json::Value> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::ExplainFindingV2 {
@@ -5247,7 +5534,6 @@ pub struct PreviewPromotionResult {
     pub findings: Vec<ValidationFindingInfo>,
 }
 
-
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PromoteRefinementResult {
@@ -6281,6 +6567,141 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(removed)
+    }
+
+    #[tool(
+        name = "get_material_assignment",
+        description = "Get the authored material assignment for one entity by element_id."
+    )]
+    async fn get_material_assignment_tool(
+        &self,
+        Parameters(params): Parameters<GetMaterialAssignmentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let assignment = self
+            .request_get_material_assignment(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(assignment)
+    }
+
+    #[tool(
+        name = "set_material_assignment",
+        description = "Set a typed material assignment for one or more entities. Supports single bindings and ordered layer sets."
+    )]
+    async fn set_material_assignment_tool(
+        &self,
+        Parameters(params): Parameters<SetMaterialAssignmentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let updated = self
+            .request_set_material_assignment(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(updated)
+    }
+
+    #[tool(
+        name = "list_material_specs",
+        description = "List curated construction material specs. Optional filters: scope, trust, classification."
+    )]
+    async fn list_material_specs_tool(
+        &self,
+        Parameters(params): Parameters<ListMaterialSpecsFilter>,
+    ) -> Result<CallToolResult, McpError> {
+        let specs = self
+            .request_list_material_specs(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(specs)
+    }
+
+    #[tool(
+        name = "get_material_spec",
+        description = "Get a curated material spec by asset_id."
+    )]
+    async fn get_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<GetMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_get_material_spec(params.asset_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "create_material_spec",
+        description = "Create a project-scope draft MaterialSpec. Provide body plus optional asset_id, author, and rationale."
+    )]
+    async fn create_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<DraftMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_create_material_spec(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "update_material_spec",
+        description = "Replace the body of an existing MaterialSpec draft."
+    )]
+    async fn update_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<UpdateMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_update_material_spec(params.asset_id, params.body, params.rationale)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "save_material_spec",
+        description = "Change the scope of a MaterialSpec draft or project asset."
+    )]
+    async fn save_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<SaveMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_save_material_spec(params.asset_id, params.scope)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "publish_material_spec",
+        description = "Publish a MaterialSpec when its publication-policy floor passes."
+    )]
+    async fn publish_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<GetMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let spec = self
+            .request_publish_material_spec(params.asset_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(spec)
+    }
+
+    #[tool(
+        name = "delete_material_spec",
+        description = "Delete a non-shipped MaterialSpec by asset_id."
+    )]
+    async fn delete_material_spec_tool(
+        &self,
+        Parameters(params): Parameters<DeleteMaterialSpecRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let asset_id = self
+            .request_delete_material_spec(params.asset_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(asset_id)
     }
 
     #[tool(
@@ -8213,19 +8634,21 @@ fn handle_clip_plane_toggle(
 
 #[cfg(feature = "model-api")]
 fn handle_list_materials(world: &World) -> Vec<MaterialInfo> {
+    let texture_registry = world.resource::<TextureRegistry>();
     world
         .resource::<MaterialRegistry>()
         .all()
-        .map(MaterialInfo::from_def)
+        .map(|def| MaterialInfo::from_def(def, &texture_registry))
         .collect()
 }
 
 #[cfg(feature = "model-api")]
 fn handle_get_material(world: &World, id: &str) -> Result<MaterialInfo, String> {
+    let texture_registry = world.resource::<TextureRegistry>();
     world
         .resource::<MaterialRegistry>()
         .get(id)
-        .map(MaterialInfo::from_def)
+        .map(|def| MaterialInfo::from_def(def, &texture_registry))
         .ok_or_else(|| format!("Material '{id}' not found"))
 }
 
@@ -8234,7 +8657,10 @@ fn handle_create_material(
     world: &mut World,
     req: CreateMaterialRequest,
 ) -> Result<MaterialInfo, String> {
-    let def = material_def_from_request(req);
+    let mut def = material_def_from_request(req);
+    if let Some(mut textures) = world.get_resource_mut::<TextureRegistry>() {
+        normalize_material_textures(&mut def, &mut textures);
+    }
     let id = def.id.clone();
     world.resource_mut::<MaterialRegistry>().upsert(def);
     handle_get_material(world, &id)
@@ -8246,28 +8672,38 @@ fn handle_update_material(
     id: &str,
     req: CreateMaterialRequest,
 ) -> Result<MaterialInfo, String> {
-    {
-        let mut registry = world.resource_mut::<MaterialRegistry>();
-        let def = registry
-            .get_mut(id)
-            .ok_or_else(|| format!("Material '{id}' not found"))?;
-        apply_request_to_def(req, def);
+    let mut def = world
+        .resource::<MaterialRegistry>()
+        .get(id)
+        .cloned()
+        .ok_or_else(|| format!("Material '{id}' not found"))?;
+    apply_request_to_def(req, &mut def);
+    if let Some(mut textures) = world.get_resource_mut::<TextureRegistry>() {
+        normalize_material_textures(&mut def, &mut textures);
     }
+    world.resource_mut::<MaterialRegistry>().upsert(def);
     handle_get_material(world, id)
 }
 
 #[cfg(feature = "model-api")]
 fn handle_delete_material(world: &mut World, id: &str) -> Result<String, String> {
-    // Remove assignment from all entities that reference this material
-    let entities_to_clean: Vec<Entity> = {
+    // Remove or downgrade assignments that explicitly reference this render material.
+    let assignment_updates: Vec<(Entity, Option<MaterialAssignment>)> = {
         let mut q = world.query::<(Entity, &MaterialAssignment)>();
         q.iter(world)
-            .filter(|(_, a)| a.material_id == id)
-            .map(|(e, _)| e)
+            .filter(|(_, assignment)| assignment.contains_explicit_render_material_id(id))
+            .map(|(entity, assignment)| {
+                (entity, assignment.without_explicit_render_material_id(id))
+            })
             .collect()
     };
-    for entity in entities_to_clean {
-        world.entity_mut(entity).remove::<MaterialAssignment>();
+    for (entity, assignment) in assignment_updates {
+        let mut entity_mut = world.entity_mut(entity);
+        if let Some(assignment) = assignment {
+            entity_mut.insert(assignment);
+        } else {
+            entity_mut.remove::<MaterialAssignment>();
+        }
     }
     world
         .resource_mut::<MaterialRegistry>()
@@ -8306,6 +8742,94 @@ fn handle_remove_material(world: &mut World, element_ids: Vec<u64>) -> Result<Ve
         removed.push(eid);
     }
     Ok(removed)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_material_assignment(
+    world: &World,
+    element_id: u64,
+) -> Result<EntityMaterialAssignmentInfo, String> {
+    let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    Ok(EntityMaterialAssignmentInfo {
+        element_id,
+        assignment: world.entity(entity).get::<MaterialAssignment>().cloned(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_set_material_assignment(
+    world: &mut World,
+    request: SetMaterialAssignmentRequest,
+) -> Result<Vec<EntityMaterialAssignmentInfo>, String> {
+    crate::plugins::materials::validate_material_assignment(world, &request.assignment)?;
+
+    let mut updated = Vec::new();
+    for element_id in request.element_ids {
+        let entity = find_entity_by_element_id(world, ElementId(element_id))
+            .ok_or_else(|| format!("Entity {element_id} not found"))?;
+        world.entity_mut(entity).insert(request.assignment.clone());
+        updated.push(EntityMaterialAssignmentInfo {
+            element_id,
+            assignment: Some(request.assignment.clone()),
+        });
+    }
+    Ok(updated)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_list_material_specs(
+    world: &World,
+    filter: ListMaterialSpecsFilter,
+) -> Result<Vec<MaterialSpecInfo>, String> {
+    Ok(crate::curation::api::list_material_specs(world, filter))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_material_spec(world: &World, asset_id: &str) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::get_material_spec(world, asset_id).map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_create_material_spec(
+    world: &mut World,
+    request: DraftMaterialSpecRequest,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::create_material_spec(world, request).map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_update_material_spec(
+    world: &mut World,
+    asset_id: &str,
+    body: MaterialSpecBody,
+    rationale: Option<String>,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::update_material_spec(world, asset_id, body, rationale)
+        .map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_save_material_spec(
+    world: &mut World,
+    asset_id: &str,
+    scope: &str,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::save_material_spec(world, asset_id, scope)
+        .map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_publish_material_spec(
+    world: &mut World,
+    asset_id: &str,
+) -> Result<MaterialSpecInfo, String> {
+    crate::curation::api::publish_material_spec(world, asset_id).map_err(|failure| failure.message)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_delete_material_spec(world: &mut World, asset_id: &str) -> Result<String, String> {
+    crate::curation::api::delete_material_spec(world, asset_id).map_err(|failure| failure.message)
 }
 
 #[cfg(feature = "model-api")]
@@ -8769,6 +9293,7 @@ fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
     def.clearcoat_perceptual_roughness = req.clearcoat_perceptual_roughness;
     def.anisotropy_strength = req.anisotropy_strength;
     def.anisotropy_rotation = req.anisotropy_rotation_deg.to_radians();
+    def.spec_ref = req.spec_ref.map(crate::curation::AssetId::new);
     def.alpha_mode = parse_alpha_mode(&req.alpha_mode);
     def.alpha_cutoff = req.alpha_cutoff;
     def.double_sided = req.double_sided;
@@ -9321,11 +9846,13 @@ fn handle_split_box_face(
         element_id: id_a,
         primitive: prim_a,
         rotation,
+        material_assignment: None,
     };
     let snapshot_b: PrimitiveSnapshot<BoxPrimitive> = PrimitiveSnapshot {
         element_id: id_b,
         primitive: prim_b,
         rotation,
+        material_assignment: None,
     };
     let group_snapshot = GroupSnapshot {
         element_id: group_id,
@@ -12201,6 +12728,7 @@ fn handle_array_dissolve(world: &mut World, element_id: u64) -> ApiResult<u64> {
         element_id: new_id,
         primitive: tri_mesh,
         layer: None,
+        material_assignment: None,
     };
 
     send_event(
@@ -12392,6 +12920,7 @@ fn handle_mirror_dissolve(world: &mut World, element_id: u64) -> ApiResult<u64> 
         element_id: new_id,
         primitive: tri_mesh,
         layer: None,
+        material_assignment: None,
     };
 
     send_event(
@@ -12976,9 +13505,7 @@ pub fn handle_get_claim_grounding(
     element_id: u64,
     path_filter: Option<String>,
 ) -> ApiResult<Vec<ClaimGroundingEntry>> {
-    use crate::capability_registry::{
-        effective_promotion_critical_paths, ElementClassAssignment,
-    };
+    use crate::capability_registry::{effective_promotion_critical_paths, ElementClassAssignment};
     use crate::plugins::refinement::{ClaimGrounding, RefinementStateComponent};
 
     let eid = ElementId(element_id);
@@ -13255,10 +13782,7 @@ pub fn handle_run_validation(
 }
 
 #[cfg(feature = "model-api")]
-fn handle_explain_finding(
-    _world: &World,
-    finding_id: String,
-) -> ApiResult<serde_json::Value> {
+fn handle_explain_finding(_world: &World, finding_id: String) -> ApiResult<serde_json::Value> {
     // PP70 scaffold: derive rationale from the finding_id prefix.
     // The richer per-finding lookup with caching lands in PP74.
     if finding_id.starts_with("declared_state_obligations:") {
@@ -13308,7 +13832,9 @@ pub fn handle_list_recipe_families(
     let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
         return Vec::new();
     };
-    let filter = element_class.as_deref().map(|s| ElementClassId(s.to_string()));
+    let filter = element_class
+        .as_deref()
+        .map(|s| ElementClassId(s.to_string()));
     registry
         .recipe_family_descriptors(filter.as_ref())
         .into_iter()
@@ -13389,7 +13915,8 @@ pub fn handle_select_recipe(
                 .filter(|p| match &p.scope {
                     PriorScope::RecipeSelection { recipe_family, .. } => {
                         recipe_family.is_none()
-                            || recipe_family.as_ref().map(|rf| rf.0.as_str()) == Some(d.id.0.as_str())
+                            || recipe_family.as_ref().map(|rf| rf.0.as_str())
+                                == Some(d.id.0.as_str())
                     }
                     _ => false,
                 })
@@ -13405,7 +13932,11 @@ pub fn handle_select_recipe(
         .collect();
 
     // Sort descending by weight so the highest-weight recipe comes first.
-    viable.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
+    viable.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(viable)
 }
@@ -13415,10 +13946,7 @@ pub fn handle_select_recipe(
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "model-api")]
-fn handle_list_constraints(
-    world: &World,
-    _scope: Option<String>,
-) -> Vec<ConstraintInfo> {
+fn handle_list_constraints(world: &World, _scope: Option<String>) -> Vec<ConstraintInfo> {
     use crate::capability_registry::CapabilityRegistry;
 
     let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
@@ -13451,10 +13979,7 @@ fn handle_list_constraints(
 ///
 /// Called after `validation_sweep_system` runs in the dispatch path.
 #[cfg(feature = "model-api")]
-fn handle_run_validation_v2(
-    world: &World,
-    element_id: Option<u64>,
-) -> Vec<ValidationFindingInfo> {
+fn handle_run_validation_v2(world: &World, element_id: Option<u64>) -> Vec<ValidationFindingInfo> {
     use crate::plugins::validation::Findings;
 
     let Some(findings) = world.get_resource::<Findings>() else {
@@ -13496,10 +14021,7 @@ fn finding_to_info(f: &crate::capability_registry::Finding) -> ValidationFinding
 /// Look up a finding by `FindingId` in the `Findings` index and return a rich
 /// explanation JSON object.
 #[cfg(feature = "model-api")]
-fn handle_explain_finding_v2(
-    world: &World,
-    finding_id: String,
-) -> ApiResult<serde_json::Value> {
+fn handle_explain_finding_v2(world: &World, finding_id: String) -> ApiResult<serde_json::Value> {
     use crate::capability_registry::{CapabilityRegistry, FindingId};
     use crate::plugins::validation::Findings;
 
@@ -13548,7 +14070,9 @@ fn handle_preview_promotion(
         apply_demote_refinement, ClaimPath, DemoteRefinementRequest, RefinementState,
         RefinementStateComponent,
     };
-    use crate::plugins::refinement::{apply_promote_refinement, PromoteRefinementRequest, RecipeId};
+    use crate::plugins::refinement::{
+        apply_promote_refinement, PromoteRefinementRequest, RecipeId,
+    };
 
     let target_state = RefinementState::from_str(&target_state_str)
         .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
@@ -15960,5 +16484,109 @@ mod tests {
             .expect("delete_light should succeed");
         assert_eq!(removed, 1);
         assert_eq!(handle_list_lights(&world).len(), 1);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn material_assignment_round_trips_layer_sets() {
+        let mut world = init_model_api_test_world();
+        world.spawn((ElementId(42),));
+        world
+            .resource_mut::<crate::plugins::materials::MaterialRegistry>()
+            .upsert(MaterialDef {
+                id: "oak_finish".to_string(),
+                name: "Oak Finish".to_string(),
+                ..Default::default()
+            });
+
+        let assignment =
+            MaterialAssignment::LayerSet(crate::plugins::materials::MaterialLayerSet {
+                layers: vec![
+                    crate::plugins::materials::MaterialLayer {
+                        name: Some("structure".to_string()),
+                        thickness_mm: Some(45.0),
+                        binding: crate::plugins::materials::MaterialBinding {
+                            spec: None,
+                            render: Some(crate::plugins::materials::material_def_asset_id(
+                                "oak_finish",
+                            )),
+                        },
+                    },
+                    crate::plugins::materials::MaterialLayer {
+                        name: Some("finish".to_string()),
+                        thickness_mm: Some(12.5),
+                        binding: crate::plugins::materials::MaterialBinding::default(),
+                    },
+                ],
+            });
+
+        let updated = handle_set_material_assignment(
+            &mut world,
+            SetMaterialAssignmentRequest {
+                element_ids: vec![42],
+                assignment: assignment.clone(),
+            },
+        )
+        .expect("set_material_assignment should accept layer sets");
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].assignment, Some(assignment.clone()));
+
+        let fetched =
+            handle_get_material_assignment(&world, 42).expect("get_material_assignment works");
+        assert_eq!(fetched.assignment, Some(assignment));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn deleting_material_keeps_spec_binding_when_assignment_has_fallback() {
+        let mut world = init_model_api_test_world();
+        let spec_id = crate::curation::MaterialSpec::asset_id_for("gypsum_board");
+        let mut specs = crate::curation::MaterialSpecRegistry::default();
+        specs.insert(crate::curation::MaterialSpec::draft(
+            spec_id.clone(),
+            crate::curation::MaterialSpecBody {
+                display_name: "Gypsum Board".to_string(),
+                ..Default::default()
+            },
+            crate::plugins::refinement::AgentId("codex".to_string()),
+            None,
+        ));
+        world.insert_resource(specs);
+        world
+            .resource_mut::<crate::plugins::materials::MaterialRegistry>()
+            .upsert(MaterialDef {
+                id: "paint_white".to_string(),
+                name: "White Paint".to_string(),
+                ..Default::default()
+            });
+        world.spawn((
+            ElementId(7),
+            MaterialAssignment::Single(crate::plugins::materials::MaterialBinding {
+                spec: Some(spec_id.clone()),
+                render: Some(crate::plugins::materials::material_def_asset_id(
+                    "paint_white",
+                )),
+            }),
+        ));
+
+        let deleted =
+            handle_delete_material(&mut world, "paint_white").expect("delete_material should work");
+        assert_eq!(deleted, "paint_white");
+
+        let assignment = handle_get_material_assignment(&world, 7)
+            .expect("entity should remain")
+            .assignment;
+        assert_eq!(
+            assignment,
+            Some(MaterialAssignment::Single(
+                crate::plugins::materials::MaterialBinding {
+                    spec: Some(spec_id),
+                    render: None,
+                }
+            ))
+        );
+        assert!(!world
+            .resource::<crate::plugins::materials::MaterialRegistry>()
+            .contains("paint_white"));
     }
 }

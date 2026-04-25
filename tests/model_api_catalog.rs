@@ -48,8 +48,12 @@ fn list_catalog_providers_returns_one_provider() {
 #[test]
 fn catalog_query_returns_six_c24_rows() {
     let world = init_catalog_test_world();
-    let rows = handle_catalog_query(&world, "dimensional_lumber_metric".into(), serde_json::json!({}))
-        .expect("catalog_query should succeed");
+    let rows = handle_catalog_query(
+        &world,
+        "dimensional_lumber_metric".into(),
+        serde_json::json!({}),
+    )
+    .expect("catalog_query should succeed");
 
     assert_eq!(rows.len(), 6, "expected 6 C24 rows, got {}", rows.len());
 

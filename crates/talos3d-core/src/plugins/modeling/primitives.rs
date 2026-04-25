@@ -840,6 +840,7 @@ impl Primitive for PlanePrimitive {
                     half_extents: Vec3::new(half_w.max(0.005), half_h, half_d.max(0.005)),
                 },
                 rotation: ShapeRotation(rotation),
+                material_assignment: None,
             }
             .into(),
         ))

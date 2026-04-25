@@ -42,7 +42,7 @@ use crate::plugins::{
         SceneLightSnapshot, SceneLightingSettings,
     },
     material_browser::{draw_materials_window, MaterialsWindowState},
-    materials::MaterialRegistry,
+    materials::{MaterialAssignment, MaterialRegistry},
     menu_bar::MenuBarState,
     modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
     palette::{draw_command_palette, PaletteState},
@@ -686,6 +686,7 @@ struct ChromeData<'w, 's> {
     light_object_visibility: ResMut<'w, SceneLightObjectVisibility>,
     materials_window_state: ResMut<'w, MaterialsWindowState>,
     material_registry: ResMut<'w, MaterialRegistry>,
+    texture_registry: ResMut<'w, crate::plugins::materials::TextureRegistry>,
     render_settings: ResMut<'w, RenderSettings>,
     paper_drawing_state: ResMut<'w, PaperDrawingState>,
     render_settings_window_state: ResMut<'w, RenderSettingsWindowState>,
@@ -703,6 +704,8 @@ struct ChromeData<'w, 's> {
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
     selected_entities: Query<'w, 's, Entity, With<Selected>>,
+    selected_material_assignments:
+        Query<'w, 's, (&'static ElementId, Option<&'static MaterialAssignment>), With<Selected>>,
     light_query: Query<
         'w,
         's,
@@ -907,14 +910,21 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &data.cursor_world_pos,
         &mut data.status_bar_data,
     );
+    let selected_material_assignments: Vec<(u64, Option<MaterialAssignment>)> = data
+        .selected_material_assignments
+        .iter()
+        .map(|(element_id, assignment)| (element_id.0, assignment.cloned()))
+        .collect();
     draw_materials_window(
         &mut contexts,
         &ctx,
         &mut data.materials_window_state,
         &mut data.material_registry,
+        &mut data.texture_registry,
         &data.asset_server,
         &mut data.images,
         &mut data.pending_command_invocations,
+        &selected_material_assignments,
     );
     draw_lighting_window(&ctx, &mut data);
     draw_render_settings_window(

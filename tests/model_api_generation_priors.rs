@@ -132,7 +132,10 @@ fn select_recipe_flat_terrain_ranks_slab_first_via_prior() {
         ranking[0].id,
         "slab_on_grade",
         "flat terrain (slope 2%) must rank slab_on_grade first; got: {:?}",
-        ranking.iter().map(|r| (&r.id, r.weight)).collect::<Vec<_>>()
+        ranking
+            .iter()
+            .map(|r| (&r.id, r.weight))
+            .collect::<Vec<_>>()
     );
     assert!(
         ranking[0].weight > ranking[1].weight,
@@ -157,7 +160,10 @@ fn select_recipe_steep_terrain_ranks_pier_first_via_prior() {
         ranking[0].id,
         "pier_foundation",
         "steep terrain (slope 18%) must rank pier_foundation first; got: {:?}",
-        ranking.iter().map(|r| (&r.id, r.weight)).collect::<Vec<_>>()
+        ranking
+            .iter()
+            .map(|r| (&r.id, r.weight))
+            .collect::<Vec<_>>()
     );
     assert!(
         ranking[0].weight > ranking[1].weight,
@@ -171,14 +177,14 @@ fn select_recipe_steep_terrain_ranks_pier_first_via_prior() {
 #[test]
 fn select_recipe_no_slope_all_weight_one_via_prior() {
     let world = init_priors_test_world();
-    let ranking = handle_select_recipe(
-        &world,
-        "foundation_system".into(),
-        serde_json::json!({}),
-    )
-    .expect("select_recipe should succeed");
+    let ranking = handle_select_recipe(&world, "foundation_system".into(), serde_json::json!({}))
+        .expect("select_recipe should succeed");
 
-    assert_eq!(ranking.len(), 2, "both foundation recipes should be returned");
+    assert_eq!(
+        ranking.len(),
+        2,
+        "both foundation recipes should be returned"
+    );
     for entry in &ranking {
         assert!(
             (entry.weight - 1.0).abs() < f32::EPSILON,

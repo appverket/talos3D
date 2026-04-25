@@ -30,8 +30,9 @@ use super::identity::{SourceId, SourceRevision};
 // Re-export the shipped refinement-layer types that curation reuses, so
 // consumers can pull everything from a single namespace.
 pub use crate::plugins::refinement::{
-    AgentId as AgentIdReExport, AuthoringMode as Lineage, CatalogRowId, ClaimPath as ClaimPathReExport,
-    ClaimRecord, Grounding as GroundingKind, HeuristicTag, PassageRef, RecipeId, RuleId, SourceRef,
+    AgentId as AgentIdReExport, AuthoringMode as Lineage, CatalogRowId,
+    ClaimPath as ClaimPathReExport, ClaimRecord, Grounding as GroundingKind, HeuristicTag,
+    PassageRef, RecipeId, RuleId, SourceRef,
 };
 
 /// Confidence an author or reviewer has in a curated asset's contents.
@@ -39,7 +40,9 @@ pub use crate::plugins::refinement::{
 /// `Certified` carries a specific operational meaning: combined with an
 /// explicit reviewer signature it can override the default "no superseded
 /// evidence" publication floor for one specific publication attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default,
+)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {

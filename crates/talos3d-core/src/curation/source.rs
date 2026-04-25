@@ -18,7 +18,9 @@ use super::provenance::JurisdictionTag;
 /// Five-tier source classification. Narrower tiers cite content that is
 /// more specific and more operator- or user-scoped; wider tiers cite
 /// content shipped with the platform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default,
+)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SourceTier {
@@ -50,7 +52,9 @@ pub enum SourceTier {
 /// source-family-specific (Cc0 / BoverketPublic / IccCiteOnly /
 /// VendorEula / PublicRecord / StandardsBodyCitationOnly). PP80 will
 /// provide a mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default,
+)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum SourceLicense {

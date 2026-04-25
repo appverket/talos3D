@@ -586,8 +586,14 @@ impl PriorContext {
     /// Known fields are extracted; any remaining keys flow into `extras`.
     pub fn from_json(value: &serde_json::Value) -> Self {
         Self {
-            jurisdiction: value.get("jurisdiction").and_then(|v| v.as_str()).map(str::to_owned),
-            style_intent: value.get("style_intent").and_then(|v| v.as_str()).map(str::to_owned),
+            jurisdiction: value
+                .get("jurisdiction")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            style_intent: value
+                .get("style_intent")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             terrain_slope_pct: value.get("terrain_slope_pct").and_then(|v| v.as_f64()),
             extras: value.clone(),
         }
@@ -708,7 +714,10 @@ impl std::fmt::Debug for RecipeFamilyDescriptor {
             .field("id", &self.id)
             .field("target_class", &self.target_class)
             .field("label", &self.label)
-            .field("supported_refinement_levels", &self.supported_refinement_levels)
+            .field(
+                "supported_refinement_levels",
+                &self.supported_refinement_levels,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1179,7 +1188,9 @@ impl CapabilityRegistry {
     /// Register an element class descriptor. Panics if the id is already registered.
     pub fn register_element_class(&mut self, descriptor: ElementClassDescriptor) {
         assert!(
-            !self.element_class_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .element_class_index
+                .contains_key(descriptor.id.0.as_str()),
             "ElementClass '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1206,7 +1217,9 @@ impl CapabilityRegistry {
     /// Register a recipe family descriptor. Panics if the id is already registered.
     pub fn register_recipe_family(&mut self, descriptor: RecipeFamilyDescriptor) {
         assert!(
-            !self.recipe_family_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .recipe_family_index
+                .contains_key(descriptor.id.0.as_str()),
             "RecipeFamily '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1229,10 +1242,7 @@ impl CapabilityRegistry {
     }
 
     /// Look up a single recipe family descriptor by id.
-    pub fn recipe_family_descriptor(
-        &self,
-        id: &RecipeFamilyId,
-    ) -> Option<&RecipeFamilyDescriptor> {
+    pub fn recipe_family_descriptor(&self, id: &RecipeFamilyId) -> Option<&RecipeFamilyDescriptor> {
         self.recipe_family_index
             .get(id.0.as_str())
             .and_then(|&i| self.recipe_family_descriptors.get(i))
@@ -1248,8 +1258,7 @@ impl CapabilityRegistry {
             descriptor.id.0
         );
         let index = self.constraint_descriptors.len();
-        self.constraint_index
-            .insert(descriptor.id.0.clone(), index);
+        self.constraint_index.insert(descriptor.id.0.clone(), index);
         self.constraint_descriptors.push(descriptor);
     }
 
@@ -1270,7 +1279,9 @@ impl CapabilityRegistry {
     /// Register a catalog provider descriptor. Panics if the id is already registered.
     pub fn register_catalog_provider(&mut self, descriptor: CatalogProviderDescriptor) {
         assert!(
-            !self.catalog_provider_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .catalog_provider_index
+                .contains_key(descriptor.id.0.as_str()),
             "CatalogProvider '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1300,7 +1311,9 @@ impl CapabilityRegistry {
     /// Register a generation prior descriptor. Panics if the id is already registered.
     pub fn register_generation_prior(&mut self, descriptor: GenerationPriorDescriptor) {
         assert!(
-            !self.generation_prior_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .generation_prior_index
+                .contains_key(descriptor.id.0.as_str()),
             "GenerationPrior '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1325,8 +1338,12 @@ impl CapabilityRegistry {
                     return true;
                 };
                 match &d.scope {
-                    PriorScope::RecipeSelection { element_class: ec, .. } => ec == cls,
-                    PriorScope::ParameterDefaulting { element_class: ec, .. } => ec == cls,
+                    PriorScope::RecipeSelection {
+                        element_class: ec, ..
+                    } => ec == cls,
+                    PriorScope::ParameterDefaulting {
+                        element_class: ec, ..
+                    } => ec == cls,
                 }
             })
             .collect()
@@ -1709,10 +1726,7 @@ mod pp71_tests {
         let mut class_min_promotion_critical_paths = HashMap::new();
         class_min_promotion_critical_paths.insert(
             RefinementState::Constructible,
-            vec![
-                ClaimPath("height_mm".into()),
-                ClaimPath("length_mm".into()),
-            ],
+            vec![ClaimPath("height_mm".into()), ClaimPath("length_mm".into())],
         );
         ElementClassDescriptor {
             id: ElementClassId("wall_assembly".into()),
@@ -1792,18 +1806,17 @@ mod pp71_tests {
         assert_eq!(all[0].id.0, "light_frame_exterior_wall");
 
         // Filtered to correct class
-        let filtered = registry
-            .recipe_family_descriptors(Some(&ElementClassId("wall_assembly".into())));
+        let filtered =
+            registry.recipe_family_descriptors(Some(&ElementClassId("wall_assembly".into())));
         assert_eq!(filtered.len(), 1);
 
         // Filtered to nonexistent class returns empty
-        let empty = registry
-            .recipe_family_descriptors(Some(&ElementClassId("roof_system".into())));
+        let empty = registry.recipe_family_descriptors(Some(&ElementClassId("roof_system".into())));
         assert!(empty.is_empty());
 
         // Direct lookup
-        let found = registry
-            .recipe_family_descriptor(&RecipeFamilyId("light_frame_exterior_wall".into()));
+        let found =
+            registry.recipe_family_descriptor(&RecipeFamilyId("light_frame_exterior_wall".into()));
         assert!(found.is_some());
 
         assert!(registry
@@ -1827,8 +1840,7 @@ mod pp71_tests {
     #[test]
     fn effective_obligations_without_recipe_returns_class_min_only() {
         let class = make_wall_class();
-        let obligations =
-            effective_obligations(&class, None, RefinementState::Constructible);
+        let obligations = effective_obligations(&class, None, RefinementState::Constructible);
         assert_eq!(obligations.len(), 2);
     }
 
@@ -1837,8 +1849,11 @@ mod pp71_tests {
         let class = make_wall_class();
         let recipe = make_recipe(ElementClassId("wall_assembly".into()));
 
-        let paths =
-            effective_promotion_critical_paths(&class, Some(&recipe), RefinementState::Constructible);
+        let paths = effective_promotion_critical_paths(
+            &class,
+            Some(&recipe),
+            RefinementState::Constructible,
+        );
         // class has 2 + recipe adds 1
         assert_eq!(paths.len(), 3);
         assert!(paths.iter().any(|p| p.0 == "stud_spacing_mm"));

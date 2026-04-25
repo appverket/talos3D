@@ -20,9 +20,7 @@ use talos3d_core::curation::{
     meta::CurationMeta,
     plugin::CurationPlugin,
     policy::PublicationPolicy,
-    provenance::{
-        Confidence, EvidenceRef, GroundingKind, JurisdictionTag, Lineage, Provenance,
-    },
+    provenance::{Confidence, EvidenceRef, GroundingKind, JurisdictionTag, Lineage, Provenance},
     registry::SourceRegistry,
     scope_trust::{Scope, Trust},
     source::{SourceLicense, SourceRegistryEntry, SourceTier},
@@ -147,7 +145,10 @@ fn publication_floor_passes_when_evidence_resolves() {
     let meta = synthetic_recipe_meta(Some(("boverket.bbr.8", "2011:6")));
     let registry = app.world().resource::<SourceRegistry>();
     let findings = PublicationPolicy::default().check(&meta, registry);
-    assert!(findings.is_empty(), "expected no findings, got {findings:?}");
+    assert!(
+        findings.is_empty(),
+        "expected no findings, got {findings:?}"
+    );
     assert!(PublicationPolicy::default().permits(&meta, registry));
 }
 
@@ -188,7 +189,9 @@ fn sunset_nomination_approval_flips_status_and_blocks_publication() {
     let meta = synthetic_recipe_meta(Some(("boverket.bbr.8", "2011:6")));
     let registry = app.world().resource::<SourceRegistry>();
     let findings = PublicationPolicy::default().check(&meta, registry);
-    assert!(findings.iter().any(|f| f.code == "curation.publication.source_superseded"));
+    assert!(findings
+        .iter()
+        .any(|f| f.code == "curation.publication.source_superseded"));
 
     // Certified override lets it through (the ADR-040 explicit override).
     let mut certified = synthetic_recipe_meta(Some(("boverket.bbr.8", "2011:6")));
@@ -334,12 +337,7 @@ mod recipe_artifacts {
     #[test]
     fn save_recipe_refuses_to_demote_shipped_artifacts() {
         let mut app = app_with_architecture();
-        let err = save_recipe(
-            app.world_mut(),
-            "recipe.v1/pier_foundation",
-            "project",
-        )
-        .unwrap_err();
+        let err = save_recipe(app.world_mut(), "recipe.v1/pier_foundation", "project").unwrap_err();
         assert_eq!(err.code, "curation.shipped_scope_immutable");
     }
 

@@ -520,6 +520,7 @@ mod tests {
                 half_extents: Vec3::splat(0.5),
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         }
         .into();
 

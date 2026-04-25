@@ -199,7 +199,10 @@ mod tests {
         let pack = PackId::new("talos3d_architecture_se");
         let hash = ContentHash::new("blake3:abcd");
 
-        assert_eq!(serde_json::to_string(&asset_id).unwrap(), "\"recipe.v1/foo\"");
+        assert_eq!(
+            serde_json::to_string(&asset_id).unwrap(),
+            "\"recipe.v1/foo\""
+        );
         assert_eq!(serde_json::to_string(&kind).unwrap(), "\"recipe.v1\"");
         assert_eq!(
             serde_json::to_string(&source).unwrap(),

@@ -134,7 +134,10 @@ impl CorpusGapQueue {
 
     /// List gaps filtered by kind (cross-kind inspection). Returns
     /// references into the queue; callers clone as needed.
-    pub fn list_by_kind<'a>(&'a self, kind: &'a AssetKindId) -> impl Iterator<Item = &'a CorpusGap> + 'a {
+    pub fn list_by_kind<'a>(
+        &'a self,
+        kind: &'a AssetKindId,
+    ) -> impl Iterator<Item = &'a CorpusGap> + 'a {
         self.gaps
             .iter()
             .filter(move |g| g.kind.as_ref() == Some(kind))
@@ -310,9 +313,7 @@ pub fn resolve_all_rule_pack_backlinks(world: &World) -> BacklinkCheckReport {
             continue;
         };
         total += 1;
-        let found = passage_registry
-            .and_then(|pr| pr.get(backlink))
-            .is_some();
+        let found = passage_registry.and_then(|pr| pr.get(backlink)).is_some();
         if found {
             resolved += 1;
         } else {
@@ -323,7 +324,11 @@ pub fn resolve_all_rule_pack_backlinks(world: &World) -> BacklinkCheckReport {
         }
     }
 
-    BacklinkCheckReport { total, resolved, broken }
+    BacklinkCheckReport {
+        total,
+        resolved,
+        broken,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +414,11 @@ mod tests {
     fn register_and_get_roundtrip() {
         let mut registry = CorpusPassageRegistry::default();
         let pref = PassageRef("BBR_8:22_riser_max".into());
-        registry.register(pref.clone(), "Stigningen ska vara högst 200 mm.", sample_provenance());
+        registry.register(
+            pref.clone(),
+            "Stigningen ska vara högst 200 mm.",
+            sample_provenance(),
+        );
         let entry = registry.get(&pref).expect("passage should be present");
         assert!(entry.text.contains("200 mm"));
     }
@@ -445,7 +454,10 @@ mod tests {
             1_700_000_000,
         );
         let gap = queue.list().iter().find(|g| g.id == id).unwrap();
-        assert_eq!(gap.kind.as_ref().map(|k| k.as_str()), Some("material_spec.v1"));
+        assert_eq!(
+            gap.kind.as_ref().map(|k| k.as_str()),
+            Some("material_spec.v1")
+        );
         assert!(gap.element_class.is_none());
     }
 
@@ -497,7 +509,10 @@ mod tests {
         assert_eq!(gap.kind.as_ref().map(|k| k.as_str()), Some("recipe.v1"));
         assert_eq!(gap.jurisdiction.as_deref(), Some("SE"));
         let ctx = gap.context.as_object().unwrap();
-        assert_eq!(ctx.get("source_id").and_then(|v| v.as_str()), Some("boverket.bbr.8"));
+        assert_eq!(
+            ctx.get("source_id").and_then(|v| v.as_str()),
+            Some("boverket.bbr.8")
+        );
         assert_eq!(ctx.get("revision").and_then(|v| v.as_str()), Some("2011:6"));
     }
 
