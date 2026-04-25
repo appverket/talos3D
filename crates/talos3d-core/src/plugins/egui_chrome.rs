@@ -4,6 +4,7 @@ use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
+use crate::curation::{NominationQueue, SourceRegistry};
 #[cfg(feature = "model-api")]
 use crate::plugins::model_api::ModelApiRuntimeInfo;
 #[cfg(feature = "perf-stats")]
@@ -688,6 +689,8 @@ struct ChromeData<'w, 's> {
     materials_window_state: ResMut<'w, MaterialsWindowState>,
     material_registry: ResMut<'w, MaterialRegistry>,
     texture_registry: ResMut<'w, crate::plugins::materials::TextureRegistry>,
+    source_registry: ResMut<'w, SourceRegistry>,
+    nomination_queue: ResMut<'w, NominationQueue>,
     render_settings: ResMut<'w, RenderSettings>,
     paper_drawing_state: ResMut<'w, PaperDrawingState>,
     render_settings_window_state: ResMut<'w, RenderSettingsWindowState>,
@@ -922,6 +925,8 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.materials_window_state,
         &mut data.material_registry,
         &mut data.texture_registry,
+        &mut data.source_registry,
+        &mut data.nomination_queue,
         &data.asset_server,
         &mut data.images,
         &mut data.pending_command_invocations,
