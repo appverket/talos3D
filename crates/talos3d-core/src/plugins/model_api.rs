@@ -16124,6 +16124,8 @@ mod tests {
         world.insert_resource(Messages::<EndCommandGroup>::default());
         world.insert_resource(PendingCommandQueue::default());
         world.insert_resource(History::default());
+        world.insert_resource(TextureRegistry::default());
+        world.insert_resource(MaterialRegistry::default());
         world.insert_resource(ElementIdAllocator::default());
         world.insert_resource(DocumentState::default());
         world.insert_resource(OpaquePersistedEntities::default());
@@ -16309,9 +16311,11 @@ mod tests {
             .as_array()
             .expect("line_point should serialize as an array");
         assert_eq!(line_point.len(), 3);
+        // Per the "project true 3D dim geometry" fix, the offset for a
+        // horizontal dimension on the world XY plane goes along +Z.
         assert!((line_point[0].as_f64().expect("x should be numeric") - 1.0).abs() < 1e-5);
-        assert!((line_point[1].as_f64().expect("y should be numeric") + 0.36).abs() < 1e-5);
-        assert!(line_point[2].as_f64().expect("z should be numeric").abs() < 1e-5);
+        assert!(line_point[1].as_f64().expect("y should be numeric").abs() < 1e-5);
+        assert!((line_point[2].as_f64().expect("z should be numeric") - 0.36).abs() < 1e-5);
         let offset = snapshot["offset"]
             .as_f64()
             .expect("offset should serialize as numeric");

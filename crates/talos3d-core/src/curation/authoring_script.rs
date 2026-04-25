@@ -701,6 +701,6 @@ mod tests {
         // curation module is intact for postconditions that cite
         // excerpts; not used in the shape here directly but kept
         // importable via `super`.
-        let _: super::provenance::ExcerptRef = super::provenance::ExcerptRef::new("§8:22");
+        let _: crate::curation::provenance::ExcerptRef = crate::curation::provenance::ExcerptRef::new("§8:22");
     }
 }
