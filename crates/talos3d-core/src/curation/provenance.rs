@@ -23,7 +23,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::plugins::refinement::{AgentId, AuthoringMode, ClaimPath, Grounding};
+use crate::plugins::refinement::{AgentId, AuthoringMode, ClaimPath};
 
 use super::identity::{SourceId, SourceRevision};
 
@@ -225,7 +225,7 @@ mod tests {
             revision: SourceRevision::new("2011:6"),
             claim_path: Some(ClaimPath("stair/riser_height_mm".into())),
             excerpt_ref: Some(ExcerptRef::new("§8:22")),
-            grounding_kind: Grounding::ExplicitRule(RuleId("bbr_stair_riser_max".into())),
+            grounding_kind: GroundingKind::ExplicitRule(RuleId("bbr_stair_riser_max".into())),
         };
         let json = serde_json::to_string(&ev).unwrap();
         let parsed: EvidenceRef = serde_json::from_str(&json).unwrap();
@@ -249,7 +249,7 @@ mod tests {
             revision: SourceRevision::new(""),
             claim_path: None,
             excerpt_ref: None,
-            grounding_kind: Grounding::LLMHeuristic {
+            grounding_kind: GroundingKind::LLMHeuristic {
                 rationale: "placeholder".into(),
                 heuristic_tag: HeuristicTag("todo".into()),
             },
@@ -278,7 +278,7 @@ mod tests {
                 revision: SourceRevision::new("2011:6"),
                 claim_path: Some(ClaimPath("stair/riser_height_mm".into())),
                 excerpt_ref: Some(ExcerptRef::new("§8:22")),
-                grounding_kind: Grounding::ExplicitRule(RuleId("bbr_stair_riser_max".into())),
+                grounding_kind: GroundingKind::ExplicitRule(RuleId("bbr_stair_riser_max".into())),
             }],
         };
         let json = serde_json::to_string(&p).unwrap();
