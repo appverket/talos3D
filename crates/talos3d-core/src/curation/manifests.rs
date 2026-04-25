@@ -331,6 +331,36 @@ impl CuratedManifestRegistry {
     }
 }
 
+/// Bevy `App` extension methods for registering manifest kinds and
+/// authored manifests at plugin build time. Capability crates use these
+/// to install their kind descriptors and any shipped manifests in the
+/// same shape they already use for `register_recipe_family`,
+/// `register_assembly_pattern`, etc.
+pub trait CuratedManifestAppExt {
+    fn register_manifest_kind(&mut self, descriptor: ManifestKindDescriptor) -> &mut Self;
+    fn register_curated_manifest(&mut self, manifest: CuratedManifest) -> &mut Self;
+}
+
+impl CuratedManifestAppExt for App {
+    fn register_manifest_kind(&mut self, descriptor: ManifestKindDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<ManifestKindRegistry>() {
+            self.init_resource::<ManifestKindRegistry>();
+        }
+        let mut registry = self.world_mut().resource_mut::<ManifestKindRegistry>();
+        registry.register(descriptor);
+        self
+    }
+
+    fn register_curated_manifest(&mut self, manifest: CuratedManifest) -> &mut Self {
+        if !self.world().contains_resource::<CuratedManifestRegistry>() {
+            self.init_resource::<CuratedManifestRegistry>();
+        }
+        let mut registry = self.world_mut().resource_mut::<CuratedManifestRegistry>();
+        registry.insert(manifest);
+        self
+    }
+}
+
 /// Result of walking a single manifest body via its kind's `walker_hooks`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManifestWalkReport {
