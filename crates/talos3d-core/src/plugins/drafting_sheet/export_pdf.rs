@@ -15,6 +15,7 @@ use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern};
 use super::sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke};
 
 const MM_TO_PT: f32 = 72.0 / 25.4;
+const DIMENSION_STROKE_GRAY: f32 = 0.29;
 
 #[must_use]
 pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
@@ -73,6 +74,16 @@ pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
     }
 
     // Annotations: rich drafting primitives, coordinates in paper-mm.
+    let _ = writeln!(
+        content,
+        "{g:.3} {g:.3} {g:.3} RG",
+        g = DIMENSION_STROKE_GRAY
+    );
+    let _ = writeln!(
+        content,
+        "{g:.3} {g:.3} {g:.3} rg",
+        g = DIMENSION_STROKE_GRAY
+    );
     for dim in &sheet.annotations {
         for prim in dim {
             write_dim_primitive(&mut content, prim, &to_pt);

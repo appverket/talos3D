@@ -1,6 +1,8 @@
 /target
 talos3d_project.json
 .DS_Store
+.mcp.json
+.codex-artifacts/
 /tmp/
 .claude/
 *.lock

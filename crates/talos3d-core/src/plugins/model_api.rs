@@ -295,6 +295,20 @@ pub struct CameraParams {
     pub focal_length_mm: Option<f32>,
 }
 
+/// Live camera state for the active orbit camera.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CameraStateInfo {
+    pub focus: [f32; 3],
+    pub radius: f32,
+    pub orthographic_scale: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    /// `"perspective"` or `"orthographic"`.
+    pub projection: String,
+    pub focal_length_mm: f32,
+}
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SplitResult {
@@ -636,6 +650,36 @@ pub struct PlaceDimensionLineRequest {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateBoxRequest {
+    #[serde(default, alias = "centre")]
+    pub center: Option<[f32; 3]>,
+    #[serde(default)]
+    pub half_extents: Option<[f32; 3]>,
+    #[serde(default)]
+    pub size: Option<[f32; 3]>,
+    /// Optional quaternion as `[x, y, z, w]`.
+    #[serde(default)]
+    pub rotation: Option<[f32; 4]>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaceDimensionBetweenHandlesRequest {
+    pub start_element_id: u64,
+    pub start_handle_id: String,
+    pub end_element_id: u64,
+    pub end_handle_id: String,
+    pub line_point: Option<[f32; 3]>,
+    pub offset: Option<f32>,
+    pub extension: Option<f32>,
+    pub visible: Option<bool>,
+    pub label: Option<String>,
+    pub display_unit: Option<String>,
+    pub precision: Option<u8>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BooleanOperationRequest {
     /// Element ID of the base solid (the body that remains / is modified).
     pub base: u64,
@@ -867,8 +911,74 @@ pub struct OccurrenceExplainResult {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssemblyPatternLayerInfo {
+    pub layer_id: String,
+    pub label: String,
+    pub role: String,
+    pub material_hint: Option<String>,
+    pub optional: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssemblyPatternRelationRuleInfo {
+    pub relation_type: String,
+    pub source_layer_id: String,
+    pub target_layer_id: String,
+    pub required: bool,
+    pub rationale: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssemblyPatternInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub target_types: Vec<String>,
+    pub axis: String,
+    pub layers: Vec<AssemblyPatternLayerInfo>,
+    pub relation_rules: Vec<AssemblyPatternRelationRuleInfo>,
+    pub root_layer_ids: Vec<String>,
+    pub requires_support_path: bool,
+    pub tags: Vec<String>,
+    pub parameter_schema: serde_json::Value,
+    #[serde(default)]
+    pub is_session_draft: bool,
+    pub status: Option<String>,
+    pub consultable: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssemblyPatternDraftInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub target_types: Vec<String>,
+    pub axis: String,
+    pub layers: Vec<AssemblyPatternLayerInfo>,
+    pub relation_rules: Vec<AssemblyPatternRelationRuleInfo>,
+    pub root_layer_ids: Vec<String>,
+    pub requires_support_path: bool,
+    pub tags: Vec<String>,
+    pub parameter_schema: serde_json::Value,
+    pub jurisdiction: Option<String>,
+    pub gap_id: Option<String>,
+    pub source_passage_refs: Vec<String>,
+    pub acquisition_context: serde_json::Value,
+    pub notes: Vec<String>,
+    pub status: String,
+    pub consultable: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VocabularyInfo {
     pub assembly_types: Vec<crate::capability_registry::AssemblyTypeDescriptor>,
+    pub assembly_patterns: Vec<AssemblyPatternInfo>,
     pub relation_types: Vec<crate::capability_registry::RelationTypeDescriptor>,
 }
 
@@ -1124,6 +1234,10 @@ enum ModelApiRequest {
         json: Value,
         response: oneshot::Sender<ApiResult<u64>>,
     },
+    CreateBox {
+        request: CreateBoxRequest,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
     ImportFile {
         path: String,
         format_hint: Option<String>,
@@ -1251,6 +1365,11 @@ enum ModelApiRequest {
         request: RenderSettingsUpdateRequest,
         response: oneshot::Sender<ApiResult<RenderSettingsInfo>>,
     },
+    GetCamera(oneshot::Sender<CameraStateInfo>),
+    SetCamera {
+        params: CameraParams,
+        response: oneshot::Sender<ApiResult<CameraStateInfo>>,
+    },
     // --- Selection ---
     GetSelection(oneshot::Sender<Vec<u64>>),
     SetSelection {
@@ -1296,6 +1415,10 @@ enum ModelApiRequest {
     },
     PlaceSheetDimension {
         request: PlaceSheetDimensionRequest,
+        response: oneshot::Sender<ApiResult<u64>>,
+    },
+    PlaceDimensionBetweenHandles {
+        request: PlaceDimensionBetweenHandlesRequest,
         response: oneshot::Sender<ApiResult<u64>>,
     },
     SaveProject {
@@ -1576,6 +1699,7 @@ enum ModelApiRequest {
     ListElementClasses(oneshot::Sender<Vec<ElementClassInfo>>),
     ListRecipeFamilies {
         element_class: Option<String>,
+        include_session_drafts: bool,
         response: oneshot::Sender<Vec<RecipeFamilyInfo>>,
     },
     SelectRecipe {
@@ -1635,6 +1759,43 @@ enum ModelApiRequest {
         response: oneshot::Sender<ApiResult<DraftRulePackInfo>>,
     },
     CheckRulePackBacklinks(oneshot::Sender<BacklinkCheckReportInfo>),
+    // --- PP92: Session recipe drafts ---
+    ListRecipeDrafts {
+        target_class: Option<String>,
+        status: Option<String>,
+        response: oneshot::Sender<ApiResult<Vec<RecipeDraftInfo>>>,
+    },
+    GetRecipeDraft {
+        recipe_draft_id: String,
+        response: oneshot::Sender<ApiResult<RecipeDraftInfo>>,
+    },
+    SaveRecipeDraft {
+        request: SaveRecipeDraftRequest,
+        response: oneshot::Sender<ApiResult<RecipeDraftInfo>>,
+    },
+    SetRecipeDraftStatus {
+        recipe_draft_id: String,
+        status: String,
+        response: oneshot::Sender<ApiResult<RecipeDraftInfo>>,
+    },
+    ListAssemblyPatternDrafts {
+        target_type: Option<String>,
+        status: Option<String>,
+        response: oneshot::Sender<ApiResult<Vec<AssemblyPatternDraftInfo>>>,
+    },
+    GetAssemblyPatternDraft {
+        assembly_pattern_draft_id: String,
+        response: oneshot::Sender<ApiResult<AssemblyPatternDraftInfo>>,
+    },
+    SaveAssemblyPatternDraft {
+        request: SaveAssemblyPatternDraftRequest,
+        response: oneshot::Sender<ApiResult<AssemblyPatternDraftInfo>>,
+    },
+    SetAssemblyPatternDraftStatus {
+        assembly_pattern_draft_id: String,
+        status: String,
+        response: oneshot::Sender<ApiResult<AssemblyPatternDraftInfo>>,
+    },
     // --- Authoring guidance (Slice A of COMPONENT_STRUCTURE) ---
     GetAuthoringGuidance(oneshot::Sender<AuthoringGuidance>),
 }
@@ -1692,6 +1853,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::CreateEntity { json, response } => {
             let _ = response.send(handle_create_entity(world, json));
+        }
+        ModelApiRequest::CreateBox { request, response } => {
+            let _ = response.send(handle_create_box(world, request));
         }
         ModelApiRequest::ImportFile {
             path,
@@ -1863,6 +2027,12 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::SetRenderSettings { request, response } => {
             let _ = response.send(handle_set_render_settings(world, request));
         }
+        ModelApiRequest::GetCamera(response) => {
+            let _ = response.send(handle_get_camera(world));
+        }
+        ModelApiRequest::SetCamera { params, response } => {
+            let _ = response.send(handle_set_camera(world, params));
+        }
         // --- Selection ---
         ModelApiRequest::GetSelection(response) => {
             let _ = response.send(handle_get_selection(world));
@@ -1919,6 +2089,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::PlaceSheetDimension { request, response } => {
             let _ = response.send(handle_place_sheet_dimension(world, request));
+        }
+        ModelApiRequest::PlaceDimensionBetweenHandles { request, response } => {
+            let _ = response.send(handle_place_dimension_between_handles(world, request));
         }
         ModelApiRequest::SaveProject { path, response } => {
             let _ = response.send(handle_save_project(world, &path));
@@ -2302,9 +2475,14 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::ListRecipeFamilies {
             element_class,
+            include_session_drafts,
             response,
         } => {
-            let _ = response.send(handle_list_recipe_families(world, element_class));
+            let _ = response.send(handle_list_recipe_families_with_options(
+                world,
+                element_class,
+                include_session_drafts,
+            ));
         }
         ModelApiRequest::SelectRecipe {
             element_class,
@@ -2317,7 +2495,10 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::ListConstraints { scope, response } => {
             let _ = response.send(handle_list_constraints(world, scope));
         }
-        ModelApiRequest::RunValidationV2 { element_id, response } => {
+        ModelApiRequest::RunValidationV2 {
+            element_id,
+            response,
+        } => {
             // Force a fresh sweep, then read from the Findings resource.
             crate::plugins::validation::validation_sweep_system(world);
             let _ = response.send(handle_run_validation_v2(world, element_id));
@@ -2395,6 +2576,67 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::CheckRulePackBacklinks(response) => {
             let _ = response.send(handle_check_rule_pack_backlinks(world));
+        }
+        ModelApiRequest::ListRecipeDrafts {
+            target_class,
+            status,
+            response,
+        } => {
+            let _ = response.send(handle_list_recipe_drafts(world, target_class, status));
+        }
+        ModelApiRequest::GetRecipeDraft {
+            recipe_draft_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_recipe_draft(world, recipe_draft_id));
+        }
+        ModelApiRequest::SaveRecipeDraft { request, response } => {
+            let _ = response.send(handle_save_recipe_draft(world, request));
+        }
+        ModelApiRequest::SetRecipeDraftStatus {
+            recipe_draft_id,
+            status,
+            response,
+        } => {
+            let _ = response.send(handle_set_recipe_draft_status(
+                world,
+                recipe_draft_id,
+                status,
+            ));
+        }
+        ModelApiRequest::ListAssemblyPatternDrafts {
+            target_type,
+            status,
+            response,
+        } => {
+            let _ = response.send(handle_list_assembly_pattern_drafts(
+                world,
+                target_type,
+                status,
+            ));
+        }
+        ModelApiRequest::GetAssemblyPatternDraft {
+            assembly_pattern_draft_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_assembly_pattern_draft(
+                world,
+                assembly_pattern_draft_id,
+            ));
+        }
+        ModelApiRequest::SaveAssemblyPatternDraft { request, response } => {
+            let _ = response.send(handle_save_assembly_pattern_draft(world, request));
+        }
+        ModelApiRequest::SetAssemblyPatternDraftStatus {
+            assembly_pattern_draft_id,
+            status,
+            response,
+        } => {
+            let _ = response.send(handle_set_assembly_pattern_draft_status(
+                world,
+                assembly_pattern_draft_id,
+                status,
+            ));
         }
         ModelApiRequest::GetAuthoringGuidance(response) => {
             let guidance = world
@@ -2775,6 +3017,16 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::CreateEntity { json, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_box(&self, request: CreateBoxRequest) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateBox { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3402,6 +3654,26 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_get_camera(&self) -> Result<CameraStateInfo, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetCamera(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_set_camera(&self, params: CameraParams) -> ApiResult<CameraStateInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SetCamera { params, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     // --- Selection ---
 
     async fn request_get_selection(&self) -> Result<Vec<u64>, String> {
@@ -3563,6 +3835,19 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_place_dimension_between_handles(
+        &self,
+        request: PlaceDimensionBetweenHandlesRequest,
+    ) -> ApiResult<u64> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::PlaceDimensionBetweenHandles { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_save_project(&self, path: String) -> ApiResult<String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -3708,10 +3993,7 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
-    async fn request_get_obligations(
-        &self,
-        element_id: u64,
-    ) -> ApiResult<Vec<ObligationInfo>> {
+    async fn request_get_obligations(&self, element_id: u64) -> ApiResult<Vec<ObligationInfo>> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::GetObligations {
@@ -3814,10 +4096,7 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
-    async fn request_explain_finding(
-        &self,
-        finding_id: String,
-    ) -> ApiResult<serde_json::Value> {
+    async fn request_explain_finding(&self, finding_id: String) -> ApiResult<serde_json::Value> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::ExplainFinding {
@@ -3843,14 +4122,14 @@ impl ModelApiServer {
     async fn request_list_recipe_families(
         &self,
         element_class: Option<String>,
+        include_session_drafts: bool,
     ) -> Vec<RecipeFamilyInfo> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::ListRecipeFamilies {
-                element_class,
-                response,
-            });
+        let _ = self.sender.send(ModelApiRequest::ListRecipeFamilies {
+            element_class,
+            include_session_drafts,
+            response,
+        });
         receiver.await.unwrap_or_default()
     }
 
@@ -3946,7 +4225,10 @@ impl ModelApiServer {
     ) -> ApiResult<PassageLookupInfo> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::LookupSourcePassage { passage_ref, response })
+            .send(ModelApiRequest::LookupSourcePassage {
+                passage_ref,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3960,7 +4242,11 @@ impl ModelApiServer {
     ) -> ApiResult<DraftRulePackInfo> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::DraftRulePack { chunk_id, element_class, response })
+            .send(ModelApiRequest::DraftRulePack {
+                chunk_id,
+                element_class,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -3969,12 +4255,144 @@ impl ModelApiServer {
 
     async fn request_check_rule_pack_backlinks(&self) -> BacklinkCheckReportInfo {
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::CheckRulePackBacklinks(response));
+        let _ = self
+            .sender
+            .send(ModelApiRequest::CheckRulePackBacklinks(response));
         receiver.await.unwrap_or_else(|_| BacklinkCheckReportInfo {
             total: 0,
             resolved: 0,
             broken: Vec::new(),
         })
+    }
+
+    async fn request_list_recipe_drafts(
+        &self,
+        target_class: Option<String>,
+        status: Option<String>,
+    ) -> ApiResult<Vec<RecipeDraftInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListRecipeDrafts {
+                target_class,
+                status,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_recipe_draft(
+        &self,
+        recipe_draft_id: String,
+    ) -> ApiResult<RecipeDraftInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetRecipeDraft {
+                recipe_draft_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_save_recipe_draft(
+        &self,
+        request: SaveRecipeDraftRequest,
+    ) -> ApiResult<RecipeDraftInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SaveRecipeDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_set_recipe_draft_status(
+        &self,
+        recipe_draft_id: String,
+        status: String,
+    ) -> ApiResult<RecipeDraftInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SetRecipeDraftStatus {
+                recipe_draft_id,
+                status,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_list_assembly_pattern_drafts(
+        &self,
+        target_type: Option<String>,
+        status: Option<String>,
+    ) -> ApiResult<Vec<AssemblyPatternDraftInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListAssemblyPatternDrafts {
+                target_type,
+                status,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_get_assembly_pattern_draft(
+        &self,
+        assembly_pattern_draft_id: String,
+    ) -> ApiResult<AssemblyPatternDraftInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetAssemblyPatternDraft {
+                assembly_pattern_draft_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_save_assembly_pattern_draft(
+        &self,
+        request: SaveAssemblyPatternDraftRequest,
+    ) -> ApiResult<AssemblyPatternDraftInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SaveAssemblyPatternDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_set_assembly_pattern_draft_status(
+        &self,
+        assembly_pattern_draft_id: String,
+        status: String,
+    ) -> ApiResult<AssemblyPatternDraftInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SetAssemblyPatternDraftStatus {
+                assembly_pattern_draft_id,
+                status,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
     }
 
     async fn request_catalog_query(
@@ -3998,16 +4416,14 @@ impl ModelApiServer {
         element_id: Option<u64>,
     ) -> Vec<ValidationFindingInfo> {
         let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::RunValidationV2 { element_id, response });
+        let _ = self.sender.send(ModelApiRequest::RunValidationV2 {
+            element_id,
+            response,
+        });
         receiver.await.unwrap_or_default()
     }
 
-    async fn request_explain_finding_v2(
-        &self,
-        finding_id: String,
-    ) -> ApiResult<serde_json::Value> {
+    async fn request_explain_finding_v2(&self, finding_id: String) -> ApiResult<serde_json::Value> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::ExplainFindingV2 {
@@ -5066,6 +5482,8 @@ pub struct RecipeFamilyInfo {
     pub description: String,
     pub supported_refinement_levels: Vec<String>,
     pub parameters: Vec<RecipeParameterInfo>,
+    #[serde(default)]
+    pub is_session_draft: bool,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -5076,6 +5494,29 @@ pub struct RecipeRankingInfo {
     pub label: String,
     /// Tie weight — 1.0 for all viable recipes in PP71 (real priors land in PP76).
     pub weight: f32,
+    #[serde(default)]
+    pub is_session_draft: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecipeDraftInfo {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub target_class: String,
+    pub supported_refinement_levels: Vec<String>,
+    pub parameters: Vec<RecipeParameterInfo>,
+    pub jurisdiction: Option<String>,
+    pub gap_id: Option<String>,
+    pub source_passage_refs: Vec<String>,
+    pub acquisition_context: serde_json::Value,
+    pub draft_script: serde_json::Value,
+    pub notes: Vec<String>,
+    pub status: String,
+    pub consultable: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 // --- Refinement types (PP70) ---
@@ -5267,7 +5708,6 @@ pub struct PreviewPromotionResult {
     pub findings: Vec<ValidationFindingInfo>,
 }
 
-
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PromoteRefinementResult {
@@ -5334,6 +5774,9 @@ struct ExplainFindingRequest {
 struct ListRecipeFamiliesRequest {
     /// Filter to this element class id, or omit for all families.
     element_class: Option<String>,
+    /// Include session-installed recipe drafts in the response.
+    #[serde(default)]
+    include_session_drafts: bool,
 }
 
 #[cfg(feature = "model-api")]
@@ -5436,6 +5879,112 @@ struct DraftRulePackRequest {
     chunk_id: String,
     /// The element class the validator will apply to.
     element_class: String,
+}
+
+// --- PP92 request parameter structs ---
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ListRecipeDraftsRequest {
+    target_class: Option<String>,
+    status: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GetRecipeDraftRequest {
+    recipe_draft_id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SaveRecipeDraftRequest {
+    recipe_draft_id: Option<String>,
+    label: String,
+    description: String,
+    target_class: String,
+    #[serde(default)]
+    supported_refinement_levels: Vec<String>,
+    #[serde(default)]
+    parameters: Vec<RecipeParameterInfo>,
+    jurisdiction: Option<String>,
+    gap_id: Option<String>,
+    #[serde(default)]
+    source_passage_refs: Vec<String>,
+    #[serde(default)]
+    acquisition_context: serde_json::Value,
+    #[serde(default)]
+    draft_script: serde_json::Value,
+    #[serde(default)]
+    notes: Vec<String>,
+    status: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetRecipeDraftStatusRequest {
+    recipe_draft_id: String,
+    status: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ListAssemblyPatternDraftsRequest {
+    target_type: Option<String>,
+    status: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GetAssemblyPatternDraftRequest {
+    assembly_pattern_draft_id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SaveAssemblyPatternDraftRequest {
+    assembly_pattern_draft_id: Option<String>,
+    label: String,
+    description: String,
+    #[serde(default)]
+    target_types: Vec<String>,
+    axis: String,
+    #[serde(default)]
+    layers: Vec<AssemblyPatternLayerInfo>,
+    #[serde(default)]
+    relation_rules: Vec<AssemblyPatternRelationRuleInfo>,
+    #[serde(default)]
+    root_layer_ids: Vec<String>,
+    #[serde(default)]
+    requires_support_path: bool,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    parameter_schema: serde_json::Value,
+    jurisdiction: Option<String>,
+    gap_id: Option<String>,
+    #[serde(default)]
+    source_passage_refs: Vec<String>,
+    #[serde(default)]
+    acquisition_context: serde_json::Value,
+    #[serde(default)]
+    notes: Vec<String>,
+    status: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SetAssemblyPatternDraftStatusRequest {
+    assembly_pattern_draft_id: String,
+    status: String,
 }
 
 // --- Assembly / Relation request types ---
@@ -5743,6 +6292,21 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let element_id = self
             .request_create_entity(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
+        name = "create_box",
+        description = "Create a box primitive directly. Accepts `center` (or `centre`) plus either `size` or `half_extents`, with optional quaternion `rotation`."
+    )]
+    async fn create_box_tool(
+        &self,
+        Parameters(params): Parameters<CreateBoxRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_create_box(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(element_id)
@@ -6373,6 +6937,21 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "place_dimension_between_handles",
+        description = "Create a dimension line between two authored handles, such as `corner_0` and `corner_1` on a box. Use `list_handles` to discover stable handle ids, then place the visible line with `line_point` or `offset`."
+    )]
+    async fn place_dimension_between_handles_tool(
+        &self,
+        Parameters(params): Parameters<PlaceDimensionBetweenHandlesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let element_id = self
+            .request_place_dimension_between_handles(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(element_id)
+    }
+
+    #[tool(
         name = "boolean_union",
         description = "Combine two solids into one by adding their volumes together. Both operands become hidden and a new combined solid is created. The result preserves the parametric operands so either can still be edited."
     )]
@@ -6503,6 +7082,33 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(settings)
+    }
+
+    #[tool(
+        name = "get_camera",
+        description = "Get the live orbit camera state for the active viewport."
+    )]
+    async fn get_camera_tool(&self) -> Result<CallToolResult, McpError> {
+        let camera = self
+            .request_get_camera()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(camera)
+    }
+
+    #[tool(
+        name = "set_camera",
+        description = "Update the live orbit camera directly. Any omitted fields keep their current value."
+    )]
+    async fn set_camera_tool(
+        &self,
+        Parameters(params): Parameters<CameraParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let camera = self
+            .request_set_camera(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(camera)
     }
 
     // --- Selection ---
@@ -6734,7 +7340,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "list_vocabulary",
-        description = "List all registered assembly types and relation types. This is how AI discovers what domain concepts are available."
+        description = "List all registered assembly types, reusable assembly patterns, and relation types. This is how AI discovers what domain concepts are available."
     )]
     async fn list_vocabulary_tool(&self) -> Result<CallToolResult, McpError> {
         let vocab = self
@@ -6959,14 +7565,15 @@ impl ModelApiServer {
         name = "list_recipe_families",
         description = "List registered recipe families. Pass element_class to filter to a specific \
             class (e.g. 'wall_assembly'). Each entry includes the id, label, parameters, and \
-            supported refinement levels."
+            supported refinement levels. Set include_session_drafts=true to append installed \
+            session drafts."
     )]
     async fn list_recipe_families_tool(
         &self,
         Parameters(params): Parameters<ListRecipeFamiliesRequest>,
     ) -> Result<CallToolResult, McpError> {
         let families = self
-            .request_list_recipe_families(params.element_class)
+            .request_list_recipe_families(params.element_class, params.include_session_drafts)
             .await;
         json_tool_result(families)
     }
@@ -6976,7 +7583,8 @@ impl ModelApiServer {
         description = "Return viable recipe families for an element class, ranked by weight. \
             In PP71 all viable recipes tie at 1.0 (real priors land in PP76). \
             Viable means the recipe's supported_refinement_levels includes the target_state. \
-            Context schema: { target_state: string, jurisdiction?: string }."
+            Context schema: { target_state: string, jurisdiction?: string, \
+            include_session_drafts?: bool }."
     )]
     async fn select_recipe_tool(
         &self,
@@ -7186,6 +7794,141 @@ impl ModelApiServer {
     async fn check_rule_pack_backlinks_tool(&self) -> Result<CallToolResult, McpError> {
         let report = self.request_check_rule_pack_backlinks().await;
         json_tool_result(report)
+    }
+
+    #[tool(
+        name = "list_recipe_drafts",
+        description = "List session-scoped recipe drafts captured for dynamic recipe learning. \
+            Pass target_class or status to filter. Status values: gap_detected, sourced, \
+            drafted, validated, installed."
+    )]
+    async fn list_recipe_drafts_tool(
+        &self,
+        Parameters(params): Parameters<ListRecipeDraftsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let drafts = self
+            .request_list_recipe_drafts(params.target_class, params.status)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(drafts)
+    }
+
+    #[tool(
+        name = "get_recipe_draft",
+        description = "Get one session recipe draft by id, including linked gap id, source \
+            passage refs, draft script payload, notes, and current status."
+    )]
+    async fn get_recipe_draft_tool(
+        &self,
+        Parameters(params): Parameters<GetRecipeDraftRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_get_recipe_draft(params.recipe_draft_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "save_recipe_draft",
+        description = "Create or update a session recipe draft. This stores acquisition context, \
+            linked corpus gap/source passages, parameter shape, and an opaque draft_script payload. \
+            If recipe_draft_id is omitted a new session id is allocated."
+    )]
+    async fn save_recipe_draft_tool(
+        &self,
+        Parameters(params): Parameters<SaveRecipeDraftRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_save_recipe_draft(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "set_recipe_draft_status",
+        description = "Update a session recipe draft status. Use installed to make a draft \
+            consultable from list_recipe_families/select_recipe when the caller opts in."
+    )]
+    async fn set_recipe_draft_status_tool(
+        &self,
+        Parameters(params): Parameters<SetRecipeDraftStatusRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_set_recipe_draft_status(params.recipe_draft_id, params.status)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "list_assembly_pattern_drafts",
+        description = "List session-scoped assembly pattern drafts for layered construction knowledge. \
+            Pass target_type or status to filter. Status values: gap_detected, sourced, drafted, \
+            validated, installed."
+    )]
+    async fn list_assembly_pattern_drafts_tool(
+        &self,
+        Parameters(params): Parameters<ListAssemblyPatternDraftsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let drafts = self
+            .request_list_assembly_pattern_drafts(params.target_type, params.status)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(drafts)
+    }
+
+    #[tool(
+        name = "get_assembly_pattern_draft",
+        description = "Get one session assembly pattern draft by id, including ordered layers, \
+            relation rules, linked gap/source refs, and current status."
+    )]
+    async fn get_assembly_pattern_draft_tool(
+        &self,
+        Parameters(params): Parameters<GetAssemblyPatternDraftRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_get_assembly_pattern_draft(params.assembly_pattern_draft_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "save_assembly_pattern_draft",
+        description = "Create or update a session assembly pattern draft. This stores ordered layers, \
+            relation rules, support-root hints, linked corpus gaps/source passages, and acquisition \
+            context. If assembly_pattern_draft_id is omitted a new session id is allocated."
+    )]
+    async fn save_assembly_pattern_draft_tool(
+        &self,
+        Parameters(params): Parameters<SaveAssemblyPatternDraftRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_save_assembly_pattern_draft(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
+    }
+
+    #[tool(
+        name = "set_assembly_pattern_draft_status",
+        description = "Update a session assembly pattern draft status. Use installed to make a \
+            draft consultable from list_vocabulary in the current running app."
+    )]
+    async fn set_assembly_pattern_draft_status_tool(
+        &self,
+        Parameters(params): Parameters<SetAssemblyPatternDraftStatusRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let draft = self
+            .request_set_assembly_pattern_draft_status(
+                params.assembly_pattern_draft_id,
+                params.status,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(draft)
     }
 
     #[tool(
@@ -7906,6 +8649,14 @@ fn named_view_orthographic_scale(view: &crate::plugins::named_views::NamedView) 
 }
 
 #[cfg(feature = "model-api")]
+fn camera_projection_name(mode: CameraProjectionMode) -> String {
+    match mode {
+        CameraProjectionMode::Perspective => "perspective".to_string(),
+        CameraProjectionMode::Isometric => "orthographic".to_string(),
+    }
+}
+
+#[cfg(feature = "model-api")]
 fn named_view_info_from_view(view: &crate::plugins::named_views::NamedView) -> NamedViewInfo {
     NamedViewInfo {
         name: view.name.clone(),
@@ -7915,10 +8666,7 @@ fn named_view_info_from_view(view: &crate::plugins::named_views::NamedView) -> N
         orthographic_scale: named_view_orthographic_scale(view),
         yaw: view.yaw,
         pitch: view.pitch,
-        projection: match view.projection_mode {
-            CameraProjectionMode::Perspective => "perspective".to_string(),
-            CameraProjectionMode::Isometric => "orthographic".to_string(),
-        },
+        projection: camera_projection_name(view.projection_mode),
         focal_length_mm: view.focal_length_mm,
     }
 }
@@ -7944,6 +8692,19 @@ struct LiveCameraSnapshot {
     pitch: f32,
     projection_mode: CameraProjectionMode,
     focal_length_mm: f32,
+}
+
+#[cfg(feature = "model-api")]
+fn camera_state_info_from_live(snapshot: &LiveCameraSnapshot) -> CameraStateInfo {
+    CameraStateInfo {
+        focus: snapshot.focus.into(),
+        radius: snapshot.radius,
+        orthographic_scale: snapshot.orthographic_scale,
+        yaw: snapshot.yaw,
+        pitch: snapshot.pitch,
+        projection: camera_projection_name(snapshot.projection_mode),
+        focal_length_mm: snapshot.focal_length_mm,
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -8482,6 +9243,49 @@ fn create_dimension_line_request_json(request: &PlaceDimensionLineRequest) -> Va
 }
 
 #[cfg(feature = "model-api")]
+fn create_box_request_json(request: &CreateBoxRequest) -> Result<Value, String> {
+    let center = request.center.unwrap_or([0.0, 0.0, 0.0]);
+    let half_extents = match (request.half_extents, request.size) {
+        (Some(_), Some(_)) => {
+            return Err("create_box expects either `size` or `half_extents`, not both".to_string())
+        }
+        (Some(half_extents), None) => half_extents,
+        (None, Some(size)) => {
+            if size.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+                return Err(
+                    "create_box `size` values must be finite and greater than zero".to_string(),
+                );
+            }
+            [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5]
+        }
+        (None, None) => {
+            return Err("create_box requires either `size` or `half_extents`".to_string())
+        }
+    };
+    if half_extents
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(
+            "create_box `half_extents` values must be finite and greater than zero".to_string(),
+        );
+    }
+
+    let mut request_json = json!({
+        "type": "box",
+        "centre": center,
+        "half_extents": half_extents,
+    });
+    if let Some(rotation) = request.rotation {
+        request_json
+            .as_object_mut()
+            .expect("box request should serialize as an object")
+            .insert("rotation".to_string(), json!(rotation));
+    }
+    Ok(request_json)
+}
+
+#[cfg(feature = "model-api")]
 fn boolean_request_json(base: u64, tool: u64, op: &str) -> Value {
     json!({
         "type": "csg",
@@ -8761,6 +9565,23 @@ fn handle_set_render_settings(
     let info = RenderSettingsInfo::from_settings(&settings);
     world.insert_resource(settings);
     Ok(info)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_camera(world: &World) -> CameraStateInfo {
+    camera_state_info_from_live(&live_camera_snapshot(world))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_set_camera(world: &mut World, params: CameraParams) -> Result<CameraStateInfo, String> {
+    let orbit = orbit_from_camera_params(world, Some(&params))?;
+    let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
+    let Some((mut live_orbit, mut transform, mut projection)) = q.iter_mut(world).next() else {
+        return Err("No orbit camera is available".to_string());
+    };
+    *live_orbit = orbit;
+    apply_orbit_state(&live_orbit, &mut transform, &mut projection);
+    Ok(camera_state_info_from_live(&live_camera_snapshot(world)))
 }
 
 #[cfg(feature = "model-api")]
@@ -9512,6 +10333,41 @@ fn handle_place_sheet_dimension(
 }
 
 #[cfg(feature = "model-api")]
+fn resolve_handle_position(
+    world: &World,
+    element_id: u64,
+    handle_id: &str,
+) -> Result<Vec3, String> {
+    let handles = handle_list_handles(world, element_id)?;
+    handles
+        .into_iter()
+        .find(|handle| handle.id == handle_id)
+        .map(|handle| Vec3::new(handle.position.x, handle.position.y, handle.position.z))
+        .ok_or_else(|| format!("Entity {element_id} has no handle '{handle_id}'"))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_place_dimension_between_handles(
+    world: &mut World,
+    request: PlaceDimensionBetweenHandlesRequest,
+) -> Result<u64, String> {
+    let start = resolve_handle_position(world, request.start_element_id, &request.start_handle_id)?;
+    let end = resolve_handle_position(world, request.end_element_id, &request.end_handle_id)?;
+    let params = PlaceDimensionLineRequest {
+        start: start.into(),
+        end: end.into(),
+        line_point: request.line_point,
+        offset: request.offset,
+        extension: request.extension,
+        visible: request.visible,
+        label: request.label,
+        display_unit: request.display_unit,
+        precision: request.precision,
+    };
+    handle_create_entity(world, create_dimension_line_request_json(&params))
+}
+
+#[cfg(feature = "model-api")]
 fn handle_frame_model(world: &mut World) -> Result<BoundingBox, String> {
     let bounds = authored_model_bounds(world)
         .ok_or_else(|| "No authored entities with bounds available to frame".to_string())?;
@@ -9728,8 +10584,29 @@ pub fn handle_prepare_site_surface(
 #[cfg(feature = "model-api")]
 fn handle_list_vocabulary(world: &World) -> VocabularyInfo {
     let registry = world.resource::<CapabilityRegistry>();
+    let mut assembly_patterns = registry
+        .assembly_pattern_descriptors()
+        .iter()
+        .map(|descriptor| assembly_pattern_to_info(descriptor, false, None, true))
+        .collect::<Vec<_>>();
+    if let Some(drafts) = world
+        .get_resource::<crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry>()
+    {
+        assembly_patterns.extend(
+            drafts
+                .list(
+                    None,
+                    Some(
+                        crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftStatus::Installed,
+                    ),
+                )
+                .iter()
+                .map(assembly_pattern_draft_to_pattern_info),
+        );
+    }
     VocabularyInfo {
         assembly_types: registry.assembly_type_descriptors().to_vec(),
+        assembly_patterns,
         relation_types: registry.relation_type_descriptors().to_vec(),
     }
 }
@@ -12517,6 +13394,12 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
 }
 
 #[cfg(feature = "model-api")]
+pub fn handle_create_box(world: &mut World, request: CreateBoxRequest) -> Result<u64, String> {
+    let json = create_box_request_json(&request)?;
+    handle_create_entity(world, json)
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_import_file(
     world: &mut World,
     path: &str,
@@ -13008,9 +13891,7 @@ pub fn handle_get_claim_grounding(
     element_id: u64,
     path_filter: Option<String>,
 ) -> ApiResult<Vec<ClaimGroundingEntry>> {
-    use crate::capability_registry::{
-        effective_promotion_critical_paths, ElementClassAssignment,
-    };
+    use crate::capability_registry::{effective_promotion_critical_paths, ElementClassAssignment};
     use crate::plugins::refinement::{ClaimGrounding, RefinementStateComponent};
 
     let eid = ElementId(element_id);
@@ -13091,6 +13972,18 @@ pub fn handle_promote_refinement(
 
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
+
+    if let Some(recipe_id) = recipe_id.as_deref() {
+        if world
+            .get_resource::<crate::plugins::recipe_drafts::RecipeDraftRegistry>()
+            .and_then(|registry| registry.get(recipe_id))
+            .is_some()
+        {
+            return Err(format!(
+                "recipe draft '{recipe_id}' is consultable but not executable yet; use list_recipe_drafts/get_recipe_draft to inspect it"
+            ));
+        }
+    }
 
     // Capture current state before promote.
     let previous_state = {
@@ -13287,10 +14180,7 @@ pub fn handle_run_validation(
 }
 
 #[cfg(feature = "model-api")]
-fn handle_explain_finding(
-    _world: &World,
-    finding_id: String,
-) -> ApiResult<serde_json::Value> {
+fn handle_explain_finding(_world: &World, finding_id: String) -> ApiResult<serde_json::Value> {
     // PP70 scaffold: derive rationale from the finding_id prefix.
     // The richer per-finding lookup with caching lands in PP74.
     if finding_id.starts_with("declared_state_obligations:") {
@@ -13336,35 +14226,81 @@ pub fn handle_list_recipe_families(
     world: &World,
     element_class: Option<String>,
 ) -> Vec<RecipeFamilyInfo> {
+    handle_list_recipe_families_with_options(world, element_class, false)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_recipe_families_with_options(
+    world: &World,
+    element_class: Option<String>,
+    include_session_drafts: bool,
+) -> Vec<RecipeFamilyInfo> {
     use crate::capability_registry::{CapabilityRegistry, ElementClassId};
-    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
-        return Vec::new();
-    };
-    let filter = element_class.as_deref().map(|s| ElementClassId(s.to_string()));
-    registry
-        .recipe_family_descriptors(filter.as_ref())
-        .into_iter()
-        .map(|d| RecipeFamilyInfo {
-            id: d.id.0.clone(),
-            target_class: d.target_class.0.clone(),
-            label: d.label.clone(),
-            description: d.description.clone(),
-            supported_refinement_levels: d
-                .supported_refinement_levels
-                .iter()
-                .map(|s| s.as_str().to_string())
-                .collect(),
-            parameters: d
-                .parameters
-                .iter()
-                .map(|p| RecipeParameterInfo {
-                    name: p.name.clone(),
-                    value_schema: p.value_schema.clone(),
-                    default: p.default.clone(),
+    use crate::plugins::recipe_drafts::{RecipeDraftRegistry, RecipeDraftStatus};
+
+    let filter = element_class
+        .as_deref()
+        .map(|s| ElementClassId(s.to_string()));
+
+    let mut families: Vec<RecipeFamilyInfo> = world
+        .get_resource::<CapabilityRegistry>()
+        .map(|registry| {
+            registry
+                .recipe_family_descriptors(filter.as_ref())
+                .into_iter()
+                .map(|d| RecipeFamilyInfo {
+                    id: d.id.0.clone(),
+                    target_class: d.target_class.0.clone(),
+                    label: d.label.clone(),
+                    description: d.description.clone(),
+                    supported_refinement_levels: d
+                        .supported_refinement_levels
+                        .iter()
+                        .map(|s| s.as_str().to_string())
+                        .collect(),
+                    parameters: d
+                        .parameters
+                        .iter()
+                        .map(|p| RecipeParameterInfo {
+                            name: p.name.clone(),
+                            value_schema: p.value_schema.clone(),
+                            default: p.default.clone(),
+                        })
+                        .collect(),
+                    is_session_draft: false,
                 })
-                .collect(),
+                .collect()
         })
-        .collect()
+        .unwrap_or_default();
+
+    if include_session_drafts {
+        if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
+            families.extend(
+                registry
+                    .list(element_class.as_deref(), Some(RecipeDraftStatus::Installed))
+                    .into_iter()
+                    .map(|draft| RecipeFamilyInfo {
+                        id: draft.id,
+                        target_class: draft.target_class,
+                        label: draft.label,
+                        description: draft.description,
+                        supported_refinement_levels: draft.supported_refinement_levels,
+                        parameters: draft
+                            .parameters
+                            .into_iter()
+                            .map(|parameter| RecipeParameterInfo {
+                                name: parameter.name,
+                                value_schema: parameter.value_schema,
+                                default: parameter.default,
+                            })
+                            .collect(),
+                        is_session_draft: true,
+                    }),
+            );
+        }
+    }
+
+    families
 }
 
 #[cfg(feature = "model-api")]
@@ -13374,13 +14310,19 @@ pub fn handle_select_recipe(
     context: serde_json::Value,
 ) -> ApiResult<Vec<RecipeRankingInfo>> {
     use crate::capability_registry::{CapabilityRegistry, ElementClassId};
+    use crate::plugins::recipe_drafts::RecipeDraftRegistry;
     use crate::plugins::refinement::RefinementState;
 
-    let registry = world
-        .get_resource::<CapabilityRegistry>()
-        .ok_or_else(|| "CapabilityRegistry not found".to_string())?;
+    let include_session_drafts = context
+        .get("include_session_drafts")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let registry = world.get_resource::<CapabilityRegistry>();
+    if registry.is_none() && !include_session_drafts {
+        return Err("CapabilityRegistry not found".to_string());
+    }
 
-    let class_id = ElementClassId(element_class);
+    let class_id = ElementClassId(element_class.clone());
 
     // Optionally filter by target_state from the context object.
     let target_state: Option<RefinementState> = context
@@ -13400,44 +14342,85 @@ pub fn handle_select_recipe(
 
     let prior_context = PriorContext::from_json(&context);
     let recipe_selection_priors: Vec<_> = registry
-        .generation_prior_descriptors(Some(&class_id))
-        .into_iter()
-        .filter(|d| matches!(&d.scope, PriorScope::RecipeSelection { .. }))
-        .collect();
+        .map(|registry| {
+            registry
+                .generation_prior_descriptors(Some(&class_id))
+                .into_iter()
+                .filter(|d| matches!(&d.scope, PriorScope::RecipeSelection { .. }))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut viable: Vec<RecipeRankingInfo> = registry
-        .recipe_family_descriptors(Some(&class_id))
-        .into_iter()
-        .filter(|d| {
-            // Viable = supports the requested state (or all states if no filter).
-            target_state.is_none_or(|ts| d.supported_refinement_levels.contains(&ts))
-        })
-        .map(|d| {
-            // Evaluate all applicable priors for this recipe family.  A prior
-            // is applicable when its scope matches either "all families for the
-            // class" (recipe_family: None) or exactly this family.
-            let weight = recipe_selection_priors
-                .iter()
-                .filter(|p| match &p.scope {
-                    PriorScope::RecipeSelection { recipe_family, .. } => {
-                        recipe_family.is_none()
-                            || recipe_family.as_ref().map(|rf| rf.0.as_str()) == Some(d.id.0.as_str())
-                    }
-                    _ => false,
+        .map(|registry| {
+            registry
+                .recipe_family_descriptors(Some(&class_id))
+                .into_iter()
+                .filter(|d| {
+                    // Viable = supports the requested state (or all states if no filter).
+                    target_state.is_none_or(|ts| d.supported_refinement_levels.contains(&ts))
                 })
-                .map(|p| (p.prior_fn)(&prior_context).weight)
-                .fold(1.0_f32, |acc, w| acc * w);
-            RecipeRankingInfo {
-                id: d.id.0.clone(),
-                target_class: d.target_class.0.clone(),
-                label: d.label.clone(),
-                weight,
-            }
+                .map(|d| {
+                    // Evaluate all applicable priors for this recipe family.  A prior
+                    // is applicable when its scope matches either "all families for the
+                    // class" (recipe_family: None) or exactly this family.
+                    let weight = recipe_selection_priors
+                        .iter()
+                        .filter(|p| match &p.scope {
+                            PriorScope::RecipeSelection { recipe_family, .. } => {
+                                recipe_family.is_none()
+                                    || recipe_family.as_ref().map(|rf| rf.0.as_str())
+                                        == Some(d.id.0.as_str())
+                            }
+                            _ => false,
+                        })
+                        .map(|p| (p.prior_fn)(&prior_context).weight)
+                        .fold(1.0_f32, |acc, w| acc * w);
+                    RecipeRankingInfo {
+                        id: d.id.0.clone(),
+                        target_class: d.target_class.0.clone(),
+                        label: d.label.clone(),
+                        weight,
+                        is_session_draft: false,
+                    }
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
+
+    if include_session_drafts {
+        if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
+            viable.extend(
+                registry
+                    .installed_for_class(&element_class)
+                    .into_iter()
+                    .filter(|draft| {
+                        target_state.is_none_or(|ts| {
+                            draft
+                                .supported_refinement_levels
+                                .iter()
+                                .any(|state| state == ts.as_str())
+                        })
+                    })
+                    .map(|draft| RecipeRankingInfo {
+                        id: draft.id,
+                        target_class: draft.target_class,
+                        label: draft.label,
+                        // Installed drafts are consultable but intentionally rank below
+                        // executable shipped recipes until invocation exists.
+                        weight: 0.25,
+                        is_session_draft: true,
+                    }),
+            );
+        }
+    }
 
     // Sort descending by weight so the highest-weight recipe comes first.
-    viable.sort_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal));
+    viable.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     Ok(viable)
 }
@@ -13447,10 +14430,7 @@ pub fn handle_select_recipe(
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "model-api")]
-fn handle_list_constraints(
-    world: &World,
-    _scope: Option<String>,
-) -> Vec<ConstraintInfo> {
+fn handle_list_constraints(world: &World, _scope: Option<String>) -> Vec<ConstraintInfo> {
     use crate::capability_registry::CapabilityRegistry;
 
     let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
@@ -13483,10 +14463,7 @@ fn handle_list_constraints(
 ///
 /// Called after `validation_sweep_system` runs in the dispatch path.
 #[cfg(feature = "model-api")]
-fn handle_run_validation_v2(
-    world: &World,
-    element_id: Option<u64>,
-) -> Vec<ValidationFindingInfo> {
+fn handle_run_validation_v2(world: &World, element_id: Option<u64>) -> Vec<ValidationFindingInfo> {
     use crate::plugins::validation::Findings;
 
     let Some(findings) = world.get_resource::<Findings>() else {
@@ -13528,10 +14505,7 @@ fn finding_to_info(f: &crate::capability_registry::Finding) -> ValidationFinding
 /// Look up a finding by `FindingId` in the `Findings` index and return a rich
 /// explanation JSON object.
 #[cfg(feature = "model-api")]
-fn handle_explain_finding_v2(
-    world: &World,
-    finding_id: String,
-) -> ApiResult<serde_json::Value> {
+fn handle_explain_finding_v2(world: &World, finding_id: String) -> ApiResult<serde_json::Value> {
     use crate::capability_registry::{CapabilityRegistry, FindingId};
     use crate::plugins::validation::Findings;
 
@@ -13580,7 +14554,9 @@ fn handle_preview_promotion(
         apply_demote_refinement, ClaimPath, DemoteRefinementRequest, RefinementState,
         RefinementStateComponent,
     };
-    use crate::plugins::refinement::{apply_promote_refinement, PromoteRefinementRequest, RecipeId};
+    use crate::plugins::refinement::{
+        apply_promote_refinement, PromoteRefinementRequest, RecipeId,
+    };
 
     let target_state = RefinementState::from_str(&target_state_str)
         .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
@@ -13961,6 +14937,314 @@ pub fn handle_check_rule_pack_backlinks(world: &World) -> BacklinkCheckReportInf
 }
 
 #[cfg(feature = "model-api")]
+pub fn handle_list_recipe_drafts(
+    world: &World,
+    target_class: Option<String>,
+    status: Option<String>,
+) -> ApiResult<Vec<RecipeDraftInfo>> {
+    use crate::plugins::recipe_drafts::{RecipeDraftRegistry, RecipeDraftStatus};
+
+    let parsed_status = status
+        .as_deref()
+        .map(|value| {
+            RecipeDraftStatus::from_str(value)
+                .ok_or_else(|| format!("unknown recipe draft status '{value}'"))
+        })
+        .transpose()?;
+
+    let Some(registry) = world.get_resource::<RecipeDraftRegistry>() else {
+        return Ok(Vec::new());
+    };
+
+    Ok(registry
+        .list(target_class.as_deref(), parsed_status)
+        .iter()
+        .map(recipe_draft_to_info)
+        .collect())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_recipe_draft(
+    world: &World,
+    recipe_draft_id: String,
+) -> ApiResult<RecipeDraftInfo> {
+    use crate::plugins::recipe_drafts::RecipeDraftRegistry;
+
+    let registry = world
+        .get_resource::<RecipeDraftRegistry>()
+        .ok_or_else(|| "RecipeDraftRegistry not found in world".to_string())?;
+    let draft = registry
+        .get(&recipe_draft_id)
+        .ok_or_else(|| format!("recipe draft not found: '{recipe_draft_id}'"))?;
+    Ok(recipe_draft_to_info(draft))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_save_recipe_draft(
+    world: &mut World,
+    request: SaveRecipeDraftRequest,
+) -> ApiResult<RecipeDraftInfo> {
+    use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
+    use crate::plugins::recipe_drafts::{
+        RecipeDraftArtifact, RecipeDraftParameter, RecipeDraftRegistry, RecipeDraftStatus,
+    };
+
+    if let Some(ref gap_id) = request.gap_id {
+        let Some(queue) = world.get_resource::<CorpusGapQueue>() else {
+            return Err("CorpusGapQueue not found in world".to_string());
+        };
+        let found = queue.list().iter().any(|gap| gap.id.0 == *gap_id);
+        if !found {
+            return Err(format!("unknown corpus gap id '{gap_id}'"));
+        }
+    }
+
+    if !request.source_passage_refs.is_empty() {
+        let registry = world
+            .get_resource::<CorpusPassageRegistry>()
+            .ok_or_else(|| "CorpusPassageRegistry not found in world".to_string())?;
+        for passage_ref in &request.source_passage_refs {
+            let found = registry
+                .iter()
+                .any(|(registered_ref, _)| registered_ref == passage_ref.as_str());
+            if !found {
+                return Err(format!("unknown source passage ref '{passage_ref}'"));
+            }
+        }
+    }
+
+    let status = match request.status.as_deref() {
+        Some(value) => RecipeDraftStatus::from_str(value)
+            .ok_or_else(|| format!("unknown recipe draft status '{value}'"))?,
+        None => request
+            .recipe_draft_id
+            .as_deref()
+            .and_then(|id| {
+                world
+                    .get_resource::<RecipeDraftRegistry>()
+                    .and_then(|registry| registry.get(id))
+                    .map(|draft| draft.status)
+            })
+            .unwrap_or(RecipeDraftStatus::Drafted),
+    };
+
+    world.init_resource::<RecipeDraftRegistry>();
+    let saved = world
+        .resource_mut::<RecipeDraftRegistry>()
+        .save(RecipeDraftArtifact {
+            id: request.recipe_draft_id.unwrap_or_default(),
+            label: request.label,
+            description: request.description,
+            target_class: request.target_class,
+            supported_refinement_levels: request.supported_refinement_levels,
+            parameters: request
+                .parameters
+                .into_iter()
+                .map(|parameter| RecipeDraftParameter {
+                    name: parameter.name,
+                    value_schema: parameter.value_schema,
+                    default: parameter.default,
+                })
+                .collect(),
+            jurisdiction: request.jurisdiction,
+            gap_id: request.gap_id,
+            source_passage_refs: request.source_passage_refs,
+            acquisition_context: request.acquisition_context,
+            draft_script: request.draft_script,
+            notes: request.notes,
+            status,
+            created_at: 0,
+            updated_at: 0,
+        });
+
+    Ok(recipe_draft_to_info(&saved))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_set_recipe_draft_status(
+    world: &mut World,
+    recipe_draft_id: String,
+    status: String,
+) -> ApiResult<RecipeDraftInfo> {
+    use crate::plugins::recipe_drafts::{RecipeDraftRegistry, RecipeDraftStatus};
+
+    let status = RecipeDraftStatus::from_str(&status)
+        .ok_or_else(|| format!("unknown recipe draft status '{status}'"))?;
+    let mut registry = world
+        .get_resource_mut::<RecipeDraftRegistry>()
+        .ok_or_else(|| "RecipeDraftRegistry not found in world".to_string())?;
+    let updated = registry.set_status(&recipe_draft_id, status)?;
+    Ok(recipe_draft_to_info(&updated))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_assembly_pattern_drafts(
+    world: &World,
+    target_type: Option<String>,
+    status: Option<String>,
+) -> ApiResult<Vec<AssemblyPatternDraftInfo>> {
+    use crate::plugins::assembly_pattern_drafts::{
+        AssemblyPatternDraftRegistry, AssemblyPatternDraftStatus,
+    };
+
+    let parsed_status = status
+        .as_deref()
+        .map(|value| {
+            AssemblyPatternDraftStatus::from_str(value)
+                .ok_or_else(|| format!("unknown assembly pattern draft status '{value}'"))
+        })
+        .transpose()?;
+
+    let Some(registry) = world.get_resource::<AssemblyPatternDraftRegistry>() else {
+        return Ok(Vec::new());
+    };
+
+    Ok(registry
+        .list(target_type.as_deref(), parsed_status)
+        .iter()
+        .map(assembly_pattern_draft_to_info)
+        .collect())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_assembly_pattern_draft(
+    world: &World,
+    assembly_pattern_draft_id: String,
+) -> ApiResult<AssemblyPatternDraftInfo> {
+    use crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry;
+
+    let registry = world
+        .get_resource::<AssemblyPatternDraftRegistry>()
+        .ok_or_else(|| "AssemblyPatternDraftRegistry not found in world".to_string())?;
+    let draft = registry.get(&assembly_pattern_draft_id).ok_or_else(|| {
+        format!("assembly pattern draft not found: '{assembly_pattern_draft_id}'")
+    })?;
+    Ok(assembly_pattern_draft_to_info(draft))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_save_assembly_pattern_draft(
+    world: &mut World,
+    request: SaveAssemblyPatternDraftRequest,
+) -> ApiResult<AssemblyPatternDraftInfo> {
+    use crate::capability_registry::{AssemblyPatternLayerDescriptor, AssemblyPatternRelationRule};
+    use crate::plugins::assembly_pattern_drafts::{
+        AssemblyPatternDraftArtifact, AssemblyPatternDraftRegistry, AssemblyPatternDraftStatus,
+    };
+    use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
+
+    if let Some(ref gap_id) = request.gap_id {
+        let Some(queue) = world.get_resource::<CorpusGapQueue>() else {
+            return Err("CorpusGapQueue not found in world".to_string());
+        };
+        let found = queue.list().iter().any(|gap| gap.id.0 == *gap_id);
+        if !found {
+            return Err(format!("unknown corpus gap id '{gap_id}'"));
+        }
+    }
+
+    if !request.source_passage_refs.is_empty() {
+        let registry = world
+            .get_resource::<CorpusPassageRegistry>()
+            .ok_or_else(|| "CorpusPassageRegistry not found in world".to_string())?;
+        for passage_ref in &request.source_passage_refs {
+            let found = registry
+                .iter()
+                .any(|(registered_ref, _)| registered_ref == passage_ref.as_str());
+            if !found {
+                return Err(format!("unknown source passage ref '{passage_ref}'"));
+            }
+        }
+    }
+
+    if request.target_types.is_empty() {
+        return Err("assembly pattern drafts require at least one target_type".to_string());
+    }
+
+    let status = match request.status.as_deref() {
+        Some(value) => AssemblyPatternDraftStatus::from_str(value)
+            .ok_or_else(|| format!("unknown assembly pattern draft status '{value}'"))?,
+        None => request
+            .assembly_pattern_draft_id
+            .as_deref()
+            .and_then(|id| {
+                world
+                    .get_resource::<AssemblyPatternDraftRegistry>()
+                    .and_then(|registry| registry.get(id))
+                    .map(|draft| draft.status)
+            })
+            .unwrap_or(AssemblyPatternDraftStatus::Drafted),
+    };
+
+    world.init_resource::<AssemblyPatternDraftRegistry>();
+    let saved =
+        world
+            .resource_mut::<AssemblyPatternDraftRegistry>()
+            .save(AssemblyPatternDraftArtifact {
+                id: request.assembly_pattern_draft_id.unwrap_or_default(),
+                label: request.label,
+                description: request.description,
+                target_types: request.target_types,
+                axis: request.axis,
+                layers: request
+                    .layers
+                    .into_iter()
+                    .map(|layer| AssemblyPatternLayerDescriptor {
+                        layer_id: layer.layer_id,
+                        label: layer.label,
+                        role: layer.role,
+                        material_hint: layer.material_hint,
+                        optional: layer.optional,
+                    })
+                    .collect(),
+                relation_rules: request
+                    .relation_rules
+                    .into_iter()
+                    .map(|rule| AssemblyPatternRelationRule {
+                        relation_type: rule.relation_type,
+                        source_layer_id: rule.source_layer_id,
+                        target_layer_id: rule.target_layer_id,
+                        required: rule.required,
+                        rationale: rule.rationale,
+                    })
+                    .collect(),
+                root_layer_ids: request.root_layer_ids,
+                requires_support_path: request.requires_support_path,
+                tags: request.tags,
+                parameter_schema: request.parameter_schema,
+                jurisdiction: request.jurisdiction,
+                gap_id: request.gap_id,
+                source_passage_refs: request.source_passage_refs,
+                acquisition_context: request.acquisition_context,
+                notes: request.notes,
+                status,
+                created_at: 0,
+                updated_at: 0,
+            });
+
+    Ok(assembly_pattern_draft_to_info(&saved))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_set_assembly_pattern_draft_status(
+    world: &mut World,
+    assembly_pattern_draft_id: String,
+    status: String,
+) -> ApiResult<AssemblyPatternDraftInfo> {
+    use crate::plugins::assembly_pattern_drafts::{
+        AssemblyPatternDraftRegistry, AssemblyPatternDraftStatus,
+    };
+
+    let status = AssemblyPatternDraftStatus::from_str(&status)
+        .ok_or_else(|| format!("unknown assembly pattern draft status '{status}'"))?;
+    let mut registry = world
+        .get_resource_mut::<AssemblyPatternDraftRegistry>()
+        .ok_or_else(|| "AssemblyPatternDraftRegistry not found in world".to_string())?;
+    let updated = registry.set_status(&assembly_pattern_draft_id, status)?;
+    Ok(assembly_pattern_draft_to_info(&updated))
+}
+
+#[cfg(feature = "model-api")]
 fn corpus_gap_to_info(gap: &crate::plugins::corpus_gap::CorpusGap) -> CorpusGapInfo {
     CorpusGapInfo {
         id: gap.id.0.clone(),
@@ -13970,6 +15254,152 @@ fn corpus_gap_to_info(gap: &crate::plugins::corpus_gap::CorpusGap) -> CorpusGapI
         context: gap.context.clone(),
         reported_by: gap.reported_by.clone(),
         reported_at: gap.reported_at,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn recipe_draft_to_info(
+    draft: &crate::plugins::recipe_drafts::RecipeDraftArtifact,
+) -> RecipeDraftInfo {
+    RecipeDraftInfo {
+        id: draft.id.clone(),
+        label: draft.label.clone(),
+        description: draft.description.clone(),
+        target_class: draft.target_class.clone(),
+        supported_refinement_levels: draft.supported_refinement_levels.clone(),
+        parameters: draft
+            .parameters
+            .iter()
+            .map(|parameter| RecipeParameterInfo {
+                name: parameter.name.clone(),
+                value_schema: parameter.value_schema.clone(),
+                default: parameter.default.clone(),
+            })
+            .collect(),
+        jurisdiction: draft.jurisdiction.clone(),
+        gap_id: draft.gap_id.clone(),
+        source_passage_refs: draft.source_passage_refs.clone(),
+        acquisition_context: draft.acquisition_context.clone(),
+        draft_script: draft.draft_script.clone(),
+        notes: draft.notes.clone(),
+        status: draft.status.as_str().to_string(),
+        consultable: matches!(
+            draft.status,
+            crate::plugins::recipe_drafts::RecipeDraftStatus::Installed
+        ),
+        created_at: draft.created_at,
+        updated_at: draft.updated_at,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn assembly_pattern_to_info(
+    pattern: &crate::capability_registry::AssemblyPatternDescriptor,
+    is_session_draft: bool,
+    status: Option<String>,
+    consultable: bool,
+) -> AssemblyPatternInfo {
+    AssemblyPatternInfo {
+        id: pattern.pattern_id.clone(),
+        label: pattern.label.clone(),
+        description: pattern.description.clone(),
+        target_types: pattern.target_types.clone(),
+        axis: pattern.axis.clone(),
+        layers: pattern
+            .layers
+            .iter()
+            .map(|layer| AssemblyPatternLayerInfo {
+                layer_id: layer.layer_id.clone(),
+                label: layer.label.clone(),
+                role: layer.role.clone(),
+                material_hint: layer.material_hint.clone(),
+                optional: layer.optional,
+            })
+            .collect(),
+        relation_rules: pattern
+            .relation_rules
+            .iter()
+            .map(|rule| AssemblyPatternRelationRuleInfo {
+                relation_type: rule.relation_type.clone(),
+                source_layer_id: rule.source_layer_id.clone(),
+                target_layer_id: rule.target_layer_id.clone(),
+                required: rule.required,
+                rationale: rule.rationale.clone(),
+            })
+            .collect(),
+        root_layer_ids: pattern.root_layer_ids.clone(),
+        requires_support_path: pattern.requires_support_path,
+        tags: pattern.tags.clone(),
+        parameter_schema: pattern.parameter_schema.clone(),
+        is_session_draft,
+        status,
+        consultable,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn assembly_pattern_draft_to_pattern_info(
+    draft: &crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftArtifact,
+) -> AssemblyPatternInfo {
+    assembly_pattern_to_info(
+        &draft.to_descriptor(),
+        true,
+        Some(draft.status.as_str().to_string()),
+        matches!(
+            draft.status,
+            crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftStatus::Installed
+        ),
+    )
+}
+
+#[cfg(feature = "model-api")]
+fn assembly_pattern_draft_to_info(
+    draft: &crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftArtifact,
+) -> AssemblyPatternDraftInfo {
+    AssemblyPatternDraftInfo {
+        id: draft.id.clone(),
+        label: draft.label.clone(),
+        description: draft.description.clone(),
+        target_types: draft.target_types.clone(),
+        axis: draft.axis.clone(),
+        layers: draft
+            .layers
+            .iter()
+            .map(|layer| AssemblyPatternLayerInfo {
+                layer_id: layer.layer_id.clone(),
+                label: layer.label.clone(),
+                role: layer.role.clone(),
+                material_hint: layer.material_hint.clone(),
+                optional: layer.optional,
+            })
+            .collect(),
+        relation_rules: draft
+            .relation_rules
+            .iter()
+            .map(|rule| AssemblyPatternRelationRuleInfo {
+                relation_type: rule.relation_type.clone(),
+                source_layer_id: rule.source_layer_id.clone(),
+                target_layer_id: rule.target_layer_id.clone(),
+                required: rule.required,
+                rationale: rule.rationale.clone(),
+            })
+            .collect(),
+        root_layer_ids: draft.root_layer_ids.clone(),
+        requires_support_path: draft.requires_support_path,
+        tags: draft.tags.clone(),
+        parameter_schema: draft.parameter_schema.clone(),
+        jurisdiction: draft.jurisdiction.clone(),
+        gap_id: draft.gap_id.clone(),
+        source_passage_refs: draft.source_passage_refs.clone(),
+        acquisition_context: draft.acquisition_context.clone(),
+        notes: draft.notes.clone(),
+        status: draft.status.as_str().to_string(),
+        consultable: matches!(
+            draft.status,
+            crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftStatus::Installed
+        ),
+        created_at: draft.created_at,
+        updated_at: draft.updated_at,
     }
 }
 
@@ -14247,9 +15677,17 @@ mod tests {
         world.insert_resource(crate::plugins::modeling::occurrence::ChangedDefinitions::default());
         world.insert_resource(RenderSettings::default());
         world.insert_resource(SceneLightingSettings::default());
+        world.insert_resource(crate::plugins::drawing_export::ViewportExportState::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(crate::plugins::layers::LayerRegistry::default());
         world.insert_resource(crate::plugins::materials::MaterialRegistry::default());
+        world.spawn((
+            Camera::default(),
+            OrbitCamera::default(),
+            Transform::default(),
+            GlobalTransform::default(),
+            Projection::Perspective(PerspectiveProjection::default()),
+        ));
         world
     }
 
@@ -14374,6 +15812,88 @@ mod tests {
         assert!(entities.iter().any(|entry| {
             entry.element_id == element_id && entry.entity_type == "dimension_line"
         }));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn agent_workflow_create_box_dimension_camera_and_screenshot_is_supported() {
+        let mut world = init_model_api_test_world();
+
+        let box_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 1.0, 0.0]),
+                half_extents: None,
+                size: Some([4.0, 2.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .expect("create_box should create a primitive");
+
+        let box_snapshot =
+            get_entity_snapshot(&world, ElementId(box_id)).expect("box snapshot should exist");
+        assert_eq!(box_snapshot["centre"], json!([0.0, 1.0, 0.0]));
+        assert_eq!(box_snapshot["half_extents"], json!([2.0, 1.0, 0.5]));
+
+        let dimension_id = handle_place_dimension_between_handles(
+            &mut world,
+            PlaceDimensionBetweenHandlesRequest {
+                start_element_id: box_id,
+                start_handle_id: "corner_0".to_string(),
+                end_element_id: box_id,
+                end_handle_id: "corner_3".to_string(),
+                line_point: None,
+                offset: Some(0.5),
+                extension: Some(0.25),
+                visible: Some(true),
+                label: Some("Width".to_string()),
+                display_unit: Some("mm".to_string()),
+                precision: Some(0),
+            },
+        )
+        .expect("handle-based dimension should be created");
+
+        let dimension_snapshot = get_entity_snapshot(&world, ElementId(dimension_id))
+            .expect("dimension snapshot should exist");
+        assert_eq!(dimension_snapshot["start"], json!([-2.0, 0.0, -0.5]));
+        assert_eq!(dimension_snapshot["end"], json!([2.0, 0.0, -0.5]));
+        assert_eq!(dimension_snapshot["label"], json!("Width"));
+
+        let camera = handle_set_camera(
+            &mut world,
+            CameraParams {
+                focus: Some([0.0, 1.0, 0.0]),
+                radius: Some(8.0),
+                orthographic_scale: Some(3.0),
+                yaw: Some(0.75),
+                pitch: Some(-0.4),
+                projection: Some("orthographic".to_string()),
+                focal_length_mm: Some(35.0),
+            },
+        )
+        .expect("set_camera should update the live orbit camera");
+        assert_eq!(camera.focus, [0.0, 1.0, 0.0]);
+        assert_eq!(camera.projection, "orthographic");
+        assert_eq!(camera.orthographic_scale, 3.0);
+
+        let camera_snapshot = handle_get_camera(&world);
+        assert_eq!(camera_snapshot.yaw, 0.75);
+        assert_eq!(camera_snapshot.pitch, -0.4);
+
+        let screenshot_path = std::env::temp_dir().join(format!(
+            "talos3d-model-api-workflow-{}.png",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should be monotonic")
+                .as_millis()
+        ));
+        let saved_path = handle_take_screenshot(&mut world, screenshot_path.to_str().unwrap())
+            .expect("take_screenshot should queue a capture");
+        assert_eq!(saved_path, screenshot_path.to_string_lossy().to_string());
+        assert!(world
+            .resource::<crate::plugins::drawing_export::ViewportExportState>()
+            .pending
+            .is_some());
     }
 
     #[cfg(feature = "model-api")]
@@ -14811,6 +16331,10 @@ mod tests {
             tools.iter().map(|tool| tool.name.clone()).collect();
         assert!(tool_names.contains("list_entities"));
         assert!(tool_names.contains("create_entity"));
+        assert!(tool_names.contains("create_box"));
+        assert!(tool_names.contains("place_dimension_between_handles"));
+        assert!(tool_names.contains("get_camera"));
+        assert!(tool_names.contains("set_camera"));
         assert!(tool_names.contains("take_screenshot"));
         assert!(tool_names.contains("export_drawing"));
 
@@ -16099,5 +17623,413 @@ mod tests {
             .expect("delete_light should succeed");
         assert_eq!(removed, 1);
         assert_eq!(handle_list_lights(&world).len(), 1);
+    }
+
+    #[cfg(feature = "model-api")]
+    fn seed_recipe_draft_corpus(world: &mut World) {
+        use crate::capability_registry::{CorpusProvenance, LicenseTag, PassageRef};
+        use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
+
+        world.insert_resource(CorpusGapQueue::default());
+        let mut passages = CorpusPassageRegistry::default();
+        passages.register(
+            PassageRef("SE/mono_truss".into()),
+            "Mono-pitch trusses require a continuous support path into the wall frame.",
+            CorpusProvenance {
+                source: "test corpus".into(),
+                source_version: "2026-04-22".into(),
+                jurisdiction: Some("SE".into()),
+                ingested_at: 0,
+                license: LicenseTag::PublicRecord,
+                backlink: None,
+                supersedes: Vec::new(),
+            },
+        );
+        passages.register(
+            PassageRef("SE/rainscreen_wall".into()),
+            "Ventilated wood cladding requires a backing support layer and a continuous drainage cavity.",
+            CorpusProvenance {
+                source: "test corpus".into(),
+                source_version: "2026-04-22".into(),
+                jurisdiction: Some("SE".into()),
+                ingested_at: 0,
+                license: LicenseTag::PublicRecord,
+                backlink: None,
+                supersedes: Vec::new(),
+            },
+        );
+        world.insert_resource(passages);
+    }
+
+    #[cfg(feature = "model-api")]
+    fn save_recipe_draft_fixture(
+        world: &mut World,
+        recipe_draft_id: Option<String>,
+        status: Option<&str>,
+    ) -> RecipeDraftInfo {
+        let gap = handle_request_corpus_expansion(
+            world,
+            Some("roof_system".into()),
+            Some("SE".into()),
+            "recipe".into(),
+            "need mono roof framing".into(),
+        );
+        handle_save_recipe_draft(
+            world,
+            SaveRecipeDraftRequest {
+                recipe_draft_id,
+                label: "Mono Roof Draft".into(),
+                description: "Session draft for a mono-pitch roof framing recipe".into(),
+                target_class: "roof_system".into(),
+                supported_refinement_levels: vec!["Constructible".into()],
+                parameters: vec![RecipeParameterInfo {
+                    name: "span_mm".into(),
+                    value_schema: serde_json::json!({ "type": "number", "minimum": 1 }),
+                    default: Some(serde_json::json!(6000)),
+                }],
+                jurisdiction: Some("SE".into()),
+                gap_id: Some(gap.id),
+                source_passage_refs: vec!["SE/mono_truss".into()],
+                acquisition_context: serde_json::json!({
+                    "assembly_strategy": "mono_truss",
+                    "siding_support": "rainscreen"
+                }),
+                draft_script: serde_json::json!({
+                    "kind": "authoring_script_draft",
+                    "steps": ["TODO"]
+                }),
+                notes: vec!["Needs constructability validation".into()],
+                status: status.map(str::to_string),
+            },
+        )
+        .expect("recipe draft should save")
+    }
+
+    #[cfg(feature = "model-api")]
+    fn save_assembly_pattern_draft_fixture(
+        world: &mut World,
+        assembly_pattern_draft_id: Option<String>,
+        status: Option<&str>,
+    ) -> AssemblyPatternDraftInfo {
+        let gap = handle_request_corpus_expansion(
+            world,
+            Some("wall_assembly".into()),
+            Some("SE".into()),
+            "assembly_pattern".into(),
+            "need ventilated rainscreen wall pattern".into(),
+        );
+        handle_save_assembly_pattern_draft(
+            world,
+            SaveAssemblyPatternDraftRequest {
+                assembly_pattern_draft_id,
+                label: "Ventilated Rainscreen Wall".into(),
+                description: "Session draft for a ventilated exterior wall assembly pattern".into(),
+                target_types: vec!["wall_assembly".into()],
+                axis: "exterior_to_interior".into(),
+                layers: vec![
+                    AssemblyPatternLayerInfo {
+                        layer_id: "cedar_siding".into(),
+                        label: "Cedar Siding".into(),
+                        role: "exterior_finish".into(),
+                        material_hint: Some("cedar".into()),
+                        optional: false,
+                    },
+                    AssemblyPatternLayerInfo {
+                        layer_id: "ventilated_battens".into(),
+                        label: "Ventilated Battens".into(),
+                        role: "drainage_cavity".into(),
+                        material_hint: Some("timber_battens".into()),
+                        optional: false,
+                    },
+                    AssemblyPatternLayerInfo {
+                        layer_id: "stud_frame".into(),
+                        label: "Stud Frame".into(),
+                        role: "primary_structure".into(),
+                        material_hint: Some("light_frame_studs".into()),
+                        optional: false,
+                    },
+                ],
+                relation_rules: vec![
+                    AssemblyPatternRelationRuleInfo {
+                        relation_type: "supported_by".into(),
+                        source_layer_id: "cedar_siding".into(),
+                        target_layer_id: "ventilated_battens".into(),
+                        required: true,
+                        rationale: "Siding needs a backing support layer.".into(),
+                    },
+                    AssemblyPatternRelationRuleInfo {
+                        relation_type: "fastened_to".into(),
+                        source_layer_id: "cedar_siding".into(),
+                        target_layer_id: "ventilated_battens".into(),
+                        required: true,
+                        rationale: "Siding fastens to battens.".into(),
+                    },
+                ],
+                root_layer_ids: vec!["stud_frame".into()],
+                requires_support_path: true,
+                tags: vec!["wall".into(), "rainscreen".into()],
+                parameter_schema: serde_json::json!({}),
+                jurisdiction: Some("SE".into()),
+                gap_id: Some(gap.id),
+                source_passage_refs: vec!["SE/rainscreen_wall".into()],
+                acquisition_context: serde_json::json!({
+                    "assembly_strategy": "ventilated_rainscreen"
+                }),
+                notes: vec!["Needs continuity rules later".into()],
+                status: status.map(str::to_string),
+            },
+        )
+        .expect("assembly pattern draft should save")
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn recipe_draft_round_trip_with_gap_and_source_refs() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let saved = save_recipe_draft_fixture(&mut world, None, Some("drafted"));
+        assert_eq!(saved.status, "drafted");
+        assert_eq!(saved.target_class, "roof_system");
+        assert_eq!(saved.source_passage_refs, vec!["SE/mono_truss".to_string()]);
+
+        let fetched = handle_get_recipe_draft(&world, saved.id.clone()).expect("draft should load");
+        assert_eq!(fetched.id, saved.id);
+        assert_eq!(fetched.gap_id, saved.gap_id);
+        assert_eq!(
+            fetched.notes,
+            vec!["Needs constructability validation".to_string()]
+        );
+
+        let filtered =
+            handle_list_recipe_drafts(&world, Some("roof_system".into()), Some("drafted".into()))
+                .expect("list_recipe_drafts should succeed");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, saved.id);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn recipe_draft_rejects_unknown_gap_id() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let error = handle_save_recipe_draft(
+            &mut world,
+            SaveRecipeDraftRequest {
+                recipe_draft_id: None,
+                label: "Mono Roof Draft".into(),
+                description: "Invalid gap linkage".into(),
+                target_class: "roof_system".into(),
+                supported_refinement_levels: vec!["Constructible".into()],
+                parameters: Vec::new(),
+                jurisdiction: Some("SE".into()),
+                gap_id: Some("gap-999".into()),
+                source_passage_refs: vec!["SE/mono_truss".into()],
+                acquisition_context: serde_json::Value::Null,
+                draft_script: serde_json::Value::Null,
+                notes: Vec::new(),
+                status: Some("drafted".into()),
+            },
+        )
+        .expect_err("unknown gap id must fail");
+
+        assert!(error.contains("unknown corpus gap id"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn recipe_draft_rejects_unknown_passage_ref() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let gap = handle_request_corpus_expansion(
+            &mut world,
+            Some("roof_system".into()),
+            Some("SE".into()),
+            "recipe".into(),
+            "need mono roof framing".into(),
+        );
+
+        let error = handle_save_recipe_draft(
+            &mut world,
+            SaveRecipeDraftRequest {
+                recipe_draft_id: None,
+                label: "Mono Roof Draft".into(),
+                description: "Invalid source linkage".into(),
+                target_class: "roof_system".into(),
+                supported_refinement_levels: vec!["Constructible".into()],
+                parameters: Vec::new(),
+                jurisdiction: Some("SE".into()),
+                gap_id: Some(gap.id),
+                source_passage_refs: vec!["SE/missing".into()],
+                acquisition_context: serde_json::Value::Null,
+                draft_script: serde_json::Value::Null,
+                notes: Vec::new(),
+                status: Some("drafted".into()),
+            },
+        )
+        .expect_err("unknown source passage ref must fail");
+
+        assert!(error.contains("unknown source passage ref"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn installed_recipe_drafts_are_consultable_from_recipe_discovery() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let installed = save_recipe_draft_fixture(
+            &mut world,
+            Some("draft-installed".into()),
+            Some("installed"),
+        );
+        let _drafted =
+            save_recipe_draft_fixture(&mut world, Some("draft-pending".into()), Some("drafted"));
+
+        let families =
+            handle_list_recipe_families_with_options(&world, Some("roof_system".into()), true);
+        assert_eq!(families.len(), 1);
+        assert_eq!(families[0].id, installed.id);
+        assert!(families[0].is_session_draft);
+
+        let ranking = handle_select_recipe(
+            &world,
+            "roof_system".into(),
+            serde_json::json!({
+                "target_state": "Constructible",
+                "include_session_drafts": true
+            }),
+        )
+        .expect("select_recipe should surface installed drafts");
+        assert_eq!(ranking.len(), 1);
+        assert_eq!(ranking[0].id, installed.id);
+        assert!(ranking[0].is_session_draft);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn promote_refinement_rejects_session_recipe_draft_ids() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+        let installed = save_recipe_draft_fixture(
+            &mut world,
+            Some("draft-installed".into()),
+            Some("installed"),
+        );
+
+        let element_id = world.resource_mut::<ElementIdAllocator>().next_id();
+        world.spawn((element_id,));
+
+        let error = handle_promote_refinement(
+            &mut world,
+            element_id.0,
+            "Constructible".into(),
+            Some(installed.id),
+            serde_json::json!({}),
+        )
+        .expect_err("draft recipe ids must not execute");
+
+        assert!(error.contains("consultable but not executable yet"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn assembly_pattern_draft_round_trip_with_gap_and_source_refs() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let saved = save_assembly_pattern_draft_fixture(&mut world, None, Some("installed"));
+        assert_eq!(saved.status, "installed");
+        assert_eq!(saved.target_types, vec!["wall_assembly".to_string()]);
+        assert_eq!(
+            saved.source_passage_refs,
+            vec!["SE/rainscreen_wall".to_string()]
+        );
+
+        let fetched =
+            handle_get_assembly_pattern_draft(&world, saved.id.clone()).expect("draft should load");
+        assert_eq!(fetched.id, saved.id);
+        assert_eq!(fetched.gap_id, saved.gap_id);
+        assert_eq!(fetched.layers.len(), 3);
+
+        let filtered = handle_list_assembly_pattern_drafts(
+            &world,
+            Some("wall_assembly".into()),
+            Some("installed".into()),
+        )
+        .expect("list_assembly_pattern_drafts should succeed");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, saved.id);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn assembly_pattern_draft_rejects_unknown_passage_ref() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let gap = handle_request_corpus_expansion(
+            &mut world,
+            Some("wall_assembly".into()),
+            Some("SE".into()),
+            "assembly_pattern".into(),
+            "need ventilated wall pattern".into(),
+        );
+
+        let error = handle_save_assembly_pattern_draft(
+            &mut world,
+            SaveAssemblyPatternDraftRequest {
+                assembly_pattern_draft_id: None,
+                label: "Wall Pattern".into(),
+                description: "Invalid source linkage".into(),
+                target_types: vec!["wall_assembly".into()],
+                axis: "exterior_to_interior".into(),
+                layers: Vec::new(),
+                relation_rules: Vec::new(),
+                root_layer_ids: vec!["stud_frame".into()],
+                requires_support_path: true,
+                tags: Vec::new(),
+                parameter_schema: serde_json::json!({}),
+                jurisdiction: Some("SE".into()),
+                gap_id: Some(gap.id),
+                source_passage_refs: vec!["SE/missing".into()],
+                acquisition_context: serde_json::Value::Null,
+                notes: Vec::new(),
+                status: Some("drafted".into()),
+            },
+        )
+        .expect_err("unknown source passage ref must fail");
+
+        assert!(error.contains("unknown source passage ref"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn installed_assembly_pattern_drafts_are_consultable_from_vocabulary() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let installed = save_assembly_pattern_draft_fixture(
+            &mut world,
+            Some("pattern-installed".into()),
+            Some("installed"),
+        );
+        let _drafted = save_assembly_pattern_draft_fixture(
+            &mut world,
+            Some("pattern-pending".into()),
+            Some("drafted"),
+        );
+
+        let vocabulary = handle_list_vocabulary(&world);
+        assert_eq!(vocabulary.assembly_patterns.len(), 1);
+        assert_eq!(vocabulary.assembly_patterns[0].id, installed.id);
+        assert!(vocabulary.assembly_patterns[0].is_session_draft);
+        assert!(vocabulary.assembly_patterns[0].consultable);
+        assert_eq!(
+            vocabulary.assembly_patterns[0].status.as_deref(),
+            Some("installed")
+        );
     }
 }

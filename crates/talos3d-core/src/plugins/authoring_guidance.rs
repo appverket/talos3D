@@ -20,7 +20,6 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-
 /// Canonical authoring guidance document.
 ///
 /// Consumed by the in-app assistant (when assembling its system prompt) and

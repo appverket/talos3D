@@ -34,8 +34,8 @@ use talos3d_core::{
         },
         modeling::assembly::{AssemblyFactory, RelationFactory},
         refinement::{
-            ClaimGrounding, ClaimPath, ClaimRecord, Grounding, HeuristicTag, ObligationSet,
-            ObligationStatus, query_refined_into,
+            query_refined_into, ClaimGrounding, ClaimPath, ClaimRecord, Grounding, HeuristicTag,
+            ObligationSet, ObligationStatus,
         },
     },
 };
@@ -177,7 +177,10 @@ fn select_recipe_returns_all_viable_at_constructible() {
 
     assert_eq!(ranking.len(), 1);
     assert_eq!(ranking[0].id, "light_frame_exterior_wall");
-    assert!((ranking[0].weight - 1.0).abs() < f32::EPSILON, "weight must be 1.0 in PP71");
+    assert!(
+        (ranking[0].weight - 1.0).abs() < f32::EPSILON,
+        "weight must be 1.0 in PP71"
+    );
 }
 
 #[test]

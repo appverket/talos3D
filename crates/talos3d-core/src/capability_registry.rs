@@ -156,6 +156,66 @@ pub struct RelationTypeDescriptor {
     pub participates_in_dependency_graph: bool,
 }
 
+/// One ordered member/layer within a reusable assembly pattern.
+///
+/// The ids and roles are capability-defined, but the structure itself is
+/// generic enough to be reused by any domain that needs ordered assemblies
+/// with support/attachment semantics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct AssemblyPatternLayerDescriptor {
+    pub layer_id: String,
+    pub label: String,
+    pub role: String,
+    /// Optional hint such as a material family, product family, or
+    /// construction-system placeholder understood by the capability.
+    pub material_hint: Option<String>,
+    pub optional: bool,
+}
+
+/// One required relationship rule inside an assembly pattern.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct AssemblyPatternRelationRule {
+    pub relation_type: String,
+    pub source_layer_id: String,
+    pub target_layer_id: String,
+    pub required: bool,
+    pub rationale: String,
+}
+
+/// Describes a reusable, capability-contributed assembly pattern.
+///
+/// This is intentionally more specific than `AssemblyTypeDescriptor`: it is not
+/// just a type of assembly, but a concrete ordered pattern of members/layers
+/// and the relations that should hold between them. It is designed to be a
+/// consultable target for both shipped knowledge and future dynamic learning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct AssemblyPatternDescriptor {
+    pub pattern_id: String,
+    pub label: String,
+    pub description: String,
+    /// Capability-defined class or assembly ids the pattern applies to.
+    pub target_types: Vec<String>,
+    /// Free-form orientation hint such as `exterior_to_interior` or
+    /// `top_to_bottom`.
+    pub axis: String,
+    /// Layers or ordered members from one side of the assembly to the other.
+    pub layers: Vec<AssemblyPatternLayerDescriptor>,
+    /// Support/attachment/continuity-style relations expected within the pattern.
+    pub relation_rules: Vec<AssemblyPatternRelationRule>,
+    /// Which layers are considered support roots within the local pattern.
+    pub root_layer_ids: Vec<String>,
+    /// Whether all materialized members are expected to resolve to a broader
+    /// stable support path outside the local pattern.
+    pub requires_support_path: bool,
+    /// Capability-defined tags such as climate/jurisdiction/system family hints.
+    pub tags: Vec<String>,
+    /// Pattern parameters that recipes or learning flows may expose.
+    pub parameter_schema: serde_json::Value,
+}
+
 // ---------------------------------------------------------------------------
 // PP71: ElementClassDescriptor and RecipeFamilyDescriptor
 // ---------------------------------------------------------------------------
@@ -586,8 +646,14 @@ impl PriorContext {
     /// Known fields are extracted; any remaining keys flow into `extras`.
     pub fn from_json(value: &serde_json::Value) -> Self {
         Self {
-            jurisdiction: value.get("jurisdiction").and_then(|v| v.as_str()).map(str::to_owned),
-            style_intent: value.get("style_intent").and_then(|v| v.as_str()).map(str::to_owned),
+            jurisdiction: value
+                .get("jurisdiction")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            style_intent: value
+                .get("style_intent")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             terrain_slope_pct: value.get("terrain_slope_pct").and_then(|v| v.as_f64()),
             extras: value.clone(),
         }
@@ -708,7 +774,10 @@ impl std::fmt::Debug for RecipeFamilyDescriptor {
             .field("id", &self.id)
             .field("target_class", &self.target_class)
             .field("label", &self.label)
-            .field("supported_refinement_levels", &self.supported_refinement_levels)
+            .field(
+                "supported_refinement_levels",
+                &self.supported_refinement_levels,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1009,6 +1078,8 @@ pub struct CapabilityRegistry {
     ordered_factories: Vec<Arc<dyn AuthoredEntityFactory>>,
     factories_by_type: HashMap<&'static str, Arc<dyn AuthoredEntityFactory>>,
     assembly_type_descriptors: Vec<AssemblyTypeDescriptor>,
+    assembly_pattern_descriptors: Vec<AssemblyPatternDescriptor>,
+    assembly_pattern_index: HashMap<String, usize>,
     relation_type_descriptors: Vec<RelationTypeDescriptor>,
     // PP71
     element_class_descriptors: Vec<ElementClassDescriptor>,
@@ -1162,12 +1233,39 @@ impl CapabilityRegistry {
         self.assembly_type_descriptors.push(descriptor);
     }
 
+    pub fn register_assembly_pattern(&mut self, descriptor: AssemblyPatternDescriptor) {
+        assert!(
+            !self
+                .assembly_pattern_index
+                .contains_key(descriptor.pattern_id.as_str()),
+            "AssemblyPattern '{}' was registered more than once",
+            descriptor.pattern_id
+        );
+        let index = self.assembly_pattern_descriptors.len();
+        self.assembly_pattern_index
+            .insert(descriptor.pattern_id.clone(), index);
+        self.assembly_pattern_descriptors.push(descriptor);
+    }
+
     pub fn register_relation_type(&mut self, descriptor: RelationTypeDescriptor) {
         self.relation_type_descriptors.push(descriptor);
     }
 
     pub fn assembly_type_descriptors(&self) -> &[AssemblyTypeDescriptor] {
         &self.assembly_type_descriptors
+    }
+
+    pub fn assembly_pattern_descriptors(&self) -> &[AssemblyPatternDescriptor] {
+        &self.assembly_pattern_descriptors
+    }
+
+    pub fn assembly_pattern_descriptor(
+        &self,
+        pattern_id: &str,
+    ) -> Option<&AssemblyPatternDescriptor> {
+        self.assembly_pattern_index
+            .get(pattern_id)
+            .and_then(|index| self.assembly_pattern_descriptors.get(*index))
     }
 
     pub fn relation_type_descriptors(&self) -> &[RelationTypeDescriptor] {
@@ -1179,7 +1277,9 @@ impl CapabilityRegistry {
     /// Register an element class descriptor. Panics if the id is already registered.
     pub fn register_element_class(&mut self, descriptor: ElementClassDescriptor) {
         assert!(
-            !self.element_class_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .element_class_index
+                .contains_key(descriptor.id.0.as_str()),
             "ElementClass '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1206,7 +1306,9 @@ impl CapabilityRegistry {
     /// Register a recipe family descriptor. Panics if the id is already registered.
     pub fn register_recipe_family(&mut self, descriptor: RecipeFamilyDescriptor) {
         assert!(
-            !self.recipe_family_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .recipe_family_index
+                .contains_key(descriptor.id.0.as_str()),
             "RecipeFamily '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1229,10 +1331,7 @@ impl CapabilityRegistry {
     }
 
     /// Look up a single recipe family descriptor by id.
-    pub fn recipe_family_descriptor(
-        &self,
-        id: &RecipeFamilyId,
-    ) -> Option<&RecipeFamilyDescriptor> {
+    pub fn recipe_family_descriptor(&self, id: &RecipeFamilyId) -> Option<&RecipeFamilyDescriptor> {
         self.recipe_family_index
             .get(id.0.as_str())
             .and_then(|&i| self.recipe_family_descriptors.get(i))
@@ -1248,8 +1347,7 @@ impl CapabilityRegistry {
             descriptor.id.0
         );
         let index = self.constraint_descriptors.len();
-        self.constraint_index
-            .insert(descriptor.id.0.clone(), index);
+        self.constraint_index.insert(descriptor.id.0.clone(), index);
         self.constraint_descriptors.push(descriptor);
     }
 
@@ -1270,7 +1368,9 @@ impl CapabilityRegistry {
     /// Register a catalog provider descriptor. Panics if the id is already registered.
     pub fn register_catalog_provider(&mut self, descriptor: CatalogProviderDescriptor) {
         assert!(
-            !self.catalog_provider_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .catalog_provider_index
+                .contains_key(descriptor.id.0.as_str()),
             "CatalogProvider '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1300,7 +1400,9 @@ impl CapabilityRegistry {
     /// Register a generation prior descriptor. Panics if the id is already registered.
     pub fn register_generation_prior(&mut self, descriptor: GenerationPriorDescriptor) {
         assert!(
-            !self.generation_prior_index.contains_key(descriptor.id.0.as_str()),
+            !self
+                .generation_prior_index
+                .contains_key(descriptor.id.0.as_str()),
             "GenerationPrior '{}' was registered more than once",
             descriptor.id.0
         );
@@ -1325,8 +1427,12 @@ impl CapabilityRegistry {
                     return true;
                 };
                 match &d.scope {
-                    PriorScope::RecipeSelection { element_class: ec, .. } => ec == cls,
-                    PriorScope::ParameterDefaulting { element_class: ec, .. } => ec == cls,
+                    PriorScope::RecipeSelection {
+                        element_class: ec, ..
+                    } => ec == cls,
+                    PriorScope::ParameterDefaulting {
+                        element_class: ec, ..
+                    } => ec == cls,
                 }
             })
             .collect()
@@ -1406,6 +1512,8 @@ pub trait CapabilityRegistryAppExt {
         F: AuthoredEntityFactory;
 
     fn register_assembly_type(&mut self, descriptor: AssemblyTypeDescriptor) -> &mut Self;
+
+    fn register_assembly_pattern(&mut self, descriptor: AssemblyPatternDescriptor) -> &mut Self;
 
     fn register_relation_type(&mut self, descriptor: RelationTypeDescriptor) -> &mut Self;
 
@@ -1488,6 +1596,17 @@ impl CapabilityRegistryAppExt for App {
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_assembly_type(descriptor);
+        self
+    }
+
+    fn register_assembly_pattern(&mut self, descriptor: AssemblyPatternDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_assembly_pattern(descriptor);
         self
     }
 
@@ -1709,10 +1828,7 @@ mod pp71_tests {
         let mut class_min_promotion_critical_paths = HashMap::new();
         class_min_promotion_critical_paths.insert(
             RefinementState::Constructible,
-            vec![
-                ClaimPath("height_mm".into()),
-                ClaimPath("length_mm".into()),
-            ],
+            vec![ClaimPath("height_mm".into()), ClaimPath("length_mm".into())],
         );
         ElementClassDescriptor {
             id: ElementClassId("wall_assembly".into()),
@@ -1792,18 +1908,17 @@ mod pp71_tests {
         assert_eq!(all[0].id.0, "light_frame_exterior_wall");
 
         // Filtered to correct class
-        let filtered = registry
-            .recipe_family_descriptors(Some(&ElementClassId("wall_assembly".into())));
+        let filtered =
+            registry.recipe_family_descriptors(Some(&ElementClassId("wall_assembly".into())));
         assert_eq!(filtered.len(), 1);
 
         // Filtered to nonexistent class returns empty
-        let empty = registry
-            .recipe_family_descriptors(Some(&ElementClassId("roof_system".into())));
+        let empty = registry.recipe_family_descriptors(Some(&ElementClassId("roof_system".into())));
         assert!(empty.is_empty());
 
         // Direct lookup
-        let found = registry
-            .recipe_family_descriptor(&RecipeFamilyId("light_frame_exterior_wall".into()));
+        let found =
+            registry.recipe_family_descriptor(&RecipeFamilyId("light_frame_exterior_wall".into()));
         assert!(found.is_some());
 
         assert!(registry
@@ -1827,8 +1942,7 @@ mod pp71_tests {
     #[test]
     fn effective_obligations_without_recipe_returns_class_min_only() {
         let class = make_wall_class();
-        let obligations =
-            effective_obligations(&class, None, RefinementState::Constructible);
+        let obligations = effective_obligations(&class, None, RefinementState::Constructible);
         assert_eq!(obligations.len(), 2);
     }
 
@@ -1837,8 +1951,11 @@ mod pp71_tests {
         let class = make_wall_class();
         let recipe = make_recipe(ElementClassId("wall_assembly".into()));
 
-        let paths =
-            effective_promotion_critical_paths(&class, Some(&recipe), RefinementState::Constructible);
+        let paths = effective_promotion_critical_paths(
+            &class,
+            Some(&recipe),
+            RefinementState::Constructible,
+        );
         // class has 2 + recipe adds 1
         assert_eq!(paths.len(), 3);
         assert!(paths.iter().any(|p| p.0 == "stud_spacing_mm"));

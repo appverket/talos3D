@@ -115,6 +115,9 @@ fn main() {
     // above no longer registers them. CorpusGapPlugin provides the shared
     // CorpusGapQueue + CorpusPassageRegistry that PP78's MCP tools consume.
     .add_plugins(talos3d_core::plugins::corpus_gap::CorpusGapPlugin)
+    .add_plugins(talos3d_core::plugins::recipe_drafts::RecipeDraftPlugin)
+    .add_plugins(talos3d_core::plugins::assembly_pattern_drafts::AssemblyPatternDraftPlugin)
+    .add_plugins(talos3d_core::plugins::session_draft_cache::SessionDraftCachePlugin)
     .add_plugins(ArchitectureCorePlugin);
 
     #[cfg(feature = "terrain")]

@@ -17,15 +17,31 @@ meshes. Clients can:
 
 - inspect authored entities and normalized property data
 - inspect model-level summaries and document properties
-- discover registered assembly and relation vocabulary
+- discover registered assembly types, reusable assembly patterns, and relation vocabulary
 - inspect authored semantic assemblies and typed relations
 - query registered commands, toolbars, layers, groups, and selection state
 - invoke write operations through the same command pipeline the UI uses
 - import files and capture viewport screenshots
 
 Recent additions expose first steps toward higher-order semantic structure:
-capabilities can register assembly and relation vocabulary, and MCP clients can
-inspect or create authored assemblies and relations through structured tools.
+capabilities can register assembly types, reusable assembly patterns, and
+relation vocabulary, and MCP clients can inspect or create authored assemblies
+and relations through structured tools.
+
+The recipe-discovery surface now also supports a session-scoped bridge for
+dynamic recipe learning. Missing recipes can be captured as draft artifacts
+linked to corpus gaps and source passages, marked installed for the current
+session, and then surfaced back through recipe discovery tools without
+requiring product-code changes or hot-loaded Rust.
+
+The same bridge now exists for reusable layered assembly patterns. Missing wall
+or roof stack knowledge can be captured as session-scoped assembly-pattern
+drafts, linked to corpus evidence, marked installed for consultation, and
+surfaced back through `list_vocabulary` without changing product code.
+
+Desktop builds may also warm-start these session drafts from a storage-backed
+local cache. That cache is non-authoritative: it exists so standalone desktop
+sessions can resume useful learned context without assuming any backend.
 
 The modeling layer also exposes authored edge features such as `fillet` and
 `chamfer` through the same public APIs. AI clients can create them with
@@ -38,7 +54,10 @@ an anchor plus `through` point, or an angular contract
 (`reference_direction`, `angle_degrees`, `plane_normal`). `place_dimension_line`
 creates measured annotations from start and end points plus an explicit visible
 line placement (`line_point` or scalar `offset`), with optional extension and
-unit overrides.
+unit overrides. For authoring workflows that should not reconstruct raw world
+points, `place_dimension_between_handles` resolves stable handle ids such as
+box `corner_0` … `corner_7` through the same public handle surface exposed by
+`list_handles`.
 
 Built-in definition libraries are also loaded at startup and show up through
 the same definition-library inspection tools as project-local libraries. Their
@@ -84,8 +103,21 @@ When enabled, Talos3D exposes MCP endpoints in two forms:
 - stdio transport for local process-based integrations
 - streamable HTTP at `http://127.0.0.1:<port>/mcp`
 
-The repository includes a local `.mcp.json` example that points to the HTTP
-endpoint.
+Create a local `.mcp.json` in the repository root if your MCP client supports
+repository-scoped config:
+
+```json
+{
+  "mcpServers": {
+    "talos3d": {
+      "url": "http://127.0.0.1:24842/mcp"
+    }
+  }
+}
+```
+
+That file is intentionally ignored so local ports and instance choices do not
+end up committed.
 
 ## Instance Discovery
 
@@ -124,11 +156,37 @@ Current tool categories include:
 - `list_assembly_members`
 - `query_relations`
 
+`list_vocabulary` now returns:
+
+- `assembly_types`
+- `assembly_patterns`
+- `relation_types`
+
+### Recipe discovery and session drafts
+
+- `list_element_classes`
+- `list_recipe_families`
+- `select_recipe`
+- `list_corpus_gaps`
+- `request_corpus_expansion`
+- `lookup_source_passage`
+- `draft_rule_pack`
+- `list_recipe_drafts`
+- `get_recipe_draft`
+- `save_recipe_draft`
+- `set_recipe_draft_status`
+- `list_assembly_pattern_drafts`
+- `get_assembly_pattern_draft`
+- `save_assembly_pattern_draft`
+- `set_assembly_pattern_draft_status`
+
 ### Editing and authored changes
 
 - `create_entity`
+- `create_box`
 - `place_guide_line`
 - `place_dimension_line`
+- `place_dimension_between_handles`
 - `create_assembly`
 - `delete_entities`
 - `transform`
@@ -158,6 +216,8 @@ For fillet/chamfer specifically:
 - `set_selection`
 - `get_render_settings`
 - `set_render_settings`
+- `get_camera`
+- `set_camera`
 - `get_lighting_scene`
 - `list_lights`
 - `create_light`
@@ -193,6 +253,11 @@ For fillet/chamfer specifically:
 `model_summary` now also reports `assembly_counts` and `relation_counts` in
 addition to entity counts and capability-defined metrics.
 
+Session recipe drafts are intentionally **consultable but not executable**
+today. Installed drafts can be appended to `list_recipe_families` and
+`select_recipe` when the caller opts in, but `promote_refinement` still only
+executes shipped/native recipes.
+
 ## Lighting And Viewport Lookdev
 
 The renderer and lighting surfaces are intentionally agent-facing:
@@ -216,6 +281,8 @@ fixture. That means:
 Renderer control also now supports drawing-style viewport composition:
 
 - orthographic views can be saved/restored as named views
+- direct live camera control is also available through `get_camera` and
+  `set_camera`
 - white-paper presentation can be produced through `background_rgb`,
   `grid_enabled`, and `paper_fill_enabled`
 - hidden-line-friendly export can be approximated with
@@ -230,6 +297,55 @@ Renderer control also now supports drawing-style viewport composition:
   `view.projection_perspective`, `view.projection_orthographic`,
   `view.apply_paper_preset`, `view.toggle_grid`, `view.toggle_outline`, and
   `view.toggle_wireframe`)
+
+## Example: Box, Corner Dimension, Camera, Screenshot
+
+For the basic interactive workflow an agent should be able to:
+
+1. Create a box with `create_box`.
+2. Discover its stable corner handles with `list_handles`.
+3. Dimension between two corners with `place_dimension_between_handles`.
+4. Reposition the live camera with `set_camera`.
+5. Capture the viewport with `take_screenshot`.
+
+Example requests:
+
+```json
+{
+  "center": [0.0, 1.0, 0.0],
+  "size": [4.0, 2.0, 1.0]
+}
+```
+
+`list_handles` on the created box will return entries such as `corner_0`,
+`corner_1`, `corner_2`, and so on.
+
+```json
+{
+  "start_element_id": 12,
+  "start_handle_id": "corner_0",
+  "end_element_id": 12,
+  "end_handle_id": "corner_3",
+  "offset": 0.5,
+  "extension": 0.25
+}
+```
+
+```json
+{
+  "focus": [0.0, 1.0, 0.0],
+  "projection": "orthographic",
+  "orthographic_scale": 3.0,
+  "yaw": 0.75,
+  "pitch": -0.4
+}
+```
+
+```json
+{
+  "path": "/tmp/talos3d-box-dimension.png"
+}
+```
 
 Light creation/update currently supports:
 

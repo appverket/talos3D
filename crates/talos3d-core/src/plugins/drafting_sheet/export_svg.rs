@@ -18,6 +18,8 @@ use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern};
 
 use super::sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke};
 
+const DIMENSION_STROKE_HEX: &str = "#4A4A4E";
+
 /// Render a [`DraftingSheet`] as a self-contained SVG document. Output
 /// bytes are UTF-8; caller owns the bytes.
 #[must_use]
@@ -202,11 +204,12 @@ fn write_dim_primitive(out: &mut String, prim: &DimPrimitive) {
         DimPrimitive::LineSegment { a, b, stroke_mm } => {
             let _ = writeln!(
                 out,
-                r##"      <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#000" stroke-width="{}" stroke-linecap="round" fill="none"/>"##,
+                r##"      <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}" stroke-linecap="round" fill="none"/>"##,
                 fmt_num(a.x),
                 fmt_num(a.y),
                 fmt_num(b.x),
                 fmt_num(b.y),
+                DIMENSION_STROKE_HEX,
                 fmt_num(*stroke_mm),
             );
         }
@@ -225,11 +228,12 @@ fn write_dim_primitive(out: &mut String, prim: &DimPrimitive) {
             let y2 = pos.y + half * s;
             let _ = writeln!(
                 out,
-                r##"      <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="#000" stroke-width="{}" stroke-linecap="round" fill="none"/>"##,
+                r##"      <line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="{}" stroke-linecap="round" fill="none"/>"##,
                 fmt_num(x1),
                 fmt_num(y1),
                 fmt_num(x2),
                 fmt_num(y2),
+                DIMENSION_STROKE_HEX,
                 fmt_num(*stroke_mm),
             );
         }
@@ -250,24 +254,26 @@ fn write_dim_primitive(out: &mut String, prim: &DimPrimitive) {
             let fill = if *filled { "#000" } else { "none" };
             let _ = writeln!(
                 out,
-                r##"      <polygon points="{},{} {},{} {},{}" fill="{}" stroke="#000" stroke-width="{}" stroke-linejoin="miter"/>"##,
+                r##"      <polygon points="{},{} {},{} {},{}" fill="{}" stroke="{}" stroke-width="{}" stroke-linejoin="miter"/>"##,
                 fmt_num(tip.x),
                 fmt_num(tip.y),
                 fmt_num(base_l.x),
                 fmt_num(base_l.y),
                 fmt_num(base_r.x),
                 fmt_num(base_r.y),
-                fill,
+                if *filled { DIMENSION_STROKE_HEX } else { fill },
+                DIMENSION_STROKE_HEX,
                 fmt_num(*stroke_mm),
             );
         }
         DimPrimitive::Dot { pos, radius_mm } => {
             let _ = writeln!(
                 out,
-                r##"      <circle cx="{}" cy="{}" r="{}" fill="#000"/>"##,
+                r##"      <circle cx="{}" cy="{}" r="{}" fill="{}"/>"##,
                 fmt_num(pos.x),
                 fmt_num(pos.y),
                 fmt_num(*radius_mm),
+                DIMENSION_STROKE_HEX,
             );
         }
         DimPrimitive::Text {

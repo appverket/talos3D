@@ -30,8 +30,7 @@ use crate::capability_registry::{
 use crate::plugins::{
     identity::ElementId,
     refinement::{
-        ObligationSet, ObligationStatus, RefinementState, RefinementStateComponent,
-        SemanticRole,
+        ObligationSet, ObligationStatus, RefinementState, RefinementStateComponent, SemanticRole,
     },
 };
 
@@ -464,7 +463,12 @@ mod tests {
         // Spawn entity with no ElementClassAssignment (not a wall).
         let allocator = world.resource::<ElementIdAllocator>().clone();
         let eid = allocator.next_id();
-        world.spawn((eid, RefinementStateComponent { state: RefinementState::Constructible }));
+        world.spawn((
+            eid,
+            RefinementStateComponent {
+                state: RefinementState::Constructible,
+            },
+        ));
 
         validation_sweep_system(&mut world);
 
@@ -525,7 +529,9 @@ mod tests {
     #[test]
     fn declared_state_obligations_constraint_emits_for_constructible_unresolved() {
         use crate::plugins::identity::{ElementId, ElementIdAllocator};
-        use crate::plugins::refinement::{Obligation, ObligationId, ObligationSet, ObligationStatus};
+        use crate::plugins::refinement::{
+            Obligation, ObligationId, ObligationSet, ObligationStatus,
+        };
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());

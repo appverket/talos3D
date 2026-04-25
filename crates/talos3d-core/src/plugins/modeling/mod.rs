@@ -79,6 +79,7 @@ impl Plugin for ModelingPlugin {
         // app that boots ModelingPlugin has the full relation discovery
         // surface without needing to touch the architectural capability.
         crate::plugins::refinement::register_refinement_relations(app);
+        crate::plugins::support_graph::register_support_graph_relations(app);
         app.init_resource::<ModelingWorkbench>()
             .init_resource::<GroupEditContext>()
             .init_resource::<DefinitionsWindowState>()

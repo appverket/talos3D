@@ -80,7 +80,7 @@ ecolor = { path = "vendor/egui-0.33.3/ecolor" }
 #
 # - If you need local Bevy main, do that only on a dedicated Talos branch and
 #   replace versioned `bevy = "0.18"` dependencies with path dependencies to:
-#   /Users/torstenek/dev/bevy
+#   /path/to/your/local/bevy
 #
 # Full workflow:
 # docs/ENGINE_FORK_WORKFLOW.md

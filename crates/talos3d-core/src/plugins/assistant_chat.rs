@@ -638,10 +638,7 @@ impl AssistantChatState {
         }
     }
 
-    fn runtime_config(
-        &self,
-        guidance_prompt: String,
-    ) -> Result<AssistantRuntimeConfig, String> {
+    fn runtime_config(&self, guidance_prompt: String) -> Result<AssistantRuntimeConfig, String> {
         runtime_config_from_preferences(&self.preferences, guidance_prompt)
     }
 
@@ -1728,8 +1725,10 @@ fn run_openai_chat_completions_turn(
     api_key: &str,
     model: &str,
 ) -> Result<(), String> {
-    let mut messages =
-        build_openai_chat_messages(conversation, &assistant_system_prompt(&bridge.base_url, &bridge.guidance_prompt));
+    let mut messages = build_openai_chat_messages(
+        conversation,
+        &assistant_system_prompt(&bridge.base_url, &bridge.guidance_prompt),
+    );
 
     for _ in 0..ASSISTANT_TOOL_STEPS {
         let body = json!({
