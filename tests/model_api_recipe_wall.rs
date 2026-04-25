@@ -289,11 +289,13 @@ fn promote_to_constructible_links_children_via_refined_into() {
 
     let parent_eid = ElementId(wall_eid);
     let children = query_refined_into(&world, parent_eid);
-    // 6 satisfaction links → 6 children → 6 refined_into relations.
+    // The wall recipe now emits one refined_into link per satisfied
+    // obligation plus the assembly children added by curation merges.
+    // Updated from 6 → 14 after the curation/material substrate landed.
     assert_eq!(
         children.len(),
-        6,
-        "expected 6 refined_into child links; got {}",
+        14,
+        "expected 14 refined_into child links; got {}",
         children.len()
     );
 }
