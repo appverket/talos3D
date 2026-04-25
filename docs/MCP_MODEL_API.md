@@ -79,6 +79,38 @@ Scene lighting is also available over MCP. Ambient lighting is explicit scene
 state, while directional, point, and spot lights are authored entities with
 stable element ids and editable properties.
 
+## Standard Agent Loop
+
+Agents should treat MCP as a semantic model contract, not as a geometry macro
+recorder. The expected loop is:
+
+1. Inspect the instance and loaded capability surface with `get_instance_info`,
+   `list_vocabulary`, `list_element_classes`, `list_recipe_families`,
+   `list_constraints`, `list_generation_priors`, and
+   `list_catalog_providers`.
+2. Inspect the current document with `model_summary`, entity queries, assembly
+   queries, relation queries, selection state, camera state, and screenshots
+   where visual grounding is useful.
+3. Author or refine semantic structure through commands and Model API tools.
+   Prefer authored entities, assemblies, relations, recipes, definitions, and
+   stable handles over raw coordinate reconstruction.
+4. Run validation after meaningful changes. Treat findings as part of the
+   authoring loop, not as a final report bolted on at the end.
+5. Explain unresolved findings and obligations in terms of refinement state:
+   conceptual gaps, schematic coordination issues, constructible blockers, or
+   explicitly deferred work.
+6. When a needed recipe, assembly pattern, source, or rule is missing, create a
+   gap or session draft instead of inventing unsupported structure silently.
+7. Re-run validation after each refinement step and preserve accepted waivers
+   or deferrals as authored state.
+8. Produce named views, screenshots, and drawing exports from the same authored
+   model when the result is ready to communicate.
+
+This loop is intentionally agent-independent. The embedded assistant, Claude,
+Codex, scripted tests, and future hosted agents should all follow the same
+surface. If a workflow only works through hidden editor hooks or prompt luck, it
+is not aligned with the platform direction.
+
 ## Running Talos3D With MCP Enabled
 
 Start the app with the `model-api` feature:
@@ -167,6 +199,10 @@ Current tool categories include:
 - `list_element_classes`
 - `list_recipe_families`
 - `select_recipe`
+- `list_constraints`
+- `list_generation_priors`
+- `list_catalog_providers`
+- `catalog_query`
 - `list_corpus_gaps`
 - `request_corpus_expansion`
 - `lookup_source_passage`
@@ -179,6 +215,13 @@ Current tool categories include:
 - `get_assembly_pattern_draft`
 - `save_assembly_pattern_draft`
 - `set_assembly_pattern_draft_status`
+
+### Validation and findings
+
+- `run_validation`
+- `explain_finding`
+- `run_validation_v2`
+- `explain_finding_v2`
 
 ### Editing and authored changes
 
