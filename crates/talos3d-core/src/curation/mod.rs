@@ -30,10 +30,10 @@ pub mod scope_trust;
 pub mod source;
 
 pub use plugin::CurationPlugin;
-pub use publication::{PublicationFinding, PublicationFindingSeverity, evidence_resolution_report};
+pub use publication::{evidence_resolution_report, PublicationFinding, PublicationFindingSeverity};
 pub use recipes::{
-    NativeFnId, RECIPE_ARTIFACT_KIND, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
-    ScenarioTest, mirror_recipe_descriptors_to_artifacts, recipe_artifact_from_descriptor,
+    mirror_recipe_descriptors_to_artifacts, recipe_artifact_from_descriptor, NativeFnId,
+    RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest, RECIPE_ARTIFACT_KIND,
 };
 
 pub use compat_shim::corpus_provenance_to_registry_entry;
@@ -44,9 +44,9 @@ pub use identity::{
     SourceRevision,
 };
 pub use material_specs::{
-    AcousticProperties, FireProperties, MATERIAL_SPEC_BODY_SCHEMA_VERSION, MATERIAL_SPEC_KIND,
-    MaterialIdentity, MaterialSpec, MaterialSpecBody, MaterialSpecRegistry, MoistureProperties,
-    StandardRef, StructuralProperties, ThermalProperties, next_material_spec_asset_id,
+    next_material_spec_asset_id, AcousticProperties, FireProperties, MaterialIdentity,
+    MaterialSpec, MaterialSpecBody, MaterialSpecRegistry, MoistureProperties, StandardRef,
+    StructuralProperties, ThermalProperties, MATERIAL_SPEC_BODY_SCHEMA_VERSION, MATERIAL_SPEC_KIND,
 };
 pub use meta::CurationMeta;
 pub use nomination::{Nomination, NominationError, NominationId, NominationKind, NominationQueue};
@@ -59,6 +59,6 @@ pub use provenance::{
     CatalogRef, Confidence, EvidenceRef, ExcerptRef, GroundingKind, JurisdictionTag, Lineage,
     Provenance,
 };
-pub use registry::{SourceFilter, SourceRegistry, ensure_canonical_seed};
+pub use registry::{ensure_canonical_seed, SourceFilter, SourceRegistry};
 pub use scope_trust::{Scope, Trust, ValidationStatus};
 pub use source::{SourceLicense, SourceRegistryEntry, SourceStatus, SourceTier};

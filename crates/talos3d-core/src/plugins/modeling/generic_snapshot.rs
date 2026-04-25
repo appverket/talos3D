@@ -181,7 +181,12 @@ where
     }
 
     fn apply_to(&self, world: &mut World) {
-        apply_mesh_primitive(world, self.element_id, self.primitive.clone(), self.rotation);
+        apply_mesh_primitive(
+            world,
+            self.element_id,
+            self.primitive.clone(),
+            self.rotation,
+        );
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             let mut entity_mut = world.entity_mut(entity);
             if let Some(material_assignment) = &self.material_assignment {

@@ -272,13 +272,12 @@ mod tests {
         );
         q.approve(&id, &mut reg).unwrap();
         assert!(q.is_empty());
-        assert!(
-            reg.get(
+        assert!(reg
+            .get(
                 &SourceId::new("boverket.bbr.8"),
                 &SourceRevision::new("2011:6")
             )
-            .is_some()
-        );
+            .is_some());
     }
 
     #[test]
