@@ -849,11 +849,10 @@ impl MaterialAssignment {
     pub fn contains_explicit_render_material_id(&self, material_id: &str) -> bool {
         match self {
             Self::Single(binding) => binding.contains_explicit_render_material_id(material_id),
-            Self::LayerSet(layer_set) => layer_set.layers.iter().any(|layer| {
-                layer
-                    .binding
-                    .contains_explicit_render_material_id(material_id)
-            }),
+            Self::LayerSet(layer_set) => layer_set
+                .layers
+                .iter()
+                .any(|layer| layer.binding.contains_explicit_render_material_id(material_id)),
         }
     }
 
@@ -912,11 +911,7 @@ impl MaterialAssignment {
         match self {
             Self::Single(binding) => binding.is_empty(),
             Self::LayerSet(layer_set) => {
-                layer_set.layers.is_empty()
-                    || layer_set
-                        .layers
-                        .iter()
-                        .all(|layer| layer.binding.is_empty())
+                layer_set.layers.is_empty() || layer_set.layers.iter().all(|layer| layer.binding.is_empty())
             }
         }
     }
@@ -929,8 +924,7 @@ pub fn material_assignment_from_value(value: &Value) -> Option<MaterialAssignmen
     serde_json::from_value::<MaterialAssignment>(value.clone())
         .ok()
         .or_else(|| {
-            value
-                .get("material_id")
+            value.get("material_id")
                 .and_then(Value::as_str)
                 .map(MaterialAssignment::new)
         })
@@ -1023,8 +1017,7 @@ impl Plugin for MaterialPlugin {
                 CommandDescriptor {
                     id: "materials.clear_assignment_on_selection".to_string(),
                     label: "Clear Material Assignment".to_string(),
-                    description: "Remove material assignments from all selected entities"
-                        .to_string(),
+                    description: "Remove material assignments from all selected entities".to_string(),
                     category: CommandCategory::Edit,
                     parameters: None,
                     default_shortcut: None,
@@ -1212,10 +1205,7 @@ fn execute_clear_material_assignment_on_selection(
     })
 }
 
-pub fn validate_material_assignment(
-    world: &World,
-    assignment: &MaterialAssignment,
-) -> Result<(), String> {
+pub fn validate_material_assignment(world: &World, assignment: &MaterialAssignment) -> Result<(), String> {
     if assignment.is_empty() {
         return Err("material assignment is empty; clear the assignment instead".to_string());
     }
@@ -1267,9 +1257,7 @@ fn rebuild_changed_material_handles(
 ) {
     if !registry.is_changed()
         && !texture_registry.is_changed()
-        && !spec_registry
-            .as_ref()
-            .is_some_and(|registry| registry.is_changed())
+        && !spec_registry.as_ref().is_some_and(|registry| registry.is_changed())
     {
         return;
     }
@@ -1346,14 +1334,9 @@ fn apply_material_assignments(
                     .clone();
                 Some(handle)
             })
-            .or_else(|| {
-                primitive_material
-                    .as_ref()
-                    .map(|material| material.0.clone())
-            });
+            .or_else(|| primitive_material.as_ref().map(|material| material.0.clone()));
         commands.queue(move |world: &mut World| {
-            if let (Some(handle), Ok(mut entity_mut)) =
-                (handle.clone(), world.get_entity_mut(entity))
+            if let (Some(handle), Ok(mut entity_mut)) = (handle.clone(), world.get_entity_mut(entity))
             {
                 entity_mut.insert(MeshMaterial3d::<StandardMaterial>(handle));
             }
@@ -1497,10 +1480,7 @@ mod tests {
             ],
         });
         let layered_value = material_assignment_to_value(&layered);
-        assert_eq!(
-            material_assignment_from_value(&layered_value),
-            Some(layered)
-        );
+        assert_eq!(material_assignment_from_value(&layered_value), Some(layered));
     }
 
     #[test]

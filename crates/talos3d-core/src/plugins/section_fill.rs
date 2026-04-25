@@ -24,6 +24,7 @@ use crate::plugins::{
     clipping_planes::ClipPlaneNode,
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
 };
+use crate::curation::MaterialSpecRegistry;
 
 // ─── Hatch pattern types ─────────────────────────────────────────────────────
 
