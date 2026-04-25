@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::{
     capability_registry::{CapabilityRegistry, DefaultsRegistry},
+    curation::{Nomination, NominationQueue, SourceRegistry, SourceRegistryEntry, SourceTier},
     plugins::{
         bundled_definition_libraries::apply_bundled_definition_libraries,
         commands::snapshot_dependency_order,
@@ -15,7 +16,10 @@ use crate::{
         identity::{ElementId, ElementIdAllocator},
         layers::LayerRegistry,
         lighting::{ensure_default_lighting_scene, SceneLightingSettings},
-        materials::{ensure_builtin_materials, is_builtin_material_id, MaterialRegistry},
+        materials::{
+            ensure_builtin_materials, is_builtin_material_id, material_texture_asset_ids,
+            normalize_material_textures, MaterialRegistry, TextureRegistry,
+        },
         modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
         named_views::NamedViewRegistry,
         property_edit::PropertyEditState,
@@ -68,6 +72,8 @@ struct ProjectFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     materials: Option<MaterialRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    textures: Option<TextureRegistry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     definitions: Option<DefinitionRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     definition_libraries: Option<DefinitionLibraryRegistry>,
@@ -75,6 +81,15 @@ struct ProjectFile {
     named_views: Option<NamedViewRegistry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lighting: Option<SceneLightingSettings>,
+    /// Project-scope `SourceRegistry` entries (ADR-040 / PP80). Only
+    /// `SourceTier::Project` entries persist here; Canonical and
+    /// Jurisdictional live in code/packs and are rebuilt on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sources: Option<Vec<SourceRegistryEntry>>,
+    /// Pending source-registry nominations (ADR-040 / PP80). Persist so
+    /// an agent's proposed additions survive across authoring sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nominations: Option<Vec<Nomination>>,
     entities: Vec<PersistedEntityRecord>,
 }
 
@@ -203,6 +218,7 @@ pub fn new_document(world: &mut World) {
     world.insert_resource(OpaquePersistedEntities::default());
     world.insert_resource(LayerRegistry::default());
     world.insert_resource(MaterialRegistry::default());
+    world.insert_resource(TextureRegistry::default());
     if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
         ensure_builtin_materials(&mut materials);
     }
@@ -215,6 +231,15 @@ pub fn new_document(world: &mut World) {
     }
     world.insert_resource(NamedViewRegistry::default());
     world.insert_resource(SceneLightingSettings::default());
+    // Curation substrate (ADR-040 / PP80): reset the SourceRegistry's
+    // Project-tier entries on New Document. Canonical seeds and any
+    // pack-loaded Jurisdictional entries stay put.
+    if let Some(mut registry) = world.get_resource_mut::<SourceRegistry>() {
+        registry.replace_project_scope(std::iter::empty());
+    }
+    if let Some(mut queue) = world.get_resource_mut::<NominationQueue>() {
+        *queue = NominationQueue::default();
+    }
     world.resource_mut::<ElementIdAllocator>().set_next(1);
     ensure_default_lighting_scene(world);
     world.resource_mut::<History>().clear();
@@ -301,8 +326,10 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         None
     };
     let mut material_registry = MaterialRegistry::default();
+    let mut referenced_texture_ids = std::collections::BTreeSet::new();
     for material in world.resource::<MaterialRegistry>().all() {
         if !is_builtin_material_id(&material.id) {
+            referenced_texture_ids.extend(material_texture_asset_ids(material));
             material_registry.upsert(material.clone());
         }
     }
@@ -310,6 +337,12 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         Some(material_registry)
     } else {
         None
+    };
+    let texture_registry = world.resource::<TextureRegistry>();
+    let textures = if referenced_texture_ids.is_empty() {
+        None
+    } else {
+        Some(texture_registry.referenced_subset(&referenced_texture_ids))
     };
     let definition_registry = world.resource::<DefinitionRegistry>().clone();
     let definitions = if definition_registry.list().is_empty() {
@@ -335,6 +368,22 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         Some(named_view_registry)
     };
     let lighting = world.get_resource::<SceneLightingSettings>().cloned();
+    let sources = world.get_resource::<SourceRegistry>().and_then(|reg| {
+        let project_entries: Vec<SourceRegistryEntry> =
+            reg.project_scope_entries().cloned().collect();
+        if project_entries.is_empty() {
+            None
+        } else {
+            Some(project_entries)
+        }
+    });
+    let nominations = world.get_resource::<NominationQueue>().and_then(|q| {
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.list().iter().cloned().collect::<Vec<_>>())
+        }
+    });
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
@@ -342,10 +391,13 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         document_properties: Some(doc_props),
         layers,
         materials,
+        textures,
         definitions,
         definition_libraries,
         named_views,
         lighting,
+        sources,
+        nominations,
         entities,
     })
 }
@@ -357,10 +409,13 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         document_properties,
         layers,
         materials,
+        textures,
         definitions,
         definition_libraries,
         named_views,
         lighting,
+        sources,
+        nominations,
         entities,
     } = project;
 
@@ -434,9 +489,26 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     world.insert_resource(doc_props);
     world.insert_resource(layers.unwrap_or_default());
+    world.insert_resource(textures.unwrap_or_default());
     world.insert_resource(materials.unwrap_or_default());
     if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
         ensure_builtin_materials(&mut materials);
+    }
+    let mut normalized_materials = {
+        let materials = world.resource::<MaterialRegistry>();
+        materials.all().cloned().collect::<Vec<_>>()
+    };
+    if let Some(mut textures) = world.get_resource_mut::<TextureRegistry>() {
+        for material in &mut normalized_materials {
+            normalize_material_textures(material, &mut textures);
+        }
+    }
+    if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
+        for material in normalized_materials {
+            if let Some(existing) = materials.get_mut(&material.id) {
+                *existing = material;
+            }
+        }
     }
     world.insert_resource(definitions.unwrap_or_default());
     world.insert_resource(definition_libraries.unwrap_or_default());
@@ -447,6 +519,23 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     world.insert_resource(named_views.unwrap_or_default());
     world.insert_resource(lighting.unwrap_or_default());
+
+    // Curation substrate (ADR-040 / PP80): reload Project-tier sources
+    // into the registry. The registry itself is installed by
+    // `CurationPlugin` and already holds Canonical seeds; here we only
+    // restore the project-persisted tier. Jurisdictional/Organizational
+    // entries live in packs and aren't part of the project file.
+    if let Some(mut registry) = world.get_resource_mut::<SourceRegistry>() {
+        let project_entries: Vec<SourceRegistryEntry> = sources
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.tier == SourceTier::Project)
+            .collect();
+        registry.replace_project_scope(project_entries);
+    }
+    if let Some(mut queue) = world.get_resource_mut::<NominationQueue>() {
+        queue.restore(nominations.unwrap_or_default());
+    }
 
     recognized.sort_by_key(snapshot_dependency_order);
     for snapshot in recognized {
@@ -582,8 +671,9 @@ mod tests {
         layers::LayerRegistry,
         lighting::SceneLightingSettings,
         materials::{
-            ensure_builtin_materials, BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80,
-            BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO,
+            ensure_builtin_materials, normalize_material_textures, MaterialDef,
+            TextureChannelIntent, TextureColorSpace, TextureRef, TextureRegistry,
+            BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80, BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO,
         },
         modeling::definition::{DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope},
         property_edit::PropertyEditState,
@@ -598,6 +688,7 @@ mod tests {
         world.insert_resource(DocumentProperties::default());
         world.insert_resource(LayerRegistry::default());
         world.insert_resource(MaterialRegistry::default());
+        world.insert_resource(TextureRegistry::default());
         world.insert_resource(DefinitionRegistry::default());
         world.insert_resource(NamedViewRegistry::default());
         world.insert_resource(ElementIdAllocator::default());
@@ -637,6 +728,7 @@ mod tests {
         ensure_builtin_materials(&mut materials);
         materials.create("Project Material");
         world.insert_resource(materials);
+        world.insert_resource(TextureRegistry::default());
         world.insert_resource(DefinitionRegistry::default());
         world.insert_resource(DefinitionLibraryRegistry::default());
         world.insert_resource(NamedViewRegistry::default());
@@ -663,6 +755,48 @@ mod tests {
     }
 
     #[test]
+    fn build_project_file_persists_only_referenced_texture_assets() {
+        let mut world = World::new();
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(DocumentProperties::default());
+        world.insert_resource(LayerRegistry::default());
+
+        let mut materials = MaterialRegistry::default();
+        let mut textures = TextureRegistry::default();
+        let mut material = MaterialDef::new("Project Material");
+        material.base_color_texture = Some(TextureRef::Embedded {
+            data: "referenced-bytes".to_string(),
+            mime: "image/png".to_string(),
+        });
+        normalize_material_textures(&mut material, &mut textures);
+        let referenced_texture_id = match material.base_color_texture.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => id.clone(),
+            other => panic!("expected normalized texture asset, got {other:?}"),
+        };
+        let unreferenced_texture_id = textures.intern_embedded(
+            "unreferenced-bytes".to_string(),
+            "image/png".to_string(),
+            TextureColorSpace::Srgb,
+            TextureChannelIntent::BaseColor,
+        );
+        materials.upsert(material);
+        world.insert_resource(materials);
+        world.insert_resource(textures);
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(DefinitionLibraryRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+
+        let project = build_project_file(&mut world).expect("project should serialize");
+        let textures = project
+            .textures
+            .expect("referenced textures should persist");
+        assert!(textures.get(&referenced_texture_id).is_some());
+        assert!(textures.get(&unreferenced_texture_id).is_none());
+    }
+
+    #[test]
     fn load_project_promotes_legacy_drawing_metadata_entities() {
         let mut world = World::new();
         world.insert_resource(CapabilityRegistry::default());
@@ -686,10 +820,13 @@ mod tests {
             document_properties: Some(DocumentProperties::default()),
             layers: None,
             materials: None,
+            textures: None,
             definitions: None,
             definition_libraries: None,
             named_views: None,
             lighting: Some(SceneLightingSettings::default()),
+            sources: None,
+            nominations: None,
             entities: vec![
                 PersistedEntityRecord {
                     type_name: "dimension_line".to_string(),

@@ -472,6 +472,7 @@ pub(crate) fn enqueue_create_box(world: &mut World, command: CreateBoxCommand) -
                 half_extents: command.half_extents,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         }
         .into(),
     );
@@ -493,6 +494,7 @@ pub(crate) fn enqueue_create_cylinder(
                 height: command.height,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         }
         .into(),
     );
@@ -510,6 +512,7 @@ pub(crate) fn enqueue_create_sphere(world: &mut World, command: CreateSphereComm
                 radius: command.radius,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         }
         .into(),
     );
@@ -528,6 +531,7 @@ pub(crate) fn enqueue_create_plane(world: &mut World, command: CreatePlaneComman
                 elevation: command.elevation,
             },
             rotation: ShapeRotation::default(),
+            material_assignment: None,
         }
         .into(),
     );
@@ -548,6 +552,7 @@ pub(crate) fn enqueue_create_polyline(
             },
             layer: None,
             elevation_metadata: None,
+            material_assignment: None,
         }
         .into(),
     );
@@ -570,6 +575,7 @@ pub(crate) fn enqueue_create_triangle_mesh(
                 name: command.name,
             },
             layer: None,
+            material_assignment: None,
         }
         .into(),
     );

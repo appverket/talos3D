@@ -11,6 +11,7 @@ use crate::{
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id, find_entity_by_element_id},
         identity::ElementId,
+        materials::{material_assignment_to_value, MaterialAssignment},
         modeling::primitives::ShapeRotation,
     },
 };
@@ -24,6 +25,7 @@ pub struct PrimitiveSnapshot<P: Primitive> {
     pub element_id: ElementId,
     pub primitive: P,
     pub rotation: ShapeRotation,
+    pub material_assignment: Option<MaterialAssignment>,
 }
 
 impl<P: Primitive> PartialEq for PrimitiveSnapshot<P>
@@ -34,6 +36,7 @@ where
         self.element_id == other.element_id
             && self.primitive == other.primitive
             && self.rotation == other.rotation
+            && self.material_assignment == other.material_assignment
     }
 }
 
@@ -66,6 +69,7 @@ where
             element_id: self.element_id,
             primitive: self.primitive.translated(delta),
             rotation: self.rotation,
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -76,6 +80,7 @@ where
             element_id: self.element_id,
             primitive: new_primitive,
             rotation: ShapeRotation(new_rotation),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -85,6 +90,7 @@ where
             element_id: self.element_id,
             primitive: self.primitive.scaled(factor, center),
             rotation: self.rotation,
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -99,6 +105,7 @@ where
                     element_id: self.element_id,
                     primitive: new_prim,
                     rotation: ShapeRotation(new_rot),
+                    material_assignment: self.material_assignment.clone(),
                 }
                 .into(),
             ),
@@ -120,6 +127,7 @@ where
             element_id: self.element_id,
             primitive: new_prim,
             rotation: self.rotation,
+            material_assignment: self.material_assignment.clone(),
         }
         .into())
     }
@@ -141,6 +149,7 @@ where
                 element_id: self.element_id,
                 primitive: new_prim,
                 rotation: self.rotation,
+                material_assignment: self.material_assignment.clone(),
             }
             .into(),
         )
@@ -161,6 +170,12 @@ where
                 "rotation".to_string(),
                 serde_json::to_value(self.rotation).unwrap_or(Value::Null),
             );
+            if let Some(material_assignment) = &self.material_assignment {
+                object.insert(
+                    "material_assignment".to_string(),
+                    material_assignment_to_value(material_assignment),
+                );
+            }
         }
         json
     }
@@ -172,6 +187,14 @@ where
             self.primitive.clone(),
             self.rotation,
         );
+        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+            let mut entity_mut = world.entity_mut(entity);
+            if let Some(material_assignment) = &self.material_assignment {
+                entity_mut.insert(material_assignment.clone());
+            } else {
+                entity_mut.remove::<MaterialAssignment>();
+            }
+        }
     }
 
     fn apply_with_previous(&self, world: &mut World, previous: Option<&dyn AuthoredEntity>) {
@@ -187,11 +210,17 @@ where
         }
 
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world.entity_mut(entity).insert((
+            let mut entity_mut = world.entity_mut(entity);
+            entity_mut.insert((
                 self.primitive.clone(),
                 self.rotation,
                 self.primitive.entity_transform(self.rotation.0),
             ));
+            if let Some(material_assignment) = &self.material_assignment {
+                entity_mut.insert(material_assignment.clone());
+            } else {
+                entity_mut.remove::<MaterialAssignment>();
+            }
         } else {
             self.apply_to(world);
         }
@@ -219,7 +248,10 @@ where
     }
 
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
-        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
     }
 }
 
