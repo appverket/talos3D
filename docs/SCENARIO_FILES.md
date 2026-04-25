@@ -13,6 +13,13 @@ Scenarios make AI-first workflows repeatable. An assistant can produce,
 inspect, revise, and execute a scenario through public model APIs instead of
 hiding domain expertise inside a prompt transcript or a compiled test fixture.
 
+Scenario files are not intended to be the normal user interface. Most users
+should never see JSON, Rust, command-line runners, or schema terminology. They
+should describe goals in ordinary language, fill guided forms, import reference
+material, choose between visual alternatives, and read plain-language
+validation explanations. The scenario is the durable internal plan that the
+assistant, product UI, automation, or hosted service can inspect and execute.
+
 ## Product Concept
 
 Scenario files are a bona fide Talos3D concept.
@@ -33,6 +40,10 @@ capability, project, or private workspace. For example, the concept of a
 scenario is generic; the knowledge that a Swedish villa should have a
 slab-on-grade foundation, light-frame exterior walls, and a gable roof belongs
 to an architecture capability or architecture project artifact.
+
+The product may expose scenarios under different user-facing names such as
+brief, plan, template, checklist, or showcase. The storage and interchange
+format can be JSON, but that is an implementation detail.
 
 ## What A Scenario May Contain
 
@@ -87,6 +98,11 @@ A scenario-aware workflow should:
 This workflow may be executed by the in-app assistant, an MCP client, a CI
 test, a desktop command, or a hosted service. It should not depend on a hidden
 editor hook.
+
+For end users, the same workflow should appear as a guided design conversation:
+Talos3D asks for missing intent, proposes a plan, previews the model, explains
+validation gaps, and offers next refinements. The scenario file is the
+machine-readable memory of that process, not something the user must author.
 
 ## Relationship To Capabilities
 
