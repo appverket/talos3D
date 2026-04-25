@@ -75,7 +75,10 @@ impl std::fmt::Display for NominationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotFound(id) => write!(f, "no nomination with id {}", id.0),
-            Self::TargetNotInRegistry { source_id, revision } => write!(
+            Self::TargetNotInRegistry {
+                source_id,
+                revision,
+            } => write!(
                 f,
                 "sunset target ({}, {}) not found in SourceRegistry",
                 source_id.0, revision.0,
@@ -269,12 +272,13 @@ mod tests {
         );
         q.approve(&id, &mut reg).unwrap();
         assert!(q.is_empty());
-        assert!(reg
-            .get(
+        assert!(
+            reg.get(
                 &SourceId::new("boverket.bbr.8"),
                 &SourceRevision::new("2011:6")
             )
-            .is_some());
+            .is_some()
+        );
     }
 
     #[test]
@@ -297,7 +301,10 @@ mod tests {
         let e = reg
             .get(&SourceId::new("bbr.8"), &SourceRevision::new("2011:6"))
             .unwrap();
-        assert!(matches!(e.status, crate::curation::SourceStatus::Superseded { .. }));
+        assert!(matches!(
+            e.status,
+            crate::curation::SourceStatus::Superseded { .. }
+        ));
     }
 
     #[test]

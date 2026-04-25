@@ -95,7 +95,10 @@ mod tests {
 
     #[test]
     fn pack_ref_roundtrips() {
-        let r = PackRef::new(PackId::new("talos3d_architecture_se"), PackRevision::new("v1"));
+        let r = PackRef::new(
+            PackId::new("talos3d_architecture_se"),
+            PackRevision::new("v1"),
+        );
         let json = serde_json::to_string(&r).unwrap();
         let parsed: PackRef = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, r);

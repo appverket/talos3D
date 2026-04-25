@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use super::identity::{AssetId, AssetKindId, AssetRevision};
 
 /// Why one asset depends on another.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord, Default,
+)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyRole {

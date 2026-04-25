@@ -9,10 +9,11 @@ use bevy::prelude::*;
 
 use crate::capability_registry::CapabilityRegistry;
 
+use super::material_specs::MaterialSpecRegistry;
 use super::nomination::NominationQueue;
 use super::policy::HookRegistry;
-use super::recipes::{mirror_recipe_descriptors_to_artifacts, RecipeArtifactRegistry};
-use super::registry::{ensure_canonical_seed, SourceRegistry};
+use super::recipes::{RecipeArtifactRegistry, mirror_recipe_descriptors_to_artifacts};
+use super::registry::{SourceRegistry, ensure_canonical_seed};
 
 pub struct CurationPlugin;
 
@@ -28,6 +29,7 @@ impl Plugin for CurationPlugin {
         app.init_resource::<SourceRegistry>()
             .init_resource::<NominationQueue>()
             .init_resource::<RecipeArtifactRegistry>()
+            .init_resource::<MaterialSpecRegistry>()
             .init_resource::<HookRegistry>()
             .add_systems(
                 Startup,
@@ -59,15 +61,22 @@ mod tests {
         app.update(); // runs Startup schedule
 
         let registry = app.world().resource::<SourceRegistry>();
-        assert!(registry
-            .get(&SourceId::new("iso.129-1"), &SourceRevision::new("2018"))
-            .is_some());
-        assert!(registry
-            .get(&SourceId::new("asme.y14.5"), &SourceRevision::new("2018"))
-            .is_some());
-        assert!(registry
-            .get(&SourceId::new("iso.80000-1"), &SourceRevision::new("2022"))
-            .is_some());
+        assert!(app.world().contains_resource::<MaterialSpecRegistry>());
+        assert!(
+            registry
+                .get(&SourceId::new("iso.129-1"), &SourceRevision::new("2018"))
+                .is_some()
+        );
+        assert!(
+            registry
+                .get(&SourceId::new("asme.y14.5"), &SourceRevision::new("2018"))
+                .is_some()
+        );
+        assert!(
+            registry
+                .get(&SourceId::new("iso.80000-1"), &SourceRevision::new("2022"))
+                .is_some()
+        );
     }
 
     #[test]
@@ -77,8 +86,7 @@ mod tests {
         app.update();
         let count_after_first = app.world().resource::<SourceRegistry>().revision_count();
         // Re-run the startup schedule.
-        app.world_mut()
-            .run_schedule(bevy::app::Startup);
+        app.world_mut().run_schedule(bevy::app::Startup);
         let count_after_second = app.world().resource::<SourceRegistry>().revision_count();
         assert_eq!(count_after_first, count_after_second);
     }

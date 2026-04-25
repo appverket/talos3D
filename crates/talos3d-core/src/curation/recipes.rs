@@ -27,9 +27,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::capability_registry::{
-    CapabilityRegistry, RecipeFamilyDescriptor, RecipeFamilyId,
-};
+use crate::capability_registry::{CapabilityRegistry, RecipeFamilyDescriptor, RecipeFamilyId};
 use crate::plugins::refinement::{AgentId, RefinementState};
 
 use super::identity::{AssetId, AssetKindId};
@@ -74,7 +72,10 @@ impl NativeFnId {
 pub enum RecipeBody {
     /// Reference to a native `GenerateFn`. `family_id` identifies the
     /// registered closure inside `CapabilityRegistry`.
-    NativeFnRef { family_id: RecipeFamilyId, fn_id: NativeFnId },
+    NativeFnRef {
+        family_id: RecipeFamilyId,
+        fn_id: NativeFnId,
+    },
     /// Placeholder for the `AuthoringScript` body format. PP82 replaces
     /// the `opaque` field with the real typed schema.
     AuthoringScript { opaque: Value },
@@ -237,9 +238,7 @@ pub fn recipe_artifact_from_descriptor(descriptor: &RecipeFamilyDescriptor) -> R
     }
 }
 
-fn parameters_to_json_schema(
-    parameters: &[crate::capability_registry::RecipeParameter],
-) -> Value {
+fn parameters_to_json_schema(parameters: &[crate::capability_registry::RecipeParameter]) -> Value {
     let mut properties = Map::new();
     let mut defaults = Map::new();
     for param in parameters {
@@ -407,10 +406,11 @@ mod tests {
         };
         use std::sync::Arc;
 
-        let generate: GenerateFn =
-            Arc::new(|_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
+        let generate: GenerateFn = Arc::new(
+            |_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
                 Ok(GenerateOutput::default())
-            });
+            },
+        );
         let descriptor = RecipeFamilyDescriptor {
             id: RecipeFamilyId("wall_light_frame_exterior".into()),
             target_class: ElementClassId("wall_assembly".into()),
@@ -475,7 +475,10 @@ mod tests {
             ),
         };
 
-        let descriptors = vec![make_descriptor("pier_foundation"), make_descriptor("slab_on_grade")];
+        let descriptors = vec![
+            make_descriptor("pier_foundation"),
+            make_descriptor("slab_on_grade"),
+        ];
         let mut reg = RecipeArtifactRegistry::default();
         reg.mirror_descriptors(descriptors.iter());
         let first = reg.len();
