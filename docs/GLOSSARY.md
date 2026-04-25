@@ -41,6 +41,13 @@ A stable semantic face identifier exposed above raw topology indices.
 The principle that editing affordances should come from authored semantics and
 invariants rather than inferred rendered topology.
 
+## Scenario File
+
+A data-only authoring plan that declares desired entities, relations, recipe
+selections, refinement targets, validations, deferrals, and exports. Scenarios
+are executable by generic runners or MCP workflows and should not contain
+compiled domain logic.
+
 ## Workbench
 
 A curated user-facing workflow built from capabilities, with presentation

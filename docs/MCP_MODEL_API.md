@@ -94,6 +94,9 @@ recorder. The expected loop is:
 3. Author or refine semantic structure through commands and Model API tools.
    Prefer authored entities, assemblies, relations, recipes, definitions, and
    stable handles over raw coordinate reconstruction.
+   For repeatable work, capture the intended entities, relations, recipe
+   choices, validation expectations, and deferrals as a scenario file rather
+   than leaving the plan only in the prompt transcript.
 4. Run validation after meaningful changes. Treat findings as part of the
    authoring loop, not as a final report bolted on at the end.
 5. Explain unresolved findings and obligations in terms of refinement state:

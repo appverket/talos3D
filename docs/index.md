@@ -25,6 +25,7 @@ The platform is designed so that:
 - [Drawing Metadata and Section Views Plan](./PLAN_DRAWING_METADATA_AND_SECTION_VIEWS.md)
 - [ADR 025: Drawing Metadata Boundary](./ADR-025_DRAWING_METADATA_BOUNDARY.md)
 - [MCP Model API](./MCP_MODEL_API.md)
+- [Scenario Files](./SCENARIO_FILES.md)
 - [Assistant Chat](./ASSISTANT_CHAT.md)
 - [Developer Onboarding](./DEVELOPER_ONBOARDING.md)
 - [Engine Fork Workflow](./ENGINE_FORK_WORKFLOW.md)

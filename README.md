@@ -137,6 +137,7 @@ Start here:
 
 - [Docs Home](./docs/index.md)
 - [MCP Model API](./docs/MCP_MODEL_API.md)
+- [Scenario Files](./docs/SCENARIO_FILES.md)
 - [Assistant Chat](./docs/ASSISTANT_CHAT.md)
 - [Developer Onboarding](./docs/DEVELOPER_ONBOARDING.md)
 - [Engine Fork Workflow](./docs/ENGINE_FORK_WORKFLOW.md)
