@@ -36,6 +36,34 @@ can now carry authored assemblies and typed semantic relations so higher-order
 structures such as rooms, storeys, or houses can be represented directly
 instead of only being inferred from geometry.
 
+## AI-First Strategy
+
+MCP is necessary but not sufficient. A legacy 3D tool can expose a scripting
+API over MCP and let an agent create geometry, but that does not by itself make
+the model understandable, refinable, or trustworthy.
+
+Talos3D's AI-first advantage must come from the model contract behind the
+transport:
+
+- agents inspect authored entities, assemblies, relationships, refinement
+  state, obligations, validation findings, and provenance
+- agents create and modify through the same command substrate as the UI
+- generated results remain explainable as semantic model state, not only as
+  viewport geometry
+- missing knowledge can be captured as recipe or assembly-pattern drafts and
+  later promoted into domain packs
+
+The product should therefore prioritize comprehension, critique, validation,
+and progressive refinement at least as strongly as raw generation. A generated
+model that only looks plausible is a weak demo. A model that can explain what it
+is, what has been refined, what remains unresolved, and why an edit is valid is
+the strategic target.
+
+Domain capability packs are the compounding asset. Architecture is the first
+reference domain, but the same loop should apply to naval, mechanical, terrain,
+and future disciplines: discover vocabulary, author semantic structure, refine
+through recipes, validate against obligations, and package reusable knowledge.
+
 ## Core Product Promises
 
 ### 1. AI-friendly authored geometry
