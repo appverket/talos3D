@@ -20,7 +20,10 @@ use crate::{
             ensure_builtin_materials, is_builtin_material_id, material_texture_asset_ids,
             normalize_material_textures, MaterialRegistry, TextureRegistry,
         },
-        modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+        modeling::{
+            definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+            dependency_graph::stamp_authored_entity_dependencies,
+        },
         named_views::NamedViewRegistry,
         property_edit::PropertyEditState,
         selection::Selected,
@@ -538,8 +541,9 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
 
     recognized.sort_by_key(snapshot_dependency_order);
-    for snapshot in recognized {
+    for snapshot in &recognized {
         snapshot.apply_to(world);
+        stamp_authored_entity_dependencies(world, snapshot);
     }
 
     world.insert_resource(OpaquePersistedEntities(opaque));
