@@ -11659,18 +11659,18 @@ fn parse_representations(
                 let representation = representation
                     .as_object()
                     .ok_or_else(|| "each representation must be an object".to_string())?;
-                Ok(RepresentationDecl {
-                    kind: parse_representation_kind(representation.get("kind"))?,
-                    role: parse_representation_role(representation.get("role"))?,
-                })
+                Ok(RepresentationDecl::new(
+                    parse_representation_kind(representation.get("kind"))?,
+                    parse_representation_role(representation.get("role"))?,
+                ))
             })
             .collect();
     }
 
-    Ok(vec![RepresentationDecl {
-        kind: RepresentationKind::Body,
-        role: RepresentationRole::PrimaryGeometry,
-    }])
+    Ok(vec![RepresentationDecl::new(
+        RepresentationKind::Body,
+        RepresentationRole::PrimaryGeometry,
+    )])
 }
 
 #[cfg(feature = "model-api")]
