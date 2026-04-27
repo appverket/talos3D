@@ -6,6 +6,7 @@ pub mod csg;
 pub mod definition;
 pub mod editable_mesh;
 pub mod fillet;
+pub mod foundation;
 pub mod generic_factory;
 pub mod generic_snapshot;
 pub mod group;
