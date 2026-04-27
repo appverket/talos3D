@@ -12,6 +12,7 @@ pub mod fillet;
 pub mod foundation;
 pub mod generic_factory;
 pub mod generic_snapshot;
+pub mod ghost_geometry;
 pub mod group;
 pub mod mesh_generation;
 pub mod mirror;
@@ -714,6 +715,15 @@ impl Plugin for ModelingPlugin {
         // state (layer function codes, ventilation flags, constituent
         // fractions). Mirrors the property-sets pattern.
         app.add_plugins(bim_material_assignment::BimMaterialAssignmentPlugin);
+
+        // ADR-042 §10 PP-B: ghost geometry primitives
+        // (ClearanceEnvelope + SupportCorridor) plus the uniform
+        // AABB-based intersection / load-path validator. The plugin
+        // is a no-op marker today; a viewport-rendering system for
+        // gizmo-line envelope visualisation will land here in a
+        // follow-up. Recipes consume the components directly and the
+        // validator is invoked from postcondition oracles.
+        app.add_plugins(ghost_geometry::GhostGeometryPlugin);
     }
 }
 
