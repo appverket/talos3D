@@ -597,6 +597,53 @@ pub struct EntityMaterialAssignmentInfo {
     pub assignment: Option<MaterialAssignment>,
 }
 
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BimMaterialLayerInput {
+    pub material: String,
+    pub thickness_m: f64,
+    pub function: Option<String>,
+    pub is_ventilated: Option<bool>,
+    pub label: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BimMaterialConstituentInput {
+    pub material: String,
+    pub fraction: f64,
+    pub label: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BimMaterialAssignLayeredRequest {
+    pub definition_id: Option<String>,
+    pub element_id: Option<u64>,
+    pub layers: Vec<BimMaterialLayerInput>,
+    pub total_thickness_param: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BimMaterialAssignConstituentsRequest {
+    pub definition_id: Option<String>,
+    pub element_id: Option<u64>,
+    pub constituents: Vec<BimMaterialConstituentInput>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BimMaterialGetEffectiveRequest {
+    pub definition_id: Option<String>,
+    pub element_id: Option<u64>,
+}
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GetMaterialSpecRequest {
@@ -1509,6 +1556,18 @@ enum ModelApiRequest {
         request: SetMaterialAssignmentRequest,
         response: oneshot::Sender<ApiResult<Vec<EntityMaterialAssignmentInfo>>>,
     },
+    BimMaterialAssignLayered {
+        request: BimMaterialAssignLayeredRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimMaterialAssignConstituents {
+        request: BimMaterialAssignConstituentsRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimMaterialGetEffective {
+        request: BimMaterialGetEffectiveRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     ListMaterialSpecs {
         filter: ListMaterialSpecsFilter,
         response: oneshot::Sender<ApiResult<Vec<MaterialSpecInfo>>>,
@@ -2314,6 +2373,15 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::SetMaterialAssignment { request, response } => {
             let _ = response.send(handle_set_material_assignment(world, request));
+        }
+        ModelApiRequest::BimMaterialAssignLayered { request, response } => {
+            let _ = response.send(handle_bim_material_assign_layered(world, request));
+        }
+        ModelApiRequest::BimMaterialAssignConstituents { request, response } => {
+            let _ = response.send(handle_bim_material_assign_constituents(world, request));
+        }
+        ModelApiRequest::BimMaterialGetEffective { request, response } => {
+            let _ = response.send(handle_bim_material_get_effective(world, request));
         }
         ModelApiRequest::ListMaterialSpecs { filter, response } => {
             let _ = response.send(handle_list_material_specs(world, filter));
@@ -4100,6 +4168,45 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::SetMaterialAssignment { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_material_assign_layered(
+        &self,
+        request: BimMaterialAssignLayeredRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimMaterialAssignLayered { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_material_assign_constituents(
+        &self,
+        request: BimMaterialAssignConstituentsRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimMaterialAssignConstituents { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_material_get_effective(
+        &self,
+        request: BimMaterialGetEffectiveRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimMaterialGetEffective { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -7855,6 +7962,57 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "bim_material.assign_layered",
+        description = "ADR-026 Phase 6d: assign a BIM layered material build-up. \
+                       Provide exactly one target: definition_id for the type-level default, \
+                       or element_id for an occurrence override."
+    )]
+    async fn bim_material_assign_layered_tool(
+        &self,
+        Parameters(params): Parameters<BimMaterialAssignLayeredRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_material_assign_layered(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "bim_material.assign_constituents",
+        description = "ADR-026 Phase 6d: assign a BIM constituent material set. \
+                       Provide exactly one target: definition_id for the type-level default, \
+                       or element_id for an occurrence override. Fractions must sum to 1.0."
+    )]
+    async fn bim_material_assign_constituents_tool(
+        &self,
+        Parameters(params): Parameters<BimMaterialAssignConstituentsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_material_assign_constituents(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "bim_material.get_effective",
+        description = "ADR-026 Phase 6d: resolve the effective BIM material assignment. \
+                       With element_id, returns occurrence override first and then definition default. \
+                       With definition_id, returns the definition default."
+    )]
+    async fn bim_material_get_effective_tool(
+        &self,
+        Parameters(params): Parameters<BimMaterialGetEffectiveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_material_get_effective(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
         name = "list_material_specs",
         description = "List curated construction material specs. Optional filters: scope, trust, classification."
     )]
@@ -10288,6 +10446,322 @@ fn handle_set_material_assignment(
         });
     }
     Ok(updated)
+}
+
+#[cfg(feature = "model-api")]
+fn parse_bim_material_ref(
+    value: &str,
+) -> Result<crate::plugins::modeling::bim_material_assignment::BimMaterialRef, String> {
+    let id = value.trim();
+    if id.is_empty() {
+        return Err("material id must be non-empty".to_string());
+    }
+    Ok(crate::plugins::modeling::bim_material_assignment::BimMaterialRef::new(id))
+}
+
+#[cfg(feature = "model-api")]
+fn parse_bim_layer_function(
+    value: Option<&str>,
+) -> Result<crate::plugins::modeling::bim_material_assignment::LayerFunction, String> {
+    use crate::plugins::modeling::bim_material_assignment::LayerFunction;
+
+    match value
+        .unwrap_or("other")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "structural" => Ok(LayerFunction::Structural),
+        "insulation" => Ok(LayerFunction::Insulation),
+        "finish" => Ok(LayerFunction::Finish),
+        "membrane" => Ok(LayerFunction::Membrane),
+        "air" => Ok(LayerFunction::Air),
+        "other" => Ok(LayerFunction::Other),
+        other => Err(format!("Unsupported BIM material layer function '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn build_bim_layered_assignment(
+    request: &BimMaterialAssignLayeredRequest,
+) -> Result<crate::plugins::modeling::bim_material_assignment::BimMaterialAssignment, String> {
+    use crate::plugins::modeling::bim_material_assignment::{
+        BimMaterialAssignment, BimMaterialLayer, BimMaterialLayerSet,
+    };
+
+    if request.layers.is_empty() {
+        return Err("layers must be non-empty".to_string());
+    }
+    let mut layers = Vec::with_capacity(request.layers.len());
+    for layer in &request.layers {
+        if !layer.thickness_m.is_finite() || layer.thickness_m <= 0.0 {
+            return Err("layer thickness_m must be finite and greater than zero".to_string());
+        }
+        let mut parsed =
+            BimMaterialLayer::new(parse_bim_material_ref(&layer.material)?, layer.thickness_m)
+                .with_function(parse_bim_layer_function(layer.function.as_deref())?);
+        if layer.is_ventilated.unwrap_or(false) {
+            parsed = parsed.ventilated();
+        }
+        if let Some(label) = layer
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parsed = parsed.with_label(label);
+        }
+        layers.push(parsed);
+    }
+    let mut set = BimMaterialLayerSet::new(layers);
+    if let Some(param) = request
+        .total_thickness_param
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        set = set.with_total_thickness_param(param);
+    }
+    Ok(BimMaterialAssignment::LayerSet(set))
+}
+
+#[cfg(feature = "model-api")]
+fn build_bim_constituent_assignment(
+    request: &BimMaterialAssignConstituentsRequest,
+) -> Result<crate::plugins::modeling::bim_material_assignment::BimMaterialAssignment, String> {
+    use crate::plugins::modeling::bim_material_assignment::{
+        BimMaterialAssignment, BimMaterialConstituent, BimMaterialConstituentSet,
+    };
+
+    if request.constituents.is_empty() {
+        return Err("constituents must be non-empty".to_string());
+    }
+    let mut constituents = Vec::with_capacity(request.constituents.len());
+    for constituent in &request.constituents {
+        let mut parsed = BimMaterialConstituent::new(
+            parse_bim_material_ref(&constituent.material)?,
+            constituent.fraction,
+        );
+        if let Some(label) = constituent
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            parsed = parsed.with_label(label);
+        }
+        constituents.push(parsed);
+    }
+    let set = BimMaterialConstituentSet::new(constituents);
+    if !set.is_well_formed(1.0e-6) {
+        return Err(
+            "constituent fractions must be finite, within [0, 1], non-empty, and sum to 1.0"
+                .to_string(),
+        );
+    }
+    Ok(BimMaterialAssignment::ConstituentSet(set))
+}
+
+#[cfg(feature = "model-api")]
+enum BimMaterialTarget {
+    Definition(crate::plugins::modeling::definition::DefinitionId),
+    Occurrence {
+        element_id: u64,
+        entity: Entity,
+        definition_id: crate::plugins::modeling::definition::DefinitionId,
+    },
+}
+
+#[cfg(feature = "model-api")]
+fn resolve_bim_material_target(
+    world: &World,
+    definition_id: Option<&str>,
+    element_id: Option<u64>,
+) -> Result<BimMaterialTarget, String> {
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+
+    match (definition_id, element_id) {
+        (Some(_), Some(_)) | (None, None) => {
+            Err("provide exactly one of definition_id or element_id".to_string())
+        }
+        (Some(definition_id), None) => {
+            let id = definition_id.trim();
+            if id.is_empty() {
+                return Err("definition_id must be non-empty".to_string());
+            }
+            let id = DefinitionId(id.to_string());
+            world
+                .resource::<DefinitionRegistry>()
+                .get(&id)
+                .ok_or_else(|| format!("Definition '{}' not found", id))?;
+            Ok(BimMaterialTarget::Definition(id))
+        }
+        (None, Some(element_id)) => {
+            let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
+                .ok_or_else(|| format!("Entity {element_id} not found"))?;
+            let identity = world
+                .entity(entity)
+                .get::<OccurrenceIdentity>()
+                .ok_or_else(|| {
+                    format!("Entity {element_id} is not an occurrence and cannot carry a BIM material override")
+                })?;
+            world
+                .resource::<DefinitionRegistry>()
+                .get(&identity.definition_id)
+                .ok_or_else(|| format!("Definition '{}' not found", identity.definition_id))?;
+            Ok(BimMaterialTarget::Occurrence {
+                element_id,
+                entity,
+                definition_id: identity.definition_id.clone(),
+            })
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn ensure_bim_material_registry(world: &mut World) {
+    if world
+        .get_resource::<crate::plugins::modeling::bim_material_assignment::BimMaterialAssignmentRegistry>()
+        .is_none()
+    {
+        world.insert_resource(
+            crate::plugins::modeling::bim_material_assignment::BimMaterialAssignmentRegistry::default(),
+        );
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn serialize_bim_assignment(
+    assignment: Option<&crate::plugins::modeling::bim_material_assignment::BimMaterialAssignment>,
+) -> Value {
+    assignment
+        .and_then(|assignment| serde_json::to_value(assignment).ok())
+        .unwrap_or(Value::Null)
+}
+
+#[cfg(feature = "model-api")]
+fn assign_bim_material(
+    world: &mut World,
+    definition_id: Option<&str>,
+    element_id: Option<u64>,
+    assignment: crate::plugins::modeling::bim_material_assignment::BimMaterialAssignment,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::bim_material_assignment::{
+        BimMaterialAssignmentOverride, BimMaterialAssignmentRegistry,
+    };
+
+    ensure_bim_material_registry(world);
+    let target = resolve_bim_material_target(world, definition_id, element_id)?;
+    match target {
+        BimMaterialTarget::Definition(definition_id) => {
+            let prior = world
+                .resource_mut::<BimMaterialAssignmentRegistry>()
+                .register(definition_id.clone(), assignment.clone());
+            Ok(serde_json::json!({
+                "target": "definition",
+                "definition_id": definition_id.to_string(),
+                "assignment": serialize_bim_assignment(Some(&assignment)),
+                "prior": serialize_bim_assignment(prior.as_ref()),
+            }))
+        }
+        BimMaterialTarget::Occurrence {
+            element_id,
+            entity,
+            definition_id,
+        } => {
+            let prior = world
+                .entity(entity)
+                .get::<BimMaterialAssignmentOverride>()
+                .map(|override_component| override_component.0.clone());
+            world
+                .entity_mut(entity)
+                .insert(BimMaterialAssignmentOverride(assignment.clone()));
+            Ok(serde_json::json!({
+                "target": "element",
+                "element_id": element_id,
+                "definition_id": definition_id.to_string(),
+                "assignment": serialize_bim_assignment(Some(&assignment)),
+                "prior": serialize_bim_assignment(prior.as_ref()),
+            }))
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_bim_material_assign_layered(
+    world: &mut World,
+    request: BimMaterialAssignLayeredRequest,
+) -> Result<Value, String> {
+    let assignment = build_bim_layered_assignment(&request)?;
+    assign_bim_material(
+        world,
+        request.definition_id.as_deref(),
+        request.element_id,
+        assignment,
+    )
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_bim_material_assign_constituents(
+    world: &mut World,
+    request: BimMaterialAssignConstituentsRequest,
+) -> Result<Value, String> {
+    let assignment = build_bim_constituent_assignment(&request)?;
+    assign_bim_material(
+        world,
+        request.definition_id.as_deref(),
+        request.element_id,
+        assignment,
+    )
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_bim_material_get_effective(
+    world: &mut World,
+    request: BimMaterialGetEffectiveRequest,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::bim_material_assignment::{
+        effective_assignment, BimMaterialAssignmentOverride, BimMaterialAssignmentRegistry,
+    };
+
+    ensure_bim_material_registry(world);
+    let target =
+        resolve_bim_material_target(world, request.definition_id.as_deref(), request.element_id)?;
+    let registry = world.resource::<BimMaterialAssignmentRegistry>();
+    match target {
+        BimMaterialTarget::Definition(definition_id) => {
+            let assignment = registry.get(&definition_id);
+            Ok(serde_json::json!({
+                "target": "definition",
+                "definition_id": definition_id.to_string(),
+                "source": if assignment.is_some() { "definition" } else { "none" },
+                "assignment": serialize_bim_assignment(assignment),
+            }))
+        }
+        BimMaterialTarget::Occurrence {
+            element_id,
+            entity,
+            definition_id,
+        } => {
+            let override_component = world.entity(entity).get::<BimMaterialAssignmentOverride>();
+            let assignment = effective_assignment(registry, &definition_id, override_component);
+            let source = if override_component.is_some() {
+                "override"
+            } else if assignment.is_some() {
+                "definition"
+            } else {
+                "none"
+            };
+            Ok(serde_json::json!({
+                "target": "element",
+                "element_id": element_id,
+                "definition_id": definition_id.to_string(),
+                "source": source,
+                "assignment": serialize_bim_assignment(assignment),
+            }))
+        }
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -19979,6 +20453,195 @@ mod tests {
         let fetched =
             handle_get_material_assignment(&world, 42).expect("get_material_assignment works");
         assert_eq!(fetched.assignment, Some(assignment));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_material_layered_definition_default_resolves_for_occurrence() {
+        let mut world = init_model_api_test_world();
+        let definition = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("definition should be created");
+
+        let assigned = handle_bim_material_assign_layered(
+            &mut world,
+            BimMaterialAssignLayeredRequest {
+                definition_id: Some(definition.definition_id.clone()),
+                element_id: None,
+                layers: vec![
+                    BimMaterialLayerInput {
+                        material: "mat.gypsum.standard_12_5mm".into(),
+                        thickness_m: 0.0125,
+                        function: Some("finish".into()),
+                        is_ventilated: None,
+                        label: Some("Interior gypsum".into()),
+                    },
+                    BimMaterialLayerInput {
+                        material: "mat.insulation.mineral_wool".into(),
+                        thickness_m: 0.15,
+                        function: Some("insulation".into()),
+                        is_ventilated: Some(false),
+                        label: None,
+                    },
+                ],
+                total_thickness_param: Some("depth".into()),
+            },
+        )
+        .expect("layered assignment should succeed");
+        assert_eq!(assigned["target"], json!("definition"));
+        assert_eq!(assigned["prior"], Value::Null);
+        assert_eq!(assigned["assignment"]["kind"], json!("layer_set"));
+        assert_eq!(
+            assigned["assignment"]["layers"][0]["function"],
+            json!("finish")
+        );
+        assert_eq!(
+            assigned["assignment"]["total_thickness_param"],
+            json!("depth")
+        );
+
+        let occurrence_id = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": definition.definition_id, "label": "Wall1" }),
+        )
+        .expect("occurrence should be placed");
+        let effective = handle_bim_material_get_effective(
+            &mut world,
+            BimMaterialGetEffectiveRequest {
+                definition_id: None,
+                element_id: Some(occurrence_id),
+            },
+        )
+        .expect("effective material should resolve");
+        assert_eq!(effective["source"], json!("definition"));
+        assert_eq!(effective["assignment"]["kind"], json!("layer_set"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_material_constituent_override_wins_over_definition_default() {
+        let mut world = init_model_api_test_world();
+        let definition = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("definition should be created");
+        handle_bim_material_assign_layered(
+            &mut world,
+            BimMaterialAssignLayeredRequest {
+                definition_id: Some(definition.definition_id.clone()),
+                element_id: None,
+                layers: vec![BimMaterialLayerInput {
+                    material: "mat.concrete.c25_30".into(),
+                    thickness_m: 0.2,
+                    function: Some("structural".into()),
+                    is_ventilated: None,
+                    label: None,
+                }],
+                total_thickness_param: None,
+            },
+        )
+        .expect("definition default should be assigned");
+
+        let occurrence_id = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": definition.definition_id, "label": "Wall1" }),
+        )
+        .expect("occurrence should be placed");
+        let assigned = handle_bim_material_assign_constituents(
+            &mut world,
+            BimMaterialAssignConstituentsRequest {
+                definition_id: None,
+                element_id: Some(occurrence_id),
+                constituents: vec![
+                    BimMaterialConstituentInput {
+                        material: "mat.concrete.c25_30".into(),
+                        fraction: 0.95,
+                        label: Some("Concrete".into()),
+                    },
+                    BimMaterialConstituentInput {
+                        material: "mat.steel.rebar_b500b".into(),
+                        fraction: 0.05,
+                        label: Some("Rebar".into()),
+                    },
+                ],
+            },
+        )
+        .expect("constituent override should be assigned");
+        assert_eq!(assigned["target"], json!("element"));
+        assert_eq!(assigned["prior"], Value::Null);
+
+        let effective = handle_bim_material_get_effective(
+            &mut world,
+            BimMaterialGetEffectiveRequest {
+                definition_id: None,
+                element_id: Some(occurrence_id),
+            },
+        )
+        .expect("effective material should resolve");
+        assert_eq!(effective["source"], json!("override"));
+        assert_eq!(effective["assignment"]["kind"], json!("constituent_set"));
+        assert_eq!(
+            effective["assignment"]["constituents"][1]["label"],
+            json!("Rebar")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_material_assignment_rejects_invalid_targets_and_fractions() {
+        let mut world = init_model_api_test_world();
+        let definition = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("definition should be created");
+        let non_occurrence = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .expect("box should be created");
+
+        let err = handle_bim_material_assign_layered(
+            &mut world,
+            BimMaterialAssignLayeredRequest {
+                definition_id: Some(definition.definition_id.clone()),
+                element_id: Some(non_occurrence),
+                layers: vec![BimMaterialLayerInput {
+                    material: "mat.concrete.c25_30".into(),
+                    thickness_m: 0.2,
+                    function: Some("structural".into()),
+                    is_ventilated: None,
+                    label: None,
+                }],
+                total_thickness_param: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("exactly one"));
+
+        let err = handle_bim_material_assign_constituents(
+            &mut world,
+            BimMaterialAssignConstituentsRequest {
+                definition_id: Some(definition.definition_id),
+                element_id: None,
+                constituents: vec![BimMaterialConstituentInput {
+                    material: "mat.concrete.c25_30".into(),
+                    fraction: 0.5,
+                    label: None,
+                }],
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("sum to 1.0"));
+
+        let err = handle_bim_material_get_effective(
+            &mut world,
+            BimMaterialGetEffectiveRequest {
+                definition_id: None,
+                element_id: Some(non_occurrence),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("not an occurrence"));
     }
 
     #[cfg(feature = "model-api")]
