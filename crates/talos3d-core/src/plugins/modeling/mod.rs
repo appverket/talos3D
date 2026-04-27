@@ -1,5 +1,6 @@
 pub mod array;
 pub mod assembly;
+pub mod bim_material_assignment;
 pub mod bsp_csg;
 pub mod composite_solid;
 pub mod csg;
@@ -702,6 +703,13 @@ impl Plugin for ModelingPlugin {
         // separation is the architectural enforcement of ADR-026 §1's
         // "property-set changes must never set mesh_dirty" invariant.
         app.add_plugins(property_sets::PropertySetsPlugin);
+
+        // ADR-026 Phase 6d: BIM material assignment substrate. Lives
+        // separately from the render-side `MaterialAssignment` so the
+        // geometry / render pipeline never observes BIM authoring
+        // state (layer function codes, ventilation flags, constituent
+        // fractions). Mirrors the property-sets pattern.
+        app.add_plugins(bim_material_assignment::BimMaterialAssignmentPlugin);
     }
 }
 
