@@ -23,6 +23,7 @@ pub mod property_sets;
 pub mod quantity_set;
 pub mod semantics;
 pub mod snapshots;
+pub mod spatial_container;
 pub mod tools;
 pub mod triangulate;
 pub mod void_declaration;
