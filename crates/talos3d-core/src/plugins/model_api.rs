@@ -644,6 +644,52 @@ pub struct BimMaterialGetEffectiveRequest {
     pub element_id: Option<u64>,
 }
 
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuantityProvenanceInput {
+    pub kind: String,
+    pub parameter: Option<String>,
+    pub node: Option<String>,
+    pub source: Option<String>,
+    pub rationale: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuantitySetRequest {
+    pub element_id: u64,
+    pub field: String,
+    pub value: Value,
+    pub material: Option<String>,
+    pub provenance: QuantityProvenanceInput,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuantityGetRequest {
+    pub element_id: u64,
+    pub field: Option<String>,
+    pub material: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuantityListProvenanceRequest {
+    pub element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuantityCheckInvariantsRequest {
+    pub element_id: u64,
+    pub tolerance: Option<f64>,
+}
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GetMaterialSpecRequest {
@@ -1568,6 +1614,22 @@ enum ModelApiRequest {
         request: BimMaterialGetEffectiveRequest,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    QuantitySet {
+        request: QuantitySetRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    QuantityGet {
+        request: QuantityGetRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    QuantityListProvenance {
+        request: QuantityListProvenanceRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    QuantityCheckInvariants {
+        request: QuantityCheckInvariantsRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     ListMaterialSpecs {
         filter: ListMaterialSpecsFilter,
         response: oneshot::Sender<ApiResult<Vec<MaterialSpecInfo>>>,
@@ -2382,6 +2444,18 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::BimMaterialGetEffective { request, response } => {
             let _ = response.send(handle_bim_material_get_effective(world, request));
+        }
+        ModelApiRequest::QuantitySet { request, response } => {
+            let _ = response.send(handle_quantity_set(world, request));
+        }
+        ModelApiRequest::QuantityGet { request, response } => {
+            let _ = response.send(handle_quantity_get(world, request));
+        }
+        ModelApiRequest::QuantityListProvenance { request, response } => {
+            let _ = response.send(handle_quantity_list_provenance(world, request));
+        }
+        ModelApiRequest::QuantityCheckInvariants { request, response } => {
+            let _ = response.send(handle_quantity_check_invariants(world, request));
         }
         ModelApiRequest::ListMaterialSpecs { filter, response } => {
             let _ = response.send(handle_list_material_specs(world, filter));
@@ -4207,6 +4281,52 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::BimMaterialGetEffective { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_quantity_set(&self, request: QuantitySetRequest) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::QuantitySet { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_quantity_get(&self, request: QuantityGetRequest) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::QuantityGet { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_quantity_list_provenance(
+        &self,
+        request: QuantityListProvenanceRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::QuantityListProvenance { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_quantity_check_invariants(
+        &self,
+        request: QuantityCheckInvariantsRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::QuantityCheckInvariants { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -8013,6 +8133,69 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "quantity.set",
+        description = "ADR-026 Phase 6e: set one typed quantity on an entity. \
+                       For per-material quantities, pass material plus field \
+                       volume_m3, area_m2, length_m, mass_kg, or count."
+    )]
+    async fn quantity_set_tool(
+        &self,
+        Parameters(params): Parameters<QuantitySetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_quantity_set(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "quantity.get",
+        description = "ADR-026 Phase 6e: get an entity QuantitySet, or one field. \
+                       Omit field for the full set; pass material to read a per-material field."
+    )]
+    async fn quantity_get_tool(
+        &self,
+        Parameters(params): Parameters<QuantityGetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_quantity_get(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "quantity.list_provenance",
+        description = "ADR-026 Phase 6e: list provenance records for all set primary and material quantities on an entity."
+    )]
+    async fn quantity_list_provenance_tool(
+        &self,
+        Parameters(params): Parameters<QuantityListProvenanceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_quantity_list_provenance(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "quantity.check_invariants",
+        description = "ADR-026 Phase 6e: check gross/net, opening deduction, and grounded-provenance invariants for an entity QuantitySet."
+    )]
+    async fn quantity_check_invariants_tool(
+        &self,
+        Parameters(params): Parameters<QuantityCheckInvariantsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_quantity_check_invariants(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
         name = "list_material_specs",
         description = "List curated construction material specs. Optional filters: scope, trust, classification."
     )]
@@ -10762,6 +10945,416 @@ pub fn handle_bim_material_get_effective(
             }))
         }
     }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_quantity_provenance(
+    input: &QuantityProvenanceInput,
+) -> Result<crate::plugins::modeling::quantity_set::QuantityProvenance, String> {
+    use crate::plugins::modeling::quantity_set::QuantityProvenance;
+
+    match input.kind.trim().to_ascii_lowercase().as_str() {
+        "authored_parameter" | "parameter" => {
+            let parameter = input
+                .parameter
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "authored_parameter provenance requires parameter".to_string())?;
+            Ok(QuantityProvenance::AuthoredParameter {
+                parameter: parameter.to_string(),
+            })
+        }
+        "evaluator_node" | "evaluator" => {
+            let node = input
+                .node
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "evaluator_node provenance requires node".to_string())?;
+            Ok(QuantityProvenance::EvaluatorNode {
+                node: node.to_string(),
+            })
+        }
+        "imported" | "import" => {
+            let source = input
+                .source
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "imported provenance requires source".to_string())?;
+            Ok(QuantityProvenance::Imported {
+                source: source.to_string(),
+            })
+        }
+        "mesh_approximation" | "mesh" => Ok(QuantityProvenance::MeshApproximation),
+        "user_override" | "user" => Ok(QuantityProvenance::UserOverride {
+            rationale: input
+                .rationale
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+        }),
+        other => Err(format!("Unsupported quantity provenance kind '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_quantity_f64(field: &str, value: &Value) -> Result<f64, String> {
+    let value = value
+        .as_f64()
+        .ok_or_else(|| format!("quantity field '{field}' must be a number"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!(
+            "quantity field '{field}' must be finite and non-negative"
+        ));
+    }
+    Ok(value)
+}
+
+#[cfg(feature = "model-api")]
+fn parse_quantity_count(field: &str, value: &Value) -> Result<u32, String> {
+    let value = value
+        .as_u64()
+        .ok_or_else(|| format!("quantity field '{field}' must be an unsigned integer"))?;
+    u32::try_from(value).map_err(|_| format!("quantity field '{field}' exceeds u32::MAX"))
+}
+
+#[cfg(feature = "model-api")]
+fn normalized_quantity_field(field: &str) -> String {
+    field.trim().to_ascii_lowercase()
+}
+
+#[cfg(feature = "model-api")]
+fn set_primary_quantity_field(
+    set: &mut crate::plugins::modeling::quantity_set::QuantitySet,
+    field: &str,
+    value: &Value,
+    provenance: crate::plugins::modeling::quantity_set::QuantityProvenance,
+) -> Result<(), String> {
+    use crate::plugins::modeling::quantity_set::QuantityValue;
+
+    match normalized_quantity_field(field).as_str() {
+        "area_gross" | "area_gross_m2" => {
+            set.area_gross_m2 = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "area_net" | "area_net_m2" => {
+            set.area_net_m2 = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "volume_gross" | "volume_gross_m3" => {
+            set.volume_gross_m3 = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "volume_net" | "volume_net_m3" => {
+            set.volume_net_m3 = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "length" | "length_m" => {
+            set.length_m = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "opening_area_deducted" | "opening_area_deducted_m2" => {
+            set.opening_area_deducted_m2 = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "count" => {
+            set.count = Some(QuantityValue::new(
+                parse_quantity_count(field, value)?,
+                provenance,
+            ));
+        }
+        other => {
+            return Err(format!("Unsupported primary quantity field '{other}'"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn get_primary_quantity_field(
+    set: &crate::plugins::modeling::quantity_set::QuantitySet,
+    field: &str,
+) -> Result<Value, String> {
+    let value = match normalized_quantity_field(field).as_str() {
+        "area_gross" | "area_gross_m2" => set
+            .area_gross_m2
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "area_net" | "area_net_m2" => set
+            .area_net_m2
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "volume_gross" | "volume_gross_m3" => set
+            .volume_gross_m3
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "volume_net" | "volume_net_m3" => set
+            .volume_net_m3
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "length" | "length_m" => set
+            .length_m
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "opening_area_deducted" | "opening_area_deducted_m2" => set
+            .opening_area_deducted_m2
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "count" => set
+            .count
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        other => return Err(format!("Unsupported primary quantity field '{other}'")),
+    };
+    Ok(value.unwrap_or(Value::Null))
+}
+
+#[cfg(feature = "model-api")]
+fn set_material_quantity_field(
+    quantity: &mut crate::plugins::modeling::quantity_set::MaterialQuantity,
+    field: &str,
+    value: &Value,
+    provenance: crate::plugins::modeling::quantity_set::QuantityProvenance,
+) -> Result<(), String> {
+    use crate::plugins::modeling::quantity_set::QuantityValue;
+
+    match normalized_quantity_field(field).as_str() {
+        "volume" | "volume_m3" => {
+            quantity.volume_m3 = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "area" | "area_m2" => {
+            quantity.area_m2 = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "length" | "length_m" => {
+            quantity.length_m = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "mass" | "mass_kg" => {
+            quantity.mass_kg = Some(QuantityValue::new(
+                parse_quantity_f64(field, value)?,
+                provenance,
+            ));
+        }
+        "count" => {
+            quantity.count = Some(QuantityValue::new(
+                parse_quantity_count(field, value)?,
+                provenance,
+            ));
+        }
+        other => return Err(format!("Unsupported material quantity field '{other}'")),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn get_material_quantity_field(
+    quantity: &crate::plugins::modeling::quantity_set::MaterialQuantity,
+    field: &str,
+) -> Result<Value, String> {
+    let value = match normalized_quantity_field(field).as_str() {
+        "volume" | "volume_m3" => quantity
+            .volume_m3
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "area" | "area_m2" => quantity
+            .area_m2
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "length" | "length_m" => quantity
+            .length_m
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "mass" | "mass_kg" => quantity
+            .mass_kg
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        "count" => quantity
+            .count
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok()),
+        other => return Err(format!("Unsupported material quantity field '{other}'")),
+    };
+    Ok(value.unwrap_or(Value::Null))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_quantity_set(
+    world: &mut World,
+    request: QuantitySetRequest,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::quantity_set::{MaterialQuantity, QuantitySet};
+
+    let entity = find_entity_by_element_id(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    if world.get::<QuantitySet>(entity).is_none() {
+        world.entity_mut(entity).insert(QuantitySet::empty());
+    }
+    let provenance = parse_quantity_provenance(&request.provenance)?;
+    let mut set = world
+        .get_mut::<QuantitySet>(entity)
+        .ok_or_else(|| "QuantitySet component missing after insert".to_string())?;
+    if let Some(material) = request.material.as_deref() {
+        let material = parse_bim_material_ref(material)?;
+        let mut quantity = set
+            .material_quantity(&material)
+            .cloned()
+            .unwrap_or_else(|| MaterialQuantity::new(material));
+        set_material_quantity_field(&mut quantity, &request.field, &request.value, provenance)?;
+        set.upsert_material_quantity(quantity);
+    } else {
+        set_primary_quantity_field(&mut set, &request.field, &request.value, provenance)?;
+    }
+    serde_json::to_value(&*set).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_quantity_get(
+    world: &mut World,
+    request: QuantityGetRequest,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::quantity_set::QuantitySet;
+
+    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let Some(set) = world.entity(entity).get::<QuantitySet>() else {
+        return Ok(Value::Null);
+    };
+    let Some(field) = request.field.as_deref() else {
+        return serde_json::to_value(set).map_err(|error| error.to_string());
+    };
+    if let Some(material) = request.material.as_deref() {
+        let material = parse_bim_material_ref(material)?;
+        let Some(quantity) = set.material_quantity(&material) else {
+            return Ok(Value::Null);
+        };
+        return get_material_quantity_field(quantity, field);
+    }
+    get_primary_quantity_field(set, field)
+}
+
+#[cfg(feature = "model-api")]
+fn provenance_json(
+    field: &str,
+    material: Option<&str>,
+    provenance: &crate::plugins::modeling::quantity_set::QuantityProvenance,
+) -> Value {
+    serde_json::json!({
+        "field": field,
+        "material": material,
+        "provenance": provenance,
+        "grounded": provenance.is_grounded(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_quantity_list_provenance(
+    world: &mut World,
+    request: QuantityListProvenanceRequest,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::quantity_set::QuantitySet;
+
+    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let Some(set) = world.entity(entity).get::<QuantitySet>() else {
+        return Ok(Value::Array(Vec::new()));
+    };
+    let mut out: Vec<Value> = set
+        .provenances()
+        .into_iter()
+        .map(|(field, provenance)| provenance_json(field, None, provenance))
+        .collect();
+    for quantity in &set.material_quantities {
+        let material = quantity.material.as_str();
+        if let Some(value) = &quantity.volume_m3 {
+            out.push(provenance_json(
+                "volume_m3",
+                Some(material),
+                &value.provenance,
+            ));
+        }
+        if let Some(value) = &quantity.area_m2 {
+            out.push(provenance_json(
+                "area_m2",
+                Some(material),
+                &value.provenance,
+            ));
+        }
+        if let Some(value) = &quantity.length_m {
+            out.push(provenance_json(
+                "length_m",
+                Some(material),
+                &value.provenance,
+            ));
+        }
+        if let Some(value) = &quantity.mass_kg {
+            out.push(provenance_json(
+                "mass_kg",
+                Some(material),
+                &value.provenance,
+            ));
+        }
+        if let Some(value) = &quantity.count {
+            out.push(provenance_json("count", Some(material), &value.provenance));
+        }
+    }
+    Ok(Value::Array(out))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_quantity_check_invariants(
+    world: &mut World,
+    request: QuantityCheckInvariantsRequest,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::quantity_set::QuantitySet;
+
+    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let Some(set) = world.entity(entity).get::<QuantitySet>() else {
+        return Ok(serde_json::json!({
+            "has_quantity_set": false,
+            "ok": true,
+            "net_le_gross_violations": [],
+            "area_deduction_consistent": true,
+            "all_grounded": true,
+        }));
+    };
+    let tol = request.tolerance.unwrap_or(1.0e-6);
+    if !tol.is_finite() || tol < 0.0 {
+        return Err("tolerance must be finite and non-negative".to_string());
+    }
+    let net_le_gross_violations = set.net_le_gross_violations();
+    let area_deduction_consistent = set.area_deduction_consistent(tol);
+    let all_grounded = set.all_grounded();
+    Ok(serde_json::json!({
+        "has_quantity_set": true,
+        "ok": net_le_gross_violations.is_empty() && area_deduction_consistent && all_grounded,
+        "net_le_gross_violations": net_le_gross_violations,
+        "area_deduction_consistent": area_deduction_consistent,
+        "all_grounded": all_grounded,
+    }))
 }
 
 #[cfg(feature = "model-api")]
@@ -20642,6 +21235,202 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("not an occurrence"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn quantity_set_get_and_list_provenance_for_primary_fields() {
+        let mut world = init_model_api_test_world();
+        world.spawn((ElementId(314),));
+
+        let full = handle_quantity_set(
+            &mut world,
+            QuantitySetRequest {
+                element_id: 314,
+                field: "area_gross_m2".into(),
+                value: json!(12.5),
+                material: None,
+                provenance: QuantityProvenanceInput {
+                    kind: "authored_parameter".into(),
+                    parameter: Some("wall_area".into()),
+                    node: None,
+                    source: None,
+                    rationale: None,
+                },
+            },
+        )
+        .expect("quantity set should succeed");
+        assert_eq!(full["area_gross_m2"]["value"], json!(12.5));
+
+        let got = handle_quantity_get(
+            &mut world,
+            QuantityGetRequest {
+                element_id: 314,
+                field: Some("area_gross".into()),
+                material: None,
+            },
+        )
+        .expect("quantity get should succeed");
+        assert_eq!(got["value"], json!(12.5));
+        assert_eq!(
+            got["provenance"],
+            json!({ "kind": "authored_parameter", "parameter": "wall_area" })
+        );
+
+        let provenance = handle_quantity_list_provenance(
+            &mut world,
+            QuantityListProvenanceRequest { element_id: 314 },
+        )
+        .expect("quantity provenance list should succeed");
+        assert_eq!(provenance.as_array().unwrap().len(), 1);
+        assert_eq!(provenance[0]["field"], json!("area_gross_m2"));
+        assert_eq!(provenance[0]["grounded"], json!(true));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn quantity_set_get_material_quantities() {
+        let mut world = init_model_api_test_world();
+        world.spawn((ElementId(315),));
+
+        handle_quantity_set(
+            &mut world,
+            QuantitySetRequest {
+                element_id: 315,
+                field: "volume_m3".into(),
+                value: json!(1.75),
+                material: Some("mat.concrete.c25_30".into()),
+                provenance: QuantityProvenanceInput {
+                    kind: "evaluator_node".into(),
+                    parameter: None,
+                    node: Some("wall.quantities".into()),
+                    source: None,
+                    rationale: None,
+                },
+            },
+        )
+        .expect("material quantity set should succeed");
+
+        let got = handle_quantity_get(
+            &mut world,
+            QuantityGetRequest {
+                element_id: 315,
+                field: Some("volume_m3".into()),
+                material: Some("mat.concrete.c25_30".into()),
+            },
+        )
+        .expect("material quantity get should succeed");
+        assert_eq!(got["value"], json!(1.75));
+        assert_eq!(
+            got["provenance"],
+            json!({ "kind": "evaluator_node", "node": "wall.quantities" })
+        );
+
+        let full = handle_quantity_get(
+            &mut world,
+            QuantityGetRequest {
+                element_id: 315,
+                field: None,
+                material: None,
+            },
+        )
+        .expect("full quantity get should succeed");
+        assert_eq!(
+            full["material_quantities"][0]["material"],
+            json!("mat.concrete.c25_30")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn quantity_check_invariants_reports_violations_and_mesh_provenance() {
+        let mut world = init_model_api_test_world();
+        world.spawn((ElementId(316),));
+
+        for (field, value) in [
+            ("area_gross_m2", json!(10.0)),
+            ("area_net_m2", json!(11.0)),
+            ("opening_area_deducted_m2", json!(2.0)),
+        ] {
+            handle_quantity_set(
+                &mut world,
+                QuantitySetRequest {
+                    element_id: 316,
+                    field: field.into(),
+                    value,
+                    material: None,
+                    provenance: QuantityProvenanceInput {
+                        kind: "mesh_approximation".into(),
+                        parameter: None,
+                        node: None,
+                        source: None,
+                        rationale: None,
+                    },
+                },
+            )
+            .expect("quantity set should succeed");
+        }
+
+        let check = handle_quantity_check_invariants(
+            &mut world,
+            QuantityCheckInvariantsRequest {
+                element_id: 316,
+                tolerance: Some(1.0e-6),
+            },
+        )
+        .expect("quantity invariant check should succeed");
+        assert_eq!(check["ok"], json!(false));
+        assert_eq!(check["all_grounded"], json!(false));
+        assert_eq!(check["area_deduction_consistent"], json!(false));
+        assert_eq!(
+            check["net_le_gross_violations"],
+            json!(["area_net_m2 > area_gross_m2"])
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn quantity_set_rejects_bad_values_and_missing_provenance_payload() {
+        let mut world = init_model_api_test_world();
+        world.spawn((ElementId(317),));
+
+        let err = handle_quantity_set(
+            &mut world,
+            QuantitySetRequest {
+                element_id: 317,
+                field: "length_m".into(),
+                value: json!(-1.0),
+                material: None,
+                provenance: QuantityProvenanceInput {
+                    kind: "user_override".into(),
+                    parameter: None,
+                    node: None,
+                    source: None,
+                    rationale: Some("test".into()),
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("non-negative"));
+
+        let err = handle_quantity_set(
+            &mut world,
+            QuantitySetRequest {
+                element_id: 317,
+                field: "length_m".into(),
+                value: json!(1.0),
+                material: None,
+                provenance: QuantityProvenanceInput {
+                    kind: "authored_parameter".into(),
+                    parameter: None,
+                    node: None,
+                    source: None,
+                    rationale: None,
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("requires parameter"));
     }
 
     #[cfg(feature = "model-api")]
