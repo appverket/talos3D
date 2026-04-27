@@ -25,6 +25,7 @@ pub mod semantics;
 pub mod snapshots;
 pub mod tools;
 pub mod triangulate;
+pub mod void_declaration;
 
 use crate::{
     capability_registry::{
