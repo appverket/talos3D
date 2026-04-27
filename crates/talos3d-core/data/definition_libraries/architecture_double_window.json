@@ -60,8 +60,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": null
@@ -116,8 +116,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": {
@@ -178,8 +178,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": null
@@ -234,8 +234,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": null
@@ -290,8 +290,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": {
@@ -396,8 +396,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": null
@@ -704,8 +704,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "compound": {
@@ -2310,8 +2310,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": {
@@ -2385,8 +2385,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": null
@@ -2441,8 +2441,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": null
@@ -2497,8 +2497,8 @@
         ],
         "representations": [
           {
-            "kind": "Body",
-            "role": "PrimaryGeometry"
+            "kind": "PrimaryGeometry",
+            "role": "Body"
           }
         ],
         "domain_data": null

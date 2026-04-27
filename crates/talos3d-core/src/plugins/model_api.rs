@@ -9424,7 +9424,7 @@ impl ModelApiServer {
     #[tool(
         name = "representation.declare",
         description = "ADR-026 Phase 6c: declare or replace a representation on a definition. \
-                       Requires definition_id and kind; role defaults to PrimaryGeometry. \
+                       Requires definition_id and kind; role defaults to Body. \
                        Optional lod and update_policy set explicit representation metadata."
     )]
     async fn representation_declare_tool(
@@ -13402,7 +13402,11 @@ fn parse_definition_kind(
 fn parse_representation_kind(
     value: Option<&Value>,
 ) -> Result<crate::plugins::modeling::definition::RepresentationKind, String> {
-    parse_representation_kind_label(value.and_then(|value| value.as_str()).unwrap_or("Body"))
+    parse_representation_kind_label(
+        value
+            .and_then(|value| value.as_str())
+            .unwrap_or("PrimaryGeometry"),
+    )
 }
 
 #[cfg(feature = "model-api")]
@@ -13415,27 +13419,21 @@ fn parse_representation_kind_label(
     if label.is_empty() {
         return Err("representation kind must be non-empty".to_string());
     }
-    Ok(match label.to_ascii_lowercase().as_str() {
-        "body" => RepresentationKind::Body,
-        "axis" => RepresentationKind::Axis,
-        "footprint" | "foot_print" => RepresentationKind::Footprint,
-        "boundingbox" | "bounding_box" | "box" => RepresentationKind::BoundingBox,
-        "annotation" => RepresentationKind::Annotation,
-        "cog" | "centerofgravity" | "center_of_gravity" | "centreofgravity"
-        | "centre_of_gravity" => RepresentationKind::CoG,
-        _ => RepresentationKind::Custom(label.to_string()),
-    })
+    match label.to_ascii_lowercase().as_str() {
+        "primarygeometry" | "primary_geometry" | "primary" => {
+            Ok(RepresentationKind::PrimaryGeometry)
+        }
+        "annotation" => Ok(RepresentationKind::Annotation),
+        "reference" => Ok(RepresentationKind::Reference),
+        other => Err(format!("Unsupported representation kind '{other}'")),
+    }
 }
 
 #[cfg(feature = "model-api")]
 fn parse_representation_role(
     value: Option<&Value>,
 ) -> Result<crate::plugins::modeling::definition::RepresentationRole, String> {
-    parse_representation_role_label(
-        value
-            .and_then(|value| value.as_str())
-            .unwrap_or("PrimaryGeometry"),
-    )
+    parse_representation_role_label(value.and_then(|value| value.as_str()).unwrap_or("Body"))
 }
 
 #[cfg(feature = "model-api")]
@@ -13444,14 +13442,20 @@ fn parse_representation_role_label(
 ) -> Result<crate::plugins::modeling::definition::RepresentationRole, String> {
     use crate::plugins::modeling::definition::RepresentationRole;
 
-    match value.trim().to_ascii_lowercase().as_str() {
-        "primarygeometry" | "primary_geometry" | "primary" => {
-            Ok(RepresentationRole::PrimaryGeometry)
-        }
-        "annotation" => Ok(RepresentationRole::Annotation),
-        "reference" => Ok(RepresentationRole::Reference),
-        other => Err(format!("Unsupported representation role '{other}'")),
+    let label = value.trim();
+    if label.is_empty() {
+        return Err("representation role must be non-empty".to_string());
     }
+    Ok(match label.to_ascii_lowercase().as_str() {
+        "body" => RepresentationRole::Body,
+        "axis" => RepresentationRole::Axis,
+        "footprint" | "foot_print" => RepresentationRole::Footprint,
+        "boundingbox" | "bounding_box" | "box" => RepresentationRole::BoundingBox,
+        "annotation" => RepresentationRole::Annotation,
+        "cog" | "centerofgravity" | "center_of_gravity" | "centreofgravity"
+        | "centre_of_gravity" => RepresentationRole::CoG,
+        _ => RepresentationRole::Custom(label.to_string()),
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -13523,8 +13527,8 @@ fn parse_representations(
     }
 
     Ok(vec![RepresentationDecl::new(
-        RepresentationKind::Body,
-        RepresentationRole::PrimaryGeometry,
+        RepresentationKind::PrimaryGeometry,
+        RepresentationRole::Body,
     )])
 }
 
@@ -14094,7 +14098,7 @@ pub fn handle_representation_declare(
         .as_deref()
         .map(parse_representation_role_label)
         .transpose()?
-        .unwrap_or(crate::plugins::modeling::definition::RepresentationRole::PrimaryGeometry);
+        .unwrap_or(crate::plugins::modeling::definition::RepresentationRole::Body);
     let lod = request
         .lod
         .as_deref()
@@ -19676,8 +19680,8 @@ mod tests {
                 "name": "RepresentedWall",
                 "definition_kind": "Solid",
                 "representations": [
-                    { "kind": "Body", "role": "PrimaryGeometry" },
-                    { "kind": "Axis", "role": "Reference", "lod": "Conceptual", "update_policy": "OnDemand" }
+                    { "kind": "PrimaryGeometry", "role": "Body" },
+                    { "kind": "Reference", "role": "Axis", "lod": "Conceptual", "update_policy": "OnDemand" }
                 ]
             }),
         )
@@ -19687,7 +19691,7 @@ mod tests {
             &mut world,
             RepresentationSetLodRequest {
                 definition_id: created.definition_id.clone(),
-                kind: "Axis".into(),
+                kind: "Reference".into(),
                 role: None,
                 lod: "Fabrication".into(),
             },
@@ -19697,7 +19701,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|representation| representation["kind"] == json!("Axis"))
+            .find(|representation| representation["role"] == json!("Axis"))
             .unwrap();
         assert_eq!(axis["lod"], json!("Fabrication"));
 
@@ -19705,8 +19709,8 @@ mod tests {
             &mut world,
             RepresentationSetUpdatePolicyRequest {
                 definition_id: created.definition_id.clone(),
-                kind: "axis".into(),
-                role: Some("reference".into()),
+                kind: "reference".into(),
+                role: Some("axis".into()),
                 update_policy: "Frozen".into(),
             },
         )
@@ -19715,7 +19719,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|representation| representation["kind"] == json!("Axis"))
+            .find(|representation| representation["role"] == json!("Axis"))
             .unwrap();
         assert_eq!(axis["update_policy"], json!("Frozen"));
     }
@@ -19730,8 +19734,8 @@ mod tests {
                 "name": "AmbiguousBody",
                 "definition_kind": "Solid",
                 "representations": [
-                    { "kind": "Body", "role": "PrimaryGeometry" },
-                    { "kind": "Body", "role": "Reference" }
+                    { "kind": "PrimaryGeometry", "role": "Body" },
+                    { "kind": "PrimaryGeometry", "role": "Axis" }
                 ]
             }),
         )
@@ -19741,7 +19745,7 @@ mod tests {
             &mut world,
             RepresentationSetLodRequest {
                 definition_id: created.definition_id.clone(),
-                kind: "Body".into(),
+                kind: "PrimaryGeometry".into(),
                 role: None,
                 lod: "Detailed".into(),
             },
@@ -19753,8 +19757,8 @@ mod tests {
             &mut world,
             RepresentationSetUpdatePolicyRequest {
                 definition_id: "missing".into(),
-                kind: "Body".into(),
-                role: Some("PrimaryGeometry".into()),
+                kind: "PrimaryGeometry".into(),
+                role: Some("Body".into()),
                 update_policy: "Always".into(),
             },
         )
