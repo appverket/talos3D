@@ -359,17 +359,144 @@ impl std::fmt::Display for DependencyGraphError {
 impl std::error::Error for DependencyGraphError {}
 
 // ---------------------------------------------------------------------------
+// Cache resource (rebuilt on Changed<EntityDependencies>)
+// ---------------------------------------------------------------------------
+
+/// Bevy resource caching the most recently rebuilt
+/// [`DependencyGraph`] and its topological order.
+///
+/// Rebuilt by [`rebuild_dependency_graph_system`] whenever any
+/// entity's `EntityDependencies` component changes (or one is
+/// added / removed). The cache lets multiple downstream systems
+/// (the propagator below, future constraint solvers, debug tools)
+/// share the same graph view per frame without each one walking
+/// the world.
+#[derive(Resource, Debug, Default, Clone)]
+pub struct DependencyGraphResource {
+    pub graph: DependencyGraph,
+    /// `Some(order)` when the graph is acyclic and the order has
+    /// been computed; `None` after a rebuild that detected a cycle
+    /// (the cycle is logged; consumers fall back to BFS walks).
+    pub topological_order: Option<Vec<ElementId>>,
+}
+
+/// Bevy system: rebuild [`DependencyGraphResource`] from the world's
+/// `EntityDependencies` components when any change is detected.
+///
+/// Cheap when nothing changed: the `Changed` filter sees no rows and
+/// the system returns early.
+pub fn rebuild_dependency_graph_system(
+    changed: Query<(), Changed<EntityDependencies>>,
+    removed: RemovedComponents<EntityDependencies>,
+    all: Query<(&ElementId, &EntityDependencies)>,
+    mut cache: ResMut<DependencyGraphResource>,
+) {
+    if changed.is_empty() && removed.is_empty() {
+        return;
+    }
+    let mut graph = DependencyGraph::new();
+    for (id, deps) in all.iter() {
+        graph.set_dependencies(*id, deps.edges.clone());
+    }
+    cache.topological_order = match graph.topological_order() {
+        Ok(order) => Some(order),
+        Err(e) => {
+            bevy::log::warn!("dependency graph rebuild detected: {e}");
+            None
+        }
+    };
+    cache.graph = graph;
+}
+
+// ---------------------------------------------------------------------------
+// Topological dirty-mark propagation
+// ---------------------------------------------------------------------------
+
+/// Bevy system: propagate `NeedsEvaluation` topologically along the
+/// dependency graph (ADR-007 §2, §4).
+///
+/// For every entity currently marked [`NeedsEvaluation`], the system
+/// walks its transitive dependents in the cached graph and inserts
+/// `NeedsEvaluation` on each one (idempotent — entities that already
+/// carry the marker are unaffected). The walk is bounded by the
+/// graph's node count to defend against malformed cycles, even
+/// though the cache rebuild rejects them.
+///
+/// This system is **additive**: entities without
+/// `EntityDependencies` are unaffected — domain-specific propagators
+/// (`fillet::propagate_*`, `support_graph` resolver, profile-feature
+/// parent walker) continue to work as before. ADR-007 §"Migrate
+/// domain-specific propagators" calls for retiring those one at a
+/// time once they register their edges in the generic graph; that
+/// migration is a follow-up.
+pub fn propagate_needs_evaluation_topologically(
+    cache: Res<DependencyGraphResource>,
+    needs: Query<&ElementId, With<crate::plugins::modeling::mesh_generation::NeedsEvaluation>>,
+    all: Query<(Entity, &ElementId)>,
+    mut commands: Commands,
+) {
+    use crate::plugins::modeling::mesh_generation::NeedsEvaluation;
+
+    if cache.graph.node_count() == 0 {
+        return;
+    }
+    let dirty_seeds: Vec<ElementId> = needs.iter().copied().collect();
+    if dirty_seeds.is_empty() {
+        return;
+    }
+    let bound = cache.graph.node_count().saturating_add(1);
+    let mut already_dirty: HashSet<ElementId> = dirty_seeds.iter().copied().collect();
+    let mut to_dirty: HashSet<ElementId> = HashSet::new();
+    for seed in &dirty_seeds {
+        for descendant in cache.graph.bounded_descendant_walk(*seed, bound) {
+            if !already_dirty.contains(&descendant) {
+                to_dirty.insert(descendant);
+            }
+        }
+    }
+    if to_dirty.is_empty() {
+        return;
+    }
+    already_dirty.extend(to_dirty.iter().copied());
+    // Map dirtied ElementIds back to Bevy entities and insert the
+    // marker.
+    for (entity, id) in all.iter() {
+        if to_dirty.contains(id) {
+            commands.entity(entity).insert(NeedsEvaluation);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
-/// Bevy plugin: reserved for symmetry. The kernel is data + algorithms;
-/// no resources or systems are required today. Consumers attach
-/// `EntityDependencies` components and call the algorithms directly.
+/// Bevy plugin: installs [`DependencyGraphResource`] and registers
+/// the cache-rebuild + topological-propagation systems in the
+/// `EvaluationSet::Evaluate` schedule (per ADR-007 §"Integration with
+/// the existing `mesh_generation::EvaluationSet` schedule").
+///
+/// Per the kernel's "additive" contract, entities without
+/// `EntityDependencies` are unaffected. `ModelingPlugin` adds the
+/// plugin so any app that boots modeling gets ADR-007 propagation
+/// out of the box.
 pub struct DependencyGraphPlugin;
 
 impl Plugin for DependencyGraphPlugin {
-    fn build(&self, _app: &mut App) {
-        // Intentionally empty.
+    fn build(&self, app: &mut App) {
+        use crate::plugins::modeling::mesh_generation::EvaluationSet;
+        if !app.world().contains_resource::<DependencyGraphResource>() {
+            app.init_resource::<DependencyGraphResource>();
+        }
+        app.add_systems(
+            Update,
+            (
+                rebuild_dependency_graph_system,
+                propagate_needs_evaluation_topologically,
+            )
+                .chain()
+                .in_set(EvaluationSet::Evaluate),
+        );
     }
 }
 
@@ -590,7 +717,148 @@ mod tests {
     fn plugin_can_be_added_without_panic() {
         let mut app = App::new();
         app.add_plugins(DependencyGraphPlugin);
+        // The plugin schedules systems inside EvaluationSet::Evaluate,
+        // which ModelingMeshPlugin configures; smoke-test by running
+        // a single update without panic.
         app.update();
+    }
+
+    // ── DependencyGraphResource cache + propagator ─────────────
+
+    use crate::plugins::modeling::mesh_generation::{
+        EvaluationSet, NeedsEvaluation,
+    };
+
+    fn boot_propagator_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.configure_sets(Update, EvaluationSet::Evaluate);
+        app.add_plugins(DependencyGraphPlugin);
+        app
+    }
+
+    #[test]
+    fn cache_starts_empty() {
+        let mut app = boot_propagator_app();
+        app.update();
+        let cache = app.world().resource::<DependencyGraphResource>();
+        assert_eq!(cache.graph.node_count(), 0);
+        // topological_order remains None until the first rebuild;
+        // there is no rebuild work to do when nothing has changed.
+        assert!(cache.topological_order.is_none());
+    }
+
+    #[test]
+    fn cache_rebuilds_when_entity_dependencies_added() {
+        let mut app = boot_propagator_app();
+        app.world_mut().spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "parametric"),
+        ));
+        app.world_mut().spawn((ElementId(2), EntityDependencies::empty()));
+        app.update();
+        let cache = app.world().resource::<DependencyGraphResource>();
+        assert_eq!(cache.graph.parents_of(ElementId(1)).len(), 1);
+        assert_eq!(cache.graph.children_of(ElementId(2)), &[ElementId(1)]);
+    }
+
+    #[test]
+    fn propagator_marks_direct_dependent() {
+        let mut app = boot_propagator_app();
+        // 1 depends on 2. 2 is dirty. After update, 1 must be dirty too.
+        app.world_mut().spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "parametric"),
+        ));
+        let dirty = app
+            .world_mut()
+            .spawn((ElementId(2), EntityDependencies::empty(), NeedsEvaluation))
+            .id();
+        // First update builds the cache and propagates.
+        app.update();
+        let world = app.world_mut();
+        // Dependent entity 1 should now have NeedsEvaluation.
+        let mut q = world
+            .try_query::<(&ElementId, &NeedsEvaluation)>()
+            .expect("query NeedsEvaluation");
+        let dirty_ids: Vec<ElementId> = q.iter(world).map(|(id, _)| *id).collect();
+        assert!(dirty_ids.contains(&ElementId(1)));
+        assert!(dirty_ids.contains(&ElementId(2)));
+        let _ = dirty; // entity handle kept for future debugging
+    }
+
+    #[test]
+    fn propagator_marks_transitive_chain() {
+        let mut app = boot_propagator_app();
+        // Chain: 1 depends on 2, 2 depends on 3, 3 depends on 4.
+        // Dirtying 4 must dirty 3, 2, and 1.
+        app.world_mut().spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "p"),
+        ));
+        app.world_mut().spawn((
+            ElementId(2),
+            EntityDependencies::empty().with_edge(ElementId(3), "p"),
+        ));
+        app.world_mut().spawn((
+            ElementId(3),
+            EntityDependencies::empty().with_edge(ElementId(4), "p"),
+        ));
+        app.world_mut()
+            .spawn((ElementId(4), EntityDependencies::empty(), NeedsEvaluation));
+        app.update();
+        let world = app.world_mut();
+        let mut q = world
+            .try_query::<(&ElementId, &NeedsEvaluation)>()
+            .expect("query");
+        let dirty: HashSet<ElementId> = q.iter(world).map(|(id, _)| *id).collect();
+        for id in [1, 2, 3, 4] {
+            assert!(
+                dirty.contains(&ElementId(id)),
+                "ElementId({id}) must be dirty after propagation"
+            );
+        }
+    }
+
+    #[test]
+    fn propagator_does_not_dirty_unrelated_entities() {
+        let mut app = boot_propagator_app();
+        app.world_mut().spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "p"),
+        ));
+        app.world_mut()
+            .spawn((ElementId(2), EntityDependencies::empty(), NeedsEvaluation));
+        // Orthogonal entity 99 has no dependency edges.
+        app.world_mut().spawn(ElementId(99));
+        app.update();
+        let world = app.world_mut();
+        let mut q = world
+            .try_query::<(&ElementId, &NeedsEvaluation)>()
+            .expect("query");
+        let dirty: HashSet<ElementId> = q.iter(world).map(|(id, _)| *id).collect();
+        assert!(!dirty.contains(&ElementId(99)));
+    }
+
+    #[test]
+    fn cycle_in_graph_logs_and_does_not_panic() {
+        let mut app = boot_propagator_app();
+        // Direct cycle: 1 → 2 → 1.
+        app.world_mut().spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "p"),
+        ));
+        app.world_mut().spawn((
+            ElementId(2),
+            EntityDependencies::empty().with_edge(ElementId(1), "p"),
+        ));
+        app.update();
+        let cache = app.world().resource::<DependencyGraphResource>();
+        // Cache rebuilt, but topological order is None because of the
+        // cycle. Propagator falls back to the BFS walk so it still
+        // works (and won't panic) — the propagator does not need a
+        // topological order, only the adjacency.
+        assert!(cache.topological_order.is_none());
     }
 
     // ── Display ────────────────────────────────────────────────
