@@ -8,8 +8,8 @@
 //!   `PropertySetMap` carries values.
 //! - Phase 6b — `ExchangeIdentityMap` carries the wall's IFC GUID,
 //!   assigned-once.
-//! - Phase 6c — `RepresentationDecl` declares Body and Annotation
-//!   representations with explicit LOD and update policy.
+//! - Phase 6c — `RepresentationDecl` declares PrimaryGeometry and
+//!   Annotation representations with explicit LOD and update policy.
 //! - Phase 6d — `BimMaterialAssignment::LayerSet` describes the
 //!   wall's three-layer build-up (gypsum / mineral wool / gypsum).
 //! - Phase 6e — `QuantitySet` with `QuantityProvenance` on every
@@ -142,8 +142,8 @@ fn bim_substrate_composes_end_to_end() {
     //              test, but RepresentationDecl is what an export
     //              pack would inspect to pick the right output).
     let body_decl = RepresentationDecl::new_detailed(
-        RepresentationKind::Body,
-        RepresentationRole::PrimaryGeometry,
+        RepresentationKind::PrimaryGeometry,
+        RepresentationRole::Body,
         LevelOfDetail::Detailed,
         UpdatePolicy::Always,
     );
