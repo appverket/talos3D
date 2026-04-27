@@ -1357,6 +1357,26 @@ enum ModelApiRequest {
         value: Value,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    BimVoidDeclareForDefinition {
+        definition_id: String,
+        declaration: Value,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimVoidPlanPlacement {
+        filling_definition: String,
+        host_element_id: u64,
+        filling_element_id: u64,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimSpatialAssign {
+        child_element_id: u64,
+        container_element_id: u64,
+        container_kind: String,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimSpatialListKindRegistry {
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     GetDocumentProperties(oneshot::Sender<serde_json::Value>),
     SetDocumentProperties {
         partial: serde_json::Value,
@@ -2056,6 +2076,46 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
                 &property_name,
                 value,
             ));
+        }
+        ModelApiRequest::BimVoidDeclareForDefinition {
+            definition_id,
+            declaration,
+            response,
+        } => {
+            let _ = response.send(handle_bim_void_declare_for_definition(
+                world,
+                &definition_id,
+                declaration,
+            ));
+        }
+        ModelApiRequest::BimVoidPlanPlacement {
+            filling_definition,
+            host_element_id,
+            filling_element_id,
+            response,
+        } => {
+            let _ = response.send(handle_bim_void_plan_placement(
+                world,
+                &filling_definition,
+                host_element_id,
+                filling_element_id,
+            ));
+        }
+        ModelApiRequest::BimSpatialAssign {
+            child_element_id,
+            container_element_id,
+            container_kind,
+            response,
+        } => {
+            let _ = response.send(handle_bim_spatial_assign(
+                world,
+                child_element_id,
+                container_element_id,
+                &container_kind,
+            ));
+        }
+        ModelApiRequest::BimSpatialListKindRegistry { response } => {
+            let _ = response.send(handle_bim_spatial_list_kind_registry(world));
         }
         ModelApiRequest::GetDocumentProperties(response) => {
             let props = world.resource::<DocumentProperties>();
@@ -3351,6 +3411,74 @@ impl ModelApiServer {
                 value,
                 response,
             })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_void_declare_for_definition(
+        &self,
+        definition_id: String,
+        declaration: Value,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimVoidDeclareForDefinition {
+                definition_id,
+                declaration,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_void_plan_placement(
+        &self,
+        filling_definition: String,
+        host_element_id: u64,
+        filling_element_id: u64,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimVoidPlanPlacement {
+                filling_definition,
+                host_element_id,
+                filling_element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_spatial_assign(
+        &self,
+        child_element_id: u64,
+        container_element_id: u64,
+        container_kind: String,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimSpatialAssign {
+                child_element_id,
+                container_element_id,
+                container_kind,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_spatial_list_kind_registry(&self) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimSpatialListKindRegistry { response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -5456,6 +5584,39 @@ struct BimPropertySetSetRequest {
     value: Value,
 }
 
+/// ADR-026 Phase 6f: register a `VoidDeclaration` against a
+/// `DefinitionId` so placing that Definition cuts a void in its host.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimVoidDeclareForDefinitionRequest {
+    definition_id: String,
+    /// JSON-encoded `VoidDeclaration` (shape, placement, exchange_role).
+    declaration: Value,
+}
+
+/// ADR-026 Phase 6f: plan an atomic void placement.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimVoidPlanPlacementRequest {
+    filling_definition: String,
+    host_element_id: u64,
+    filling_element_id: u64,
+}
+
+/// ADR-026 Phase 6g: assign an entity to a spatial container.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimSpatialAssignRequest {
+    child_element_id: u64,
+    container_element_id: u64,
+    /// Kind label of the container (`"storey"`, `"space"`, …). Must
+    /// be registered in the `SpatialContainerKindRegistry`.
+    container_kind: String,
+}
+
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6853,6 +7014,84 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(prior)
+    }
+
+    #[tool(
+        name = "bim_void.declare_for_definition",
+        description = "ADR-026 Phase 6f: register a VoidDeclaration against a Definition so \
+                       placing that Definition cuts a void in its host. The declaration is the \
+                       JSON shape of `VoidDeclaration` (kind=Rectangular|Profile, placement, \
+                       exchange_role). Returns the prior declaration if any was previously \
+                       registered (for diff / rollback), or null."
+    )]
+    async fn bim_void_declare_for_definition_tool(
+        &self,
+        Parameters(params): Parameters<BimVoidDeclareForDefinitionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let prior = self
+            .request_bim_void_declare_for_definition(params.definition_id, params.declaration)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(prior)
+    }
+
+    #[tool(
+        name = "bim_void.plan_placement",
+        description = "ADR-026 Phase 6f: plan an atomic void placement. Validates that the \
+                       filling Definition has a VoidDeclaration registered, that host != filling, \
+                       and returns the planned OpeningContext + VoidLink components plus the \
+                       freshly-allocated opening element id. The caller applies the plan in a \
+                       single command per ADR-026 §Consequences."
+    )]
+    async fn bim_void_plan_placement_tool(
+        &self,
+        Parameters(params): Parameters<BimVoidPlanPlacementRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let plan = self
+            .request_bim_void_plan_placement(
+                params.filling_definition,
+                params.host_element_id,
+                params.filling_element_id,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(plan)
+    }
+
+    #[tool(
+        name = "bim_spatial.assign",
+        description = "ADR-026 Phase 6g: assign an entity to a spatial container, enforcing the \
+                       three-invariant contract (registered kind, no cycles, single-parent). \
+                       Inserts a SpatialMembership component on the child entity on success. \
+                       Returns null on success; errors out if the kind is unregistered, the \
+                       child already has a parent, or the assignment would create a cycle."
+    )]
+    async fn bim_spatial_assign_tool(
+        &self,
+        Parameters(params): Parameters<BimSpatialAssignRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_spatial_assign(
+                params.child_element_id,
+                params.container_element_id,
+                params.container_kind,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "bim_spatial.list_kind_registry",
+        description = "ADR-026 Phase 6g: list the registered spatial container kinds. Returns a \
+                       JSON array of strings (e.g. [\"storey\", \"space\", \"zone\"])."
+    )]
+    async fn bim_spatial_list_kind_registry_tool(&self) -> Result<CallToolResult, McpError> {
+        let kinds = self
+            .request_bim_spatial_list_kind_registry()
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(kinds)
     }
 
     #[tool(
@@ -14308,6 +14547,134 @@ pub fn handle_bim_property_set_set(
         .unwrap_or(Value::Null))
 }
 
+/// ADR-026 Phase 6f MCP handler: register a `VoidDeclaration` against
+/// a `DefinitionId`. Returns the prior declaration as JSON, or
+/// `Value::Null` if no prior was registered.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_void_declare_for_definition(
+    world: &mut World,
+    definition_id: &str,
+    declaration: Value,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::definition::DefinitionId;
+    use crate::plugins::modeling::void_declaration::{VoidDeclaration, VoidDeclarationRegistry};
+
+    let parsed: VoidDeclaration = serde_json::from_value(declaration)
+        .map_err(|e| format!("declaration must be a typed VoidDeclaration JSON: {e}"))?;
+    if !world.contains_resource::<VoidDeclarationRegistry>() {
+        world.init_resource::<VoidDeclarationRegistry>();
+    }
+    let mut reg = world.resource_mut::<VoidDeclarationRegistry>();
+    let prior = reg.register(DefinitionId(definition_id.to_string()), parsed);
+    Ok(prior
+        .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null))
+}
+
+/// ADR-026 Phase 6f MCP handler: plan an atomic void placement.
+/// Returns a JSON object `{ opening_element, filling_link, opening_context }`.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_void_plan_placement(
+    world: &mut World,
+    filling_definition: &str,
+    host_element_id: u64,
+    filling_element_id: u64,
+) -> Result<Value, String> {
+    use crate::plugins::identity::ElementIdAllocator;
+    use crate::plugins::modeling::definition::DefinitionId;
+    use crate::plugins::modeling::void_declaration::{
+        plan_void_placement, VoidDeclarationRegistry,
+    };
+
+    let registry = world
+        .get_resource::<VoidDeclarationRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let host = ElementId(host_element_id);
+    let filling = ElementId(filling_element_id);
+    ensure_entity_exists(world, host)?;
+    ensure_entity_exists(world, filling)?;
+    let next_opening_id = world.resource::<ElementIdAllocator>().next_id();
+    let outcome = plan_void_placement(
+        &registry,
+        &DefinitionId(filling_definition.to_string()),
+        host,
+        filling,
+        next_opening_id,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "opening_element": outcome.opening_element.0,
+        "filling_link": {
+            "opening": outcome.filling_link.opening.0,
+        },
+        "opening_context": {
+            "host": outcome.opening_context.host.0,
+            "filling": outcome.opening_context.filling.map(|f| f.0),
+        },
+    }))
+}
+
+/// ADR-026 Phase 6g MCP handler: validate + insert a
+/// `SpatialMembership` component on the child entity. Returns
+/// `Value::Null` on success.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_spatial_assign(
+    world: &mut World,
+    child_element_id: u64,
+    container_element_id: u64,
+    container_kind: &str,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::spatial_container::{
+        validate_assignment, SpatialContainerKind, SpatialContainerKindRegistry,
+        SpatialContainmentGraph, SpatialMembership,
+    };
+
+    let child = ElementId(child_element_id);
+    let container = ElementId(container_element_id);
+    let child_entity =
+        find_entity_by_element_id(world, child).ok_or_else(|| format!("child {child_element_id} not found"))?;
+    ensure_entity_exists(world, container)?;
+
+    // Build the current containment graph from existing SpatialMembership
+    // components.
+    let mut graph = SpatialContainmentGraph::new();
+    if let Some(mut q) = world.try_query::<(&ElementId, &SpatialMembership)>() {
+        for (id, m) in q.iter(world) {
+            graph.parent_of.insert(*id, m.container);
+        }
+    }
+    let kinds = world
+        .get_resource::<SpatialContainerKindRegistry>()
+        .cloned()
+        .unwrap_or_default();
+    let kind = SpatialContainerKind::new(container_kind);
+    validate_assignment(&graph, &kinds, &kind, child, container).map_err(|e| e.to_string())?;
+    world
+        .entity_mut(child_entity)
+        .insert(SpatialMembership::in_container(container));
+    Ok(Value::Null)
+}
+
+/// ADR-026 Phase 6g MCP handler: list the registered spatial
+/// container kinds.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_spatial_list_kind_registry(world: &mut World) -> Result<Value, String> {
+    use crate::plugins::modeling::spatial_container::SpatialContainerKindRegistry;
+    let kinds = world
+        .get_resource::<SpatialContainerKindRegistry>()
+        .map(|r| {
+            let mut v: Vec<String> =
+                r.kinds.iter().map(|k| k.as_str().to_string()).collect();
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
+    Ok(Value::Array(
+        kinds.into_iter().map(Value::String).collect(),
+    ))
+}
+
 #[cfg(feature = "model-api")]
 fn handle_set_toolbar_layout(
     world: &mut World,
@@ -19153,5 +19520,237 @@ mod tests {
         assert_eq!(collected[0].element_id, ElementId(element_id));
         assert_eq!(collected[0].set_name, "Pset_WallCommon");
         assert_eq!(collected[0].property_name, "LoadBearing");
+    }
+
+    // ── ADR-026 Phase 6f / 6g MCP handler tests ─────────────────────
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_void_declare_for_definition_registers_and_returns_prior_null() {
+        use crate::plugins::modeling::definition::DefinitionId;
+        use crate::plugins::modeling::void_declaration::VoidDeclarationRegistry;
+
+        let mut world = init_model_api_test_world();
+        let declaration = serde_json::json!({
+            "shape": { "kind": "rectangular",
+                       "width_param": "opening_width_m",
+                       "height_param": "opening_height_m" },
+            "placement": { "translation": [0.0, 0.0, 0.0], "yaw_radians": 0.0 },
+            "exchange_role": "Opening"
+        });
+        let prior = handle_bim_void_declare_for_definition(
+            &mut world,
+            "window.double_v1",
+            declaration.clone(),
+        )
+        .unwrap();
+        assert_eq!(prior, Value::Null);
+        let reg = world.resource::<VoidDeclarationRegistry>();
+        assert!(reg
+            .get(&DefinitionId("window.double_v1".into()))
+            .is_some());
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_void_declare_for_definition_returns_prior_when_overwriting() {
+        let mut world = init_model_api_test_world();
+        let v1 = serde_json::json!({
+            "shape": { "kind": "rectangular",
+                       "width_param": "w", "height_param": "h" },
+            "placement": { "translation": [0.0,0.0,0.0], "yaw_radians": 0.0 },
+            "exchange_role": "Opening"
+        });
+        handle_bim_void_declare_for_definition(&mut world, "win.v1", v1.clone()).unwrap();
+        let prior =
+            handle_bim_void_declare_for_definition(&mut world, "win.v1", v1.clone()).unwrap();
+        assert!(prior.is_object(), "expected prior declaration object");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_void_declare_for_definition_rejects_malformed_json() {
+        let mut world = init_model_api_test_world();
+        let err = handle_bim_void_declare_for_definition(
+            &mut world,
+            "win.v1",
+            serde_json::json!({ "shape": "garbage" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("VoidDeclaration"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_void_plan_placement_returns_three_part_outcome() {
+        let mut world = init_model_api_test_world();
+        let host_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        let filling_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([1.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        // Register a declaration first.
+        let declaration = serde_json::json!({
+            "shape": { "kind": "rectangular",
+                       "width_param": "w", "height_param": "h" },
+            "placement": { "translation": [0.0, 0.0, 0.0], "yaw_radians": 0.0 },
+            "exchange_role": "Opening"
+        });
+        handle_bim_void_declare_for_definition(&mut world, "win.v1", declaration).unwrap();
+        let plan =
+            handle_bim_void_plan_placement(&mut world, "win.v1", host_id, filling_id).unwrap();
+        assert!(plan.get("opening_element").is_some());
+        assert_eq!(
+            plan["opening_context"]["host"],
+            Value::from(host_id)
+        );
+        assert_eq!(
+            plan["opening_context"]["filling"],
+            Value::from(filling_id)
+        );
+        assert_eq!(
+            plan["filling_link"]["opening"],
+            plan["opening_element"]
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_void_plan_placement_errors_when_declaration_missing() {
+        let mut world = init_model_api_test_world();
+        let host_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        let filling_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([2.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        let err =
+            handle_bim_void_plan_placement(&mut world, "no.such.def", host_id, filling_id)
+                .unwrap_err();
+        assert!(err.contains("no VoidDeclaration"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_spatial_assign_inserts_membership_and_validates_kind() {
+        use crate::plugins::modeling::spatial_container::{
+            SpatialContainerKind, SpatialContainerKindRegistry, SpatialMembership,
+        };
+
+        let mut world = init_model_api_test_world();
+        let mut reg = SpatialContainerKindRegistry::default();
+        reg.register(SpatialContainerKind::new("storey"));
+        world.insert_resource(reg);
+
+        let storey = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([10.0, 0.5, 10.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        let room = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([1.0, 1.5, 1.0]),
+                half_extents: None,
+                size: Some([3.0, 3.0, 3.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        handle_bim_spatial_assign(&mut world, room, storey, "storey").unwrap();
+
+        let entity = find_entity_by_element_id(&mut world, ElementId(room)).unwrap();
+        let m = world.get::<SpatialMembership>(entity).unwrap();
+        assert_eq!(m.container, ElementId(storey));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_spatial_assign_rejects_unregistered_kind() {
+        let mut world = init_model_api_test_world();
+        let storey = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([10.0, 0.5, 10.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        let room = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([1.0, 1.5, 1.0]),
+                half_extents: None,
+                size: Some([3.0, 3.0, 3.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        let err =
+            handle_bim_spatial_assign(&mut world, room, storey, "ghost_kind").unwrap_err();
+        assert!(err.contains("not registered"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_spatial_list_kind_registry_returns_sorted_kinds() {
+        use crate::plugins::modeling::spatial_container::{
+            SpatialContainerKind, SpatialContainerKindRegistry,
+        };
+        let mut world = init_model_api_test_world();
+        let mut reg = SpatialContainerKindRegistry::default();
+        reg.register(SpatialContainerKind::new("zone"));
+        reg.register(SpatialContainerKind::new("storey"));
+        reg.register(SpatialContainerKind::new("space"));
+        world.insert_resource(reg);
+        let result = handle_bim_spatial_list_kind_registry(&mut world).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!(["space", "storey", "zone"])
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_spatial_list_kind_registry_returns_empty_when_unset() {
+        let mut world = init_model_api_test_world();
+        let result = handle_bim_spatial_list_kind_registry(&mut world).unwrap();
+        assert_eq!(result, serde_json::json!([]));
     }
 }
