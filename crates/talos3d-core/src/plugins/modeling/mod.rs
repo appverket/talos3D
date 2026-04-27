@@ -20,6 +20,7 @@ pub mod primitives;
 pub mod profile;
 pub mod profile_feature;
 pub mod property_sets;
+pub mod quantity_set;
 pub mod semantics;
 pub mod snapshots;
 pub mod tools;
