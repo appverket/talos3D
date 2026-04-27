@@ -122,6 +122,7 @@ impl Plugin for ModelingPlugin {
             .register_authored_entity_factory(assembly::AssemblyFactory)
             .register_authored_entity_factory(assembly::RelationFactory)
             .register_authored_entity_factory(ClipPlaneFactory)
+            .register_authored_entity_factory(foundation::FoundationFactory)
             .register_command(
                 CommandDescriptor {
                     id: "modeling.clip_plane_create".to_string(),
@@ -685,6 +686,12 @@ impl Plugin for ModelingPlugin {
                     .chain()
                     .in_set(mesh_generation::EvaluationSet::Evaluate),
             );
+
+        // ADR-034 Foundation planting: install the terrain-version
+        // counter and the Foundation evaluation system. This is part of
+        // the modeling plugin so any app that boots ModelingPlugin
+        // gets foundation support out of the box.
+        app.add_plugins(foundation::FoundationPlugin);
     }
 }
 
