@@ -23,8 +23,8 @@
 //!   delegated to a profile node.
 //! - `VoidPlacement` — the local-frame transform of the void
 //!   relative to the filling element's slot.
-//! - `VoidDeclarationRegistry` — Resource keyed by `DefinitionId`
-//!   for the type-level void declaration.
+//! - `Interface::void_declaration` — the type-level void declaration
+//!   stored directly on the filling `Definition`.
 //! - `OpeningContext` — Bevy component on the **opening
 //!   Occurrence** entity. Records the host and filling element
 //!   ids. Lives as a sibling to `OccurrenceIdentity` — the
@@ -36,17 +36,6 @@
 //!   ADR-026 §Consequences atomic-command requirement is the
 //!   responsibility of the surrounding command pipeline; this
 //!   helper is the data primitive.
-//!
-//! `Interface::void_declaration` (the field on the legacy
-//! `Interface` struct in `definition.rs`) is **not** modified by
-//! this slice — that change requires touching every existing
-//! Definition construction site. Definitions register their void
-//! declarations via the registry instead, keyed by
-//! `DefinitionId`. A future non-additive slice can move the field
-//! inline once all consumers are updated.
-
-use std::collections::HashMap;
-
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -119,7 +108,11 @@ impl VoidPlacement {
     }
 
     pub fn translation_dvec3(&self) -> DVec3 {
-        DVec3::new(self.translation[0], self.translation[1], self.translation[2])
+        DVec3::new(
+            self.translation[0],
+            self.translation[1],
+            self.translation[2],
+        )
     }
 }
 
@@ -147,10 +140,7 @@ pub struct VoidDeclaration {
 }
 
 impl VoidDeclaration {
-    pub fn rectangular(
-        width_param: impl Into<String>,
-        height_param: impl Into<String>,
-    ) -> Self {
+    pub fn rectangular(width_param: impl Into<String>, height_param: impl Into<String>) -> Self {
         Self {
             shape: VoidShape::Rectangular {
                 width_param: width_param.into(),
@@ -169,28 +159,6 @@ impl VoidDeclaration {
     pub fn with_exchange_role(mut self, role: impl Into<String>) -> Self {
         self.exchange_role = role.into();
         self
-    }
-}
-
-/// Bevy resource: per-`DefinitionId` void declarations registered by
-/// capability crates. A Definition without a registered declaration
-/// does not cut a void when placed.
-#[derive(Resource, Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VoidDeclarationRegistry {
-    pub by_definition: HashMap<DefinitionId, VoidDeclaration>,
-}
-
-impl VoidDeclarationRegistry {
-    pub fn register(
-        &mut self,
-        definition_id: DefinitionId,
-        declaration: VoidDeclaration,
-    ) -> Option<VoidDeclaration> {
-        self.by_definition.insert(definition_id, declaration)
-    }
-
-    pub fn get(&self, definition_id: &DefinitionId) -> Option<&VoidDeclaration> {
-        self.by_definition.get(definition_id)
     }
 }
 
@@ -245,7 +213,7 @@ pub struct VoidLink {
 /// Errors that can be raised by the void-placement helper.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VoidPlacementError {
-    /// The filling Definition has no `VoidDeclaration` registered.
+    /// The filling Definition has no inline `VoidDeclaration`.
     NoVoidDeclaration { definition_id: DefinitionId },
     /// The filling element id and host element id are equal.
     HostIsFilling,
@@ -256,7 +224,7 @@ impl std::fmt::Display for VoidPlacementError {
         match self {
             Self::NoVoidDeclaration { definition_id } => write!(
                 f,
-                "definition '{}' has no VoidDeclaration registered",
+                "definition '{}' has no VoidDeclaration declared",
                 definition_id.0
             ),
             Self::HostIsFilling => f.write_str("filling element cannot be its own host"),
@@ -297,13 +265,13 @@ pub struct VoidPlacementOutcome {
 /// for subtracting the void from its solid" — that is plumbed by
 /// the host's recipe, not by this helper.
 pub fn plan_void_placement(
-    registry: &VoidDeclarationRegistry,
+    declaration: Option<&VoidDeclaration>,
     filling_definition: &DefinitionId,
     host: ElementId,
     filling: ElementId,
     next_opening_id: ElementId,
 ) -> Result<VoidPlacementOutcome, VoidPlacementError> {
-    if registry.get(filling_definition).is_none() {
+    if declaration.is_none() {
         return Err(VoidPlacementError::NoVoidDeclaration {
             definition_id: filling_definition.clone(),
         });
@@ -321,26 +289,6 @@ pub fn plan_void_placement(
             filling: Some(filling),
         },
     })
-}
-
-// ---------------------------------------------------------------------------
-// Plugin
-// ---------------------------------------------------------------------------
-
-/// Bevy plugin: installs `VoidDeclarationRegistry`. Components
-/// (`OpeningContext`, `VoidLink`) are entity data — no resources
-/// or systems are needed today.
-pub struct VoidDeclarationPlugin;
-
-impl Plugin for VoidDeclarationPlugin {
-    fn build(&self, app: &mut App) {
-        if !app
-            .world()
-            .contains_resource::<VoidDeclarationRegistry>()
-        {
-            app.init_resource::<VoidDeclarationRegistry>();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -388,25 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_register_and_get() {
-        let mut reg = VoidDeclarationRegistry::default();
-        let prior = reg.register(window_def(), rectangular_window());
-        assert!(prior.is_none());
-        let fetched = reg.get(&window_def()).unwrap();
-        assert_eq!(fetched.exchange_role, "Opening");
-    }
-
-    #[test]
-    fn registry_register_returns_prior_on_overwrite() {
-        let mut reg = VoidDeclarationRegistry::default();
-        reg.register(window_def(), rectangular_window());
-        let new = VoidDeclaration::rectangular("w", "h").with_exchange_role("Custom");
-        let prior = reg.register(window_def(), new);
-        assert!(prior.is_some());
-        assert_eq!(prior.unwrap().exchange_role, "Opening");
-    }
-
-    #[test]
     fn opening_context_records_host_and_optional_filling() {
         let ctx = OpeningContext::new(ElementId(10));
         assert_eq!(ctx.host, ElementId(10));
@@ -417,12 +346,16 @@ mod tests {
     }
 
     #[test]
-    fn plan_void_placement_succeeds_for_registered_definition() {
-        let mut reg = VoidDeclarationRegistry::default();
-        reg.register(window_def(), rectangular_window());
-        let outcome =
-            plan_void_placement(&reg, &window_def(), ElementId(1), ElementId(2), ElementId(3))
-                .unwrap();
+    fn plan_void_placement_succeeds_for_declared_definition() {
+        let declaration = rectangular_window();
+        let outcome = plan_void_placement(
+            Some(&declaration),
+            &window_def(),
+            ElementId(1),
+            ElementId(2),
+            ElementId(3),
+        )
+        .unwrap();
         assert_eq!(outcome.opening_element, ElementId(3));
         assert_eq!(outcome.filling_link.opening, ElementId(3));
         assert_eq!(outcome.opening_context.host, ElementId(1));
@@ -430,16 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_void_placement_rejects_unregistered_definition() {
-        let reg = VoidDeclarationRegistry::default();
-        let err = plan_void_placement(
-            &reg,
-            &door_def(),
-            ElementId(1),
-            ElementId(2),
-            ElementId(3),
-        )
-        .unwrap_err();
+    fn plan_void_placement_rejects_definition_without_declaration() {
+        let err = plan_void_placement(None, &door_def(), ElementId(1), ElementId(2), ElementId(3))
+            .unwrap_err();
         match err {
             VoidPlacementError::NoVoidDeclaration { definition_id } => {
                 assert_eq!(definition_id, door_def());
@@ -450,10 +376,9 @@ mod tests {
 
     #[test]
     fn plan_void_placement_rejects_self_hosting() {
-        let mut reg = VoidDeclarationRegistry::default();
-        reg.register(window_def(), rectangular_window());
+        let declaration = rectangular_window();
         let err = plan_void_placement(
-            &reg,
+            Some(&declaration),
             &window_def(),
             ElementId(7),
             ElementId(7),
@@ -493,12 +418,5 @@ mod tests {
         let json = serde_json::to_string(&ctx).unwrap();
         let parsed: OpeningContext = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, ctx);
-    }
-
-    #[test]
-    fn plugin_installs_registry() {
-        let mut app = App::new();
-        app.add_plugins(VoidDeclarationPlugin);
-        assert!(app.world().contains_resource::<VoidDeclarationRegistry>());
     }
 }
