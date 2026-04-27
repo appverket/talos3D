@@ -230,21 +230,46 @@ impl ParameterSchema {
 // ---------------------------------------------------------------------------
 // RepresentationKind / RepresentationRole / RepresentationDecl
 // ---------------------------------------------------------------------------
+//
+// Naming note (ADR-026 §5): the ADR uses "RepresentationRole" for the
+// per-representation geometric tag (Body / Axis / Footprint / Box /
+// Annotation / CoG / Custom) and "RepresentationKind" for the higher-
+// level semantic purpose (PrimaryGeometry / Reference / …). Core's
+// historical naming is inverted relative to the ADR — `RepresentationKind`
+// here carries what the ADR calls "RepresentationRole", and
+// `RepresentationRole` here carries what the ADR calls
+// "RepresentationKind". The semantic content matches; the rename to
+// align names exactly is a separate non-additive refactor and is
+// deferred until the export-pack consumers are written.
 
-/// The geometric role a representation plays in space.
+/// The per-representation geometric tag. **Maps to ADR-026 §5
+/// "RepresentationRole"** — i.e. the field an export pack inspects to
+/// pick the right output (`Body` for the IFC `IfcShapeRepresentation`
+/// identifier `"Body"`, etc.).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepresentationKind {
-    /// Full volumetric body.
+    /// Full volumetric body — the primary solid geometry.
     Body,
     /// Centre-line or reference axis.
     Axis,
     /// Horizontal footprint projection.
     Footprint,
-    /// Axis-aligned bounding box proxy.
+    /// Axis-aligned bounding-box proxy.
     BoundingBox,
+    /// 2D annotation symbol (line work, hatching, leaders, dimensions).
+    /// Per ADR-026 §5; maps to the IFC `"Annotation"` representation
+    /// identifier.
+    Annotation,
+    /// Centre-of-gravity point. Per ADR-026 §5; maps to the IFC
+    /// `"CoG"` representation identifier.
+    CoG,
+    /// Vendor-, workflow-, or export-pack-specific representation tag.
+    /// The string is opaque to core; export packs interpret it.
+    Custom(String),
 }
 
-/// Semantic purpose of a representation within a definition.
+/// Higher-level semantic purpose of a representation within a
+/// definition. **Maps to ADR-026 §5 "RepresentationKind"**.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepresentationRole {
     /// The primary geometry used for rendering and analysis.
@@ -255,11 +280,97 @@ pub enum RepresentationRole {
     Reference,
 }
 
-/// Declaration pairing a `RepresentationKind` with a `RepresentationRole`.
+/// Level-of-detail hint for a representation. Coarse enum; export
+/// packs map to format-specific LOD scales (LOD100…LOD500 in IFC,
+/// 1:50/1:20/1:10 in dimensioned drawings, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum LevelOfDetail {
+    /// Conceptual-stage massing — schematic only.
+    Conceptual,
+    /// Schematic-stage representation. Default.
+    #[default]
+    Schematic,
+    /// Detailed representation suitable for documentation drawings.
+    Detailed,
+    /// Fabrication-ready representation.
+    Fabrication,
+}
+
+/// Declares how a representation should be (re-)evaluated when its
+/// inputs change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UpdatePolicy {
+    /// Re-evaluate eagerly on every parameter change. Default — matches
+    /// existing behaviour for all representations registered before
+    /// ADR-026 §5.
+    #[default]
+    Always,
+    /// Re-evaluate on demand only (e.g. when the export pipeline
+    /// requests it). Suitable for expensive or rarely-needed outputs
+    /// like quantity takeoff or detailed shop drawings.
+    OnDemand,
+    /// Snapshot at first evaluation; never re-evaluate. Used for
+    /// imported representations whose authoring upstream is unknown.
+    Frozen,
+}
+
+/// Declaration pairing a `RepresentationKind` (ADR-026 §5 "Role"),
+/// a higher-level `RepresentationRole` (ADR-026 §5 "Kind"), an
+/// optional `LevelOfDetail` hint, and an `UpdatePolicy`.
+///
+/// `lod` and `update_policy` are `Option`-defaulted so existing call
+/// sites that only set `kind` and `role` continue to compile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepresentationDecl {
     pub kind: RepresentationKind,
     pub role: RepresentationRole,
+    /// Optional LOD hint. `None` is treated as
+    /// `LevelOfDetail::Schematic` by readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lod: Option<LevelOfDetail>,
+    /// Optional re-evaluation policy. `None` is treated as
+    /// `UpdatePolicy::Always` by readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_policy: Option<UpdatePolicy>,
+}
+
+impl RepresentationDecl {
+    /// Construct a representation with default LOD (`Schematic`) and
+    /// update policy (`Always`). Preserves backward compatibility with
+    /// existing call sites.
+    pub fn new(kind: RepresentationKind, role: RepresentationRole) -> Self {
+        Self {
+            kind,
+            role,
+            lod: None,
+            update_policy: None,
+        }
+    }
+
+    /// Construct a representation with explicit LOD + update policy.
+    pub fn new_detailed(
+        kind: RepresentationKind,
+        role: RepresentationRole,
+        lod: LevelOfDetail,
+        update_policy: UpdatePolicy,
+    ) -> Self {
+        Self {
+            kind,
+            role,
+            lod: Some(lod),
+            update_policy: Some(update_policy),
+        }
+    }
+
+    /// Effective LOD, with the documented `Schematic` default.
+    pub fn effective_lod(&self) -> LevelOfDetail {
+        self.lod.unwrap_or_default()
+    }
+
+    /// Effective update policy, with the documented `Always` default.
+    pub fn effective_update_policy(&self) -> UpdatePolicy {
+        self.update_policy.unwrap_or_default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,5 +1202,104 @@ fn validate_numeric_bound(
         Err(format!("{context} must be >= {bound}"))
     } else {
         Err(format!("{context} must be <= {bound}"))
+    }
+}
+
+#[cfg(test)]
+mod adr_026_phase_6c_tests {
+    use super::*;
+
+    #[test]
+    fn representation_decl_new_uses_no_lod_or_policy_field() {
+        let decl = RepresentationDecl::new(
+            RepresentationKind::Body,
+            RepresentationRole::PrimaryGeometry,
+        );
+        assert!(decl.lod.is_none());
+        assert!(decl.update_policy.is_none());
+    }
+
+    #[test]
+    fn representation_decl_effective_defaults_to_schematic_and_always() {
+        let decl = RepresentationDecl::new(
+            RepresentationKind::Body,
+            RepresentationRole::PrimaryGeometry,
+        );
+        assert_eq!(decl.effective_lod(), LevelOfDetail::Schematic);
+        assert_eq!(decl.effective_update_policy(), UpdatePolicy::Always);
+    }
+
+    #[test]
+    fn representation_decl_new_detailed_carries_lod_and_policy() {
+        let decl = RepresentationDecl::new_detailed(
+            RepresentationKind::CoG,
+            RepresentationRole::Reference,
+            LevelOfDetail::Conceptual,
+            UpdatePolicy::OnDemand,
+        );
+        assert_eq!(decl.lod, Some(LevelOfDetail::Conceptual));
+        assert_eq!(decl.update_policy, Some(UpdatePolicy::OnDemand));
+        assert_eq!(decl.effective_lod(), LevelOfDetail::Conceptual);
+        assert_eq!(decl.effective_update_policy(), UpdatePolicy::OnDemand);
+    }
+
+    #[test]
+    fn representation_kind_new_variants_exist_and_serialize() {
+        for kind in [
+            RepresentationKind::Body,
+            RepresentationKind::Axis,
+            RepresentationKind::Footprint,
+            RepresentationKind::BoundingBox,
+            RepresentationKind::Annotation,
+            RepresentationKind::CoG,
+            RepresentationKind::Custom("vendor.qto".into()),
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let parsed: RepresentationKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn representation_decl_round_trips_with_optional_fields_omitted() {
+        let decl = RepresentationDecl::new(
+            RepresentationKind::Annotation,
+            RepresentationRole::Annotation,
+        );
+        let json = serde_json::to_string(&decl).unwrap();
+        // Optional fields should be skipped on serialize when None.
+        assert!(!json.contains("\"lod\""));
+        assert!(!json.contains("\"update_policy\""));
+        let parsed: RepresentationDecl = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kind, decl.kind);
+        assert_eq!(parsed.role, decl.role);
+        assert!(parsed.lod.is_none());
+        assert!(parsed.update_policy.is_none());
+    }
+
+    #[test]
+    fn representation_decl_round_trips_with_optional_fields_set() {
+        let decl = RepresentationDecl::new_detailed(
+            RepresentationKind::Footprint,
+            RepresentationRole::PrimaryGeometry,
+            LevelOfDetail::Detailed,
+            UpdatePolicy::Frozen,
+        );
+        let json = serde_json::to_string(&decl).unwrap();
+        let parsed: RepresentationDecl = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.lod, Some(LevelOfDetail::Detailed));
+        assert_eq!(parsed.update_policy, Some(UpdatePolicy::Frozen));
+    }
+
+    #[test]
+    fn level_of_detail_default_is_schematic() {
+        let lod: LevelOfDetail = Default::default();
+        assert_eq!(lod, LevelOfDetail::Schematic);
+    }
+
+    #[test]
+    fn update_policy_default_is_always() {
+        let pol: UpdatePolicy = Default::default();
+        assert_eq!(pol, UpdatePolicy::Always);
     }
 }
