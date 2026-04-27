@@ -176,6 +176,7 @@ fn check_rule_pack_backlinks_detects_missing_passage() {
             default_severity: Severity::Warning,
             rationale: "Test".into(),
             source_backlink: Some(PassageRef("nonexistent_passage_ref".into())),
+            role: ConstraintRole::Validation,
             validator: Arc::new(|_, _| vec![]),
         });
 
