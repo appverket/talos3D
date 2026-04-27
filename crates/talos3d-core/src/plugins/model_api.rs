@@ -1357,6 +1357,21 @@ enum ModelApiRequest {
         value: Value,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    BimExchangeIdentityAssign {
+        element_id: u64,
+        system: String,
+        exchange_id: String,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimExchangeIdentityGet {
+        element_id: u64,
+        system: String,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimExchangeIdentityList {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     BimVoidDeclareForDefinition {
         definition_id: String,
         declaration: Value,
@@ -2076,6 +2091,32 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
                 &property_name,
                 value,
             ));
+        }
+        ModelApiRequest::BimExchangeIdentityAssign {
+            element_id,
+            system,
+            exchange_id,
+            response,
+        } => {
+            let _ = response.send(handle_bim_exchange_identity_assign(
+                world,
+                element_id,
+                &system,
+                &exchange_id,
+            ));
+        }
+        ModelApiRequest::BimExchangeIdentityGet {
+            element_id,
+            system,
+            response,
+        } => {
+            let _ = response.send(handle_bim_exchange_identity_get(world, element_id, &system));
+        }
+        ModelApiRequest::BimExchangeIdentityList {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_bim_exchange_identity_list(world, element_id));
         }
         ModelApiRequest::BimVoidDeclareForDefinition {
             definition_id,
@@ -3409,6 +3450,57 @@ impl ModelApiServer {
                 set_name,
                 property_name,
                 value,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_exchange_identity_assign(
+        &self,
+        element_id: u64,
+        system: String,
+        exchange_id: String,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimExchangeIdentityAssign {
+                element_id,
+                system,
+                exchange_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_exchange_identity_get(
+        &self,
+        element_id: u64,
+        system: String,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimExchangeIdentityGet {
+                element_id,
+                system,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_exchange_identity_list(&self, element_id: u64) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimExchangeIdentityList {
+                element_id,
                 response,
             })
             .map_err(|_| "model API request channel closed".to_string())?;
@@ -5584,6 +5676,38 @@ struct BimPropertySetSetRequest {
     value: Value,
 }
 
+/// ADR-026 Phase 6b: assign a stable BIM exchange identifier to an
+/// authored entity if the system slot is currently empty.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimExchangeIdentityAssignRequest {
+    element_id: u64,
+    /// Exchange system label: `ifc`, `revit`, `dwg`, `cobie`, or a
+    /// custom system name.
+    system: String,
+    exchange_id: String,
+}
+
+/// ADR-026 Phase 6b: read a single BIM exchange identifier.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimExchangeIdentityGetRequest {
+    element_id: u64,
+    /// Exchange system label: `ifc`, `revit`, `dwg`, `cobie`, or a
+    /// custom system name.
+    system: String,
+}
+
+/// ADR-026 Phase 6b: list all exchange identifiers assigned to an entity.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimExchangeIdentityListRequest {
+    element_id: u64,
+}
+
 /// ADR-026 Phase 6f: register a `VoidDeclaration` against a
 /// `DefinitionId` so placing that Definition cuts a void in its host.
 #[cfg(feature = "model-api")]
@@ -6981,11 +7105,7 @@ impl ModelApiServer {
         Parameters(params): Parameters<BimPropertySetGetRequest>,
     ) -> Result<CallToolResult, McpError> {
         let value = self
-            .request_bim_property_set_get(
-                params.element_id,
-                params.set_name,
-                params.property_name,
-            )
+            .request_bim_property_set_get(params.element_id, params.set_name, params.property_name)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(value)
@@ -7014,6 +7134,60 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(prior)
+    }
+
+    #[tool(
+        name = "bim_exchange_identity.assign",
+        description = "ADR-026 Phase 6b: assign a stable BIM exchange identifier to an entity. \
+                       Uses assign-if-absent semantics: if the requested system already has an \
+                       id, the call errors instead of regenerating it. Returns null on success."
+    )]
+    async fn bim_exchange_identity_assign_tool(
+        &self,
+        Parameters(params): Parameters<BimExchangeIdentityAssignRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_exchange_identity_assign(
+                params.element_id,
+                params.system,
+                params.exchange_id,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "bim_exchange_identity.get",
+        description = "ADR-026 Phase 6b: read one exchange identifier from an entity for a \
+                       system label (`ifc`, `revit`, `dwg`, `cobie`, or custom). Returns the \
+                       id string or null if the entity has no id for that system."
+    )]
+    async fn bim_exchange_identity_get_tool(
+        &self,
+        Parameters(params): Parameters<BimExchangeIdentityGetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_exchange_identity_get(params.element_id, params.system)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "bim_exchange_identity.list",
+        description = "ADR-026 Phase 6b: list all stable BIM exchange identifiers assigned to \
+                       an entity. Returns an object keyed by exchange system label."
+    )]
+    async fn bim_exchange_identity_list_tool(
+        &self,
+        Parameters(params): Parameters<BimExchangeIdentityListRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_exchange_identity_list(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
     }
 
     #[tool(
@@ -14479,12 +14653,12 @@ pub fn handle_bim_property_set_set(
     property_name: &str,
     value: Value,
 ) -> Result<Value, String> {
-    use bevy::ecs::message::Messages;
     use crate::plugins::modeling::definition::DefinitionId;
     use crate::plugins::modeling::property_sets::{
         set_property_validated, PropertySetChangeKind, PropertySetChanged, PropertySetMap,
         PropertySetSchemaRegistry, PropertyValue,
     };
+    use bevy::ecs::message::Messages;
 
     let entity = find_entity_by_element_id(world, ElementId(element_id))
         .ok_or_else(|| format!("element {element_id} not found"))?;
@@ -14498,9 +14672,7 @@ pub fn handle_bim_property_set_set(
 
     // Ensure the entity has a PropertySetMap; insert empty if not.
     if world.get::<PropertySetMap>(entity).is_none() {
-        world
-            .entity_mut(entity)
-            .insert(PropertySetMap::default());
+        world.entity_mut(entity).insert(PropertySetMap::default());
     }
 
     // Validate against the registered schema, then mutate.
@@ -14545,6 +14717,106 @@ pub fn handle_bim_property_set_set(
     Ok(prior
         .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
         .unwrap_or(Value::Null))
+}
+
+#[cfg(feature = "model-api")]
+fn parse_exchange_system(
+    system: &str,
+) -> Result<crate::plugins::modeling::exchange_identity::ExchangeSystem, String> {
+    use crate::plugins::modeling::exchange_identity::ExchangeSystem;
+    let label = system.trim();
+    if label.is_empty() {
+        return Err("exchange system must be non-empty".to_string());
+    }
+    Ok(match label.to_ascii_lowercase().as_str() {
+        "ifc" => ExchangeSystem::Ifc,
+        "revit" => ExchangeSystem::Revit,
+        "dwg" => ExchangeSystem::Dwg,
+        "cobie" => ExchangeSystem::Cobie,
+        _ => ExchangeSystem::Custom(label.to_string()),
+    })
+}
+
+/// ADR-026 Phase 6b MCP handler: assign a stable BIM exchange id to an
+/// entity if no id exists for that exchange system. Returns
+/// `Value::Null` on success.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_exchange_identity_assign(
+    world: &mut World,
+    element_id: u64,
+    system: &str,
+    exchange_id: &str,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::exchange_identity::{ExchangeId, ExchangeIdentityMap};
+
+    let exchange_id = exchange_id.trim();
+    if exchange_id.is_empty() {
+        return Err("exchange_id must be non-empty".to_string());
+    }
+    let system = parse_exchange_system(system)?;
+    let entity = find_entity_by_element_id(world, ElementId(element_id))
+        .ok_or_else(|| format!("element {element_id} not found"))?;
+    if world.get::<ExchangeIdentityMap>(entity).is_none() {
+        world
+            .entity_mut(entity)
+            .insert(ExchangeIdentityMap::empty());
+    }
+    let mut map = world
+        .get_mut::<ExchangeIdentityMap>(entity)
+        .ok_or_else(|| "ExchangeIdentityMap component missing after insert".to_string())?;
+    map.assign_if_absent(system, ExchangeId::new(exchange_id))
+        .map_err(|e| e.to_string())?;
+    Ok(Value::Null)
+}
+
+/// ADR-026 Phase 6b MCP handler: read one BIM exchange id from an
+/// entity. Returns the id string, or `Value::Null` if that system has
+/// not been assigned.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_exchange_identity_get(
+    world: &mut World,
+    element_id: u64,
+    system: &str,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::exchange_identity::ExchangeIdentityMap;
+
+    let system = parse_exchange_system(system)?;
+    let entity = find_entity_by_element_id(world, ElementId(element_id))
+        .ok_or_else(|| format!("element {element_id} not found"))?;
+    let Some(map) = world.get::<ExchangeIdentityMap>(entity) else {
+        return Ok(Value::Null);
+    };
+    Ok(map
+        .get(&system)
+        .map(|id| Value::String(id.as_str().to_string()))
+        .unwrap_or(Value::Null))
+}
+
+/// ADR-026 Phase 6b MCP handler: list all BIM exchange identities
+/// assigned to an entity as a JSON object keyed by exchange system
+/// label.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_exchange_identity_list(
+    world: &mut World,
+    element_id: u64,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::exchange_identity::ExchangeIdentityMap;
+
+    let entity = find_entity_by_element_id(world, ElementId(element_id))
+        .ok_or_else(|| format!("element {element_id} not found"))?;
+    let Some(map) = world.get::<ExchangeIdentityMap>(entity) else {
+        return Ok(serde_json::json!({}));
+    };
+    let mut entries: Vec<(&str, &str)> = map
+        .iter()
+        .map(|(system, exchange_id)| (system.as_label(), exchange_id.as_str()))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut out = serde_json::Map::new();
+    for (system, exchange_id) in entries {
+        out.insert(system.to_string(), Value::String(exchange_id.to_string()));
+    }
+    Ok(Value::Object(out))
 }
 
 /// ADR-026 Phase 6f MCP handler: register a `VoidDeclaration` against
@@ -14632,8 +14904,8 @@ pub fn handle_bim_spatial_assign(
 
     let child = ElementId(child_element_id);
     let container = ElementId(container_element_id);
-    let child_entity =
-        find_entity_by_element_id(world, child).ok_or_else(|| format!("child {child_element_id} not found"))?;
+    let child_entity = find_entity_by_element_id(world, child)
+        .ok_or_else(|| format!("child {child_element_id} not found"))?;
     ensure_entity_exists(world, container)?;
 
     // Build the current containment graph from existing SpatialMembership
@@ -14664,15 +14936,12 @@ pub fn handle_bim_spatial_list_kind_registry(world: &mut World) -> Result<Value,
     let kinds = world
         .get_resource::<SpatialContainerKindRegistry>()
         .map(|r| {
-            let mut v: Vec<String> =
-                r.kinds.iter().map(|k| k.as_str().to_string()).collect();
+            let mut v: Vec<String> = r.kinds.iter().map(|k| k.as_str().to_string()).collect();
             v.sort();
             v
         })
         .unwrap_or_default();
-    Ok(Value::Array(
-        kinds.into_iter().map(Value::String).collect(),
-    ))
+    Ok(Value::Array(kinds.into_iter().map(Value::String).collect()))
 }
 
 #[cfg(feature = "model-api")]
@@ -19328,13 +19597,9 @@ mod tests {
             },
         )
         .unwrap();
-        let value = handle_bim_property_set_get(
-            &mut world,
-            element_id,
-            "Pset_WallCommon",
-            "FireRating",
-        )
-        .unwrap();
+        let value =
+            handle_bim_property_set_get(&mut world, element_id, "Pset_WallCommon", "FireRating")
+                .unwrap();
         assert_eq!(value, Value::Null);
     }
 
@@ -19342,13 +19607,9 @@ mod tests {
     #[test]
     fn bim_property_set_get_returns_null_for_missing_element() {
         let mut world = init_model_api_test_world();
-        let err = handle_bim_property_set_get(
-            &mut world,
-            999_999_999,
-            "Pset_WallCommon",
-            "FireRating",
-        )
-        .unwrap_err();
+        let err =
+            handle_bim_property_set_get(&mut world, 999_999_999, "Pset_WallCommon", "FireRating")
+                .unwrap_err();
         assert!(err.contains("not found"));
     }
 
@@ -19377,12 +19638,10 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![
-                PropertySetSchema::new("Pset_WallCommon").with_property(
-                    PropertyDef::new("FireRating", PropertyValueType::Text)
-                        .required_for(ExportProfile::new("IFC4")),
-                ),
-            ],
+            vec![PropertySetSchema::new("Pset_WallCommon").with_property(
+                PropertyDef::new("FireRating", PropertyValueType::Text)
+                    .required_for(ExportProfile::new("IFC4")),
+            )],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<
@@ -19402,13 +19661,9 @@ mod tests {
         assert_eq!(prior, Value::Null);
 
         // Read back via get.
-        let v = handle_bim_property_set_get(
-            &mut world,
-            element_id,
-            "Pset_WallCommon",
-            "FireRating",
-        )
-        .unwrap();
+        let v =
+            handle_bim_property_set_get(&mut world, element_id, "Pset_WallCommon", "FireRating")
+                .unwrap();
         assert_eq!(v, serde_json::json!({ "text": "REI60" }));
 
         // The component is now present on the entity.
@@ -19441,9 +19696,8 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![PropertySetSchema::new("Pset_WallCommon").with_property(
-                PropertyDef::new("FireRating", PropertyValueType::Text),
-            )],
+            vec![PropertySetSchema::new("Pset_WallCommon")
+                .with_property(PropertyDef::new("FireRating", PropertyValueType::Text))],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<
@@ -19472,6 +19726,136 @@ mod tests {
 
     #[cfg(feature = "model-api")]
     #[test]
+    fn bim_exchange_identity_assign_get_and_list_round_trip() {
+        use crate::plugins::modeling::exchange_identity::{ExchangeIdentityMap, ExchangeSystem};
+
+        let mut world = init_model_api_test_world();
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+
+        let result = handle_bim_exchange_identity_assign(
+            &mut world,
+            element_id,
+            "ifc",
+            "0Lh3Y2nzz3wuRfV4z4xRGn",
+        )
+        .unwrap();
+        assert_eq!(result, Value::Null);
+
+        let got = handle_bim_exchange_identity_get(&mut world, element_id, "ifc").unwrap();
+        assert_eq!(got, Value::String("0Lh3Y2nzz3wuRfV4z4xRGn".into()));
+
+        handle_bim_exchange_identity_assign(&mut world, element_id, "facility_db", "FM-42")
+            .unwrap();
+        let listed = handle_bim_exchange_identity_list(&mut world, element_id).unwrap();
+        assert_eq!(
+            listed,
+            serde_json::json!({
+                "facility_db": "FM-42",
+                "ifc": "0Lh3Y2nzz3wuRfV4z4xRGn"
+            })
+        );
+
+        let entity = find_entity_by_element_id(&mut world, ElementId(element_id)).unwrap();
+        let map = world.get::<ExchangeIdentityMap>(entity).unwrap();
+        assert!(map.contains(&ExchangeSystem::Ifc));
+        assert!(map.contains(&ExchangeSystem::Custom("facility_db".into())));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_exchange_identity_assign_refuses_to_regenerate_existing_system_id() {
+        let mut world = init_model_api_test_world();
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+
+        handle_bim_exchange_identity_assign(&mut world, element_id, "ifc", "first").unwrap();
+        let err = handle_bim_exchange_identity_assign(&mut world, element_id, "IFC", "second")
+            .unwrap_err();
+        assert!(
+            err.contains("already assigned"),
+            "assign-if-absent invariant should reject regeneration: {err}"
+        );
+        assert_eq!(
+            handle_bim_exchange_identity_get(&mut world, element_id, "ifc").unwrap(),
+            Value::String("first".into())
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_exchange_identity_get_returns_null_for_missing_map_or_system() {
+        let mut world = init_model_api_test_world();
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            handle_bim_exchange_identity_get(&mut world, element_id, "ifc").unwrap(),
+            Value::Null
+        );
+        handle_bim_exchange_identity_assign(&mut world, element_id, "revit", "r-1").unwrap();
+        assert_eq!(
+            handle_bim_exchange_identity_get(&mut world, element_id, "ifc").unwrap(),
+            Value::Null
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_exchange_identity_errors_for_missing_element_or_blank_inputs() {
+        let mut world = init_model_api_test_world();
+        assert!(handle_bim_exchange_identity_get(&mut world, 999, "ifc")
+            .unwrap_err()
+            .contains("not found"));
+        assert!(
+            handle_bim_exchange_identity_assign(&mut world, 999, "", "x")
+                .unwrap_err()
+                .contains("exchange system must be non-empty")
+        );
+
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        assert!(
+            handle_bim_exchange_identity_assign(&mut world, element_id, "ifc", " ")
+                .unwrap_err()
+                .contains("exchange_id must be non-empty")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
     fn bim_property_set_set_emits_property_set_changed_message() {
         use crate::plugins::modeling::definition::DefinitionId;
         use crate::plugins::modeling::property_sets::{
@@ -19494,14 +19878,11 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![PropertySetSchema::new("Pset_WallCommon").with_property(
-                PropertyDef::new("LoadBearing", PropertyValueType::Boolean),
-            )],
+            vec![PropertySetSchema::new("Pset_WallCommon")
+                .with_property(PropertyDef::new("LoadBearing", PropertyValueType::Boolean))],
         );
         world.insert_resource(registry);
-        world.insert_resource(
-            bevy::ecs::message::Messages::<PropertySetChanged>::default(),
-        );
+        world.insert_resource(bevy::ecs::message::Messages::<PropertySetChanged>::default());
 
         handle_bim_property_set_set(
             &mut world,
@@ -19515,7 +19896,8 @@ mod tests {
 
         let messages = world.resource::<bevy::ecs::message::Messages<PropertySetChanged>>();
         // Use the read iterator pattern: drain to count.
-        let collected: Vec<&PropertySetChanged> = bevy::ecs::message::Messages::iter_current_update_messages(messages).collect();
+        let collected: Vec<&PropertySetChanged> =
+            bevy::ecs::message::Messages::iter_current_update_messages(messages).collect();
         assert_eq!(collected.len(), 1);
         assert_eq!(collected[0].element_id, ElementId(element_id));
         assert_eq!(collected[0].set_name, "Pset_WallCommon");
@@ -19546,9 +19928,7 @@ mod tests {
         .unwrap();
         assert_eq!(prior, Value::Null);
         let reg = world.resource::<VoidDeclarationRegistry>();
-        assert!(reg
-            .get(&DefinitionId("window.double_v1".into()))
-            .is_some());
+        assert!(reg.get(&DefinitionId("window.double_v1".into())).is_some());
     }
 
     #[cfg(feature = "model-api")]
@@ -19615,18 +19995,9 @@ mod tests {
         let plan =
             handle_bim_void_plan_placement(&mut world, "win.v1", host_id, filling_id).unwrap();
         assert!(plan.get("opening_element").is_some());
-        assert_eq!(
-            plan["opening_context"]["host"],
-            Value::from(host_id)
-        );
-        assert_eq!(
-            plan["opening_context"]["filling"],
-            Value::from(filling_id)
-        );
-        assert_eq!(
-            plan["filling_link"]["opening"],
-            plan["opening_element"]
-        );
+        assert_eq!(plan["opening_context"]["host"], Value::from(host_id));
+        assert_eq!(plan["opening_context"]["filling"], Value::from(filling_id));
+        assert_eq!(plan["filling_link"]["opening"], plan["opening_element"]);
     }
 
     #[cfg(feature = "model-api")]
@@ -19653,9 +20024,8 @@ mod tests {
             },
         )
         .unwrap();
-        let err =
-            handle_bim_void_plan_placement(&mut world, "no.such.def", host_id, filling_id)
-                .unwrap_err();
+        let err = handle_bim_void_plan_placement(&mut world, "no.such.def", host_id, filling_id)
+            .unwrap_err();
         assert!(err.contains("no VoidDeclaration"));
     }
 
@@ -19722,8 +20092,7 @@ mod tests {
             },
         )
         .unwrap();
-        let err =
-            handle_bim_spatial_assign(&mut world, room, storey, "ghost_kind").unwrap_err();
+        let err = handle_bim_spatial_assign(&mut world, room, storey, "ghost_kind").unwrap_err();
         assert!(err.contains("not registered"));
     }
 
@@ -19740,10 +20109,7 @@ mod tests {
         reg.register(SpatialContainerKind::new("space"));
         world.insert_resource(reg);
         let result = handle_bim_spatial_list_kind_registry(&mut world).unwrap();
-        assert_eq!(
-            result,
-            serde_json::json!(["space", "storey", "zone"])
-        );
+        assert_eq!(result, serde_json::json!(["space", "storey", "zone"]));
     }
 
     #[cfg(feature = "model-api")]
