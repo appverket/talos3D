@@ -378,6 +378,12 @@ pub struct Finding {
     pub backlink: Option<PassageRef>,
     /// Unix timestamp (seconds) when this finding was emitted.
     pub emitted_at: i64,
+    /// Role of the emitting constraint, denormalized onto the finding for
+    /// O(1) filtering by role (ADR-042 §13). Stamped by
+    /// `validation_sweep_system`. Old serialized payloads default to
+    /// `Validation`.
+    #[serde(default)]
+    pub role: ConstraintRole,
 }
 
 /// Specifies which entities a validator applies to.
@@ -410,6 +416,47 @@ impl Applicability {
 /// struct (F4 from MCP validation notes).
 pub type ValidatorFn = Arc<dyn Fn(Entity, &World) -> Vec<Finding> + Send + Sync>;
 
+/// What role a constraint plays in the refinement lifecycle (ADR-042 §13).
+///
+/// Discovery, Validation, and Promotion are three orthogonal jobs. Generation
+/// priors are tracked separately (see `RecipeArtifact` etc.).
+///
+/// - `Discovery` constraints ask clarification questions or surface design
+///   judgment. Their findings are user-facing prompts; the validation sweep
+///   suppresses emissions beyond the per-session budget kept in
+///   [`DiscoveryFindingsBudget`].
+/// - `Validation` constraints report issues in the current model. Severity is
+///   the existing Advice/Warning/Error ladder. Default for backward
+///   compatibility — every legacy constraint is `Validation`.
+/// - `Promotion` constraints gate movement to a higher refinement state.
+///   At promotion time the requester walks `findings_for_role(Promotion)`
+///   for the entity; any finding with `severity >= Warning` blocks the
+///   advancement. Helper:
+///   [`crate::plugins::validation::entity_has_unresolved_promotion_findings`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub enum ConstraintRole {
+    Discovery,
+    Validation,
+    Promotion,
+}
+
+impl Default for ConstraintRole {
+    fn default() -> Self {
+        Self::Validation
+    }
+}
+
+impl ConstraintRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Discovery => "Discovery",
+            Self::Validation => "Validation",
+            Self::Promotion => "Promotion",
+        }
+    }
+}
+
 /// A registered constraint: a validator with its metadata.
 ///
 /// Registered via `CapabilityRegistryAppExt::register_constraint` or
@@ -432,6 +479,9 @@ pub struct ConstraintDescriptor {
     pub rationale: String,
     /// Back-reference to the source corpus passage (`None` in PP74; PP77 fills in).
     pub source_backlink: Option<PassageRef>,
+    /// Role of this constraint in the refinement lifecycle (ADR-042 §13).
+    /// Defaults to `Validation` for backward compatibility.
+    pub role: ConstraintRole,
     /// The validator function.
     pub validator: ValidatorFn,
 }
