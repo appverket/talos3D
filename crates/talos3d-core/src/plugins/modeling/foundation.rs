@@ -23,17 +23,21 @@
 //! system that resolves the footprint, samples the terrain, and emits
 //! the resulting `TriangleMesh` + `NeedsMesh`.
 //!
-//! Limitations of this first cut, called out in ADR-034 §Consequences:
+//! ADR-034 slice 4 (this commit) ships the `WallLoop` footprint
+//! resolver: foundation evaluation walks the `Vec<ElementId>` wall
+//! list, looks each wall up by its `WallEndpoints` component, and
+//! threads the endpoints into a closed XZ polyline. Arch-core wall
+//! recipes are responsible for inserting `WallEndpoints` on every
+//! placed wall occurrence. The component is defined in core so the
+//! contract is one-way: core defines the data shape, capability
+//! crates supply the data.
+//!
+//! Earlier limitations from slices 1–3 that remain:
 //!
 //! - Top and bottom caps are fan-triangulated. This is robust for
 //!   convex footprints; non-convex (L-, U-shaped) footprints can
-//!   produce overlapping triangles. A constrained-Delaunay or
-//!   ear-clipping pass is the natural follow-up.
-//! - Wall-loop footprint resolution is stubbed: the recipe exists in
-//!   `FoundationFootprint::WallLoop` for forward compatibility but
-//!   the evaluation system currently expects an explicit polyline
-//!   footprint. A wall-loop resolver lands once arch-core wall
-//!   recipes expose a stable XZ-endpoint accessor.
+//!   produce overlapping triangles — see `ear_clip_triangulate`
+//!   which slice 3 wired in for the cap pass.
 
 use std::any::Any;
 
@@ -133,6 +137,27 @@ impl TerrainVersion {
     }
 }
 
+/// Per-wall XZ endpoint contract (ADR-034 §5).
+///
+/// Capability crates that author placed wall occurrences (the
+/// architectural light-frame exterior wall recipe being the first
+/// example) attach `WallEndpoints` to every wall entity so the
+/// `WallLoop` footprint resolver can thread them into a closed
+/// polygon. The component carries the start / end XZ in world
+/// coordinates as `DVec2(x, z)`. Order is the "authored" order of the
+/// wall — the resolver tolerates either traversal direction.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WallEndpoints {
+    pub start: DVec2,
+    pub end: DVec2,
+}
+
+impl WallEndpoints {
+    pub fn new(start: DVec2, end: DVec2) -> Self {
+        Self { start, end }
+    }
+}
+
 /// Errors produced by foundation evaluation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FoundationError {
@@ -143,9 +168,20 @@ pub enum FoundationError {
     ZeroLengthSegment,
     /// `sample_spacing` was non-positive.
     InvalidSampleSpacing,
-    /// Wall-loop footprint resolution is not yet implemented; only
-    /// inline polyline footprints are supported in this slice.
-    WallLoopUnresolved,
+    /// `WallLoop` footprint references a wall whose `WallEndpoints`
+    /// component is missing. Either the wall id is wrong or the
+    /// authoring crate forgot to attach `WallEndpoints`.
+    WallEndpointsMissing { wall: ElementId },
+    /// `WallLoop` ordered list of walls does not form a connected
+    /// loop — the end of wall N does not coincide (within
+    /// `wall_loop_tolerance`) with either endpoint of wall N+1.
+    WallLoopDisconnected { wall_index: usize },
+    /// Last wall's far endpoint does not coincide with the first
+    /// wall's start endpoint within tolerance — the loop is open.
+    WallLoopOpen,
+    /// `WallLoop` had fewer than 3 walls (a closed footprint needs
+    /// at least three segments).
+    WallLoopTooFewWalls { count: usize },
     /// Terrain provider returned no elevation at one of the sample
     /// points (e.g. sample fell outside the terrain extent).
     TerrainOutOfRange { x: f64, z: f64 },
@@ -159,9 +195,24 @@ impl std::fmt::Display for FoundationError {
             Self::DegenerateFootprint => write!(f, "footprint must have at least 3 vertices"),
             Self::ZeroLengthSegment => write!(f, "footprint contains a zero-length segment"),
             Self::InvalidSampleSpacing => write!(f, "sample_spacing must be > 0"),
-            Self::WallLoopUnresolved => write!(
+            Self::WallEndpointsMissing { wall } => write!(
                 f,
-                "WallLoop footprints are not yet resolved; use FoundationFootprint::Polyline"
+                "wall {} has no WallEndpoints component; arch-core recipes must attach it on placement",
+                wall.0,
+            ),
+            Self::WallLoopDisconnected { wall_index } => write!(
+                f,
+                "wall loop disconnected between wall index {} and {}",
+                wall_index,
+                wall_index + 1
+            ),
+            Self::WallLoopOpen => write!(
+                f,
+                "wall loop is open: last wall's endpoint does not return to the first wall's start"
+            ),
+            Self::WallLoopTooFewWalls { count } => write!(
+                f,
+                "wall loop has {count} walls; need at least 3 for a closed footprint"
             ),
             Self::TerrainOutOfRange { x, z } => {
                 write!(f, "terrain has no elevation at sample ({x}, {z})")
@@ -172,6 +223,106 @@ impl std::fmt::Display for FoundationError {
 }
 
 impl std::error::Error for FoundationError {}
+
+/// Default tolerance (in metres) for matching adjacent wall endpoints
+/// in [`resolve_wall_loop`]. 1 mm is tight enough to catch authoring
+/// errors but lax enough to absorb FP noise from upstream transforms.
+pub const DEFAULT_WALL_LOOP_TOLERANCE: f64 = 1.0e-3;
+
+/// Resolve an ordered list of wall element ids into a closed XZ
+/// polyline by chaining their endpoints.
+///
+/// `lookup` returns the start / end XZ pair for each wall id (the
+/// `WallEndpoints` data, supplied by the world-side query in
+/// [`evaluate_foundations_system`]). The resolver:
+///
+/// 1. Validates the wall count (≥ 3).
+/// 2. Picks the first wall's start such that the chosen end is
+///    closest to either endpoint of the second wall.
+/// 3. For each subsequent wall, picks the endpoint that matches the
+///    previous wall's end within `tolerance`; the other endpoint
+///    becomes the new "current" point.
+/// 4. Verifies that the final end coincides with the first wall's
+///    start.
+///
+/// On success the returned polyline has one vertex per wall (the
+/// "start" of each wall in the chosen traversal direction).
+pub fn resolve_wall_loop<F>(
+    walls: &[ElementId],
+    tolerance: f64,
+    mut lookup: F,
+) -> Result<Vec<DVec2>, FoundationError>
+where
+    F: FnMut(ElementId) -> Option<(DVec2, DVec2)>,
+{
+    if walls.len() < 3 {
+        return Err(FoundationError::WallLoopTooFewWalls { count: walls.len() });
+    }
+    let endpoints: Vec<(DVec2, DVec2)> = walls
+        .iter()
+        .map(|id| lookup(*id).ok_or(FoundationError::WallEndpointsMissing { wall: *id }))
+        .collect::<Result<_, _>>()?;
+
+    // Pick the first wall's traversal direction by checking which
+    // endpoint of the first wall is closer to either endpoint of the
+    // second wall. The "other" endpoint of the first wall is the
+    // loop's first vertex; the "shared" endpoint is the connection
+    // point with the second wall.
+    let (a0, b0) = endpoints[0];
+    let (a1, b1) = endpoints[1];
+    let (start, mut current) = if dist(b0, a1) <= tolerance
+        || dist(b0, b1) <= tolerance
+    {
+        (a0, b0)
+    } else if dist(a0, a1) <= tolerance || dist(a0, b1) <= tolerance {
+        (b0, a0)
+    } else {
+        return Err(FoundationError::WallLoopDisconnected { wall_index: 0 });
+    };
+
+    let mut polyline: Vec<DVec2> = Vec::with_capacity(walls.len());
+    polyline.push(start);
+    polyline.push(current);
+
+    for i in 1..walls.len() {
+        let (a, b) = endpoints[i];
+        let next = if dist(current, a) <= tolerance {
+            b
+        } else if dist(current, b) <= tolerance {
+            a
+        } else {
+            return Err(FoundationError::WallLoopDisconnected { wall_index: i - 1 });
+        };
+        // Last wall: `next` must coincide with `start`.
+        if i == walls.len() - 1 {
+            if dist(next, start) > tolerance {
+                return Err(FoundationError::WallLoopOpen);
+            }
+        } else {
+            polyline.push(next);
+        }
+        current = next;
+    }
+
+    Ok(polyline)
+}
+
+fn dist(a: DVec2, b: DVec2) -> f64 {
+    (a - b).length()
+}
+
+/// World-side lookup: find the entity whose `ElementId` matches `id`
+/// and read its `WallEndpoints`. Returns `None` if either is absent.
+fn lookup_wall_endpoints(world: &World, id: ElementId) -> Option<(DVec2, DVec2)> {
+    let mut q = world
+        .try_query::<(&ElementId, &WallEndpoints)>()?;
+    for (eid, ep) in q.iter(world) {
+        if *eid == id {
+            return Some((ep.start, ep.end));
+        }
+    }
+    None
+}
 
 /// One sub-sampled perimeter point: its XZ position and the terrain
 /// elevation that was observed there.
@@ -388,11 +539,27 @@ pub fn evaluate_foundations_system(
         }
         let perimeter = match &foundation.footprint {
             FoundationFootprint::Polyline(verts) => verts.clone(),
-            FoundationFootprint::WallLoop(_) => {
-                bevy::log::warn!(
-                    "Foundation {entity:?}: WallLoop footprints are not yet resolved; skipping",
+            FoundationFootprint::WallLoop(walls) => {
+                // Look each wall up in the world and chain the
+                // endpoints. `WallEndpoints` is attached by the
+                // capability crate that authored the wall (e.g.
+                // `talos3d-architecture-core`'s wall recipe).
+                let result = resolve_wall_loop(
+                    walls,
+                    DEFAULT_WALL_LOOP_TOLERANCE,
+                    |id| -> Option<(DVec2, DVec2)> {
+                        lookup_wall_endpoints(world, id)
+                    },
                 );
-                continue;
+                match result {
+                    Ok(verts) => verts,
+                    Err(e) => {
+                        bevy::log::warn!(
+                            "Foundation {entity:?}: wall-loop resolution failed: {e}",
+                        );
+                        continue;
+                    }
+                }
             }
         };
         let samples = match subsample_perimeter(&perimeter, foundation.sample_spacing) {
@@ -1262,5 +1429,146 @@ mod tests {
         assert_eq!(handles.len(), 5);
         assert_eq!(handles[0].id, "center");
         assert_eq!(handles[1].id, "vertex_0");
+    }
+
+    // ---- WallLoop resolver tests (ADR-034 slice 4) -----------------
+
+    fn unit_square_walls() -> Vec<((u64, DVec2, DVec2))> {
+        // 4 walls forming a 1x1 square at the origin.
+        vec![
+            (10, DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0)),
+            (11, DVec2::new(1.0, 0.0), DVec2::new(1.0, 1.0)),
+            (12, DVec2::new(1.0, 1.0), DVec2::new(0.0, 1.0)),
+            (13, DVec2::new(0.0, 1.0), DVec2::new(0.0, 0.0)),
+        ]
+    }
+
+    fn lookup_for(walls: &[(u64, DVec2, DVec2)]) -> impl Fn(ElementId) -> Option<(DVec2, DVec2)> + '_ {
+        move |id: ElementId| -> Option<(DVec2, DVec2)> {
+            walls
+                .iter()
+                .find(|(wid, _, _)| *wid == id.0)
+                .map(|(_, a, b)| (*a, *b))
+        }
+    }
+
+    #[test]
+    fn resolve_wall_loop_unit_square_returns_four_vertices() {
+        let walls = unit_square_walls();
+        let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
+        let lookup = lookup_for(&walls);
+        let polyline =
+            resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
+        assert_eq!(polyline.len(), 4);
+        // Polyline starts somewhere on the loop; rotate so we know
+        // the first vertex.
+        assert!(polyline.contains(&DVec2::new(0.0, 0.0)));
+        assert!(polyline.contains(&DVec2::new(1.0, 0.0)));
+        assert!(polyline.contains(&DVec2::new(1.0, 1.0)));
+        assert!(polyline.contains(&DVec2::new(0.0, 1.0)));
+    }
+
+    #[test]
+    fn resolve_wall_loop_tolerates_reversed_walls() {
+        // Same square but wall 11 is authored backward (1,1)→(1,0).
+        let walls = vec![
+            (10, DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0)),
+            (11, DVec2::new(1.0, 1.0), DVec2::new(1.0, 0.0)),
+            (12, DVec2::new(1.0, 1.0), DVec2::new(0.0, 1.0)),
+            (13, DVec2::new(0.0, 1.0), DVec2::new(0.0, 0.0)),
+        ];
+        let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
+        let lookup = lookup_for(&walls);
+        let polyline =
+            resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
+        assert_eq!(polyline.len(), 4);
+    }
+
+    #[test]
+    fn resolve_wall_loop_rejects_too_few_walls() {
+        let walls = vec![
+            (10, DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0)),
+            (11, DVec2::new(1.0, 0.0), DVec2::new(0.0, 0.0)),
+        ];
+        let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
+        let lookup = lookup_for(&walls);
+        let err = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap_err();
+        assert_eq!(err, FoundationError::WallLoopTooFewWalls { count: 2 });
+    }
+
+    #[test]
+    fn resolve_wall_loop_reports_missing_wall_endpoints() {
+        let ids = vec![ElementId(99), ElementId(98), ElementId(97)];
+        let err = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, |_| None).unwrap_err();
+        assert_eq!(
+            err,
+            FoundationError::WallEndpointsMissing { wall: ElementId(99) }
+        );
+    }
+
+    #[test]
+    fn resolve_wall_loop_detects_disconnected_walls() {
+        // Wall 11 doesn't touch wall 10 anywhere.
+        let walls = vec![
+            (10, DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0)),
+            (11, DVec2::new(5.0, 5.0), DVec2::new(5.0, 6.0)),
+            (12, DVec2::new(5.0, 6.0), DVec2::new(0.0, 6.0)),
+            (13, DVec2::new(0.0, 6.0), DVec2::new(0.0, 0.0)),
+        ];
+        let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
+        let lookup = lookup_for(&walls);
+        let err = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap_err();
+        assert_eq!(err, FoundationError::WallLoopDisconnected { wall_index: 0 });
+    }
+
+    #[test]
+    fn resolve_wall_loop_detects_open_loop() {
+        // Three walls that touch end-to-end but the third doesn't
+        // close back to wall 1.
+        let walls = vec![
+            (10, DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0)),
+            (11, DVec2::new(1.0, 0.0), DVec2::new(1.0, 1.0)),
+            (12, DVec2::new(1.0, 1.0), DVec2::new(2.0, 2.0)),
+        ];
+        let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
+        let lookup = lookup_for(&walls);
+        let err = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap_err();
+        assert_eq!(err, FoundationError::WallLoopOpen);
+    }
+
+    #[test]
+    fn resolve_wall_loop_tolerance_absorbs_small_fp_noise() {
+        // Tiny gap between wall 10 end and wall 11 start (0.5 mm).
+        let walls = vec![
+            (10, DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0)),
+            (11, DVec2::new(1.0 + 5.0e-4, 0.0), DVec2::new(1.0, 1.0)),
+            (12, DVec2::new(1.0, 1.0), DVec2::new(0.0, 1.0)),
+            (13, DVec2::new(0.0, 1.0), DVec2::new(0.0, 0.0)),
+        ];
+        let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
+        let lookup = lookup_for(&walls);
+        let polyline =
+            resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
+        assert_eq!(polyline.len(), 4);
+    }
+
+    #[test]
+    fn resolve_wall_loop_world_lookup_finds_walls() {
+        // Build a Bevy world holding the four wall entities and
+        // verify `lookup_wall_endpoints` returns the right pairs.
+        let mut world = World::new();
+        for (id, a, b) in unit_square_walls() {
+            world.spawn((ElementId(id), WallEndpoints::new(a, b)));
+        }
+        let ep = lookup_wall_endpoints(&world, ElementId(11)).unwrap();
+        assert_eq!(ep, (DVec2::new(1.0, 0.0), DVec2::new(1.0, 1.0)));
+    }
+
+    #[test]
+    fn wall_endpoints_round_trip_through_json() {
+        let ep = WallEndpoints::new(DVec2::new(0.5, -1.0), DVec2::new(2.5, 4.0));
+        let s = serde_json::to_string(&ep).unwrap();
+        let back: WallEndpoints = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, ep);
     }
 }
