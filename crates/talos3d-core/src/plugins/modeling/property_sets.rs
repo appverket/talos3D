@@ -29,7 +29,9 @@
 
 use std::collections::HashMap;
 
-use bevy::ecs::message::{Message, Messages};
+#[cfg(test)]
+use bevy::ecs::message::Messages;
+use bevy::ecs::message::Message;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
