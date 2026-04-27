@@ -888,6 +888,37 @@ pub struct DefinitionEntry {
     pub effective_full: serde_json::Value,
 }
 
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepresentationDeclareRequest {
+    pub definition_id: String,
+    pub kind: String,
+    pub role: Option<String>,
+    pub lod: Option<String>,
+    pub update_policy: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepresentationSetLodRequest {
+    pub definition_id: String,
+    pub kind: String,
+    pub role: Option<String>,
+    pub lod: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepresentationSetUpdatePolicyRequest {
+    pub definition_id: String,
+    pub kind: String,
+    pub role: Option<String>,
+    pub update_policy: String,
+}
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DefinitionLibraryEntry {
@@ -1639,6 +1670,18 @@ enum ModelApiRequest {
     },
     UpdateDefinition {
         request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    RepresentationDeclare {
+        request: RepresentationDeclareRequest,
+        response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    RepresentationSetLod {
+        request: RepresentationSetLodRequest,
+        response: oneshot::Sender<ApiResult<DefinitionEntry>>,
+    },
+    RepresentationSetUpdatePolicy {
+        request: RepresentationSetUpdatePolicyRequest,
         response: oneshot::Sender<ApiResult<DefinitionEntry>>,
     },
     ListDefinitionDrafts(oneshot::Sender<Vec<DefinitionDraftEntry>>),
@@ -2459,6 +2502,15 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::UpdateDefinition { request, response } => {
             let _ = response.send(handle_update_definition(world, request));
+        }
+        ModelApiRequest::RepresentationDeclare { request, response } => {
+            let _ = response.send(handle_representation_declare(world, request));
+        }
+        ModelApiRequest::RepresentationSetLod { request, response } => {
+            let _ = response.send(handle_representation_set_lod(world, request));
+        }
+        ModelApiRequest::RepresentationSetUpdatePolicy { request, response } => {
+            let _ = response.send(handle_representation_set_update_policy(world, request));
         }
         ModelApiRequest::ListDefinitionDrafts(response) => {
             let _ = response.send(handle_list_definition_drafts(world));
@@ -5088,6 +5140,45 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::UpdateDefinition { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_representation_declare(
+        &self,
+        request: RepresentationDeclareRequest,
+    ) -> ApiResult<DefinitionEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::RepresentationDeclare { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_representation_set_lod(
+        &self,
+        request: RepresentationSetLodRequest,
+    ) -> ApiResult<DefinitionEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::RepresentationSetLod { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_representation_set_update_policy(
+        &self,
+        request: RepresentationSetUpdatePolicyRequest,
+    ) -> ApiResult<DefinitionEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::RepresentationSetUpdatePolicy { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -8990,6 +9081,55 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "representation.declare",
+        description = "ADR-026 Phase 6c: declare or replace a representation on a definition. \
+                       Requires definition_id and kind; role defaults to PrimaryGeometry. \
+                       Optional lod and update_policy set explicit representation metadata."
+    )]
+    async fn representation_declare_tool(
+        &self,
+        Parameters(params): Parameters<RepresentationDeclareRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_representation_declare(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "representation.set_lod",
+        description = "ADR-026 Phase 6c: set the LevelOfDetail for an existing representation. \
+                       Requires definition_id, kind, and lod; provide role when kind alone is ambiguous."
+    )]
+    async fn representation_set_lod_tool(
+        &self,
+        Parameters(params): Parameters<RepresentationSetLodRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_representation_set_lod(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "representation.set_update_policy",
+        description = "ADR-026 Phase 6c: set the UpdatePolicy for an existing representation. \
+                       Requires definition_id, kind, and update_policy; provide role when kind alone is ambiguous."
+    )]
+    async fn representation_set_update_policy_tool(
+        &self,
+        Parameters(params): Parameters<RepresentationSetUpdatePolicyRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_representation_set_update_policy(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
         name = "definition.draft.list",
         description = "List all open definition drafts."
     )]
@@ -12195,31 +12335,84 @@ fn parse_definition_kind(
 fn parse_representation_kind(
     value: Option<&Value>,
 ) -> Result<crate::plugins::modeling::definition::RepresentationKind, String> {
+    parse_representation_kind_label(value.and_then(|value| value.as_str()).unwrap_or("Body"))
+}
+
+#[cfg(feature = "model-api")]
+fn parse_representation_kind_label(
+    value: &str,
+) -> Result<crate::plugins::modeling::definition::RepresentationKind, String> {
     use crate::plugins::modeling::definition::RepresentationKind;
 
-    match value.and_then(|value| value.as_str()).unwrap_or("Body") {
-        "Body" => Ok(RepresentationKind::Body),
-        "Axis" => Ok(RepresentationKind::Axis),
-        "Footprint" => Ok(RepresentationKind::Footprint),
-        "BoundingBox" => Ok(RepresentationKind::BoundingBox),
-        other => Err(format!("Unsupported representation kind '{other}'")),
+    let label = value.trim();
+    if label.is_empty() {
+        return Err("representation kind must be non-empty".to_string());
     }
+    Ok(match label.to_ascii_lowercase().as_str() {
+        "body" => RepresentationKind::Body,
+        "axis" => RepresentationKind::Axis,
+        "footprint" | "foot_print" => RepresentationKind::Footprint,
+        "boundingbox" | "bounding_box" | "box" => RepresentationKind::BoundingBox,
+        "annotation" => RepresentationKind::Annotation,
+        "cog" | "centerofgravity" | "center_of_gravity" | "centreofgravity"
+        | "centre_of_gravity" => RepresentationKind::CoG,
+        _ => RepresentationKind::Custom(label.to_string()),
+    })
 }
 
 #[cfg(feature = "model-api")]
 fn parse_representation_role(
     value: Option<&Value>,
 ) -> Result<crate::plugins::modeling::definition::RepresentationRole, String> {
+    parse_representation_role_label(
+        value
+            .and_then(|value| value.as_str())
+            .unwrap_or("PrimaryGeometry"),
+    )
+}
+
+#[cfg(feature = "model-api")]
+fn parse_representation_role_label(
+    value: &str,
+) -> Result<crate::plugins::modeling::definition::RepresentationRole, String> {
     use crate::plugins::modeling::definition::RepresentationRole;
 
-    match value
-        .and_then(|value| value.as_str())
-        .unwrap_or("PrimaryGeometry")
-    {
-        "PrimaryGeometry" => Ok(RepresentationRole::PrimaryGeometry),
-        "Annotation" => Ok(RepresentationRole::Annotation),
-        "Reference" => Ok(RepresentationRole::Reference),
+    match value.trim().to_ascii_lowercase().as_str() {
+        "primarygeometry" | "primary_geometry" | "primary" => {
+            Ok(RepresentationRole::PrimaryGeometry)
+        }
+        "annotation" => Ok(RepresentationRole::Annotation),
+        "reference" => Ok(RepresentationRole::Reference),
         other => Err(format!("Unsupported representation role '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_level_of_detail_label(
+    value: &str,
+) -> Result<crate::plugins::modeling::definition::LevelOfDetail, String> {
+    use crate::plugins::modeling::definition::LevelOfDetail;
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "conceptual" => Ok(LevelOfDetail::Conceptual),
+        "schematic" => Ok(LevelOfDetail::Schematic),
+        "detailed" | "detail" => Ok(LevelOfDetail::Detailed),
+        "fabrication" | "fabrication_ready" => Ok(LevelOfDetail::Fabrication),
+        other => Err(format!("Unsupported level of detail '{other}'")),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn parse_update_policy_label(
+    value: &str,
+) -> Result<crate::plugins::modeling::definition::UpdatePolicy, String> {
+    use crate::plugins::modeling::definition::UpdatePolicy;
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "always" => Ok(UpdatePolicy::Always),
+        "ondemand" | "on_demand" | "on-demand" => Ok(UpdatePolicy::OnDemand),
+        "frozen" => Ok(UpdatePolicy::Frozen),
+        other => Err(format!("Unsupported update policy '{other}'")),
     }
 }
 
@@ -12240,10 +12433,24 @@ fn parse_representations(
                 let representation = representation
                     .as_object()
                     .ok_or_else(|| "each representation must be an object".to_string())?;
-                Ok(RepresentationDecl::new(
-                    parse_representation_kind(representation.get("kind"))?,
-                    parse_representation_role(representation.get("role"))?,
-                ))
+                let kind = parse_representation_kind(representation.get("kind"))?;
+                let role = parse_representation_role(representation.get("role"))?;
+                let lod = representation
+                    .get("lod")
+                    .and_then(|value| value.as_str())
+                    .map(parse_level_of_detail_label)
+                    .transpose()?;
+                let update_policy = representation
+                    .get("update_policy")
+                    .and_then(|value| value.as_str())
+                    .map(parse_update_policy_label)
+                    .transpose()?;
+                Ok(RepresentationDecl {
+                    kind,
+                    role,
+                    lod,
+                    update_policy,
+                })
             })
             .collect();
     }
@@ -12732,6 +12939,174 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
     enqueue_update_definition(world, before, after);
     flush_model_api_write_pipeline(world);
     Ok(entry)
+}
+
+#[cfg(feature = "model-api")]
+fn mutate_definition_representations<F>(
+    world: &mut World,
+    definition_id: &str,
+    mutate: F,
+) -> ApiResult<DefinitionEntry>
+where
+    F: FnOnce(&mut crate::plugins::modeling::definition::Definition) -> Result<(), String>,
+{
+    use crate::plugins::commands::enqueue_update_definition;
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+
+    let id_str = definition_id.trim();
+    if id_str.is_empty() {
+        return Err("definition_id must be non-empty".to_string());
+    }
+    let id = DefinitionId(id_str.to_string());
+    let before = world
+        .resource::<DefinitionRegistry>()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("Definition '{id_str}' not found"))?;
+
+    let mut after = before.clone();
+    mutate(&mut after)?;
+    after.definition_version += 1;
+
+    let entry = {
+        let registry = world.resource::<DefinitionRegistry>();
+        registry.validate_definition(&after)?;
+        let mut preview = registry.clone();
+        preview.insert(after.clone());
+        let effective = preview.effective_definition(&after.id)?;
+        definition_to_entry(&after, &effective)
+    };
+    enqueue_update_definition(world, before, after);
+    flush_model_api_write_pipeline(world);
+    Ok(entry)
+}
+
+#[cfg(feature = "model-api")]
+fn find_representation_index(
+    definition_name: &str,
+    representations: &[crate::plugins::modeling::definition::RepresentationDecl],
+    kind: &crate::plugins::modeling::definition::RepresentationKind,
+    role: Option<&crate::plugins::modeling::definition::RepresentationRole>,
+) -> Result<usize, String> {
+    let matches: Vec<usize> = representations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, representation)| {
+            if &representation.kind == kind
+                && role.map_or(true, |role| &representation.role == role)
+            {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect();
+    match matches.as_slice() {
+        [] => Err(format!(
+            "Definition '{definition_name}' has no representation matching kind {:?}",
+            kind
+        )),
+        [index] => Ok(*index),
+        _ => Err(format!(
+            "Definition '{definition_name}' has multiple representations matching kind {:?}; provide role",
+            kind
+        )),
+    }
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_representation_declare(
+    world: &mut World,
+    request: RepresentationDeclareRequest,
+) -> ApiResult<DefinitionEntry> {
+    use crate::plugins::modeling::definition::RepresentationDecl;
+
+    let kind = parse_representation_kind_label(&request.kind)?;
+    let role = request
+        .role
+        .as_deref()
+        .map(parse_representation_role_label)
+        .transpose()?
+        .unwrap_or(crate::plugins::modeling::definition::RepresentationRole::PrimaryGeometry);
+    let lod = request
+        .lod
+        .as_deref()
+        .map(parse_level_of_detail_label)
+        .transpose()?;
+    let update_policy = request
+        .update_policy
+        .as_deref()
+        .map(parse_update_policy_label)
+        .transpose()?;
+
+    mutate_definition_representations(world, &request.definition_id, move |definition| {
+        let declaration = RepresentationDecl {
+            kind: kind.clone(),
+            role: role.clone(),
+            lod,
+            update_policy,
+        };
+        if let Some(existing) = definition
+            .representations
+            .iter_mut()
+            .find(|representation| representation.kind == kind && representation.role == role)
+        {
+            *existing = declaration;
+        } else {
+            definition.representations.push(declaration);
+        }
+        Ok(())
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_representation_set_lod(
+    world: &mut World,
+    request: RepresentationSetLodRequest,
+) -> ApiResult<DefinitionEntry> {
+    let kind = parse_representation_kind_label(&request.kind)?;
+    let role = request
+        .role
+        .as_deref()
+        .map(parse_representation_role_label)
+        .transpose()?;
+    let lod = parse_level_of_detail_label(&request.lod)?;
+
+    mutate_definition_representations(world, &request.definition_id, move |definition| {
+        let index = find_representation_index(
+            &definition.name,
+            &definition.representations,
+            &kind,
+            role.as_ref(),
+        )?;
+        definition.representations[index].lod = Some(lod);
+        Ok(())
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_representation_set_update_policy(
+    world: &mut World,
+    request: RepresentationSetUpdatePolicyRequest,
+) -> ApiResult<DefinitionEntry> {
+    let kind = parse_representation_kind_label(&request.kind)?;
+    let role = request
+        .role
+        .as_deref()
+        .map(parse_representation_role_label)
+        .transpose()?;
+    let update_policy = parse_update_policy_label(&request.update_policy)?;
+
+    mutate_definition_representations(world, &request.definition_id, move |definition| {
+        let index = find_representation_index(
+            &definition.name,
+            &definition.representations,
+            &kind,
+            role.as_ref(),
+        )?;
+        definition.representations[index].update_policy = Some(update_policy);
+        Ok(())
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -18172,6 +18547,152 @@ mod tests {
             fetched.effective_full["interface"]["parameters"][0]["name"],
             json!("width")
         );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn representation_declare_adds_and_replaces_definition_representation() {
+        let mut world = init_model_api_test_world();
+        let created = handle_create_definition(&mut world, make_rect_extrusion_request())
+            .expect("create definition should succeed");
+
+        let updated = handle_representation_declare(
+            &mut world,
+            RepresentationDeclareRequest {
+                definition_id: created.definition_id.clone(),
+                kind: "Annotation".into(),
+                role: Some("Annotation".into()),
+                lod: Some("Detailed".into()),
+                update_policy: Some("OnDemand".into()),
+            },
+        )
+        .expect("representation declaration should succeed");
+
+        assert_eq!(updated.definition_version, created.definition_version + 1);
+        let representations = updated.full["representations"].as_array().unwrap();
+        assert!(representations.iter().any(|representation| {
+            representation["kind"] == json!("Annotation")
+                && representation["role"] == json!("Annotation")
+                && representation["lod"] == json!("Detailed")
+                && representation["update_policy"] == json!("OnDemand")
+        }));
+
+        let replaced = handle_representation_declare(
+            &mut world,
+            RepresentationDeclareRequest {
+                definition_id: created.definition_id.clone(),
+                kind: "annotation".into(),
+                role: Some("annotation".into()),
+                lod: Some("Fabrication".into()),
+                update_policy: Some("Frozen".into()),
+            },
+        )
+        .expect("representation replacement should succeed");
+        let annotation_reps: Vec<_> = replaced.full["representations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|representation| representation["kind"] == json!("Annotation"))
+            .collect();
+        assert_eq!(annotation_reps.len(), 1);
+        assert_eq!(annotation_reps[0]["lod"], json!("Fabrication"));
+        assert_eq!(annotation_reps[0]["update_policy"], json!("Frozen"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn representation_set_lod_and_policy_update_existing_declaration() {
+        let mut world = init_model_api_test_world();
+        let created = handle_create_definition(
+            &mut world,
+            json!({
+                "name": "RepresentedWall",
+                "definition_kind": "Solid",
+                "representations": [
+                    { "kind": "Body", "role": "PrimaryGeometry" },
+                    { "kind": "Axis", "role": "Reference", "lod": "Conceptual", "update_policy": "OnDemand" }
+                ]
+            }),
+        )
+        .expect("create definition should succeed");
+
+        let with_lod = handle_representation_set_lod(
+            &mut world,
+            RepresentationSetLodRequest {
+                definition_id: created.definition_id.clone(),
+                kind: "Axis".into(),
+                role: None,
+                lod: "Fabrication".into(),
+            },
+        )
+        .expect("lod update should succeed");
+        let axis = with_lod.full["representations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|representation| representation["kind"] == json!("Axis"))
+            .unwrap();
+        assert_eq!(axis["lod"], json!("Fabrication"));
+
+        let with_policy = handle_representation_set_update_policy(
+            &mut world,
+            RepresentationSetUpdatePolicyRequest {
+                definition_id: created.definition_id.clone(),
+                kind: "axis".into(),
+                role: Some("reference".into()),
+                update_policy: "Frozen".into(),
+            },
+        )
+        .expect("policy update should succeed");
+        let axis = with_policy.full["representations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|representation| representation["kind"] == json!("Axis"))
+            .unwrap();
+        assert_eq!(axis["update_policy"], json!("Frozen"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn representation_tools_report_missing_or_ambiguous_targets() {
+        let mut world = init_model_api_test_world();
+        let created = handle_create_definition(
+            &mut world,
+            json!({
+                "name": "AmbiguousBody",
+                "definition_kind": "Solid",
+                "representations": [
+                    { "kind": "Body", "role": "PrimaryGeometry" },
+                    { "kind": "Body", "role": "Reference" }
+                ]
+            }),
+        )
+        .expect("create definition should succeed");
+
+        let err = handle_representation_set_lod(
+            &mut world,
+            RepresentationSetLodRequest {
+                definition_id: created.definition_id.clone(),
+                kind: "Body".into(),
+                role: None,
+                lod: "Detailed".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("provide role"));
+
+        let err = handle_representation_set_update_policy(
+            &mut world,
+            RepresentationSetUpdatePolicyRequest {
+                definition_id: "missing".into(),
+                kind: "Body".into(),
+                role: Some("PrimaryGeometry".into()),
+                update_policy: "Always".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("not found"));
     }
 
     #[cfg(feature = "model-api")]
