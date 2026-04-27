@@ -224,6 +224,7 @@ pub fn blank_definition(name: impl Into<String>) -> Definition {
         definition_version: 1,
         interface: Interface {
             parameters: ParameterSchema::default(),
+            void_declaration: None,
         },
         evaluators: Vec::new(),
         representations: Vec::new(),
@@ -287,6 +288,7 @@ pub fn derive_definition_from_base(
         definition_version: 1,
         interface: Interface {
             parameters: ParameterSchema::default(),
+            void_declaration: None,
         },
         evaluators: Vec::new(),
         representations: Vec::new(),

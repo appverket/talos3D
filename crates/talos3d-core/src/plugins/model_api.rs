@@ -6026,8 +6026,9 @@ struct BimExchangeIdentityListRequest {
     element_id: u64,
 }
 
-/// ADR-026 Phase 6f: register a `VoidDeclaration` against a
-/// `DefinitionId` so placing that Definition cuts a void in its host.
+/// ADR-026 Phase 6f: write a `VoidDeclaration` into a
+/// Definition interface so placing that Definition cuts a void in its
+/// host.
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7510,11 +7511,11 @@ impl ModelApiServer {
 
     #[tool(
         name = "bim_void.declare_for_definition",
-        description = "ADR-026 Phase 6f: register a VoidDeclaration against a Definition so \
+        description = "ADR-026 Phase 6f: write a VoidDeclaration into a Definition's interface so \
                        placing that Definition cuts a void in its host. The declaration is the \
                        JSON shape of `VoidDeclaration` (kind=Rectangular|Profile, placement, \
-                       exchange_role). Returns the prior declaration if any was previously \
-                       registered (for diff / rollback), or null."
+                       exchange_role). Returns the prior inline declaration if any was previously \
+                       declared (for diff / rollback), or null."
     )]
     async fn bim_void_declare_for_definition_tool(
         &self,
@@ -7530,7 +7531,7 @@ impl ModelApiServer {
     #[tool(
         name = "bim_void.plan_placement",
         description = "ADR-026 Phase 6f: plan an atomic void placement. Validates that the \
-                       filling Definition has a VoidDeclaration registered, that host != filling, \
+                       filling Definition has an inline VoidDeclaration, that host != filling, \
                        and returns the planned OpeningContext + VoidLink components plus the \
                        freshly-allocated opening element id. The caller applies the plan in a \
                        single command per ADR-026 §Consequences."
@@ -9393,7 +9394,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "definition.create",
-        description = "Create a new reusable definition. Requires: name. Optionally: base_definition_id, definition_kind, parameters, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data."
+        description = "Create a new reusable definition. Requires: name. Optionally: base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data."
     )]
     async fn definition_create_tool(
         &self,
@@ -9408,7 +9409,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "definition.update",
-        description = "Update an existing definition. Requires: definition_id. Optionally: name, base_definition_id, definition_kind, parameters, evaluators, representations, compound, and domain_data. Bumps definition_version and propagates changes to all linked occurrences."
+        description = "Update an existing definition. Requires: definition_id. Optionally: name, base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, and domain_data. Bumps definition_version and propagates changes to all linked occurrences."
     )]
     async fn definition_update_tool(
         &self,
@@ -13386,6 +13387,21 @@ fn parse_parameter_schema(
 }
 
 #[cfg(feature = "model-api")]
+fn parse_optional_void_declaration(
+    value: Option<&Value>,
+) -> Result<Option<crate::plugins::modeling::void_declaration::VoidDeclaration>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|e| format!("void_declaration must be a typed VoidDeclaration JSON: {e}"))
+}
+
+#[cfg(feature = "model-api")]
 fn parse_definition_kind(
     value: Option<&Value>,
 ) -> Result<crate::plugins::modeling::definition::DefinitionKind, String> {
@@ -13799,6 +13815,7 @@ fn build_definition_from_object(
         definition_version: 1,
         interface: Interface {
             parameters: parse_parameter_schema(object.get("parameters"))?,
+            void_declaration: parse_optional_void_declaration(object.get("void_declaration"))?,
         },
         evaluators: parse_evaluators(object)?,
         representations: parse_representations(object)?,
@@ -13977,6 +13994,11 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
 
     if obj.contains_key("parameters") {
         after.interface.parameters = parse_parameter_schema(obj.get("parameters"))?;
+    }
+
+    if obj.contains_key("void_declaration") {
+        after.interface.void_declaration =
+            parse_optional_void_declaration(obj.get("void_declaration"))?;
     }
 
     if obj.contains_key("evaluators")
@@ -16265,25 +16287,37 @@ pub fn handle_bim_exchange_identity_list(
     Ok(Value::Object(out))
 }
 
-/// ADR-026 Phase 6f MCP handler: register a `VoidDeclaration` against
-/// a `DefinitionId`. Returns the prior declaration as JSON, or
-/// `Value::Null` if no prior was registered.
+/// ADR-026 Phase 6f MCP handler: write a `VoidDeclaration` into a
+/// Definition interface. Returns the prior declaration as JSON, or
+/// `Value::Null` if no prior was declared.
 #[cfg(feature = "model-api")]
 pub fn handle_bim_void_declare_for_definition(
     world: &mut World,
     definition_id: &str,
     declaration: Value,
 ) -> Result<Value, String> {
-    use crate::plugins::modeling::definition::DefinitionId;
-    use crate::plugins::modeling::void_declaration::{VoidDeclaration, VoidDeclarationRegistry};
+    use crate::plugins::commands::enqueue_update_definition;
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+    use crate::plugins::modeling::void_declaration::VoidDeclaration;
 
     let parsed: VoidDeclaration = serde_json::from_value(declaration)
         .map_err(|e| format!("declaration must be a typed VoidDeclaration JSON: {e}"))?;
-    if !world.contains_resource::<VoidDeclarationRegistry>() {
-        world.init_resource::<VoidDeclarationRegistry>();
+    let id = DefinitionId(definition_id.to_string());
+    let before = world
+        .resource::<DefinitionRegistry>()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("Definition '{definition_id}' not found"))?;
+    let prior = before.interface.void_declaration.clone();
+    let mut after = before.clone();
+    after.definition_version += 1;
+    after.interface.void_declaration = Some(parsed);
+    {
+        let registry = world.resource::<DefinitionRegistry>();
+        registry.validate_definition(&after)?;
     }
-    let mut reg = world.resource_mut::<VoidDeclarationRegistry>();
-    let prior = reg.register(DefinitionId(definition_id.to_string()), parsed);
+    enqueue_update_definition(world, before, after);
+    flush_model_api_write_pipeline(world);
     Ok(prior
         .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
         .unwrap_or(Value::Null))
@@ -16299,23 +16333,21 @@ pub fn handle_bim_void_plan_placement(
     filling_element_id: u64,
 ) -> Result<Value, String> {
     use crate::plugins::identity::ElementIdAllocator;
-    use crate::plugins::modeling::definition::DefinitionId;
-    use crate::plugins::modeling::void_declaration::{
-        plan_void_placement, VoidDeclarationRegistry,
-    };
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+    use crate::plugins::modeling::void_declaration::plan_void_placement;
 
-    let registry = world
-        .get_resource::<VoidDeclarationRegistry>()
-        .cloned()
-        .unwrap_or_default();
+    let definition_id = DefinitionId(filling_definition.to_string());
+    let definition = world
+        .resource::<DefinitionRegistry>()
+        .effective_definition(&definition_id)?;
     let host = ElementId(host_element_id);
     let filling = ElementId(filling_element_id);
     ensure_entity_exists(world, host)?;
     ensure_entity_exists(world, filling)?;
     let next_opening_id = world.resource::<ElementIdAllocator>().next_id();
     let outcome = plan_void_placement(
-        &registry,
-        &DefinitionId(filling_definition.to_string()),
+        definition.interface.void_declaration.as_ref(),
+        &definition_id,
         host,
         filling,
         next_opening_id,
@@ -21885,11 +21917,22 @@ mod tests {
 
     #[cfg(feature = "model-api")]
     #[test]
-    fn bim_void_declare_for_definition_registers_and_returns_prior_null() {
-        use crate::plugins::modeling::definition::DefinitionId;
-        use crate::plugins::modeling::void_declaration::VoidDeclarationRegistry;
+    fn bim_void_declare_for_definition_updates_interface_and_returns_prior_null() {
+        use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
 
         let mut world = init_model_api_test_world();
+        handle_create_definition(
+            &mut world,
+            serde_json::json!({ "name": "Window", "definition_id": "ignored" }),
+        )
+        .unwrap();
+        let definition_id = world
+            .resource::<DefinitionRegistry>()
+            .list()
+            .first()
+            .unwrap()
+            .id
+            .clone();
         let declaration = serde_json::json!({
             "shape": { "kind": "rectangular",
                        "width_param": "opening_width_m",
@@ -21899,28 +21942,43 @@ mod tests {
         });
         let prior = handle_bim_void_declare_for_definition(
             &mut world,
-            "window.double_v1",
+            definition_id.as_str(),
             declaration.clone(),
         )
         .unwrap();
         assert_eq!(prior, Value::Null);
-        let reg = world.resource::<VoidDeclarationRegistry>();
-        assert!(reg.get(&DefinitionId("window.double_v1".into())).is_some());
+        let stored = world
+            .resource::<DefinitionRegistry>()
+            .get(&DefinitionId(definition_id.as_str().to_string()))
+            .unwrap();
+        assert!(stored.interface.void_declaration.is_some());
+        assert_eq!(stored.definition_version, 2);
     }
 
     #[cfg(feature = "model-api")]
     #[test]
     fn bim_void_declare_for_definition_returns_prior_when_overwriting() {
+        use crate::plugins::modeling::definition::DefinitionRegistry;
+
         let mut world = init_model_api_test_world();
+        handle_create_definition(&mut world, serde_json::json!({ "name": "Window" })).unwrap();
+        let definition_id = world
+            .resource::<DefinitionRegistry>()
+            .list()
+            .first()
+            .unwrap()
+            .id
+            .as_str()
+            .to_string();
         let v1 = serde_json::json!({
             "shape": { "kind": "rectangular",
                        "width_param": "w", "height_param": "h" },
             "placement": { "translation": [0.0,0.0,0.0], "yaw_radians": 0.0 },
             "exchange_role": "Opening"
         });
-        handle_bim_void_declare_for_definition(&mut world, "win.v1", v1.clone()).unwrap();
+        handle_bim_void_declare_for_definition(&mut world, &definition_id, v1.clone()).unwrap();
         let prior =
-            handle_bim_void_declare_for_definition(&mut world, "win.v1", v1.clone()).unwrap();
+            handle_bim_void_declare_for_definition(&mut world, &definition_id, v1.clone()).unwrap();
         assert!(prior.is_object(), "expected prior declaration object");
     }
 
@@ -21940,7 +21998,18 @@ mod tests {
     #[cfg(feature = "model-api")]
     #[test]
     fn bim_void_plan_placement_returns_three_part_outcome() {
+        use crate::plugins::modeling::definition::DefinitionRegistry;
+
         let mut world = init_model_api_test_world();
+        handle_create_definition(&mut world, serde_json::json!({ "name": "Window" })).unwrap();
+        let definition_id = world
+            .resource::<DefinitionRegistry>()
+            .list()
+            .first()
+            .unwrap()
+            .id
+            .as_str()
+            .to_string();
         let host_id = handle_create_box(
             &mut world,
             CreateBoxRequest {
@@ -21961,16 +22030,16 @@ mod tests {
             },
         )
         .unwrap();
-        // Register a declaration first.
+        // Declare the void cut first.
         let declaration = serde_json::json!({
             "shape": { "kind": "rectangular",
                        "width_param": "w", "height_param": "h" },
             "placement": { "translation": [0.0, 0.0, 0.0], "yaw_radians": 0.0 },
             "exchange_role": "Opening"
         });
-        handle_bim_void_declare_for_definition(&mut world, "win.v1", declaration).unwrap();
-        let plan =
-            handle_bim_void_plan_placement(&mut world, "win.v1", host_id, filling_id).unwrap();
+        handle_bim_void_declare_for_definition(&mut world, &definition_id, declaration).unwrap();
+        let plan = handle_bim_void_plan_placement(&mut world, &definition_id, host_id, filling_id)
+            .unwrap();
         assert!(plan.get("opening_element").is_some());
         assert_eq!(plan["opening_context"]["host"], Value::from(host_id));
         assert_eq!(plan["opening_context"]["filling"], Value::from(filling_id));
@@ -21980,7 +22049,18 @@ mod tests {
     #[cfg(feature = "model-api")]
     #[test]
     fn bim_void_plan_placement_errors_when_declaration_missing() {
+        use crate::plugins::modeling::definition::DefinitionRegistry;
+
         let mut world = init_model_api_test_world();
+        handle_create_definition(&mut world, serde_json::json!({ "name": "Window" })).unwrap();
+        let definition_id = world
+            .resource::<DefinitionRegistry>()
+            .list()
+            .first()
+            .unwrap()
+            .id
+            .as_str()
+            .to_string();
         let host_id = handle_create_box(
             &mut world,
             CreateBoxRequest {
@@ -22001,7 +22081,7 @@ mod tests {
             },
         )
         .unwrap();
-        let err = handle_bim_void_plan_placement(&mut world, "no.such.def", host_id, filling_id)
+        let err = handle_bim_void_plan_placement(&mut world, &definition_id, host_id, filling_id)
             .unwrap_err();
         assert!(err.contains("no VoidDeclaration"));
     }
