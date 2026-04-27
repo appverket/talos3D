@@ -724,6 +724,17 @@ impl Plugin for ModelingPlugin {
         // follow-up. Recipes consume the components directly and the
         // validator is invoked from postcondition oracles.
         app.add_plugins(ghost_geometry::GhostGeometryPlugin);
+
+        // ADR-007 propagation: the kernel ships `EntityDependencies`
+        // and the topological algorithms; this plugin installs the
+        // `DependencyGraphResource` cache, rebuilds it on
+        // `Changed<EntityDependencies>`, and propagates
+        // `NeedsEvaluation` topologically along the graph before the
+        // domain-specific evaluators run. Additive: entities without
+        // `EntityDependencies` are unaffected; the existing
+        // domain-specific propagators (fillet, support_graph,
+        // profile-feature parent walker) continue to operate.
+        app.add_plugins(dependency_graph::DependencyGraphPlugin);
     }
 }
 
