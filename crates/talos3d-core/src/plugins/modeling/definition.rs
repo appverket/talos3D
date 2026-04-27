@@ -230,24 +230,25 @@ impl ParameterSchema {
 // ---------------------------------------------------------------------------
 // RepresentationKind / RepresentationRole / RepresentationDecl
 // ---------------------------------------------------------------------------
-//
-// Naming note (ADR-026 §5): the ADR uses "RepresentationRole" for the
-// per-representation geometric tag (Body / Axis / Footprint / Box /
-// Annotation / CoG / Custom) and "RepresentationKind" for the higher-
-// level semantic purpose (PrimaryGeometry / Reference / …). Core's
-// historical naming is inverted relative to the ADR — `RepresentationKind`
-// here carries what the ADR calls "RepresentationRole", and
-// `RepresentationRole` here carries what the ADR calls
-// "RepresentationKind". The semantic content matches; the rename to
-// align names exactly is a separate non-additive refactor and is
-// deferred until the export-pack consumers are written.
 
-/// The per-representation geometric tag. **Maps to ADR-026 §5
-/// "RepresentationRole"** — i.e. the field an export pack inspects to
-/// pick the right output (`Body` for the IFC `IfcShapeRepresentation`
-/// identifier `"Body"`, etc.).
+/// Higher-level semantic purpose of a representation within a
+/// definition. Matches ADR-026 §5 `RepresentationKind`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepresentationKind {
+    /// The primary geometry used for rendering and analysis.
+    PrimaryGeometry,
+    /// A 2-D annotation layer.
+    Annotation,
+    /// A lightweight reference geometry (e.g. snap axis).
+    Reference,
+}
+
+/// The per-representation geometric/export tag. Matches ADR-026 §5
+/// `RepresentationRole`; export packs inspect this to pick the right
+/// output (`Body` for the IFC `IfcShapeRepresentation` identifier
+/// `"Body"`, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepresentationRole {
     /// Full volumetric body — the primary solid geometry.
     Body,
     /// Centre-line or reference axis.
@@ -266,18 +267,6 @@ pub enum RepresentationKind {
     /// Vendor-, workflow-, or export-pack-specific representation tag.
     /// The string is opaque to core; export packs interpret it.
     Custom(String),
-}
-
-/// Higher-level semantic purpose of a representation within a
-/// definition. **Maps to ADR-026 §5 "RepresentationKind"**.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RepresentationRole {
-    /// The primary geometry used for rendering and analysis.
-    PrimaryGeometry,
-    /// A 2-D annotation layer.
-    Annotation,
-    /// A lightweight reference geometry (e.g. snap axis).
-    Reference,
 }
 
 /// Level-of-detail hint for a representation. Coarse enum; export
@@ -314,9 +303,9 @@ pub enum UpdatePolicy {
     Frozen,
 }
 
-/// Declaration pairing a `RepresentationKind` (ADR-026 §5 "Role"),
-/// a higher-level `RepresentationRole` (ADR-026 §5 "Kind"), an
-/// optional `LevelOfDetail` hint, and an `UpdatePolicy`.
+/// Declaration pairing a higher-level `RepresentationKind`, an
+/// export-facing `RepresentationRole`, an optional `LevelOfDetail`
+/// hint, and an `UpdatePolicy`.
 ///
 /// `lod` and `update_policy` are `Option`-defaulted so existing call
 /// sites that only set `kind` and `role` continue to compile.
@@ -1212,8 +1201,8 @@ mod adr_026_phase_6c_tests {
     #[test]
     fn representation_decl_new_uses_no_lod_or_policy_field() {
         let decl = RepresentationDecl::new(
-            RepresentationKind::Body,
-            RepresentationRole::PrimaryGeometry,
+            RepresentationKind::PrimaryGeometry,
+            RepresentationRole::Body,
         );
         assert!(decl.lod.is_none());
         assert!(decl.update_policy.is_none());
@@ -1222,8 +1211,8 @@ mod adr_026_phase_6c_tests {
     #[test]
     fn representation_decl_effective_defaults_to_schematic_and_always() {
         let decl = RepresentationDecl::new(
-            RepresentationKind::Body,
-            RepresentationRole::PrimaryGeometry,
+            RepresentationKind::PrimaryGeometry,
+            RepresentationRole::Body,
         );
         assert_eq!(decl.effective_lod(), LevelOfDetail::Schematic);
         assert_eq!(decl.effective_update_policy(), UpdatePolicy::Always);
@@ -1232,8 +1221,8 @@ mod adr_026_phase_6c_tests {
     #[test]
     fn representation_decl_new_detailed_carries_lod_and_policy() {
         let decl = RepresentationDecl::new_detailed(
-            RepresentationKind::CoG,
-            RepresentationRole::Reference,
+            RepresentationKind::Reference,
+            RepresentationRole::CoG,
             LevelOfDetail::Conceptual,
             UpdatePolicy::OnDemand,
         );
@@ -1244,18 +1233,18 @@ mod adr_026_phase_6c_tests {
     }
 
     #[test]
-    fn representation_kind_new_variants_exist_and_serialize() {
+    fn representation_role_new_variants_exist_and_serialize() {
         for kind in [
-            RepresentationKind::Body,
-            RepresentationKind::Axis,
-            RepresentationKind::Footprint,
-            RepresentationKind::BoundingBox,
-            RepresentationKind::Annotation,
-            RepresentationKind::CoG,
-            RepresentationKind::Custom("vendor.qto".into()),
+            RepresentationRole::Body,
+            RepresentationRole::Axis,
+            RepresentationRole::Footprint,
+            RepresentationRole::BoundingBox,
+            RepresentationRole::Annotation,
+            RepresentationRole::CoG,
+            RepresentationRole::Custom("vendor.qto".into()),
         ] {
             let json = serde_json::to_string(&kind).unwrap();
-            let parsed: RepresentationKind = serde_json::from_str(&json).unwrap();
+            let parsed: RepresentationRole = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, kind);
         }
     }
@@ -1280,8 +1269,8 @@ mod adr_026_phase_6c_tests {
     #[test]
     fn representation_decl_round_trips_with_optional_fields_set() {
         let decl = RepresentationDecl::new_detailed(
-            RepresentationKind::Footprint,
-            RepresentationRole::PrimaryGeometry,
+            RepresentationKind::PrimaryGeometry,
+            RepresentationRole::Footprint,
             LevelOfDetail::Detailed,
             UpdatePolicy::Frozen,
         );
