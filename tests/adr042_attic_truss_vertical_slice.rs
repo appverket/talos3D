@@ -46,7 +46,13 @@ use talos3d_core::curation::{
     Provenance, RecipeArtifact, RecipeBody, RefField, Scope, Trust, RECIPE_ARTIFACT_KIND,
 };
 use talos3d_core::capability_registry::RecipeFamilyId;
+use talos3d_core::plugins::identity::ElementId;
+use talos3d_core::plugins::modeling::ghost_geometry::{
+    check_clearance_envelope, ClearanceEnvelope, ClearanceShape, GhostObstacle,
+};
 use talos3d_core::plugins::refinement::{AgentId, ClaimPath, RefinementState, RuleId};
+use talos3d_core::authored_entity::EntityBounds;
+use bevy::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Architecture-owned (post-merge) — ConstructionSystemManifest kind
@@ -691,4 +697,63 @@ fn recipe_artifact_serializes_to_stable_data_form() {
     let json = serde_json::to_string(&artifact).unwrap();
     let parsed: RecipeArtifact = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, artifact);
+}
+
+#[test]
+fn storage_variant_clearance_envelope_passes_validator() {
+    // ADR-042 §10 PP-B: the attic-truss `storage` variant declares a
+    // central pocket that downstream construction must keep clear so
+    // the storage volume remains usable. With nothing else in the
+    // model the validator must produce no findings; the envelope
+    // ignores the truss owner itself (an envelope cannot intrude on
+    // its own owner).
+    let truss_owner = ElementId(42);
+    // 4 m × 2 m × 6 m envelope centred over the attic floor, 1.0 m
+    // above the bottom-chord datum. Half-extents in metres.
+    let envelope = ClearanceEnvelope::usable(
+        truss_owner,
+        "roof.truss.attic.storage_void",
+        ClearanceShape::Box {
+            center: Vec3::new(0.0, 1.0, 0.0),
+            half_extents: Vec3::new(2.0, 1.0, 3.0),
+            rotation: Quat::IDENTITY,
+        },
+    )
+    .with_label("storage volume");
+
+    // No obstacles in the world → no findings.
+    let findings = check_clearance_envelope(&envelope, &[]);
+    assert!(
+        findings.is_empty(),
+        "storage envelope should validate cleanly with no obstacles; got: {findings:?}"
+    );
+
+    // The owning truss occurrence at the same location is also OK —
+    // the envelope cannot intrude on its own owner.
+    let truss_obstacle = GhostObstacle {
+        element_id: truss_owner,
+        bounds: EntityBounds {
+            min: Vec3::new(-2.0, 0.0, -3.0),
+            max: Vec3::new(2.0, 2.0, 3.0),
+        },
+        label: Some("truss occurrence".into()),
+    };
+    let findings = check_clearance_envelope(&envelope, std::slice::from_ref(&truss_obstacle));
+    assert!(
+        findings.is_empty(),
+        "owner geometry must not be flagged against its own envelope"
+    );
+
+    // A foreign element placed inside the envelope must be flagged.
+    let intruder = GhostObstacle {
+        element_id: ElementId(999),
+        bounds: EntityBounds {
+            min: Vec3::new(-0.1, 0.5, -0.1),
+            max: Vec3::new(0.1, 1.5, 0.1),
+        },
+        label: Some("rogue strut".into()),
+    };
+    let findings = check_clearance_envelope(&envelope, std::slice::from_ref(&intruder));
+    assert_eq!(findings.len(), 1, "intruder must be reported");
+    assert_eq!(findings[0].offending_element, ElementId(999));
 }
