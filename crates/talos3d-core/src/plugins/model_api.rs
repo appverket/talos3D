@@ -14974,33 +14974,31 @@ fn validate_relation_descriptor(
 }
 
 #[cfg(feature = "model-api")]
-fn create_relation_snapshot(
+fn build_relation_snapshot(
     world: &mut World,
     source: ElementId,
     target: ElementId,
     relation_type: String,
     parameters: Value,
-) -> u64 {
+) -> (
+    ElementId,
+    crate::plugins::modeling::assembly::RelationSnapshot,
+) {
     use crate::plugins::modeling::assembly::{RelationSnapshot, SemanticRelation};
 
     let relation_id = world.resource_mut::<ElementIdAllocator>().next_id();
-    send_event(
-        world,
-        CreateEntityCommand {
-            snapshot: RelationSnapshot {
-                element_id: relation_id,
-                relation: SemanticRelation {
-                    source,
-                    target,
-                    relation_type,
-                    parameters,
-                },
-            }
-            .into(),
+    (
+        relation_id,
+        RelationSnapshot {
+            element_id: relation_id,
+            relation: SemanticRelation {
+                source,
+                target,
+                relation_type,
+                parameters,
+            },
         },
-    );
-    flush_model_api_write_pipeline(world);
-    relation_id.0
+    )
 }
 
 #[cfg(feature = "model-api")]
@@ -15193,6 +15191,12 @@ pub fn handle_instantiate_hosted_definition(
     world: &mut World,
     request: Value,
 ) -> ApiResult<InstantiateDefinitionResult> {
+    use crate::plugins::commands::{enqueue_apply_void_placement, enqueue_create_boxed_entity};
+    use crate::plugins::history::PendingCommandQueue;
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
+    use crate::plugins::modeling::occurrence::HostedOccurrenceContext;
+    use crate::plugins::modeling::void_declaration::plan_void_placement;
+
     let object = request
         .as_object()
         .ok_or_else(|| "definition.instantiate_hosted expects a JSON object".to_string())?;
@@ -15201,11 +15205,20 @@ pub fn handle_instantiate_hosted_definition(
     let (hosted_request, relation_type, host_element_id, relation_parameters) =
         prepare_hosted_occurrence_request(world, object)?;
 
-    let element_id = handle_place_occurrence(world, hosted_request)?;
+    let hosted_context: HostedOccurrenceContext = hosted_request
+        .get("hosting")
+        .cloned()
+        .ok_or_else(|| "Hosted request missing resolved hosting context".to_string())
+        .and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| format!("Invalid hosting context: {error}"))
+        })?;
+    let (element_id, occurrence_snapshot) =
+        build_occurrence_snapshot_for_place(world, hosted_request)?;
 
-    let relation_ids =
+    let relation_snapshots =
         if let (Some(relation_type), Some(host_element_id)) = (relation_type, host_element_id) {
-            vec![create_relation_snapshot(
+            vec![build_relation_snapshot(
                 world,
                 ElementId(element_id),
                 host_element_id,
@@ -15215,6 +15228,50 @@ pub fn handle_instantiate_hosted_definition(
         } else {
             Vec::new()
         };
+    let relation_ids = relation_snapshots
+        .iter()
+        .map(|(relation_id, _)| relation_id.0)
+        .collect();
+
+    let void_outcome = match (
+        hosted_context.host_element_id,
+        hosted_context.opening_element_id,
+    ) {
+        (Some(host), Some(opening)) => {
+            let definition_key = DefinitionId(definition_id.clone());
+            let definition = world
+                .resource::<DefinitionRegistry>()
+                .effective_definition(&definition_key)?;
+            if definition.interface.void_declaration.is_some() {
+                Some(
+                    plan_void_placement(
+                        definition.interface.void_declaration.as_ref(),
+                        &definition_key,
+                        host,
+                        ElementId(element_id),
+                        opening,
+                    )
+                    .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .begin_group("Instantiate hosted definition");
+    enqueue_create_boxed_entity(world, occurrence_snapshot);
+    for (_, relation_snapshot) in relation_snapshots {
+        enqueue_create_boxed_entity(world, relation_snapshot.into());
+    }
+    if let Some(outcome) = void_outcome {
+        enqueue_apply_void_placement(world, outcome);
+    }
+    world.resource_mut::<PendingCommandQueue>().end_group();
+    flush_model_api_write_pipeline(world);
 
     Ok(InstantiateDefinitionResult {
         element_id,
@@ -15227,6 +15284,18 @@ pub fn handle_instantiate_hosted_definition(
 #[cfg(feature = "model-api")]
 pub fn handle_place_occurrence(world: &mut World, request: Value) -> ApiResult<u64> {
     use crate::plugins::commands::enqueue_create_boxed_entity;
+
+    let (result_id, snapshot) = build_occurrence_snapshot_for_place(world, request)?;
+    enqueue_create_boxed_entity(world, snapshot);
+    flush_model_api_write_pipeline(world);
+    Ok(result_id)
+}
+
+#[cfg(feature = "model-api")]
+fn build_occurrence_snapshot_for_place(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<(u64, BoxedEntity)> {
     use crate::plugins::identity::ElementIdAllocator;
     use crate::plugins::modeling::definition::{DefinitionId, DefinitionRegistry};
     use crate::plugins::modeling::occurrence::{
@@ -15295,9 +15364,7 @@ pub fn handle_place_occurrence(world: &mut World, request: Value) -> ApiResult<u
     snapshot.rotation = rotation;
 
     let result_id = element_id.0;
-    enqueue_create_boxed_entity(world, snapshot.into());
-    flush_model_api_write_pipeline(world);
-    Ok(result_id)
+    Ok((result_id, snapshot.into()))
 }
 
 #[cfg(feature = "model-api")]
@@ -19521,6 +19588,11 @@ mod tests {
                 { "name": "wall_thickness", "param_type": "Numeric", "default_value": 0.2, "override_policy": "Overridable", "metadata": { "unit": "m" } },
                 { "name": "finish_color", "param_type": "StringVal", "default_value": "white", "override_policy": "Overridable" }
             ],
+            "void_declaration": {
+                "shape": { "kind": "rectangular", "width_param": "overall_width", "height_param": "overall_height" },
+                "placement": { "translation": [0.0, 0.0, 0.0], "yaw_radians": 0.0 },
+                "exchange_role": "Opening"
+            },
             "compound": {
                 "anchors": [
                     { "id": "opening.exterior_face", "kind": "host_exterior_face" },
@@ -20260,6 +20332,9 @@ mod tests {
     #[cfg(feature = "model-api")]
     #[test]
     fn hosted_definition_instantiation_derives_anchors_and_relation() {
+        use crate::plugins::history::PendingCommandQueue;
+        use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink};
+
         let mut world = init_model_api_test_world();
         world
             .resource_mut::<CapabilityRegistry>()
@@ -20347,6 +20422,35 @@ mod tests {
             .expect("hosted occurrence details should resolve");
         assert_eq!(details.entity_type, "occurrence");
         assert_eq!(details.label, "HostedWindow");
+
+        let opening_entity = find_entity_by_element_id(&mut world, ElementId(opening_id))
+            .expect("opening entity should exist");
+        assert_eq!(
+            world.get::<OpeningContext>(opening_entity),
+            Some(&OpeningContext {
+                host: ElementId(host_id),
+                filling: Some(ElementId(instantiated.element_id)),
+            })
+        );
+        let filling_entity =
+            find_entity_by_element_id(&mut world, ElementId(instantiated.element_id))
+                .expect("filling entity should exist");
+        assert_eq!(
+            world.get::<VoidLink>(filling_entity),
+            Some(&VoidLink {
+                opening: ElementId(opening_id),
+            })
+        );
+
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands(&mut world);
+
+        assert!(get_entity_details(&world, ElementId(instantiated.element_id)).is_none());
+        assert!(get_entity_details(&world, ElementId(instantiated.relation_ids[0])).is_none());
+        assert!(get_entity_details(&world, ElementId(opening_id)).is_some());
+        let opening_entity = find_entity_by_element_id(&mut world, ElementId(opening_id))
+            .expect("opening entity should remain after undo");
+        assert!(world.get::<OpeningContext>(opening_entity).is_none());
     }
 
     #[cfg(feature = "model-api")]

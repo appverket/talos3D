@@ -19,6 +19,7 @@ use crate::{
                 SpherePrimitive, TriangleMesh,
             },
             snapshots::{PolylineSnapshot, TriangleMeshSnapshot},
+            void_declaration::{OpeningContext, VoidLink, VoidPlacementOutcome},
         },
     },
 };
@@ -604,6 +605,71 @@ pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEnti
             label: command.label,
             before: command.before,
             after: command.after,
+        }));
+}
+
+struct ApplyVoidPlacementHistoryCommand {
+    outcome: VoidPlacementOutcome,
+    prior_opening_context: Option<OpeningContext>,
+    prior_filling_link: Option<VoidLink>,
+}
+
+impl EditorCommand for ApplyVoidPlacementHistoryCommand {
+    fn label(&self) -> &'static str {
+        "Apply void placement"
+    }
+
+    fn apply(&mut self, world: &mut World) {
+        let opening_entity = find_entity_by_element_id(world, self.outcome.opening_element);
+        let filling_entity = self
+            .outcome
+            .opening_context
+            .filling
+            .and_then(|filling| find_entity_by_element_id(world, filling));
+
+        self.prior_opening_context =
+            opening_entity.and_then(|entity| world.get::<OpeningContext>(entity).copied());
+        self.prior_filling_link =
+            filling_entity.and_then(|entity| world.get::<VoidLink>(entity).copied());
+
+        if let Some(entity) = opening_entity {
+            world
+                .entity_mut(entity)
+                .insert(self.outcome.opening_context);
+        }
+        if let Some(entity) = filling_entity {
+            world.entity_mut(entity).insert(self.outcome.filling_link);
+        }
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        if let Some(entity) = find_entity_by_element_id(world, self.outcome.opening_element) {
+            if let Some(previous) = self.prior_opening_context {
+                world.entity_mut(entity).insert(previous);
+            } else {
+                world.entity_mut(entity).remove::<OpeningContext>();
+            }
+        }
+
+        if let Some(filling) = self.outcome.opening_context.filling {
+            if let Some(entity) = find_entity_by_element_id(world, filling) {
+                if let Some(previous) = self.prior_filling_link {
+                    world.entity_mut(entity).insert(previous);
+                } else {
+                    world.entity_mut(entity).remove::<VoidLink>();
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn enqueue_apply_void_placement(world: &mut World, outcome: VoidPlacementOutcome) {
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .push_command(Box::new(ApplyVoidPlacementHistoryCommand {
+            outcome,
+            prior_opening_context: None,
+            prior_filling_link: None,
         }));
 }
 
