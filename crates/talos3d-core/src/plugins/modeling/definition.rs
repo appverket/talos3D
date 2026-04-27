@@ -15,6 +15,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::void_declaration::VoidDeclaration;
+
 // ---------------------------------------------------------------------------
 // Global counters
 // ---------------------------------------------------------------------------
@@ -534,6 +536,8 @@ pub struct CompoundDefinition {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Interface {
     pub parameters: ParameterSchema,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub void_declaration: Option<VoidDeclaration>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,15 +1048,15 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
         domain_data,
     } = child;
 
+    let interface = merge_interface(base.interface, interface);
+
     Definition {
         id,
         base_definition_id,
         name,
         definition_kind,
         definition_version,
-        interface: Interface {
-            parameters: merge_parameter_schema(base.interface.parameters, interface.parameters),
-        },
+        interface,
         evaluators: if evaluators.is_empty() {
             base.evaluators
         } else {
@@ -1065,6 +1069,13 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
         },
         compound: merge_compound_definition(base.compound, compound),
         domain_data: merge_json_values(base.domain_data, domain_data),
+    }
+}
+
+fn merge_interface(base: Interface, child: Interface) -> Interface {
+    Interface {
+        parameters: merge_parameter_schema(base.parameters, child.parameters),
+        void_declaration: child.void_declaration.or(base.void_declaration),
     }
 }
 

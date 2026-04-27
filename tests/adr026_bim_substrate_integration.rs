@@ -25,21 +25,19 @@
 //! Per ADR-026 §1 the geometry pipeline must NOT observe any of
 //! the BIM authoring state. This test does not invoke the
 //! evaluation pipeline; it asserts the contracts hold at the data
-//! level. The architectural separation is proven by the fact
-//! that none of the substrates required modifying core types like
-//! `Definition`, `OccurrenceIdentity`, or `Interface`.
+//! level.
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use talos3d_core::plugins::identity::ElementId;
 use talos3d_core::plugins::modeling::bim_material_assignment::{
-    effective_assignment, BimMaterialAssignment, BimMaterialAssignmentRegistry,
-    BimMaterialLayer, BimMaterialLayerSet, BimMaterialRef, LayerFunction,
+    effective_assignment, BimMaterialAssignment, BimMaterialAssignmentRegistry, BimMaterialLayer,
+    BimMaterialLayerSet, BimMaterialRef, LayerFunction,
 };
 use talos3d_core::plugins::modeling::definition::{
-    DefinitionId, LevelOfDetail, RepresentationDecl, RepresentationKind, RepresentationRole,
-    UpdatePolicy,
+    DefinitionId, Interface, LevelOfDetail, ParameterSchema, RepresentationDecl,
+    RepresentationKind, RepresentationRole, UpdatePolicy,
 };
 use talos3d_core::plugins::modeling::exchange_identity::{
     ExchangeId, ExchangeIdentityMap, ExchangeSystem,
@@ -48,16 +46,13 @@ use talos3d_core::plugins::modeling::property_sets::{
     set_property_validated, ExportProfile, PropertyDef, PropertySetMap, PropertySetSchema,
     PropertySetSchemaRegistry, PropertyValue, PropertyValueType,
 };
-use talos3d_core::plugins::modeling::quantity_set::{
-    MaterialQuantity, QuantitySet, QuantityValue,
-};
+use talos3d_core::plugins::modeling::quantity_set::{MaterialQuantity, QuantitySet, QuantityValue};
 use talos3d_core::plugins::modeling::spatial_container::{
     validate_assignment, SpatialContainer, SpatialContainerKind, SpatialContainerKindRegistry,
     SpatialContainmentGraph, SpatialMembership,
 };
 use talos3d_core::plugins::modeling::void_declaration::{
-    plan_void_placement, OpeningContext, VoidDeclaration, VoidDeclarationRegistry, VoidLink,
-    VoidPlacement,
+    plan_void_placement, OpeningContext, VoidDeclaration, VoidLink, VoidPlacement,
 };
 
 // -- Definition ids ----------------------------------------------------------
@@ -125,13 +120,15 @@ fn bim_substrate_composes_end_to_end() {
         BimMaterialAssignment::LayerSet(wall_layers.clone()),
     );
 
-    // ── Phase 6f: register the window definition's void declaration
-    let mut voids = VoidDeclarationRegistry::default();
-    voids.register(
-        window_def_id(),
-        VoidDeclaration::rectangular("opening_width_m", "opening_height_m")
-            .with_placement(VoidPlacement::at(DVec3::new(0.0, 1.0, 0.0))),
-    );
+    // ── Phase 6f: declare the window definition's void cut inline
+    //              on its public interface.
+    let window_interface = Interface {
+        parameters: ParameterSchema::default(),
+        void_declaration: Some(
+            VoidDeclaration::rectangular("opening_width_m", "opening_height_m")
+                .with_placement(VoidPlacement::at(DVec3::new(0.0, 1.0, 0.0))),
+        ),
+    };
 
     // ── Phase 6g: register the storey kind
     let mut spatial_kinds = SpatialContainerKindRegistry::default();
@@ -206,7 +203,10 @@ fn bim_substrate_composes_end_to_end() {
         prop_schemas.schemas_for(&wall_def_id()),
         &ExportProfile::new("IFC4"),
     );
-    assert!(missing.is_empty(), "missing required IFC4 properties: {missing:?}");
+    assert!(
+        missing.is_empty(),
+        "missing required IFC4 properties: {missing:?}"
+    );
 
     // ── Phase 6b: assign and lock the wall's IFC GUID
     let mut wall_exchange = ExchangeIdentityMap::empty();
@@ -218,10 +218,8 @@ fn bim_substrate_composes_end_to_end() {
         .expect("first IFC GUID assignment succeeds");
     // Re-assigning must be refused: the ADR-026 §2 "never
     // regenerate" rule.
-    let refused = wall_exchange.assign_if_absent(
-        ExchangeSystem::Ifc,
-        ExchangeId::new("different-guid"),
-    );
+    let refused =
+        wall_exchange.assign_if_absent(ExchangeSystem::Ifc, ExchangeId::new("different-guid"));
     assert!(refused.is_err(), "second assignment must be refused");
     assert_eq!(
         wall_exchange.get(&ExchangeSystem::Ifc),
@@ -232,8 +230,7 @@ fn bim_substrate_composes_end_to_end() {
     let mut qs = QuantitySet::empty();
     qs.length_m = Some(QuantityValue::from_parameter(4.0, "wall.length_m"));
     qs.area_gross_m2 = Some(QuantityValue::from_evaluator(11.2, "wall.gross_area"));
-    qs.opening_area_deducted_m2 =
-        Some(QuantityValue::from_evaluator(1.92, "wall.opening_area"));
+    qs.opening_area_deducted_m2 = Some(QuantityValue::from_evaluator(1.92, "wall.opening_area"));
     qs.area_net_m2 = Some(QuantityValue::from_evaluator(9.28, "wall.net_area"));
     qs.volume_gross_m3 = Some(QuantityValue::from_evaluator(1.96, "wall.gross_vol"));
     qs.volume_net_m3 = Some(QuantityValue::from_evaluator(1.62, "wall.net_vol"));
@@ -262,7 +259,7 @@ fn bim_substrate_composes_end_to_end() {
     let filling_eid = ElementId(200); // window
     let opening_eid = ElementId(201); // newly-minted opening
     let placement = plan_void_placement(
-        &voids,
+        window_interface.void_declaration.as_ref(),
         &window_def_id(),
         host_eid,
         filling_eid,
@@ -270,7 +267,12 @@ fn bim_substrate_composes_end_to_end() {
     )
     .expect("void placement plans cleanly");
     assert_eq!(placement.opening_element, opening_eid);
-    assert_eq!(placement.filling_link, VoidLink { opening: opening_eid });
+    assert_eq!(
+        placement.filling_link,
+        VoidLink {
+            opening: opening_eid
+        }
+    );
     assert_eq!(
         placement.opening_context,
         OpeningContext {
@@ -294,27 +296,15 @@ fn bim_substrate_composes_end_to_end() {
 
     // Second-parent rejection (single-parent invariant).
     let other_storey = ElementId(11);
-    let err = validate_assignment(
-        &graph,
-        &spatial_kinds,
-        &storey_kind,
-        host_eid,
-        other_storey,
-    )
-    .unwrap_err();
+    let err = validate_assignment(&graph, &spatial_kinds, &storey_kind, host_eid, other_storey)
+        .unwrap_err();
     let display = format!("{err}");
     assert!(display.contains("already assigned"));
 
     // Cycle rejection: trying to put the storey inside the wall
     // would close a cycle.
-    let cycle_err = validate_assignment(
-        &graph,
-        &spatial_kinds,
-        &storey_kind,
-        storey_eid,
-        host_eid,
-    )
-    .unwrap_err();
+    let cycle_err = validate_assignment(&graph, &spatial_kinds, &storey_kind, storey_eid, host_eid)
+        .unwrap_err();
     let display = format!("{cycle_err}");
     assert!(display.contains("cycle"));
 
