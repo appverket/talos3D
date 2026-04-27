@@ -851,11 +851,32 @@ fn is_direct_child_of_group(world: &World, element_id: ElementId, group_id: Elem
 }
 
 /// Find the top-level group that (transitively) owns a given element.
+///
+/// Defends against cycles in the group-membership graph (a group whose
+/// member chain eventually points back at itself). Cycles are not
+/// supposed to exist, but a malformed import or a bug in group editing
+/// could produce one, and the loop must not hang the app.
 fn find_top_level_group_for(world: &World, element_id: ElementId) -> Option<ElementId> {
+    use std::collections::HashSet;
+
     let mut current = element_id;
+    let mut visited: HashSet<ElementId> = HashSet::new();
+    visited.insert(current);
     loop {
         match find_group_for_member(world, current) {
-            Some(parent_id) => current = parent_id,
+            Some(parent_id) => {
+                if !visited.insert(parent_id) {
+                    // Cycle detected — bail out at the deepest unique
+                    // ancestor we reached. Returning the last `current`
+                    // matches the documented contract (a top-level
+                    // group, even if the graph is malformed).
+                    if current == element_id {
+                        return None;
+                    }
+                    return Some(current);
+                }
+                current = parent_id;
+            }
             None => {
                 // current is not a member of any group
                 if current == element_id {
