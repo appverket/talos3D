@@ -1343,6 +1343,20 @@ enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Vec<HandleInfo>>>,
     },
+    BimPropertySetGet {
+        element_id: u64,
+        set_name: String,
+        property_name: String,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    BimPropertySetSet {
+        element_id: u64,
+        definition_id: String,
+        set_name: String,
+        property_name: String,
+        value: Value,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     GetDocumentProperties(oneshot::Sender<serde_json::Value>),
     SetDocumentProperties {
         partial: serde_json::Value,
@@ -2012,6 +2026,36 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_list_handles(world, element_id));
+        }
+        ModelApiRequest::BimPropertySetGet {
+            element_id,
+            set_name,
+            property_name,
+            response,
+        } => {
+            let _ = response.send(handle_bim_property_set_get(
+                world,
+                element_id,
+                &set_name,
+                &property_name,
+            ));
+        }
+        ModelApiRequest::BimPropertySetSet {
+            element_id,
+            definition_id,
+            set_name,
+            property_name,
+            value,
+            response,
+        } => {
+            let _ = response.send(handle_bim_property_set_set(
+                world,
+                element_id,
+                &definition_id,
+                &set_name,
+                &property_name,
+                value,
+            ));
         }
         ModelApiRequest::GetDocumentProperties(response) => {
             let props = world.resource::<DocumentProperties>();
@@ -3261,6 +3305,50 @@ impl ModelApiServer {
         self.sender
             .send(ModelApiRequest::ListHandles {
                 element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_property_set_get(
+        &self,
+        element_id: u64,
+        set_name: String,
+        property_name: String,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimPropertySetGet {
+                element_id,
+                set_name,
+                property_name,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_bim_property_set_set(
+        &self,
+        element_id: u64,
+        definition_id: String,
+        set_name: String,
+        property_name: String,
+        value: Value,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::BimPropertySetSet {
+                element_id,
+                definition_id,
+                set_name,
+                property_name,
+                value,
                 response,
             })
             .map_err(|_| "model API request channel closed".to_string())?;
@@ -5335,6 +5423,39 @@ struct ListHandlesRequest {
     element_id: u64,
 }
 
+/// ADR-026 Phase 6a: read a single BIM property-set value from an
+/// authored entity.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimPropertySetGetRequest {
+    element_id: u64,
+    set_name: String,
+    property_name: String,
+}
+
+/// ADR-026 Phase 6a: write a single BIM property-set value on an
+/// authored entity. The write is schema-validated against the
+/// `PropertySetSchemaRegistry` for the entity's Definition; type
+/// mismatches and unknown set/property names are rejected.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BimPropertySetSetRequest {
+    element_id: u64,
+    /// Definition id used to look up the property-set schema. Must
+    /// be the id of a Definition that has registered schemas via
+    /// `PropertySetSchemaRegistry`.
+    definition_id: String,
+    set_name: String,
+    property_name: String,
+    /// Property value, encoded with the standard `PropertyValue`
+    /// JSON shape (`{"number": 0.18}` / `{"text": "REI60"}` /
+    /// `{"boolean": true}` / `{"integer": 60}` / `{"enum": "A1"}`
+    /// / `{"json": ...}`).
+    value: Value,
+}
+
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6685,6 +6806,53 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(handles)
+    }
+
+    #[tool(
+        name = "bim_property_set.get",
+        description = "ADR-026 Phase 6a: read a single BIM property-set value from an entity. \
+                       Returns the typed PropertyValue JSON (e.g. {\"text\": \"REI60\"}) or \
+                       null if the entity has no PropertySetMap or the requested property is \
+                       not authored."
+    )]
+    async fn bim_property_set_get_tool(
+        &self,
+        Parameters(params): Parameters<BimPropertySetGetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = self
+            .request_bim_property_set_get(
+                params.element_id,
+                params.set_name,
+                params.property_name,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(value)
+    }
+
+    #[tool(
+        name = "bim_property_set.set",
+        description = "ADR-026 Phase 6a: write a single BIM property-set value on an entity. \
+                       The value is schema-validated against the PropertySetSchemaRegistry \
+                       for the given definition_id; type mismatches and unknown set/property \
+                       names are rejected. Per ADR-026 §1 this write does NOT invalidate the \
+                       mesh cache. Returns the prior value (or null) for rollback / diff."
+    )]
+    async fn bim_property_set_set_tool(
+        &self,
+        Parameters(params): Parameters<BimPropertySetSetRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let prior = self
+            .request_bim_property_set_set(
+                params.element_id,
+                params.definition_id,
+                params.set_name,
+                params.property_name,
+                params.value,
+            )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(prior)
     }
 
     #[tool(
@@ -14030,6 +14198,116 @@ pub fn handle_list_handles(world: &World, element_id: u64) -> Result<Vec<HandleI
         .collect())
 }
 
+/// ADR-026 Phase 6a MCP handler: read a single BIM property-set
+/// value. Returns the typed `PropertyValue` JSON, or `Value::Null`
+/// when the entity has no `PropertySetMap` component or the
+/// requested property is not authored.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_property_set_get(
+    world: &mut World,
+    element_id: u64,
+    set_name: &str,
+    property_name: &str,
+) -> Result<Value, String> {
+    use crate::plugins::modeling::property_sets::PropertySetMap;
+    let entity = find_entity_by_element_id(world, ElementId(element_id))
+        .ok_or_else(|| format!("element {element_id} not found"))?;
+    let Some(map) = world.get::<PropertySetMap>(entity) else {
+        return Ok(Value::Null);
+    };
+    Ok(map
+        .get(set_name, property_name)
+        .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null))
+}
+
+/// ADR-026 Phase 6a MCP handler: write a single BIM property-set
+/// value. Validates the value against the
+/// `PropertySetSchemaRegistry` for the given definition id and
+/// emits a `PropertySetChanged` message on success. Returns the
+/// prior value as JSON (or `Value::Null`).
+///
+/// Per ADR-026 §1 this handler does NOT invalidate the mesh cache:
+/// the data lives in `PropertySetMap`, a sibling component to
+/// `OccurrenceIdentity`; the geometry-evaluation pipeline never
+/// queries it.
+#[cfg(feature = "model-api")]
+pub fn handle_bim_property_set_set(
+    world: &mut World,
+    element_id: u64,
+    definition_id: &str,
+    set_name: &str,
+    property_name: &str,
+    value: Value,
+) -> Result<Value, String> {
+    use bevy::ecs::message::Messages;
+    use crate::plugins::modeling::definition::DefinitionId;
+    use crate::plugins::modeling::property_sets::{
+        set_property_validated, PropertySetChangeKind, PropertySetChanged, PropertySetMap,
+        PropertySetSchemaRegistry, PropertyValue,
+    };
+
+    let entity = find_entity_by_element_id(world, ElementId(element_id))
+        .ok_or_else(|| format!("element {element_id} not found"))?;
+    let parsed_value: PropertyValue = serde_json::from_value(value).map_err(|e| {
+        format!(
+            "value must be a typed PropertyValue JSON ({{\"text\": ...}} / \
+             {{\"number\": ...}} / etc.); got error: {e}"
+        )
+    })?;
+    let def_id = DefinitionId(definition_id.to_string());
+
+    // Ensure the entity has a PropertySetMap; insert empty if not.
+    if world.get::<PropertySetMap>(entity).is_none() {
+        world
+            .entity_mut(entity)
+            .insert(PropertySetMap::default());
+    }
+
+    // Validate against the registered schema, then mutate.
+    let prior = {
+        let registry_clone: PropertySetSchemaRegistry = world
+            .get_resource::<PropertySetSchemaRegistry>()
+            .cloned()
+            .unwrap_or_default();
+        let mut map_view = world
+            .get_mut::<PropertySetMap>(entity)
+            .ok_or_else(|| "PropertySetMap component missing after insert".to_string())?;
+        set_property_validated(
+            &mut map_view,
+            &registry_clone,
+            &def_id,
+            set_name,
+            property_name,
+            parsed_value,
+        )?
+    };
+
+    // Emit PropertySetChanged message. The geometry pipeline does
+    // not consume this message — only validation, export, and AI
+    // inspection surfaces do.
+    let kind = match &prior {
+        Some(p) => PropertySetChangeKind::Updated { prior: p.clone() },
+        None => PropertySetChangeKind::Created,
+    };
+    if let Some(mut messages) = world.get_resource_mut::<Messages<PropertySetChanged>>() {
+        messages.write(PropertySetChanged {
+            element_id: ElementId(element_id),
+            set_name: set_name.to_string(),
+            property_name: property_name.to_string(),
+            kind,
+        });
+    }
+
+    // No flush_model_api_write_pipeline call: per ADR-026 §1 the
+    // write must NOT invalidate the mesh cache, and there is no
+    // dirty marker to flush.
+
+    Ok(prior
+        .map(|v| serde_json::to_value(v).unwrap_or(Value::Null))
+        .unwrap_or(Value::Null))
+}
+
 #[cfg(feature = "model-api")]
 fn handle_set_toolbar_layout(
     world: &mut World,
@@ -18667,5 +18945,213 @@ mod tests {
         assert!(!world
             .resource::<crate::plugins::materials::MaterialRegistry>()
             .contains("paint_white"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_property_set_get_returns_null_for_missing_map() {
+        let mut world = init_model_api_test_world();
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+        let value = handle_bim_property_set_get(
+            &mut world,
+            element_id,
+            "Pset_WallCommon",
+            "FireRating",
+        )
+        .unwrap();
+        assert_eq!(value, Value::Null);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_property_set_get_returns_null_for_missing_element() {
+        let mut world = init_model_api_test_world();
+        let err = handle_bim_property_set_get(
+            &mut world,
+            999_999_999,
+            "Pset_WallCommon",
+            "FireRating",
+        )
+        .unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_property_set_set_writes_validated_value_and_returns_null_prior() {
+        use crate::plugins::modeling::definition::DefinitionId;
+        use crate::plugins::modeling::property_sets::{
+            ExportProfile, PropertyDef, PropertySetMap, PropertySetSchema,
+            PropertySetSchemaRegistry, PropertyValueType,
+        };
+
+        let mut world = init_model_api_test_world();
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+
+        // Register the schema for a wall-like definition.
+        let mut registry = PropertySetSchemaRegistry::default();
+        registry.register(
+            DefinitionId("wall.lf_v1".into()),
+            vec![
+                PropertySetSchema::new("Pset_WallCommon").with_property(
+                    PropertyDef::new("FireRating", PropertyValueType::Text)
+                        .required_for(ExportProfile::new("IFC4")),
+                ),
+            ],
+        );
+        world.insert_resource(registry);
+        world.insert_resource(bevy::ecs::message::Messages::<
+            crate::plugins::modeling::property_sets::PropertySetChanged,
+        >::default());
+
+        // Write a valid Text value.
+        let prior = handle_bim_property_set_set(
+            &mut world,
+            element_id,
+            "wall.lf_v1",
+            "Pset_WallCommon",
+            "FireRating",
+            serde_json::json!({ "text": "REI60" }),
+        )
+        .unwrap();
+        assert_eq!(prior, Value::Null);
+
+        // Read back via get.
+        let v = handle_bim_property_set_get(
+            &mut world,
+            element_id,
+            "Pset_WallCommon",
+            "FireRating",
+        )
+        .unwrap();
+        assert_eq!(v, serde_json::json!({ "text": "REI60" }));
+
+        // The component is now present on the entity.
+        let entity = find_entity_by_element_id(&mut world, ElementId(element_id)).unwrap();
+        let map = world.get::<PropertySetMap>(entity).unwrap();
+        assert_eq!(map.property_count(), 1);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_property_set_set_rejects_type_mismatch_and_does_not_mutate() {
+        use crate::plugins::modeling::definition::DefinitionId;
+        use crate::plugins::modeling::property_sets::{
+            PropertyDef, PropertySetMap, PropertySetSchema, PropertySetSchemaRegistry,
+            PropertyValueType,
+        };
+
+        let mut world = init_model_api_test_world();
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+
+        let mut registry = PropertySetSchemaRegistry::default();
+        registry.register(
+            DefinitionId("wall.lf_v1".into()),
+            vec![PropertySetSchema::new("Pset_WallCommon").with_property(
+                PropertyDef::new("FireRating", PropertyValueType::Text),
+            )],
+        );
+        world.insert_resource(registry);
+        world.insert_resource(bevy::ecs::message::Messages::<
+            crate::plugins::modeling::property_sets::PropertySetChanged,
+        >::default());
+
+        // Number where Text is expected → reject.
+        let err = handle_bim_property_set_set(
+            &mut world,
+            element_id,
+            "wall.lf_v1",
+            "Pset_WallCommon",
+            "FireRating",
+            serde_json::json!({ "number": 60.0 }),
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"));
+
+        // The map should be empty after the rejection. The
+        // PropertySetMap component was inserted (default) but
+        // no value was written into it.
+        let entity = find_entity_by_element_id(&mut world, ElementId(element_id)).unwrap();
+        let map = world.get::<PropertySetMap>(entity).unwrap();
+        assert_eq!(map.property_count(), 0);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bim_property_set_set_emits_property_set_changed_message() {
+        use crate::plugins::modeling::definition::DefinitionId;
+        use crate::plugins::modeling::property_sets::{
+            PropertyDef, PropertySetChanged, PropertySetSchema, PropertySetSchemaRegistry,
+            PropertyValueType,
+        };
+
+        let mut world = init_model_api_test_world();
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 0.0, 0.0]),
+                half_extents: None,
+                size: Some([1.0, 1.0, 1.0]),
+                rotation: None,
+            },
+        )
+        .unwrap();
+
+        let mut registry = PropertySetSchemaRegistry::default();
+        registry.register(
+            DefinitionId("wall.lf_v1".into()),
+            vec![PropertySetSchema::new("Pset_WallCommon").with_property(
+                PropertyDef::new("LoadBearing", PropertyValueType::Boolean),
+            )],
+        );
+        world.insert_resource(registry);
+        world.insert_resource(
+            bevy::ecs::message::Messages::<PropertySetChanged>::default(),
+        );
+
+        handle_bim_property_set_set(
+            &mut world,
+            element_id,
+            "wall.lf_v1",
+            "Pset_WallCommon",
+            "LoadBearing",
+            serde_json::json!({ "boolean": true }),
+        )
+        .unwrap();
+
+        let messages = world.resource::<bevy::ecs::message::Messages<PropertySetChanged>>();
+        // Use the read iterator pattern: drain to count.
+        let collected: Vec<&PropertySetChanged> = bevy::ecs::message::Messages::iter_current_update_messages(messages).collect();
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].element_id, ElementId(element_id));
+        assert_eq!(collected[0].set_name, "Pset_WallCommon");
+        assert_eq!(collected[0].property_name, "LoadBearing");
     }
 }
