@@ -35,14 +35,23 @@
 //!   footprint. A wall-loop resolver lands once arch-core wall
 //!   recipes expose a stable XZ-endpoint accessor.
 
+use std::any::Any;
+
 use bevy::math::{DVec2, Vec3};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
-use crate::capability_registry::TerrainProviderRegistry;
-use crate::plugins::identity::ElementId;
+use crate::authored_entity::{
+    invalid_property_error, property_field, scalar_from_json, AuthoredEntity, BoxedEntity,
+    HandleInfo, HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
+};
+use crate::capability_registry::{AuthoredEntityFactory, TerrainProviderRegistry};
+use crate::plugins::commands::{despawn_by_element_id, find_entity_by_element_id};
+use crate::plugins::identity::{ElementId, ElementIdAllocator};
 use crate::plugins::modeling::mesh_generation::{NeedsEvaluation, NeedsMesh};
 use crate::plugins::modeling::primitives::TriangleMesh;
+use crate::plugins::modeling::triangulate::ear_clip_triangulate;
 
 /// Footprint reference for a `Foundation`.
 ///
@@ -215,6 +224,22 @@ pub fn subsample_perimeter(
     Ok(samples)
 }
 
+/// Signed area of a 2D polygon (shoelace). Positive when CCW. Used
+/// to decide cap normal orientation.
+fn projected_signed_area(polygon: &[bevy::math::Vec2]) -> f32 {
+    let n = polygon.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0_f32;
+    for i in 0..n {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % n];
+        sum += a.x * b.y - b.x * a.y;
+    }
+    sum * 0.5
+}
+
 /// Build a closed manifold `TriangleMesh` from a perimeter sample
 /// sequence and per-sample terrain elevations.
 ///
@@ -266,16 +291,37 @@ pub fn build_foundation_mesh_from_samples(
         faces.push([top_i, bot_next, top_next]);
     }
 
-    // Top cap: fan from sample[0]. Faces wind opposite to the
-    // perimeter so the cap normal points up (out of the foundation).
-    for i in 1..(n - 1) {
-        faces.push([0, (i + 1) as u32, i as u32]);
+    // Top + bottom caps: triangulate the XZ projection of the
+    // perimeter via ear-clipping. This is robust for non-convex
+    // (L-, U-shaped) footprints; for convex inputs it produces
+    // results equivalent to a fan.
+    //
+    // The XZ-plane signed area drives normal orientation:
+    // - positive (CCW when looking down -y) → top normal points +y
+    //   so we keep the ear-clipper's index order for the bottom cap
+    //   and reverse for the top.
+    // - negative → swap.
+    let projected: Vec<bevy::math::Vec2> = samples
+        .iter()
+        .map(|s| bevy::math::Vec2::new(s.xz.x as f32, s.xz.y as f32))
+        .collect();
+    let cap_tris = ear_clip_triangulate(&projected);
+    let area = projected_signed_area(&projected);
+    if cap_tris.is_empty() {
+        return Err(FoundationError::DegenerateFootprint);
     }
-
-    // Bottom cap: fan from sample[0] + n. Wound to face downward.
-    let bot0 = n as u32;
-    for i in 1..(n - 1) {
-        faces.push([bot0, (i + n) as u32, (i + 1 + n) as u32]);
+    let bot_offset = n as u32;
+    for tri in cap_tris {
+        let [a, b, c] = tri;
+        if area > 0.0 {
+            // CCW projection → top cap reversed for +y normal,
+            // bottom cap kept for -y normal.
+            faces.push([a, c, b]);
+            faces.push([a + bot_offset, b + bot_offset, c + bot_offset]);
+        } else {
+            faces.push([a, b, c]);
+            faces.push([a + bot_offset, c + bot_offset, b + bot_offset]);
+        }
     }
 
     Ok(TriangleMesh {
@@ -395,6 +441,444 @@ pub fn evaluate_foundations_system(
             .insert(NeedsMesh)
             .insert(LastEvaluatedTerrainVersion(terrain_version.0))
             .remove::<NeedsEvaluation>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AuthoredEntity snapshot + MCP factory
+// ---------------------------------------------------------------------------
+
+/// MCP-/persistence-facing snapshot of a `Foundation`.
+///
+/// `Foundation` itself is an ECS component carrying the authored
+/// parameters; the snapshot mirrors those parameters in a form that
+/// implements [`AuthoredEntity`] so the standard `create_entity` /
+/// `get_entity` / `set_property` MCP surface can author and edit
+/// foundations from agents.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundationSnapshot {
+    pub element_id: ElementId,
+    pub footprint: FoundationFootprint,
+    pub floor_datum: f64,
+    pub below_grade_margin: f64,
+    pub sample_spacing: f64,
+}
+
+impl FoundationSnapshot {
+    fn footprint_centroid_y0(&self) -> Vec3 {
+        match &self.footprint {
+            FoundationFootprint::Polyline(verts) if !verts.is_empty() => {
+                let n = verts.len() as f64;
+                let sum: DVec2 = verts.iter().copied().fold(DVec2::ZERO, |a, b| a + b);
+                let c = sum / n;
+                Vec3::new(c.x as f32, self.floor_datum as f32, c.y as f32)
+            }
+            _ => Vec3::new(0.0, self.floor_datum as f32, 0.0),
+        }
+    }
+
+    fn footprint_to_json(&self) -> Value {
+        match &self.footprint {
+            FoundationFootprint::Polyline(verts) => json!({
+                "kind": "polyline",
+                "vertices": verts
+                    .iter()
+                    .map(|v| json!([v.x, v.y]))
+                    .collect::<Vec<_>>(),
+            }),
+            FoundationFootprint::WallLoop(walls) => json!({
+                "kind": "wall_loop",
+                "walls": walls.iter().map(|e| e.0).collect::<Vec<_>>(),
+            }),
+        }
+    }
+
+    fn footprint_from_json(value: &Value) -> Result<FoundationFootprint, String> {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| "footprint must be an object".to_string())?;
+        let kind = obj
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "footprint.kind required (\"polyline\" | \"wall_loop\")".to_string())?;
+        match kind {
+            "polyline" => {
+                let arr = obj
+                    .get("vertices")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "polyline footprint requires vertices array".to_string())?;
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr {
+                    let pair = v
+                        .as_array()
+                        .ok_or_else(|| "vertex must be a [x, z] array".to_string())?;
+                    if pair.len() != 2 {
+                        return Err("vertex must have exactly 2 components".to_string());
+                    }
+                    let x = pair[0]
+                        .as_f64()
+                        .ok_or_else(|| "vertex x must be numeric".to_string())?;
+                    let z = pair[1]
+                        .as_f64()
+                        .ok_or_else(|| "vertex z must be numeric".to_string())?;
+                    out.push(DVec2::new(x, z));
+                }
+                Ok(FoundationFootprint::Polyline(out))
+            }
+            "wall_loop" => {
+                let arr = obj
+                    .get("walls")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "wall_loop footprint requires walls array".to_string())?;
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr {
+                    let id = v
+                        .as_u64()
+                        .ok_or_else(|| "wall id must be a u64".to_string())?;
+                    out.push(ElementId(id));
+                }
+                Ok(FoundationFootprint::WallLoop(out))
+            }
+            other => Err(format!(
+                "unknown footprint kind '{other}'; expected polyline or wall_loop"
+            )),
+        }
+    }
+}
+
+impl AuthoredEntity for FoundationSnapshot {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn type_name(&self) -> &'static str {
+        "foundation"
+    }
+
+    fn element_id(&self) -> ElementId {
+        self.element_id
+    }
+
+    fn label(&self) -> String {
+        match &self.footprint {
+            FoundationFootprint::Polyline(verts) => {
+                format!("Foundation ({}-vertex polyline)", verts.len())
+            }
+            FoundationFootprint::WallLoop(walls) => {
+                format!("Foundation ({}-wall loop)", walls.len())
+            }
+        }
+    }
+
+    fn center(&self) -> Vec3 {
+        self.footprint_centroid_y0()
+    }
+
+    fn translate_by(&self, delta: Vec3) -> BoxedEntity {
+        let mut s = self.clone();
+        if let FoundationFootprint::Polyline(ref mut verts) = s.footprint {
+            for v in verts.iter_mut() {
+                v.x += delta.x as f64;
+                v.y += delta.z as f64;
+            }
+        }
+        s.floor_datum += delta.y as f64;
+        s.into()
+    }
+
+    fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
+        let mut s = self.clone();
+        if let FoundationFootprint::Polyline(ref mut verts) = s.footprint {
+            for v in verts.iter_mut() {
+                let world = rotation * Vec3::new(v.x as f32, 0.0, v.y as f32);
+                v.x = world.x as f64;
+                v.y = world.z as f64;
+            }
+        }
+        s.into()
+    }
+
+    fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity {
+        let mut s = self.clone();
+        if let FoundationFootprint::Polyline(ref mut verts) = s.footprint {
+            let cx = center.x as f64;
+            let cz = center.z as f64;
+            let fx = factor.x as f64;
+            let fz = factor.z as f64;
+            for v in verts.iter_mut() {
+                v.x = cx + (v.x - cx) * fx;
+                v.y = cz + (v.y - cz) * fz;
+            }
+        }
+        // floor_datum scales around center.y
+        let cy = center.y as f64;
+        let fy = factor.y as f64;
+        s.floor_datum = cy + (s.floor_datum - cy) * fy;
+        s.below_grade_margin *= fy.abs();
+        s.into()
+    }
+
+    fn property_fields(&self) -> Vec<PropertyFieldDef> {
+        vec![
+            property_field(
+                "floor_datum",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.floor_datum as f32)),
+            ),
+            property_field(
+                "below_grade_margin",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.below_grade_margin as f32)),
+            ),
+            property_field(
+                "sample_spacing",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.sample_spacing as f32)),
+            ),
+        ]
+    }
+
+    fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        let mut s = self.clone();
+        match property_name {
+            "floor_datum" => s.floor_datum = scalar_from_json(value)? as f64,
+            "below_grade_margin" => {
+                let v = scalar_from_json(value)? as f64;
+                if v < 0.0 {
+                    return Err("below_grade_margin must be >= 0".to_string());
+                }
+                s.below_grade_margin = v;
+            }
+            "sample_spacing" => {
+                let v = scalar_from_json(value)? as f64;
+                if v <= 0.0 {
+                    return Err("sample_spacing must be > 0".to_string());
+                }
+                s.sample_spacing = v;
+            }
+            "footprint" => {
+                s.footprint = Self::footprint_from_json(value)?;
+            }
+            _ => {
+                return Err(invalid_property_error(
+                    "foundation",
+                    &[
+                        "floor_datum",
+                        "below_grade_margin",
+                        "sample_spacing",
+                        "footprint",
+                    ],
+                ))
+            }
+        }
+        Ok(s.into())
+    }
+
+    fn handles(&self) -> Vec<HandleInfo> {
+        let mut handles = vec![HandleInfo {
+            id: "center".to_string(),
+            position: self.footprint_centroid_y0(),
+            kind: HandleKind::Center,
+            label: "Foundation center".to_string(),
+        }];
+        if let FoundationFootprint::Polyline(verts) = &self.footprint {
+            for (i, v) in verts.iter().enumerate() {
+                handles.push(HandleInfo {
+                    id: format!("vertex_{i}"),
+                    position: Vec3::new(v.x as f32, self.floor_datum as f32, v.y as f32),
+                    kind: HandleKind::Vertex,
+                    label: format!("Vertex {i}"),
+                });
+            }
+        }
+        handles
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "element_id": self.element_id,
+            "footprint": self.footprint_to_json(),
+            "floor_datum": self.floor_datum,
+            "below_grade_margin": self.below_grade_margin,
+            "sample_spacing": self.sample_spacing,
+        })
+    }
+
+    fn apply_to(&self, world: &mut World) {
+        let foundation = Foundation {
+            footprint: self.footprint.clone(),
+            floor_datum: self.floor_datum,
+            below_grade_margin: self.below_grade_margin,
+            sample_spacing: self.sample_spacing,
+        };
+        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+            world
+                .entity_mut(entity)
+                .insert(foundation)
+                .insert(NeedsEvaluation);
+        } else {
+            world.spawn((self.element_id, foundation, NeedsEvaluation));
+        }
+    }
+
+    fn remove_from(&self, world: &mut World) {
+        despawn_by_element_id(world, self.element_id);
+    }
+
+    fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
+        if let FoundationFootprint::Polyline(verts) = &self.footprint {
+            let datum = self.floor_datum as f32;
+            for i in 0..verts.len() {
+                let a = verts[i];
+                let b = verts[(i + 1) % verts.len()];
+                gizmos.line(
+                    Vec3::new(a.x as f32, datum, a.y as f32),
+                    Vec3::new(b.x as f32, datum, b.y as f32),
+                    color,
+                );
+            }
+        }
+    }
+
+    fn preview_line_count(&self) -> usize {
+        match &self.footprint {
+            FoundationFootprint::Polyline(verts) => verts.len(),
+            FoundationFootprint::WallLoop(_) => 0,
+        }
+    }
+
+    fn box_clone(&self) -> BoxedEntity {
+        self.clone().into()
+    }
+
+    fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+        other.type_name() == "foundation" && other.to_json() == self.to_json()
+    }
+}
+
+impl From<FoundationSnapshot> for BoxedEntity {
+    fn from(snapshot: FoundationSnapshot) -> Self {
+        Self(Box::new(snapshot))
+    }
+}
+
+/// MCP factory: exposes `create_entity { "type": "foundation", ... }`,
+/// `get_entity` / `set_property` on existing foundations, and project
+/// persistence round-trips.
+///
+/// Create-request schema:
+///
+/// ```json
+/// {
+///   "type": "foundation",
+///   "footprint": {
+///     "kind": "polyline",
+///     "vertices": [[x0, z0], [x1, z1], ...]
+///   },
+///   "floor_datum": 0.0,
+///   "below_grade_margin": 0.3,
+///   "sample_spacing": 1.0
+/// }
+/// ```
+pub struct FoundationFactory;
+
+impl AuthoredEntityFactory for FoundationFactory {
+    fn type_name(&self) -> &'static str {
+        "foundation"
+    }
+
+    fn capture_snapshot(
+        &self,
+        entity_ref: &bevy::ecs::world::EntityRef,
+        _world: &World,
+    ) -> Option<BoxedEntity> {
+        let element_id = *entity_ref.get::<ElementId>()?;
+        let foundation = entity_ref.get::<Foundation>()?;
+        Some(
+            FoundationSnapshot {
+                element_id,
+                footprint: foundation.footprint.clone(),
+                floor_datum: foundation.floor_datum,
+                below_grade_margin: foundation.below_grade_margin,
+                sample_spacing: foundation.sample_spacing,
+            }
+            .into(),
+        )
+    }
+
+    fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String> {
+        let element_id: ElementId = serde_json::from_value(
+            data.get("element_id")
+                .cloned()
+                .ok_or_else(|| "Missing element_id".to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let footprint = data
+            .get("footprint")
+            .ok_or_else(|| "Missing footprint".to_string())
+            .and_then(FoundationSnapshot::footprint_from_json)?;
+        let floor_datum = data
+            .get("floor_datum")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| "Missing floor_datum".to_string())?;
+        let below_grade_margin = data
+            .get("below_grade_margin")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.3);
+        let sample_spacing = data
+            .get("sample_spacing")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        Ok(FoundationSnapshot {
+            element_id,
+            footprint,
+            floor_datum,
+            below_grade_margin,
+            sample_spacing,
+        }
+        .into())
+    }
+
+    fn from_create_request(&self, world: &World, request: &Value) -> Result<BoxedEntity, String> {
+        let obj = request
+            .as_object()
+            .ok_or_else(|| "create_entity expects a JSON object".to_string())?;
+        let element_id = world
+            .get_resource::<ElementIdAllocator>()
+            .ok_or_else(|| "ElementIdAllocator not available".to_string())?
+            .next_id();
+        let footprint = obj
+            .get("footprint")
+            .ok_or_else(|| {
+                "foundation create_entity requires \"footprint\" with kind + vertices".to_string()
+            })
+            .and_then(FoundationSnapshot::footprint_from_json)?;
+        let floor_datum = obj
+            .get("floor_datum")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let below_grade_margin = obj
+            .get("below_grade_margin")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.3);
+        if below_grade_margin < 0.0 {
+            return Err("below_grade_margin must be >= 0".to_string());
+        }
+        let sample_spacing = obj
+            .get("sample_spacing")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        if !(sample_spacing > 0.0) {
+            return Err("sample_spacing must be > 0".to_string());
+        }
+        Ok(FoundationSnapshot {
+            element_id,
+            footprint,
+            floor_datum,
+            below_grade_margin,
+            sample_spacing,
+        }
+        .into())
     }
 }
 
@@ -527,6 +1011,33 @@ mod tests {
     }
 
     #[test]
+    fn build_mesh_handles_non_convex_l_shape() {
+        // L-shaped footprint:
+        //   (0,0) → (4,0) → (4,2) → (2,2) → (2,4) → (0,4) → close
+        let footprint = vec![
+            DVec2::new(0.0, 0.0),
+            DVec2::new(4.0, 0.0),
+            DVec2::new(4.0, 2.0),
+            DVec2::new(2.0, 2.0),
+            DVec2::new(2.0, 4.0),
+            DVec2::new(0.0, 4.0),
+        ];
+        let samples: Vec<PerimeterSample> = subsample_perimeter(&footprint, 2.0)
+            .unwrap()
+            .into_iter()
+            .map(|xz| PerimeterSample { xz, terrain_y: -1.5 })
+            .collect();
+        let n = samples.len();
+        let mesh = build_foundation_mesh_from_samples(&samples, 0.0, 0.3).unwrap();
+        // Vertices: 2N (top + bottom rings).
+        assert_eq!(mesh.vertices.len(), 2 * n);
+        // Wall: 2N triangles. Caps: 2 × (N - 2). Same arithmetic as
+        // the convex case because the ear-clipper outputs n-2
+        // triangles for any simple polygon.
+        assert_eq!(mesh.faces.len(), 2 * n + 2 * (n - 2));
+    }
+
+    #[test]
     fn build_mesh_handles_sloped_terrain() {
         // East side at y = -1, west side at y = -3. Bottom vertices
         // should form a stairstep on the perimeter sequence.
@@ -584,5 +1095,172 @@ mod tests {
         v.bump();
         v.bump();
         assert_eq!(v.0, 3);
+    }
+
+    // -- Snapshot / factory tests ------------------------------------
+
+    fn sample_snapshot() -> FoundationSnapshot {
+        FoundationSnapshot {
+            element_id: ElementId(42),
+            footprint: FoundationFootprint::Polyline(square_footprint(2.0)),
+            floor_datum: 0.5,
+            below_grade_margin: 0.3,
+            sample_spacing: 1.0,
+        }
+    }
+
+    #[test]
+    fn snapshot_to_json_round_trips_via_factory() {
+        let snapshot = sample_snapshot();
+        let json = snapshot.to_json();
+        let parsed = FoundationFactory.from_persisted_json(&json).unwrap();
+        assert!(snapshot.eq_snapshot(&*parsed.0));
+    }
+
+    #[test]
+    fn factory_create_request_assigns_fresh_element_id() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+        let request = json!({
+            "type": "foundation",
+            "footprint": {
+                "kind": "polyline",
+                "vertices": [[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0]]
+            },
+            "floor_datum": 0.0,
+            "below_grade_margin": 0.3,
+            "sample_spacing": 1.0
+        });
+        let boxed = FoundationFactory
+            .from_create_request(&world, &request)
+            .unwrap();
+        let snapshot = boxed.0.as_any().downcast_ref::<FoundationSnapshot>().unwrap();
+        // The allocator started at 0; the first call returns 0, then 1, ...
+        // After this call the allocator should be advanced to 1.
+        assert_eq!(snapshot.element_id.0, 0);
+        assert_eq!(world.resource::<ElementIdAllocator>().next_value(), 1);
+        assert_eq!(snapshot.floor_datum, 0.0);
+        assert_eq!(snapshot.below_grade_margin, 0.3);
+    }
+
+    #[test]
+    fn factory_create_request_rejects_negative_below_grade_margin() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+        let request = json!({
+            "type": "foundation",
+            "footprint": {
+                "kind": "polyline",
+                "vertices": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+            },
+            "below_grade_margin": -0.1,
+        });
+        let err = FoundationFactory
+            .from_create_request(&world, &request)
+            .unwrap_err();
+        assert!(err.contains("below_grade_margin"));
+    }
+
+    #[test]
+    fn factory_create_request_rejects_zero_sample_spacing() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+        let request = json!({
+            "type": "foundation",
+            "footprint": {
+                "kind": "polyline",
+                "vertices": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+            },
+            "sample_spacing": 0.0,
+        });
+        let err = FoundationFactory
+            .from_create_request(&world, &request)
+            .unwrap_err();
+        assert!(err.contains("sample_spacing"));
+    }
+
+    #[test]
+    fn factory_create_request_requires_footprint() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+        let request = json!({ "type": "foundation" });
+        let err = FoundationFactory
+            .from_create_request(&world, &request)
+            .unwrap_err();
+        assert!(err.contains("footprint"));
+    }
+
+    #[test]
+    fn footprint_from_json_supports_wall_loop_kind() {
+        let json = json!({ "kind": "wall_loop", "walls": [10, 11, 12, 13] });
+        let footprint = FoundationSnapshot::footprint_from_json(&json).unwrap();
+        match footprint {
+            FoundationFootprint::WallLoop(walls) => {
+                assert_eq!(walls.len(), 4);
+                assert_eq!(walls[0].0, 10);
+            }
+            _ => panic!("expected WallLoop"),
+        }
+    }
+
+    #[test]
+    fn snapshot_translate_by_shifts_polyline_and_datum() {
+        let snapshot = sample_snapshot();
+        let translated = snapshot.translate_by(Vec3::new(10.0, 1.5, -3.0));
+        let s = translated
+            .0
+            .as_any()
+            .downcast_ref::<FoundationSnapshot>()
+            .unwrap();
+        if let FoundationFootprint::Polyline(verts) = &s.footprint {
+            for (orig, moved) in square_footprint(2.0).iter().zip(verts.iter()) {
+                assert!((moved.x - orig.x - 10.0).abs() < 1e-6);
+                assert!((moved.y - orig.y - (-3.0)).abs() < 1e-6);
+            }
+        } else {
+            panic!("expected Polyline");
+        }
+        assert!((s.floor_datum - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn snapshot_apply_to_inserts_foundation_and_needs_evaluation() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+        let snapshot = sample_snapshot();
+        snapshot.apply_to(&mut world);
+        // Find the entity by element id.
+        let entity = find_entity_by_element_id(&mut world, snapshot.element_id).unwrap();
+        let f = world.get::<Foundation>(entity).unwrap();
+        assert_eq!(f.floor_datum, snapshot.floor_datum);
+        assert!(world.get::<NeedsEvaluation>(entity).is_some());
+    }
+
+    #[test]
+    fn snapshot_set_property_validates_below_grade_margin_non_negative() {
+        let snapshot = sample_snapshot();
+        let err = snapshot
+            .set_property_json("below_grade_margin", &json!(-0.1))
+            .unwrap_err();
+        assert!(err.contains(">= 0"));
+    }
+
+    #[test]
+    fn snapshot_set_property_validates_sample_spacing_positive() {
+        let snapshot = sample_snapshot();
+        let err = snapshot
+            .set_property_json("sample_spacing", &json!(0.0))
+            .unwrap_err();
+        assert!(err.contains("> 0"));
+    }
+
+    #[test]
+    fn snapshot_handles_one_per_polyline_vertex_plus_center() {
+        let snapshot = sample_snapshot();
+        let handles = snapshot.handles();
+        // 1 center + 4 polyline vertex handles for the unit square.
+        assert_eq!(handles.len(), 5);
+        assert_eq!(handles[0].id, "center");
+        assert_eq!(handles[1].id, "vertex_0");
     }
 }
