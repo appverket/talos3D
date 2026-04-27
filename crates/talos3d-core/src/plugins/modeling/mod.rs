@@ -17,6 +17,7 @@ pub mod primitive_trait;
 pub mod primitives;
 pub mod profile;
 pub mod profile_feature;
+pub mod property_sets;
 pub mod semantics;
 pub mod snapshots;
 pub mod tools;
@@ -692,6 +693,14 @@ impl Plugin for ModelingPlugin {
         // the modeling plugin so any app that boots ModelingPlugin
         // gets foundation support out of the box.
         app.add_plugins(foundation::FoundationPlugin);
+
+        // ADR-026 Phase 6a: BIM property-set substrate. Registers the
+        // `PropertySetSchemaRegistry` resource and the
+        // `PropertySetChanged` event channel. The geometry pipeline
+        // never observes property-set state — that structural
+        // separation is the architectural enforcement of ADR-026 §1's
+        // "property-set changes must never set mesh_dirty" invariant.
+        app.add_plugins(property_sets::PropertySetsPlugin);
     }
 }
 
