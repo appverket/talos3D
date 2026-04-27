@@ -51,6 +51,7 @@ use serde::{Deserialize, Serialize};
 use crate::authored_entity::BoxedEntity;
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::identity::ElementId;
+use crate::plugins::modeling::assembly::SemanticRelation;
 
 // ---------------------------------------------------------------------------
 // Edge label
@@ -122,7 +123,8 @@ impl EntityDependencies {
 
     pub fn remove_to(&mut self, on: ElementId, role: &str) -> bool {
         let before = self.edges.len();
-        self.edges.retain(|e| !(e.on == on && e.role.as_str() == role));
+        self.edges
+            .retain(|e| !(e.on == on && e.role.as_str() == role));
         before != self.edges.len()
     }
 
@@ -130,6 +132,18 @@ impl EntityDependencies {
     pub fn target_set(&self) -> HashSet<ElementId> {
         self.edges.iter().map(|e| e.on).collect()
     }
+}
+
+const RELATION_DEPENDENCY_ROLE_PREFIX: &str = "relation:";
+
+fn relation_dependency_role(relation_type: &str) -> String {
+    format!("{RELATION_DEPENDENCY_ROLE_PREFIX}{relation_type}")
+}
+
+fn is_relation_dependency_edge(edge: &DependencyOut) -> bool {
+    edge.role
+        .as_str()
+        .starts_with(RELATION_DEPENDENCY_ROLE_PREFIX)
 }
 
 // ---------------------------------------------------------------------------
@@ -217,21 +231,14 @@ impl DependencyGraph {
 
     /// Direct dependents of `entity` (transposed view).
     pub fn children_of(&self, entity: ElementId) -> &[ElementId] {
-        self.in_edges
-            .get(&entity)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.in_edges.get(&entity).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Walk all transitive dependents of `entity` (everything that
     /// transitively depends on it). Ordering is BFS from `entity`.
     /// Bounded by `max_depth` to defend against malformed graphs
     /// even though `topological_order` rejects cycles up front.
-    pub fn bounded_descendant_walk(
-        &self,
-        entity: ElementId,
-        max_depth: usize,
-    ) -> Vec<ElementId> {
+    pub fn bounded_descendant_walk(&self, entity: ElementId, max_depth: usize) -> Vec<ElementId> {
         let mut out = Vec::new();
         let mut seen: HashSet<ElementId> = HashSet::new();
         seen.insert(entity);
@@ -259,11 +266,7 @@ impl DependencyGraph {
     ///
     /// Self-edges (`dependent == dependency`) always count as
     /// would-create-cycle.
-    pub fn would_create_cycle(
-        &self,
-        dependent: ElementId,
-        dependency: ElementId,
-    ) -> bool {
+    pub fn would_create_cycle(&self, dependent: ElementId, dependency: ElementId) -> bool {
         if dependent == dependency {
             return true;
         }
@@ -576,7 +579,11 @@ fn sync_factory_declared_dependencies_system(world: &mut World) {
     }
 
     // Phase 2: resolve factories, skipping unregistered type names.
-    let resolved: Vec<(Entity, ElementId, std::sync::Arc<dyn crate::capability_registry::AuthoredEntityFactory>)> = {
+    let resolved: Vec<(
+        Entity,
+        ElementId,
+        std::sync::Arc<dyn crate::capability_registry::AuthoredEntityFactory>,
+    )> = {
         let registry = world.resource::<CapabilityRegistry>();
         stale
             .into_iter()
@@ -618,6 +625,96 @@ fn sync_factory_declared_dependencies_system(world: &mut World) {
 }
 
 // ---------------------------------------------------------------------------
+// Relation / constraint edges (ADR-007 §6)
+// ---------------------------------------------------------------------------
+
+/// Sync `SemanticRelation`s into source-entity dependency edges.
+///
+/// ADR-007 §6 treats simple constraints as dependency edges: if a
+/// relationship says entity A is hosted/supported/constrained by entity B,
+/// A depends on B and should be dirtied when B changes. Relation vocabularies
+/// opt into this by setting
+/// [`RelationTypeDescriptor::participates_in_dependency_graph`] on the
+/// registered relation type.
+///
+/// The generated edge role is `relation:<relation_type>`. The sync owns only
+/// those generated relation edges; factory-declared edges such as
+/// `parametric`, `source`, or `parent` are preserved.
+///
+/// [`RelationTypeDescriptor::participates_in_dependency_graph`]:
+/// crate::capability_registry::RelationTypeDescriptor::participates_in_dependency_graph
+fn sync_relation_dependency_edges_system(world: &mut World) {
+    let participating_relation_types: HashSet<String> = {
+        let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+            return;
+        };
+        registry
+            .relation_type_descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.participates_in_dependency_graph)
+            .map(|descriptor| descriptor.relation_type.clone())
+            .collect()
+    };
+
+    let mut desired_by_source: HashMap<ElementId, Vec<DependencyOut>> = HashMap::new();
+    {
+        let mut query = world.query::<&SemanticRelation>();
+        for relation in query.iter(world) {
+            if !participating_relation_types.contains(&relation.relation_type) {
+                continue;
+            }
+            desired_by_source
+                .entry(relation.source)
+                .or_default()
+                .push(DependencyOut::new(
+                    relation.target,
+                    relation_dependency_role(&relation.relation_type),
+                ));
+        }
+    }
+
+    let updates: Vec<(Entity, EntityDependencies)> = {
+        let mut query = world.query::<(Entity, &ElementId, Option<&EntityDependencies>)>();
+        query
+            .iter(world)
+            .filter_map(|(entity, element_id, existing)| {
+                let mut next_edges: Vec<DependencyOut> = existing
+                    .map(|deps| {
+                        deps.edges
+                            .iter()
+                            .filter(|edge| !is_relation_dependency_edge(edge))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(mut relation_edges) = desired_by_source.remove(element_id) {
+                    next_edges.append(&mut relation_edges);
+                }
+                next_edges.sort_by(|a, b| {
+                    a.on.0
+                        .cmp(&b.on.0)
+                        .then_with(|| a.role.as_str().cmp(b.role.as_str()))
+                });
+                next_edges.dedup();
+                let next = EntityDependencies { edges: next_edges };
+                let changed = existing
+                    .map(|deps| deps != &next)
+                    .unwrap_or(!next.edges.is_empty());
+                changed.then_some((entity, next))
+            })
+            .collect()
+    };
+
+    for (entity, next) in updates {
+        if next.edges.is_empty() {
+            world.entity_mut(entity).remove::<EntityDependencies>();
+        } else {
+            world.entity_mut(entity).insert(next);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
@@ -641,7 +738,11 @@ impl Plugin for DependencyGraphPlugin {
         app.register_type::<AuthoredEntityType>();
         app.add_systems(
             Update,
-            sync_factory_declared_dependencies_system
+            (
+                sync_factory_declared_dependencies_system,
+                sync_relation_dependency_edges_system,
+            )
+                .chain()
                 .before(rebuild_dependency_graph_system)
                 .in_set(EvaluationSet::Evaluate),
         );
@@ -728,12 +829,8 @@ mod tests {
 
     #[test]
     fn set_dependencies_replaces_previous_edges() {
-        let mut g = DependencyGraph::new()
-            .with_edge(eid(1), eid(10), "parametric");
-        g.set_dependencies(
-            eid(1),
-            vec![DependencyOut::new(eid(20), "parametric")],
-        );
+        let mut g = DependencyGraph::new().with_edge(eid(1), eid(10), "parametric");
+        g.set_dependencies(eid(1), vec![DependencyOut::new(eid(20), "parametric")]);
         assert_eq!(g.parents_of(eid(1)).len(), 1);
         assert_eq!(g.parents_of(eid(1))[0].on, eid(20));
         assert!(g.children_of(eid(10)).is_empty());
@@ -882,9 +979,7 @@ mod tests {
 
     // ── DependencyGraphResource cache + propagator ─────────────
 
-    use crate::plugins::modeling::mesh_generation::{
-        EvaluationSet, NeedsEvaluation,
-    };
+    use crate::plugins::modeling::mesh_generation::{EvaluationSet, NeedsEvaluation};
 
     fn boot_propagator_app() -> App {
         let mut app = App::new();
@@ -912,7 +1007,8 @@ mod tests {
             ElementId(1),
             EntityDependencies::empty().with_edge(ElementId(2), "parametric"),
         ));
-        app.world_mut().spawn((ElementId(2), EntityDependencies::empty()));
+        app.world_mut()
+            .spawn((ElementId(2), EntityDependencies::empty()));
         app.update();
         let cache = app.world().resource::<DependencyGraphResource>();
         assert_eq!(cache.graph.parents_of(ElementId(1)).len(), 1);
@@ -1018,6 +1114,128 @@ mod tests {
         assert!(cache.topological_order.is_none());
     }
 
+    // ── Relation dependency edges ──────────────────────────────
+
+    fn relation_type(
+        relation_type: &str,
+        participates_in_dependency_graph: bool,
+    ) -> crate::capability_registry::RelationTypeDescriptor {
+        crate::capability_registry::RelationTypeDescriptor {
+            relation_type: relation_type.to_string(),
+            label: relation_type.to_string(),
+            description: "test relation".into(),
+            valid_source_types: Vec::new(),
+            valid_target_types: Vec::new(),
+            parameter_schema: serde_json::json!({}),
+            participates_in_dependency_graph,
+        }
+    }
+
+    #[test]
+    fn participating_relation_type_adds_dependency_edge_to_source() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_relation_type(relation_type("hosted_on", true));
+        world.insert_resource(registry);
+        world.spawn(ElementId(10));
+        world.spawn(ElementId(20));
+        world.spawn((
+            ElementId(99),
+            SemanticRelation {
+                source: ElementId(10),
+                target: ElementId(20),
+                relation_type: "hosted_on".into(),
+                parameters: serde_json::json!({}),
+            },
+        ));
+
+        sync_relation_dependency_edges_system(&mut world);
+
+        let mut q = world.query::<(&ElementId, &EntityDependencies)>();
+        let source_deps = q
+            .iter(&world)
+            .find_map(|(id, deps)| (*id == ElementId(10)).then_some(deps))
+            .expect("source gets dependencies");
+        assert_eq!(
+            source_deps.edges,
+            vec![DependencyOut::new(ElementId(20), "relation:hosted_on")]
+        );
+    }
+
+    #[test]
+    fn non_participating_relation_type_is_ignored() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_relation_type(relation_type("fastened_to", false));
+        world.insert_resource(registry);
+        world.spawn((
+            ElementId(10),
+            EntityDependencies::empty().with_edge(ElementId(20), "relation:fastened_to"),
+        ));
+        world.spawn(ElementId(20));
+        world.spawn((
+            ElementId(99),
+            SemanticRelation {
+                source: ElementId(10),
+                target: ElementId(20),
+                relation_type: "fastened_to".into(),
+                parameters: serde_json::json!({}),
+            },
+        ));
+
+        sync_relation_dependency_edges_system(&mut world);
+
+        let mut q = world.query::<(&ElementId, Option<&EntityDependencies>)>();
+        let source_deps = q
+            .iter(&world)
+            .find_map(|(id, deps)| (*id == ElementId(10)).then_some(deps))
+            .expect("source exists");
+        assert!(
+            source_deps.is_none(),
+            "non-participating relation types remove stale relation-generated edges"
+        );
+    }
+
+    #[test]
+    fn relation_sync_preserves_factory_declared_edges_and_removes_stale_relation_edges() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_relation_type(relation_type("hosted_on", true));
+        registry.register_relation_type(relation_type("supported_by", true));
+        world.insert_resource(registry);
+        world.spawn((
+            ElementId(10),
+            EntityDependencies::empty()
+                .with_edge(ElementId(1), "parametric")
+                .with_edge(ElementId(30), "relation:supported_by"),
+        ));
+        world.spawn(ElementId(20));
+        world.spawn((
+            ElementId(99),
+            SemanticRelation {
+                source: ElementId(10),
+                target: ElementId(20),
+                relation_type: "hosted_on".into(),
+                parameters: serde_json::json!({}),
+            },
+        ));
+
+        sync_relation_dependency_edges_system(&mut world);
+
+        let mut q = world.query::<(&ElementId, &EntityDependencies)>();
+        let source_deps = q
+            .iter(&world)
+            .find_map(|(id, deps)| (*id == ElementId(10)).then_some(deps))
+            .expect("source gets dependencies");
+        assert_eq!(
+            source_deps.edges,
+            vec![
+                DependencyOut::new(ElementId(1), "parametric"),
+                DependencyOut::new(ElementId(20), "relation:hosted_on"),
+            ]
+        );
+    }
+
     // ── Display ────────────────────────────────────────────────
 
     #[test]
@@ -1029,12 +1247,8 @@ mod tests {
 
     // ── TYPEREG substrate ──────────────────────────────────────
 
-    use crate::authored_entity::{
-        AuthoredEntity, BoxedEntity, HandleInfo, PropertyFieldDef,
-    };
-    use crate::capability_registry::{
-        AuthoredEntityFactory, CapabilityRegistry, HitCandidate,
-    };
+    use crate::authored_entity::{AuthoredEntity, BoxedEntity, HandleInfo, PropertyFieldDef};
+    use crate::capability_registry::{AuthoredEntityFactory, CapabilityRegistry, HitCandidate};
     use bevy::ecs::world::EntityRef;
     use bevy::math::Ray3d;
     use serde_json::Value;
@@ -1134,11 +1348,7 @@ mod tests {
         fn type_name(&self) -> &'static str {
             self.type_name
         }
-        fn capture_snapshot(
-            &self,
-            _entity_ref: &EntityRef,
-            _world: &World,
-        ) -> Option<BoxedEntity> {
+        fn capture_snapshot(&self, _entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
             None
         }
         fn from_persisted_json(&self, _data: &Value) -> Result<BoxedEntity, String> {
@@ -1205,20 +1415,16 @@ mod tests {
         let mut app = boot_typereg_app();
 
         let factory = StubFactory::new("stub_kind");
-        factory
-            .edges_for_entity
-            .lock()
-            .unwrap()
-            .insert(1, EntityDependencies::empty().with_edge(ElementId(2), "stub_role"));
+        factory.edges_for_entity.lock().unwrap().insert(
+            1,
+            EntityDependencies::empty().with_edge(ElementId(2), "stub_role"),
+        );
         app.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_factory(StubFactoryWrapper(factory.clone()));
 
         let entity = app.world_mut().spawn(ElementId(1)).id();
-        stamp_authored_entity_dependencies(
-            app.world_mut(),
-            &stub_snapshot(1, "stub_kind"),
-        );
+        stamp_authored_entity_dependencies(app.world_mut(), &stub_snapshot(1, "stub_kind"));
 
         app.update();
 
@@ -1240,10 +1446,7 @@ mod tests {
         let mut app = boot_typereg_app();
         // Note: no factory registered.
         let entity = app.world_mut().spawn(ElementId(1)).id();
-        stamp_authored_entity_dependencies(
-            app.world_mut(),
-            &stub_snapshot(1, "unregistered_kind"),
-        );
+        stamp_authored_entity_dependencies(app.world_mut(), &stub_snapshot(1, "unregistered_kind"));
 
         app.update();
 
@@ -1263,11 +1466,10 @@ mod tests {
         let mut app = boot_typereg_app();
 
         let factory = StubFactory::new("stub_kind");
-        factory
-            .edges_for_entity
-            .lock()
-            .unwrap()
-            .insert(1, EntityDependencies::empty().with_edge(ElementId(2), "stub_role"));
+        factory.edges_for_entity.lock().unwrap().insert(
+            1,
+            EntityDependencies::empty().with_edge(ElementId(2), "stub_role"),
+        );
         app.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_factory(StubFactoryWrapper(factory.clone()));
@@ -1275,10 +1477,7 @@ mod tests {
         let entity = app.world_mut().spawn(ElementId(1)).id();
 
         // First sweep stamps + writes the deps.
-        stamp_authored_entity_dependencies(
-            app.world_mut(),
-            &stub_snapshot(1, "stub_kind"),
-        );
+        stamp_authored_entity_dependencies(app.world_mut(), &stub_snapshot(1, "stub_kind"));
         app.update();
 
         // Snapshot the EntityDependencies value after the first sweep.
@@ -1296,10 +1495,7 @@ mod tests {
         // ran). The "no spurious insert" guard is also exercised by the
         // value-equality check inside the sync system itself, which
         // returns early when `existing == new_deps`.
-        stamp_authored_entity_dependencies(
-            app.world_mut(),
-            &stub_snapshot(1, "stub_kind"),
-        );
+        stamp_authored_entity_dependencies(app.world_mut(), &stub_snapshot(1, "stub_kind"));
         app.update();
 
         let second_value = app
@@ -1332,10 +1528,7 @@ mod tests {
         // Spawn dependent (1) and dependency target (2).
         app.world_mut().spawn(ElementId(1));
         app.world_mut().spawn(ElementId(2));
-        stamp_authored_entity_dependencies(
-            app.world_mut(),
-            &stub_snapshot(1, "stub_kind"),
-        );
+        stamp_authored_entity_dependencies(app.world_mut(), &stub_snapshot(1, "stub_kind"));
 
         app.update();
 
@@ -1354,11 +1547,7 @@ mod tests {
         fn type_name(&self) -> &'static str {
             self.0.type_name()
         }
-        fn capture_snapshot(
-            &self,
-            entity_ref: &EntityRef,
-            world: &World,
-        ) -> Option<BoxedEntity> {
+        fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
             self.0.capture_snapshot(entity_ref, world)
         }
         fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String> {
