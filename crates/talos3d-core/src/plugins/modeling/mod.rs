@@ -5,6 +5,7 @@ pub mod composite_solid;
 pub mod csg;
 pub mod definition;
 pub mod editable_mesh;
+pub mod exchange_identity;
 pub mod fillet;
 pub mod foundation;
 pub mod generic_factory;
