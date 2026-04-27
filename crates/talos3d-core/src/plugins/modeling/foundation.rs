@@ -1047,6 +1047,30 @@ impl AuthoredEntityFactory for FoundationFactory {
         }
         .into())
     }
+
+    fn dependency_edges(
+        &self,
+        world: &World,
+        entity: Entity,
+    ) -> crate::plugins::modeling::dependency_graph::EntityDependencies {
+        use crate::plugins::modeling::dependency_graph::EntityDependencies;
+        let Some(foundation) = world.get::<Foundation>(entity) else {
+            return EntityDependencies::empty();
+        };
+        // Polyline footprints carry no structural edges; the
+        // perimeter is fully self-contained data on the component.
+        // WallLoop footprints depend on every wall in the loop.
+        match &foundation.footprint {
+            FoundationFootprint::Polyline(_) => EntityDependencies::empty(),
+            FoundationFootprint::WallLoop(walls) => {
+                let mut deps = EntityDependencies::empty();
+                for wall in walls {
+                    deps = deps.with_edge(*wall, "foundation_wall_loop");
+                }
+                deps
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1570,5 +1594,79 @@ mod tests {
         let s = serde_json::to_string(&ep).unwrap();
         let back: WallEndpoints = serde_json::from_str(&s).unwrap();
         assert_eq!(back, ep);
+    }
+}
+
+#[cfg(test)]
+mod typereg_tests {
+    use super::*;
+    use crate::capability_registry::AuthoredEntityFactory;
+    use crate::plugins::modeling::dependency_graph::EntityDependencies;
+    use bevy::prelude::*;
+
+    #[test]
+    fn foundation_factory_polyline_footprint_declares_no_edges() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(100),
+                Foundation::polyline(
+                    vec![
+                        DVec2::new(0.0, 0.0),
+                        DVec2::new(10.0, 0.0),
+                        DVec2::new(10.0, 8.0),
+                        DVec2::new(0.0, 8.0),
+                    ],
+                    0.0,
+                    0.3,
+                    1.0,
+                ),
+            ))
+            .id();
+
+        let edges = FoundationFactory.dependency_edges(&world, entity);
+        assert_eq!(
+            edges,
+            EntityDependencies::empty(),
+            "Polyline footprint declares no structural edges; perimeter is self-contained"
+        );
+    }
+
+    #[test]
+    fn foundation_factory_wall_loop_footprint_declares_one_edge_per_wall() {
+        let mut world = World::new();
+        let walls = vec![
+            ElementId(201),
+            ElementId(202),
+            ElementId(203),
+            ElementId(204),
+        ];
+        let entity = world
+            .spawn((
+                ElementId(101),
+                Foundation {
+                    footprint: FoundationFootprint::WallLoop(walls.clone()),
+                    floor_datum: 0.0,
+                    below_grade_margin: 0.3,
+                    sample_spacing: 1.0,
+                },
+            ))
+            .id();
+
+        let edges = FoundationFactory.dependency_edges(&world, entity);
+        let expected = walls
+            .iter()
+            .fold(EntityDependencies::empty(), |acc, w| {
+                acc.with_edge(*w, "foundation_wall_loop")
+            });
+        assert_eq!(edges, expected);
+    }
+
+    #[test]
+    fn foundation_factory_returns_empty_when_component_missing() {
+        let mut world = World::new();
+        let entity = world.spawn(ElementId(102)).id();
+        let edges = FoundationFactory.dependency_edges(&world, entity);
+        assert_eq!(edges, EntityDependencies::empty());
     }
 }
