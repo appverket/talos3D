@@ -12,6 +12,7 @@
 //! bodies, validators, and authoring MCP surfaces live in capability crates.
 
 pub mod api;
+pub mod assembly_pattern_v2;
 pub mod authoring_script;
 pub mod compat_shim;
 pub mod compatibility;
@@ -34,6 +35,12 @@ pub mod scope_trust;
 pub mod source;
 pub mod synthesis;
 
+pub use assembly_pattern_v2::{
+    assembly_pattern_v2_manifest_kind, validate_pattern_v2, validate_pattern_v2_body,
+    AssemblyPatternV2, AssemblyPatternV2Error, PatternEnvelope, PatternObligation,
+    PatternRelation, PatternSlot, PatternSlotOverride, PatternSupportCorridor, PatternVariant,
+    SlotMultiplicity, ASSEMBLY_PATTERN_V2_KIND, ASSEMBLY_PATTERN_V2_SCHEMA_VERSION,
+};
 pub use authoring_script::{
     ArgExpr, AuthoringScript, AuthoringScriptStructuralError, McpToolId, MutationScope, OutputPath,
     Postcondition, Predicate, Step, StepId, AUTHORING_SCRIPT_SCHEMA_VERSION,

@@ -183,6 +183,7 @@ pub fn aabb_overlaps(a: &EntityBounds, b: &EntityBounds) -> bool {
 
 /// What the clearance envelope is reserving negative space *for*.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ClearanceKind {
     /// Useful but uninhabitable volume (storage, attic pocket).
     Usable,
@@ -200,6 +201,7 @@ pub enum ClearanceKind {
 
 /// Whether the envelope tolerates declared intrusions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum ClearanceConstraint {
     /// Nothing may intrude on the envelope.
     NoIntersect,
@@ -309,6 +311,7 @@ impl FaceAnchor {
 
 /// Whether the corridor's contributors must form a continuous chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum LoadPathRequirement {
     /// Every contributor must touch (AABB-overlap) its neighbours so
     /// the load path is unbroken from `start_face` to `end_face`.
