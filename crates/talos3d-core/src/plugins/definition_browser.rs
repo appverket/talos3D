@@ -1935,6 +1935,9 @@ pub fn library_effective_definition(
 }
 
 pub fn definition_requires_opening_host_definition(definition: &Definition) -> bool {
+    if definition.interface.void_declaration.is_some() {
+        return true;
+    }
     definition
         .domain_data
         .get("architectural")
