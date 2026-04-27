@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::authored_entity::BoxedEntity;
 use crate::plugins::document_properties::DocumentProperties;
 use crate::plugins::identity::ElementId;
+use crate::plugins::modeling::dependency_graph::EntityDependencies;
 use crate::plugins::modeling::primitives::TriangleMesh;
 use crate::plugins::refinement::{ClaimPath, ObligationId, RefinementState, SemanticRole};
 
@@ -936,6 +937,23 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
         _requested_ids: &[ElementId],
         _out: &mut Vec<ElementId>,
     ) {
+    }
+
+    /// Declare outbound dependency edges for an entity owned by this
+    /// factory. Called by [`sync_factory_declared_dependencies_system`]
+    /// whenever the entity's [`DependencyEdgesStale`] marker is set.
+    ///
+    /// **Default**: no edges — entity is a leaf in the graph.
+    ///
+    /// Implementations must be deterministic and read-only against
+    /// `world`. Read entity components via `world.get::<C>(entity)`.
+    ///
+    /// [`sync_factory_declared_dependencies_system`]:
+    ///   crate::plugins::modeling::dependency_graph::sync_factory_declared_dependencies_system
+    /// [`DependencyEdgesStale`]:
+    ///   crate::plugins::modeling::dependency_graph::DependencyEdgesStale
+    fn dependency_edges(&self, _world: &World, _entity: Entity) -> EntityDependencies {
+        EntityDependencies::empty()
     }
 }
 

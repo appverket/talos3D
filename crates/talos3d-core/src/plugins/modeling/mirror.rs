@@ -502,6 +502,18 @@ impl AuthoredEntityFactory for MirrorFactory {
         }
         best
     }
+
+    fn dependency_edges(
+        &self,
+        world: &World,
+        entity: Entity,
+    ) -> crate::plugins::modeling::dependency_graph::EntityDependencies {
+        use crate::plugins::modeling::dependency_graph::EntityDependencies;
+        let Some(mirror_node) = world.get::<MirrorNode>(entity) else {
+            return EntityDependencies::empty();
+        };
+        EntityDependencies::empty().with_edge(mirror_node.source, "mirror_source")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -714,4 +726,42 @@ fn try_get_primitive_triangles<P: crate::plugins::modeling::primitive_trait::Pri
         .unwrap_or_default();
     let mesh = primitive.to_editable_mesh(rotation.0)?;
     Some(bsp_csg::triangles_from_editable_mesh(&mesh))
+}
+
+#[cfg(test)]
+mod typereg_tests {
+    use super::*;
+    use crate::capability_registry::AuthoredEntityFactory;
+    use crate::plugins::modeling::dependency_graph::EntityDependencies;
+    use bevy::prelude::*;
+
+    #[test]
+    fn mirror_factory_declares_edge_on_source() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(30),
+                MirrorNode {
+                    source: ElementId(40),
+                    plane: MirrorPlane {
+                        origin: Vec3::ZERO,
+                        normal: Vec3::X,
+                    },
+                    merge: false,
+                },
+            ))
+            .id();
+
+        let edges = MirrorFactory.dependency_edges(&world, entity);
+        let expected = EntityDependencies::empty().with_edge(ElementId(40), "mirror_source");
+        assert_eq!(edges, expected);
+    }
+
+    #[test]
+    fn mirror_factory_returns_empty_when_component_missing() {
+        let mut world = World::new();
+        let entity = world.spawn(ElementId(30)).id();
+        let edges = MirrorFactory.dependency_edges(&world, entity);
+        assert_eq!(edges, EntityDependencies::empty());
+    }
 }

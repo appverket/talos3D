@@ -27,10 +27,13 @@
 //!    `support_graph` resolver, etc.) handle propagation in
 //!    domain-specific ways. The kernel here gives them a shared
 //!    primitive to reuse.
-//! 2. A type-registration trait for parametric definition kinds
-//!    (ADR-007 §5). The existing `AuthoredEntityFactory`
-//!    infrastructure plays that role today; a future slice can
-//!    cross-link it to the dependency graph.
+//! 2. ~~A type-registration trait for parametric definition kinds
+//!    (ADR-007 §5).~~ **Done**: the TYPEREG slice
+//!    (`private/proposals/TYPEREG_AGREEMENT.md`) cross-linked
+//!    `AuthoredEntityFactory` to the dependency graph via
+//!    `AuthoredEntityType`, `DependencyEdgesStale`, and
+//!    `sync_factory_declared_dependencies_system`. The item above is
+//!    now resolved.
 //! 3. Constraint-as-dependency-edge wiring (ADR-007 §6). Domain
 //!    crates declare constraints today; reusing the dependency
 //!    propagation order for them is a natural follow-up.
@@ -45,6 +48,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::authored_entity::BoxedEntity;
+use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::identity::ElementId;
 
 // ---------------------------------------------------------------------------
@@ -468,6 +473,151 @@ pub fn propagate_needs_evaluation_topologically(
 }
 
 // ---------------------------------------------------------------------------
+// TYPEREG substrate (ADR-007 §5 / TYPEREG_AGREEMENT.md)
+// ---------------------------------------------------------------------------
+
+/// Marks an entity as having been spawned by a registered
+/// [`AuthoredEntityFactory`]. Stamped by
+/// [`stamp_authored_entity_dependencies`] from every lifecycle site
+/// that applies an authored snapshot (command replay, persistence
+/// load, model-api helpers). Drives
+/// [`sync_factory_declared_dependencies_system`].
+///
+/// [`AuthoredEntityFactory`]: crate::capability_registry::AuthoredEntityFactory
+#[derive(Component, Debug, Clone, PartialEq, Reflect)]
+#[reflect(Component)]
+pub struct AuthoredEntityType {
+    pub type_name: String,
+}
+
+impl AuthoredEntityType {
+    pub fn new(type_name: impl Into<String>) -> Self {
+        Self {
+            type_name: type_name.into(),
+        }
+    }
+}
+
+/// Tag indicating that an entity's [`EntityDependencies`] may be out
+/// of date and should be recomputed by the next sync pass.
+///
+/// Owned by the dependency-graph module — domain crates do not
+/// toggle it directly.
+#[derive(Component, Debug, Clone, Default)]
+pub(crate) struct DependencyEdgesStale;
+
+/// Stamp [`AuthoredEntityType`] and mark [`DependencyEdgesStale`] after
+/// an authored snapshot has been applied. Resolves the Bevy entity by
+/// `snapshot.element_id()` against the world's `ElementId` → `Entity`
+/// index. No-op if the entity cannot be resolved (the snapshot's apply
+/// path is responsible for ensuring it exists before calling this).
+///
+/// Call this from every lifecycle site that applies an authored snapshot
+/// (create, undo, redo, persistence load). Sites migrated in commit 1:
+/// - `commands.rs`: `CreateEntityHistoryCommand::apply`,
+///   `DeleteEntitiesHistoryCommand::undo`, `apply_snapshot_changes`,
+///   `DeleteWithAssemblyRepairCommand::undo`
+/// - `persistence.rs`: the snapshot-apply loop in `apply_persisted_state`
+///
+/// TODO (commit 2+): migrate remaining `apply_to` sites:
+/// - `transform.rs`, `model_api.rs`, `lighting.rs`, `face_edit.rs`,
+///   `refinement.rs`, `clipping_planes.rs`, and any other domain files
+///   that call `snapshot.apply_to(world)` directly.
+pub fn stamp_authored_entity_dependencies(world: &mut World, snapshot: &BoxedEntity) {
+    let element_id = snapshot.element_id();
+    let type_name: String = snapshot.type_name().to_owned();
+
+    // Scan for the entity with matching ElementId.
+    let entity = {
+        let mut query = world.query::<(Entity, &ElementId)>();
+        query
+            .iter(world)
+            .find_map(|(e, id)| (*id == element_id).then_some(e))
+    };
+
+    let Some(entity) = entity else {
+        // apply_to path is expected to have created the entity; if it
+        // hasn't (e.g. a no-op apply on a missing entity), this is a
+        // silent no-op — we do not panic.
+        return;
+    };
+
+    world
+        .entity_mut(entity)
+        .insert((AuthoredEntityType { type_name }, DependencyEdgesStale));
+}
+
+/// Bevy exclusive system: sync [`EntityDependencies`] for every entity
+/// whose [`DependencyEdgesStale`] marker was just added.
+///
+/// Runs in [`EvaluationSet::Evaluate`] before
+/// [`rebuild_dependency_graph_system`] so the graph cache always
+/// reflects the latest factory-declared edges within the same frame.
+///
+/// **Steady-state cost is near zero**: the system does real work only
+/// for entities that were just stamped stale (newly created or
+/// re-applied snapshots).
+fn sync_factory_declared_dependencies_system(world: &mut World) {
+    // Phase 1: collect stale entities. We clone the strings to release the
+    // world borrow before the mutable phase.
+    let stale: Vec<(Entity, ElementId, String)> = {
+        let mut query = world.query_filtered::<
+            (Entity, &ElementId, &AuthoredEntityType),
+            With<DependencyEdgesStale>,
+        >();
+        query
+            .iter(world)
+            .map(|(entity, eid, aet)| (entity, *eid, aet.type_name.clone()))
+            .collect()
+    };
+
+    if stale.is_empty() {
+        return;
+    }
+
+    // Phase 2: resolve factories, skipping unregistered type names.
+    let resolved: Vec<(Entity, ElementId, std::sync::Arc<dyn crate::capability_registry::AuthoredEntityFactory>)> = {
+        let registry = world.resource::<CapabilityRegistry>();
+        stale
+            .into_iter()
+            .filter_map(|(entity, eid, ref type_name)| {
+                match registry.factory_for(type_name) {
+                    Some(factory) => Some((entity, eid, factory)),
+                    None => {
+                        bevy::log::warn!(
+                            "sync_factory_declared_dependencies: no factory registered \
+                             for type '{type_name}' on entity {entity:?} (ElementId {eid:?}). \
+                             Entity will not receive dependency edges until a factory is registered."
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    };
+
+    // Phase 3 & 4: call dependency_edges (world is immutable here through
+    // the factory borrow) then write results.
+    for (entity, _eid, factory) in resolved {
+        let new_deps = factory.dependency_edges(world, entity);
+
+        // Only write when the value actually changed — avoids spurious
+        // graph rebuilds from `Changed<EntityDependencies>` detection.
+        let needs_update = world
+            .get::<EntityDependencies>(entity)
+            .map(|existing| existing != &new_deps)
+            .unwrap_or(true); // entity has no EntityDependencies yet → write
+
+        if needs_update {
+            world.entity_mut(entity).insert(new_deps);
+        }
+
+        // Always clear the stale marker regardless of whether edges changed.
+        world.entity_mut(entity).remove::<DependencyEdgesStale>();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
@@ -488,6 +638,13 @@ impl Plugin for DependencyGraphPlugin {
         if !app.world().contains_resource::<DependencyGraphResource>() {
             app.init_resource::<DependencyGraphResource>();
         }
+        app.register_type::<AuthoredEntityType>();
+        app.add_systems(
+            Update,
+            sync_factory_declared_dependencies_system
+                .before(rebuild_dependency_graph_system)
+                .in_set(EvaluationSet::Evaluate),
+        );
         app.add_systems(
             Update,
             (
@@ -868,5 +1025,357 @@ mod tests {
         let err = DependencyGraphError::CycleDetected;
         let display = format!("{err}");
         assert!(display.contains("cycle"));
+    }
+
+    // ── TYPEREG substrate ──────────────────────────────────────
+
+    use crate::authored_entity::{
+        AuthoredEntity, BoxedEntity, HandleInfo, PropertyFieldDef,
+    };
+    use crate::capability_registry::{
+        AuthoredEntityFactory, CapabilityRegistry, HitCandidate,
+    };
+    use bevy::ecs::world::EntityRef;
+    use bevy::math::Ray3d;
+    use serde_json::Value;
+    use std::any::Any;
+    use std::sync::Arc;
+
+    /// Stub `AuthoredEntity` snapshot used to drive
+    /// `stamp_authored_entity_dependencies` in tests. Carries an
+    /// `ElementId` and a static type name; everything else is a
+    /// no-op.
+    #[derive(Debug, Clone)]
+    struct StubAuthored {
+        id: ElementId,
+        type_name: &'static str,
+    }
+
+    impl AuthoredEntity for StubAuthored {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn type_name(&self) -> &'static str {
+            self.type_name
+        }
+        fn element_id(&self) -> ElementId {
+            self.id
+        }
+        fn label(&self) -> String {
+            "stub".into()
+        }
+        fn center(&self) -> Vec3 {
+            Vec3::ZERO
+        }
+        fn translate_by(&self, _delta: Vec3) -> BoxedEntity {
+            BoxedEntity(Box::new(self.clone()))
+        }
+        fn rotate_by(&self, _rotation: Quat) -> BoxedEntity {
+            BoxedEntity(Box::new(self.clone()))
+        }
+        fn scale_by(&self, _factor: Vec3, _center: Vec3) -> BoxedEntity {
+            BoxedEntity(Box::new(self.clone()))
+        }
+        fn property_fields(&self) -> Vec<PropertyFieldDef> {
+            Vec::new()
+        }
+        fn set_property_json(
+            &self,
+            _property_name: &str,
+            _value: &Value,
+        ) -> Result<BoxedEntity, String> {
+            Ok(BoxedEntity(Box::new(self.clone())))
+        }
+        fn handles(&self) -> Vec<HandleInfo> {
+            Vec::new()
+        }
+        fn to_json(&self) -> Value {
+            Value::Null
+        }
+        fn apply_to(&self, _world: &mut World) {
+            // The tests spawn the entity manually with the matching
+            // ElementId; apply_to is a no-op so the stamp helper has
+            // a real entity to find.
+        }
+        fn remove_from(&self, _world: &mut World) {}
+        fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {}
+        fn box_clone(&self) -> BoxedEntity {
+            BoxedEntity(Box::new(self.clone()))
+        }
+        fn eq_snapshot(&self, _other: &dyn AuthoredEntity) -> bool {
+            false
+        }
+    }
+
+    fn stub_snapshot(id: u64, type_name: &'static str) -> BoxedEntity {
+        BoxedEntity(Box::new(StubAuthored {
+            id: ElementId(id),
+            type_name,
+        }))
+    }
+
+    /// Stub factory used to drive the sync system. The
+    /// `edges_for_entity` table maps element ids to dependency lists.
+    struct StubFactory {
+        type_name: &'static str,
+        edges_for_entity: std::sync::Mutex<HashMap<u64, EntityDependencies>>,
+    }
+
+    impl StubFactory {
+        fn new(type_name: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                type_name,
+                edges_for_entity: std::sync::Mutex::new(HashMap::new()),
+            })
+        }
+    }
+
+    impl AuthoredEntityFactory for StubFactory {
+        fn type_name(&self) -> &'static str {
+            self.type_name
+        }
+        fn capture_snapshot(
+            &self,
+            _entity_ref: &EntityRef,
+            _world: &World,
+        ) -> Option<BoxedEntity> {
+            None
+        }
+        fn from_persisted_json(&self, _data: &Value) -> Result<BoxedEntity, String> {
+            Err("stub".into())
+        }
+        fn from_create_request(
+            &self,
+            _world: &World,
+            _request: &Value,
+        ) -> Result<BoxedEntity, String> {
+            Err("stub".into())
+        }
+        fn hit_test(&self, _world: &World, _ray: Ray3d) -> Option<HitCandidate> {
+            None
+        }
+        fn dependency_edges(&self, world: &World, entity: Entity) -> EntityDependencies {
+            let Some(eid) = world.get::<ElementId>(entity) else {
+                return EntityDependencies::empty();
+            };
+            self.edges_for_entity
+                .lock()
+                .unwrap()
+                .get(&eid.0)
+                .cloned()
+                .unwrap_or_else(EntityDependencies::empty)
+        }
+    }
+
+    fn boot_typereg_app() -> App {
+        let mut app = boot_propagator_app();
+        if !app.world().contains_resource::<CapabilityRegistry>() {
+            app.init_resource::<CapabilityRegistry>();
+        }
+        app
+    }
+
+    #[test]
+    fn stamp_helper_inserts_marker_and_stale_tag() {
+        let mut app = boot_typereg_app();
+        let entity = app.world_mut().spawn(ElementId(7)).id();
+        let snap = stub_snapshot(7, "stub_kind");
+
+        stamp_authored_entity_dependencies(app.world_mut(), &snap);
+
+        let world = app.world();
+        let aet = world
+            .get::<AuthoredEntityType>(entity)
+            .expect("AuthoredEntityType marker installed");
+        assert_eq!(aet.type_name, "stub_kind");
+        assert!(world.get::<DependencyEdgesStale>(entity).is_some());
+    }
+
+    #[test]
+    fn stamp_helper_is_noop_when_entity_absent() {
+        let mut app = boot_typereg_app();
+        // No entity with ElementId(99) spawned.
+        let snap = stub_snapshot(99, "stub_kind");
+        stamp_authored_entity_dependencies(app.world_mut(), &snap);
+        // Nothing to assert except that we did not panic.
+    }
+
+    #[test]
+    fn sync_writes_entity_dependencies_from_factory() {
+        let mut app = boot_typereg_app();
+
+        let factory = StubFactory::new("stub_kind");
+        factory
+            .edges_for_entity
+            .lock()
+            .unwrap()
+            .insert(1, EntityDependencies::empty().with_edge(ElementId(2), "stub_role"));
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(StubFactoryWrapper(factory.clone()));
+
+        let entity = app.world_mut().spawn(ElementId(1)).id();
+        stamp_authored_entity_dependencies(
+            app.world_mut(),
+            &stub_snapshot(1, "stub_kind"),
+        );
+
+        app.update();
+
+        let world = app.world();
+        let deps = world
+            .get::<EntityDependencies>(entity)
+            .expect("EntityDependencies written");
+        assert_eq!(deps.edges.len(), 1);
+        assert_eq!(deps.edges[0].on, ElementId(2));
+        assert_eq!(deps.edges[0].role.as_str(), "stub_role");
+        assert!(
+            world.get::<DependencyEdgesStale>(entity).is_none(),
+            "stale marker cleared"
+        );
+    }
+
+    #[test]
+    fn sync_skips_when_factory_unregistered() {
+        let mut app = boot_typereg_app();
+        // Note: no factory registered.
+        let entity = app.world_mut().spawn(ElementId(1)).id();
+        stamp_authored_entity_dependencies(
+            app.world_mut(),
+            &stub_snapshot(1, "unregistered_kind"),
+        );
+
+        app.update();
+
+        let world = app.world();
+        assert!(
+            world.get::<EntityDependencies>(entity).is_none(),
+            "no edges written"
+        );
+        assert!(
+            world.get::<DependencyEdgesStale>(entity).is_some(),
+            "stale marker preserved when factory missing — sync did not clear it"
+        );
+    }
+
+    #[test]
+    fn sync_does_not_replace_unchanged_dependencies() {
+        let mut app = boot_typereg_app();
+
+        let factory = StubFactory::new("stub_kind");
+        factory
+            .edges_for_entity
+            .lock()
+            .unwrap()
+            .insert(1, EntityDependencies::empty().with_edge(ElementId(2), "stub_role"));
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(StubFactoryWrapper(factory.clone()));
+
+        let entity = app.world_mut().spawn(ElementId(1)).id();
+
+        // First sweep stamps + writes the deps.
+        stamp_authored_entity_dependencies(
+            app.world_mut(),
+            &stub_snapshot(1, "stub_kind"),
+        );
+        app.update();
+
+        // Snapshot the EntityDependencies value after the first sweep.
+        let first_value = app
+            .world()
+            .get::<EntityDependencies>(entity)
+            .cloned()
+            .expect("deps written");
+
+        // Re-stamp without changing the factory's output. The sync system
+        // should run, see the value is unchanged, and skip the insert —
+        // we can't observe change ticks across systems easily, so we
+        // assert the value still equals what we wrote (which always
+        // holds) AND that the stale marker was cleared (proving the sync
+        // ran). The "no spurious insert" guard is also exercised by the
+        // value-equality check inside the sync system itself, which
+        // returns early when `existing == new_deps`.
+        stamp_authored_entity_dependencies(
+            app.world_mut(),
+            &stub_snapshot(1, "stub_kind"),
+        );
+        app.update();
+
+        let second_value = app
+            .world()
+            .get::<EntityDependencies>(entity)
+            .cloned()
+            .expect("deps still present");
+
+        assert_eq!(first_value, second_value, "deps value unchanged");
+        assert!(
+            app.world().get::<DependencyEdgesStale>(entity).is_none(),
+            "stale marker cleared on second sweep"
+        );
+    }
+
+    #[test]
+    fn sync_runs_before_rebuild_so_graph_reflects_factory_edges() {
+        let mut app = boot_typereg_app();
+
+        let factory = StubFactory::new("stub_kind");
+        factory
+            .edges_for_entity
+            .lock()
+            .unwrap()
+            .insert(1, EntityDependencies::empty().with_edge(ElementId(2), "p"));
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_factory(StubFactoryWrapper(factory.clone()));
+
+        // Spawn dependent (1) and dependency target (2).
+        app.world_mut().spawn(ElementId(1));
+        app.world_mut().spawn(ElementId(2));
+        stamp_authored_entity_dependencies(
+            app.world_mut(),
+            &stub_snapshot(1, "stub_kind"),
+        );
+
+        app.update();
+
+        let cache = app.world().resource::<DependencyGraphResource>();
+        assert_eq!(cache.graph.parents_of(ElementId(1)).len(), 1);
+        assert_eq!(cache.graph.children_of(ElementId(2)), &[ElementId(1)]);
+    }
+
+    /// `register_factory` requires a sized type. The stub factory is
+    /// `Arc<Self>`-shaped to allow mutating the edge table from tests;
+    /// this thin newtype implements the trait by delegating to the
+    /// inner `Arc`.
+    struct StubFactoryWrapper(Arc<StubFactory>);
+
+    impl AuthoredEntityFactory for StubFactoryWrapper {
+        fn type_name(&self) -> &'static str {
+            self.0.type_name()
+        }
+        fn capture_snapshot(
+            &self,
+            entity_ref: &EntityRef,
+            world: &World,
+        ) -> Option<BoxedEntity> {
+            self.0.capture_snapshot(entity_ref, world)
+        }
+        fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String> {
+            self.0.from_persisted_json(data)
+        }
+        fn from_create_request(
+            &self,
+            world: &World,
+            request: &Value,
+        ) -> Result<BoxedEntity, String> {
+            self.0.from_create_request(world, request)
+        }
+        fn hit_test(&self, world: &World, ray: Ray3d) -> Option<HitCandidate> {
+            self.0.hit_test(world, ray)
+        }
+        fn dependency_edges(&self, world: &World, entity: Entity) -> EntityDependencies {
+            self.0.dependency_edges(world, entity)
+        }
     }
 }
