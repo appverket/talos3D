@@ -606,6 +606,18 @@ impl AuthoredEntityFactory for LinearArrayFactory {
     fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
         hit_test_array(world, ray)
     }
+
+    fn dependency_edges(
+        &self,
+        world: &World,
+        entity: Entity,
+    ) -> crate::plugins::modeling::dependency_graph::EntityDependencies {
+        use crate::plugins::modeling::dependency_graph::EntityDependencies;
+        let Some(node) = world.get::<LinearArrayNode>(entity) else {
+            return EntityDependencies::empty();
+        };
+        EntityDependencies::empty().with_edge(node.source, "array_source")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +702,18 @@ impl AuthoredEntityFactory for PolarArrayFactory {
 
     fn hit_test(&self, world: &World, ray: bevy::math::Ray3d) -> Option<HitCandidate> {
         hit_test_array(world, ray)
+    }
+
+    fn dependency_edges(
+        &self,
+        world: &World,
+        entity: Entity,
+    ) -> crate::plugins::modeling::dependency_graph::EntityDependencies {
+        use crate::plugins::modeling::dependency_graph::EntityDependencies;
+        let Some(node) = world.get::<PolarArrayNode>(entity) else {
+            return EntityDependencies::empty();
+        };
+        EntityDependencies::empty().with_edge(node.source, "array_source")
     }
 }
 
@@ -1076,4 +1100,60 @@ fn try_get_primitive_triangles<P: crate::plugins::modeling::primitive_trait::Pri
         .unwrap_or_default();
     let mesh = primitive.to_editable_mesh(rotation.0)?;
     Some(bsp_csg::triangles_from_editable_mesh(&mesh))
+}
+
+#[cfg(test)]
+mod typereg_tests {
+    use super::*;
+    use crate::capability_registry::AuthoredEntityFactory;
+    use crate::plugins::modeling::dependency_graph::EntityDependencies;
+    use bevy::prelude::*;
+
+    #[test]
+    fn linear_array_factory_declares_edge_on_source() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(10),
+                LinearArrayNode {
+                    source: ElementId(20),
+                    count: 3,
+                    spacing: Vec3::X,
+                },
+            ))
+            .id();
+
+        let edges = LinearArrayFactory.dependency_edges(&world, entity);
+        let expected = EntityDependencies::empty().with_edge(ElementId(20), "array_source");
+        assert_eq!(edges, expected);
+    }
+
+    #[test]
+    fn linear_array_factory_returns_empty_when_component_missing() {
+        let mut world = World::new();
+        let entity = world.spawn(ElementId(10)).id();
+        let edges = LinearArrayFactory.dependency_edges(&world, entity);
+        assert_eq!(edges, EntityDependencies::empty());
+    }
+
+    #[test]
+    fn polar_array_factory_declares_edge_on_source() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(11),
+                PolarArrayNode {
+                    source: ElementId(21),
+                    count: 6,
+                    axis: Vec3::Z,
+                    total_angle_degrees: 360.0,
+                    center: Vec3::ZERO,
+                },
+            ))
+            .id();
+
+        let edges = PolarArrayFactory.dependency_edges(&world, entity);
+        let expected = EntityDependencies::empty().with_edge(ElementId(21), "array_source");
+        assert_eq!(edges, expected);
+    }
 }

@@ -698,6 +698,18 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             }
         }
     }
+
+    fn dependency_edges(
+        &self,
+        world: &World,
+        entity: Entity,
+    ) -> crate::plugins::modeling::dependency_graph::EntityDependencies {
+        use crate::plugins::modeling::dependency_graph::EntityDependencies;
+        let Some(feature) = world.get::<FaceProfileFeature>(entity) else {
+            return EntityDependencies::empty();
+        };
+        EntityDependencies::empty().with_edge(feature.parent, "profile_parent")
+    }
 }
 
 pub fn make_face_profile_feature_snapshot(
@@ -1160,5 +1172,43 @@ mod tests {
             hit.entity, parent_entity,
             "a hit on the inherited box surface should proxy selection back to the parent"
         );
+    }
+}
+
+#[cfg(test)]
+mod typereg_tests {
+    use super::*;
+    use crate::capability_registry::AuthoredEntityFactory;
+    use crate::plugins::modeling::dependency_graph::EntityDependencies;
+    use crate::plugins::modeling::profile::Profile2d;
+    use bevy::prelude::*;
+
+    #[test]
+    fn face_profile_feature_factory_declares_edge_on_parent() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(50),
+                FaceProfileFeature {
+                    parent: ElementId(60),
+                    anchor_origin: Vec3::ZERO,
+                    profile: Profile2d::rectangle(1.0, 1.0),
+                    depth: 0.5,
+                    support_face: None,
+                },
+            ))
+            .id();
+
+        let edges = FaceProfileFeatureFactory.dependency_edges(&world, entity);
+        let expected = EntityDependencies::empty().with_edge(ElementId(60), "profile_parent");
+        assert_eq!(edges, expected);
+    }
+
+    #[test]
+    fn face_profile_feature_factory_returns_empty_when_component_missing() {
+        let mut world = World::new();
+        let entity = world.spawn(ElementId(50)).id();
+        let edges = FaceProfileFeatureFactory.dependency_edges(&world, entity);
+        assert_eq!(edges, EntityDependencies::empty());
     }
 }

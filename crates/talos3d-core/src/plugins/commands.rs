@@ -10,6 +10,7 @@ use crate::{
         identity::{ElementId, ElementIdAllocator},
         modeling::{
             definition::{Definition, DefinitionRegistry},
+            dependency_graph::stamp_authored_entity_dependencies,
             generic_snapshot::PrimitiveSnapshot,
             mesh_generation::NeedsMesh,
             occurrence::ChangedDefinitions,
@@ -155,6 +156,7 @@ impl EditorCommand for CreateEntityHistoryCommand {
 
     fn apply(&mut self, world: &mut World) {
         self.snapshot.apply_to(world);
+        stamp_authored_entity_dependencies(world, &self.snapshot);
     }
 
     fn undo(&mut self, world: &mut World) {
@@ -180,6 +182,7 @@ impl EditorCommand for DeleteEntitiesHistoryCommand {
     fn undo(&mut self, world: &mut World) {
         for snapshot in &self.snapshots {
             snapshot.apply_to(world);
+            stamp_authored_entity_dependencies(world, snapshot);
         }
     }
 }
@@ -212,6 +215,7 @@ fn apply_snapshot_changes(world: &mut World, target: &[BoxedEntity], previous: &
 
     for snapshot in target {
         snapshot.apply_with_previous(world, previous_by_id.get(&snapshot.element_id()).copied());
+        stamp_authored_entity_dependencies(world, snapshot);
     }
 }
 
@@ -419,6 +423,7 @@ impl EditorCommand for DeleteWithAssemblyRepairCommand {
         // First restore deleted entities.
         for snapshot in &self.delete_snapshots {
             snapshot.apply_to(world);
+            stamp_authored_entity_dependencies(world, snapshot);
         }
         // Then restore original assembly membership.
         apply_snapshot_changes(world, &self.repair_before, &self.repair_after);
