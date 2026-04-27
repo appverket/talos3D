@@ -367,6 +367,20 @@ impl AuthoredEntityFactory for CsgFactory {
         }
         best
     }
+
+    fn dependency_edges(
+        &self,
+        world: &World,
+        entity: Entity,
+    ) -> crate::plugins::modeling::dependency_graph::EntityDependencies {
+        use crate::plugins::modeling::dependency_graph::EntityDependencies;
+        let Some(node) = world.get::<CsgNode>(entity) else {
+            return EntityDependencies::empty();
+        };
+        EntityDependencies::empty()
+            .with_edge(node.operand_a, "csg_operand_a")
+            .with_edge(node.operand_b, "csg_operand_b")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -762,4 +776,41 @@ fn face_hit_test_primitive<P: crate::plugins::modeling::primitive_trait::Primiti
         normal: face.normal,
         centroid: mesh.face_centroid(face_idx),
     })
+}
+
+#[cfg(test)]
+mod typereg_tests {
+    use super::*;
+    use crate::capability_registry::AuthoredEntityFactory;
+    use crate::plugins::modeling::dependency_graph::EntityDependencies;
+    use bevy::prelude::*;
+
+    #[test]
+    fn csg_factory_declares_two_named_role_edges() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(70),
+                CsgNode {
+                    operand_a: ElementId(80),
+                    operand_b: ElementId(81),
+                    op: BooleanOp::Difference,
+                },
+            ))
+            .id();
+
+        let edges = CsgFactory.dependency_edges(&world, entity);
+        let expected = EntityDependencies::empty()
+            .with_edge(ElementId(80), "csg_operand_a")
+            .with_edge(ElementId(81), "csg_operand_b");
+        assert_eq!(edges, expected);
+    }
+
+    #[test]
+    fn csg_factory_returns_empty_when_component_missing() {
+        let mut world = World::new();
+        let entity = world.spawn(ElementId(70)).id();
+        let edges = CsgFactory.dependency_edges(&world, entity);
+        assert_eq!(edges, EntityDependencies::empty());
+    }
 }
