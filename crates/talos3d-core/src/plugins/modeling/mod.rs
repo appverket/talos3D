@@ -5,6 +5,7 @@ pub mod bsp_csg;
 pub mod composite_solid;
 pub mod csg;
 pub mod definition;
+pub mod dependency_graph;
 pub mod editable_mesh;
 pub mod exchange_identity;
 pub mod fillet;
