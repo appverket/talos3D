@@ -229,15 +229,9 @@ fn apply_layout_on_host_relations(world: &mut World) {
                     "center_offset_m".to_string(),
                     json!(placement.center_offset_m),
                 );
-                object
-                    .entry("sill_height".to_string())
-                    .or_insert(json!(params.sill_height_m));
-                object
-                    .entry("window_height_m".to_string())
-                    .or_insert(json!(params.member_height_m));
-                object
-                    .entry("window_width_m".to_string())
-                    .or_insert(json!(params.member_width_m));
+                object.insert("sill_height".to_string(), json!(params.sill_height_m));
+                object.insert("window_height_m".to_string(), json!(params.member_height_m));
+                object.insert("window_width_m".to_string(), json!(params.member_width_m));
                 object.insert("layout_on_host_id".to_string(), json!(layout_relation_id.0));
             }
             writes.push((hosted_entity, next));
@@ -528,7 +522,12 @@ mod tests {
             20,
             1,
             "hosted_on",
-            json!({ "opening_element_id": 2 }),
+            json!({
+                "opening_element_id": 2,
+                "sill_height": 0.5,
+                "window_height_m": 0.6,
+                "window_width_m": 0.7
+            }),
         );
         spawn_relation(
             &mut world,
