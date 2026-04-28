@@ -19,10 +19,12 @@ use crate::{
                 SpherePrimitive, TriangleMesh,
             },
             snapshots::{PolylineSnapshot, TriangleMeshSnapshot},
-            void_declaration::{OpeningContext, VoidLink, VoidPlacementOutcome},
         },
     },
 };
+
+#[cfg(feature = "model-api")]
+use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink, VoidPlacementOutcome};
 
 pub struct CommandPlugin;
 
@@ -608,12 +610,14 @@ pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEnti
         }));
 }
 
+#[cfg(feature = "model-api")]
 struct ApplyVoidPlacementHistoryCommand {
     outcome: VoidPlacementOutcome,
     prior_opening_context: Option<OpeningContext>,
     prior_filling_link: Option<VoidLink>,
 }
 
+#[cfg(feature = "model-api")]
 impl EditorCommand for ApplyVoidPlacementHistoryCommand {
     fn label(&self) -> &'static str {
         "Apply void placement"
@@ -663,6 +667,7 @@ impl EditorCommand for ApplyVoidPlacementHistoryCommand {
     }
 }
 
+#[cfg(feature = "model-api")]
 pub(crate) fn enqueue_apply_void_placement(world: &mut World, outcome: VoidPlacementOutcome) {
     world
         .resource_mut::<PendingCommandQueue>()
