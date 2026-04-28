@@ -279,15 +279,28 @@ impl AuthoredEntity for RelationSnapshot {
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.relation.target.0 as f32)),
             ),
+            property_field(
+                "parameters",
+                PropertyValueKind::Text,
+                Some(PropertyValue::Text(self.relation.parameters.to_string())),
+            ),
         ]
     }
 
-    fn set_property_json(
-        &self,
-        _property_name: &str,
-        _value: &Value,
-    ) -> Result<BoxedEntity, String> {
-        Err(invalid_property_error("semantic_relation", &[]))
+    fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        match property_name {
+            "parameters" => {
+                snapshot.relation.parameters = if let Some(text) = value.as_str() {
+                    serde_json::from_str(text)
+                        .map_err(|error| format!("parameters must be valid JSON: {error}"))?
+                } else {
+                    value.clone()
+                };
+            }
+            _ => return Err(invalid_property_error("semantic_relation", &["parameters"])),
+        }
+        Ok(snapshot.into())
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
@@ -633,4 +646,49 @@ pub fn find_assemblies_for_member(world: &World, member_id: ElementId) -> Vec<El
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authored_entity::AuthoredEntity;
+    use serde_json::json;
+
+    fn relation_snapshot() -> RelationSnapshot {
+        RelationSnapshot {
+            element_id: ElementId(1),
+            relation: SemanticRelation {
+                source: ElementId(2),
+                target: ElementId(3),
+                relation_type: "layout_on_host".to_string(),
+                parameters: json!({ "start_offset_m": 1.0 }),
+            },
+        }
+    }
+
+    #[test]
+    fn relation_parameters_are_editable_as_json_values() {
+        let updated = relation_snapshot()
+            .set_property_json("parameters", &json!({ "start_offset_m": 2.0 }))
+            .expect("parameters should be editable");
+        let relation = updated
+            .0
+            .as_any()
+            .downcast_ref::<RelationSnapshot>()
+            .expect("updated snapshot should still be a relation");
+        assert_eq!(relation.relation.parameters["start_offset_m"], json!(2.0));
+    }
+
+    #[test]
+    fn relation_parameters_are_editable_as_json_text() {
+        let updated = relation_snapshot()
+            .set_property_json("parameters", &json!("{\"total_width_m\":5.0}"))
+            .expect("parameters should accept JSON text");
+        let relation = updated
+            .0
+            .as_any()
+            .downcast_ref::<RelationSnapshot>()
+            .expect("updated snapshot should still be a relation");
+        assert_eq!(relation.relation.parameters["total_width_m"], json!(5.0));
+    }
 }
