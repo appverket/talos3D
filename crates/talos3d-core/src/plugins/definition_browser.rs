@@ -608,19 +608,66 @@ fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, 
         return Ok(identity.definition_id.clone());
     }
 
+    if let Some(relation) = world.get::<SemanticRelation>(selected) {
+        if relation.relation_type == "hosted_on" {
+            if let Some(definition_id) = occurrence_definition_for_element(world, relation.source) {
+                return Ok(definition_id);
+            }
+        }
+    }
+
     if let Some(generated) =
         world.get::<crate::plugins::modeling::occurrence::GeneratedOccurrencePart>(selected)
     {
-        let owner = generated.owner;
-        let mut owner_query = world.query::<(&ElementId, &OccurrenceIdentity)>();
-        if let Some(definition_id) = owner_query.iter(world).find_map(|(element_id, identity)| {
-            (*element_id == owner).then_some(identity.definition_id.clone())
-        }) {
+        if let Some(definition_id) = occurrence_definition_for_element(world, generated.owner) {
+            return Ok(definition_id);
+        }
+    }
+
+    if let Some(opening_id) = world.get::<ElementId>(selected).copied() {
+        if let Some(definition_id) = occurrence_definition_for_hosted_opening(world, opening_id) {
             return Ok(definition_id);
         }
     }
 
     Err("Selected entity is not an occurrence".to_string())
+}
+
+fn occurrence_definition_for_element(
+    world: &mut World,
+    occurrence_id: ElementId,
+) -> Option<DefinitionId> {
+    let mut owner_query = world.query::<(&ElementId, &OccurrenceIdentity)>();
+    owner_query.iter(world).find_map(|(element_id, identity)| {
+        (*element_id == occurrence_id).then_some(identity.definition_id.clone())
+    })
+}
+
+fn occurrence_definition_for_hosted_opening(
+    world: &mut World,
+    opening_id: ElementId,
+) -> Option<DefinitionId> {
+    let hosted_sources = {
+        let mut relation_query = world.query::<&SemanticRelation>();
+        relation_query
+            .iter(world)
+            .filter_map(|relation| {
+                if relation.relation_type != "hosted_on" {
+                    return None;
+                }
+                let relation_opening_id = relation
+                    .parameters
+                    .get("opening_element_id")
+                    .and_then(Value::as_u64)
+                    .map(ElementId);
+                (relation_opening_id == Some(opening_id)).then_some(relation.source)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    hosted_sources
+        .into_iter()
+        .find_map(|source| occurrence_definition_for_element(world, source))
 }
 
 fn wall_axis_from_value(value: &Value) -> Option<Vec3> {
