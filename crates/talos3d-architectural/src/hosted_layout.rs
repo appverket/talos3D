@@ -18,6 +18,7 @@ use talos3d_core::plugins::{
     identity::ElementId,
     modeling::{
         assembly::SemanticRelation,
+        definition::DefinitionRegistry,
         mesh_generation::NeedsMesh,
         occurrence::{NeedsEval, OccurrenceIdentity},
     },
@@ -253,7 +254,7 @@ fn apply_layout_on_host_relations(world: &mut World) {
 fn apply_hosted_on_relations(world: &mut World) {
     let walls = collect_walls(world);
     let relations = collect_relations(world);
-    let mut transform_writes: Vec<(Entity, Transform, bool, f32)> = Vec::new();
+    let mut transform_writes: Vec<(Entity, Transform, Vec<(String, Value)>)> = Vec::new();
     let mut opening_writes: Vec<(Entity, Entity, ElementId, f32, f32, f32, f32)> = Vec::new();
 
     for (_, relation_id, relation) in relations
@@ -298,8 +299,14 @@ fn apply_hosted_on_relations(world: &mut World) {
         let center = point_on_wall(wall, position, sill_height + window_height * 0.5);
         let transform = Transform::from_translation(center).with_rotation(wall_rotation(wall));
         if let Some(source_entity) = find_entity_by_element_id(world, relation.source) {
-            let is_occurrence = world.get::<OccurrenceIdentity>(source_entity).is_some();
-            transform_writes.push((source_entity, transform, is_occurrence, wall.thickness));
+            let occurrence_overrides = hosted_occurrence_override_writes(
+                world,
+                source_entity,
+                wall.thickness,
+                window_width,
+                window_height,
+            );
+            transform_writes.push((source_entity, transform, occurrence_overrides));
         }
 
         if let Some(opening_id) = relation
@@ -322,14 +329,14 @@ fn apply_hosted_on_relations(world: &mut World) {
         }
     }
 
-    for (entity, transform, is_occurrence, wall_thickness) in transform_writes {
+    for (entity, transform, occurrence_overrides) in transform_writes {
         let mut entity_mut = world.entity_mut(entity);
         entity_mut.insert(transform);
-        if is_occurrence {
+        if !occurrence_overrides.is_empty() {
             if let Some(mut identity) = entity_mut.get_mut::<OccurrenceIdentity>() {
-                identity
-                    .overrides
-                    .set("wall_thickness".to_string(), json!(wall_thickness));
+                for (name, value) in occurrence_overrides {
+                    identity.overrides.set(name, value);
+                }
             }
             entity_mut.insert(NeedsEval);
         }
@@ -352,6 +359,41 @@ fn apply_hosted_on_relations(world: &mut World) {
         ));
         world.entity_mut(wall_entity).insert(NeedsMesh);
     }
+}
+
+fn hosted_occurrence_override_writes(
+    world: &World,
+    entity: Entity,
+    wall_thickness: f32,
+    window_width: f32,
+    window_height: f32,
+) -> Vec<(String, Value)> {
+    let Some(identity) = world.get::<OccurrenceIdentity>(entity) else {
+        return Vec::new();
+    };
+    let Some(definitions) = world.get_resource::<DefinitionRegistry>() else {
+        return Vec::new();
+    };
+    let Some(definition) = definitions.get(&identity.definition_id) else {
+        return Vec::new();
+    };
+
+    let mut writes = Vec::new();
+    for (parameter_name, value) in [
+        ("wall_thickness", wall_thickness),
+        ("overall_width", window_width),
+        ("overall_height", window_height),
+    ] {
+        if definition
+            .interface
+            .parameters
+            .get(parameter_name)
+            .is_some()
+        {
+            writes.push((parameter_name.to_string(), json!(value)));
+        }
+    }
+    writes
 }
 
 fn collect_walls(world: &mut World) -> HashMap<ElementId, (Entity, Wall)> {
@@ -393,6 +435,10 @@ fn ensure_object(value: &mut Value) {
 mod tests {
     use super::*;
     use crate::components::{BimData, OpeningKind};
+    use talos3d_core::plugins::modeling::definition::{
+        Definition, DefinitionId, DefinitionKind, Interface, OverridePolicy, ParamType,
+        ParameterDef, ParameterMetadata, ParameterSchema,
+    };
 
     fn spawn_relation(
         world: &mut World,
@@ -445,6 +491,11 @@ mod tests {
     #[test]
     fn layout_relation_writes_hosted_on_params_and_opening() {
         let mut world = World::new();
+        let definition_id = DefinitionId("test.window".to_string());
+        world.insert_resource(DefinitionRegistry::default());
+        world
+            .resource_mut::<DefinitionRegistry>()
+            .insert(test_window_definition(definition_id.clone()));
         let wall = Wall {
             start: Vec2::new(0.0, 0.0),
             end: Vec2::new(10.0, 0.0),
@@ -466,7 +517,11 @@ mod tests {
             },
             BimData::default(),
         ));
-        world.spawn((ElementId(20), Transform::default()));
+        world.spawn((
+            ElementId(20),
+            Transform::default(),
+            OccurrenceIdentity::new(definition_id, 1),
+        ));
         spawn_relation(
             &mut world,
             30,
@@ -504,6 +559,12 @@ mod tests {
         let parent_wall = world.get::<ParentWall>(opening_entity).unwrap();
         assert_eq!(opening.sill_height, 1.0);
         assert_eq!(parent_wall.position_along_wall, 0.15);
+
+        let occurrence_entity = find_entity_by_element_id(&mut world, ElementId(20)).unwrap();
+        let occurrence = world.get::<OccurrenceIdentity>(occurrence_entity).unwrap();
+        assert_override_near(occurrence, "overall_width", 1.0);
+        assert_override_near(occurrence, "overall_height", 1.2);
+        assert_override_near(occurrence, "wall_thickness", 0.3);
     }
 
     fn find_relation(world: &mut World, relation_id: ElementId) -> SemanticRelation {
@@ -512,5 +573,46 @@ mod tests {
             .iter(world)
             .find_map(|(id, relation)| (*id == relation_id).then_some(relation.clone()))
             .expect("relation should exist")
+    }
+
+    fn test_window_definition(definition_id: DefinitionId) -> Definition {
+        Definition {
+            id: definition_id,
+            base_definition_id: None,
+            name: "Test Window".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![
+                    numeric_parameter("overall_width"),
+                    numeric_parameter("overall_height"),
+                    numeric_parameter("wall_thickness"),
+                ]),
+                void_declaration: None,
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            domain_data: Value::Null,
+        }
+    }
+
+    fn numeric_parameter(name: &str) -> ParameterDef {
+        ParameterDef {
+            name: name.to_string(),
+            param_type: ParamType::Numeric,
+            default_value: json!(0.0),
+            override_policy: OverridePolicy::Overridable,
+            metadata: ParameterMetadata::default(),
+        }
+    }
+
+    fn assert_override_near(occurrence: &OccurrenceIdentity, name: &str, expected: f64) {
+        let actual = occurrence
+            .overrides
+            .get(name)
+            .and_then(Value::as_f64)
+            .expect("override should be numeric");
+        assert!((actual - expected).abs() < 1e-5);
     }
 }
