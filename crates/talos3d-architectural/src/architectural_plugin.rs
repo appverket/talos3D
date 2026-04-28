@@ -18,6 +18,7 @@ use talos3d_capability_api::{
 
 use crate::{
     create_commands::ArchitecturalCreateCommandPlugin,
+    hosted_layout::evaluate_hosted_layouts_and_placements,
     mesh_generation, rules,
     snapshots::{OpeningFactory, WallFactory},
     tools,
@@ -135,6 +136,27 @@ impl Plugin for ArchitecturalPlugin {
             participates_in_dependency_graph: true,
         })
         .register_relation_type(RelationTypeDescriptor {
+            relation_type: "layout_on_host".into(),
+            label: "Layout On Host".into(),
+            description: "Collection-level hosted layout that distributes hosted_on relations along a wall or wall segment.".into(),
+            valid_source_types: vec!["opening".into(), "occurrence".into(), "semantic_assembly".into()],
+            valid_target_types: vec!["wall".into()],
+            parameter_schema: serde_json::json!({
+                "properties": {
+                    "members": {"type": "array"},
+                    "mode": {"type": "string", "enum": ["fixed_start_total_width", "equal_spacing"]},
+                    "anchor": {"type": "string", "enum": ["left_edge", "center"]},
+                    "start_offset_m": {"type": "number"},
+                    "total_width_m": {"type": "number"},
+                    "member_width_m": {"type": "number"},
+                    "sill_height_m": {"type": "number"},
+                    "member_height_m": {"type": "number"}
+                },
+                "required": ["members", "start_offset_m", "total_width_m"]
+            }),
+            participates_in_dependency_graph: true,
+        })
+        .register_relation_type(RelationTypeDescriptor {
             relation_type: "bounds".into(),
             label: "Bounds".into(),
             description: "Element spatially bounds another (e.g. wall bounds room)".into(),
@@ -221,7 +243,13 @@ impl Plugin for ArchitecturalPlugin {
         .add_plugins(ArchitecturalCreateCommandPlugin)
         .add_plugins(mesh_generation::ArchitecturalMeshPlugin)
         .add_plugins(rules::ArchitecturalRulesPlugin)
-        .add_plugins(tools::ArchitecturalToolPlugin);
+        .add_plugins(tools::ArchitecturalToolPlugin)
+        .add_systems(
+            Update,
+            evaluate_hosted_layouts_and_placements
+                .before(talos3d_core::plugins::modeling::occurrence::evaluate_occurrences)
+                .in_set(talos3d_core::plugins::modeling::mesh_generation::EvaluationSet::Evaluate),
+        );
     }
 }
 
