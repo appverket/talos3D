@@ -45,7 +45,13 @@ const BOX_SELECT_CROSSING_BORDER: Color = Color::srgba(0.3, 1.0, 0.6, 0.8);
 const BOX_SELECT_DRAG_THRESHOLD: f32 = 5.0;
 const SELECTION_CLICK_SLOP_PX: f32 = 6.0;
 
-type SelectedGroupClickQueryItem = (Entity, &'static ElementId, Has<GroupMembers>, Has<CsgNode>);
+type SelectedCompositeClickQueryItem = (
+    Entity,
+    &'static ElementId,
+    Has<GroupMembers>,
+    Has<CsgNode>,
+    Has<OccurrenceIdentity>,
+);
 type BoxSelectEntityQueryItem = (
     Entity,
     &'static ElementId,
@@ -67,6 +73,8 @@ impl Plugin for SelectionPlugin {
             .init_resource::<BoxSelectState>()
             .init_resource::<SelectionPressCapture>()
             .init_resource::<PreviousGroupEditContext>()
+            .init_resource::<OccurrenceEditContext>()
+            .init_resource::<PreviousOccurrenceEditContext>()
             .add_systems(
                 Update,
                 (
@@ -308,10 +316,11 @@ struct GroupDoubleClickContext<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     time: Res<'w, Time<Real>>,
     tracker: ResMut<'w, DoubleClickTracker>,
-    selected_query: Query<'w, 's, SelectedGroupClickQueryItem, With<Selected>>,
+    selected_query: Query<'w, 's, SelectedCompositeClickQueryItem, With<Selected>>,
     ownership: Res<'w, InputOwnership>,
     egui_wants_input: Res<'w, EguiWantsInput>,
     edit_context: Res<'w, GroupEditContext>,
+    occurrence_edit_context: Res<'w, OccurrenceEditContext>,
     face_edit_context: ResMut<'w, FaceEditContext>,
 }
 
@@ -331,7 +340,7 @@ fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
         return;
     }
 
-    let (entity, element_id, is_group, is_csg) = selected[0];
+    let (entity, element_id, is_group, is_csg, is_occurrence) = selected[0];
 
     let now = cx.time.elapsed_secs_f64();
     let is_double_click = cx.tracker.last_click_entity == Some(entity)
@@ -349,6 +358,17 @@ fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
         let mut ctx = cx.edit_context.clone();
         ctx.enter(*element_id);
         cx.commands.insert_resource(ctx);
+        let mut occurrence_ctx = cx.occurrence_edit_context.clone();
+        occurrence_ctx.reset();
+        cx.commands.insert_resource(occurrence_ctx);
+        cx.commands.entity(entity).remove::<Selected>();
+    } else if is_occurrence {
+        let mut occurrence_ctx = cx.occurrence_edit_context.clone();
+        occurrence_ctx.enter(*element_id);
+        cx.commands.insert_resource(occurrence_ctx);
+        let mut group_ctx = cx.edit_context.clone();
+        group_ctx.reset();
+        cx.commands.insert_resource(group_ctx);
         cx.commands.entity(entity).remove::<Selected>();
     } else if is_csg {
         // Enter face editing mode on the CsgNode — operand faces are
@@ -366,17 +386,27 @@ fn handle_group_escape(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     edit_context: Res<GroupEditContext>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     face_edit_context: Res<FaceEditContext>,
     ownership: Res<InputOwnership>,
 ) {
-    if !ownership.is_idle() || edit_context.is_root() || face_edit_context.is_active() {
+    if !ownership.is_idle()
+        || (edit_context.is_root() && occurrence_edit_context.is_root())
+        || face_edit_context.is_active()
+    {
         return;
     }
 
     if keys.just_pressed(KeyCode::Escape) {
-        let mut ctx = edit_context.clone();
-        ctx.exit();
-        commands.insert_resource(ctx);
+        if !occurrence_edit_context.is_root() {
+            let mut ctx = occurrence_edit_context.clone();
+            ctx.exit();
+            commands.insert_resource(ctx);
+        } else {
+            let mut ctx = edit_context.clone();
+            ctx.exit();
+            commands.insert_resource(ctx);
+        }
         // Deselect all when exiting group
         // (deselection happens naturally since the next click will re-evaluate)
     }
@@ -405,7 +435,9 @@ fn handle_delete_shortcut(
 fn update_selection_status(
     selected_query: Query<(), With<Selected>>,
     edit_context: Res<GroupEditContext>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     group_query: Query<(&ElementId, &GroupMembers)>,
+    occurrence_query: Query<(&ElementId, &OccurrenceIdentity)>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
     let selection_count = selected_query.iter().count();
@@ -434,6 +466,26 @@ fn update_selection_status(
             };
         }
     }
+    if !occurrence_edit_context.is_root() {
+        let breadcrumb: Vec<&str> = occurrence_edit_context
+            .stack
+            .iter()
+            .filter_map(|id| {
+                occurrence_query
+                    .iter()
+                    .find(|(eid, _)| *eid == id)
+                    .map(|(_, identity)| identity.definition_id.as_str())
+            })
+            .collect();
+        let breadcrumb = breadcrumb.join(" > ");
+        if !breadcrumb.is_empty() {
+            summary = if summary.is_empty() {
+                format!("Editing Occurrence: {breadcrumb}")
+            } else {
+                format!("{summary} | Editing Occurrence: {breadcrumb}")
+            };
+        }
+    }
     status_bar_data.selection_summary = summary;
 }
 
@@ -442,10 +494,25 @@ fn draw_selected_outlines(
     selected_query: Query<Entity, With<Selected>>,
     registry: Res<CapabilityRegistry>,
     transform_state: Res<TransformState>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     mut gizmos: Gizmos,
 ) {
     let active_mode = transform_state.mode;
     let is_active_transform = !transform_state.is_idle();
+
+    if let Some(active_occurrence_id) = occurrence_edit_context.current_occurrence() {
+        if let Some(active_entity) = find_entity_by_element_id_ref(world, active_occurrence_id) {
+            if let Ok(active_ref) = world.get_entity(active_entity) {
+                if let Some(bounds) = occurrence_generated_part_bounds(world, active_ref) {
+                    draw_bounds_wireframe(
+                        &mut gizmos,
+                        &bounds,
+                        Color::srgb(0.2, 0.85, 1.0),
+                    );
+                }
+            }
+        }
+    }
 
     for entity in &selected_query {
         if !entity_is_visible(world, entity) {
@@ -1024,24 +1091,76 @@ struct PreviousGroupEditContext {
     stack: Vec<ElementId>,
 }
 
+#[derive(Resource, Debug, Clone, Default)]
+struct OccurrenceEditContext {
+    stack: Vec<ElementId>,
+}
+
+impl OccurrenceEditContext {
+    fn is_root(&self) -> bool {
+        self.stack.is_empty()
+    }
+
+    fn current_occurrence(&self) -> Option<ElementId> {
+        self.stack.last().copied()
+    }
+
+    fn enter(&mut self, occurrence_id: ElementId) {
+        self.stack.push(occurrence_id);
+    }
+
+    fn exit(&mut self) {
+        self.stack.pop();
+    }
+
+    fn reset(&mut self) {
+        self.stack.clear();
+    }
+}
+
+#[derive(Resource, Default)]
+struct PreviousOccurrenceEditContext {
+    stack: Vec<ElementId>,
+}
+
 const MUTED_ALPHA: f32 = 0.15;
 
 fn update_group_edit_muting(
     mut commands: Commands,
     edit_context: Res<GroupEditContext>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     mut previous: ResMut<PreviousGroupEditContext>,
-    entity_query: Query<(Entity, &ElementId, Has<GroupEditMuted>)>,
+    mut previous_occurrence: ResMut<PreviousOccurrenceEditContext>,
+    entity_query: Query<
+        (
+            Entity,
+            Option<&ElementId>,
+            Option<&GeneratedOccurrencePart>,
+            Has<GroupEditMuted>,
+        ),
+        Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+    >,
     group_query: Query<(&ElementId, &GroupMembers)>,
-    material_query: Query<(Entity, &ElementId, &MeshMaterial3d<StandardMaterial>)>,
+    material_query: Query<
+        (
+            Option<&ElementId>,
+            Option<&GeneratedOccurrencePart>,
+            &MeshMaterial3d<StandardMaterial>,
+        ),
+        Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+    >,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if edit_context.stack == previous.stack {
+    if edit_context.stack == previous.stack
+        && occurrence_edit_context.stack == previous_occurrence.stack
+    {
         return;
     }
     previous.stack = edit_context.stack.clone();
+    previous_occurrence.stack = occurrence_edit_context.stack.clone();
 
-    if edit_context.is_root() {
-        for (entity, _, is_muted) in &entity_query {
+    if edit_context.is_root() && occurrence_edit_context.is_root() {
+        for (entity, _, _, is_muted) in &entity_query {
             if is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
                     ec.remove::<GroupEditMuted>();
@@ -1057,12 +1176,20 @@ fn update_group_edit_muting(
             }
         }
     } else {
-        let active_group_id = edit_context.current_group().unwrap();
-        let active_members = collect_members_recursive(&group_query, active_group_id);
+        let active_group_id = edit_context.current_group();
+        let active_occurrence_id = occurrence_edit_context.current_occurrence();
+        let active_members = active_group_id
+            .map(|group_id| collect_members_recursive(&group_query, group_id))
+            .unwrap_or_default();
 
-        for (entity, element_id, is_muted) in &entity_query {
-            let is_active_member =
-                active_members.contains(element_id) || *element_id == active_group_id;
+        for (entity, element_id, generated_part, is_muted) in &entity_query {
+            let is_active_member = edit_entity_is_active(
+                element_id,
+                generated_part,
+                active_group_id,
+                active_occurrence_id,
+                &active_members,
+            );
 
             if is_active_member && is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
@@ -1075,8 +1202,14 @@ fn update_group_edit_muting(
             }
         }
 
-        for (_, element_id, mat_handle) in &material_query {
-            let is_muted = !active_members.contains(element_id) && *element_id != active_group_id;
+        for (element_id, generated_part, mat_handle) in &material_query {
+            let is_muted = !edit_entity_is_active(
+                element_id,
+                generated_part,
+                active_group_id,
+                active_occurrence_id,
+                &active_members,
+            );
 
             if let Some(mat) = materials.get_mut(mat_handle) {
                 if is_muted {
@@ -1089,6 +1222,36 @@ fn update_group_edit_muting(
             }
         }
     }
+}
+
+fn edit_entity_is_active(
+    element_id: Option<&ElementId>,
+    generated_part: Option<&GeneratedOccurrencePart>,
+    active_group_id: Option<ElementId>,
+    active_occurrence_id: Option<ElementId>,
+    active_group_members: &[ElementId],
+) -> bool {
+    if let Some(group_id) = active_group_id {
+        if let Some(element_id) = element_id {
+            if *element_id == group_id || active_group_members.contains(element_id) {
+                return true;
+            }
+        }
+    }
+
+    if let Some(occurrence_id) = active_occurrence_id {
+        if element_id.copied() == Some(occurrence_id) {
+            return true;
+        }
+        if generated_part
+            .map(|part| part.owner == occurrence_id)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn collect_members_recursive(
