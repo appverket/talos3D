@@ -6,4 +6,4 @@
 - task-id: codex-selection-hierarchy-cues-20260428
 - target base: main at 3dcd670
 - summary: Improve selection and hierarchy cues for occurrences/composite models.
-- status: active
+- status: awaiting-merge
