@@ -24,7 +24,10 @@ use crate::{
                 collect_group_members_recursive, find_group_for_member, GroupEditContext,
                 GroupEditMuted, GroupMembers,
             },
-            occurrence::GeneratedOccurrencePart,
+            occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
+            primitive_trait::Primitive,
+            primitives::ShapeRotation,
+            profile::ProfileExtrusion,
             profile_feature::{FaceProfileFeature, FeatureOperand},
         },
         tools::ActiveTool,
@@ -475,7 +478,53 @@ fn draw_selected_outlines(
         } else {
             SELECTION_HIGHLIGHT_COLOR
         };
+        if let Some(bounds) = occurrence_generated_part_bounds(world, entity_ref) {
+            draw_bounds_wireframe(&mut gizmos, &bounds, color);
+        }
         factory.draw_selection(world, entity, &mut gizmos, color);
+    }
+}
+
+fn occurrence_generated_part_bounds(
+    world: &World,
+    entity_ref: EntityRef<'_>,
+) -> Option<EntityBounds> {
+    if entity_ref.get::<OccurrenceIdentity>().is_none() {
+        return None;
+    }
+    let owner = entity_ref.get::<ElementId>().copied()?;
+    let mut query = world.try_query::<(
+        &GeneratedOccurrencePart,
+        &ProfileExtrusion,
+        Option<&ShapeRotation>,
+    )>()?;
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+
+    for (part, extrusion, rotation) in query.iter(world) {
+        if part.owner != owner {
+            continue;
+        }
+        let rotation = rotation
+            .map(|rotation| rotation.0)
+            .unwrap_or(Quat::IDENTITY);
+        if let Some(bounds) = extrusion.bounds(rotation) {
+            min = min.min(bounds.min);
+            max = max.max(bounds.max);
+            any = true;
+        }
+    }
+
+    any.then_some(EntityBounds { min, max })
+}
+
+fn draw_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Color) {
+    let corners = bounds.corners();
+    for i in 0..4 {
+        gizmos.line(corners[i], corners[(i + 1) % 4], color);
+        gizmos.line(corners[i + 4], corners[4 + (i + 1) % 4], color);
+        gizmos.line(corners[i], corners[i + 4], color);
     }
 }
 
