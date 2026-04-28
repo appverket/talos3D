@@ -44,8 +44,9 @@ use crate::{
         definition_browser::{
             execute_create_definition_draft, execute_derive_definition_draft,
             execute_instantiate_definition, execute_open_definition_draft,
-            execute_patch_definition_draft, execute_publish_definition_draft,
-            execute_toggle_definitions_browser, DefinitionSelectionContext, DefinitionsWindowState,
+            execute_open_selected_occurrence_definition, execute_patch_definition_draft,
+            execute_publish_definition_draft, execute_toggle_definitions_browser,
+            DefinitionSelectionContext, DefinitionsWindowState,
         },
         handles::arm_move_handles,
         identity::ElementId,
@@ -223,6 +224,28 @@ impl Plugin for ModelingPlugin {
                     capability_id: Some("modeling".to_string()),
                 },
                 execute_open_definition_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.open_selected_occurrence_definition".to_string(),
+                    label: "Open Occurrence Definition".to_string(),
+                    description: "Open the selected occurrence's definition as an editable draft"
+                        .to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some(
+                        "Navigate from a selected occurrence to its reusable definition"
+                            .to_string(),
+                    ),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_open_selected_occurrence_definition,
             )
             .register_command(
                 CommandDescriptor {

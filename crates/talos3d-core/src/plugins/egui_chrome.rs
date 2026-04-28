@@ -2491,6 +2491,10 @@ fn draw_viewport_context_menu(
                         materials_window_state.visible = true;
                         menu.open = false;
                     }
+                    item!(
+                        "Open Occurrence Definition",
+                        "modeling.open_selected_occurrence_definition"
+                    );
                     ui.separator();
                     item!(
                         "Zoom to Selection    \u{21e7}Home",
