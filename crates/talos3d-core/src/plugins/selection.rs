@@ -24,6 +24,7 @@ use crate::{
                 collect_group_members_recursive, find_group_for_member, GroupEditContext,
                 GroupEditMuted, GroupMembers,
             },
+            occurrence::GeneratedOccurrencePart,
             profile_feature::{FaceProfileFeature, FeatureOperand},
         },
         tools::ActiveTool,
@@ -177,8 +178,10 @@ fn handle_selection_click(world: &mut World) {
     // Skip muted entities (outside active group context)
     let hit_entity = hit_entity.filter(|entity| world.get::<GroupEditMuted>(*entity).is_none());
 
-    // Redirect member hits to their owning group relative to the active context
+    // Redirect generated occurrence geometry to its authored occurrence root,
+    // then redirect group members relative to the active context.
     let hit_entity = hit_entity.map(|entity| {
+        let entity = redirect_generated_occurrence_part_to_owner(world, entity);
         let edit_context = world.resource::<GroupEditContext>();
         if let Some(element_id) = world.get::<ElementId>(entity).copied() {
             redirect_hit_to_context_group(world, entity, element_id, edit_context)
@@ -273,6 +276,18 @@ fn handle_selection_click(world: &mut World) {
         }
         None => {}
     }
+}
+
+fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity) -> Entity {
+    let Some(generated) = world.get::<GeneratedOccurrencePart>(entity) else {
+        return entity;
+    };
+    let owner = generated.owner;
+    let mut query = world.query::<(Entity, &ElementId)>();
+    query
+        .iter(world)
+        .find_map(|(candidate, element_id)| (*element_id == owner).then_some(candidate))
+        .unwrap_or(entity)
 }
 
 #[derive(Resource, Default)]

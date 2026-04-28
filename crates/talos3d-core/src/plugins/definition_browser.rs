@@ -394,6 +394,26 @@ pub fn execute_open_definition_draft(
     })
 }
 
+pub fn execute_open_selected_occurrence_definition(
+    world: &mut World,
+    _: &Value,
+) -> Result<CommandResult, String> {
+    let definition_id = selected_occurrence_definition_id(world)?;
+    let output = execute_open_definition_draft(
+        world,
+        &json!({
+            "definition_id": definition_id.to_string(),
+        }),
+    )?;
+    if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
+        status.set_feedback(
+            format!("Opened occurrence definition '{}'", definition_id),
+            2.0,
+        );
+    }
+    Ok(output)
+}
+
 pub fn execute_derive_definition_draft(
     world: &mut World,
     parameters: &Value,
@@ -574,6 +594,33 @@ pub fn analyze_selection_snapshots(snapshots: &[BoxedEntity]) -> DefinitionSelec
         }
     }
     context
+}
+
+fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, String> {
+    let mut selected_query = world.query_filtered::<Entity, With<Selected>>();
+    let selected_entities: Vec<Entity> = selected_query.iter(world).collect();
+    if selected_entities.len() != 1 {
+        return Err("Select exactly one occurrence".to_string());
+    }
+
+    let selected = selected_entities[0];
+    if let Some(identity) = world.get::<OccurrenceIdentity>(selected) {
+        return Ok(identity.definition_id.clone());
+    }
+
+    if let Some(generated) =
+        world.get::<crate::plugins::modeling::occurrence::GeneratedOccurrencePart>(selected)
+    {
+        let owner = generated.owner;
+        let mut owner_query = world.query::<(&ElementId, &OccurrenceIdentity)>();
+        if let Some(definition_id) = owner_query.iter(world).find_map(|(element_id, identity)| {
+            (*element_id == owner).then_some(identity.definition_id.clone())
+        }) {
+            return Ok(definition_id);
+        }
+    }
+
+    Err("Selected entity is not an occurrence".to_string())
 }
 
 fn wall_axis_from_value(value: &Value) -> Option<Vec3> {
@@ -1140,6 +1187,7 @@ fn draw_definition_inspector(
                         definitions,
                         libraries,
                         drafts,
+                        pending,
                         &active_draft_id,
                         &active_draft,
                         status,
@@ -1208,6 +1256,26 @@ fn draw_definition_overview_tab(
     }
     if let Some(source_library_id) = &active_draft.source_library_id {
         ui.label(format!("Source library {}", source_library_id));
+    }
+    if definition_is_glazing(&active_draft.working_copy)
+        && ui.button("Set Glass Material").clicked()
+    {
+        let domain_data = domain_data_with_glass_material(&active_draft.working_copy.domain_data);
+        match apply_patch_to_draft(
+            definitions,
+            libraries,
+            drafts,
+            active_draft_id,
+            DefinitionPatch::SetDomainData {
+                value: domain_data.clone(),
+            },
+        ) {
+            Ok(()) => {
+                state.domain_data_buffer = pretty_json(&domain_data);
+                status.set_feedback("Glass material assigned".to_string(), 2.0);
+            }
+            Err(error) => status.set_feedback(error, 2.0),
+        }
     }
 
     ui.separator();
@@ -1477,6 +1545,7 @@ fn draw_definition_structure_tab(
     definitions: &DefinitionRegistry,
     libraries: &DefinitionLibraryRegistry,
     drafts: &mut DefinitionDraftRegistry,
+    pending: &mut PendingCommandInvocations,
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
     status: &mut StatusBarData,
@@ -1549,6 +1618,21 @@ fn draw_definition_structure_tab(
         ui.vertical(|ui| {
             if let Some(slot_id) = state.selected_slot_id.clone() {
                 ui.label(egui::RichText::new(&slot_id).strong());
+                if let Some(slot) = child_slots.iter().find(|slot| slot.slot_id == slot_id) {
+                    if ui.button("Open Child Definition").clicked() {
+                        let mut parameters = json!({
+                            "definition_id": slot.definition_id.to_string(),
+                        });
+                        if let Some(library_id) = &active_draft.source_library_id {
+                            parameters["library_id"] = json!(library_id.to_string());
+                        }
+                        queue_command_invocation_resource(
+                            pending,
+                            "modeling.open_definition_draft".to_string(),
+                            parameters,
+                        );
+                    }
+                }
                 ui.add(
                     egui::TextEdit::multiline(&mut state.slot_editor_buffer)
                         .desired_rows(18)
@@ -1917,6 +2001,38 @@ fn pretty_json<T: serde::Serialize>(value: &T) -> String {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
+fn definition_is_glazing(definition: &Definition) -> bool {
+    definition
+        .id
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("glazing")
+        || definition.name.to_ascii_lowercase().contains("glazing")
+}
+
+fn domain_data_with_glass_material(current: &Value) -> Value {
+    let mut domain_data = current.clone();
+    if !domain_data.is_object() {
+        domain_data = json!({});
+    }
+    let Some(root) = domain_data.as_object_mut() else {
+        return domain_data;
+    };
+    let architectural = root.entry("architectural").or_insert_with(|| json!({}));
+    if !architectural.is_object() {
+        *architectural = json!({});
+    }
+    if let Some(architectural) = architectural.as_object_mut() {
+        architectural.insert(
+            "material_assignment".to_string(),
+            json!({
+                "material_id": crate::plugins::materials::BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80
+            }),
+        );
+    }
+    domain_data
 }
 
 pub fn library_effective_definition(
