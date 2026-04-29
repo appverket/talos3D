@@ -18,7 +18,9 @@ use crate::{
             draft_effective_definition, preview_registry_for_draft, validate_draft,
             DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry, DefinitionPatch,
         },
-        definition_preview_scene::{draw_definition_3d_preview, DefinitionPreviewScene},
+        definition_preview_scene::{
+            draw_definition_3d_preview, DefinitionPreviewScene, PendingPreviewClick,
+        },
         history::apply_pending_history_commands,
         identity::{ElementId, ElementIdAllocator},
         modeling::{
@@ -129,6 +131,13 @@ pub struct DefinitionsWindowState {
     pub selected_draft_id: Option<String>,
     /// PP-DBUX2: unified selection for the Definition Editor.
     pub selected_node: DefinitionEditorNode,
+    /// PP-DBUX4: frame-local hover target in the property tree.
+    ///
+    /// Set to `Some(node)` while the pointer hovers a tree row and reset to
+    /// `None` at the start of each frame by `reset_hovered_node`.  Never
+    /// persists across frames — do not read this outside the same frame it
+    /// was written.
+    pub hovered_node: Option<DefinitionEditorNode>,
     /// PP-DBUX2: when true the center pane shows scoped JSON instead of the
     /// context editor.
     pub technical_view: bool,
@@ -435,13 +444,68 @@ pub fn execute_open_selected_occurrence_definition(
     world: &mut World,
     _: &Value,
 ) -> Result<CommandResult, String> {
-    let definition_id = selected_occurrence_definition_id(world)?;
+    let (definition_id, source_slot_path) =
+        selected_occurrence_definition_id_and_slot(world)?;
+
     let output = execute_open_definition_draft(
         world,
         &json!({
             "definition_id": definition_id.to_string(),
         }),
     )?;
+
+    // PP-DBUX4 D: when the editor was opened by clicking a generated part in
+    // the main viewport, auto-select the matching slot in the property tree.
+    // This is best-effort: if the slot path leaf does not exist in the opened
+    // definition's child slots, fall back to the definition root.
+    if let Some(slot_path) = source_slot_path {
+        // The `slot_path` may be nested (e.g. "glazing.left_pane"). The
+        // controlling definition is the child definition at the top-level
+        // slot, so its own slot list may not contain the nested segment.
+        // Use only the top-level segment when testing for a match.
+        let top_level_slot = slot_path
+            .split('.')
+            .next()
+            .unwrap_or(&slot_path)
+            .to_string();
+
+        // Verify the slot exists in the opened definition before committing
+        // to the selection — best-effort, fall through silently if not found.
+        let slot_exists = {
+            let definitions = world.resource::<DefinitionRegistry>();
+            let libraries = world.resource::<DefinitionLibraryRegistry>();
+            let drafts = world.resource::<DefinitionDraftRegistry>();
+            if let Some(active_draft_id) = &drafts.active_draft_id.clone() {
+                if let Some(draft) = drafts.get(active_draft_id) {
+                    let eff = crate::plugins::definition_authoring::draft_effective_definition(
+                        definitions, libraries, draft,
+                    );
+                    eff.ok().and_then(|def| {
+                        def.compound.map(|compound| {
+                            compound
+                                .child_slots
+                                .iter()
+                                .any(|s| s.slot_id == top_level_slot)
+                        })
+                    }).unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if slot_exists {
+            if let Some(mut state) = world.get_resource_mut::<DefinitionsWindowState>() {
+                state.selected_node =
+                    DefinitionEditorNode::Slot(top_level_slot);
+                state.technical_view_buffer.clear();
+                state.technical_view_error = None;
+            }
+        }
+    }
+
     if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
         status.set_feedback(
             format!("Opened occurrence definition '{}'", definition_id),
@@ -633,7 +697,16 @@ pub fn analyze_selection_snapshots(snapshots: &[BoxedEntity]) -> DefinitionSelec
     context
 }
 
-fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, String> {
+/// Return the controlling definition id for the single currently-selected
+/// entity, plus the slot path that led to it (populated when the selection is
+/// a [`GeneratedOccurrencePart`]).
+///
+/// The slot path is used by PP-DBUX4 to auto-select the matching slot in the
+/// Definition Editor property tree when the editor is opened from the main
+/// viewport.
+fn selected_occurrence_definition_id_and_slot(
+    world: &mut World,
+) -> Result<(DefinitionId, Option<String>), String> {
     let mut selected_query = world.query_filtered::<Entity, With<Selected>>();
     let selected_entities: Vec<Entity> = selected_query.iter(world).collect();
     if selected_entities.len() != 1 {
@@ -642,13 +715,13 @@ fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, 
 
     let selected = selected_entities[0];
     if let Some(identity) = world.get::<OccurrenceIdentity>(selected) {
-        return Ok(identity.definition_id.clone());
+        return Ok((identity.definition_id.clone(), None));
     }
 
     if let Some(relation) = world.get::<SemanticRelation>(selected) {
         if relation.relation_type == "hosted_on" {
             if let Some(definition_id) = occurrence_definition_for_element(world, relation.source) {
-                return Ok(definition_id);
+                return Ok((definition_id, None));
             }
         }
     }
@@ -664,12 +737,16 @@ fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, 
         // route before any one-off face/material override." This is what
         // makes a one-click material assignment to glazing reach every
         // pane in the project.
-        return Ok(generated.definition_id.clone());
+        //
+        // PP-DBUX4: also capture the slot path so the editor can auto-select
+        // the matching slot row when it opens.
+        let slot_path = generated.slot_path.clone();
+        return Ok((generated.definition_id.clone(), Some(slot_path)));
     }
 
     if let Some(opening_id) = world.get::<ElementId>(selected).copied() {
         if let Some(definition_id) = occurrence_definition_for_hosted_opening(world, opening_id) {
-            return Ok(definition_id);
+            return Ok((definition_id, None));
         }
     }
 
@@ -742,6 +819,7 @@ pub fn draw_definitions_window(
     cursor_world_pos: &CursorWorldPos,
     status: &mut StatusBarData,
     preview_scene: &DefinitionPreviewScene,
+    pending_click: &mut PendingPreviewClick,
 ) {
     if !state.visible {
         return;
@@ -1006,6 +1084,7 @@ pub fn draw_definitions_window(
                                         ui,
                                         contexts,
                                         preview_scene,
+                                        pending_click,
                                         DEFINITION_PREVIEW_HEIGHT,
                                     );
                                     ui.add_space(6.0);
@@ -1105,7 +1184,18 @@ pub fn draw_definitions_window(
                 });
         });
     state.visible = open;
-    draw_definition_editor(ctx, contexts, preview_scene, state, definitions, libraries, drafts, pending, status);
+    draw_definition_editor(
+        ctx,
+        contexts,
+        preview_scene,
+        pending_click,
+        state,
+        definitions,
+        libraries,
+        drafts,
+        pending,
+        status,
+    );
 }
 
 fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry) {
@@ -1228,6 +1318,7 @@ fn draw_definition_editor(
     ctx: &egui::Context,
     contexts: &mut EguiContexts,
     preview_scene: &DefinitionPreviewScene,
+    pending_click: &mut PendingPreviewClick,
     state: &mut DefinitionsWindowState,
     definitions: &DefinitionRegistry,
     libraries: &DefinitionLibraryRegistry,
@@ -1353,10 +1444,13 @@ fn draw_definition_editor(
                     |ui| {
                         ui.set_width(left_width);
                         // PP-DBUX3: real 3D occurrence preview rendered via RenderTarget::Image.
+                        // PP-DBUX4: pending_click is written here on primary click and consumed
+                        // by the `resolve_preview_click` Bevy system on the same frame.
                         draw_definition_3d_preview(
                             ui,
                             contexts,
                             preview_scene,
+                            pending_click,
                             DEFINITION_PREVIEW_HEIGHT,
                         );
                         ui.separator();
@@ -1561,14 +1655,19 @@ fn draw_property_tree(
                         )
                         .show_header(ui, |ui| {
                             ui.horizontal(|ui| {
-                                if ui
-                                    .selectable_label(slot_selected, &slot.slot_id)
-                                    .clicked()
-                                {
+                                let slot_response = ui
+                                    .selectable_label(slot_selected, &slot.slot_id);
+                                if slot_response.clicked() {
                                     state.selected_node =
                                         DefinitionEditorNode::Slot(slot.slot_id.clone());
                                     state.technical_view_buffer.clear();
                                     state.technical_view_error = None;
+                                }
+                                // PP-DBUX4 C: track hover for preview pulse highlight.
+                                if slot_response.hovered() {
+                                    state.hovered_node = Some(
+                                        DefinitionEditorNode::Slot(slot.slot_id.clone()),
+                                    );
                                 }
                                 ui.label(slot_secondary);
                             });

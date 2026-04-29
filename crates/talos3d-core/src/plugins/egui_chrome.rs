@@ -31,7 +31,7 @@ use crate::plugins::{
         draw_definitions_window, sync_definition_selection_context, DefinitionSelectionContext,
         DefinitionsWindowState,
     },
-    definition_preview_scene::DefinitionPreviewScene,
+    definition_preview_scene::{DefinitionPreviewScene, PendingPreviewClick},
     document_properties::DocumentProperties,
     drawing_export::ViewportExportState,
     identity::{ElementId, ElementIdAllocator},
@@ -788,6 +788,7 @@ struct ChromeData<'w, 's> {
     definition_draft_registry:
         ResMut<'w, crate::plugins::definition_authoring::DefinitionDraftRegistry>,
     definition_preview_scene: Res<'w, DefinitionPreviewScene>,
+    pending_preview_click: ResMut<'w, PendingPreviewClick>,
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
     selected_entities: Query<'w, 's, Entity, With<Selected>>,
@@ -998,6 +999,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &data.cursor_world_pos,
         &mut data.status_bar_data,
         &data.definition_preview_scene,
+        &mut data.pending_preview_click,
     );
     let selected_material_assignments: Vec<(u64, Option<MaterialAssignment>)> = data
         .selected_material_assignments

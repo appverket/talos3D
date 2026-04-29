@@ -39,6 +39,7 @@
 
 use bevy::{
     camera::{RenderTarget, visibility::RenderLayers},
+    gizmos::config::{GizmoConfigGroup, GizmoConfigStore},
     prelude::*,
     render::render_resource::{
         Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
@@ -50,11 +51,15 @@ use crate::plugins::{
     definition_authoring::{
         draft_effective_definition, DefinitionDraftRegistry,
     },
+    definition_browser::{DefinitionEditorNode, DefinitionsWindowState},
     identity::ElementId,
     modeling::{
         definition::{DefinitionId, DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap},
         mesh_generation::EvaluationSet,
-        occurrence::{NeedsEval, OccurrenceIdentity},
+        occurrence::{GeneratedOccurrencePart, NeedsEval, OccurrenceIdentity},
+        primitive_trait::Primitive as _,
+        primitives::ShapeRotation,
+        profile::ProfileExtrusion,
     },
 };
 
@@ -81,6 +86,27 @@ pub const PREVIEW_RENDER_LAYER: RenderLayers = RenderLayers::layer(1);
 /// serialised.
 pub const PREVIEW_ELEMENT_ID_SENTINEL: ElementId = ElementId(u64::MAX - 1);
 
+/// Selection highlight colour used for the selected slot's generated parts
+/// in the preview.  Matches the saturated orange used by the old 2D painter.
+const PREVIEW_HIGHLIGHT_COLOR: Color = Color::srgb(1.0, 0.62, 0.31);
+
+/// Hover pulse colour — same hue as the selection highlight but dimmed.
+/// Applied when the pointer hovers a slot row without clicking.
+const PREVIEW_HOVER_COLOR: Color = Color::srgba(1.0, 0.62, 0.31, 0.45);
+
+// ---------------------------------------------------------------------------
+// Gizmo group
+// ---------------------------------------------------------------------------
+
+/// Custom [`GizmoConfigGroup`] for the definition-preview slot-highlight
+/// wireframes.
+///
+/// Its `render_layers` is set to [`PREVIEW_RENDER_LAYER`] at startup so
+/// the gizmos are only visible through the preview camera and never leak
+/// into the main viewport.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct PreviewSelectionGizmos;
+
 // ---------------------------------------------------------------------------
 // Marker component
 // ---------------------------------------------------------------------------
@@ -95,7 +121,7 @@ pub const PREVIEW_ELEMENT_ID_SENTINEL: ElementId = ElementId(u64::MAX - 1);
 pub struct PreviewOnly;
 
 // ---------------------------------------------------------------------------
-// Resource
+// Resources
 // ---------------------------------------------------------------------------
 
 /// Tracks the state of the running definition preview scene.
@@ -117,6 +143,23 @@ pub struct DefinitionPreviewScene {
     pub occurrence_root: Entity,
 }
 
+/// PP-DBUX4: NDC-space coordinates of a click on the preview image, pending
+/// resolution by [`resolve_preview_click`].
+///
+/// The egui draw system writes `Some(ndc)` when the user clicks the preview
+/// image.  The follow-up Bevy system reads and clears the value in the same
+/// frame, updating `DefinitionsWindowState::selected_node`.
+///
+/// NDC convention: X ∈ [-1, 1] left-to-right, Y ∈ [-1, 1] bottom-to-top
+/// (standard clip space, matching `Camera::viewport_to_ndc` output).
+#[derive(Resource, Debug, Default)]
+pub struct PendingPreviewClick {
+    /// Normalised device coordinates of the last un-processed click, or `None`
+    /// if no click is pending.  Reset to `None` after `resolve_preview_click`
+    /// consumes it.
+    pub ndc: Option<Vec2>,
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -128,17 +171,30 @@ pub struct DefinitionPreviewPlugin;
 
 impl Plugin for DefinitionPreviewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_preview_scene)
+        app
+            // Register the custom gizmo group so Bevy allocates its pipeline.
+            .init_gizmo_group::<PreviewSelectionGizmos>()
+            .insert_resource(PendingPreviewClick::default())
+            .add_systems(Startup, (setup_preview_scene, configure_preview_gizmos))
             .add_systems(Update, sync_preview_to_active_draft)
             .add_systems(
                 Update,
                 tag_preview_generated_parts.after(EvaluationSet::Evaluate),
-            );
+            )
+            // PP-DBUX4: reset the frame-local hover target before egui draws
+            // the property tree so that rows from a previous frame never
+            // produce sticky highlights.
+            .add_systems(Update, reset_hovered_node)
+            // PP-DBUX4: draw per-slot wireframe highlights in the preview.
+            .add_systems(Update, draw_preview_slot_highlight)
+            // PP-DBUX4: consume a pending preview-image click and map it to a
+            // property-tree selection.
+            .add_systems(Update, resolve_preview_click);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Startup system
+// Startup systems
 // ---------------------------------------------------------------------------
 
 /// Create the render-target image, preview camera, and directional light.
@@ -210,8 +266,8 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
             },
             Transform::from_rotation(Quat::from_euler(
                 EulerRot::YXZ,
-                std::f32::consts::FRAC_PI_4,       // 45° yaw
-                -std::f32::consts::FRAC_PI_4 * 0.8, // 36° pitch down
+                std::f32::consts::FRAC_PI_4,         // 45° yaw
+                -std::f32::consts::FRAC_PI_4 * 0.8,  // 36° pitch down
                 0.0,
             )),
             PREVIEW_RENDER_LAYER,
@@ -226,6 +282,16 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
         light_entity,
         occurrence_root: Entity::PLACEHOLDER,
     });
+}
+
+/// Point the [`PreviewSelectionGizmos`] config at [`PREVIEW_RENDER_LAYER`].
+///
+/// Runs once after the gizmo plugin initialises.  Without this the highlight
+/// wireframes would render on every camera, leaking into the main viewport.
+fn configure_preview_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
+    let (config, _ext) = config_store.config_mut::<PreviewSelectionGizmos>();
+    config.render_layers = PREVIEW_RENDER_LAYER;
+    config.depth_bias = -0.1;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +403,7 @@ pub fn sync_preview_to_active_draft(world: &mut World) {
 pub fn tag_preview_generated_parts(
     mut commands: Commands,
     untagged: Query<
-        (Entity, &crate::plugins::modeling::occurrence::GeneratedOccurrencePart),
+        (Entity, &GeneratedOccurrencePart),
         Without<PreviewOnly>,
     >,
 ) {
@@ -351,6 +417,157 @@ pub fn tag_preview_generated_parts(
 }
 
 // ---------------------------------------------------------------------------
+// PP-DBUX4 — Selection echo systems
+// ---------------------------------------------------------------------------
+
+/// Reset the frame-local `hovered_node` to `None` at the start of each frame.
+///
+/// This must run before the egui property-tree draw so that stale hover state
+/// from the previous frame is cleared before new hover state is written.
+pub fn reset_hovered_node(mut state: ResMut<DefinitionsWindowState>) {
+    state.hovered_node = None;
+}
+
+/// Draw selection-echo wireframe highlights in the preview for the currently
+/// selected (and optionally hovered) slot.
+///
+/// * If `selected_node` is `Slot(id)` or `SlotParameterBinding { slot_id, .. }`,
+///   all `GeneratedOccurrencePart`s with matching `slot_path` (or whose
+///   `slot_path` starts with `id + "."`) are highlighted with
+///   [`PREVIEW_HIGHLIGHT_COLOR`].
+/// * If `hovered_node` is set to a different slot, a softer
+///   [`PREVIEW_HOVER_COLOR`] pulse is drawn on top.
+///
+/// Gizmos are drawn through [`PreviewSelectionGizmos`], whose `render_layers`
+/// is set to [`PREVIEW_RENDER_LAYER`] at startup, so they are only visible
+/// through the preview camera.
+pub fn draw_preview_slot_highlight(
+    state: Res<DefinitionsWindowState>,
+    preview_parts: Query<
+        (
+            &GeneratedOccurrencePart,
+            &ProfileExtrusion,
+            Option<&ShapeRotation>,
+        ),
+        With<PreviewOnly>,
+    >,
+    mut gizmos: Gizmos<PreviewSelectionGizmos>,
+) {
+    let selected_slot_id = selected_slot_id(&state.selected_node);
+    let hovered_slot_id = state
+        .hovered_node
+        .as_ref()
+        .and_then(|n| selected_slot_id_from_node(n));
+
+    for (part, extrusion, rotation) in &preview_parts {
+        let rot = rotation.copied().unwrap_or_default().0;
+
+        // Selection takes priority over hover.
+        if let Some(sel_id) = &selected_slot_id {
+            if slot_path_matches(&part.slot_path, sel_id) {
+                draw_extrusion_wireframe_preview(&mut gizmos, extrusion, rot, PREVIEW_HIGHLIGHT_COLOR);
+                continue;
+            }
+        }
+
+        // Hover pulse — only when the hovered slot differs from the selection.
+        if let Some(hov_id) = &hovered_slot_id {
+            if Some(hov_id.as_str()) != selected_slot_id.as_deref() {
+                if slot_path_matches(&part.slot_path, hov_id) {
+                    draw_extrusion_wireframe_preview(&mut gizmos, extrusion, rot, PREVIEW_HOVER_COLOR);
+                }
+            }
+        }
+    }
+}
+
+/// Consume a [`PendingPreviewClick`] stored by the egui draw pass and map it
+/// to a `selected_node` update in [`DefinitionsWindowState`].
+///
+/// Ray-casts a ray from the preview camera against the AABB of every
+/// `GeneratedOccurrencePart` with a [`ProfileExtrusion`] that is tagged
+/// [`PreviewOnly`].  The closest hit wins; an empty-space click resets the
+/// selection back to `DefinitionEditorNode::Definition`.
+pub fn resolve_preview_click(
+    mut pending: ResMut<PendingPreviewClick>,
+    mut state: ResMut<DefinitionsWindowState>,
+    scene: Res<DefinitionPreviewScene>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    preview_parts: Query<
+        (
+            &GeneratedOccurrencePart,
+            &ProfileExtrusion,
+            Option<&ShapeRotation>,
+        ),
+        With<PreviewOnly>,
+    >,
+) {
+    let Some(ndc) = pending.ndc.take() else {
+        return;
+    };
+
+    // Retrieve the preview camera.
+    let Ok((camera, camera_transform)) = camera_query.get(scene.camera_entity) else {
+        return;
+    };
+
+    // Convert NDC to a viewport position so we can call `viewport_to_world`.
+    //
+    // `viewport_to_world` expects a position in **logical viewport pixels**
+    // (origin top-left).  The viewport for the preview camera is the full
+    // 512×512 render target.
+    //
+    // NDC → pixel: pixel = (ndc * 0.5 + 0.5) * size, then flip Y.
+    let half = PREVIEW_TEXTURE_SIZE as f32 * 0.5;
+    let viewport_pos = Vec2::new(
+        (ndc.x * 0.5 + 0.5) * PREVIEW_TEXTURE_SIZE as f32,
+        (1.0 - (ndc.y * 0.5 + 0.5)) * PREVIEW_TEXTURE_SIZE as f32,
+    );
+
+    let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_pos) else {
+        return;
+    };
+
+    // Intersect the ray with each part's AABB.
+    let mut closest: Option<(f32, &GeneratedOccurrencePart)> = None;
+    for (part, extrusion, rotation) in &preview_parts {
+        let rot = rotation.copied().unwrap_or_default().0;
+        let Some(bounds) = extrusion.bounds(rot) else {
+            continue;
+        };
+        let aabb = Aabb3d {
+            min: bounds.min.into(),
+            max: bounds.max.into(),
+        };
+        if let Some(dist) = ray_aabb_intersection(ray.origin, *ray.direction, aabb) {
+            if closest.is_none_or(|(best, _)| dist < best) {
+                closest = Some((dist, part));
+            }
+        }
+    }
+
+    // Map the hit to a slot selection.
+    if let Some((_, part)) = closest {
+        // Use the top-level slot segment (everything up to the first '.').
+        let slot_id = part
+            .slot_path
+            .split('.')
+            .next()
+            .unwrap_or(&part.slot_path)
+            .to_string();
+        state.selected_node = DefinitionEditorNode::Slot(slot_id);
+        state.technical_view_buffer.clear();
+        state.technical_view_error = None;
+    } else {
+        // Empty-space click — fall back to root selection.
+        state.selected_node = DefinitionEditorNode::Definition;
+        state.technical_view_buffer.clear();
+        state.technical_view_error = None;
+    }
+    let _ = half; // suppress unused-variable warning (used in comment above)
+}
+
+// ---------------------------------------------------------------------------
 // egui UI helper
 // ---------------------------------------------------------------------------
 
@@ -359,10 +576,16 @@ pub fn tag_preview_generated_parts(
 /// Call this from `draw_definition_editor` in place of `draw_definition_preview`.
 /// When the scene has no current definition (e.g. draft not yet evaluated),
 /// a small placeholder message is shown instead.
+///
+/// PP-DBUX4: if the user clicks the image, the normalised device coordinates of
+/// the click are written to [`PendingPreviewClick`] so that
+/// `resolve_preview_click` can map the click to a slot selection on the next
+/// system run.
 pub fn draw_definition_3d_preview(
     ui: &mut egui::Ui,
     contexts: &mut EguiContexts,
     scene: &DefinitionPreviewScene,
+    pending_click: &mut PendingPreviewClick,
     available_height: f32,
 ) {
     let width = ui.available_width().clamp(220.0, 360.0);
@@ -398,10 +621,34 @@ pub fn draw_definition_3d_preview(
                     contexts.add_image(EguiTextureHandle::Weak(scene.render_target.id()))
                 });
 
-            ui.add(egui::Image::new((
-                texture_id,
-                egui::vec2(width, available_height),
-            )));
+            // PP-DBUX4: add Sense::click() so egui reports primary clicks on
+            // the preview image.  Sense::hover() is included by default in
+            // egui::Image interactions; we do NOT add Sense::drag() per the
+            // PP-DBUX4 constraints.
+            let response = ui
+                .add(egui::Image::new((
+                    texture_id,
+                    egui::vec2(width, available_height),
+                )))
+                .interact(egui::Sense::click());
+
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some(pointer_pos) = response.interact_pointer_pos() {
+                    // Convert the screen-space click position to NDC relative
+                    // to the preview image's egui rect.
+                    //
+                    // egui rect origin is top-left; NDC is centre-origin,
+                    // X right, Y up.
+                    let rect = response.rect;
+                    let relative = pointer_pos - rect.left_top();
+                    let norm = relative / rect.size(); // [0,1] top-left origin
+                    let ndc = egui::Vec2::new(
+                        norm.x * 2.0 - 1.0,
+                        1.0 - norm.y * 2.0, // flip Y: egui Y down, NDC Y up
+                    );
+                    pending_click.ndc = Some(Vec2::new(ndc.x, ndc.y));
+                }
+            }
         });
 
     // Overlay label drawn after the frame so it is not clipped.
@@ -414,6 +661,95 @@ pub fn draw_definition_3d_preview(
         egui::TextStyle::Small.resolve(ui.style()),
         egui::Color32::from_rgb(205, 214, 220),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Arc tessellation resolution for wireframe drawing — matches the value used
+/// in `profile.rs` (`ARC_SEGMENTS_PER_CIRCLE = 32`).
+const WIREFRAME_ARC_SEGMENTS: u32 = 32;
+
+/// Draw an extrusion wireframe onto a [`Gizmos<PreviewSelectionGizmos>`].
+///
+/// Mirrors the logic in [`Primitive::draw_wireframe`] for
+/// [`ProfileExtrusion`] but uses the custom gizmo group so the lines only
+/// appear on the preview render layer.
+fn draw_extrusion_wireframe_preview(
+    gizmos: &mut Gizmos<PreviewSelectionGizmos>,
+    extrusion: &ProfileExtrusion,
+    rotation: Quat,
+    color: Color,
+) {
+    let pts = extrusion.profile.tessellate(WIREFRAME_ARC_SEGMENTS);
+    let half_h = extrusion.height * 0.5;
+    let to_world = |p: bevy::math::Vec2, y: f32| -> Vec3 {
+        extrusion.centre + rotation * Vec3::new(p.x, y, p.y)
+    };
+    let n = pts.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        gizmos.line(to_world(pts[i], -half_h), to_world(pts[j], -half_h), color);
+        gizmos.line(to_world(pts[i], half_h), to_world(pts[j], half_h), color);
+    }
+    for p in &pts {
+        gizmos.line(to_world(*p, -half_h), to_world(*p, half_h), color);
+    }
+}
+
+/// Return the slot id from a `DefinitionEditorNode` if it is a slot variant.
+fn selected_slot_id(node: &DefinitionEditorNode) -> Option<String> {
+    selected_slot_id_from_node(node)
+}
+
+fn selected_slot_id_from_node(node: &DefinitionEditorNode) -> Option<String> {
+    match node {
+        DefinitionEditorNode::Slot(id) => Some(id.clone()),
+        DefinitionEditorNode::SlotParameterBinding { slot_id, .. } => Some(slot_id.clone()),
+        _ => None,
+    }
+}
+
+/// Return `true` if `slot_path` equals `slot_id` or is a child path of it.
+///
+/// A child path is one where the path starts with `slot_id + "."`, e.g.
+/// `"glazing.left_pane"` is a child of `"glazing"`.
+fn slot_path_matches(slot_path: &str, slot_id: &str) -> bool {
+    slot_path == slot_id
+        || slot_path.starts_with(&format!("{slot_id}."))
+}
+
+/// Minimal slab AABB type used for the ray-AABB intersection.
+struct Aabb3d {
+    min: Vec3,
+    max: Vec3,
+}
+
+/// Ray–AABB slab intersection.  Returns the entry `t` along `direction` (in
+/// world units) if the ray hits the box, or `None` otherwise.
+///
+/// `direction` does not need to be normalised; `t` is parameterised in terms
+/// of `direction`'s length.  The caller should compare `t` values to find the
+/// nearest hit.
+fn ray_aabb_intersection(origin: Vec3, direction: Vec3, aabb: Aabb3d) -> Option<f32> {
+    let inv = Vec3::new(
+        if direction.x.abs() > f32::EPSILON { 1.0 / direction.x } else { f32::INFINITY },
+        if direction.y.abs() > f32::EPSILON { 1.0 / direction.y } else { f32::INFINITY },
+        if direction.z.abs() > f32::EPSILON { 1.0 / direction.z } else { f32::INFINITY },
+    );
+
+    let t1 = (aabb.min - origin) * inv;
+    let t2 = (aabb.max - origin) * inv;
+
+    let t_enter = t1.min(t2).max_element();
+    let t_exit = t1.max(t2).min_element();
+
+    if t_exit >= t_enter && t_exit >= 0.0 {
+        Some(t_enter.max(0.0))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +788,59 @@ mod tests {
             PREVIEW_ELEMENT_ID_SENTINEL.0 > 1_000_000,
             "sentinel must be far above normal element id range"
         );
+    }
+
+    /// PP-DBUX4: `slot_path_matches` must return `true` only for the selected
+    /// slot and its children, not for siblings or unrelated paths.
+    ///
+    /// Given two `GeneratedOccurrencePart`s with `slot_path` "left_glazing" and
+    /// "right_glazing", and `selected_node = Slot("left_glazing")`, the match
+    /// helper must return `true` only for the left one.
+    #[test]
+    fn slot_highlight_filters_by_slot_path() {
+        assert!(
+            slot_path_matches("left_glazing", "left_glazing"),
+            "exact match must return true"
+        );
+        assert!(
+            !slot_path_matches("right_glazing", "left_glazing"),
+            "sibling slot must not match"
+        );
+        // Nested child of selected slot must also highlight.
+        assert!(
+            slot_path_matches("left_glazing.inner_frame", "left_glazing"),
+            "child slot path must match"
+        );
+        // Prefix that is not a dot-separated parent must not match.
+        assert!(
+            !slot_path_matches("left_glazing_extra", "left_glazing"),
+            "same-prefix but non-child path must not match"
+        );
+    }
+
+    /// `ray_aabb_intersection` returns `Some` for a ray pointing directly at a
+    /// unit box and `None` for one that misses.
+    #[test]
+    fn ray_aabb_hit_and_miss() {
+        let aabb = Aabb3d {
+            min: Vec3::new(-0.5, -0.5, -0.5),
+            max: Vec3::new(0.5, 0.5, 0.5),
+        };
+        // Ray along +Z from z = -5, aimed at origin.
+        let hit = ray_aabb_intersection(Vec3::new(0.0, 0.0, -5.0), Vec3::Z, aabb);
+        assert!(hit.is_some(), "centre ray must hit the box");
+        assert!(
+            (hit.unwrap() - 4.5).abs() < 1e-4,
+            "entry t should be ~4.5"
+        );
+
+        // Ray along +Z but offset in X so it misses.
+        let aabb2 = Aabb3d {
+            min: Vec3::new(-0.5, -0.5, -0.5),
+            max: Vec3::new(0.5, 0.5, 0.5),
+        };
+        let miss = ray_aabb_intersection(Vec3::new(2.0, 0.0, -5.0), Vec3::Z, aabb2);
+        assert!(miss.is_none(), "offset ray must miss the box");
     }
 
     // PP-DBUX3 followup: integration tests for persistence and selection
