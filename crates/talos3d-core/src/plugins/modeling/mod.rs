@@ -563,6 +563,20 @@ impl Plugin for ModelingPlugin {
                             "modeling.create_chamfer".to_string(),
                         ],
                     },
+                    // PP-DBUX1: surface reusable-content libraries on the
+                    // toolbar so the Definitions Browser and Materials Browser
+                    // are reachable from a primary spatial surface, per
+                    // DEFINITION_BROWSER_UX_AGREEMENT.md (Command Surfaces
+                    // rule). Both commands have `icon: None`; the toolbar
+                    // falls back to label text via
+                    // `toolbar_button_fallback_text`.
+                    ToolbarSection {
+                        label: "Library".to_string(),
+                        command_ids: vec![
+                            "modeling.toggle_definitions_browser".to_string(),
+                            "materials.toggle_browser".to_string(),
+                        ],
+                    },
                 ],
             })
             .register_command(
