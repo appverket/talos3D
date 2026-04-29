@@ -632,9 +632,15 @@ fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, 
     if let Some(generated) =
         world.get::<crate::plugins::modeling::occurrence::GeneratedOccurrencePart>(selected)
     {
-        if let Some(definition_id) = occurrence_definition_for_element(world, generated.owner) {
-            return Ok(definition_id);
-        }
+        // PP-DBUX1: when the user selects a generated part (e.g. a window
+        // pane), open the *controlling* child definition (e.g. the Glazing
+        // definition), not the parent occurrence's definition. Per
+        // DEFINITION_BROWSER_UX_AGREEMENT.md: "Selecting a generated pane
+        // must identify the controlling child definition and offer that
+        // route before any one-off face/material override." This is what
+        // makes a one-click material assignment to glazing reach every
+        // pane in the project.
+        return Ok(generated.definition_id.clone());
     }
 
     if let Some(opening_id) = world.get::<ElementId>(selected).copied() {

@@ -49,7 +49,7 @@ use crate::plugins::{
     palette::{draw_command_palette, PaletteState},
     property_edit::{
         parse_property_value, shared_property_value, PropertyEditState, PropertyPanelData,
-        PropertyPanelState,
+        PropertyPanelState, SelectionSemanticKind,
     },
     render_pipeline::{
         paper_drawing_active, paper_drawing_toggle_active, toggle_paper_drawing_mode,
@@ -402,6 +402,49 @@ fn draw_command_menu_button(
     }
 }
 
+/// Predicate: would this group render inline under the menu-collapse rule? Used
+/// by `draw_category_menu_contents` to decide whether to emit a visual
+/// separator before the *next* group when the previous one was a submenu.
+/// Same filter logic as `draw_command_submenu` so the prediction agrees with
+/// the actual draw call.
+fn group_will_render_inline(
+    command_ids: &[&str],
+    category_commands: &[&CommandDescriptor],
+) -> bool {
+    let count = command_ids
+        .iter()
+        .filter(|id| {
+            category_commands
+                .iter()
+                .any(|descriptor| descriptor.id == **id)
+        })
+        .count();
+    count > 0 && count <= INLINE_GROUP_THRESHOLD
+}
+
+/// Threshold for the menu-collapse rule (DEFINITION_BROWSER_UX_AGREEMENT.md):
+/// groups whose visible command count is at or below this threshold render
+/// inline with a non-clickable section heading; groups above it render as a
+/// cascading submenu. Filtering is applied first so capability-hidden commands
+/// do not force tiny cascades.
+const INLINE_GROUP_THRESHOLD: usize = 2;
+
+/// Result of rendering one menu group; used by the parent to decide whether to
+/// emit a visual separator between adjacent sections.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MenuGroupRenderKind {
+    Inline,
+    Submenu,
+}
+
+/// Render one menu group. Returns `Some(kind)` if any commands were drawn,
+/// `None` if the group was empty after filtering.
+///
+/// Inline rendering applies the menu-collapse rule from
+/// `private/proposals/DEFINITION_BROWSER_UX_AGREEMENT.md` — a group with 1 or 2
+/// visible commands is rendered as a small dim heading followed by its
+/// commands, instead of a `ui.menu_button` cascade. Above that threshold the
+/// classic cascading submenu is preserved.
 fn draw_command_submenu(
     ui: &mut egui::Ui,
     label: &str,
@@ -411,7 +454,7 @@ fn draw_command_submenu(
     pending_command_invocations: &mut PendingCommandInvocations,
     hovered_menu_hint: &mut Option<String>,
     rendered_ids: &mut HashSet<String>,
-) -> bool {
+) -> Option<MenuGroupRenderKind> {
     let descriptors: Vec<&CommandDescriptor> = command_ids
         .iter()
         .filter_map(|id| {
@@ -423,11 +466,18 @@ fn draw_command_submenu(
         .collect();
 
     if descriptors.is_empty() {
-        return false;
+        return None;
     }
 
     rendered_ids.extend(descriptors.iter().map(|descriptor| descriptor.id.clone()));
-    ui.menu_button(label, |ui| {
+
+    if descriptors.len() <= INLINE_GROUP_THRESHOLD {
+        ui.label(
+            egui::RichText::new(label)
+                .small()
+                .weak()
+                .color(CHROME_MUTED),
+        );
         for descriptor in &descriptors {
             draw_command_menu_button(
                 ui,
@@ -437,8 +487,21 @@ fn draw_command_submenu(
                 hovered_menu_hint,
             );
         }
-    });
-    true
+        Some(MenuGroupRenderKind::Inline)
+    } else {
+        ui.menu_button(label, |ui| {
+            for descriptor in &descriptors {
+                draw_command_menu_button(
+                    ui,
+                    descriptor,
+                    selection_count,
+                    pending_command_invocations,
+                    hovered_menu_hint,
+                );
+            }
+        });
+        Some(MenuGroupRenderKind::Submenu)
+    }
 }
 
 fn draw_view_workspace_submenu(
@@ -560,8 +623,24 @@ fn draw_category_menu_contents(
     }
 
     let mut rendered_ids = HashSet::new();
+    let mut previous_kind: Option<MenuGroupRenderKind> = None;
     for group in groups {
-        draw_command_submenu(
+        // Inline sections are visually denser than a submenu row; place a
+        // separator between adjacent sections whenever at least one side is
+        // inline. Adjacent submenu-only neighbours (the legacy case) keep
+        // their original tight layout.
+        let needs_separator_now = match previous_kind {
+            Some(MenuGroupRenderKind::Inline) => true,
+            Some(MenuGroupRenderKind::Submenu) => group_will_render_inline(
+                group.command_ids,
+                category_commands,
+            ),
+            None => false,
+        };
+        if needs_separator_now {
+            ui.separator();
+        }
+        if let Some(kind) = draw_command_submenu(
             ui,
             group.label,
             group.command_ids,
@@ -570,7 +649,9 @@ fn draw_category_menu_contents(
             pending_command_invocations,
             hovered_menu_hint,
             &mut rendered_ids,
-        );
+        ) {
+            previous_kind = Some(kind);
+        }
     }
 
     if matches!(
@@ -1048,7 +1129,6 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &ctx,
         &mut data.viewport_context_menu,
         selection_count,
-        &mut data.materials_window_state,
         &mut data.pending_command_invocations,
     );
 
@@ -1111,6 +1191,15 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         let Some(first) = data.property_panel_data.snapshots.first() else {
             return;
         };
+        // PP-DBUX1: semantic header — distinguish Opening vs Occurrence vs
+        // GeneratedPart with stable wording, an "affects N occurrences" cue
+        // for occurrences, and an inline "Open Definition" entry per
+        // DEFINITION_BROWSER_UX_AGREEMENT.md.
+        draw_property_panel_semantic_header(
+            ui,
+            &data.property_panel_data.semantic_kind,
+            &mut data.pending_command_invocations,
+        );
         let fields = first.property_fields();
         let sections = property_panel_sections(&fields);
         let mut pending_action = None;
@@ -1640,6 +1729,96 @@ fn focus_property_panel_field(
         .as_ref()
         .map(|value| edit_buffer_for_property_value(value, field_name, doc_props))
         .unwrap_or_default();
+}
+
+/// Render the semantic header strip at the top of the property panel.
+///
+/// Per `DEFINITION_BROWSER_UX_AGREEMENT.md` §"Hierarchy Labels": opening,
+/// occurrence, definition, child definition, and generated part are stable
+/// distinct concepts and must be labeled non-negotiably in the property
+/// panel. Occurrences also need an "affects N occurrences" cue plus a
+/// one-click route to their backing definition. Generated parts must route
+/// to the controlling child definition before any one-off override.
+///
+/// The strip is silent for `Generic` selections — primitives and other
+/// authored entities that have no special class/instance relationship — so
+/// the existing property grid is unchanged for those cases.
+fn draw_property_panel_semantic_header(
+    ui: &mut egui::Ui,
+    kind: &SelectionSemanticKind,
+    pending: &mut PendingCommandInvocations,
+) {
+    let label = match kind {
+        SelectionSemanticKind::Generic => return,
+        SelectionSemanticKind::Opening => egui::RichText::new("Opening · wall void").color(CHROME_MUTED),
+        SelectionSemanticKind::Occurrence {
+            definition_display,
+            sibling_count,
+            ..
+        } => {
+            let suffix = match sibling_count {
+                0 | 1 => "this is the only occurrence".to_string(),
+                n => format!("{n} occurrences in this document"),
+            };
+            egui::RichText::new(format!(
+                "Instance of: {definition_display} · {suffix}"
+            ))
+            .color(CHROME_MUTED)
+        }
+        SelectionSemanticKind::GeneratedPart {
+            controlling_definition_display,
+            ..
+        } => egui::RichText::new(format!(
+            "Generated from: {controlling_definition_display} · material is controlled by the definition"
+        ))
+        .color(CHROME_MUTED),
+    };
+
+    egui::Frame::group(ui.style())
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(label.small());
+            });
+            match kind {
+                SelectionSemanticKind::Occurrence { .. } => {
+                    if ui
+                        .button("Open Definition")
+                        .on_hover_text(
+                            "Edit the reusable definition behind this occurrence. Changes affect every occurrence of the same definition.",
+                        )
+                        .clicked()
+                    {
+                        queue_command_invocation_resource(
+                            pending,
+                            "modeling.open_selected_occurrence_definition".to_string(),
+                            serde_json::json!({}),
+                        );
+                    }
+                }
+                SelectionSemanticKind::GeneratedPart {
+                    controlling_definition_display,
+                    ..
+                } => {
+                    let label = format!("Open {controlling_definition_display} Definition");
+                    if ui
+                        .button(label)
+                        .on_hover_text(
+                            "Edit the controlling child definition. Material and class-level overrides belong here.",
+                        )
+                        .clicked()
+                    {
+                        queue_command_invocation_resource(
+                            pending,
+                            "modeling.open_selected_occurrence_definition".to_string(),
+                            serde_json::json!({}),
+                        );
+                    }
+                }
+                SelectionSemanticKind::Opening | SelectionSemanticKind::Generic => {}
+            }
+        });
+    ui.add_space(4.0);
 }
 
 fn property_panel_title(
@@ -2440,7 +2619,6 @@ fn draw_viewport_context_menu(
     ctx: &egui::Context,
     menu: &mut ViewportContextMenu,
     selection_count: usize,
-    materials_window_state: &mut MaterialsWindowState,
     pending: &mut PendingCommandInvocations,
 ) {
     if !menu.open {
@@ -2487,13 +2665,17 @@ fn draw_viewport_context_menu(
                     item!("Rotate    R", "modeling.rotate");
                     item!("Scale    S", "modeling.scale");
                     ui.separator();
-                    if ui.button("Materials…    Cmd+\u{21e7}M").clicked() {
-                        materials_window_state.visible = true;
-                        menu.open = false;
-                    }
                     item!(
-                        "Open Occurrence Definition",
+                        "Open Definition",
                         "modeling.open_selected_occurrence_definition"
+                    );
+                    item!(
+                        "Materials\u{2026}    Cmd+\u{21e7}M",
+                        "materials.toggle_browser"
+                    );
+                    item!(
+                        "Definitions\u{2026}    Cmd+\u{21e7}D",
+                        "modeling.toggle_definitions_browser"
                     );
                     ui.separator();
                     item!(
@@ -2508,6 +2690,15 @@ fn draw_viewport_context_menu(
                     item!("Delete    Delete", "core.delete");
                 } else {
                     item!("Select All    Cmd+A", "core.select_all");
+                    ui.separator();
+                    item!(
+                        "Materials\u{2026}    Cmd+\u{21e7}M",
+                        "materials.toggle_browser"
+                    );
+                    item!(
+                        "Definitions\u{2026}    Cmd+\u{21e7}D",
+                        "modeling.toggle_definitions_browser"
+                    );
                     ui.separator();
                     item!("Zoom to Extents    Home", "core.zoom_to_extents");
                 }
