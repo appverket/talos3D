@@ -14,6 +14,7 @@ use crate::{
     capability_registry::CapabilityRegistry,
     plugins::{
         camera::{CameraProjectionMode, OrbitCamera},
+        definition_preview_scene::PreviewOnly,
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         document_properties::DocumentProperties,
         drafting::{
@@ -137,13 +138,13 @@ pub fn extract_drawing_geometry(world: &World) -> Option<DrawingGeometry> {
     let (vp_width, vp_height, world_width, world_height) = viewport_dimensions(orbit, projection);
 
     // Collect mesh subjects
-    let mut entity_query = world.try_query::<(
+    let mut entity_query = world.try_query_filtered::<(
         Entity,
         &crate::plugins::identity::ElementId,
         &Mesh3d,
         &GlobalTransform,
         Option<&Visibility>,
-    )>()?;
+    ), Without<PreviewOnly>>()?;
 
     let mut subjects = Vec::new();
     for (entity, _eid, mesh_handle, mesh_transform, visibility) in entity_query.iter(world) {
