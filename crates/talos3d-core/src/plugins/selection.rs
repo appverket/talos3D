@@ -118,12 +118,13 @@ struct SelectionPressCapture {
     entity: Option<Entity>,
     cursor_screen: Option<Vec2>,
     additive: bool,
+    edit_context_after_click: Option<GroupEditContext>,
 }
 
 #[derive(Component)]
 pub struct Selected;
 
-type MeshSelectableQueryFilter = With<ElementId>;
+type MeshSelectableQueryFilter = Or<(With<ElementId>, With<GeneratedOccurrencePart>)>;
 
 #[derive(SystemParam)]
 struct SelectionHitTest<'w, 's> {
@@ -136,9 +137,7 @@ struct SelectionHitTest<'w, 's> {
 fn handle_selection_click(world: &mut World) {
     let ownership = world.resource::<InputOwnership>().clone();
     let egui_ptr = world.resource::<EguiWantsInput>().pointer;
-    let handle_captures = world
-        .resource::<HandleInteractionState>()
-        .captures_pointer();
+    let handle_is_busy = world.resource::<HandleInteractionState>().is_busy();
     let box_dragging = world.resource::<BoxSelectState>().is_dragging;
     let box_just_completed = world.resource::<BoxSelectState>().just_completed;
     let just_pressed = world
@@ -152,7 +151,7 @@ fn handle_selection_click(world: &mut World) {
 
     if !ownership.is_idle()
         || egui_ptr
-        || handle_captures
+        || handle_is_busy
         || box_dragging
         || box_just_completed
         || face_editing
@@ -161,67 +160,42 @@ fn handle_selection_click(world: &mut World) {
         return;
     }
 
+    if !just_pressed && !just_released {
+        return;
+    }
+
     let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
-    let Ok(window) = window_query.single(world) else {
-        return;
+    let cursor_position = {
+        let Ok(window) = window_query.single(world) else {
+            return;
+        };
+
+        let Some(cursor_position) = window.cursor_position() else {
+            return;
+        };
+        cursor_position
     };
 
-    let Some(cursor_position) = window.cursor_position() else {
-        return;
+    let hit_target = if just_pressed {
+        let mut camera_query = world.query::<(&Camera, &GlobalTransform)>();
+        let Some((camera, camera_transform)) = camera_query.iter(world).next() else {
+            return;
+        };
+
+        let viewport_cursor = match camera.logical_viewport_rect() {
+            Some(rect) => cursor_position - rect.min,
+            None => cursor_position,
+        };
+
+        let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_cursor) else {
+            return;
+        };
+
+        let raw_hit_entity = selection_hit_entity(world, ray);
+        resolve_selection_click_target(world, raw_hit_entity)
+    } else {
+        SelectionClickTarget::default()
     };
-
-    let mut camera_query = world.query::<(&Camera, &GlobalTransform)>();
-    let Some((camera, camera_transform)) = camera_query.iter(world).next() else {
-        return;
-    };
-
-    let viewport_cursor = match camera.logical_viewport_rect() {
-        Some(rect) => cursor_position - rect.min,
-        None => cursor_position,
-    };
-
-    let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_cursor) else {
-        return;
-    };
-
-    let hit_entity = selection_hit_entity(world, ray);
-
-    // Skip muted entities (outside active group context)
-    let hit_entity = hit_entity.filter(|entity| world.get::<GroupEditMuted>(*entity).is_none());
-
-    // Redirect generated occurrence geometry to its authored occurrence root,
-    // then redirect group members relative to the active context.
-    let hit_entity = hit_entity.map(|entity| {
-        let entity = redirect_generated_occurrence_part_to_owner(world, entity);
-        let edit_context = world.resource::<GroupEditContext>();
-        if let Some(element_id) = world.get::<ElementId>(entity).copied() {
-            redirect_hit_to_context_group(world, entity, element_id, edit_context)
-        } else {
-            entity
-        }
-    });
-
-    // Skip entities on locked layers
-    let hit_entity =
-        hit_entity.filter(|entity| !crate::plugins::layers::entity_on_locked_layer(world, *entity));
-
-    // If inside a group, verify the hit is a direct child of the active context
-    let hit_entity = hit_entity.filter(|entity| {
-        let edit_context = world.resource::<GroupEditContext>();
-        if edit_context.is_root() {
-            // At root: allow top-level entities and groups
-            true
-        } else if let Some(active_group_id) = edit_context.current_group() {
-            // Inside group: only allow direct children of the active group
-            if let Some(element_id) = world.get::<ElementId>(*entity).copied() {
-                is_direct_child_of_group(world, element_id, active_group_id)
-            } else {
-                false
-            }
-        } else {
-            true
-        }
-    });
 
     let additive_pressed = {
         let keys = world.resource::<ButtonInput<KeyCode>>();
@@ -229,9 +203,10 @@ fn handle_selection_click(world: &mut World) {
     };
     let mut press_capture = world.resource_mut::<SelectionPressCapture>();
     if just_pressed {
-        press_capture.entity = hit_entity;
+        press_capture.entity = hit_target.entity;
         press_capture.cursor_screen = Some(cursor_position);
         press_capture.additive = additive_pressed;
+        press_capture.edit_context_after_click = hit_target.edit_context_after_click;
     }
 
     if !just_released {
@@ -244,11 +219,16 @@ fn handle_selection_click(world: &mut World) {
         .unwrap_or(false);
     let additive_selection = press_capture.additive;
     let hit_entity = press_capture.entity.take();
+    let edit_context_after_click = press_capture.edit_context_after_click.take();
     press_capture.cursor_screen = None;
     press_capture.additive = false;
 
     if moved_too_far {
         return;
+    }
+
+    if let Some(edit_context) = edit_context_after_click {
+        world.insert_resource(edit_context);
     }
 
     let selected_entities: Vec<Entity> = world
@@ -277,13 +257,7 @@ fn handle_selection_click(world: &mut World) {
                 world.entity_mut(selected_entity).remove::<Selected>();
             }
             world.insert_resource(PivotPoint::default());
-            // Exit one level of group editing on empty click
-            let edit_context = world.resource::<GroupEditContext>();
-            if !edit_context.is_root() {
-                let mut ctx = edit_context.clone();
-                ctx.exit();
-                world.insert_resource(ctx);
-            }
+            world.insert_resource(GroupEditContext::default());
         }
         None => {}
     }
@@ -299,6 +273,73 @@ fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity
         .iter(world)
         .find_map(|(candidate, element_id)| (*element_id == owner).then_some(candidate))
         .unwrap_or(entity)
+}
+
+#[derive(Default)]
+struct SelectionClickTarget {
+    entity: Option<Entity>,
+    edit_context_after_click: Option<GroupEditContext>,
+}
+
+fn resolve_selection_click_target(
+    world: &mut World,
+    hit_entity: Option<Entity>,
+) -> SelectionClickTarget {
+    let Some(hit_entity) = hit_entity else {
+        return SelectionClickTarget::default();
+    };
+    let mut entity = redirect_generated_occurrence_part_to_owner(world, hit_entity);
+    if crate::plugins::layers::entity_on_locked_layer(world, entity) {
+        return SelectionClickTarget::default();
+    }
+
+    let Some(element_id) = world.get::<ElementId>(entity).copied() else {
+        return SelectionClickTarget::default();
+    };
+    let edit_context = world.resource::<GroupEditContext>().clone();
+
+    if edit_context.is_root() {
+        return SelectionClickTarget {
+            entity: Some(redirect_hit_to_context_group(
+                world,
+                entity,
+                element_id,
+                &edit_context,
+            )),
+            edit_context_after_click: None,
+        };
+    }
+
+    let Some(active_group_id) = edit_context.current_group() else {
+        return SelectionClickTarget {
+            entity: Some(entity),
+            edit_context_after_click: None,
+        };
+    };
+
+    let redirected = redirect_hit_to_context_group(world, entity, element_id, &edit_context);
+    if let Some(redirected_id) = world.get::<ElementId>(redirected).copied() {
+        if is_direct_child_of_group(world, redirected_id, active_group_id) {
+            return SelectionClickTarget {
+                entity: Some(redirected),
+                edit_context_after_click: None,
+            };
+        }
+    }
+    if is_direct_child_of_group(world, element_id, active_group_id) {
+        return SelectionClickTarget {
+            entity: Some(entity),
+            edit_context_after_click: None,
+        };
+    }
+
+    let mut parent_context = edit_context;
+    parent_context.exit();
+    entity = redirect_hit_to_context_group(world, entity, element_id, &parent_context);
+    SelectionClickTarget {
+        entity: (!crate::plugins::layers::entity_on_locked_layer(world, entity)).then_some(entity),
+        edit_context_after_click: Some(parent_context),
+    }
 }
 
 #[derive(Resource, Default)]
@@ -504,11 +545,7 @@ fn draw_selected_outlines(
         if let Some(active_entity) = find_entity_by_element_id_ref(world, active_occurrence_id) {
             if let Ok(active_ref) = world.get_entity(active_entity) {
                 if let Some(bounds) = occurrence_generated_part_bounds(world, active_ref) {
-                    draw_bounds_wireframe(
-                        &mut gizmos,
-                        &bounds,
-                        Color::srgb(0.2, 0.85, 1.0),
-                    );
+                    draw_bounds_wireframe(&mut gizmos, &bounds, Color::srgb(0.2, 0.85, 1.0));
                 }
             }
         }
@@ -545,9 +582,6 @@ fn draw_selected_outlines(
         } else {
             SELECTION_HIGHLIGHT_COLOR
         };
-        if let Some(bounds) = occurrence_generated_part_bounds(world, entity_ref) {
-            draw_bounds_wireframe(&mut gizmos, &bounds, color);
-        }
         factory.draw_selection(world, entity, &mut gizmos, color);
     }
 }
