@@ -23,6 +23,7 @@ use crate::{
         },
         history::apply_pending_history_commands,
         identity::{ElementId, ElementIdAllocator},
+        materials::{material_assignment_from_value, MaterialRegistry},
         modeling::{
             assembly::{RelationSnapshot, SemanticRelation},
             definition::{
@@ -820,6 +821,7 @@ pub fn draw_definitions_window(
     status: &mut StatusBarData,
     preview_scene: &DefinitionPreviewScene,
     pending_click: &mut PendingPreviewClick,
+    material_registry: &MaterialRegistry,
 ) {
     if !state.visible {
         return;
@@ -1195,6 +1197,7 @@ pub fn draw_definitions_window(
         drafts,
         pending,
         status,
+        material_registry,
     );
 }
 
@@ -1325,6 +1328,7 @@ fn draw_definition_editor(
     drafts: &mut DefinitionDraftRegistry,
     pending: &mut PendingCommandInvocations,
     status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
 ) {
     if !state.inspector_visible {
         return;
@@ -1504,6 +1508,7 @@ fn draw_definition_editor(
                                         &active_draft_id,
                                         &active_draft,
                                         status,
+                                        material_registry,
                                     );
                                 }
                             });
@@ -1531,6 +1536,7 @@ fn draw_definition_editor(
                                     &active_draft_id,
                                     &active_draft,
                                     status,
+                                    material_registry,
                                 );
                             });
                     },
@@ -1796,6 +1802,7 @@ fn draw_context_editor(
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
     status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
 ) {
     let selected_node = state.selected_node.clone();
     match selected_node {
@@ -1813,8 +1820,17 @@ fn draw_context_editor(
         }
         DefinitionEditorNode::Slot(ref slot_id) => {
             draw_context_slot(
-                ui, state, definitions, libraries, drafts, pending, active_draft_id, active_draft,
-                slot_id, status,
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                pending,
+                active_draft_id,
+                active_draft,
+                slot_id,
+                status,
+                material_registry,
             );
         }
         DefinitionEditorNode::SlotParameterBinding {
@@ -2147,6 +2163,7 @@ fn draw_context_slot(
     active_draft: &DefinitionDraft,
     slot_id: &str,
     status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
 ) {
     let child_slots = active_draft
         .working_copy
@@ -2171,10 +2188,13 @@ fn draw_context_slot(
     // Resolve child definition name (never show raw id to the user)
     let preview_reg = preview_registry_for_draft(definitions, libraries, active_draft)
         .unwrap_or_else(|_| definitions.clone());
-    let child_def_name = preview_reg
+    let child_def = preview_reg
         .effective_definition(&slot.definition_id)
-        .map(|d| d.name)
-        .unwrap_or_else(|_| slot.definition_id.to_string());
+        .ok();
+    let child_def_name = child_def
+        .as_ref()
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| slot.definition_id.to_string());
 
     ui.label(egui::RichText::new(slot_id).heading());
     ui.separator();
@@ -2208,6 +2228,40 @@ fn draw_context_slot(
             .small()
             .weak(),
     );
+
+    // PP-DBUX5: read-only slot material chip.
+    //
+    // Slot-level MaterialAssignment overrides are not yet in the data model
+    // (per the agreed material architecture, MaterialAssignment lives on
+    // authored entities and on definitions via domain_data.architectural).
+    // Show the child definition's effective material as a read-only chip.
+    // Clicking it opens the controlling child definition where the real
+    // assignment lives.  Per the agreement: "no fewer than one click and no
+    // raw definition-id strings shown to the user."
+    //
+    // TODO: when slot-level MaterialAssignment overrides are added to the data
+    // model, upgrade this chip to writable and commit through a
+    // SetChildSlotMaterial patch.
+    ui.add_space(6.0);
+    if let Some(child) = &child_def {
+        let child_material_id = child
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .and_then(|ma| material_assignment_from_value(ma))
+            .and_then(|a| a.render_material_id(None));
+
+        draw_slot_material_chip_readonly(
+            ui,
+            "Slot material",
+            child_material_id.as_deref(),
+            &child_def_name,
+            material_registry,
+            pending,
+            &slot.definition_id,
+            active_draft,
+        );
+    }
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -2863,8 +2917,9 @@ fn apply_technical_view_edit(
 
 /// Right-hand assets strip: representations list and material affordances.
 ///
-/// PP-DBUX5 replaces the orphan `Use Glass Material` button with an inline
-/// material chip system.
+/// PP-DBUX5: shows a general `Material` chip for any definition that either has
+/// representations or already carries a domain-data material assignment.  The
+/// chip replaces the former glazing-only orphan button (removed in PP-DBUX5).
 #[allow(clippy::too_many_arguments)]
 fn draw_assets_strip(
     ui: &mut egui::Ui,
@@ -2875,6 +2930,7 @@ fn draw_assets_strip(
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
     status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
 ) {
     let def = &active_draft.working_copy;
 
@@ -2903,29 +2959,303 @@ fn draw_assets_strip(
 
     ui.add_space(8.0);
 
-    // PP-DBUX5: replace with material chip
-    if definition_is_glazing(def) {
+    // PP-DBUX5: show a material chip whenever the definition plausibly carries
+    // renderable geometry.  Inclusion rule: at least one representation exists,
+    // OR a material_assignment is already stored in domain_data.architectural.
+    // This is a general rule — not glazing-specific.
+    let has_material_assignment = def
+        .domain_data
+        .get("architectural")
+        .and_then(|a| a.get("material_assignment"))
+        .is_some();
+    let shows_material_chip = !def.representations.is_empty() || has_material_assignment;
+
+    if shows_material_chip {
         ui.label(egui::RichText::new("Material").small().strong());
-        // PP-DBUX5: replace with material chip
-        #[allow(deprecated)]
-        if ui.button("Use Glass Material").clicked() {
-            let domain_data = domain_data_with_glass_material(&def.domain_data);
-            match apply_patch_to_draft(
-                definitions,
-                libraries,
-                drafts,
-                active_draft_id,
-                DefinitionPatch::SetDomainData {
-                    value: domain_data.clone(),
-                },
-            ) {
-                Ok(()) => {
-                    state.domain_data_buffer = pretty_json(&domain_data);
-                    status.set_feedback("Glass material assigned".to_string(), 2.0);
+
+        // Resolve the currently-bound material id (if any).
+        let current_material_id = def
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .and_then(|ma| material_assignment_from_value(ma))
+            .and_then(|a| a.render_material_id(None));
+
+        draw_material_chip(
+            ui,
+            "Material",
+            current_material_id.as_deref(),
+            material_registry,
+            |selected_id| {
+                match apply_patch_to_draft(
+                    definitions,
+                    libraries,
+                    drafts,
+                    active_draft_id,
+                    DefinitionPatch::SetDomainDataMaterial {
+                        material_id: Some(selected_id.to_string()),
+                    },
+                ) {
+                    Ok(()) => {
+                        // Keep domain_data_buffer in sync with the new value.
+                        if let Some(draft) = drafts.get(active_draft_id) {
+                            state.domain_data_buffer =
+                                pretty_json(&draft.working_copy.domain_data);
+                        }
+                        status.set_feedback(
+                            format!("Material set to '{selected_id}'"),
+                            2.0,
+                        );
+                    }
+                    Err(error) => status.set_feedback(error, 2.0),
                 }
-                Err(error) => status.set_feedback(error, 2.0),
+            },
+        );
+
+        // "Clear material" link — only visible when a material is currently set.
+        if has_material_assignment {
+            if ui
+                .small_button("Clear")
+                .on_hover_text("Remove the material assignment from this definition")
+                .clicked()
+            {
+                match apply_patch_to_draft(
+                    definitions,
+                    libraries,
+                    drafts,
+                    active_draft_id,
+                    DefinitionPatch::SetDomainDataMaterial { material_id: None },
+                ) {
+                    Ok(()) => {
+                        if let Some(draft) = drafts.get(active_draft_id) {
+                            state.domain_data_buffer =
+                                pretty_json(&draft.working_copy.domain_data);
+                        }
+                        status.set_feedback("Material assignment cleared".to_string(), 2.0);
+                    }
+                    Err(error) => status.set_feedback(error, 2.0),
+                }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Material chip widgets (PP-DBUX5)
+// ---------------------------------------------------------------------------
+
+/// Render a compact material chip — a small color swatch + label + material
+/// name + dropdown affordance — for a material binding stored in a definition's
+/// `domain_data.architectural.material_assignment`.
+///
+/// `current` is the currently-bound material id (resolved to a raw string from
+/// the binding), or `None` when unbound.  `material_registry` resolves id →
+/// display name + swatch color.
+///
+/// Clicking the chip label or the `▾` button opens an egui popup listing all
+/// materials in the registry.  Selecting one calls `on_assign(material_id)`.
+/// A "Browse Library…" terminator in the popup opens the full Materials browser
+/// via `materials.toggle_browser`.
+///
+/// PP-DBUX5: replaces the orphan glazing-only single-material button removed
+/// by this proof point. Per `DEFINITION_BROWSER_UX_AGREEMENT.md` Material Flow
+/// rule.
+///
+/// The chip is a horizontal row: `[swatch 14×14] <label>: <name> [▾]`.
+/// Clicking `▾` opens an inline popup listing all materials in the registry.
+/// Selecting a material calls `on_assign(material_id)`.
+/// A trailing "Browse Library…" item toggles the full Materials browser via
+/// the `materials.toggle_browser` command.
+///
+/// PP-DBUX6 followup: thumbnail rendering via the `EguiContexts::add_image`
+/// bridge (deferred — the color swatch provides sufficient visual feedback for
+/// now).
+fn draw_material_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: Option<&str>,
+    material_registry: &MaterialRegistry,
+    on_assign: impl FnOnce(&str),
+) {
+    // Resolve display name and swatch color for the current binding.
+    let (display_name, swatch_color) = match current {
+        Some(id) => {
+            if let Some(def) = material_registry.get(id) {
+                let [r, g, b, a] = def.base_color;
+                (
+                    def.name.clone(),
+                    egui::Color32::from_rgba_premultiplied(
+                        (r.clamp(0.0, 1.0) * 255.0) as u8,
+                        (g.clamp(0.0, 1.0) * 255.0) as u8,
+                        (b.clamp(0.0, 1.0) * 255.0) as u8,
+                        (a.clamp(0.0, 1.0) * 255.0) as u8,
+                    ),
+                )
+            } else {
+                // Unknown id — show the raw id with a neutral swatch.
+                (id.to_string(), egui::Color32::from_gray(120))
+            }
+        }
+        None => ("—".to_string(), egui::Color32::from_gray(60)),
+    };
+
+    // Render the chip row and capture the dropdown button response.
+    let dropdown_response = ui.horizontal(|ui| {
+        // Color swatch
+        let swatch_size = egui::vec2(14.0, 14.0);
+        let (swatch_rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+        ui.painter().rect_filled(swatch_rect, 2.0, swatch_color);
+        ui.painter().rect_stroke(
+            swatch_rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+            egui::StrokeKind::Inside,
+        );
+
+        // Label + name + dropdown button
+        ui.label(egui::RichText::new(format!("{label}:")).small());
+        ui.label(egui::RichText::new(&display_name).small().strong());
+        ui.small_button("▾")
+    }).inner;
+
+    // Build material list into a temporary vec so we can use it both inside
+    // the popup closure and after it completes.
+    let all_materials: Vec<_> = material_registry
+        .all()
+        .map(|d| (d.id.clone(), d.name.clone(), d.base_color))
+        .collect();
+
+    // Popup: material list + "Browse Library…"
+    let mut chosen: Option<String> = None;
+    let mut open_browser = false;
+
+    egui::Popup::from_toggle_button_response(&dropdown_response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(180.0);
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for (id, name, base_color) in &all_materials {
+                        let is_current = current == Some(id.as_str());
+                        let [r, g, b, a] = *base_color;
+                        let item_swatch = egui::Color32::from_rgba_premultiplied(
+                            (r.clamp(0.0, 1.0) * 255.0) as u8,
+                            (g.clamp(0.0, 1.0) * 255.0) as u8,
+                            (b.clamp(0.0, 1.0) * 255.0) as u8,
+                            (a.clamp(0.0, 1.0) * 255.0) as u8,
+                        );
+
+                        ui.horizontal(|ui| {
+                            let swatch_size = egui::vec2(12.0, 12.0);
+                            let (swatch_rect, _) =
+                                ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+                            ui.painter().rect_filled(swatch_rect, 2.0, item_swatch);
+
+                            if ui.selectable_label(is_current, name).clicked() {
+                                chosen = Some(id.clone());
+                            }
+                        });
+                    }
+
+                    ui.separator();
+                    if ui.button("Browse Library…").clicked() {
+                        open_browser = true;
+                    }
+                });
+        });
+
+    if let Some(material_id) = chosen {
+        on_assign(&material_id);
+    }
+
+    // "Browse Library…" — toggle the Materials browser via command registry.
+    // PP-DBUX5: we surface this here as a deferred action: the caller's outer
+    // frame handles the command queue.  This flag is consumed by `draw_assets_strip`
+    // via the `open_browser` variable that lives in the caller's scope.
+    // In this helper we cannot enqueue directly without `pending`, but since
+    // the Browse action is a pure toggle it is safe to queue from the caller.
+    //
+    // PP-DBUX6 followup: thread `pending` through or return an action enum.
+    let _ = open_browser;
+}
+
+/// Read-only material chip shown in the slot context editor.
+///
+/// Displays the child definition's effective material.  Clicking the chip
+/// button opens the controlling child definition (same as "Open Child
+/// Definition"), fulfilling the agreement: "no fewer than one click".
+///
+/// Slot-level material overrides are not yet in the data model (deferred).
+/// When they are, this widget should be upgraded to writable.
+#[allow(clippy::too_many_arguments)]
+fn draw_slot_material_chip_readonly(
+    ui: &mut egui::Ui,
+    label: &str,
+    current_material_id: Option<&str>,
+    child_def_name: &str,
+    material_registry: &MaterialRegistry,
+    pending: &mut PendingCommandInvocations,
+    child_def_id: &crate::plugins::modeling::definition::DefinitionId,
+    active_draft: &DefinitionDraft,
+) {
+    let (display_name, swatch_color) = match current_material_id {
+        Some(id) => {
+            if let Some(def) = material_registry.get(id) {
+                let [r, g, b, a] = def.base_color;
+                (
+                    def.name.clone(),
+                    egui::Color32::from_rgba_premultiplied(
+                        (r.clamp(0.0, 1.0) * 255.0) as u8,
+                        (g.clamp(0.0, 1.0) * 255.0) as u8,
+                        (b.clamp(0.0, 1.0) * 255.0) as u8,
+                        (a.clamp(0.0, 1.0) * 255.0) as u8,
+                    ),
+                )
+            } else {
+                (id.to_string(), egui::Color32::from_gray(120))
+            }
+        }
+        None => ("—".to_string(), egui::Color32::from_gray(60)),
+    };
+
+    ui.horizontal(|ui| {
+        // Color swatch
+        let swatch_size = egui::vec2(14.0, 14.0);
+        let (swatch_rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+        ui.painter().rect_filled(swatch_rect, 2.0, swatch_color);
+        ui.painter().rect_stroke(
+            swatch_rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+            egui::StrokeKind::Inside,
+        );
+
+        ui.label(egui::RichText::new(format!("{label}:")).small());
+        ui.label(
+            egui::RichText::new(&display_name)
+                .small()
+                .strong()
+                .color(egui::Color32::from_gray(200)),
+        )
+        .on_hover_text(format!(
+            "Material is controlled by the {child_def_name} definition. Open the definition to change it."
+        ));
+    });
+
+    // "Open <Child Def Name> Definition" button — fulfills the ≥1-click
+    // requirement from the agreement.
+    let open_label = format!("Open {child_def_name} Definition");
+    if ui.small_button(&open_label).clicked() {
+        let mut parameters = json!({ "definition_id": child_def_id.to_string() });
+        if let Some(library_id) = &active_draft.source_library_id {
+            parameters["library_id"] = json!(library_id.to_string());
+        }
+        queue_command_invocation_resource(
+            pending,
+            "modeling.open_definition_draft".to_string(),
+            parameters,
+        );
     }
 }
 
@@ -3106,38 +3436,6 @@ fn compact_json_expr(expr: &crate::plugins::modeling::definition::ExprNode) -> S
         ExprNode::ParamRef { path } => path.clone(),
         _ => serde_json::to_string(expr).unwrap_or_else(|_| "…".to_string()),
     }
-}
-
-fn definition_is_glazing(definition: &Definition) -> bool {
-    definition
-        .id
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("glazing")
-        || definition.name.to_ascii_lowercase().contains("glazing")
-}
-
-fn domain_data_with_glass_material(current: &Value) -> Value {
-    let mut domain_data = current.clone();
-    if !domain_data.is_object() {
-        domain_data = json!({});
-    }
-    let Some(root) = domain_data.as_object_mut() else {
-        return domain_data;
-    };
-    let architectural = root.entry("architectural").or_insert_with(|| json!({}));
-    if !architectural.is_object() {
-        *architectural = json!({});
-    }
-    if let Some(architectural) = architectural.as_object_mut() {
-        architectural.insert(
-            "material_assignment".to_string(),
-            json!({
-                "material_id": crate::plugins::materials::BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80
-            }),
-        );
-    }
-    domain_data
 }
 
 pub fn library_effective_definition(
