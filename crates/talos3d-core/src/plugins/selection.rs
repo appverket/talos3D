@@ -24,7 +24,10 @@ use crate::{
                 collect_group_members_recursive, find_group_for_member, GroupEditContext,
                 GroupEditMuted, GroupMembers,
             },
-            occurrence::GeneratedOccurrencePart,
+            occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
+            primitive_trait::Primitive,
+            primitives::ShapeRotation,
+            profile::ProfileExtrusion,
             profile_feature::{FaceProfileFeature, FeatureOperand},
         },
         tools::ActiveTool,
@@ -42,7 +45,13 @@ const BOX_SELECT_CROSSING_BORDER: Color = Color::srgba(0.3, 1.0, 0.6, 0.8);
 const BOX_SELECT_DRAG_THRESHOLD: f32 = 5.0;
 const SELECTION_CLICK_SLOP_PX: f32 = 6.0;
 
-type SelectedGroupClickQueryItem = (Entity, &'static ElementId, Has<GroupMembers>, Has<CsgNode>);
+type SelectedCompositeClickQueryItem = (
+    Entity,
+    &'static ElementId,
+    Has<GroupMembers>,
+    Has<CsgNode>,
+    Has<OccurrenceIdentity>,
+);
 type BoxSelectEntityQueryItem = (
     Entity,
     &'static ElementId,
@@ -64,6 +73,8 @@ impl Plugin for SelectionPlugin {
             .init_resource::<BoxSelectState>()
             .init_resource::<SelectionPressCapture>()
             .init_resource::<PreviousGroupEditContext>()
+            .init_resource::<OccurrenceEditContext>()
+            .init_resource::<PreviousOccurrenceEditContext>()
             .add_systems(
                 Update,
                 (
@@ -107,12 +118,13 @@ struct SelectionPressCapture {
     entity: Option<Entity>,
     cursor_screen: Option<Vec2>,
     additive: bool,
+    edit_context_after_click: Option<GroupEditContext>,
 }
 
 #[derive(Component)]
 pub struct Selected;
 
-type MeshSelectableQueryFilter = With<ElementId>;
+type MeshSelectableQueryFilter = Or<(With<ElementId>, With<GeneratedOccurrencePart>)>;
 
 #[derive(SystemParam)]
 struct SelectionHitTest<'w, 's> {
@@ -125,9 +137,7 @@ struct SelectionHitTest<'w, 's> {
 fn handle_selection_click(world: &mut World) {
     let ownership = world.resource::<InputOwnership>().clone();
     let egui_ptr = world.resource::<EguiWantsInput>().pointer;
-    let handle_captures = world
-        .resource::<HandleInteractionState>()
-        .captures_pointer();
+    let handle_is_busy = world.resource::<HandleInteractionState>().is_busy();
     let box_dragging = world.resource::<BoxSelectState>().is_dragging;
     let box_just_completed = world.resource::<BoxSelectState>().just_completed;
     let just_pressed = world
@@ -141,7 +151,7 @@ fn handle_selection_click(world: &mut World) {
 
     if !ownership.is_idle()
         || egui_ptr
-        || handle_captures
+        || handle_is_busy
         || box_dragging
         || box_just_completed
         || face_editing
@@ -150,67 +160,42 @@ fn handle_selection_click(world: &mut World) {
         return;
     }
 
+    if !just_pressed && !just_released {
+        return;
+    }
+
     let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
-    let Ok(window) = window_query.single(world) else {
-        return;
+    let cursor_position = {
+        let Ok(window) = window_query.single(world) else {
+            return;
+        };
+
+        let Some(cursor_position) = window.cursor_position() else {
+            return;
+        };
+        cursor_position
     };
 
-    let Some(cursor_position) = window.cursor_position() else {
-        return;
+    let hit_target = if just_pressed {
+        let mut camera_query = world.query::<(&Camera, &GlobalTransform)>();
+        let Some((camera, camera_transform)) = camera_query.iter(world).next() else {
+            return;
+        };
+
+        let viewport_cursor = match camera.logical_viewport_rect() {
+            Some(rect) => cursor_position - rect.min,
+            None => cursor_position,
+        };
+
+        let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_cursor) else {
+            return;
+        };
+
+        let raw_hit_entity = selection_hit_entity(world, ray);
+        resolve_selection_click_target(world, raw_hit_entity)
+    } else {
+        SelectionClickTarget::default()
     };
-
-    let mut camera_query = world.query::<(&Camera, &GlobalTransform)>();
-    let Some((camera, camera_transform)) = camera_query.iter(world).next() else {
-        return;
-    };
-
-    let viewport_cursor = match camera.logical_viewport_rect() {
-        Some(rect) => cursor_position - rect.min,
-        None => cursor_position,
-    };
-
-    let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_cursor) else {
-        return;
-    };
-
-    let hit_entity = selection_hit_entity(world, ray);
-
-    // Skip muted entities (outside active group context)
-    let hit_entity = hit_entity.filter(|entity| world.get::<GroupEditMuted>(*entity).is_none());
-
-    // Redirect generated occurrence geometry to its authored occurrence root,
-    // then redirect group members relative to the active context.
-    let hit_entity = hit_entity.map(|entity| {
-        let entity = redirect_generated_occurrence_part_to_owner(world, entity);
-        let edit_context = world.resource::<GroupEditContext>();
-        if let Some(element_id) = world.get::<ElementId>(entity).copied() {
-            redirect_hit_to_context_group(world, entity, element_id, edit_context)
-        } else {
-            entity
-        }
-    });
-
-    // Skip entities on locked layers
-    let hit_entity =
-        hit_entity.filter(|entity| !crate::plugins::layers::entity_on_locked_layer(world, *entity));
-
-    // If inside a group, verify the hit is a direct child of the active context
-    let hit_entity = hit_entity.filter(|entity| {
-        let edit_context = world.resource::<GroupEditContext>();
-        if edit_context.is_root() {
-            // At root: allow top-level entities and groups
-            true
-        } else if let Some(active_group_id) = edit_context.current_group() {
-            // Inside group: only allow direct children of the active group
-            if let Some(element_id) = world.get::<ElementId>(*entity).copied() {
-                is_direct_child_of_group(world, element_id, active_group_id)
-            } else {
-                false
-            }
-        } else {
-            true
-        }
-    });
 
     let additive_pressed = {
         let keys = world.resource::<ButtonInput<KeyCode>>();
@@ -218,9 +203,10 @@ fn handle_selection_click(world: &mut World) {
     };
     let mut press_capture = world.resource_mut::<SelectionPressCapture>();
     if just_pressed {
-        press_capture.entity = hit_entity;
+        press_capture.entity = hit_target.entity;
         press_capture.cursor_screen = Some(cursor_position);
         press_capture.additive = additive_pressed;
+        press_capture.edit_context_after_click = hit_target.edit_context_after_click;
     }
 
     if !just_released {
@@ -233,11 +219,16 @@ fn handle_selection_click(world: &mut World) {
         .unwrap_or(false);
     let additive_selection = press_capture.additive;
     let hit_entity = press_capture.entity.take();
+    let edit_context_after_click = press_capture.edit_context_after_click.take();
     press_capture.cursor_screen = None;
     press_capture.additive = false;
 
     if moved_too_far {
         return;
+    }
+
+    if let Some(edit_context) = edit_context_after_click {
+        world.insert_resource(edit_context);
     }
 
     let selected_entities: Vec<Entity> = world
@@ -266,13 +257,7 @@ fn handle_selection_click(world: &mut World) {
                 world.entity_mut(selected_entity).remove::<Selected>();
             }
             world.insert_resource(PivotPoint::default());
-            // Exit one level of group editing on empty click
-            let edit_context = world.resource::<GroupEditContext>();
-            if !edit_context.is_root() {
-                let mut ctx = edit_context.clone();
-                ctx.exit();
-                world.insert_resource(ctx);
-            }
+            world.insert_resource(GroupEditContext::default());
         }
         None => {}
     }
@@ -290,6 +275,73 @@ fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity
         .unwrap_or(entity)
 }
 
+#[derive(Default)]
+struct SelectionClickTarget {
+    entity: Option<Entity>,
+    edit_context_after_click: Option<GroupEditContext>,
+}
+
+fn resolve_selection_click_target(
+    world: &mut World,
+    hit_entity: Option<Entity>,
+) -> SelectionClickTarget {
+    let Some(hit_entity) = hit_entity else {
+        return SelectionClickTarget::default();
+    };
+    let mut entity = redirect_generated_occurrence_part_to_owner(world, hit_entity);
+    if crate::plugins::layers::entity_on_locked_layer(world, entity) {
+        return SelectionClickTarget::default();
+    }
+
+    let Some(element_id) = world.get::<ElementId>(entity).copied() else {
+        return SelectionClickTarget::default();
+    };
+    let edit_context = world.resource::<GroupEditContext>().clone();
+
+    if edit_context.is_root() {
+        return SelectionClickTarget {
+            entity: Some(redirect_hit_to_context_group(
+                world,
+                entity,
+                element_id,
+                &edit_context,
+            )),
+            edit_context_after_click: None,
+        };
+    }
+
+    let Some(active_group_id) = edit_context.current_group() else {
+        return SelectionClickTarget {
+            entity: Some(entity),
+            edit_context_after_click: None,
+        };
+    };
+
+    let redirected = redirect_hit_to_context_group(world, entity, element_id, &edit_context);
+    if let Some(redirected_id) = world.get::<ElementId>(redirected).copied() {
+        if is_direct_child_of_group(world, redirected_id, active_group_id) {
+            return SelectionClickTarget {
+                entity: Some(redirected),
+                edit_context_after_click: None,
+            };
+        }
+    }
+    if is_direct_child_of_group(world, element_id, active_group_id) {
+        return SelectionClickTarget {
+            entity: Some(entity),
+            edit_context_after_click: None,
+        };
+    }
+
+    let mut parent_context = edit_context;
+    parent_context.exit();
+    entity = redirect_hit_to_context_group(world, entity, element_id, &parent_context);
+    SelectionClickTarget {
+        entity: (!crate::plugins::layers::entity_on_locked_layer(world, entity)).then_some(entity),
+        edit_context_after_click: Some(parent_context),
+    }
+}
+
 #[derive(Resource, Default)]
 struct DoubleClickTracker {
     last_click_time: f64,
@@ -305,10 +357,11 @@ struct GroupDoubleClickContext<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     time: Res<'w, Time<Real>>,
     tracker: ResMut<'w, DoubleClickTracker>,
-    selected_query: Query<'w, 's, SelectedGroupClickQueryItem, With<Selected>>,
+    selected_query: Query<'w, 's, SelectedCompositeClickQueryItem, With<Selected>>,
     ownership: Res<'w, InputOwnership>,
     egui_wants_input: Res<'w, EguiWantsInput>,
     edit_context: Res<'w, GroupEditContext>,
+    occurrence_edit_context: Res<'w, OccurrenceEditContext>,
     face_edit_context: ResMut<'w, FaceEditContext>,
 }
 
@@ -328,7 +381,7 @@ fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
         return;
     }
 
-    let (entity, element_id, is_group, is_csg) = selected[0];
+    let (entity, element_id, is_group, is_csg, is_occurrence) = selected[0];
 
     let now = cx.time.elapsed_secs_f64();
     let is_double_click = cx.tracker.last_click_entity == Some(entity)
@@ -346,6 +399,17 @@ fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
         let mut ctx = cx.edit_context.clone();
         ctx.enter(*element_id);
         cx.commands.insert_resource(ctx);
+        let mut occurrence_ctx = cx.occurrence_edit_context.clone();
+        occurrence_ctx.reset();
+        cx.commands.insert_resource(occurrence_ctx);
+        cx.commands.entity(entity).remove::<Selected>();
+    } else if is_occurrence {
+        let mut occurrence_ctx = cx.occurrence_edit_context.clone();
+        occurrence_ctx.enter(*element_id);
+        cx.commands.insert_resource(occurrence_ctx);
+        let mut group_ctx = cx.edit_context.clone();
+        group_ctx.reset();
+        cx.commands.insert_resource(group_ctx);
         cx.commands.entity(entity).remove::<Selected>();
     } else if is_csg {
         // Enter face editing mode on the CsgNode — operand faces are
@@ -363,17 +427,27 @@ fn handle_group_escape(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     edit_context: Res<GroupEditContext>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     face_edit_context: Res<FaceEditContext>,
     ownership: Res<InputOwnership>,
 ) {
-    if !ownership.is_idle() || edit_context.is_root() || face_edit_context.is_active() {
+    if !ownership.is_idle()
+        || (edit_context.is_root() && occurrence_edit_context.is_root())
+        || face_edit_context.is_active()
+    {
         return;
     }
 
     if keys.just_pressed(KeyCode::Escape) {
-        let mut ctx = edit_context.clone();
-        ctx.exit();
-        commands.insert_resource(ctx);
+        if !occurrence_edit_context.is_root() {
+            let mut ctx = occurrence_edit_context.clone();
+            ctx.exit();
+            commands.insert_resource(ctx);
+        } else {
+            let mut ctx = edit_context.clone();
+            ctx.exit();
+            commands.insert_resource(ctx);
+        }
         // Deselect all when exiting group
         // (deselection happens naturally since the next click will re-evaluate)
     }
@@ -402,7 +476,9 @@ fn handle_delete_shortcut(
 fn update_selection_status(
     selected_query: Query<(), With<Selected>>,
     edit_context: Res<GroupEditContext>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     group_query: Query<(&ElementId, &GroupMembers)>,
+    occurrence_query: Query<(&ElementId, &OccurrenceIdentity)>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
     let selection_count = selected_query.iter().count();
@@ -431,6 +507,26 @@ fn update_selection_status(
             };
         }
     }
+    if !occurrence_edit_context.is_root() {
+        let breadcrumb: Vec<&str> = occurrence_edit_context
+            .stack
+            .iter()
+            .filter_map(|id| {
+                occurrence_query
+                    .iter()
+                    .find(|(eid, _)| *eid == id)
+                    .map(|(_, identity)| identity.definition_id.as_str())
+            })
+            .collect();
+        let breadcrumb = breadcrumb.join(" > ");
+        if !breadcrumb.is_empty() {
+            summary = if summary.is_empty() {
+                format!("Editing Occurrence: {breadcrumb}")
+            } else {
+                format!("{summary} | Editing Occurrence: {breadcrumb}")
+            };
+        }
+    }
     status_bar_data.selection_summary = summary;
 }
 
@@ -439,10 +535,21 @@ fn draw_selected_outlines(
     selected_query: Query<Entity, With<Selected>>,
     registry: Res<CapabilityRegistry>,
     transform_state: Res<TransformState>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     mut gizmos: Gizmos,
 ) {
     let active_mode = transform_state.mode;
     let is_active_transform = !transform_state.is_idle();
+
+    if let Some(active_occurrence_id) = occurrence_edit_context.current_occurrence() {
+        if let Some(active_entity) = find_entity_by_element_id_ref(world, active_occurrence_id) {
+            if let Ok(active_ref) = world.get_entity(active_entity) {
+                if let Some(bounds) = occurrence_generated_part_bounds(world, active_ref) {
+                    draw_bounds_wireframe(&mut gizmos, &bounds, Color::srgb(0.2, 0.85, 1.0));
+                }
+            }
+        }
+    }
 
     for entity in &selected_query {
         if !entity_is_visible(world, entity) {
@@ -476,6 +583,49 @@ fn draw_selected_outlines(
             SELECTION_HIGHLIGHT_COLOR
         };
         factory.draw_selection(world, entity, &mut gizmos, color);
+    }
+}
+
+fn occurrence_generated_part_bounds(
+    world: &World,
+    entity_ref: EntityRef<'_>,
+) -> Option<EntityBounds> {
+    if entity_ref.get::<OccurrenceIdentity>().is_none() {
+        return None;
+    }
+    let owner = entity_ref.get::<ElementId>().copied()?;
+    let mut query = world.try_query::<(
+        &GeneratedOccurrencePart,
+        &ProfileExtrusion,
+        Option<&ShapeRotation>,
+    )>()?;
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+
+    for (part, extrusion, rotation) in query.iter(world) {
+        if part.owner != owner {
+            continue;
+        }
+        let rotation = rotation
+            .map(|rotation| rotation.0)
+            .unwrap_or(Quat::IDENTITY);
+        if let Some(bounds) = extrusion.bounds(rotation) {
+            min = min.min(bounds.min);
+            max = max.max(bounds.max);
+            any = true;
+        }
+    }
+
+    any.then_some(EntityBounds { min, max })
+}
+
+fn draw_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Color) {
+    let corners = bounds.corners();
+    for i in 0..4 {
+        gizmos.line(corners[i], corners[(i + 1) % 4], color);
+        gizmos.line(corners[i + 4], corners[4 + (i + 1) % 4], color);
+        gizmos.line(corners[i], corners[i + 4], color);
     }
 }
 
@@ -975,24 +1125,76 @@ struct PreviousGroupEditContext {
     stack: Vec<ElementId>,
 }
 
+#[derive(Resource, Debug, Clone, Default)]
+struct OccurrenceEditContext {
+    stack: Vec<ElementId>,
+}
+
+impl OccurrenceEditContext {
+    fn is_root(&self) -> bool {
+        self.stack.is_empty()
+    }
+
+    fn current_occurrence(&self) -> Option<ElementId> {
+        self.stack.last().copied()
+    }
+
+    fn enter(&mut self, occurrence_id: ElementId) {
+        self.stack.push(occurrence_id);
+    }
+
+    fn exit(&mut self) {
+        self.stack.pop();
+    }
+
+    fn reset(&mut self) {
+        self.stack.clear();
+    }
+}
+
+#[derive(Resource, Default)]
+struct PreviousOccurrenceEditContext {
+    stack: Vec<ElementId>,
+}
+
 const MUTED_ALPHA: f32 = 0.15;
 
 fn update_group_edit_muting(
     mut commands: Commands,
     edit_context: Res<GroupEditContext>,
+    occurrence_edit_context: Res<OccurrenceEditContext>,
     mut previous: ResMut<PreviousGroupEditContext>,
-    entity_query: Query<(Entity, &ElementId, Has<GroupEditMuted>)>,
+    mut previous_occurrence: ResMut<PreviousOccurrenceEditContext>,
+    entity_query: Query<
+        (
+            Entity,
+            Option<&ElementId>,
+            Option<&GeneratedOccurrencePart>,
+            Has<GroupEditMuted>,
+        ),
+        Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+    >,
     group_query: Query<(&ElementId, &GroupMembers)>,
-    material_query: Query<(Entity, &ElementId, &MeshMaterial3d<StandardMaterial>)>,
+    material_query: Query<
+        (
+            Option<&ElementId>,
+            Option<&GeneratedOccurrencePart>,
+            &MeshMaterial3d<StandardMaterial>,
+        ),
+        Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+    >,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if edit_context.stack == previous.stack {
+    if edit_context.stack == previous.stack
+        && occurrence_edit_context.stack == previous_occurrence.stack
+    {
         return;
     }
     previous.stack = edit_context.stack.clone();
+    previous_occurrence.stack = occurrence_edit_context.stack.clone();
 
-    if edit_context.is_root() {
-        for (entity, _, is_muted) in &entity_query {
+    if edit_context.is_root() && occurrence_edit_context.is_root() {
+        for (entity, _, _, is_muted) in &entity_query {
             if is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
                     ec.remove::<GroupEditMuted>();
@@ -1008,12 +1210,20 @@ fn update_group_edit_muting(
             }
         }
     } else {
-        let active_group_id = edit_context.current_group().unwrap();
-        let active_members = collect_members_recursive(&group_query, active_group_id);
+        let active_group_id = edit_context.current_group();
+        let active_occurrence_id = occurrence_edit_context.current_occurrence();
+        let active_members = active_group_id
+            .map(|group_id| collect_members_recursive(&group_query, group_id))
+            .unwrap_or_default();
 
-        for (entity, element_id, is_muted) in &entity_query {
-            let is_active_member =
-                active_members.contains(element_id) || *element_id == active_group_id;
+        for (entity, element_id, generated_part, is_muted) in &entity_query {
+            let is_active_member = edit_entity_is_active(
+                element_id,
+                generated_part,
+                active_group_id,
+                active_occurrence_id,
+                &active_members,
+            );
 
             if is_active_member && is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
@@ -1026,8 +1236,14 @@ fn update_group_edit_muting(
             }
         }
 
-        for (_, element_id, mat_handle) in &material_query {
-            let is_muted = !active_members.contains(element_id) && *element_id != active_group_id;
+        for (element_id, generated_part, mat_handle) in &material_query {
+            let is_muted = !edit_entity_is_active(
+                element_id,
+                generated_part,
+                active_group_id,
+                active_occurrence_id,
+                &active_members,
+            );
 
             if let Some(mat) = materials.get_mut(mat_handle) {
                 if is_muted {
@@ -1040,6 +1256,36 @@ fn update_group_edit_muting(
             }
         }
     }
+}
+
+fn edit_entity_is_active(
+    element_id: Option<&ElementId>,
+    generated_part: Option<&GeneratedOccurrencePart>,
+    active_group_id: Option<ElementId>,
+    active_occurrence_id: Option<ElementId>,
+    active_group_members: &[ElementId],
+) -> bool {
+    if let Some(group_id) = active_group_id {
+        if let Some(element_id) = element_id {
+            if *element_id == group_id || active_group_members.contains(element_id) {
+                return true;
+            }
+        }
+    }
+
+    if let Some(occurrence_id) = active_occurrence_id {
+        if element_id.copied() == Some(occurrence_id) {
+            return true;
+        }
+        if generated_part
+            .map(|part| part.owner == occurrence_id)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn collect_members_recursive(
