@@ -5,6 +5,7 @@ use bevy::{
     input::touch::TouchPhase,
     prelude::*,
 };
+use bevy_egui::PrimaryEguiContext;
 use serde_json::Value;
 
 use crate::authored_entity::EntityBounds;
@@ -254,7 +255,13 @@ fn spawn_camera(mut commands: Commands) {
     let mut transform = orbit_transform(&orbit);
     let mut projection = Projection::Perspective(PerspectiveProjection::default());
     apply_orbit_state(&orbit, &mut transform, &mut projection);
-    commands.spawn((Camera3d::default(), projection, transform, orbit));
+    commands.spawn((
+        PrimaryEguiContext,
+        Camera3d::default(),
+        projection,
+        transform,
+        orbit,
+    ));
 }
 
 #[derive(SystemParam)]
