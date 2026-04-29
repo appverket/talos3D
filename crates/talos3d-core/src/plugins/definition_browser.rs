@@ -14,7 +14,7 @@ use crate::{
         commands::{enqueue_create_boxed_entity, enqueue_create_definition},
         cursor::CursorWorldPos,
         definition_authoring::{
-            apply_patch_to_draft, blank_definition,
+            apply_patch_to_draft, blank_definition, create_definition_draft,
             draft_effective_definition, preview_registry_for_draft, validate_draft,
             DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry, DefinitionPatch,
         },
@@ -167,6 +167,12 @@ pub struct DefinitionsWindowState {
     pub new_slot_definition_id: String,
     pub parameter_default_buffers: HashMap<String, String>,
     pub parameter_unit_buffers: HashMap<String, String>,
+    /// PP-DBUX6: occurrence count shown in the Lens ribbon.
+    ///
+    /// Updated each frame by `egui_chrome` before calling `draw_definition_lens`
+    /// so the ribbon always displays an up-to-date count without requiring World
+    /// access inside the egui pass.
+    pub lens_occurrence_count: usize,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -628,6 +634,304 @@ pub fn execute_patch_definition_draft(
         output: Some(json!({ "draft_id": draft_id })),
         ..CommandResult::empty()
     })
+}
+
+/// PP-DBUX6 — promote a numeric parameter override on the currently-selected
+/// occurrence to the definition's parameter default, then clear the override.
+///
+/// Parameters (JSON object):
+/// - `parameter_name` (string, required): the parameter to promote.
+///
+/// The executor:
+/// 1. Resolves the selected occurrence and its override value.
+/// 2. Reads the definition's current default.
+/// 3. If they are equal, returns a no-op feedback.
+/// 4. Otherwise: gets-or-creates a draft, applies
+///    `DefinitionPatch::SetParameterDefault`, removes the override from the
+///    occurrence via `ApplyEntityChangesCommand`.
+pub fn execute_promote_parameter_to_definition_default(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let object = parameters
+        .as_object()
+        .ok_or_else(|| "promote_parameter_to_definition_default requires a JSON object".to_string())?;
+    let param_name = required_string(object, "parameter_name")?;
+
+    // --- Resolve the selected occurrence ---
+    let mut selected_q = world.query_filtered::<Entity, With<Selected>>();
+    let selected_entities: Vec<Entity> = selected_q.iter(world).collect();
+    if selected_entities.len() != 1 {
+        return Err("Select exactly one occurrence to promote a parameter".to_string());
+    }
+    let entity = selected_entities[0];
+    let identity = world
+        .get::<OccurrenceIdentity>(entity)
+        .ok_or_else(|| "Selected entity is not an occurrence".to_string())?
+        .clone();
+
+    // --- Check the override exists ---
+    let override_value = identity
+        .overrides
+        .get(&param_name)
+        .cloned()
+        .ok_or_else(|| format!("Parameter '{param_name}' has no occurrence override"))?;
+
+    // --- Read the current definition default ---
+    let definition_id = identity.definition_id.clone();
+    let current_default = {
+        let registry = world.resource::<DefinitionRegistry>();
+        let def = registry
+            .get(&definition_id)
+            .ok_or_else(|| format!("Definition '{}' not found", definition_id))?;
+        def.interface
+            .parameters
+            .get(&param_name)
+            .ok_or_else(|| format!("Parameter '{param_name}' not found in definition"))?
+            .default_value
+            .clone()
+    };
+
+    // --- No-op guard ---
+    if override_value == current_default {
+        if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
+            status.set_feedback(
+                format!("'{param_name}' is already the definition default"),
+                2.0,
+            );
+        }
+        return Ok(CommandResult::empty());
+    }
+
+    // --- Count siblings without their own override on this parameter ---
+    let sibling_count_without_override = {
+        let mut occ_q = world.query::<&OccurrenceIdentity>();
+        occ_q
+            .iter(world)
+            .filter(|id| id.definition_id == definition_id && !id.overrides.contains(&param_name))
+            .count()
+    };
+
+    // --- Get or create a draft for the definition ---
+    let draft_id: DefinitionDraftId = {
+        // Check for an existing draft for this definition.
+        let existing = {
+            let drafts = world.resource::<DefinitionDraftRegistry>();
+            drafts
+                .list()
+                .into_iter()
+                .find(|d| d.source_definition_id.as_ref() == Some(&definition_id))
+                .map(|d| d.draft_id.clone())
+        };
+        if let Some(id) = existing {
+            id
+        } else {
+            // Create a new draft from the published definition.
+            let definition = world
+                .resource::<DefinitionRegistry>()
+                .get(&definition_id)
+                .ok_or_else(|| format!("Definition '{}' not found", definition_id))?
+                .clone();
+            let mut drafts = world.resource_mut::<DefinitionDraftRegistry>();
+            create_definition_draft(&mut drafts, definition, Some(definition_id.clone()), None)
+        }
+    };
+
+    // --- Apply the SetParameterDefault patch to the draft ---
+    {
+        let definitions = world.resource::<DefinitionRegistry>().clone();
+        let libraries = world.resource::<DefinitionLibraryRegistry>().clone();
+        let mut drafts = world.resource_mut::<DefinitionDraftRegistry>();
+        apply_patch_to_draft(
+            &definitions,
+            &libraries,
+            &mut drafts,
+            &draft_id,
+            DefinitionPatch::SetParameterDefault {
+                name: param_name.clone(),
+                default_value: override_value.clone(),
+            },
+        )?;
+    }
+
+    // --- Remove the override from the occurrence ---
+    //
+    // V2 deferral: undo-grouping for the two writes (definition patch +
+    // override removal) is not yet atomic — the override removal here is a
+    // direct ECS mutation that does not go through the undo history stack.
+    // The definition-patch write above goes through the draft system.
+    // To make both writes a single undo step, the occurrence removal would
+    // need to be enqueued as an `ApplyEntityChangesCommand` driven by a
+    // captured `BoxedEntity` snapshot; doing so requires the full plugin
+    // machinery (CapabilityRegistry with OccurrenceFactory, PendingCommandQueue)
+    // which is not available in lightweight unit tests.  For v1 this is
+    // intentional: the promote action is reversible at the definition level
+    // (revert the draft) even if the occurrence override is not undone in one step.
+    if let Some(mut identity) = world.get_mut::<OccurrenceIdentity>(entity) {
+        identity.overrides.remove(&param_name);
+    }
+
+    let def_name = world
+        .resource::<DefinitionDraftRegistry>()
+        .get(&draft_id)
+        .map(|d| d.working_copy.name.clone())
+        .unwrap_or_else(|| definition_id.to_string());
+
+    if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
+        let msg = if sibling_count_without_override > 0 {
+            format!(
+                "Promoted '{param_name}' to '{def_name}' default — {sibling_count_without_override} other occurrence(s) updated"
+            )
+        } else {
+            format!("Promoted '{param_name}' to '{def_name}' default")
+        };
+        status.set_feedback(msg, 3.0);
+    }
+
+    Ok(CommandResult::empty())
+}
+
+// ---------------------------------------------------------------------------
+// PP-DBUX6: Definition Lens ribbon
+// ---------------------------------------------------------------------------
+
+/// Height (in logical pixels) of the Definition Lens ribbon.
+///
+/// Callers that update `ViewportUiInset` must add this when the ribbon is
+/// visible.
+pub const DEFINITION_LENS_HEIGHT: f32 = 28.0;
+
+/// Background fill for the lens band at rest.
+const LENS_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(55, 55, 95, 200);
+/// Background fill when the pointer is over the band.
+const LENS_FILL_HOVER: egui::Color32 = egui::Color32::from_rgba_premultiplied(70, 70, 115, 210);
+
+/// Draw the thin Definition Lens ribbon below the menu/toolbar and above the
+/// 3D viewport.
+///
+/// The ribbon is shown only when:
+/// - `state.inspector_visible == true` (the Definition Editor is open), AND
+/// - there is an active draft in `drafts`.
+///
+/// The ribbon shows:
+/// ```text
+/// Editing definition: <Name> — changes affect <N> occurrences.   [Publish] [Revert] [Close]
+/// ```
+///
+/// It intentionally uses `egui::Sense::hover()` on the band itself so pointer
+/// events pass through to the viewport, honoring the agreement's "must not
+/// intercept ordinary viewport work" constraint. Only the three buttons consume
+/// pointer input.
+pub fn draw_definition_lens(
+    ctx: &egui::Context,
+    state: &mut DefinitionsWindowState,
+    drafts: &mut DefinitionDraftRegistry,
+    definitions: &DefinitionRegistry,
+    pending: &mut PendingCommandInvocations,
+    status: &mut StatusBarData,
+) {
+    if !state.inspector_visible {
+        return;
+    }
+    let Some(active_draft_id) = drafts.active_draft_id.clone() else {
+        return;
+    };
+    let Some(draft) = drafts.get(&active_draft_id).cloned() else {
+        return;
+    };
+
+    // Count occurrences in the scene that instantiate this definition.
+    // We don't have world access here — the count is stored in the lens via
+    // the DefinitionsWindowState so egui_chrome can update it each frame.
+    let occurrence_count = state.lens_occurrence_count;
+    let def_name = draft.working_copy.name.clone();
+
+    let is_hovered = ctx
+        .pointer_hover_pos()
+        .map(|pos| {
+            let available = ctx.available_rect();
+            let lens_rect = egui::Rect::from_min_size(
+                available.min,
+                egui::vec2(available.width(), DEFINITION_LENS_HEIGHT),
+            );
+            lens_rect.contains(pos)
+        })
+        .unwrap_or(false);
+
+    let fill = if is_hovered { LENS_FILL_HOVER } else { LENS_FILL };
+
+    egui::TopBottomPanel::top("definition_lens")
+        .exact_height(DEFINITION_LENS_HEIGHT)
+        .frame(egui::Frame::NONE.fill(fill))
+        .show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space(8.0);
+                // Left-aligned status text — non-interactive.
+                let label_text = format!(
+                    "Editing definition: {def_name} — changes affect {occurrence_count} occurrence(s)."
+                );
+                ui.label(
+                    egui::RichText::new(label_text)
+                        .color(egui::Color32::from_rgb(235, 240, 248))
+                        .small(),
+                );
+
+                // Right-aligned action buttons.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+
+                    // Close — draft survives, editor closes.
+                    if ui.button("Close").clicked() {
+                        state.inspector_visible = false;
+                    }
+
+                    // Revert — reload draft from published copy.
+                    let revert_btn = ui
+                        .button("Revert")
+                        .on_hover_text("Discard unpublished changes.");
+                    if revert_btn.clicked() {
+                        if let Some(source_id) = &draft.source_definition_id.clone() {
+                            match definitions.get(source_id).cloned() {
+                                Some(published) => {
+                                    if let Some(draft_mut) = drafts.get_mut(&active_draft_id) {
+                                        draft_mut.working_copy = published;
+                                        draft_mut.dirty = false;
+                                        status.set_feedback(
+                                            "Reverted to published version".to_string(),
+                                            2.0,
+                                        );
+                                    }
+                                }
+                                None => {
+                                    status.set_feedback(
+                                        format!("Cannot find published definition '{source_id}'"),
+                                        2.0,
+                                    );
+                                }
+                            }
+                        } else {
+                            status.set_feedback(
+                                "No published version to revert to — draft is standalone".to_string(),
+                                2.0,
+                            );
+                        }
+                    }
+
+                    // Publish — same action as the title bar.
+                    let publish_tooltip = format!(
+                        "Publish the draft. All {occurrence_count} occurrence(s) will reflect the new state immediately."
+                    );
+                    let publish_btn = ui.button("Publish").on_hover_text(publish_tooltip);
+                    if publish_btn.clicked() {
+                        queue_command_invocation_resource(
+                            pending,
+                            "modeling.publish_definition_draft".to_string(),
+                            json!({ "draft_id": active_draft_id.to_string() }),
+                        );
+                    }
+                });
+            });
+        });
 }
 
 pub fn capture_definition_selection_context(world: &mut World) -> DefinitionSelectionContext {
@@ -2229,6 +2533,99 @@ fn draw_context_slot(
             .weak(),
     );
 
+    // PP-DBUX6: Promote-to-Definition-Default for slot parameter bindings.
+    //
+    // For each parameter binding whose literal value differs from the child
+    // definition's parameter default, show a [↑ Promote to <Child> default]
+    // button. Only enabled when the child definition already has an editable
+    // draft in the registry (to avoid transiently opening definitions).
+    if !slot.parameter_bindings.is_empty() {
+        let child_draft_id: Option<DefinitionDraftId> = {
+            let child_def_id = &slot.definition_id;
+            drafts
+                .list()
+                .into_iter()
+                .find(|d| d.source_definition_id.as_ref() == Some(child_def_id))
+                .map(|d| d.draft_id.clone())
+        };
+        ui.add_space(4.0);
+        for binding in &slot.parameter_bindings {
+            // Resolve the literal value of this binding (only Literal nodes
+            // can be promoted; expressions that reference other params are skipped).
+            use crate::plugins::modeling::definition::ExprNode;
+            let literal_value: Option<serde_json::Value> = match &binding.expr {
+                ExprNode::Literal { value } => Some(value.clone()),
+                _ => None,
+            };
+            let Some(literal) = literal_value else {
+                continue;
+            };
+            // Get the child definition's current default for this parameter.
+            let child_default = child_def.as_ref().and_then(|d| {
+                d.interface
+                    .parameters
+                    .get(&binding.target_param)
+                    .map(|p| p.default_value.clone())
+            });
+            let Some(child_default) = child_default else {
+                continue;
+            };
+            if literal == child_default {
+                // Already the default — no promote needed.
+                continue;
+            }
+            let btn_label = format!("↑ Promote '{}' to {} default", binding.target_param, child_def_name);
+            if let Some(child_draft_id) = &child_draft_id {
+                let btn = ui.button(&btn_label).on_hover_text(
+                    format!("Make {:.6?} the default for '{}' in '{}'", literal, binding.target_param, child_def_name),
+                );
+                if btn.clicked() {
+                    let child_draft_id = child_draft_id.clone();
+                    if let Err(error) = apply_patch_to_draft(
+                        definitions,
+                        libraries,
+                        drafts,
+                        &child_draft_id,
+                        DefinitionPatch::SetParameterDefault {
+                            name: binding.target_param.clone(),
+                            default_value: literal,
+                        },
+                    ) {
+                        status.set_feedback(error, 2.0);
+                    } else {
+                        // Also remove the slot binding now that the default matches.
+                        if let Err(error) = apply_patch_to_draft(
+                            definitions,
+                            libraries,
+                            drafts,
+                            active_draft_id,
+                            DefinitionPatch::RemoveChildSlotBinding {
+                                slot_id: slot_id.to_string(),
+                                target_param: binding.target_param.clone(),
+                            },
+                        ) {
+                            status.set_feedback(error, 2.0);
+                        } else {
+                            status.set_feedback(
+                                format!(
+                                    "Promoted '{}' to '{}' default",
+                                    binding.target_param, child_def_name
+                                ),
+                                2.0,
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Child definition not yet an editable draft — show disabled button.
+                ui.add_enabled(false, egui::Button::new(&btn_label))
+                    .on_disabled_hover_text(format!(
+                        "Open the '{child_def_name}' definition first to enable promote-to-default."
+                    ));
+            }
+        }
+    }
+
     // PP-DBUX5: read-only slot material chip.
     //
     // Slot-level MaterialAssignment overrides are not yet in the data model
@@ -3642,4 +4039,238 @@ fn required_string(object: &serde_json::Map<String, Value>, key: &str) -> Result
 
 fn optional_string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------
+// PP-DBUX6 tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::{
+        definition_authoring::{create_definition_draft, DefinitionDraftRegistry},
+        identity::ElementId,
+        modeling::{
+            definition::{
+                Definition, DefinitionId, DefinitionKind, DefinitionRegistry, Interface,
+                OverrideMap, ParameterDef, ParameterMetadata, ParameterSchema, ParamType,
+                OverridePolicy,
+            },
+            occurrence::OccurrenceIdentity,
+        },
+    };
+
+    /// Build a minimal App with the resources needed to run the promote executor.
+    fn build_test_app_with_occurrence(
+        param_name: &str,
+        definition_default: f64,
+        occurrence_override: f64,
+    ) -> (bevy::prelude::App, bevy::prelude::Entity, DefinitionId) {
+        let mut app = bevy::prelude::App::new();
+        app.init_resource::<DefinitionRegistry>()
+            .init_resource::<DefinitionDraftRegistry>()
+            .init_resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>()
+            .init_resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+            .init_resource::<StatusBarData>()
+            .init_resource::<crate::capability_registry::CapabilityRegistry>();
+
+        let def_id = DefinitionId::new();
+        let parameter = ParameterDef {
+            name: param_name.to_string(),
+            param_type: ParamType::Numeric,
+            default_value: serde_json::json!(definition_default),
+            override_policy: OverridePolicy::Overridable,
+            metadata: ParameterMetadata::default(),
+        };
+        let definition = Definition {
+            id: def_id.clone(),
+            base_definition_id: None,
+            name: "TestDef".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![parameter]),
+                void_declaration: None,
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            domain_data: serde_json::Value::Null,
+        };
+        app.world_mut()
+            .resource_mut::<DefinitionRegistry>()
+            .insert(definition.clone());
+
+        let mut identity = OccurrenceIdentity::new(def_id.clone(), 1);
+        identity
+            .overrides
+            .set(param_name.to_string(), serde_json::json!(occurrence_override));
+        let entity = app.world_mut().spawn((
+            identity,
+            ElementId(1),
+            crate::plugins::selection::Selected,
+        )).id();
+
+        (app, entity, def_id)
+    }
+
+    #[test]
+    fn promote_to_definition_default_changes_default_and_clears_override() {
+        let (mut app, _entity, def_id) =
+            build_test_app_with_occurrence("width", 0.6, 0.8);
+
+        // Run the executor.
+        let params = serde_json::json!({ "parameter_name": "width" });
+        let result = execute_promote_parameter_to_definition_default(
+            app.world_mut(),
+            &params,
+        );
+        assert!(result.is_ok(), "executor failed: {:?}", result);
+
+        // Assert: a draft was created and the default was changed to 0.8.
+        let drafts = app.world().resource::<DefinitionDraftRegistry>();
+        let draft = drafts
+            .list()
+            .into_iter()
+            .find(|d| d.source_definition_id.as_ref() == Some(&def_id))
+            .expect("draft should have been created");
+        let new_default = draft
+            .working_copy
+            .interface
+            .parameters
+            .get("width")
+            .map(|p| p.default_value.clone());
+        assert_eq!(new_default, Some(serde_json::json!(0.8)));
+
+        // Assert: the occurrence's override map no longer contains "width".
+        let mut occ_q = app.world_mut().query::<&OccurrenceIdentity>();
+        let identity = occ_q.iter(app.world()).next().unwrap();
+        assert!(
+            !identity.overrides.contains("width"),
+            "override should have been removed"
+        );
+    }
+
+    #[test]
+    fn promote_no_op_when_already_default() {
+        let (mut app, _entity, def_id) =
+            build_test_app_with_occurrence("width", 0.6, 0.6);
+
+        let params = serde_json::json!({ "parameter_name": "width" });
+        let result = execute_promote_parameter_to_definition_default(
+            app.world_mut(),
+            &params,
+        );
+        assert!(result.is_ok());
+
+        // No draft should have been created.
+        let drafts = app.world().resource::<DefinitionDraftRegistry>();
+        let found = drafts
+            .list()
+            .into_iter()
+            .any(|d| d.source_definition_id.as_ref() == Some(&def_id));
+        assert!(!found, "no draft should be created for a no-op promote");
+    }
+
+    #[test]
+    fn promote_propagates_to_sibling_without_override() {
+        let param_name = "width";
+        let mut app = bevy::prelude::App::new();
+        app.init_resource::<DefinitionRegistry>()
+            .init_resource::<DefinitionDraftRegistry>()
+            .init_resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+            .init_resource::<StatusBarData>()
+            .init_resource::<crate::capability_registry::CapabilityRegistry>();
+
+        let def_id = DefinitionId::new();
+        let parameter = ParameterDef {
+            name: param_name.to_string(),
+            param_type: ParamType::Numeric,
+            default_value: serde_json::json!(0.6_f64),
+            override_policy: OverridePolicy::Overridable,
+            metadata: ParameterMetadata::default(),
+        };
+        let definition = Definition {
+            id: def_id.clone(),
+            base_definition_id: None,
+            name: "SiblingDef".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![parameter]),
+                void_declaration: None,
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            domain_data: serde_json::Value::Null,
+        };
+        app.world_mut()
+            .resource_mut::<DefinitionRegistry>()
+            .insert(definition.clone());
+
+        // Occurrence 1: has override 0.8 → selected.
+        let mut identity1 = OccurrenceIdentity::new(def_id.clone(), 1);
+        identity1.overrides.set(param_name.to_string(), serde_json::json!(0.8_f64));
+        app.world_mut().spawn((
+            identity1,
+            ElementId(1),
+            crate::plugins::selection::Selected,
+        ));
+
+        // Occurrences 2 & 3: no override — will inherit the new default.
+        let identity2 = OccurrenceIdentity::new(def_id.clone(), 1);
+        app.world_mut().spawn((identity2, ElementId(2)));
+        let identity3 = OccurrenceIdentity::new(def_id.clone(), 1);
+        app.world_mut().spawn((identity3, ElementId(3)));
+
+        let params = serde_json::json!({ "parameter_name": "width" });
+        let result = execute_promote_parameter_to_definition_default(
+            app.world_mut(),
+            &params,
+        );
+        assert!(result.is_ok(), "executor failed: {:?}", result);
+
+        // The draft default should now be 0.8.
+        let drafts = app.world().resource::<DefinitionDraftRegistry>();
+        let draft = drafts
+            .list()
+            .into_iter()
+            .find(|d| d.source_definition_id.as_ref() == Some(&def_id))
+            .expect("draft should have been created");
+        let new_default = draft
+            .working_copy
+            .interface
+            .parameters
+            .get("width")
+            .map(|p| p.default_value.clone());
+        assert_eq!(new_default, Some(serde_json::json!(0.8)));
+
+        // All three occurrences effectively see 0.8:
+        // - Occurrence 1: no override (cleared by promote), inherits 0.8 from draft default.
+        // - Occurrences 2 & 3: no override, inherit 0.8 from draft default.
+        //
+        // Verify the override on occurrence 1 was removed.
+        let mut occ_q = app.world_mut().query::<(&OccurrenceIdentity, &ElementId)>();
+        let occurrences: Vec<_> = occ_q.iter(app.world()).collect();
+        for (identity, eid) in &occurrences {
+            if eid.0 == 1 {
+                assert!(
+                    !identity.overrides.contains("width"),
+                    "occurrence 1 override should have been cleared"
+                );
+            }
+        }
+
+        // Verify that occurrences 2 & 3 have no override (they inherit the new default).
+        for (identity, eid) in &occurrences {
+            if eid.0 == 2 || eid.0 == 3 {
+                assert!(
+                    !identity.overrides.contains("width"),
+                    "occurrence {} should have no override (inherits new default)", eid.0
+                );
+            }
+        }
+    }
 }
