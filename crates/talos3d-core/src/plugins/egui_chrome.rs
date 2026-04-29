@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
-use bevy_egui::{egui, EguiContexts, EguiPlugin};
+use bevy_egui::{egui, EguiContexts, EguiGlobalSettings, EguiPlugin};
 
 use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 use crate::curation::{NominationQueue, SourceRegistry};
@@ -252,6 +252,10 @@ impl Plugin for EguiChromePlugin {
             // Disable bindless textures — not yet supported on Metal
             // (see https://github.com/bevyengine/bevy/issues/18149)
             bindless_mode_array_size: None,
+            ..default()
+        })
+        .insert_resource(EguiGlobalSettings {
+            auto_create_primary_context: false,
             ..default()
         })
         .init_resource::<MenuBarState>()
