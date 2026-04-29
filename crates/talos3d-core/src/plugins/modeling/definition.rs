@@ -838,6 +838,16 @@ impl OverrideMap {
     pub fn set(&mut self, name: impl Into<String>, value: serde_json::Value) {
         self.0.insert(name.into(), value);
     }
+
+    /// Remove an override, returning its previous value if any.
+    pub fn remove(&mut self, name: &str) -> Option<serde_json::Value> {
+        self.0.remove(name)
+    }
+
+    /// Returns `true` if the map contains an override for `name`.
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(name)
+    }
 }
 
 // ---------------------------------------------------------------------------

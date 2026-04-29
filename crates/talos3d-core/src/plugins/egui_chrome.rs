@@ -28,8 +28,8 @@ use crate::plugins::{
     },
     cursor::{CursorWorldPos, ViewportUiInset},
     definition_browser::{
-        draw_definitions_window, sync_definition_selection_context, DefinitionSelectionContext,
-        DefinitionsWindowState,
+        draw_definition_lens, draw_definitions_window, sync_definition_selection_context,
+        DefinitionSelectionContext, DefinitionsWindowState,
     },
     definition_preview_scene::{DefinitionPreviewScene, PendingPreviewClick},
     document_properties::DocumentProperties,
@@ -46,7 +46,10 @@ use crate::plugins::{
     material_browser::{draw_materials_window, MaterialsWindowState},
     materials::{material_assignment_from_value, MaterialAssignment, MaterialRegistry},
     menu_bar::MenuBarState,
-    modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+    modeling::{
+        definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+        occurrence::OccurrenceIdentity,
+    },
     palette::{draw_command_palette, PaletteState},
     property_edit::{
         parse_property_value, shared_property_value, PropertyEditState, PropertyPanelData,
@@ -792,6 +795,9 @@ struct ChromeData<'w, 's> {
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
     selected_entities: Query<'w, 's, Entity, With<Selected>>,
+    selected_with_occurrence:
+        Query<'w, 's, (Entity, &'static OccurrenceIdentity), With<Selected>>,
+    all_occurrences: Query<'w, 's, &'static OccurrenceIdentity>,
     selected_material_assignments:
         Query<'w, 's, (&'static ElementId, Option<&'static MaterialAssignment>), With<Selected>>,
     light_query: Query<
@@ -977,6 +983,34 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             draw_floating_toolbar(&ctx, &mut render, descriptor);
         }
     }
+
+    // PP-DBUX6: update the occurrence count for the active draft before
+    // rendering the Lens so the ribbon always shows an up-to-date value.
+    {
+        let active_def_id = data
+            .definition_draft_registry
+            .active_draft_id
+            .as_ref()
+            .and_then(|id| data.definition_draft_registry.get(id))
+            .and_then(|draft| draft.source_definition_id.clone());
+        let count = if let Some(def_id) = active_def_id {
+            data.all_occurrences
+                .iter()
+                .filter(|identity| identity.definition_id == def_id)
+                .count()
+        } else {
+            0
+        };
+        data.definitions_window_state.lens_occurrence_count = count;
+    }
+    draw_definition_lens(
+        &ctx,
+        &mut data.definitions_window_state,
+        &mut data.definition_draft_registry,
+        &data.definition_registry,
+        &mut data.pending_command_invocations,
+        &mut data.status_bar_data,
+    );
 
     draw_command_palette(
         &ctx,
@@ -1350,6 +1384,78 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         }
         if let Some(action) = pending_action {
             apply_property_panel_action(data, &fields, action);
+        }
+
+        // PP-DBUX6: Promote-to-Definition-Default section.
+        //
+        // Shown when the selected entity is a single occurrence that has at
+        // least one numeric override differing from the definition's default.
+        // For each such override, an inline [↑ Promote to definition default]
+        // button is shown. Clicking enqueues the command which writes
+        // SetParameterDefault to the draft AND removes the override.
+        if let SelectionSemanticKind::Occurrence {
+            definition_id: ref def_id_str,
+            ..
+        } = data.property_panel_data.semantic_kind
+        {
+            // Collect overrides that differ from definition defaults.
+            let promote_candidates: Vec<(String, serde_json::Value)> = {
+                let def_id = crate::plugins::modeling::definition::DefinitionId(def_id_str.clone());
+                let maybe_def = data.definition_registry.get(&def_id);
+                let maybe_override: Option<Vec<(String, serde_json::Value)>> =
+                    data.selected_with_occurrence
+                        .iter()
+                        .next()
+                        .and_then(|(_, identity)| {
+                            let def = maybe_def?;
+                            Some(
+                                identity
+                                    .overrides
+                                    .0
+                                    .iter()
+                                    .filter_map(|(name, override_val)| {
+                                        let param = def.interface.parameters.get(name)?;
+                                        // Only surface numeric overrides that differ from the default.
+                                        if param.param_type == crate::plugins::modeling::definition::ParamType::Numeric
+                                            && override_val != &param.default_value
+                                        {
+                                            Some((name.clone(), override_val.clone()))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect(),
+                            )
+                        });
+                maybe_override.unwrap_or_default()
+            };
+
+            if !promote_candidates.is_empty() {
+                ui.add_space(6.0);
+                egui::CollapsingHeader::new("Override Promotion")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for (param_name, _override_val) in &promote_candidates {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(param_name).small(),
+                                );
+                                let btn = ui
+                                    .small_button("↑ Promote to definition default")
+                                    .on_hover_text(format!(
+                                        "Make this override the new default for every occurrence of this definition"
+                                    ));
+                                if btn.clicked() {
+                                    crate::plugins::command_registry::queue_command_invocation_resource(
+                                        &mut data.pending_command_invocations,
+                                        "modeling.promote_parameter_to_definition_default",
+                                        serde_json::json!({ "parameter_name": param_name }),
+                                    );
+                                }
+                            });
+                        }
+                    });
+            }
         }
     });
 
