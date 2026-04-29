@@ -44,7 +44,7 @@ use crate::plugins::{
         SceneLightSnapshot, SceneLightingSettings,
     },
     material_browser::{draw_materials_window, MaterialsWindowState},
-    materials::{MaterialAssignment, MaterialRegistry},
+    materials::{material_assignment_from_value, MaterialAssignment, MaterialRegistry},
     menu_bar::MenuBarState,
     modeling::definition::{DefinitionLibraryRegistry, DefinitionRegistry},
     palette::{draw_command_palette, PaletteState},
@@ -1000,6 +1000,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.status_bar_data,
         &data.definition_preview_scene,
         &mut data.pending_preview_click,
+        &data.material_registry,
     );
     let selected_material_assignments: Vec<(u64, Option<MaterialAssignment>)> = data
         .selected_material_assignments
@@ -1205,6 +1206,8 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
             ui,
             &data.property_panel_data.semantic_kind,
             &mut data.pending_command_invocations,
+            &data.definition_registry,
+            &data.material_registry,
         );
         let fields = first.property_fields();
         let sections = property_panel_sections(&fields);
@@ -1753,6 +1756,8 @@ fn draw_property_panel_semantic_header(
     ui: &mut egui::Ui,
     kind: &SelectionSemanticKind,
     pending: &mut PendingCommandInvocations,
+    definition_registry: &DefinitionRegistry,
+    material_registry: &MaterialRegistry,
 ) {
     let label = match kind {
         SelectionSemanticKind::Generic => return,
@@ -1804,11 +1809,75 @@ fn draw_property_panel_semantic_header(
                 }
                 SelectionSemanticKind::GeneratedPart {
                     controlling_definition_display,
-                    ..
+                    controlling_definition_id,
                 } => {
-                    let label = format!("Open {controlling_definition_display} Definition");
+                    // PP-DBUX5: show a read-only material chip for the
+                    // generated part's effective material, resolved through the
+                    // controlling child definition.  Clicking the chip or the
+                    // "Open … Definition" button routes the user to the
+                    // definition — per the agreement: "no fewer than one click
+                    // and no raw definition-id strings shown to the user."
+                    let ctrl_def_id = crate::plugins::modeling::definition::DefinitionId(
+                        controlling_definition_id.clone(),
+                    );
+                    let effective_material_id = definition_registry
+                        .get(&ctrl_def_id)
+                        .and_then(|d| {
+                            d.domain_data
+                                .get("architectural")
+                                .and_then(|a| a.get("material_assignment"))
+                                .and_then(|ma| material_assignment_from_value(ma))
+                                .and_then(|a| a.render_material_id(None))
+                        });
+
+                    // Read-only material chip
+                    let (mat_display, swatch_color) = match effective_material_id.as_deref() {
+                        Some(id) => {
+                            if let Some(def) = material_registry.get(id) {
+                                let [r, g, b, a] = def.base_color;
+                                (
+                                    def.name.clone(),
+                                    egui::Color32::from_rgba_premultiplied(
+                                        (r.clamp(0.0, 1.0) * 255.0) as u8,
+                                        (g.clamp(0.0, 1.0) * 255.0) as u8,
+                                        (b.clamp(0.0, 1.0) * 255.0) as u8,
+                                        (a.clamp(0.0, 1.0) * 255.0) as u8,
+                                    ),
+                                )
+                            } else {
+                                (id.to_string(), egui::Color32::from_gray(120))
+                            }
+                        }
+                        None => ("—".to_string(), egui::Color32::from_gray(60)),
+                    };
+
+                    ui.horizontal(|ui| {
+                        let swatch_size = egui::vec2(14.0, 14.0);
+                        let (swatch_rect, _) =
+                            ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+                        ui.painter().rect_filled(swatch_rect, 2.0, swatch_color);
+                        ui.painter().rect_stroke(
+                            swatch_rect,
+                            2.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.label(egui::RichText::new("Material:").small());
+                        ui.label(
+                            egui::RichText::new(&mat_display)
+                                .small()
+                                .strong()
+                                .color(egui::Color32::from_gray(200)),
+                        )
+                        .on_hover_text(format!(
+                            "Material is controlled by the {} definition. Open the definition to change it.",
+                            controlling_definition_display
+                        ));
+                    });
+
+                    let open_label = format!("Open {controlling_definition_display} Definition");
                     if ui
-                        .button(label)
+                        .button(open_label)
                         .on_hover_text(
                             "Edit the controlling child definition. Material and class-level overrides belong here.",
                         )
