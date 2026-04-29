@@ -45,8 +45,9 @@ use crate::{
             execute_create_definition_draft, execute_derive_definition_draft,
             execute_instantiate_definition, execute_open_definition_draft,
             execute_open_selected_occurrence_definition, execute_patch_definition_draft,
-            execute_publish_definition_draft, execute_toggle_definitions_browser,
-            DefinitionSelectionContext, DefinitionsWindowState,
+            execute_promote_parameter_to_definition_default, execute_publish_definition_draft,
+            execute_toggle_definitions_browser, DefinitionSelectionContext,
+            DefinitionsWindowState,
         },
         handles::arm_move_handles,
         identity::ElementId,
@@ -302,6 +303,30 @@ impl Plugin for ModelingPlugin {
                     capability_id: Some("modeling".to_string()),
                 },
                 execute_patch_definition_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.promote_parameter_to_definition_default".to_string(),
+                    label: "Promote Override to Definition Default".to_string(),
+                    description: "Make the selected occurrence's numeric override the definition's new default. All occurrences without their own override will inherit it.".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "parameter_name": { "type": "string" }
+                        },
+                        "required": ["parameter_name"]
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Make this override the new default for every occurrence".to_string()),
+                    requires_selection: true,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                execute_promote_parameter_to_definition_default,
             )
             .register_command(
                 CommandDescriptor {
@@ -561,6 +586,20 @@ impl Plugin for ModelingPlugin {
                         command_ids: vec![
                             "modeling.create_fillet".to_string(),
                             "modeling.create_chamfer".to_string(),
+                        ],
+                    },
+                    // PP-DBUX1: surface reusable-content libraries on the
+                    // toolbar so the Definitions Browser and Materials Browser
+                    // are reachable from a primary spatial surface, per
+                    // DEFINITION_BROWSER_UX_AGREEMENT.md (Command Surfaces
+                    // rule). Both commands have `icon: None`; the toolbar
+                    // falls back to label text via
+                    // `toolbar_button_fallback_text`.
+                    ToolbarSection {
+                        label: "Library".to_string(),
+                        command_ids: vec![
+                            "modeling.toggle_definitions_browser".to_string(),
+                            "materials.toggle_browser".to_string(),
                         ],
                     },
                 ],
