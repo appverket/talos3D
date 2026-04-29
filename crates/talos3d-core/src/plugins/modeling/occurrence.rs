@@ -28,6 +28,7 @@ use crate::{
                 DefinitionVersion, EvaluatorDecl, ExprNode, OverrideMap, ParamType,
             },
             mesh_generation::NeedsMesh,
+            primitive_trait::Primitive,
             primitives::ShapeRotation,
             profile::{Profile2d, ProfileExtrusion},
         },
@@ -465,6 +466,109 @@ impl AuthoredEntityFactory for OccurrenceFactory {
             "Occurrences are created via the definition API, not from a generic create request"
                 .to_string(),
         )
+    }
+
+    fn draw_selection(&self, world: &World, entity: Entity, gizmos: &mut Gizmos, color: Color) {
+        let Some(owner) = world.get::<ElementId>(entity).copied() else {
+            return;
+        };
+
+        if let Some((extrusion, rotation)) =
+            world.get::<ProfileExtrusion>(entity).map(|extrusion| {
+                (
+                    extrusion,
+                    world
+                        .get::<ShapeRotation>(entity)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+            })
+        {
+            extrusion.draw_wireframe(gizmos, rotation.0, color);
+        }
+
+        let mut drew_generated = false;
+        let mut query = world
+            .try_query::<(
+                &GeneratedOccurrencePart,
+                &ProfileExtrusion,
+                Option<&ShapeRotation>,
+            )>()
+            .unwrap();
+        for (generated, extrusion, rotation) in query.iter(world) {
+            if generated.owner != owner {
+                continue;
+            }
+            extrusion.draw_wireframe(gizmos, rotation.copied().unwrap_or_default().0, color);
+            drew_generated = true;
+        }
+
+        if drew_generated {
+            if let Some(bounds) = occurrence_generated_bounds(world, owner) {
+                draw_occurrence_bounds(gizmos, bounds, color.with_alpha(0.55));
+            }
+        }
+    }
+
+    fn selection_line_count(&self, world: &World, entity: Entity) -> usize {
+        let Some(owner) = world.get::<ElementId>(entity).copied() else {
+            return 0;
+        };
+        let mut count = world
+            .get::<ProfileExtrusion>(entity)
+            .map(ProfileExtrusion::wireframe_line_count)
+            .unwrap_or(0);
+        let mut query = world
+            .try_query::<(&GeneratedOccurrencePart, &ProfileExtrusion)>()
+            .unwrap();
+        for (generated, extrusion) in query.iter(world) {
+            if generated.owner == owner {
+                count += extrusion.wireframe_line_count();
+            }
+        }
+        if count > 0 {
+            count + 12
+        } else {
+            0
+        }
+    }
+}
+
+fn occurrence_generated_bounds(world: &World, owner: ElementId) -> Option<EntityBounds> {
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+    let mut query = world
+        .try_query::<(
+            &GeneratedOccurrencePart,
+            &ProfileExtrusion,
+            Option<&ShapeRotation>,
+        )>()
+        .unwrap();
+    for (generated, extrusion, rotation) in query.iter(world) {
+        if generated.owner != owner {
+            continue;
+        }
+        let Some(bounds) = extrusion.bounds(rotation.copied().unwrap_or_default().0) else {
+            continue;
+        };
+        min = min.min(bounds.min);
+        max = max.max(bounds.max);
+        any = true;
+    }
+    any.then_some(EntityBounds { min, max })
+}
+
+fn draw_occurrence_bounds(gizmos: &mut Gizmos, bounds: EntityBounds, color: Color) {
+    let corners = bounds.corners();
+    for i in 0..4 {
+        gizmos.line(corners[i], corners[(i + 1) % 4], color);
+    }
+    for i in 4..8 {
+        gizmos.line(corners[i], corners[4 + (i - 4 + 1) % 4], color);
+    }
+    for i in 0..4 {
+        gizmos.line(corners[i], corners[i + 4], color);
     }
 }
 
