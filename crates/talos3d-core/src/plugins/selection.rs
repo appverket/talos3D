@@ -11,6 +11,7 @@ use crate::{
     plugins::{
         camera::orbit_modifier_pressed,
         commands::DeleteEntitiesCommand,
+        definition_preview_scene::PreviewOnly,
         egui_chrome::EguiWantsInput,
         face_edit::FaceEditContext,
         handles::HandleInteractionState,
@@ -124,7 +125,15 @@ struct SelectionPressCapture {
 #[derive(Component)]
 pub struct Selected;
 
-type MeshSelectableQueryFilter = Or<(With<ElementId>, With<GeneratedOccurrencePart>)>;
+/// Filter that matches authored scene entities eligible for selection.
+///
+/// `Without<PreviewOnly>` ensures that synthetic preview-scene entities
+/// (spawned by `DefinitionPreviewPlugin`) can never be selected by raycast
+/// or box-select — even when they carry `GeneratedOccurrencePart`.
+type MeshSelectableQueryFilter = (
+    Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+    Without<PreviewOnly>,
+);
 
 #[derive(SystemParam)]
 struct SelectionHitTest<'w, 's> {
@@ -1172,7 +1181,10 @@ fn update_group_edit_muting(
             Option<&GeneratedOccurrencePart>,
             Has<GroupEditMuted>,
         ),
-        Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+        (
+            Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+            Without<PreviewOnly>,
+        ),
     >,
     group_query: Query<(&ElementId, &GroupMembers)>,
     material_query: Query<
@@ -1181,7 +1193,10 @@ fn update_group_edit_muting(
             Option<&GeneratedOccurrencePart>,
             &MeshMaterial3d<StandardMaterial>,
         ),
-        Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+        (
+            Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
+            Without<PreviewOnly>,
+        ),
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {

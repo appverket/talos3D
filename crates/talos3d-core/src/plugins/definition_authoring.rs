@@ -180,6 +180,16 @@ pub enum DefinitionPatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         suppression_expr: Option<ExprNode>,
     },
+    /// Typed patch that writes (or clears) the architectural material assignment
+    /// stored at `domain_data.architectural.material_assignment.material_id`.
+    ///
+    /// `None` removes the `material_assignment` key entirely.
+    /// This replaces the former orphan `Use Glass Material` button and the
+    /// free-form `SetDomainData` calls that accompanied it.
+    SetDomainDataMaterial {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        material_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -831,6 +841,39 @@ fn apply_patch_to_definition(
             let slot = ensure_local_child_slot(definition, effective_before, &slot_id)?;
             slot.suppression_expr = suppression_expr;
         }
+        DefinitionPatch::SetDomainDataMaterial { material_id } => {
+            // Ensure domain_data is an object.
+            if !definition.domain_data.is_object() {
+                definition.domain_data = json!({});
+            }
+            let root = definition
+                .domain_data
+                .as_object_mut()
+                .expect("domain_data is an object");
+
+            match material_id {
+                Some(id) => {
+                    // Ensure domain_data.architectural exists and is an object.
+                    let arch = root
+                        .entry("architectural")
+                        .or_insert_with(|| json!({}));
+                    if !arch.is_object() {
+                        *arch = json!({});
+                    }
+                    arch.as_object_mut()
+                        .expect("architectural is an object")
+                        .insert("material_assignment".to_string(), json!({ "material_id": id }));
+                }
+                None => {
+                    // Remove the key from architectural if it exists.
+                    if let Some(arch) = root.get_mut("architectural") {
+                        if let Some(obj) = arch.as_object_mut() {
+                            obj.remove("material_assignment");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -886,6 +929,103 @@ fn ensure_local_parameter<'a>(
         .iter_mut()
         .find(|entry| entry.name == name)
         .ok_or_else(|| format!("Parameter '{}' not found", name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: create a standalone draft from a blank definition and apply a
+    /// single patch, returning the resulting `Definition`.
+    fn apply_single_patch(patch: DefinitionPatch) -> Result<Definition, String> {
+        let definition = blank_definition("Test");
+        let draft = DefinitionDraft {
+            draft_id: DefinitionDraftId::new(),
+            source_definition_id: None,
+            source_library_id: None,
+            working_copy: definition,
+            dirty: false,
+        };
+        let mut drafts = DefinitionDraftRegistry::default();
+        let draft_id = drafts.insert(draft);
+        let definitions = DefinitionRegistry::default();
+        let libraries = DefinitionLibraryRegistry::default();
+        apply_patch_to_draft(&definitions, &libraries, &mut drafts, &draft_id, patch)?;
+        Ok(drafts
+            .get(&draft_id)
+            .expect("draft still present after patch")
+            .working_copy
+            .clone())
+    }
+
+    #[test]
+    fn set_domain_data_material_patch_round_trips() {
+        // Set a non-None material_id.
+        let result = apply_single_patch(DefinitionPatch::SetDomainDataMaterial {
+            material_id: Some("builtin.glass.blue_tint_glazing_80".to_string()),
+        })
+        .expect("patch should succeed");
+
+        let material_id = result
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .and_then(|ma| ma.get("material_id"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(
+            material_id,
+            Some("builtin.glass.blue_tint_glazing_80"),
+            "material_id should round-trip through the patch"
+        );
+
+        // Now clear it with None.
+        let mut drafts = DefinitionDraftRegistry::default();
+        let definitions = DefinitionRegistry::default();
+        let libraries = DefinitionLibraryRegistry::default();
+        let draft = DefinitionDraft {
+            draft_id: DefinitionDraftId::new(),
+            source_definition_id: None,
+            source_library_id: None,
+            working_copy: result,
+            dirty: false,
+        };
+        let draft_id = drafts.insert(draft);
+        apply_patch_to_draft(
+            &definitions,
+            &libraries,
+            &mut drafts,
+            &draft_id,
+            DefinitionPatch::SetDomainDataMaterial { material_id: None },
+        )
+        .expect("clearing patch should succeed");
+
+        let cleared = &drafts.get(&draft_id).unwrap().working_copy;
+        let removed = cleared
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"));
+        assert!(
+            removed.is_none(),
+            "material_assignment should be removed after None patch"
+        );
+    }
+
+    #[test]
+    fn glass_material_orphan_is_gone() {
+        // Structural assertion: the source text of definition_browser.rs must
+        // not contain the literal "Use Glass Material".  This is the cheapest
+        // enforcement of the DEFINITION_BROWSER_UX_AGREEMENT.md hard rule:
+        // "The orphan `Use Glass Material` affordance is removed."
+        //
+        // The test reads the compiled-in source path via env! so it works in
+        // CI without any runtime filesystem assumptions beyond the normal cargo
+        // source tree.
+        let source = include_str!("./definition_browser.rs");
+        assert!(
+            !source.contains("Use Glass Material"),
+            "definition_browser.rs must not contain \"Use Glass Material\" (PP-DBUX5 agreement)"
+        );
+    }
 }
 
 fn ensure_local_child_slot<'a>(

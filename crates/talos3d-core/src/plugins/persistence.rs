@@ -10,6 +10,7 @@ use crate::{
     plugins::{
         bundled_definition_libraries::apply_bundled_definition_libraries,
         commands::snapshot_dependency_order,
+        definition_preview_scene::PreviewOnly,
         document_properties::DocumentProperties,
         document_state::DocumentState,
         history::{History, PendingCommandQueue},
@@ -298,7 +299,10 @@ fn ensure_extension(mut path: PathBuf) -> PathBuf {
 }
 
 fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
-    let mut query = world.query_filtered::<Entity, With<ElementId>>();
+    // `Without<PreviewOnly>` is defense-in-depth: the definition preview scene
+    // spawns an occurrence root with `ElementId(u64::MAX - 1)` that must never
+    // appear in a saved project file.  `PreviewOnly` is the single gate.
+    let mut query = world.query_filtered::<Entity, (With<ElementId>, Without<PreviewOnly>)>();
     let entity_ids: Vec<Entity> = query.iter(world).collect();
     let registry = world.resource::<CapabilityRegistry>();
 

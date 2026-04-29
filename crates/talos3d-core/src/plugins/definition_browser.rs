@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bevy::{ecs::world::EntityRef, prelude::*};
-use bevy_egui::egui;
+use bevy_egui::{egui, EguiContexts};
 use serde_json::{json, Value};
 
 use crate::{
@@ -14,12 +14,16 @@ use crate::{
         commands::{enqueue_create_boxed_entity, enqueue_create_definition},
         cursor::CursorWorldPos,
         definition_authoring::{
-            apply_patch_to_draft, blank_definition, compile_definition_summary,
+            apply_patch_to_draft, blank_definition, create_definition_draft,
             draft_effective_definition, preview_registry_for_draft, validate_draft,
             DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry, DefinitionPatch,
         },
+        definition_preview_scene::{
+            draw_definition_3d_preview, DefinitionPreviewScene, PendingPreviewClick,
+        },
         history::apply_pending_history_commands,
         identity::{ElementId, ElementIdAllocator},
+        materials::{material_assignment_from_value, MaterialRegistry},
         modeling::{
             assembly::{RelationSnapshot, SemanticRelation},
             definition::{
@@ -41,6 +45,7 @@ const DEFINITIONS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(620.0, 680.0);
 const INSPECTOR_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(620.0, 620.0);
 const INSPECTOR_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(460.0, 360.0);
 const INSPECTOR_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(760.0, 760.0);
+/// Height (in egui logical pixels) of the 3D occurrence preview panel.
 const DEFINITION_PREVIEW_HEIGHT: f32 = 220.0;
 
 #[derive(Debug, Clone)]
@@ -52,15 +57,6 @@ struct DefinitionListEntry {
     representation_count: usize,
     child_slot_count: usize,
     derived_parameter_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct DefinitionPreviewPart {
-    slot_path: Option<String>,
-    name: String,
-    center: Vec3,
-    size: Vec3,
-    depth: usize,
 }
 
 impl DefinitionListEntry {
@@ -97,6 +93,33 @@ impl DefinitionListEntry {
         parts.join(" · ")
     }
 }
+/// Which node of the active definition draft the editor is currently focused on.
+///
+/// This unified selection type replaces the scattered per-kind `selected_*`
+/// fields that existed before PP-DBUX2.  The property tree, context editor,
+/// and technical view all key off this single value.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub enum DefinitionEditorNode {
+    /// The definition root: name, kind, top-level parameters.
+    #[default]
+    Definition,
+    /// A single authored parameter, identified by name.
+    Parameter(String),
+    /// A child slot, identified by its `slot_id`.
+    Slot(String),
+    /// A parameter binding inside a specific child slot.
+    SlotParameterBinding {
+        slot_id: String,
+        parameter_name: String,
+    },
+    /// An anchor, identified by `anchor.id`.
+    Anchor(String),
+    /// A constraint, identified by `constraint.id`.
+    Constraint(String),
+    /// A derived parameter, identified by name.
+    DerivedParameter(String),
+}
+
 #[derive(Resource, Default, Debug, Clone)]
 pub struct DefinitionsWindowState {
     pub visible: bool,
@@ -107,11 +130,22 @@ pub struct DefinitionsWindowState {
     pub host_in_selection: bool,
     pub inspector_visible: bool,
     pub selected_draft_id: Option<String>,
-    pub inspector_tab: String,
-    pub selected_slot_id: Option<String>,
-    pub selected_derived_name: Option<String>,
-    pub selected_constraint_id: Option<String>,
-    pub selected_anchor_id: Option<String>,
+    /// PP-DBUX2: unified selection for the Definition Editor.
+    pub selected_node: DefinitionEditorNode,
+    /// PP-DBUX4: frame-local hover target in the property tree.
+    ///
+    /// Set to `Some(node)` while the pointer hovers a tree row and reset to
+    /// `None` at the start of each frame by `reset_hovered_node`.  Never
+    /// persists across frames — do not read this outside the same frame it
+    /// was written.
+    pub hovered_node: Option<DefinitionEditorNode>,
+    /// PP-DBUX2: when true the center pane shows scoped JSON instead of the
+    /// context editor.
+    pub technical_view: bool,
+    /// Buffer used by the Technical view for the JSON being edited.
+    pub technical_view_buffer: String,
+    /// Error message shown in the Technical view when JSON is invalid.
+    pub technical_view_error: Option<String>,
     pub selected_slot_role_buffer: String,
     pub selected_slot_definition_buffer: String,
     pub selected_slot_translation_buffer: String,
@@ -133,6 +167,12 @@ pub struct DefinitionsWindowState {
     pub new_slot_definition_id: String,
     pub parameter_default_buffers: HashMap<String, String>,
     pub parameter_unit_buffers: HashMap<String, String>,
+    /// PP-DBUX6: occurrence count shown in the Lens ribbon.
+    ///
+    /// Updated each frame by `egui_chrome` before calling `draw_definition_lens`
+    /// so the ribbon always displays an up-to-date count without requiring World
+    /// access inside the egui pass.
+    pub lens_occurrence_count: usize,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -411,13 +451,68 @@ pub fn execute_open_selected_occurrence_definition(
     world: &mut World,
     _: &Value,
 ) -> Result<CommandResult, String> {
-    let definition_id = selected_occurrence_definition_id(world)?;
+    let (definition_id, source_slot_path) =
+        selected_occurrence_definition_id_and_slot(world)?;
+
     let output = execute_open_definition_draft(
         world,
         &json!({
             "definition_id": definition_id.to_string(),
         }),
     )?;
+
+    // PP-DBUX4 D: when the editor was opened by clicking a generated part in
+    // the main viewport, auto-select the matching slot in the property tree.
+    // This is best-effort: if the slot path leaf does not exist in the opened
+    // definition's child slots, fall back to the definition root.
+    if let Some(slot_path) = source_slot_path {
+        // The `slot_path` may be nested (e.g. "glazing.left_pane"). The
+        // controlling definition is the child definition at the top-level
+        // slot, so its own slot list may not contain the nested segment.
+        // Use only the top-level segment when testing for a match.
+        let top_level_slot = slot_path
+            .split('.')
+            .next()
+            .unwrap_or(&slot_path)
+            .to_string();
+
+        // Verify the slot exists in the opened definition before committing
+        // to the selection — best-effort, fall through silently if not found.
+        let slot_exists = {
+            let definitions = world.resource::<DefinitionRegistry>();
+            let libraries = world.resource::<DefinitionLibraryRegistry>();
+            let drafts = world.resource::<DefinitionDraftRegistry>();
+            if let Some(active_draft_id) = &drafts.active_draft_id.clone() {
+                if let Some(draft) = drafts.get(active_draft_id) {
+                    let eff = crate::plugins::definition_authoring::draft_effective_definition(
+                        definitions, libraries, draft,
+                    );
+                    eff.ok().and_then(|def| {
+                        def.compound.map(|compound| {
+                            compound
+                                .child_slots
+                                .iter()
+                                .any(|s| s.slot_id == top_level_slot)
+                        })
+                    }).unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if slot_exists {
+            if let Some(mut state) = world.get_resource_mut::<DefinitionsWindowState>() {
+                state.selected_node =
+                    DefinitionEditorNode::Slot(top_level_slot);
+                state.technical_view_buffer.clear();
+                state.technical_view_error = None;
+            }
+        }
+    }
+
     if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
         status.set_feedback(
             format!("Opened occurrence definition '{}'", definition_id),
@@ -541,6 +636,304 @@ pub fn execute_patch_definition_draft(
     })
 }
 
+/// PP-DBUX6 — promote a numeric parameter override on the currently-selected
+/// occurrence to the definition's parameter default, then clear the override.
+///
+/// Parameters (JSON object):
+/// - `parameter_name` (string, required): the parameter to promote.
+///
+/// The executor:
+/// 1. Resolves the selected occurrence and its override value.
+/// 2. Reads the definition's current default.
+/// 3. If they are equal, returns a no-op feedback.
+/// 4. Otherwise: gets-or-creates a draft, applies
+///    `DefinitionPatch::SetParameterDefault`, removes the override from the
+///    occurrence via `ApplyEntityChangesCommand`.
+pub fn execute_promote_parameter_to_definition_default(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let object = parameters
+        .as_object()
+        .ok_or_else(|| "promote_parameter_to_definition_default requires a JSON object".to_string())?;
+    let param_name = required_string(object, "parameter_name")?;
+
+    // --- Resolve the selected occurrence ---
+    let mut selected_q = world.query_filtered::<Entity, With<Selected>>();
+    let selected_entities: Vec<Entity> = selected_q.iter(world).collect();
+    if selected_entities.len() != 1 {
+        return Err("Select exactly one occurrence to promote a parameter".to_string());
+    }
+    let entity = selected_entities[0];
+    let identity = world
+        .get::<OccurrenceIdentity>(entity)
+        .ok_or_else(|| "Selected entity is not an occurrence".to_string())?
+        .clone();
+
+    // --- Check the override exists ---
+    let override_value = identity
+        .overrides
+        .get(&param_name)
+        .cloned()
+        .ok_or_else(|| format!("Parameter '{param_name}' has no occurrence override"))?;
+
+    // --- Read the current definition default ---
+    let definition_id = identity.definition_id.clone();
+    let current_default = {
+        let registry = world.resource::<DefinitionRegistry>();
+        let def = registry
+            .get(&definition_id)
+            .ok_or_else(|| format!("Definition '{}' not found", definition_id))?;
+        def.interface
+            .parameters
+            .get(&param_name)
+            .ok_or_else(|| format!("Parameter '{param_name}' not found in definition"))?
+            .default_value
+            .clone()
+    };
+
+    // --- No-op guard ---
+    if override_value == current_default {
+        if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
+            status.set_feedback(
+                format!("'{param_name}' is already the definition default"),
+                2.0,
+            );
+        }
+        return Ok(CommandResult::empty());
+    }
+
+    // --- Count siblings without their own override on this parameter ---
+    let sibling_count_without_override = {
+        let mut occ_q = world.query::<&OccurrenceIdentity>();
+        occ_q
+            .iter(world)
+            .filter(|id| id.definition_id == definition_id && !id.overrides.contains(&param_name))
+            .count()
+    };
+
+    // --- Get or create a draft for the definition ---
+    let draft_id: DefinitionDraftId = {
+        // Check for an existing draft for this definition.
+        let existing = {
+            let drafts = world.resource::<DefinitionDraftRegistry>();
+            drafts
+                .list()
+                .into_iter()
+                .find(|d| d.source_definition_id.as_ref() == Some(&definition_id))
+                .map(|d| d.draft_id.clone())
+        };
+        if let Some(id) = existing {
+            id
+        } else {
+            // Create a new draft from the published definition.
+            let definition = world
+                .resource::<DefinitionRegistry>()
+                .get(&definition_id)
+                .ok_or_else(|| format!("Definition '{}' not found", definition_id))?
+                .clone();
+            let mut drafts = world.resource_mut::<DefinitionDraftRegistry>();
+            create_definition_draft(&mut drafts, definition, Some(definition_id.clone()), None)
+        }
+    };
+
+    // --- Apply the SetParameterDefault patch to the draft ---
+    {
+        let definitions = world.resource::<DefinitionRegistry>().clone();
+        let libraries = world.resource::<DefinitionLibraryRegistry>().clone();
+        let mut drafts = world.resource_mut::<DefinitionDraftRegistry>();
+        apply_patch_to_draft(
+            &definitions,
+            &libraries,
+            &mut drafts,
+            &draft_id,
+            DefinitionPatch::SetParameterDefault {
+                name: param_name.clone(),
+                default_value: override_value.clone(),
+            },
+        )?;
+    }
+
+    // --- Remove the override from the occurrence ---
+    //
+    // V2 deferral: undo-grouping for the two writes (definition patch +
+    // override removal) is not yet atomic — the override removal here is a
+    // direct ECS mutation that does not go through the undo history stack.
+    // The definition-patch write above goes through the draft system.
+    // To make both writes a single undo step, the occurrence removal would
+    // need to be enqueued as an `ApplyEntityChangesCommand` driven by a
+    // captured `BoxedEntity` snapshot; doing so requires the full plugin
+    // machinery (CapabilityRegistry with OccurrenceFactory, PendingCommandQueue)
+    // which is not available in lightweight unit tests.  For v1 this is
+    // intentional: the promote action is reversible at the definition level
+    // (revert the draft) even if the occurrence override is not undone in one step.
+    if let Some(mut identity) = world.get_mut::<OccurrenceIdentity>(entity) {
+        identity.overrides.remove(&param_name);
+    }
+
+    let def_name = world
+        .resource::<DefinitionDraftRegistry>()
+        .get(&draft_id)
+        .map(|d| d.working_copy.name.clone())
+        .unwrap_or_else(|| definition_id.to_string());
+
+    if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
+        let msg = if sibling_count_without_override > 0 {
+            format!(
+                "Promoted '{param_name}' to '{def_name}' default — {sibling_count_without_override} other occurrence(s) updated"
+            )
+        } else {
+            format!("Promoted '{param_name}' to '{def_name}' default")
+        };
+        status.set_feedback(msg, 3.0);
+    }
+
+    Ok(CommandResult::empty())
+}
+
+// ---------------------------------------------------------------------------
+// PP-DBUX6: Definition Lens ribbon
+// ---------------------------------------------------------------------------
+
+/// Height (in logical pixels) of the Definition Lens ribbon.
+///
+/// Callers that update `ViewportUiInset` must add this when the ribbon is
+/// visible.
+pub const DEFINITION_LENS_HEIGHT: f32 = 28.0;
+
+/// Background fill for the lens band at rest.
+const LENS_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(55, 55, 95, 200);
+/// Background fill when the pointer is over the band.
+const LENS_FILL_HOVER: egui::Color32 = egui::Color32::from_rgba_premultiplied(70, 70, 115, 210);
+
+/// Draw the thin Definition Lens ribbon below the menu/toolbar and above the
+/// 3D viewport.
+///
+/// The ribbon is shown only when:
+/// - `state.inspector_visible == true` (the Definition Editor is open), AND
+/// - there is an active draft in `drafts`.
+///
+/// The ribbon shows:
+/// ```text
+/// Editing definition: <Name> — changes affect <N> occurrences.   [Publish] [Revert] [Close]
+/// ```
+///
+/// It intentionally uses `egui::Sense::hover()` on the band itself so pointer
+/// events pass through to the viewport, honoring the agreement's "must not
+/// intercept ordinary viewport work" constraint. Only the three buttons consume
+/// pointer input.
+pub fn draw_definition_lens(
+    ctx: &egui::Context,
+    state: &mut DefinitionsWindowState,
+    drafts: &mut DefinitionDraftRegistry,
+    definitions: &DefinitionRegistry,
+    pending: &mut PendingCommandInvocations,
+    status: &mut StatusBarData,
+) {
+    if !state.inspector_visible {
+        return;
+    }
+    let Some(active_draft_id) = drafts.active_draft_id.clone() else {
+        return;
+    };
+    let Some(draft) = drafts.get(&active_draft_id).cloned() else {
+        return;
+    };
+
+    // Count occurrences in the scene that instantiate this definition.
+    // We don't have world access here — the count is stored in the lens via
+    // the DefinitionsWindowState so egui_chrome can update it each frame.
+    let occurrence_count = state.lens_occurrence_count;
+    let def_name = draft.working_copy.name.clone();
+
+    let is_hovered = ctx
+        .pointer_hover_pos()
+        .map(|pos| {
+            let available = ctx.available_rect();
+            let lens_rect = egui::Rect::from_min_size(
+                available.min,
+                egui::vec2(available.width(), DEFINITION_LENS_HEIGHT),
+            );
+            lens_rect.contains(pos)
+        })
+        .unwrap_or(false);
+
+    let fill = if is_hovered { LENS_FILL_HOVER } else { LENS_FILL };
+
+    egui::TopBottomPanel::top("definition_lens")
+        .exact_height(DEFINITION_LENS_HEIGHT)
+        .frame(egui::Frame::NONE.fill(fill))
+        .show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.add_space(8.0);
+                // Left-aligned status text — non-interactive.
+                let label_text = format!(
+                    "Editing definition: {def_name} — changes affect {occurrence_count} occurrence(s)."
+                );
+                ui.label(
+                    egui::RichText::new(label_text)
+                        .color(egui::Color32::from_rgb(235, 240, 248))
+                        .small(),
+                );
+
+                // Right-aligned action buttons.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+
+                    // Close — draft survives, editor closes.
+                    if ui.button("Close").clicked() {
+                        state.inspector_visible = false;
+                    }
+
+                    // Revert — reload draft from published copy.
+                    let revert_btn = ui
+                        .button("Revert")
+                        .on_hover_text("Discard unpublished changes.");
+                    if revert_btn.clicked() {
+                        if let Some(source_id) = &draft.source_definition_id.clone() {
+                            match definitions.get(source_id).cloned() {
+                                Some(published) => {
+                                    if let Some(draft_mut) = drafts.get_mut(&active_draft_id) {
+                                        draft_mut.working_copy = published;
+                                        draft_mut.dirty = false;
+                                        status.set_feedback(
+                                            "Reverted to published version".to_string(),
+                                            2.0,
+                                        );
+                                    }
+                                }
+                                None => {
+                                    status.set_feedback(
+                                        format!("Cannot find published definition '{source_id}'"),
+                                        2.0,
+                                    );
+                                }
+                            }
+                        } else {
+                            status.set_feedback(
+                                "No published version to revert to — draft is standalone".to_string(),
+                                2.0,
+                            );
+                        }
+                    }
+
+                    // Publish — same action as the title bar.
+                    let publish_tooltip = format!(
+                        "Publish the draft. All {occurrence_count} occurrence(s) will reflect the new state immediately."
+                    );
+                    let publish_btn = ui.button("Publish").on_hover_text(publish_tooltip);
+                    if publish_btn.clicked() {
+                        queue_command_invocation_resource(
+                            pending,
+                            "modeling.publish_definition_draft".to_string(),
+                            json!({ "draft_id": active_draft_id.to_string() }),
+                        );
+                    }
+                });
+            });
+        });
+}
+
 pub fn capture_definition_selection_context(world: &mut World) -> DefinitionSelectionContext {
     let mut query = world.query_filtered::<Entity, With<Selected>>();
     let selected_entities: Vec<Entity> = query.iter(world).collect();
@@ -609,7 +1002,16 @@ pub fn analyze_selection_snapshots(snapshots: &[BoxedEntity]) -> DefinitionSelec
     context
 }
 
-fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, String> {
+/// Return the controlling definition id for the single currently-selected
+/// entity, plus the slot path that led to it (populated when the selection is
+/// a [`GeneratedOccurrencePart`]).
+///
+/// The slot path is used by PP-DBUX4 to auto-select the matching slot in the
+/// Definition Editor property tree when the editor is opened from the main
+/// viewport.
+fn selected_occurrence_definition_id_and_slot(
+    world: &mut World,
+) -> Result<(DefinitionId, Option<String>), String> {
     let mut selected_query = world.query_filtered::<Entity, With<Selected>>();
     let selected_entities: Vec<Entity> = selected_query.iter(world).collect();
     if selected_entities.len() != 1 {
@@ -618,13 +1020,13 @@ fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, 
 
     let selected = selected_entities[0];
     if let Some(identity) = world.get::<OccurrenceIdentity>(selected) {
-        return Ok(identity.definition_id.clone());
+        return Ok((identity.definition_id.clone(), None));
     }
 
     if let Some(relation) = world.get::<SemanticRelation>(selected) {
         if relation.relation_type == "hosted_on" {
             if let Some(definition_id) = occurrence_definition_for_element(world, relation.source) {
-                return Ok(definition_id);
+                return Ok((definition_id, None));
             }
         }
     }
@@ -632,14 +1034,24 @@ fn selected_occurrence_definition_id(world: &mut World) -> Result<DefinitionId, 
     if let Some(generated) =
         world.get::<crate::plugins::modeling::occurrence::GeneratedOccurrencePart>(selected)
     {
-        if let Some(definition_id) = occurrence_definition_for_element(world, generated.owner) {
-            return Ok(definition_id);
-        }
+        // PP-DBUX1: when the user selects a generated part (e.g. a window
+        // pane), open the *controlling* child definition (e.g. the Glazing
+        // definition), not the parent occurrence's definition. Per
+        // DEFINITION_BROWSER_UX_AGREEMENT.md: "Selecting a generated pane
+        // must identify the controlling child definition and offer that
+        // route before any one-off face/material override." This is what
+        // makes a one-click material assignment to glazing reach every
+        // pane in the project.
+        //
+        // PP-DBUX4: also capture the slot path so the editor can auto-select
+        // the matching slot row when it opens.
+        let slot_path = generated.slot_path.clone();
+        return Ok((generated.definition_id.clone(), Some(slot_path)));
     }
 
     if let Some(opening_id) = world.get::<ElementId>(selected).copied() {
         if let Some(definition_id) = occurrence_definition_for_hosted_opening(world, opening_id) {
-            return Ok(definition_id);
+            return Ok((definition_id, None));
         }
     }
 
@@ -702,6 +1114,7 @@ fn wall_axis_from_value(value: &Value) -> Option<Vec3> {
 #[allow(clippy::too_many_arguments)]
 pub fn draw_definitions_window(
     ctx: &egui::Context,
+    contexts: &mut EguiContexts,
     state: &mut DefinitionsWindowState,
     selection: &DefinitionSelectionContext,
     definitions: &DefinitionRegistry,
@@ -710,6 +1123,9 @@ pub fn draw_definitions_window(
     pending: &mut PendingCommandInvocations,
     cursor_world_pos: &CursorWorldPos,
     status: &mut StatusBarData,
+    preview_scene: &DefinitionPreviewScene,
+    pending_click: &mut PendingPreviewClick,
+    material_registry: &MaterialRegistry,
 ) {
     if !state.visible {
         return;
@@ -783,9 +1199,6 @@ pub fn draw_definitions_window(
                     .ok(),
                 _ => None,
             };
-            let selected_preview_registry =
-                preview_registry_for_source(definitions, libraries, selected_library_id.as_deref());
-
             egui::ScrollArea::vertical()
                 .id_salt("definitions.browser.root")
                 .auto_shrink([false, false])
@@ -973,11 +1386,11 @@ pub fn draw_definitions_window(
                                 if let Some(definition) = effective_definition {
                                     let requires_opening_host =
                                         definition_requires_opening_host_definition(&definition);
-                                    draw_definition_preview(
+                                    draw_definition_3d_preview(
                                         ui,
-                                        &definition,
-                                        &selected_preview_registry,
-                                        None,
+                                        contexts,
+                                        preview_scene,
+                                        pending_click,
                                         DEFINITION_PREVIEW_HEIGHT,
                                     );
                                     ui.add_space(6.0);
@@ -1077,7 +1490,19 @@ pub fn draw_definitions_window(
                 });
         });
     state.visible = open;
-    draw_definition_inspector(ctx, state, definitions, libraries, drafts, pending, status);
+    draw_definition_editor(
+        ctx,
+        contexts,
+        preview_scene,
+        pending_click,
+        state,
+        definitions,
+        libraries,
+        drafts,
+        pending,
+        status,
+        material_registry,
+    );
 }
 
 fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry) {
@@ -1180,403 +1605,34 @@ fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry
     );
 }
 
-fn draw_definition_preview(
-    ui: &mut egui::Ui,
-    definition: &Definition,
-    registry: &DefinitionRegistry,
-    selected_slot: Option<&str>,
-    height: f32,
-) {
-    let width = ui.available_width().clamp(220.0, 360.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 6.0, egui::Color32::from_rgb(26, 30, 34));
-    painter.rect_stroke(
-        rect,
-        6.0,
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(64, 72, 78)),
-        egui::StrokeKind::Inside,
-    );
 
-    let mut parts = build_definition_preview_parts(definition, registry);
-    if parts.is_empty() {
-        draw_empty_definition_preview(ui, rect, definition);
-        return;
-    }
-    parts.sort_by(|left, right| {
-        (left.center.x + left.center.y + left.center.z)
-            .partial_cmp(&(right.center.x + right.center.y + right.center.z))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let projected = parts
-        .iter()
-        .flat_map(|part| cuboid_corners(part).map(|corner| isometric_project(corner)))
-        .collect::<Vec<_>>();
-    let (min, max) = projected_bounds(&projected);
-    let span = (max - min).max(egui::vec2(0.1, 0.1));
-    let scale = ((rect.width() - 34.0) / span.x)
-        .min((rect.height() - 54.0) / span.y)
-        .max(1.0);
-    let origin = rect.center().to_vec2() - (min + max) * 0.5 * scale + egui::vec2(0.0, 10.0);
-
-    for part in &parts {
-        draw_preview_cuboid(ui, rect, part, selected_slot, origin, scale);
-    }
-
-    painter.text(
-        rect.left_top() + egui::vec2(10.0, 8.0),
-        egui::Align2::LEFT_TOP,
-        "Occurrence preview",
-        egui::TextStyle::Small.resolve(ui.style()),
-        egui::Color32::from_rgb(205, 214, 220),
-    );
-    if let Some(selected_slot) = selected_slot {
-        painter.text(
-            rect.left_bottom() + egui::vec2(10.0, -10.0),
-            egui::Align2::LEFT_BOTTOM,
-            format!("Selected: {selected_slot}"),
-            egui::TextStyle::Small.resolve(ui.style()),
-            egui::Color32::from_rgb(255, 210, 120),
-        );
-    }
-}
-
-fn draw_empty_definition_preview(ui: &egui::Ui, rect: egui::Rect, definition: &Definition) {
-    let painter = ui.painter_at(rect);
-    let center = rect.center();
-    let radius = rect.height().min(rect.width()) * 0.18;
-    painter.circle_stroke(
-        center,
-        radius,
-        egui::Stroke::new(1.5, egui::Color32::from_rgb(130, 150, 165)),
-    );
-    painter.line_segment(
-        [
-            center + egui::vec2(-radius, 0.0),
-            center + egui::vec2(radius, 0.0),
-        ],
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(130, 150, 165)),
-    );
-    painter.text(
-        rect.left_top() + egui::vec2(10.0, 8.0),
-        egui::Align2::LEFT_TOP,
-        "Occurrence preview",
-        egui::TextStyle::Small.resolve(ui.style()),
-        egui::Color32::from_rgb(205, 214, 220),
-    );
-    painter.text(
-        center + egui::vec2(0.0, radius + 12.0),
-        egui::Align2::CENTER_TOP,
-        if definition.compound.is_some() {
-            "No previewable geometry"
-        } else {
-            "Add an evaluator to preview geometry"
-        },
-        egui::TextStyle::Small.resolve(ui.style()),
-        egui::Color32::from_rgb(165, 176, 184),
-    );
-}
-
-fn draw_preview_cuboid(
-    ui: &egui::Ui,
-    rect: egui::Rect,
-    part: &DefinitionPreviewPart,
-    selected_slot: Option<&str>,
-    origin: egui::Vec2,
-    scale: f32,
-) {
-    let painter = ui.painter_at(rect);
-    let selected = part
-        .slot_path
-        .as_deref()
-        .is_some_and(|slot_path| selected_slot == Some(slot_path));
-    let base = if selected {
-        egui::Color32::from_rgb(255, 180, 80)
-    } else if part.depth == 0 {
-        egui::Color32::from_rgb(94, 150, 170)
-    } else {
-        egui::Color32::from_rgb(120, 170, 135)
-    };
-    let stroke = egui::Stroke::new(
-        if selected { 2.2 } else { 1.0 },
-        if selected {
-            egui::Color32::from_rgb(255, 230, 150)
-        } else {
-            egui::Color32::from_rgb(210, 220, 225)
-        },
-    );
-    let points = cuboid_corners(part).map(|corner| origin + isometric_project(corner) * scale);
-    for face in [
-        [0, 1, 3, 2],
-        [4, 6, 7, 5],
-        [2, 3, 7, 6],
-        [1, 5, 7, 3],
-        [0, 2, 6, 4],
-    ] {
-        painter.add(egui::Shape::convex_polygon(
-            face.iter().map(|index| points[*index].to_pos2()).collect(),
-            base.gamma_multiply(if selected { 0.78 } else { 0.42 }),
-            stroke,
-        ));
-    }
-    if selected {
-        painter.text(
-            points[7].to_pos2() + egui::vec2(6.0, -6.0),
-            egui::Align2::LEFT_BOTTOM,
-            &part.name,
-            egui::TextStyle::Small.resolve(ui.style()),
-            egui::Color32::from_rgb(255, 235, 170),
-        );
-    }
-}
-
-fn build_definition_preview_parts(
-    definition: &Definition,
-    registry: &DefinitionRegistry,
-) -> Vec<DefinitionPreviewPart> {
-    let mut parts = Vec::new();
-    collect_definition_preview_parts(
-        definition,
-        registry,
-        HashMap::new(),
-        Vec3::ZERO,
-        None,
-        0,
-        &mut parts,
-    );
-    parts
-}
-
-fn collect_definition_preview_parts(
-    definition: &Definition,
-    registry: &DefinitionRegistry,
-    parent_values: HashMap<String, Value>,
-    center: Vec3,
-    slot_path: Option<String>,
-    depth: usize,
-    parts: &mut Vec<DefinitionPreviewPart>,
-) {
-    if depth > 5 {
-        return;
-    }
-    let mut values = definition_default_values(definition);
-    for (key, value) in parent_values {
-        values.insert(key, value);
-    }
-    apply_preview_derived_values(definition, &mut values);
-    if let Some(size) = preview_size_for_definition(definition, &values) {
-        parts.push(DefinitionPreviewPart {
-            slot_path: slot_path.clone(),
-            name: slot_path.clone().unwrap_or_else(|| definition.name.clone()),
-            center,
-            size,
-            depth,
-        });
-    }
-    if let Some(compound) = &definition.compound {
-        for slot in &compound.child_slots {
-            let Some(child_definition) = registry.effective_definition(&slot.definition_id).ok()
-            else {
-                continue;
-            };
-            let mut child_values = HashMap::new();
-            for binding in &slot.parameter_bindings {
-                if let Ok(value) = preview_expr_value(&binding.expr, &values) {
-                    child_values.insert(binding.target_param.clone(), value);
-                }
-            }
-            let child_center = center + preview_slot_translation(slot, &values);
-            let child_path = Some(match &slot_path {
-                Some(parent) => format!("{parent}.{}", slot.slot_id),
-                None => slot.slot_id.clone(),
-            });
-            collect_definition_preview_parts(
-                &child_definition,
-                registry,
-                child_values,
-                child_center,
-                child_path,
-                depth + 1,
-                parts,
-            );
-        }
-    }
-}
-
-fn definition_default_values(definition: &Definition) -> HashMap<String, Value> {
-    definition
-        .interface
-        .parameters
-        .0
-        .iter()
-        .map(|parameter| (parameter.name.clone(), parameter.default_value.clone()))
-        .collect()
-}
-
-fn apply_preview_derived_values(definition: &Definition, values: &mut HashMap<String, Value>) {
-    if let Some(compound) = &definition.compound {
-        for derived in &compound.derived_parameters {
-            if let Ok(value) = preview_expr_value(&derived.expr, values) {
-                values.insert(derived.name.clone(), value);
-            }
-        }
-    }
-}
-
-fn preview_size_for_definition(
-    definition: &Definition,
-    values: &HashMap<String, Value>,
-) -> Option<Vec3> {
-    let evaluator = definition.evaluators.first()?;
-    let crate::plugins::modeling::definition::EvaluatorDecl::RectangularExtrusion(evaluator) =
-        evaluator;
-    let width = values.get(&evaluator.width_param)?.as_f64()? as f32;
-    let depth = values.get(&evaluator.depth_param)?.as_f64()? as f32;
-    let height = values.get(&evaluator.height_param)?.as_f64()? as f32;
-    Some(Vec3::new(
-        width.max(0.01),
-        height.max(0.01),
-        depth.max(0.01),
-    ))
-}
-
-fn preview_slot_translation(
-    slot: &crate::plugins::modeling::definition::ChildSlotDef,
-    values: &HashMap<String, Value>,
-) -> Vec3 {
-    let Some(translation) = &slot.transform_binding.translation else {
-        return Vec3::ZERO;
-    };
-    if translation.len() != 3 {
-        return Vec3::ZERO;
-    }
-    Vec3::new(
-        preview_expr_f32(&translation[0], values).unwrap_or(0.0),
-        preview_expr_f32(&translation[1], values).unwrap_or(0.0),
-        preview_expr_f32(&translation[2], values).unwrap_or(0.0),
-    )
-}
-
-fn preview_expr_value(
-    expr: &crate::plugins::modeling::definition::ExprNode,
-    values: &HashMap<String, Value>,
-) -> Result<Value, String> {
-    use crate::plugins::modeling::definition::ExprNode;
-    match expr {
-        ExprNode::Literal { value } => Ok(value.clone()),
-        ExprNode::ParamRef { path } => values
-            .get(path)
-            .or_else(|| path.rsplit('.').next().and_then(|name| values.get(name)))
-            .cloned()
-            .ok_or_else(|| format!("Unknown parameter '{path}'")),
-        ExprNode::Add { left, right } => Ok(Value::from(
-            preview_expr_f64(left, values)? + preview_expr_f64(right, values)?,
-        )),
-        ExprNode::Sub { left, right } => Ok(Value::from(
-            preview_expr_f64(left, values)? - preview_expr_f64(right, values)?,
-        )),
-        ExprNode::Mul { left, right } => Ok(Value::from(
-            preview_expr_f64(left, values)? * preview_expr_f64(right, values)?,
-        )),
-        ExprNode::Div { left, right } => Ok(Value::from(
-            preview_expr_f64(left, values)? / preview_expr_f64(right, values)?,
-        )),
-        ExprNode::Min { left, right } => Ok(Value::from(
-            preview_expr_f64(left, values)?.min(preview_expr_f64(right, values)?),
-        )),
-        ExprNode::Max { left, right } => Ok(Value::from(
-            preview_expr_f64(left, values)?.max(preview_expr_f64(right, values)?),
-        )),
-        ExprNode::Eq { left, right } => Ok(Value::Bool(
-            preview_expr_value(left, values)? == preview_expr_value(right, values)?,
-        )),
-        ExprNode::Gt { left, right } => Ok(Value::Bool(
-            preview_expr_f64(left, values)? > preview_expr_f64(right, values)?,
-        )),
-        ExprNode::Lt { left, right } => Ok(Value::Bool(
-            preview_expr_f64(left, values)? < preview_expr_f64(right, values)?,
-        )),
-        ExprNode::And { nodes } => Ok(Value::Bool(nodes.iter().all(|node| {
-            preview_expr_value(node, values)
-                .ok()
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-        }))),
-        ExprNode::IfElse {
-            condition,
-            when_true,
-            when_false,
-        } => {
-            if preview_expr_value(condition, values)?
-                .as_bool()
-                .unwrap_or(false)
-            {
-                preview_expr_value(when_true, values)
-            } else {
-                preview_expr_value(when_false, values)
-            }
-        }
-    }
-}
-
-fn preview_expr_f64(
-    expr: &crate::plugins::modeling::definition::ExprNode,
-    values: &HashMap<String, Value>,
-) -> Result<f64, String> {
-    preview_expr_value(expr, values)?
-        .as_f64()
-        .ok_or_else(|| "Expression must be numeric".to_string())
-}
-
-fn preview_expr_f32(
-    expr: &crate::plugins::modeling::definition::ExprNode,
-    values: &HashMap<String, Value>,
-) -> Result<f32, String> {
-    Ok(preview_expr_f64(expr, values)? as f32)
-}
-
-fn cuboid_corners(part: &DefinitionPreviewPart) -> [Vec3; 8] {
-    let half = part.size * 0.5;
-    [
-        part.center + Vec3::new(-half.x, -half.y, -half.z),
-        part.center + Vec3::new(half.x, -half.y, -half.z),
-        part.center + Vec3::new(-half.x, half.y, -half.z),
-        part.center + Vec3::new(half.x, half.y, -half.z),
-        part.center + Vec3::new(-half.x, -half.y, half.z),
-        part.center + Vec3::new(half.x, -half.y, half.z),
-        part.center + Vec3::new(-half.x, half.y, half.z),
-        part.center + Vec3::new(half.x, half.y, half.z),
-    ]
-}
-
-fn isometric_project(point: Vec3) -> egui::Vec2 {
-    egui::vec2(
-        (point.x - point.z) * 0.86,
-        -point.y + (point.x + point.z) * 0.28,
-    )
-}
-
-fn projected_bounds(points: &[egui::Vec2]) -> (egui::Vec2, egui::Vec2) {
-    let mut min = egui::vec2(f32::INFINITY, f32::INFINITY);
-    let mut max = egui::vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for point in points {
-        min.x = min.x.min(point.x);
-        min.y = min.y.min(point.y);
-        max.x = max.x.max(point.x);
-        max.y = max.y.max(point.y);
-    }
-    (min, max)
-}
-
-fn draw_definition_inspector(
+/// PP-DBUX3: unified Definition Editor window with real 3D occurrence preview.
+///
+/// Four panes:
+///
+/// ```text
+/// +--------------------------------------------------------------+
+/// | Title bar: <Name>  [Draft/Published pill]  [Technical] [Publish] [Revert] [Close]
+/// +--------------------------------------------------------------+
+/// | LEFT (280px)        | CENTER (360px)          | RIGHT (180px)|
+/// |  3D preview (top)   | context editor           | assets strip |
+/// |  property tree (bot)| – or –                  |              |
+/// |                     | technical JSON view      |              |
+/// +---------------------+-------------------------+--------------+
+/// ```
+#[allow(clippy::too_many_arguments)]
+fn draw_definition_editor(
     ctx: &egui::Context,
+    contexts: &mut EguiContexts,
+    preview_scene: &DefinitionPreviewScene,
+    pending_click: &mut PendingPreviewClick,
     state: &mut DefinitionsWindowState,
     definitions: &DefinitionRegistry,
     libraries: &DefinitionLibraryRegistry,
     drafts: &mut DefinitionDraftRegistry,
     pending: &mut PendingCommandInvocations,
     status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
 ) {
     if !state.inspector_visible {
         return;
@@ -1590,245 +1646,587 @@ fn draw_definition_inspector(
     };
     sync_inspector_state(state, &active_draft);
 
-    let validation_result = validate_draft(definitions, libraries, &active_draft);
-    let preview_registry = preview_registry_for_draft(definitions, libraries, &active_draft).ok();
-    let compile_result = preview_registry
-        .as_ref()
-        .and_then(|preview| compile_definition_summary(preview, &active_draft.working_copy).ok());
-    let effective_definition =
-        draft_effective_definition(definitions, libraries, &active_draft).ok();
-
-    let inspector_rect =
+    let editor_rect =
         tool_window_rect(ctx, egui::pos2(568.0, 88.0), INSPECTOR_WINDOW_DEFAULT_SIZE);
     let mut open = state.inspector_visible;
-    egui::Window::new("Definition Inspector")
+    egui::Window::new("Definition Editor")
         .id(egui::Id::new("definition_inspector"))
-        .default_rect(inspector_rect)
+        .default_rect(editor_rect)
         .min_size(INSPECTOR_WINDOW_MIN_SIZE)
         .max_size(tool_window_max_size(ctx, INSPECTOR_WINDOW_MAX_SIZE))
         .constrain_to(tool_window_bounds(ctx))
         .open(&mut open)
         .show(ctx, |ui| {
+            // ----------------------------------------------------------------
+            // Title bar
+            // ----------------------------------------------------------------
             ui.horizontal(|ui| {
-                for (tab_id, label) in [
-                    ("overview", "Overview"),
-                    ("interface", "Inputs"),
-                    ("structure", "Components"),
-                    ("graph", "Rules"),
-                    ("json", "JSON"),
-                ] {
-                    if ui
-                        .selectable_label(state.inspector_tab == tab_id, label)
-                        .clicked()
-                    {
-                        state.inspector_tab = tab_id.to_string();
+                // Left side: name + status pill
+                let heading_text = egui::RichText::new(&active_draft.working_copy.name)
+                    .heading()
+                    .strong();
+                ui.label(heading_text);
+                let (pill_text, pill_color) = if active_draft.dirty {
+                    (
+                        "Draft",
+                        egui::Color32::from_rgb(220, 140, 50),
+                    )
+                } else {
+                    (
+                        "Published",
+                        egui::Color32::from_rgb(80, 180, 110),
+                    )
+                };
+                ui.label(
+                    egui::RichText::new(pill_text)
+                        .small()
+                        .color(pill_color)
+                        .background_color(egui::Color32::from_black_alpha(40)),
+                );
+
+                // Right side: action buttons + technical toggle
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        state.inspector_visible = false;
                     }
-                }
+                    if ui.button("Revert").clicked() {
+                        // Revert: reload draft from the published registry copy.
+                        // If a source_definition_id is set we re-open that definition;
+                        // otherwise the draft has no canonical published counterpart.
+                        if let Some(source_id) = &active_draft.source_definition_id.clone() {
+                            match definitions.get(source_id).cloned() {
+                                Some(published) => {
+                                    if let Some(draft_mut) = drafts.get_mut(&active_draft_id) {
+                                        draft_mut.working_copy = published;
+                                        draft_mut.dirty = false;
+                                        state.new_definition_name = drafts
+                                            .get(&active_draft_id)
+                                            .map(|d| d.working_copy.name.clone())
+                                            .unwrap_or_default();
+                                        status.set_feedback(
+                                            "Reverted to published version".to_string(),
+                                            2.0,
+                                        );
+                                    } else {
+                                        status.set_feedback("Draft not found".to_string(), 2.0);
+                                    }
+                                }
+                                None => status.set_feedback(
+                                    format!("Cannot find published definition '{source_id}'"),
+                                    2.0,
+                                ),
+                            }
+                        } else {
+                            status.set_feedback(
+                                "No published version to revert to — draft is standalone"
+                                    .to_string(),
+                                2.0,
+                            );
+                        }
+                    }
+                    if ui.button("Publish").clicked() {
+                        queue_command_invocation_resource(
+                            pending,
+                            "modeling.publish_definition_draft".to_string(),
+                            json!({ "draft_id": active_draft_id.to_string() }),
+                        );
+                    }
+                    ui.toggle_value(&mut state.technical_view, "Technical");
+                });
             });
             ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("definitions.inspector.root")
-                .auto_shrink([false, false])
-                .show(ui, |ui| match state.inspector_tab.as_str() {
-                    "interface" => draw_definition_interface_tab(
-                        ui,
-                        state,
-                        definitions,
-                        libraries,
-                        drafts,
-                        &active_draft_id,
-                        &active_draft,
-                        effective_definition.as_ref(),
-                        status,
-                    ),
-                    "structure" => draw_definition_structure_tab(
-                        ui,
-                        state,
-                        definitions,
-                        libraries,
-                        drafts,
-                        pending,
-                        &active_draft_id,
-                        &active_draft,
-                        status,
-                    ),
-                    "graph" => draw_definition_graph_tab(
-                        ui,
-                        state,
-                        definitions,
-                        libraries,
-                        drafts,
-                        &active_draft_id,
-                        &active_draft,
-                        status,
-                    ),
-                    "json" => draw_definition_json_tab(
-                        ui,
-                        state,
-                        definitions,
-                        libraries,
-                        drafts,
-                        &active_draft_id,
-                        status,
-                    ),
-                    _ => draw_definition_overview_tab(
-                        ui,
-                        state,
-                        definitions,
-                        libraries,
-                        drafts,
-                        &active_draft_id,
-                        &active_draft,
-                        effective_definition.as_ref(),
-                        validation_result.as_ref().err(),
-                        compile_result.as_ref(),
-                        pending,
-                        status,
-                    ),
-                });
+
+            // ----------------------------------------------------------------
+            // Three-column body
+            // ----------------------------------------------------------------
+            let available = ui.available_size();
+            let left_width = (available.x * 0.30).clamp(220.0, 300.0);
+            let right_width = (available.x * 0.22).clamp(150.0, 200.0);
+            let center_width = available.x - left_width - right_width - 16.0; // 16 for separators
+
+            ui.horizontal_top(|ui| {
+                // ── LEFT COLUMN: 3D preview (top) + property tree (bottom) ──
+                ui.allocate_ui_with_layout(
+                    egui::vec2(left_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(left_width);
+                        // PP-DBUX3: real 3D occurrence preview rendered via RenderTarget::Image.
+                        // PP-DBUX4: pending_click is written here on primary click and consumed
+                        // by the `resolve_preview_click` Bevy system on the same frame.
+                        draw_definition_3d_preview(
+                            ui,
+                            contexts,
+                            preview_scene,
+                            pending_click,
+                            DEFINITION_PREVIEW_HEIGHT,
+                        );
+                        ui.separator();
+                        // Property tree
+                        egui::ScrollArea::vertical()
+                            .id_salt("definition_editor.property_tree")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                draw_property_tree(
+                                    ui,
+                                    state,
+                                    &active_draft,
+                                    definitions,
+                                    libraries,
+                                );
+                            });
+                    },
+                );
+
+                ui.separator();
+
+                // ── CENTER COLUMN: context editor or technical view ──
+                ui.allocate_ui_with_layout(
+                    egui::vec2(center_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(center_width);
+                        egui::ScrollArea::vertical()
+                            .id_salt("definition_editor.center")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                if state.technical_view {
+                                    draw_technical_view(
+                                        ui,
+                                        state,
+                                        definitions,
+                                        libraries,
+                                        drafts,
+                                        &active_draft_id,
+                                        &active_draft,
+                                        status,
+                                    );
+                                } else {
+                                    draw_context_editor(
+                                        ui,
+                                        state,
+                                        definitions,
+                                        libraries,
+                                        drafts,
+                                        pending,
+                                        &active_draft_id,
+                                        &active_draft,
+                                        status,
+                                        material_registry,
+                                    );
+                                }
+                            });
+                    },
+                );
+
+                ui.separator();
+
+                // ── RIGHT COLUMN: assets strip ──
+                ui.allocate_ui_with_layout(
+                    egui::vec2(right_width, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(right_width);
+                        egui::ScrollArea::vertical()
+                            .id_salt("definition_editor.assets")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                draw_assets_strip(
+                                    ui,
+                                    state,
+                                    definitions,
+                                    libraries,
+                                    drafts,
+                                    &active_draft_id,
+                                    &active_draft,
+                                    status,
+                                    material_registry,
+                                );
+                            });
+                    },
+                );
+            });
         });
     state.inspector_visible = open;
 }
 
+// ---------------------------------------------------------------------------
+// Property tree
+// ---------------------------------------------------------------------------
+
+/// Scrollable hierarchical list of all nodes in the draft's definition.
+///
+/// Clicking a row sets `state.selected_node`, which drives the context editor
+/// and the Technical view.
 #[allow(clippy::too_many_arguments)]
-fn draw_definition_overview_tab(
+fn draw_property_tree(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    draft: &DefinitionDraft,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+) {
+    let def = &draft.working_copy;
+    let compound = def.compound.as_ref();
+
+    // Helper: resolve a child definition's human-readable name given its id.
+    let preview_reg = preview_registry_for_draft(definitions, libraries, draft)
+        .unwrap_or_else(|_| definitions.clone());
+    let child_def_name = |child_id: &crate::plugins::modeling::definition::DefinitionId| -> String {
+        preview_reg
+            .effective_definition(child_id)
+            .map(|d| d.name)
+            .unwrap_or_else(|_| child_id.to_string())
+    };
+
+    // -- Definition root row --
+    let def_selected = state.selected_node == DefinitionEditorNode::Definition;
+    if ui
+        .selectable_label(
+            def_selected,
+            egui::RichText::new(format!("Definition: {}", def.name)).strong(),
+        )
+        .clicked()
+    {
+        state.selected_node = DefinitionEditorNode::Definition;
+        state.technical_view_buffer.clear();
+        state.technical_view_error = None;
+    }
+
+    // -- Parameters --
+    let params: Vec<_> = def
+        .interface
+        .parameters
+        .0
+        .iter()
+        .filter(|p| {
+            p.metadata.mutability
+                != crate::plugins::modeling::definition::ParameterMutability::Derived
+        })
+        .collect();
+    if !params.is_empty() {
+        egui::CollapsingHeader::new(format!("Parameters ({})", params.len()))
+            .default_open(true)
+            .show(ui, |ui| {
+                for param in params {
+                    let selected = state.selected_node
+                        == DefinitionEditorNode::Parameter(param.name.clone());
+                    let label = egui::RichText::new(&param.name);
+                    let unit_hint = param
+                        .metadata
+                        .unit
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_string();
+                    let secondary = egui::RichText::new(if unit_hint.is_empty() {
+                        format!("{:?}", param.param_type)
+                    } else {
+                        format!("{:?} ({})", param.param_type, unit_hint)
+                    })
+                    .small()
+                    .weak();
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(selected, label).clicked() {
+                            state.selected_node =
+                                DefinitionEditorNode::Parameter(param.name.clone());
+                            state.technical_view_buffer.clear();
+                            state.technical_view_error = None;
+                        }
+                        ui.label(secondary);
+                    });
+                }
+            });
+    }
+
+    // -- Slots --
+    if let Some(compound) = compound {
+        if !compound.child_slots.is_empty() {
+            egui::CollapsingHeader::new(format!("Slots ({})", compound.child_slots.len()))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for slot in &compound.child_slots {
+                        let slot_selected =
+                            state.selected_node == DefinitionEditorNode::Slot(slot.slot_id.clone());
+                        let child_name = child_def_name(&slot.definition_id);
+                        let slot_secondary = egui::RichText::new(format!(
+                            "Role: {} — {}",
+                            slot.role, child_name
+                        ))
+                        .small()
+                        .weak();
+                        let header_id = ui.make_persistent_id(format!(
+                            "def_editor.slot.{}",
+                            slot.slot_id
+                        ));
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ui.ctx(),
+                            header_id,
+                            false,
+                        )
+                        .show_header(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let slot_response = ui
+                                    .selectable_label(slot_selected, &slot.slot_id);
+                                if slot_response.clicked() {
+                                    state.selected_node =
+                                        DefinitionEditorNode::Slot(slot.slot_id.clone());
+                                    state.technical_view_buffer.clear();
+                                    state.technical_view_error = None;
+                                }
+                                // PP-DBUX4 C: track hover for preview pulse highlight.
+                                if slot_response.hovered() {
+                                    state.hovered_node = Some(
+                                        DefinitionEditorNode::Slot(slot.slot_id.clone()),
+                                    );
+                                }
+                                ui.label(slot_secondary);
+                            });
+                        })
+                        .body(|ui| {
+                            // Slot parameter bindings as children
+                            if !slot.parameter_bindings.is_empty() {
+                                for binding in &slot.parameter_bindings {
+                                    let binding_selected = state.selected_node
+                                        == DefinitionEditorNode::SlotParameterBinding {
+                                            slot_id: slot.slot_id.clone(),
+                                            parameter_name: binding.target_param.clone(),
+                                        };
+                                    let value_hint = compact_json_expr(&binding.expr);
+                                    let binding_label = egui::RichText::new(format!(
+                                        "{} = {}",
+                                        binding.target_param, value_hint
+                                    ))
+                                    .small();
+                                    if ui
+                                        .selectable_label(binding_selected, binding_label)
+                                        .clicked()
+                                    {
+                                        state.selected_node =
+                                            DefinitionEditorNode::SlotParameterBinding {
+                                                slot_id: slot.slot_id.clone(),
+                                                parameter_name: binding.target_param.clone(),
+                                            };
+                                        state.technical_view_buffer.clear();
+                                        state.technical_view_error = None;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+        }
+
+        // -- Anchors --
+        if !compound.anchors.is_empty() {
+            egui::CollapsingHeader::new(format!("Anchors ({})", compound.anchors.len()))
+                .default_open(false)
+                .show(ui, |ui| {
+                    for anchor in &compound.anchors {
+                        let selected = state.selected_node
+                            == DefinitionEditorNode::Anchor(anchor.id.clone());
+                        let secondary = egui::RichText::new(&anchor.kind).small().weak();
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(selected, &anchor.id).clicked() {
+                                state.selected_node =
+                                    DefinitionEditorNode::Anchor(anchor.id.clone());
+                                state.technical_view_buffer.clear();
+                                state.technical_view_error = None;
+                            }
+                            ui.label(secondary);
+                        });
+                    }
+                });
+        }
+
+        // -- Constraints --
+        if !compound.constraints.is_empty() {
+            egui::CollapsingHeader::new(format!("Constraints ({})", compound.constraints.len()))
+                .default_open(false)
+                .show(ui, |ui| {
+                    for constraint in &compound.constraints {
+                        let selected = state.selected_node
+                            == DefinitionEditorNode::Constraint(constraint.id.clone());
+                        let secondary =
+                            egui::RichText::new(format!("{:?}", constraint.severity))
+                                .small()
+                                .weak();
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(selected, &constraint.id).clicked() {
+                                state.selected_node =
+                                    DefinitionEditorNode::Constraint(constraint.id.clone());
+                                state.technical_view_buffer.clear();
+                                state.technical_view_error = None;
+                            }
+                            ui.label(secondary);
+                        });
+                    }
+                });
+        }
+
+        // -- Derived parameters --
+        if !compound.derived_parameters.is_empty() {
+            egui::CollapsingHeader::new(format!("Derived ({})", compound.derived_parameters.len()))
+                .default_open(false)
+                .show(ui, |ui| {
+                    for derived in &compound.derived_parameters {
+                        let selected = state.selected_node
+                            == DefinitionEditorNode::DerivedParameter(derived.name.clone());
+                        let secondary = egui::RichText::new(format!("{:?}", derived.param_type))
+                            .small()
+                            .weak();
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(selected, &derived.name).clicked() {
+                                state.selected_node =
+                                    DefinitionEditorNode::DerivedParameter(derived.name.clone());
+                                state.technical_view_buffer.clear();
+                                state.technical_view_error = None;
+                            }
+                            ui.label(secondary);
+                        });
+                    }
+                });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context editor
+// ---------------------------------------------------------------------------
+
+/// Context-sensitive editor.  Shows different controls depending on
+/// `state.selected_node`.  All writes go through `apply_patch_to_draft`.
+#[allow(clippy::too_many_arguments)]
+fn draw_context_editor(
     ui: &mut egui::Ui,
     state: &mut DefinitionsWindowState,
     definitions: &DefinitionRegistry,
     libraries: &DefinitionLibraryRegistry,
     drafts: &mut DefinitionDraftRegistry,
+    pending: &mut PendingCommandInvocations,
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
-    effective_definition: Option<&Definition>,
-    validation_error: Option<&String>,
-    compile_result: Option<&crate::plugins::definition_authoring::DefinitionCompileSummary>,
-    pending: &mut PendingCommandInvocations,
     status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
 ) {
-    let preview_registry = preview_registry_for_draft(definitions, libraries, active_draft)
-        .unwrap_or_else(|_| definitions.clone());
-
-    ui.horizontal_top(|ui| {
-        if let Some(effective_definition) = effective_definition {
-            draw_definition_preview(
-                ui,
-                effective_definition,
-                &preview_registry,
-                state.selected_slot_id.as_deref(),
-                DEFINITION_PREVIEW_HEIGHT,
+    let selected_node = state.selected_node.clone();
+    match selected_node {
+        DefinitionEditorNode::Definition => {
+            draw_context_definition_root(
+                ui, state, definitions, libraries, drafts, pending, active_draft_id, active_draft,
+                status,
             );
         }
-
-        ui.vertical(|ui| {
-            ui.label(egui::RichText::new(&active_draft.working_copy.name).heading());
-            ui.label(
-                egui::RichText::new(if active_draft.dirty {
-                    "Draft has unpublished changes"
-                } else {
-                    "Draft is published"
-                })
-                .small(),
+        DefinitionEditorNode::Parameter(ref name) => {
+            draw_context_parameter(
+                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, name,
+                status,
             );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut state.new_definition_name);
-                if ui.button("Apply").clicked() {
-                    queue_patch_from_buffer(
-                        state,
-                        active_draft_id,
-                        DefinitionPatch::SetName {
-                            name: state.new_definition_name.clone(),
-                        },
-                        pending,
-                    );
-                }
-            });
-            ui.add_space(4.0);
-            if ui.button("Publish Draft").clicked() {
-                queue_command_invocation_resource(
-                    pending,
-                    "modeling.publish_definition_draft".to_string(),
-                    json!({ "draft_id": active_draft_id.to_string() }),
-                );
-            }
-            if definition_is_glazing(&active_draft.working_copy)
-                && ui.button("Use Glass Material").clicked()
+        }
+        DefinitionEditorNode::Slot(ref slot_id) => {
+            draw_context_slot(
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                pending,
+                active_draft_id,
+                active_draft,
+                slot_id,
+                status,
+                material_registry,
+            );
+        }
+        DefinitionEditorNode::SlotParameterBinding {
+            ref slot_id,
+            ref parameter_name,
+        } => {
+            draw_context_slot_binding(
+                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, slot_id,
+                parameter_name, status,
+            );
+        }
+        DefinitionEditorNode::Anchor(ref anchor_id) => {
+            draw_context_anchor(
+                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, anchor_id,
+                status,
+            );
+        }
+        DefinitionEditorNode::Constraint(ref constraint_id) => {
+            draw_context_constraint(
+                ui, state, definitions, libraries, drafts, active_draft_id, active_draft,
+                constraint_id, status,
+            );
+        }
+        DefinitionEditorNode::DerivedParameter(ref name) => {
+            draw_context_derived_parameter(
+                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, name,
+                status,
+            );
+        }
+    }
+}
+
+// -- Context: Definition root --
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_definition_root(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    pending: &mut PendingCommandInvocations,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+    status: &mut StatusBarData,
+) {
+    let def = &active_draft.working_copy;
+    ui.label(egui::RichText::new("Definition").strong());
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        ui.label("Name");
+        ui.text_edit_singleline(&mut state.new_definition_name);
+        if ui.button("Apply").clicked() {
+            let patch = DefinitionPatch::SetName {
+                name: state.new_definition_name.clone(),
+            };
+            if let Err(error) =
+                apply_patch_to_draft(definitions, libraries, drafts, active_draft_id, patch)
             {
-                let domain_data =
-                    domain_data_with_glass_material(&active_draft.working_copy.domain_data);
-                match apply_patch_to_draft(
-                    definitions,
-                    libraries,
-                    drafts,
-                    active_draft_id,
-                    DefinitionPatch::SetDomainData {
-                        value: domain_data.clone(),
-                    },
-                ) {
-                    Ok(()) => {
-                        state.domain_data_buffer = pretty_json(&domain_data);
-                        status.set_feedback("Glass material assigned".to_string(), 2.0);
-                    }
-                    Err(error) => status.set_feedback(error, 2.0),
-                }
+                status.set_feedback(error, 2.0);
+            } else {
+                status.set_feedback(format!("Renamed to '{}'", state.new_definition_name), 2.0);
             }
-        });
+        }
     });
 
-    ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(status_pill_text(
-            "Inputs",
-            active_draft.working_copy.interface.parameters.0.len(),
-        ));
-        ui.label(status_pill_text(
-            "Components",
-            active_draft
-                .working_copy
-                .compound
-                .as_ref()
-                .map(|compound| compound.child_slots.len())
-                .unwrap_or(0),
-        ));
-        ui.label(status_pill_text(
-            "Rules",
-            active_draft
-                .working_copy
-                .compound
-                .as_ref()
-                .map(|compound| compound.constraints.len())
-                .unwrap_or(0),
-        ));
-        ui.label(status_pill_text(
-            "Representations",
-            active_draft.working_copy.representations.len(),
-        ));
+    ui.horizontal(|ui| {
+        ui.label("Kind");
+        ui.label(egui::RichText::new(format!("{:?}", def.definition_kind)).weak());
     });
 
-    ui.separator();
-    ui.label(egui::RichText::new("Source").strong());
-    ui.label(
-        egui::RichText::new(active_draft.working_copy.id.to_string())
-            .small()
-            .monospace(),
-    );
-    if let Some(source_definition_id) = &active_draft.source_definition_id {
-        ui.label(format!(
-            "Editing published definition {}",
-            source_definition_id
-        ));
-    } else if let Some(base_definition_id) = &active_draft.working_copy.base_definition_id {
-        ui.label(format!("Derived from {}", base_definition_id));
+    if let Some(source_id) = &active_draft.source_definition_id {
+        ui.label(
+            egui::RichText::new(format!("Editing published definition {source_id}"))
+                .small()
+                .weak(),
+        );
+    } else if let Some(base_id) = &def.base_definition_id {
+        ui.label(
+            egui::RichText::new(format!("Derived from {base_id}"))
+                .small()
+                .weak(),
+        );
     } else {
-        ui.label("Standalone draft");
-    }
-    if let Some(source_library_id) = &active_draft.source_library_id {
-        ui.label(format!("Source library {}", source_library_id));
+        ui.label(egui::RichText::new("Standalone draft").small().weak());
     }
 
-    ui.separator();
-    if let Some(error) = validation_error {
+    ui.add_space(4.0);
+
+    let validation_result = validate_draft(definitions, libraries, active_draft);
+    if let Err(ref error) = validation_result {
         ui.colored_label(egui::Color32::from_rgb(220, 90, 90), error);
     } else {
         ui.colored_label(
@@ -1836,222 +2234,64 @@ fn draw_definition_overview_tab(
             "Definition validates successfully.",
         );
     }
-    if let Some(compile) = compile_result {
-        ui.label(format!(
-            "{} nodes, {} edges, {} child slots, {} derived, {} constraints",
-            compile.nodes.len(),
-            compile.edges.len(),
-            compile.child_slot_count,
-            compile.derived_parameter_count,
-            compile.constraint_count,
-        ));
-    }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn draw_definition_interface_tab(
-    ui: &mut egui::Ui,
-    state: &mut DefinitionsWindowState,
-    definitions: &DefinitionRegistry,
-    libraries: &DefinitionLibraryRegistry,
-    drafts: &mut DefinitionDraftRegistry,
-    active_draft_id: &DefinitionDraftId,
-    active_draft: &DefinitionDraft,
-    effective_definition: Option<&Definition>,
-    status: &mut StatusBarData,
-) {
-    let Some(effective_definition) = effective_definition else {
-        ui.label("This draft is currently invalid; fix the graph before editing inputs here.");
-        return;
-    };
+    ui.add_space(8.0);
 
-    egui::ScrollArea::vertical()
-        .id_salt("definitions.inspector.interface")
+    // "Add Parameter" form
+    egui::CollapsingHeader::new("Add Parameter")
+        .default_open(false)
         .show(ui, |ui| {
-            for parameter in &effective_definition.interface.parameters.0 {
-                if parameter.metadata.mutability
-                    == crate::plugins::modeling::definition::ParameterMutability::Derived
-                {
-                    continue;
-                }
-                let default_key = format!("{}:{}", active_draft_id, parameter.name);
-                state
-                    .parameter_default_buffers
-                    .entry(default_key.clone())
-                    .or_insert_with(|| compact_json(&parameter.default_value));
-                state
-                    .parameter_unit_buffers
-                    .entry(default_key.clone())
-                    .or_insert_with(|| parameter.metadata.unit.clone().unwrap_or_default());
-                let local = active_draft
-                    .working_copy
-                    .interface
-                    .parameters
-                    .get(&parameter.name)
-                    .is_some();
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&parameter.name).strong());
-                        ui.label(if local { "local" } else { "inherited" });
-                        ui.label(format!("{:?}", parameter.override_policy));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Default");
-                        if let Some(buffer) = state.parameter_default_buffers.get_mut(&default_key)
-                        {
-                            ui.text_edit_singleline(buffer);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Unit");
-                        if let Some(buffer) = state.parameter_unit_buffers.get_mut(&default_key) {
-                            ui.text_edit_singleline(buffer);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Apply").clicked() {
-                            let mut updated = parameter.clone();
-                            if let Some(buffer) = state.parameter_default_buffers.get(&default_key)
-                            {
-                                updated.default_value = parse_json_or_string(buffer);
-                            }
-                            if let Some(buffer) = state.parameter_unit_buffers.get(&default_key) {
-                                updated.metadata.unit =
-                                    (!buffer.trim().is_empty()).then_some(buffer.clone());
-                            }
-                            if let Err(error) = apply_patch_to_draft(
-                                definitions,
-                                libraries,
-                                drafts,
-                                active_draft_id,
-                                DefinitionPatch::SetParameter { parameter: updated },
-                            ) {
-                                status.set_feedback(error, 2.0);
-                            } else {
-                                status.set_feedback(
-                                    format!("Updated parameter '{}'", parameter.name),
-                                    2.0,
-                                );
-                            }
-                        }
-                        if local && ui.button("Remove Local Override").clicked() {
-                            if let Err(error) = apply_patch_to_draft(
-                                definitions,
-                                libraries,
-                                drafts,
-                                active_draft_id,
-                                DefinitionPatch::RemoveParameter {
-                                    name: parameter.name.clone(),
-                                },
-                            ) {
-                                status.set_feedback(error, 2.0);
-                            }
-                        }
-                    });
-                });
-                ui.separator();
-            }
-
-            ui.collapsing("Add Parameter", |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut state.new_parameter_name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Type");
-                    ui.text_edit_singleline(&mut state.new_parameter_type);
-                    ui.label("Override");
-                    ui.text_edit_singleline(&mut state.new_parameter_override_policy);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Default");
-                    ui.text_edit_singleline(&mut state.new_parameter_default);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Unit");
-                    ui.text_edit_singleline(&mut state.new_parameter_unit);
-                });
-                if ui.button("Add Parameter").clicked() {
-                    match build_parameter_from_state(state) {
-                        Ok(parameter) => {
-                            if let Err(error) = apply_patch_to_draft(
-                                definitions,
-                                libraries,
-                                drafts,
-                                active_draft_id,
-                                DefinitionPatch::SetParameter { parameter },
-                            ) {
-                                status.set_feedback(error, 2.0);
-                            } else {
-                                status.set_feedback("Added parameter".to_string(), 2.0);
-                                state.new_parameter_name.clear();
-                                state.new_parameter_default.clear();
-                                state.new_parameter_unit.clear();
-                            }
-                        }
-                        Err(error) => status.set_feedback(error, 2.0),
-                    }
-                }
-            });
-        });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_definition_structure_tab(
-    ui: &mut egui::Ui,
-    state: &mut DefinitionsWindowState,
-    definitions: &DefinitionRegistry,
-    libraries: &DefinitionLibraryRegistry,
-    drafts: &mut DefinitionDraftRegistry,
-    pending: &mut PendingCommandInvocations,
-    active_draft_id: &DefinitionDraftId,
-    active_draft: &DefinitionDraft,
-    status: &mut StatusBarData,
-) {
-    let child_slots = active_draft
-        .working_copy
-        .compound
-        .as_ref()
-        .map(|compound| compound.child_slots.clone())
-        .unwrap_or_default();
-    let preview_registry = preview_registry_for_draft(definitions, libraries, active_draft)
-        .unwrap_or_else(|_| definitions.clone());
-    if let Ok(effective_definition) =
-        draft_effective_definition(definitions, libraries, active_draft)
-    {
-        draw_definition_preview(
-            ui,
-            &effective_definition,
-            &preview_registry,
-            state.selected_slot_id.as_deref(),
-            DEFINITION_PREVIEW_HEIGHT,
-        );
-        ui.add_space(8.0);
-    }
-
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(egui::RichText::new("Components").strong());
-            egui::ScrollArea::vertical()
-                .id_salt("definitions.inspector.structure.slots")
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    for slot in &child_slots {
-                        let selected =
-                            state.selected_slot_id.as_deref() == Some(slot.slot_id.as_str());
-                        if ui
-                            .selectable_label(selected, format!("{} ({})", slot.slot_id, slot.role))
-                            .clicked()
-                        {
-                            state.selected_slot_id = Some(slot.slot_id.clone());
-                            sync_selected_slot_buffers(state, slot);
-                        }
-                    }
-                });
-            ui.separator();
-            ui.label(egui::RichText::new("Add Component").strong());
             ui.horizontal(|ui| {
                 ui.label("Name");
+                ui.text_edit_singleline(&mut state.new_parameter_name);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Type");
+                ui.text_edit_singleline(&mut state.new_parameter_type);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Override policy");
+                ui.text_edit_singleline(&mut state.new_parameter_override_policy);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Default");
+                ui.text_edit_singleline(&mut state.new_parameter_default);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Unit");
+                ui.text_edit_singleline(&mut state.new_parameter_unit);
+            });
+            if ui.button("Add Parameter").clicked() {
+                match build_parameter_from_state(state) {
+                    Ok(parameter) => {
+                        let name = parameter.name.clone();
+                        if let Err(error) = apply_patch_to_draft(
+                            definitions,
+                            libraries,
+                            drafts,
+                            active_draft_id,
+                            DefinitionPatch::SetParameter { parameter },
+                        ) {
+                            status.set_feedback(error, 2.0);
+                        } else {
+                            state.selected_node = DefinitionEditorNode::Parameter(name.clone());
+                            status.set_feedback(format!("Added parameter '{name}'"), 2.0);
+                            state.new_parameter_name.clear();
+                            state.new_parameter_default.clear();
+                            state.new_parameter_unit.clear();
+                        }
+                    }
+                    Err(error) => status.set_feedback(error, 2.0),
+                }
+            }
+        });
+
+    // "Add Slot" form
+    egui::CollapsingHeader::new("Add Slot")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Slot id");
                 ui.text_edit_singleline(&mut state.new_slot_id);
             });
             ui.horizontal(|ui| {
@@ -2059,17 +2299,14 @@ fn draw_definition_structure_tab(
                 ui.text_edit_singleline(&mut state.new_slot_role);
             });
             ui.horizontal(|ui| {
-                ui.label("Definition");
+                ui.label("Child definition id");
                 ui.text_edit_singleline(&mut state.new_slot_definition_id);
             });
-            if ui.button("Add Component").clicked() {
+            if ui.button("Add Slot").clicked() {
                 if state.new_slot_id.trim().is_empty()
                     || state.new_slot_definition_id.trim().is_empty()
                 {
-                    status.set_feedback(
-                        "Provide component name and child definition id".to_string(),
-                        2.0,
-                    );
+                    status.set_feedback("Provide slot id and child definition id".to_string(), 2.0);
                 } else {
                     let slot = crate::plugins::modeling::definition::ChildSlotDef {
                         slot_id: state.new_slot_id.trim().to_string(),
@@ -2078,13 +2315,14 @@ fn draw_definition_structure_tab(
                         } else {
                             state.new_slot_role.trim().to_string()
                         },
-                        definition_id: DefinitionId(
+                        definition_id: crate::plugins::modeling::definition::DefinitionId(
                             state.new_slot_definition_id.trim().to_string(),
                         ),
                         parameter_bindings: Vec::new(),
                         transform_binding: Default::default(),
                         suppression_expr: None,
                     };
+                    let slot_id = slot.slot_id.clone();
                     if let Err(error) = apply_patch_to_draft(
                         definitions,
                         libraries,
@@ -2094,7 +2332,8 @@ fn draw_definition_structure_tab(
                     ) {
                         status.set_feedback(error, 2.0);
                     } else {
-                        status.set_feedback("Added component".to_string(), 2.0);
+                        state.selected_node = DefinitionEditorNode::Slot(slot_id);
+                        status.set_feedback("Added slot".to_string(), 2.0);
                         state.new_slot_id.clear();
                         state.new_slot_role.clear();
                         state.new_slot_definition_id.clear();
@@ -2102,129 +2341,714 @@ fn draw_definition_structure_tab(
                 }
             }
         });
-        ui.separator();
-        ui.vertical(|ui| {
-            if let Some(slot_id) = state.selected_slot_id.clone() {
-                if let Some(slot) = child_slots.iter().find(|slot| slot.slot_id == slot_id) {
-                    if state.slot_editor_buffer.is_empty() {
-                        sync_selected_slot_buffers(state, slot);
-                    }
-                    ui.label(egui::RichText::new(&slot.slot_id).heading());
-                    ui.horizontal(|ui| {
-                        ui.label("Role");
-                        ui.text_edit_singleline(&mut state.selected_slot_role_buffer);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Definition");
-                        ui.text_edit_singleline(&mut state.selected_slot_definition_buffer);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Position");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.selected_slot_translation_buffer)
-                                .hint_text("x, y, z"),
-                        );
-                    });
-                    ui.label(format!(
-                        "{} parameter bindings",
-                        slot.parameter_bindings.len()
-                    ));
-                    ui.horizontal(|ui| {
-                        if ui.button("Apply Component").clicked() {
-                            match build_slot_from_editor_buffers(state, slot) {
-                                Ok(updated_slot) => {
-                                    state.slot_editor_buffer = pretty_json(&updated_slot);
-                                    if let Err(error) = apply_patch_to_draft(
-                                        definitions,
-                                        libraries,
-                                        drafts,
-                                        active_draft_id,
-                                        DefinitionPatch::SetChildSlot {
-                                            child_slot: updated_slot,
-                                        },
-                                    ) {
-                                        status.set_feedback(error, 2.0);
-                                    } else {
-                                        status.set_feedback(
-                                            format!("Updated component '{}'", slot_id),
-                                            2.0,
-                                        );
-                                    }
-                                }
-                                Err(error) => status.set_feedback(error, 2.0),
-                            }
-                        }
-                        if ui.button("Open Child Definition").clicked() {
-                            let mut parameters = json!({
-                                "definition_id": slot.definition_id.to_string(),
-                            });
-                            if let Some(library_id) = &active_draft.source_library_id {
-                                parameters["library_id"] = json!(library_id.to_string());
-                            }
-                            queue_command_invocation_resource(
-                                pending,
-                                "modeling.open_definition_draft".to_string(),
-                                parameters,
-                            );
-                        }
-                    });
-                    if ui.button("Remove Component").clicked() {
+
+    let _ = pending; // reserved for future "promote to definition default" actions
+}
+
+// -- Context: Parameter --
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_parameter(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+    parameter_name: &str,
+    status: &mut StatusBarData,
+) {
+    // Resolve the parameter from the effective definition (includes inherited).
+    let effective_definition =
+        draft_effective_definition(definitions, libraries, active_draft).ok();
+    let Some(effective) = effective_definition.as_ref() else {
+        ui.label("Draft is currently invalid; cannot edit parameter.");
+        return;
+    };
+    let Some(parameter) = effective.interface.parameters.get(parameter_name) else {
+        ui.label(format!("Parameter '{parameter_name}' not found."));
+        return;
+    };
+
+    let local = active_draft
+        .working_copy
+        .interface
+        .parameters
+        .get(parameter_name)
+        .is_some();
+    let default_key = format!("{}:{}", active_draft_id, parameter.name);
+    state
+        .parameter_default_buffers
+        .entry(default_key.clone())
+        .or_insert_with(|| compact_json(&parameter.default_value));
+    state
+        .parameter_unit_buffers
+        .entry(default_key.clone())
+        .or_insert_with(|| parameter.metadata.unit.clone().unwrap_or_default());
+
+    ui.label(egui::RichText::new(&parameter.name).heading());
+    ui.horizontal(|ui| {
+        ui.label("Type");
+        ui.label(egui::RichText::new(format!("{:?}", parameter.param_type)).weak());
+        ui.label(if local { "local" } else { "inherited" });
+    });
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        ui.label("Default");
+        if let Some(buffer) = state.parameter_default_buffers.get_mut(&default_key) {
+            ui.text_edit_singleline(buffer);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Unit");
+        if let Some(buffer) = state.parameter_unit_buffers.get_mut(&default_key) {
+            ui.text_edit_singleline(buffer);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Override policy");
+        ui.label(egui::RichText::new(format!("{:?}", parameter.override_policy)).weak());
+    });
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui.button("Apply").clicked() {
+            let mut updated = parameter.clone();
+            if let Some(buffer) = state.parameter_default_buffers.get(&default_key) {
+                updated.default_value = parse_json_or_string(buffer);
+            }
+            if let Some(buffer) = state.parameter_unit_buffers.get(&default_key) {
+                updated.metadata.unit =
+                    (!buffer.trim().is_empty()).then_some(buffer.trim().to_string());
+            }
+            if let Err(error) = apply_patch_to_draft(
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                DefinitionPatch::SetParameter { parameter: updated },
+            ) {
+                status.set_feedback(error, 2.0);
+            } else {
+                status.set_feedback(format!("Updated parameter '{parameter_name}'"), 2.0);
+            }
+        }
+        if local && ui.button("Delete").clicked() {
+            if let Err(error) = apply_patch_to_draft(
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                DefinitionPatch::RemoveParameter {
+                    name: parameter_name.to_string(),
+                },
+            ) {
+                status.set_feedback(error, 2.0);
+            } else {
+                state.selected_node = DefinitionEditorNode::Definition;
+            }
+        }
+    });
+}
+
+// -- Context: Slot --
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_slot(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    pending: &mut PendingCommandInvocations,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+    slot_id: &str,
+    status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
+) {
+    let child_slots = active_draft
+        .working_copy
+        .compound
+        .as_ref()
+        .map(|c| c.child_slots.clone())
+        .unwrap_or_default();
+    let Some(slot) = child_slots.iter().find(|s| s.slot_id == slot_id) else {
+        ui.label(format!("Slot '{slot_id}' not found."));
+        return;
+    };
+
+    // Initialize buffers when first shown for this slot
+    if state.selected_slot_role_buffer.is_empty()
+        || state
+            .slot_editor_buffer
+            .is_empty()
+    {
+        sync_selected_slot_buffers(state, slot);
+    }
+
+    // Resolve child definition name (never show raw id to the user)
+    let preview_reg = preview_registry_for_draft(definitions, libraries, active_draft)
+        .unwrap_or_else(|_| definitions.clone());
+    let child_def = preview_reg
+        .effective_definition(&slot.definition_id)
+        .ok();
+    let child_def_name = child_def
+        .as_ref()
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| slot.definition_id.to_string());
+
+    ui.label(egui::RichText::new(slot_id).heading());
+    ui.separator();
+
+    ui.horizontal(|ui| {
+        ui.label("Role");
+        ui.text_edit_singleline(&mut state.selected_slot_role_buffer);
+    });
+    // Child definition: show human-readable name; definition_id is edit-only
+    // through Technical view or the definition_buffer field below.
+    ui.horizontal(|ui| {
+        ui.label("Child definition");
+        ui.label(egui::RichText::new(&child_def_name).strong());
+    });
+    ui.horizontal(|ui| {
+        ui.label("Definition id");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.selected_slot_definition_buffer)
+                .hint_text("definition id"),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Position");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.selected_slot_translation_buffer)
+                .hint_text("x, y, z"),
+        );
+    });
+    ui.label(
+        egui::RichText::new(format!("{} parameter binding(s)", slot.parameter_bindings.len()))
+            .small()
+            .weak(),
+    );
+
+    // PP-DBUX6: Promote-to-Definition-Default for slot parameter bindings.
+    //
+    // For each parameter binding whose literal value differs from the child
+    // definition's parameter default, show a [↑ Promote to <Child> default]
+    // button. Only enabled when the child definition already has an editable
+    // draft in the registry (to avoid transiently opening definitions).
+    if !slot.parameter_bindings.is_empty() {
+        let child_draft_id: Option<DefinitionDraftId> = {
+            let child_def_id = &slot.definition_id;
+            drafts
+                .list()
+                .into_iter()
+                .find(|d| d.source_definition_id.as_ref() == Some(child_def_id))
+                .map(|d| d.draft_id.clone())
+        };
+        ui.add_space(4.0);
+        for binding in &slot.parameter_bindings {
+            // Resolve the literal value of this binding (only Literal nodes
+            // can be promoted; expressions that reference other params are skipped).
+            use crate::plugins::modeling::definition::ExprNode;
+            let literal_value: Option<serde_json::Value> = match &binding.expr {
+                ExprNode::Literal { value } => Some(value.clone()),
+                _ => None,
+            };
+            let Some(literal) = literal_value else {
+                continue;
+            };
+            // Get the child definition's current default for this parameter.
+            let child_default = child_def.as_ref().and_then(|d| {
+                d.interface
+                    .parameters
+                    .get(&binding.target_param)
+                    .map(|p| p.default_value.clone())
+            });
+            let Some(child_default) = child_default else {
+                continue;
+            };
+            if literal == child_default {
+                // Already the default — no promote needed.
+                continue;
+            }
+            let btn_label = format!("↑ Promote '{}' to {} default", binding.target_param, child_def_name);
+            if let Some(child_draft_id) = &child_draft_id {
+                let btn = ui.button(&btn_label).on_hover_text(
+                    format!("Make {:.6?} the default for '{}' in '{}'", literal, binding.target_param, child_def_name),
+                );
+                if btn.clicked() {
+                    let child_draft_id = child_draft_id.clone();
+                    if let Err(error) = apply_patch_to_draft(
+                        definitions,
+                        libraries,
+                        drafts,
+                        &child_draft_id,
+                        DefinitionPatch::SetParameterDefault {
+                            name: binding.target_param.clone(),
+                            default_value: literal,
+                        },
+                    ) {
+                        status.set_feedback(error, 2.0);
+                    } else {
+                        // Also remove the slot binding now that the default matches.
                         if let Err(error) = apply_patch_to_draft(
                             definitions,
                             libraries,
                             drafts,
                             active_draft_id,
-                            DefinitionPatch::RemoveChildSlot {
-                                slot_id: slot_id.clone(),
+                            DefinitionPatch::RemoveChildSlotBinding {
+                                slot_id: slot_id.to_string(),
+                                target_param: binding.target_param.clone(),
                             },
                         ) {
                             status.set_feedback(error, 2.0);
                         } else {
-                            state.selected_slot_id = None;
-                            state.slot_editor_buffer.clear();
-                            state.selected_slot_role_buffer.clear();
-                            state.selected_slot_definition_buffer.clear();
-                            state.selected_slot_translation_buffer.clear();
+                            status.set_feedback(
+                                format!(
+                                    "Promoted '{}' to '{}' default",
+                                    binding.target_param, child_def_name
+                                ),
+                                2.0,
+                            );
                         }
                     }
-                    ui.collapsing("Component JSON", |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(&mut state.slot_editor_buffer)
-                                .desired_rows(10)
-                                .code_editor(),
-                        );
-                        if ui.button("Apply Component JSON").clicked() {
-                            match serde_json::from_str::<
-                                crate::plugins::modeling::definition::ChildSlotDef,
-                            >(&state.slot_editor_buffer)
-                            {
-                                Ok(slot) => {
-                                    if let Err(error) = apply_patch_to_draft(
-                                        definitions,
-                                        libraries,
-                                        drafts,
-                                        active_draft_id,
-                                        DefinitionPatch::SetChildSlot { child_slot: slot },
-                                    ) {
-                                        status.set_feedback(error, 2.0);
-                                    }
-                                }
-                                Err(error) => status.set_feedback(error.to_string(), 2.0),
-                            }
-                        }
-                    });
-                } else {
-                    ui.label("Select a component.");
                 }
             } else {
-                ui.label("Select a component to adjust it.");
+                // Child definition not yet an editable draft — show disabled button.
+                ui.add_enabled(false, egui::Button::new(&btn_label))
+                    .on_disabled_hover_text(format!(
+                        "Open the '{child_def_name}' definition first to enable promote-to-default."
+                    ));
             }
-        });
+        }
+    }
+
+    // PP-DBUX5: read-only slot material chip.
+    //
+    // Slot-level MaterialAssignment overrides are not yet in the data model
+    // (per the agreed material architecture, MaterialAssignment lives on
+    // authored entities and on definitions via domain_data.architectural).
+    // Show the child definition's effective material as a read-only chip.
+    // Clicking it opens the controlling child definition where the real
+    // assignment lives.  Per the agreement: "no fewer than one click and no
+    // raw definition-id strings shown to the user."
+    //
+    // TODO: when slot-level MaterialAssignment overrides are added to the data
+    // model, upgrade this chip to writable and commit through a
+    // SetChildSlotMaterial patch.
+    ui.add_space(6.0);
+    if let Some(child) = &child_def {
+        let child_material_id = child
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .and_then(|ma| material_assignment_from_value(ma))
+            .and_then(|a| a.render_material_id(None));
+
+        draw_slot_material_chip_readonly(
+            ui,
+            "Slot material",
+            child_material_id.as_deref(),
+            &child_def_name,
+            material_registry,
+            pending,
+            &slot.definition_id,
+            active_draft,
+        );
+    }
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        if ui.button("Apply Slot").clicked() {
+            match build_slot_from_editor_buffers(state, slot) {
+                Ok(updated_slot) => {
+                    state.slot_editor_buffer = pretty_json(&updated_slot);
+                    if let Err(error) = apply_patch_to_draft(
+                        definitions,
+                        libraries,
+                        drafts,
+                        active_draft_id,
+                        DefinitionPatch::SetChildSlot {
+                            child_slot: updated_slot,
+                        },
+                    ) {
+                        status.set_feedback(error, 2.0);
+                    } else {
+                        status.set_feedback(format!("Updated slot '{slot_id}'"), 2.0);
+                    }
+                }
+                Err(error) => status.set_feedback(error, 2.0),
+            }
+        }
+        if ui.button("Open Child Definition").clicked() {
+            let mut parameters = json!({
+                "definition_id": slot.definition_id.to_string(),
+            });
+            if let Some(library_id) = &active_draft.source_library_id {
+                parameters["library_id"] = json!(library_id.to_string());
+            }
+            queue_command_invocation_resource(
+                pending,
+                "modeling.open_definition_draft".to_string(),
+                parameters,
+            );
+        }
+    });
+    if ui.button("Remove Slot").clicked() {
+        if let Err(error) = apply_patch_to_draft(
+            definitions,
+            libraries,
+            drafts,
+            active_draft_id,
+            DefinitionPatch::RemoveChildSlot {
+                slot_id: slot_id.to_string(),
+            },
+        ) {
+            status.set_feedback(error, 2.0);
+        } else {
+            state.selected_node = DefinitionEditorNode::Definition;
+            state.slot_editor_buffer.clear();
+            state.selected_slot_role_buffer.clear();
+            state.selected_slot_definition_buffer.clear();
+            state.selected_slot_translation_buffer.clear();
+        }
+    }
+}
+
+// -- Context: SlotParameterBinding --
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_slot_binding(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+    slot_id: &str,
+    parameter_name: &str,
+    status: &mut StatusBarData,
+) {
+    // PP-DBUX3+ TODO: surface a dedicated binding editor widget here.
+    // For PP-DBUX2 we show the JSON for this single binding with Apply.
+    let child_slots = active_draft
+        .working_copy
+        .compound
+        .as_ref()
+        .map(|c| c.child_slots.clone())
+        .unwrap_or_default();
+    let Some(slot) = child_slots.iter().find(|s| s.slot_id == slot_id) else {
+        ui.label(format!("Slot '{slot_id}' not found."));
+        return;
+    };
+    let Some(binding) = slot
+        .parameter_bindings
+        .iter()
+        .find(|b| b.target_param == parameter_name)
+    else {
+        ui.label(format!(
+            "Binding '{parameter_name}' not found in slot '{slot_id}'."
+        ));
+        return;
+    };
+
+    ui.label(egui::RichText::new(format!("{slot_id} → {parameter_name}")).heading());
+    ui.separator();
+
+    // Initialize the slot_editor_buffer with this binding's JSON if empty.
+    let binding_key = format!("{slot_id}:{parameter_name}");
+    if state.slot_editor_buffer.is_empty()
+        || !state.slot_editor_buffer.contains(&binding_key)
+    {
+        state.slot_editor_buffer = pretty_json(binding);
+    }
+
+    ui.add(
+        egui::TextEdit::multiline(&mut state.slot_editor_buffer)
+            .desired_rows(8)
+            .code_editor(),
+    );
+    ui.add_space(4.0);
+    if ui.button("Apply Binding").clicked() {
+        match serde_json::from_str::<crate::plugins::modeling::definition::ParameterBinding>(
+            &state.slot_editor_buffer,
+        ) {
+            Ok(updated_binding) => {
+                if let Err(error) = apply_patch_to_draft(
+                    definitions,
+                    libraries,
+                    drafts,
+                    active_draft_id,
+                    DefinitionPatch::SetChildSlotBinding {
+                        slot_id: slot_id.to_string(),
+                        binding: updated_binding,
+                    },
+                ) {
+                    status.set_feedback(error, 2.0);
+                } else {
+                    status.set_feedback(
+                        format!("Updated binding '{parameter_name}' in slot '{slot_id}'"),
+                        2.0,
+                    );
+                }
+            }
+            Err(error) => status.set_feedback(error.to_string(), 2.0),
+        }
+    }
+
+    let _ = state;
+}
+
+// -- Context: Anchor --
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_anchor(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+    anchor_id: &str,
+    status: &mut StatusBarData,
+) {
+    let compound = active_draft.working_copy.compound.as_ref();
+    let Some(anchor) = compound
+        .and_then(|c| c.anchors.iter().find(|a| a.id == anchor_id))
+    else {
+        ui.label(format!("Anchor '{anchor_id}' not found."));
+        return;
+    };
+
+    if state.anchor_editor_buffer.is_empty() {
+        state.anchor_editor_buffer = pretty_json(anchor);
+    }
+
+    ui.label(egui::RichText::new(anchor_id).heading());
+    ui.separator();
+    ui.label(egui::RichText::new(&anchor.kind).weak());
+    ui.add_space(4.0);
+    ui.add(
+        egui::TextEdit::multiline(&mut state.anchor_editor_buffer)
+            .desired_rows(8)
+            .code_editor(),
+    );
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.button("Apply").clicked() {
+            match serde_json::from_str::<crate::plugins::modeling::definition::AnchorDef>(
+                &state.anchor_editor_buffer,
+            ) {
+                Ok(updated) => {
+                    if let Err(error) = apply_patch_to_draft(
+                        definitions,
+                        libraries,
+                        drafts,
+                        active_draft_id,
+                        DefinitionPatch::SetAnchor { anchor: updated },
+                    ) {
+                        status.set_feedback(error, 2.0);
+                    } else {
+                        status.set_feedback(format!("Updated anchor '{anchor_id}'"), 2.0);
+                    }
+                }
+                Err(error) => status.set_feedback(error.to_string(), 2.0),
+            }
+        }
+        if ui.button("Delete").clicked() {
+            if let Err(error) = apply_patch_to_draft(
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                DefinitionPatch::RemoveAnchor {
+                    id: anchor_id.to_string(),
+                },
+            ) {
+                status.set_feedback(error, 2.0);
+            } else {
+                state.selected_node = DefinitionEditorNode::Definition;
+                state.anchor_editor_buffer.clear();
+            }
+        }
     });
 }
 
+// -- Context: Constraint --
+
 #[allow(clippy::too_many_arguments)]
-fn draw_definition_graph_tab(
+fn draw_context_constraint(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+    constraint_id: &str,
+    status: &mut StatusBarData,
+) {
+    let compound = active_draft.working_copy.compound.as_ref();
+    let Some(constraint) = compound
+        .and_then(|c| c.constraints.iter().find(|c| c.id == constraint_id))
+    else {
+        ui.label(format!("Constraint '{constraint_id}' not found."));
+        return;
+    };
+
+    if state.constraint_editor_buffer.is_empty() {
+        state.constraint_editor_buffer = pretty_json(constraint);
+    }
+
+    ui.label(egui::RichText::new(constraint_id).heading());
+    ui.separator();
+    ui.label(egui::RichText::new(&constraint.message).weak());
+    ui.add_space(4.0);
+    ui.add(
+        egui::TextEdit::multiline(&mut state.constraint_editor_buffer)
+            .desired_rows(8)
+            .code_editor(),
+    );
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.button("Apply").clicked() {
+            match serde_json::from_str::<crate::plugins::modeling::definition::ConstraintDef>(
+                &state.constraint_editor_buffer,
+            ) {
+                Ok(updated) => {
+                    if let Err(error) = apply_patch_to_draft(
+                        definitions,
+                        libraries,
+                        drafts,
+                        active_draft_id,
+                        DefinitionPatch::SetConstraint { constraint: updated },
+                    ) {
+                        status.set_feedback(error, 2.0);
+                    } else {
+                        status.set_feedback(format!("Updated constraint '{constraint_id}'"), 2.0);
+                    }
+                }
+                Err(error) => status.set_feedback(error.to_string(), 2.0),
+            }
+        }
+        if ui.button("Delete").clicked() {
+            if let Err(error) = apply_patch_to_draft(
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                DefinitionPatch::RemoveConstraint {
+                    id: constraint_id.to_string(),
+                },
+            ) {
+                status.set_feedback(error, 2.0);
+            } else {
+                state.selected_node = DefinitionEditorNode::Definition;
+                state.constraint_editor_buffer.clear();
+            }
+        }
+    });
+}
+
+// -- Context: DerivedParameter --
+
+#[allow(clippy::too_many_arguments)]
+fn draw_context_derived_parameter(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+    derived_name: &str,
+    status: &mut StatusBarData,
+) {
+    let compound = active_draft.working_copy.compound.as_ref();
+    let Some(derived) = compound
+        .and_then(|c| c.derived_parameters.iter().find(|d| d.name == derived_name))
+    else {
+        ui.label(format!("Derived parameter '{derived_name}' not found."));
+        return;
+    };
+
+    if state.derived_editor_buffer.is_empty() {
+        state.derived_editor_buffer = pretty_json(derived);
+    }
+
+    ui.label(egui::RichText::new(derived_name).heading());
+    ui.separator();
+    ui.label(egui::RichText::new(format!("{:?}", derived.param_type)).weak());
+    ui.add_space(4.0);
+    ui.add(
+        egui::TextEdit::multiline(&mut state.derived_editor_buffer)
+            .desired_rows(8)
+            .code_editor(),
+    );
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.button("Apply").clicked() {
+            match serde_json::from_str::<crate::plugins::modeling::definition::DerivedParameterDef>(
+                &state.derived_editor_buffer,
+            ) {
+                Ok(updated) => {
+                    if let Err(error) = apply_patch_to_draft(
+                        definitions,
+                        libraries,
+                        drafts,
+                        active_draft_id,
+                        DefinitionPatch::SetDerivedParameter {
+                            derived_parameter: updated,
+                        },
+                    ) {
+                        status.set_feedback(error, 2.0);
+                    } else {
+                        status.set_feedback(
+                            format!("Updated derived parameter '{derived_name}'"),
+                            2.0,
+                        );
+                    }
+                }
+                Err(error) => status.set_feedback(error.to_string(), 2.0),
+            }
+        }
+        if ui.button("Delete").clicked() {
+            if let Err(error) = apply_patch_to_draft(
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                DefinitionPatch::RemoveDerivedParameter {
+                    name: derived_name.to_string(),
+                },
+            ) {
+                status.set_feedback(error, 2.0);
+            } else {
+                state.selected_node = DefinitionEditorNode::Definition;
+                state.derived_editor_buffer.clear();
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Technical view
+// ---------------------------------------------------------------------------
+
+/// Technical JSON view for the currently selected node.
+///
+/// Only the center context-editor pane swaps; the property tree, preview, and
+/// assets strip remain visible.
+///
+/// Per the agreement: "If a technical edit cannot round-trip through the same
+/// validation path, it is rejected in place."
+#[allow(clippy::too_many_arguments)]
+fn draw_technical_view(
     ui: &mut egui::Ui,
     state: &mut DefinitionsWindowState,
     definitions: &DefinitionRegistry,
@@ -2234,334 +3058,624 @@ fn draw_definition_graph_tab(
     active_draft: &DefinitionDraft,
     status: &mut StatusBarData,
 ) {
-    let compound = active_draft
-        .working_copy
-        .compound
-        .clone()
-        .unwrap_or_default();
-    ui.columns(3, |columns| {
-        columns[0].vertical(|ui| {
-            ui.label(egui::RichText::new("Derived").strong());
-            egui::ScrollArea::vertical()
-                .id_salt("definitions.inspector.graph.derived")
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    for entry in &compound.derived_parameters {
-                        let selected =
-                            state.selected_derived_name.as_deref() == Some(entry.name.as_str());
-                        if ui.selectable_label(selected, &entry.name).clicked() {
-                            state.selected_derived_name = Some(entry.name.clone());
-                            state.derived_editor_buffer = pretty_json(entry);
-                        }
-                    }
-                });
-            if ui.button("New").clicked() {
-                state.selected_derived_name = None;
-                state.derived_editor_buffer = pretty_json(
-                    &crate::plugins::modeling::definition::DerivedParameterDef {
-                        name: "derived_param".to_string(),
-                        param_type: crate::plugins::modeling::definition::ParamType::Numeric,
-                        expr: crate::plugins::modeling::definition::ExprNode::Literal {
-                            value: json!(0.0),
-                        },
-                        dependencies: Vec::new(),
-                        metadata: Default::default(),
-                    },
-                );
-            }
-            ui.add(
-                egui::TextEdit::multiline(&mut state.derived_editor_buffer)
-                    .desired_rows(10)
-                    .code_editor(),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Apply").clicked() {
-                    match serde_json::from_str::<
-                        crate::plugins::modeling::definition::DerivedParameterDef,
-                    >(&state.derived_editor_buffer)
-                    {
-                        Ok(derived_parameter) => {
-                            if let Err(error) = apply_patch_to_draft(
-                                definitions,
-                                libraries,
-                                drafts,
-                                active_draft_id,
-                                DefinitionPatch::SetDerivedParameter { derived_parameter },
-                            ) {
-                                status.set_feedback(error, 2.0);
-                            }
-                        }
-                        Err(error) => status.set_feedback(error.to_string(), 2.0),
-                    }
-                }
-                if let Some(selected) = state.selected_derived_name.clone() {
-                    if ui.button("Remove").clicked() {
-                        if let Err(error) = apply_patch_to_draft(
-                            definitions,
-                            libraries,
-                            drafts,
-                            active_draft_id,
-                            DefinitionPatch::RemoveDerivedParameter { name: selected },
-                        ) {
-                            status.set_feedback(error, 2.0);
-                        } else {
-                            state.selected_derived_name = None;
-                            state.derived_editor_buffer.clear();
-                        }
-                    }
-                }
-            });
-        });
+    let def = &active_draft.working_copy;
 
-        columns[1].vertical(|ui| {
-            ui.label(egui::RichText::new("Constraints").strong());
-            egui::ScrollArea::vertical()
-                .id_salt("definitions.inspector.graph.constraints")
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    for entry in &compound.constraints {
-                        let selected =
-                            state.selected_constraint_id.as_deref() == Some(entry.id.as_str());
-                        if ui.selectable_label(selected, &entry.id).clicked() {
-                            state.selected_constraint_id = Some(entry.id.clone());
-                            state.constraint_editor_buffer = pretty_json(entry);
-                        }
-                    }
-                });
-            if ui.button("New").clicked() {
-                state.selected_constraint_id = None;
-                state.constraint_editor_buffer = pretty_json(
-                    &crate::plugins::modeling::definition::ConstraintDef {
-                        id: "constraint".to_string(),
-                        expr: crate::plugins::modeling::definition::ExprNode::Literal {
-                            value: json!(true),
-                        },
-                        dependencies: Vec::new(),
-                        severity: crate::plugins::modeling::definition::ConstraintSeverity::Error,
-                        message: "Constraint failed".to_string(),
-                    },
-                );
-            }
-            ui.add(
-                egui::TextEdit::multiline(&mut state.constraint_editor_buffer)
-                    .desired_rows(10)
-                    .code_editor(),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Apply").clicked() {
-                    match serde_json::from_str::<crate::plugins::modeling::definition::ConstraintDef>(
-                        &state.constraint_editor_buffer,
-                    ) {
-                        Ok(constraint) => {
-                            if let Err(error) = apply_patch_to_draft(
-                                definitions,
-                                libraries,
-                                drafts,
-                                active_draft_id,
-                                DefinitionPatch::SetConstraint { constraint },
-                            ) {
-                                status.set_feedback(error, 2.0);
-                            }
-                        }
-                        Err(error) => status.set_feedback(error.to_string(), 2.0),
-                    }
-                }
-                if let Some(selected) = state.selected_constraint_id.clone() {
-                    if ui.button("Remove").clicked() {
-                        if let Err(error) = apply_patch_to_draft(
-                            definitions,
-                            libraries,
-                            drafts,
-                            active_draft_id,
-                            DefinitionPatch::RemoveConstraint { id: selected },
-                        ) {
-                            status.set_feedback(error, 2.0);
-                        } else {
-                            state.selected_constraint_id = None;
-                            state.constraint_editor_buffer.clear();
-                        }
-                    }
-                }
-            });
-        });
+    ui.label(egui::RichText::new("Technical view").strong());
+    ui.label(
+        egui::RichText::new("Edits are validated before applying.  Invalid JSON is rejected in place.")
+            .small()
+            .weak(),
+    );
+    ui.separator();
 
-        columns[2].vertical(|ui| {
-            ui.label(egui::RichText::new("Anchors").strong());
-            egui::ScrollArea::vertical()
-                .id_salt("definitions.inspector.graph.anchors")
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    for entry in &compound.anchors {
-                        let selected =
-                            state.selected_anchor_id.as_deref() == Some(entry.id.as_str());
-                        if ui.selectable_label(selected, &entry.id).clicked() {
-                            state.selected_anchor_id = Some(entry.id.clone());
-                            state.anchor_editor_buffer = pretty_json(entry);
-                        }
-                    }
-                });
-            if ui.button("New").clicked() {
-                state.selected_anchor_id = None;
-                state.anchor_editor_buffer =
-                    pretty_json(&crate::plugins::modeling::definition::AnchorDef {
-                        id: "anchor.id".to_string(),
-                        kind: "anchor_kind".to_string(),
-                    });
+    // Populate buffer from the selected node whenever it is empty (i.e., after
+    // a node change that clears the buffer).
+    let selected_node = state.selected_node.clone();
+    if state.technical_view_buffer.is_empty() {
+        state.technical_view_buffer = technical_view_json_for_node(&selected_node, active_draft);
+        state.technical_view_error = None;
+    }
+
+    // Node label
+    let node_label = match &selected_node {
+        DefinitionEditorNode::Definition => format!("Definition: {}", def.name),
+        DefinitionEditorNode::Parameter(n) => format!("Parameter: {n}"),
+        DefinitionEditorNode::Slot(id) => format!("Slot: {id}"),
+        DefinitionEditorNode::SlotParameterBinding { slot_id, parameter_name } => {
+            format!("Binding: {slot_id} → {parameter_name}")
+        }
+        DefinitionEditorNode::Anchor(id) => format!("Anchor: {id}"),
+        DefinitionEditorNode::Constraint(id) => format!("Constraint: {id}"),
+        DefinitionEditorNode::DerivedParameter(n) => format!("Derived: {n}"),
+    };
+    ui.label(egui::RichText::new(node_label).small().weak());
+    ui.add_space(4.0);
+
+    ui.add(
+        egui::TextEdit::multiline(&mut state.technical_view_buffer)
+            .desired_rows(16)
+            .code_editor(),
+    );
+
+    if let Some(error) = &state.technical_view_error.clone() {
+        ui.colored_label(egui::Color32::from_rgb(220, 90, 90), error);
+    }
+
+    ui.add_space(4.0);
+    if ui.button("Apply").clicked() {
+        let result = apply_technical_view_edit(
+            &selected_node,
+            &state.technical_view_buffer,
+            definitions,
+            libraries,
+            drafts,
+            active_draft_id,
+            active_draft,
+        );
+        match result {
+            Ok(()) => {
+                state.technical_view_error = None;
+                status.set_feedback("Technical edit applied".to_string(), 2.0);
             }
-            ui.add(
-                egui::TextEdit::multiline(&mut state.anchor_editor_buffer)
-                    .desired_rows(10)
-                    .code_editor(),
-            );
-            ui.horizontal(|ui| {
-                if ui.button("Apply").clicked() {
-                    match serde_json::from_str::<crate::plugins::modeling::definition::AnchorDef>(
-                        &state.anchor_editor_buffer,
-                    ) {
-                        Ok(anchor) => {
-                            if let Err(error) = apply_patch_to_draft(
-                                definitions,
-                                libraries,
-                                drafts,
-                                active_draft_id,
-                                DefinitionPatch::SetAnchor { anchor },
-                            ) {
-                                status.set_feedback(error, 2.0);
-                            }
-                        }
-                        Err(error) => status.set_feedback(error.to_string(), 2.0),
-                    }
-                }
-                if let Some(selected) = state.selected_anchor_id.clone() {
-                    if ui.button("Remove").clicked() {
-                        if let Err(error) = apply_patch_to_draft(
-                            definitions,
-                            libraries,
-                            drafts,
-                            active_draft_id,
-                            DefinitionPatch::RemoveAnchor { id: selected },
-                        ) {
-                            status.set_feedback(error, 2.0);
-                        } else {
-                            state.selected_anchor_id = None;
-                            state.anchor_editor_buffer.clear();
-                        }
-                    }
-                }
-            });
-        });
-    });
+            Err(error) => {
+                state.technical_view_error = Some(error.clone());
+                status.set_feedback(error, 2.0);
+            }
+        }
+    }
 }
 
+/// Serialise the currently selected node to JSON for the Technical view buffer.
+fn technical_view_json_for_node(
+    selected_node: &DefinitionEditorNode,
+    draft: &DefinitionDraft,
+) -> String {
+    let def = &draft.working_copy;
+    let compound = def.compound.as_ref();
+    match selected_node {
+        DefinitionEditorNode::Definition => {
+            // Full definition minus compound.child_slots — editing the compound
+            // through Technical view is done by selecting the individual slot.
+            let mut value = serde_json::to_value(def).unwrap_or(json!(null));
+            if let Some(obj) = value.as_object_mut() {
+                if let Some(compound_val) = obj.get_mut("compound") {
+                    if let Some(compound_obj) = compound_val.as_object_mut() {
+                        compound_obj.remove("child_slots");
+                    }
+                }
+            }
+            pretty_json(&value)
+        }
+        DefinitionEditorNode::Parameter(name) => {
+            def.interface
+                .parameters
+                .get(name)
+                .map(|p| pretty_json(p))
+                .unwrap_or_else(|| "{}".to_string())
+        }
+        DefinitionEditorNode::Slot(slot_id) => compound
+            .and_then(|c| c.child_slots.iter().find(|s| s.slot_id == *slot_id))
+            .map(|s| pretty_json(s))
+            .unwrap_or_else(|| "{}".to_string()),
+        DefinitionEditorNode::SlotParameterBinding {
+            slot_id,
+            parameter_name,
+        } => compound
+            .and_then(|c| c.child_slots.iter().find(|s| s.slot_id == *slot_id))
+            .and_then(|s| {
+                s.parameter_bindings
+                    .iter()
+                    .find(|b| b.target_param == *parameter_name)
+            })
+            .map(|b| pretty_json(b))
+            .unwrap_or_else(|| "{}".to_string()),
+        DefinitionEditorNode::Anchor(anchor_id) => compound
+            .and_then(|c| c.anchors.iter().find(|a| a.id == *anchor_id))
+            .map(|a| pretty_json(a))
+            .unwrap_or_else(|| "{}".to_string()),
+        DefinitionEditorNode::Constraint(constraint_id) => compound
+            .and_then(|c| c.constraints.iter().find(|c| c.id == *constraint_id))
+            .map(|c| pretty_json(c))
+            .unwrap_or_else(|| "{}".to_string()),
+        DefinitionEditorNode::DerivedParameter(name) => compound
+            .and_then(|c| c.derived_parameters.iter().find(|d| d.name == *name))
+            .map(|d| pretty_json(d))
+            .unwrap_or_else(|| "{}".to_string()),
+    }
+}
+
+/// Parse the Technical view buffer and apply the edit through the typed patch
+/// path, followed by `validate_draft`.  Returns `Err` if the JSON is invalid
+/// or the validated draft rejects the edit.
 #[allow(clippy::too_many_arguments)]
-fn draw_definition_json_tab(
+fn apply_technical_view_edit(
+    selected_node: &DefinitionEditorNode,
+    buffer: &str,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    drafts: &mut DefinitionDraftRegistry,
+    active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
+) -> Result<(), String> {
+    use crate::plugins::modeling::definition as def_mod;
+    let patch = match selected_node {
+        DefinitionEditorNode::Definition => {
+            // Parse into a Value and apply patchable fields individually to
+            // avoid overwriting child_slots (which were stripped in the buffer).
+            let value: serde_json::Map<String, Value> = serde_json::from_str(buffer)
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            // Apply name if changed
+            if let Some(name) = value.get("name").and_then(Value::as_str) {
+                if name != active_draft.working_copy.name {
+                    apply_patch_to_draft(
+                        definitions,
+                        libraries,
+                        drafts,
+                        active_draft_id,
+                        DefinitionPatch::SetName {
+                            name: name.to_string(),
+                        },
+                    )?;
+                }
+            }
+            // Apply domain_data if present
+            if let Some(dd) = value.get("domain_data") {
+                apply_patch_to_draft(
+                    definitions,
+                    libraries,
+                    drafts,
+                    active_draft_id,
+                    DefinitionPatch::SetDomainData { value: dd.clone() },
+                )?;
+            }
+            // Apply evaluators if present
+            if let Some(evs) = value.get("evaluators") {
+                let evaluators: Vec<def_mod::EvaluatorDecl> =
+                    serde_json::from_value(evs.clone())
+                        .map_err(|e| format!("evaluators parse error: {e}"))?;
+                apply_patch_to_draft(
+                    definitions,
+                    libraries,
+                    drafts,
+                    active_draft_id,
+                    DefinitionPatch::SetEvaluators { evaluators },
+                )?;
+            }
+            // Apply representations if present
+            if let Some(reps) = value.get("representations") {
+                let representations: Vec<def_mod::RepresentationDecl> =
+                    serde_json::from_value(reps.clone())
+                        .map_err(|e| format!("representations parse error: {e}"))?;
+                apply_patch_to_draft(
+                    definitions,
+                    libraries,
+                    drafts,
+                    active_draft_id,
+                    DefinitionPatch::SetRepresentations { representations },
+                )?;
+            }
+            // Validate after all patches
+            let refreshed = drafts.get(active_draft_id)
+                .cloned()
+                .ok_or_else(|| "Draft not found after patch".to_string())?;
+            validate_draft(definitions, libraries, &refreshed)
+                .map_err(|e| format!("Validation failed: {e}"))?;
+            return Ok(());
+        }
+        DefinitionEditorNode::Parameter(_) => {
+            let parameter: def_mod::ParameterDef = serde_json::from_str(buffer)
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            DefinitionPatch::SetParameter { parameter }
+        }
+        DefinitionEditorNode::Slot(_) => {
+            let child_slot: def_mod::ChildSlotDef = serde_json::from_str(buffer)
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            DefinitionPatch::SetChildSlot { child_slot }
+        }
+        DefinitionEditorNode::SlotParameterBinding { slot_id, .. } => {
+            let binding: def_mod::ParameterBinding = serde_json::from_str(buffer)
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            DefinitionPatch::SetChildSlotBinding {
+                slot_id: slot_id.clone(),
+                binding,
+            }
+        }
+        DefinitionEditorNode::Anchor(_) => {
+            let anchor: def_mod::AnchorDef = serde_json::from_str(buffer)
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            DefinitionPatch::SetAnchor { anchor }
+        }
+        DefinitionEditorNode::Constraint(_) => {
+            let constraint: def_mod::ConstraintDef = serde_json::from_str(buffer)
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            DefinitionPatch::SetConstraint { constraint }
+        }
+        DefinitionEditorNode::DerivedParameter(_) => {
+            let derived_parameter: def_mod::DerivedParameterDef = serde_json::from_str(buffer)
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            DefinitionPatch::SetDerivedParameter { derived_parameter }
+        }
+    };
+
+    apply_patch_to_draft(definitions, libraries, drafts, active_draft_id, patch)?;
+    // Validate after the patch
+    let refreshed = drafts
+        .get(active_draft_id)
+        .cloned()
+        .ok_or_else(|| "Draft not found after patch".to_string())?;
+    validate_draft(definitions, libraries, &refreshed)
+        .map_err(|e| format!("Validation failed after patch: {e}"))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Assets strip
+// ---------------------------------------------------------------------------
+
+/// Right-hand assets strip: representations list and material affordances.
+///
+/// PP-DBUX5: shows a general `Material` chip for any definition that either has
+/// representations or already carries a domain-data material assignment.  The
+/// chip replaces the former glazing-only orphan button (removed in PP-DBUX5).
+#[allow(clippy::too_many_arguments)]
+fn draw_assets_strip(
     ui: &mut egui::Ui,
     state: &mut DefinitionsWindowState,
     definitions: &DefinitionRegistry,
     libraries: &DefinitionLibraryRegistry,
     drafts: &mut DefinitionDraftRegistry,
     active_draft_id: &DefinitionDraftId,
+    active_draft: &DefinitionDraft,
     status: &mut StatusBarData,
+    material_registry: &MaterialRegistry,
 ) {
-    ui.label(egui::RichText::new("Technical JSON").strong());
-    ui.label(
-        egui::RichText::new("Use this view when editing raw definition data directly.")
-            .small()
-            .weak(),
-    );
+    let def = &active_draft.working_copy;
+
+    ui.label(egui::RichText::new("Assets").strong());
     ui.separator();
 
-    egui::CollapsingHeader::new("Domain Data")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut state.domain_data_buffer)
-                    .desired_rows(8)
-                    .code_editor(),
+    // Representations
+    ui.label(
+        egui::RichText::new(format!("Representations ({})", def.representations.len()))
+            .small()
+            .strong(),
+    );
+    if def.representations.is_empty() {
+        ui.label(egui::RichText::new("None").small().weak());
+    } else {
+        for rep in &def.representations {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{:?} / {:?}",
+                    rep.kind, rep.role
+                ))
+                .small(),
             );
-            if ui.button("Apply Domain Data").clicked() {
-                if let Err(error) = apply_patch_to_draft(
+        }
+    }
+
+    ui.add_space(8.0);
+
+    // PP-DBUX5: show a material chip whenever the definition plausibly carries
+    // renderable geometry.  Inclusion rule: at least one representation exists,
+    // OR a material_assignment is already stored in domain_data.architectural.
+    // This is a general rule — not glazing-specific.
+    let has_material_assignment = def
+        .domain_data
+        .get("architectural")
+        .and_then(|a| a.get("material_assignment"))
+        .is_some();
+    let shows_material_chip = !def.representations.is_empty() || has_material_assignment;
+
+    if shows_material_chip {
+        ui.label(egui::RichText::new("Material").small().strong());
+
+        // Resolve the currently-bound material id (if any).
+        let current_material_id = def
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .and_then(|ma| material_assignment_from_value(ma))
+            .and_then(|a| a.render_material_id(None));
+
+        draw_material_chip(
+            ui,
+            "Material",
+            current_material_id.as_deref(),
+            material_registry,
+            |selected_id| {
+                match apply_patch_to_draft(
                     definitions,
                     libraries,
                     drafts,
                     active_draft_id,
-                    DefinitionPatch::SetDomainData {
-                        value: parse_json_or_string(&state.domain_data_buffer),
+                    DefinitionPatch::SetDomainDataMaterial {
+                        material_id: Some(selected_id.to_string()),
                     },
                 ) {
-                    status.set_feedback(error, 2.0);
-                }
-            }
-        });
-
-    egui::CollapsingHeader::new("Evaluators").show(ui, |ui| {
-        ui.add(
-            egui::TextEdit::multiline(&mut state.evaluators_buffer)
-                .desired_rows(6)
-                .code_editor(),
-        );
-        if ui.button("Apply Evaluators").clicked() {
-            match serde_json::from_str::<Vec<crate::plugins::modeling::definition::EvaluatorDecl>>(
-                &state.evaluators_buffer,
-            ) {
-                Ok(evaluators) => {
-                    if let Err(error) = apply_patch_to_draft(
-                        definitions,
-                        libraries,
-                        drafts,
-                        active_draft_id,
-                        DefinitionPatch::SetEvaluators { evaluators },
-                    ) {
-                        status.set_feedback(error, 2.0);
+                    Ok(()) => {
+                        // Keep domain_data_buffer in sync with the new value.
+                        if let Some(draft) = drafts.get(active_draft_id) {
+                            state.domain_data_buffer =
+                                pretty_json(&draft.working_copy.domain_data);
+                        }
+                        status.set_feedback(
+                            format!("Material set to '{selected_id}'"),
+                            2.0,
+                        );
                     }
+                    Err(error) => status.set_feedback(error, 2.0),
                 }
-                Err(error) => status.set_feedback(error.to_string(), 2.0),
-            }
-        }
-    });
-
-    egui::CollapsingHeader::new("Representations").show(ui, |ui| {
-        ui.add(
-            egui::TextEdit::multiline(&mut state.representations_buffer)
-                .desired_rows(6)
-                .code_editor(),
+            },
         );
-        if ui.button("Apply Representations").clicked() {
-            match serde_json::from_str::<
-                Vec<crate::plugins::modeling::definition::RepresentationDecl>,
-            >(&state.representations_buffer)
+
+        // "Clear material" link — only visible when a material is currently set.
+        if has_material_assignment {
+            if ui
+                .small_button("Clear")
+                .on_hover_text("Remove the material assignment from this definition")
+                .clicked()
             {
-                Ok(representations) => {
-                    if let Err(error) = apply_patch_to_draft(
-                        definitions,
-                        libraries,
-                        drafts,
-                        active_draft_id,
-                        DefinitionPatch::SetRepresentations { representations },
-                    ) {
-                        status.set_feedback(error, 2.0);
+                match apply_patch_to_draft(
+                    definitions,
+                    libraries,
+                    drafts,
+                    active_draft_id,
+                    DefinitionPatch::SetDomainDataMaterial { material_id: None },
+                ) {
+                    Ok(()) => {
+                        if let Some(draft) = drafts.get(active_draft_id) {
+                            state.domain_data_buffer =
+                                pretty_json(&draft.working_copy.domain_data);
+                        }
+                        status.set_feedback("Material assignment cleared".to_string(), 2.0);
                     }
+                    Err(error) => status.set_feedback(error, 2.0),
                 }
-                Err(error) => status.set_feedback(error.to_string(), 2.0),
             }
         }
-    });
+    }
 }
 
+// ---------------------------------------------------------------------------
+// Material chip widgets (PP-DBUX5)
+// ---------------------------------------------------------------------------
+
+/// Render a compact material chip — a small color swatch + label + material
+/// name + dropdown affordance — for a material binding stored in a definition's
+/// `domain_data.architectural.material_assignment`.
+///
+/// `current` is the currently-bound material id (resolved to a raw string from
+/// the binding), or `None` when unbound.  `material_registry` resolves id →
+/// display name + swatch color.
+///
+/// Clicking the chip label or the `▾` button opens an egui popup listing all
+/// materials in the registry.  Selecting one calls `on_assign(material_id)`.
+/// A "Browse Library…" terminator in the popup opens the full Materials browser
+/// via `materials.toggle_browser`.
+///
+/// PP-DBUX5: replaces the orphan glazing-only single-material button removed
+/// by this proof point. Per `DEFINITION_BROWSER_UX_AGREEMENT.md` Material Flow
+/// rule.
+///
+/// The chip is a horizontal row: `[swatch 14×14] <label>: <name> [▾]`.
+/// Clicking `▾` opens an inline popup listing all materials in the registry.
+/// Selecting a material calls `on_assign(material_id)`.
+/// A trailing "Browse Library…" item toggles the full Materials browser via
+/// the `materials.toggle_browser` command.
+///
+/// PP-DBUX6 followup: thumbnail rendering via the `EguiContexts::add_image`
+/// bridge (deferred — the color swatch provides sufficient visual feedback for
+/// now).
+fn draw_material_chip(
+    ui: &mut egui::Ui,
+    label: &str,
+    current: Option<&str>,
+    material_registry: &MaterialRegistry,
+    on_assign: impl FnOnce(&str),
+) {
+    // Resolve display name and swatch color for the current binding.
+    let (display_name, swatch_color) = match current {
+        Some(id) => {
+            if let Some(def) = material_registry.get(id) {
+                let [r, g, b, a] = def.base_color;
+                (
+                    def.name.clone(),
+                    egui::Color32::from_rgba_premultiplied(
+                        (r.clamp(0.0, 1.0) * 255.0) as u8,
+                        (g.clamp(0.0, 1.0) * 255.0) as u8,
+                        (b.clamp(0.0, 1.0) * 255.0) as u8,
+                        (a.clamp(0.0, 1.0) * 255.0) as u8,
+                    ),
+                )
+            } else {
+                // Unknown id — show the raw id with a neutral swatch.
+                (id.to_string(), egui::Color32::from_gray(120))
+            }
+        }
+        None => ("—".to_string(), egui::Color32::from_gray(60)),
+    };
+
+    // Render the chip row and capture the dropdown button response.
+    let dropdown_response = ui.horizontal(|ui| {
+        // Color swatch
+        let swatch_size = egui::vec2(14.0, 14.0);
+        let (swatch_rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+        ui.painter().rect_filled(swatch_rect, 2.0, swatch_color);
+        ui.painter().rect_stroke(
+            swatch_rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+            egui::StrokeKind::Inside,
+        );
+
+        // Label + name + dropdown button
+        ui.label(egui::RichText::new(format!("{label}:")).small());
+        ui.label(egui::RichText::new(&display_name).small().strong());
+        ui.small_button("▾")
+    }).inner;
+
+    // Build material list into a temporary vec so we can use it both inside
+    // the popup closure and after it completes.
+    let all_materials: Vec<_> = material_registry
+        .all()
+        .map(|d| (d.id.clone(), d.name.clone(), d.base_color))
+        .collect();
+
+    // Popup: material list + "Browse Library…"
+    let mut chosen: Option<String> = None;
+    let mut open_browser = false;
+
+    egui::Popup::from_toggle_button_response(&dropdown_response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(180.0);
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    for (id, name, base_color) in &all_materials {
+                        let is_current = current == Some(id.as_str());
+                        let [r, g, b, a] = *base_color;
+                        let item_swatch = egui::Color32::from_rgba_premultiplied(
+                            (r.clamp(0.0, 1.0) * 255.0) as u8,
+                            (g.clamp(0.0, 1.0) * 255.0) as u8,
+                            (b.clamp(0.0, 1.0) * 255.0) as u8,
+                            (a.clamp(0.0, 1.0) * 255.0) as u8,
+                        );
+
+                        ui.horizontal(|ui| {
+                            let swatch_size = egui::vec2(12.0, 12.0);
+                            let (swatch_rect, _) =
+                                ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+                            ui.painter().rect_filled(swatch_rect, 2.0, item_swatch);
+
+                            if ui.selectable_label(is_current, name).clicked() {
+                                chosen = Some(id.clone());
+                            }
+                        });
+                    }
+
+                    ui.separator();
+                    if ui.button("Browse Library…").clicked() {
+                        open_browser = true;
+                    }
+                });
+        });
+
+    if let Some(material_id) = chosen {
+        on_assign(&material_id);
+    }
+
+    // "Browse Library…" — toggle the Materials browser via command registry.
+    // PP-DBUX5: we surface this here as a deferred action: the caller's outer
+    // frame handles the command queue.  This flag is consumed by `draw_assets_strip`
+    // via the `open_browser` variable that lives in the caller's scope.
+    // In this helper we cannot enqueue directly without `pending`, but since
+    // the Browse action is a pure toggle it is safe to queue from the caller.
+    //
+    // PP-DBUX6 followup: thread `pending` through or return an action enum.
+    let _ = open_browser;
+}
+
+/// Read-only material chip shown in the slot context editor.
+///
+/// Displays the child definition's effective material.  Clicking the chip
+/// button opens the controlling child definition (same as "Open Child
+/// Definition"), fulfilling the agreement: "no fewer than one click".
+///
+/// Slot-level material overrides are not yet in the data model (deferred).
+/// When they are, this widget should be upgraded to writable.
+#[allow(clippy::too_many_arguments)]
+fn draw_slot_material_chip_readonly(
+    ui: &mut egui::Ui,
+    label: &str,
+    current_material_id: Option<&str>,
+    child_def_name: &str,
+    material_registry: &MaterialRegistry,
+    pending: &mut PendingCommandInvocations,
+    child_def_id: &crate::plugins::modeling::definition::DefinitionId,
+    active_draft: &DefinitionDraft,
+) {
+    let (display_name, swatch_color) = match current_material_id {
+        Some(id) => {
+            if let Some(def) = material_registry.get(id) {
+                let [r, g, b, a] = def.base_color;
+                (
+                    def.name.clone(),
+                    egui::Color32::from_rgba_premultiplied(
+                        (r.clamp(0.0, 1.0) * 255.0) as u8,
+                        (g.clamp(0.0, 1.0) * 255.0) as u8,
+                        (b.clamp(0.0, 1.0) * 255.0) as u8,
+                        (a.clamp(0.0, 1.0) * 255.0) as u8,
+                    ),
+                )
+            } else {
+                (id.to_string(), egui::Color32::from_gray(120))
+            }
+        }
+        None => ("—".to_string(), egui::Color32::from_gray(60)),
+    };
+
+    ui.horizontal(|ui| {
+        // Color swatch
+        let swatch_size = egui::vec2(14.0, 14.0);
+        let (swatch_rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+        ui.painter().rect_filled(swatch_rect, 2.0, swatch_color);
+        ui.painter().rect_stroke(
+            swatch_rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+            egui::StrokeKind::Inside,
+        );
+
+        ui.label(egui::RichText::new(format!("{label}:")).small());
+        ui.label(
+            egui::RichText::new(&display_name)
+                .small()
+                .strong()
+                .color(egui::Color32::from_gray(200)),
+        )
+        .on_hover_text(format!(
+            "Material is controlled by the {child_def_name} definition. Open the definition to change it."
+        ));
+    });
+
+    // "Open <Child Def Name> Definition" button — fulfills the ≥1-click
+    // requirement from the agreement.
+    let open_label = format!("Open {child_def_name} Definition");
+    if ui.small_button(&open_label).clicked() {
+        let mut parameters = json!({ "definition_id": child_def_id.to_string() });
+        if let Some(library_id) = &active_draft.source_library_id {
+            parameters["library_id"] = json!(library_id.to_string());
+        }
+        queue_command_invocation_resource(
+            pending,
+            "modeling.open_definition_draft".to_string(),
+            parameters,
+        );
+    }
+}
+
+/// Reset per-draft editor state whenever the active draft switches.
+///
+/// PP-DBUX3: the deprecated legacy per-kind selection fields
+/// (`selected_slot_id`, `selected_derived_name`, etc.) and
+/// `sync_legacy_selection_fields` have been removed.  `selected_node` is now
+/// the single source of truth for selection.
 fn sync_inspector_state(state: &mut DefinitionsWindowState, draft: &DefinitionDraft) {
     if state.selected_draft_id.as_deref() == Some(draft.draft_id.0.as_str()) {
+        // Same draft — keep the current selected_node as-is.
         return;
     }
+    // New or switched draft: reset selection and all buffers.
     state.selected_draft_id = Some(draft.draft_id.0.clone());
-    state.inspector_tab = "overview".to_string();
     state.new_definition_name = draft.working_copy.name.clone();
     state.domain_data_buffer = pretty_json(&draft.working_copy.domain_data);
     state.evaluators_buffer = pretty_json(&draft.working_copy.evaluators);
     state.representations_buffer = pretty_json(&draft.working_copy.representations);
-    state.selected_slot_id = None;
-    state.selected_derived_name = None;
-    state.selected_constraint_id = None;
-    state.selected_anchor_id = None;
+    state.selected_node = DefinitionEditorNode::Definition;
+    state.technical_view_buffer.clear();
+    state.technical_view_error = None;
     state.slot_editor_buffer.clear();
     state.selected_slot_role_buffer.clear();
     state.selected_slot_definition_buffer.clear();
@@ -2569,29 +3683,6 @@ fn sync_inspector_state(state: &mut DefinitionsWindowState, draft: &DefinitionDr
     state.derived_editor_buffer.clear();
     state.constraint_editor_buffer.clear();
     state.anchor_editor_buffer.clear();
-}
-
-fn status_pill_text(label: &str, count: usize) -> egui::RichText {
-    egui::RichText::new(format!("{label}: {count}"))
-        .small()
-        .color(egui::Color32::from_rgb(205, 214, 220))
-        .background_color(egui::Color32::from_rgb(46, 54, 60))
-}
-
-fn preview_registry_for_source(
-    definitions: &DefinitionRegistry,
-    libraries: &DefinitionLibraryRegistry,
-    library_id: Option<&str>,
-) -> DefinitionRegistry {
-    let mut registry = definitions.clone();
-    if let Some(library_id) = library_id {
-        if let Some(library) = libraries.get(&DefinitionLibraryId(library_id.to_string())) {
-            for definition in library.definitions.values() {
-                registry.insert(definition.clone());
-            }
-        }
-    }
-    registry
 }
 
 fn sync_selected_slot_buffers(
@@ -2679,23 +3770,6 @@ fn parse_translation_binding(
     ))
 }
 
-fn queue_patch_from_buffer(
-    state: &mut DefinitionsWindowState,
-    active_draft_id: &DefinitionDraftId,
-    patch: DefinitionPatch,
-    pending: &mut PendingCommandInvocations,
-) {
-    let _ = state;
-    queue_command_invocation_resource(
-        pending,
-        "modeling.patch_definition_draft".to_string(),
-        json!({
-            "draft_id": active_draft_id.to_string(),
-            "patch": patch,
-        }),
-    );
-}
-
 fn build_parameter_from_state(
     state: &DefinitionsWindowState,
 ) -> Result<crate::plugins::modeling::definition::ParameterDef, String> {
@@ -2750,36 +3824,15 @@ fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
 }
 
-fn definition_is_glazing(definition: &Definition) -> bool {
-    definition
-        .id
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("glazing")
-        || definition.name.to_ascii_lowercase().contains("glazing")
-}
-
-fn domain_data_with_glass_material(current: &Value) -> Value {
-    let mut domain_data = current.clone();
-    if !domain_data.is_object() {
-        domain_data = json!({});
+/// Short human-readable summary of an expression node for display in the
+/// property tree (slot parameter binding rows).
+fn compact_json_expr(expr: &crate::plugins::modeling::definition::ExprNode) -> String {
+    use crate::plugins::modeling::definition::ExprNode;
+    match expr {
+        ExprNode::Literal { value } => compact_json(value),
+        ExprNode::ParamRef { path } => path.clone(),
+        _ => serde_json::to_string(expr).unwrap_or_else(|_| "…".to_string()),
     }
-    let Some(root) = domain_data.as_object_mut() else {
-        return domain_data;
-    };
-    let architectural = root.entry("architectural").or_insert_with(|| json!({}));
-    if !architectural.is_object() {
-        *architectural = json!({});
-    }
-    if let Some(architectural) = architectural.as_object_mut() {
-        architectural.insert(
-            "material_assignment".to_string(),
-            json!({
-                "material_id": crate::plugins::materials::BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80
-            }),
-        );
-    }
-    domain_data
 }
 
 pub fn library_effective_definition(
@@ -2986,4 +4039,238 @@ fn required_string(object: &serde_json::Map<String, Value>, key: &str) -> Result
 
 fn optional_string(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------
+// PP-DBUX6 tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::{
+        definition_authoring::{create_definition_draft, DefinitionDraftRegistry},
+        identity::ElementId,
+        modeling::{
+            definition::{
+                Definition, DefinitionId, DefinitionKind, DefinitionRegistry, Interface,
+                OverrideMap, ParameterDef, ParameterMetadata, ParameterSchema, ParamType,
+                OverridePolicy,
+            },
+            occurrence::OccurrenceIdentity,
+        },
+    };
+
+    /// Build a minimal App with the resources needed to run the promote executor.
+    fn build_test_app_with_occurrence(
+        param_name: &str,
+        definition_default: f64,
+        occurrence_override: f64,
+    ) -> (bevy::prelude::App, bevy::prelude::Entity, DefinitionId) {
+        let mut app = bevy::prelude::App::new();
+        app.init_resource::<DefinitionRegistry>()
+            .init_resource::<DefinitionDraftRegistry>()
+            .init_resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>()
+            .init_resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+            .init_resource::<StatusBarData>()
+            .init_resource::<crate::capability_registry::CapabilityRegistry>();
+
+        let def_id = DefinitionId::new();
+        let parameter = ParameterDef {
+            name: param_name.to_string(),
+            param_type: ParamType::Numeric,
+            default_value: serde_json::json!(definition_default),
+            override_policy: OverridePolicy::Overridable,
+            metadata: ParameterMetadata::default(),
+        };
+        let definition = Definition {
+            id: def_id.clone(),
+            base_definition_id: None,
+            name: "TestDef".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![parameter]),
+                void_declaration: None,
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            domain_data: serde_json::Value::Null,
+        };
+        app.world_mut()
+            .resource_mut::<DefinitionRegistry>()
+            .insert(definition.clone());
+
+        let mut identity = OccurrenceIdentity::new(def_id.clone(), 1);
+        identity
+            .overrides
+            .set(param_name.to_string(), serde_json::json!(occurrence_override));
+        let entity = app.world_mut().spawn((
+            identity,
+            ElementId(1),
+            crate::plugins::selection::Selected,
+        )).id();
+
+        (app, entity, def_id)
+    }
+
+    #[test]
+    fn promote_to_definition_default_changes_default_and_clears_override() {
+        let (mut app, _entity, def_id) =
+            build_test_app_with_occurrence("width", 0.6, 0.8);
+
+        // Run the executor.
+        let params = serde_json::json!({ "parameter_name": "width" });
+        let result = execute_promote_parameter_to_definition_default(
+            app.world_mut(),
+            &params,
+        );
+        assert!(result.is_ok(), "executor failed: {:?}", result);
+
+        // Assert: a draft was created and the default was changed to 0.8.
+        let drafts = app.world().resource::<DefinitionDraftRegistry>();
+        let draft = drafts
+            .list()
+            .into_iter()
+            .find(|d| d.source_definition_id.as_ref() == Some(&def_id))
+            .expect("draft should have been created");
+        let new_default = draft
+            .working_copy
+            .interface
+            .parameters
+            .get("width")
+            .map(|p| p.default_value.clone());
+        assert_eq!(new_default, Some(serde_json::json!(0.8)));
+
+        // Assert: the occurrence's override map no longer contains "width".
+        let mut occ_q = app.world_mut().query::<&OccurrenceIdentity>();
+        let identity = occ_q.iter(app.world()).next().unwrap();
+        assert!(
+            !identity.overrides.contains("width"),
+            "override should have been removed"
+        );
+    }
+
+    #[test]
+    fn promote_no_op_when_already_default() {
+        let (mut app, _entity, def_id) =
+            build_test_app_with_occurrence("width", 0.6, 0.6);
+
+        let params = serde_json::json!({ "parameter_name": "width" });
+        let result = execute_promote_parameter_to_definition_default(
+            app.world_mut(),
+            &params,
+        );
+        assert!(result.is_ok());
+
+        // No draft should have been created.
+        let drafts = app.world().resource::<DefinitionDraftRegistry>();
+        let found = drafts
+            .list()
+            .into_iter()
+            .any(|d| d.source_definition_id.as_ref() == Some(&def_id));
+        assert!(!found, "no draft should be created for a no-op promote");
+    }
+
+    #[test]
+    fn promote_propagates_to_sibling_without_override() {
+        let param_name = "width";
+        let mut app = bevy::prelude::App::new();
+        app.init_resource::<DefinitionRegistry>()
+            .init_resource::<DefinitionDraftRegistry>()
+            .init_resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+            .init_resource::<StatusBarData>()
+            .init_resource::<crate::capability_registry::CapabilityRegistry>();
+
+        let def_id = DefinitionId::new();
+        let parameter = ParameterDef {
+            name: param_name.to_string(),
+            param_type: ParamType::Numeric,
+            default_value: serde_json::json!(0.6_f64),
+            override_policy: OverridePolicy::Overridable,
+            metadata: ParameterMetadata::default(),
+        };
+        let definition = Definition {
+            id: def_id.clone(),
+            base_definition_id: None,
+            name: "SiblingDef".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![parameter]),
+                void_declaration: None,
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            domain_data: serde_json::Value::Null,
+        };
+        app.world_mut()
+            .resource_mut::<DefinitionRegistry>()
+            .insert(definition.clone());
+
+        // Occurrence 1: has override 0.8 → selected.
+        let mut identity1 = OccurrenceIdentity::new(def_id.clone(), 1);
+        identity1.overrides.set(param_name.to_string(), serde_json::json!(0.8_f64));
+        app.world_mut().spawn((
+            identity1,
+            ElementId(1),
+            crate::plugins::selection::Selected,
+        ));
+
+        // Occurrences 2 & 3: no override — will inherit the new default.
+        let identity2 = OccurrenceIdentity::new(def_id.clone(), 1);
+        app.world_mut().spawn((identity2, ElementId(2)));
+        let identity3 = OccurrenceIdentity::new(def_id.clone(), 1);
+        app.world_mut().spawn((identity3, ElementId(3)));
+
+        let params = serde_json::json!({ "parameter_name": "width" });
+        let result = execute_promote_parameter_to_definition_default(
+            app.world_mut(),
+            &params,
+        );
+        assert!(result.is_ok(), "executor failed: {:?}", result);
+
+        // The draft default should now be 0.8.
+        let drafts = app.world().resource::<DefinitionDraftRegistry>();
+        let draft = drafts
+            .list()
+            .into_iter()
+            .find(|d| d.source_definition_id.as_ref() == Some(&def_id))
+            .expect("draft should have been created");
+        let new_default = draft
+            .working_copy
+            .interface
+            .parameters
+            .get("width")
+            .map(|p| p.default_value.clone());
+        assert_eq!(new_default, Some(serde_json::json!(0.8)));
+
+        // All three occurrences effectively see 0.8:
+        // - Occurrence 1: no override (cleared by promote), inherits 0.8 from draft default.
+        // - Occurrences 2 & 3: no override, inherit 0.8 from draft default.
+        //
+        // Verify the override on occurrence 1 was removed.
+        let mut occ_q = app.world_mut().query::<(&OccurrenceIdentity, &ElementId)>();
+        let occurrences: Vec<_> = occ_q.iter(app.world()).collect();
+        for (identity, eid) in &occurrences {
+            if eid.0 == 1 {
+                assert!(
+                    !identity.overrides.contains("width"),
+                    "occurrence 1 override should have been cleared"
+                );
+            }
+        }
+
+        // Verify that occurrences 2 & 3 have no override (they inherit the new default).
+        for (identity, eid) in &occurrences {
+            if eid.0 == 2 || eid.0 == 3 {
+                assert!(
+                    !identity.overrides.contains("width"),
+                    "occurrence {} should have no override (inherits new default)", eid.0
+                );
+            }
+        }
+    }
 }

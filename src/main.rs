@@ -16,6 +16,7 @@ use talos3d_core::plugins::{
     assistant_chat::AssistantChatPlugin,
     authoring_guidance::AuthoringGuidancePlugin,
     bundled_definition_libraries::BundledDefinitionLibrariesPlugin,
+    definition_preview_scene::DefinitionPreviewPlugin,
     camera::CameraPlugin,
     clipping_planes::ClippingPlanesPlugin,
     command_registry::CommandRegistryPlugin,
@@ -108,6 +109,7 @@ fn main() {
     .add_plugins(LightingPlugin)
     .add_plugins(ModelingPlugin)
     .add_plugins(BundledDefinitionLibrariesPlugin)
+    .add_plugins(DefinitionPreviewPlugin)
     .add_plugins(ArchitecturalPlugin)
     // PP70–PP78 semantic substrate: element classes, recipe families, domain
     // validators, catalog providers, and generation priors. Per ADR-037 these
