@@ -675,6 +675,7 @@ mod tests {
     use super::*;
     use crate::plugins::{
         bundled_definition_libraries::apply_bundled_definition_libraries,
+        definition_preview_scene::PreviewOnly,
         history::{History, PendingCommandQueue},
         layers::LayerRegistry,
         lighting::SceneLightingSettings,
@@ -683,7 +684,12 @@ mod tests {
             TextureChannelIntent, TextureColorSpace, TextureRef, TextureRegistry,
             BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80, BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO,
         },
-        modeling::definition::{DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope},
+        modeling::{
+            definition::{
+                DefinitionId, DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
+            },
+            occurrence::{OccurrenceFactory, OccurrenceIdentity},
+        },
         property_edit::PropertyEditState,
         tools::ActiveTool,
         transform::TransformState,
@@ -723,6 +729,50 @@ mod tests {
         assert_eq!(
             libraries.list()[0].id,
             DefinitionLibraryId("test.document-library".to_string())
+        );
+    }
+
+    #[test]
+    fn build_project_file_excludes_preview_only_entities() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(OccurrenceFactory);
+        world.insert_resource(registry);
+        world.insert_resource(DocumentProperties::default());
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(MaterialRegistry::default());
+        world.insert_resource(TextureRegistry::default());
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(DefinitionLibraryRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+
+        let definition_id = DefinitionId("test.definition".to_string());
+        world.spawn((
+            ElementId(1),
+            OccurrenceIdentity::new(definition_id.clone(), 1),
+            Transform::default(),
+            Name::new("Authored occurrence"),
+        ));
+        world.spawn((
+            ElementId(2),
+            OccurrenceIdentity::new(definition_id, 1),
+            Transform::default(),
+            Name::new("Preview occurrence"),
+            PreviewOnly,
+        ));
+
+        let project = build_project_file(&mut world).expect("project should serialize");
+
+        assert_eq!(project.entities.len(), 1);
+        assert_eq!(project.entities[0].type_name, "occurrence");
+        assert_eq!(
+            project.entities[0]
+                .data
+                .get("element_id")
+                .and_then(Value::as_u64),
+            Some(1)
         );
     }
 

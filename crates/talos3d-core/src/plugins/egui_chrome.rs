@@ -1389,7 +1389,7 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         // PP-DBUX6: Promote-to-Definition-Default section.
         //
         // Shown when the selected entity is a single occurrence that has at
-        // least one numeric override differing from the definition's default.
+        // least one override differing from the definition's default.
         // For each such override, an inline [↑ Promote to definition default]
         // button is shown. Clicking enqueues the command which writes
         // SetParameterDefault to the draft AND removes the override.
@@ -1415,10 +1415,7 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
                                     .iter()
                                     .filter_map(|(name, override_val)| {
                                         let param = def.interface.parameters.get(name)?;
-                                        // Only surface numeric overrides that differ from the default.
-                                        if param.param_type == crate::plugins::modeling::definition::ParamType::Numeric
-                                            && override_val != &param.default_value
-                                        {
+                                        if override_val != &param.default_value {
                                             Some((name.clone(), override_val.clone()))
                                         } else {
                                             None

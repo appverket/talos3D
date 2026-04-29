@@ -14,14 +14,14 @@ use crate::{
         commands::{enqueue_create_boxed_entity, enqueue_create_definition},
         cursor::CursorWorldPos,
         definition_authoring::{
-            apply_patch_to_draft, blank_definition, create_definition_draft,
+            apply_patch_to_draft, blank_definition,
             draft_effective_definition, preview_registry_for_draft, validate_draft,
             DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry, DefinitionPatch,
         },
         definition_preview_scene::{
             draw_definition_3d_preview, DefinitionPreviewScene, PendingPreviewClick,
         },
-        history::apply_pending_history_commands,
+        history::{apply_pending_history_commands, EditorCommand, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         materials::{material_assignment_from_value, MaterialRegistry},
         modeling::{
@@ -154,6 +154,7 @@ pub struct DefinitionsWindowState {
     pub evaluators_buffer: String,
     pub representations_buffer: String,
     pub slot_editor_buffer: String,
+    pub slot_binding_editor_buffer: HashMap<String, String>,
     pub derived_editor_buffer: String,
     pub constraint_editor_buffer: String,
     pub anchor_editor_buffer: String,
@@ -712,64 +713,72 @@ pub fn execute_promote_parameter_to_definition_default(
             .count()
     };
 
-    // --- Get or create a draft for the definition ---
-    let draft_id: DefinitionDraftId = {
-        // Check for an existing draft for this definition.
-        let existing = {
-            let drafts = world.resource::<DefinitionDraftRegistry>();
-            drafts
-                .list()
-                .into_iter()
-                .find(|d| d.source_definition_id.as_ref() == Some(&definition_id))
-                .map(|d| d.draft_id.clone())
-        };
-        if let Some(id) = existing {
-            id
-        } else {
-            // Create a new draft from the published definition.
-            let definition = world
-                .resource::<DefinitionRegistry>()
+    // --- Build the after-state without mutating the world ---
+    let definitions = world.resource::<DefinitionRegistry>().clone();
+    let libraries = world.resource::<DefinitionLibraryRegistry>().clone();
+    let before_draft = {
+        let drafts = world.resource::<DefinitionDraftRegistry>();
+        drafts
+            .list()
+            .into_iter()
+            .find(|d| d.source_definition_id.as_ref() == Some(&definition_id))
+            .cloned()
+    };
+    let draft_id = before_draft
+        .as_ref()
+        .map(|draft| draft.draft_id.clone())
+        .unwrap_or_else(DefinitionDraftId::new);
+    let seed_draft = match before_draft.clone() {
+        Some(draft) => draft,
+        None => {
+            let definition = definitions
                 .get(&definition_id)
                 .ok_or_else(|| format!("Definition '{}' not found", definition_id))?
                 .clone();
-            let mut drafts = world.resource_mut::<DefinitionDraftRegistry>();
-            create_definition_draft(&mut drafts, definition, Some(definition_id.clone()), None)
+            DefinitionDraft {
+                draft_id: draft_id.clone(),
+                source_definition_id: Some(definition_id.clone()),
+                source_library_id: None,
+                working_copy: definition,
+                dirty: false,
+            }
         }
     };
+    let mut staged_drafts = DefinitionDraftRegistry::default();
+    staged_drafts.insert(seed_draft);
+    apply_patch_to_draft(
+        &definitions,
+        &libraries,
+        &mut staged_drafts,
+        &draft_id,
+        DefinitionPatch::SetParameterDefault {
+            name: param_name.clone(),
+            default_value: override_value.clone(),
+        },
+    )?;
+    let after_draft = staged_drafts
+        .get(&draft_id)
+        .cloned()
+        .ok_or_else(|| format!("Definition draft '{}' not found after promote", draft_id))?;
 
-    // --- Apply the SetParameterDefault patch to the draft ---
-    {
-        let definitions = world.resource::<DefinitionRegistry>().clone();
-        let libraries = world.resource::<DefinitionLibraryRegistry>().clone();
-        let mut drafts = world.resource_mut::<DefinitionDraftRegistry>();
-        apply_patch_to_draft(
-            &definitions,
-            &libraries,
-            &mut drafts,
-            &draft_id,
-            DefinitionPatch::SetParameterDefault {
-                name: param_name.clone(),
-                default_value: override_value.clone(),
-            },
-        )?;
-    }
+    let mut after_identity = identity.clone();
+    after_identity.overrides.remove(&param_name);
+    let occurrence_element_id = *world
+        .get::<ElementId>(entity)
+        .ok_or_else(|| "Selected occurrence has no element id".to_string())?;
 
-    // --- Remove the override from the occurrence ---
-    //
-    // V2 deferral: undo-grouping for the two writes (definition patch +
-    // override removal) is not yet atomic — the override removal here is a
-    // direct ECS mutation that does not go through the undo history stack.
-    // The definition-patch write above goes through the draft system.
-    // To make both writes a single undo step, the occurrence removal would
-    // need to be enqueued as an `ApplyEntityChangesCommand` driven by a
-    // captured `BoxedEntity` snapshot; doing so requires the full plugin
-    // machinery (CapabilityRegistry with OccurrenceFactory, PendingCommandQueue)
-    // which is not available in lightweight unit tests.  For v1 this is
-    // intentional: the promote action is reversible at the definition level
-    // (revert the draft) even if the occurrence override is not undone in one step.
-    if let Some(mut identity) = world.get_mut::<OccurrenceIdentity>(entity) {
-        identity.overrides.remove(&param_name);
-    }
+    let Some(mut queue) = world.get_resource_mut::<PendingCommandQueue>() else {
+        return Err("History command queue is not available".to_string());
+    };
+    queue.push_command(Box::new(PromoteParameterToDefinitionDefaultCommand {
+        draft_id: draft_id.clone(),
+        before_draft,
+        after_draft,
+        occurrence_element_id,
+        before_identity: identity,
+        after_identity,
+    }));
+    apply_pending_history_commands(world);
 
     let def_name = world
         .resource::<DefinitionDraftRegistry>()
@@ -789,6 +798,65 @@ pub fn execute_promote_parameter_to_definition_default(
     }
 
     Ok(CommandResult::empty())
+}
+
+struct PromoteParameterToDefinitionDefaultCommand {
+    draft_id: DefinitionDraftId,
+    before_draft: Option<DefinitionDraft>,
+    after_draft: DefinitionDraft,
+    occurrence_element_id: ElementId,
+    before_identity: OccurrenceIdentity,
+    after_identity: OccurrenceIdentity,
+}
+
+impl EditorCommand for PromoteParameterToDefinitionDefaultCommand {
+    fn label(&self) -> &'static str {
+        "Promote override to definition default"
+    }
+
+    fn apply(&mut self, world: &mut World) {
+        restore_definition_draft(world, &self.draft_id, Some(self.after_draft.clone()));
+        restore_occurrence_identity(world, self.occurrence_element_id, self.after_identity.clone());
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        restore_definition_draft(world, &self.draft_id, self.before_draft.clone());
+        restore_occurrence_identity(world, self.occurrence_element_id, self.before_identity.clone());
+    }
+}
+
+fn restore_definition_draft(
+    world: &mut World,
+    draft_id: &DefinitionDraftId,
+    draft: Option<DefinitionDraft>,
+) {
+    let Some(mut drafts) = world.get_resource_mut::<DefinitionDraftRegistry>() else {
+        return;
+    };
+    match draft {
+        Some(draft) => {
+            drafts.insert(draft);
+        }
+        None => {
+            drafts.remove(draft_id);
+        }
+    }
+}
+
+fn restore_occurrence_identity(
+    world: &mut World,
+    element_id: ElementId,
+    identity: OccurrenceIdentity,
+) {
+    let mut query = world.query::<(Entity, &ElementId)>();
+    let target = query
+        .iter(world)
+        .find_map(|(entity, current)| (*current == element_id).then_some(entity));
+    if let Some(entity) = target {
+        if let Some(mut current) = world.get_mut::<OccurrenceIdentity>(entity) {
+            *current = identity;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -867,9 +935,13 @@ pub fn draw_definition_lens(
             ui.horizontal_centered(|ui| {
                 ui.add_space(8.0);
                 // Left-aligned status text — non-interactive.
-                let label_text = format!(
-                    "Editing definition: {def_name} — changes affect {occurrence_count} occurrence(s)."
-                );
+                let label_text = if draft.source_definition_id.is_none() && occurrence_count == 0 {
+                    format!("Editing definition: {def_name} — no occurrences yet; publish to place it.")
+                } else {
+                    format!(
+                        "Editing definition: {def_name} — changes affect {occurrence_count} occurrence(s)."
+                    )
+                };
                 ui.label(
                     egui::RichText::new(label_text)
                         .color(egui::Color32::from_rgb(235, 240, 248))
@@ -918,9 +990,13 @@ pub fn draw_definition_lens(
                     }
 
                     // Publish — same action as the title bar.
-                    let publish_tooltip = format!(
-                        "Publish the draft. All {occurrence_count} occurrence(s) will reflect the new state immediately."
-                    );
+                    let publish_tooltip = if draft.source_definition_id.is_none() {
+                        "Publish this new definition so it can be placed in the model.".to_string()
+                    } else {
+                        format!(
+                            "Publish the draft. All {occurrence_count} occurrence(s) will reflect the new state immediately."
+                        )
+                    };
                     let publish_btn = ui.button("Publish").on_hover_text(publish_tooltip);
                     if publish_btn.clicked() {
                         queue_command_invocation_resource(
@@ -1837,6 +1913,7 @@ fn draw_definition_editor(
                                     definitions,
                                     libraries,
                                     drafts,
+                                    pending,
                                     &active_draft_id,
                                     &active_draft,
                                     status,
@@ -2507,18 +2584,27 @@ fn draw_context_slot(
         ui.label("Role");
         ui.text_edit_singleline(&mut state.selected_slot_role_buffer);
     });
-    // Child definition: show human-readable name; definition_id is edit-only
-    // through Technical view or the definition_buffer field below.
     ui.horizontal(|ui| {
         ui.label("Child definition");
-        ui.label(egui::RichText::new(&child_def_name).strong());
-    });
-    ui.horizontal(|ui| {
-        ui.label("Definition id");
-        ui.add(
-            egui::TextEdit::singleline(&mut state.selected_slot_definition_buffer)
-                .hint_text("definition id"),
-        );
+        egui::ComboBox::from_id_salt(("slot_child_definition", slot_id))
+            .selected_text(child_def_name.clone())
+            .width(220.0)
+            .show_ui(ui, |ui| {
+                let mut choices = preview_reg.list();
+                choices.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.0.cmp(&b.id.0)));
+                for definition in choices
+                    .into_iter()
+                    .filter(|definition| definition.definition_kind == DefinitionKind::Solid)
+                {
+                    let is_selected = definition.id.0 == state.selected_slot_definition_buffer;
+                    let meta = DefinitionListEntry::from_definition(definition).meta_label();
+                    let response = ui.selectable_label(is_selected, &definition.name);
+                    if response.clicked() {
+                        state.selected_slot_definition_buffer = definition.id.to_string();
+                    }
+                    response.on_hover_text(meta);
+                }
+            });
     });
     ui.horizontal(|ui| {
         ui.label("Position");
@@ -2711,6 +2797,7 @@ fn draw_context_slot(
         } else {
             state.selected_node = DefinitionEditorNode::Definition;
             state.slot_editor_buffer.clear();
+            state.slot_binding_editor_buffer.clear();
             state.selected_slot_role_buffer.clear();
             state.selected_slot_definition_buffer.clear();
             state.selected_slot_translation_buffer.clear();
@@ -2759,23 +2846,21 @@ fn draw_context_slot_binding(
     ui.label(egui::RichText::new(format!("{slot_id} → {parameter_name}")).heading());
     ui.separator();
 
-    // Initialize the slot_editor_buffer with this binding's JSON if empty.
     let binding_key = format!("{slot_id}:{parameter_name}");
-    if state.slot_editor_buffer.is_empty()
-        || !state.slot_editor_buffer.contains(&binding_key)
-    {
-        state.slot_editor_buffer = pretty_json(binding);
-    }
+    let buffer = state
+        .slot_binding_editor_buffer
+        .entry(binding_key)
+        .or_insert_with(|| pretty_json(binding));
 
     ui.add(
-        egui::TextEdit::multiline(&mut state.slot_editor_buffer)
+        egui::TextEdit::multiline(buffer)
             .desired_rows(8)
             .code_editor(),
     );
     ui.add_space(4.0);
     if ui.button("Apply Binding").clicked() {
         match serde_json::from_str::<crate::plugins::modeling::definition::ParameterBinding>(
-            &state.slot_editor_buffer,
+            buffer,
         ) {
             Ok(updated_binding) => {
                 if let Err(error) = apply_patch_to_draft(
@@ -3324,6 +3409,7 @@ fn draw_assets_strip(
     definitions: &DefinitionRegistry,
     libraries: &DefinitionLibraryRegistry,
     drafts: &mut DefinitionDraftRegistry,
+    pending: &mut PendingCommandInvocations,
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
     status: &mut StatusBarData,
@@ -3383,6 +3469,8 @@ fn draw_assets_strip(
             "Material",
             current_material_id.as_deref(),
             material_registry,
+            pending,
+            ("definition_material", active_draft_id.to_string()),
             |selected_id| {
                 match apply_patch_to_draft(
                     definitions,
@@ -3472,6 +3560,8 @@ fn draw_material_chip(
     label: &str,
     current: Option<&str>,
     material_registry: &MaterialRegistry,
+    pending: &mut PendingCommandInvocations,
+    salt: impl std::hash::Hash,
     on_assign: impl FnOnce(&str),
 ) {
     // Resolve display name and swatch color for the current binding.
@@ -3497,23 +3587,26 @@ fn draw_material_chip(
     };
 
     // Render the chip row and capture the dropdown button response.
-    let dropdown_response = ui.horizontal(|ui| {
-        // Color swatch
-        let swatch_size = egui::vec2(14.0, 14.0);
-        let (swatch_rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
-        ui.painter().rect_filled(swatch_rect, 2.0, swatch_color);
-        ui.painter().rect_stroke(
-            swatch_rect,
-            2.0,
-            egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
-            egui::StrokeKind::Inside,
-        );
+    let dropdown_response = ui
+        .push_id(("material_chip", salt), |ui| {
+            ui.horizontal(|ui| {
+                let swatch_size = egui::vec2(14.0, 14.0);
+                let (swatch_rect, _) = ui.allocate_exact_size(swatch_size, egui::Sense::hover());
+                ui.painter().rect_filled(swatch_rect, 2.0, swatch_color);
+                ui.painter().rect_stroke(
+                    swatch_rect,
+                    2.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(180)),
+                    egui::StrokeKind::Inside,
+                );
 
-        // Label + name + dropdown button
-        ui.label(egui::RichText::new(format!("{label}:")).small());
-        ui.label(egui::RichText::new(&display_name).small().strong());
-        ui.small_button("▾")
-    }).inner;
+                ui.label(egui::RichText::new(format!("{label}:")).small());
+                ui.label(egui::RichText::new(&display_name).small().strong());
+                ui.small_button("▾")
+            })
+            .inner
+        })
+        .inner;
 
     // Build material list into a temporary vec so we can use it both inside
     // the popup closure and after it completes.
@@ -3566,15 +3659,13 @@ fn draw_material_chip(
         on_assign(&material_id);
     }
 
-    // "Browse Library…" — toggle the Materials browser via command registry.
-    // PP-DBUX5: we surface this here as a deferred action: the caller's outer
-    // frame handles the command queue.  This flag is consumed by `draw_assets_strip`
-    // via the `open_browser` variable that lives in the caller's scope.
-    // In this helper we cannot enqueue directly without `pending`, but since
-    // the Browse action is a pure toggle it is safe to queue from the caller.
-    //
-    // PP-DBUX6 followup: thread `pending` through or return an action enum.
-    let _ = open_browser;
+    if open_browser {
+        queue_command_invocation_resource(
+            pending,
+            "materials.toggle_browser".to_string(),
+            json!({}),
+        );
+    }
 }
 
 /// Read-only material chip shown in the slot context editor.
@@ -3677,6 +3768,7 @@ fn sync_inspector_state(state: &mut DefinitionsWindowState, draft: &DefinitionDr
     state.technical_view_buffer.clear();
     state.technical_view_error = None;
     state.slot_editor_buffer.clear();
+    state.slot_binding_editor_buffer.clear();
     state.selected_slot_role_buffer.clear();
     state.selected_slot_definition_buffer.clear();
     state.selected_slot_translation_buffer.clear();
@@ -4049,13 +4141,13 @@ fn optional_string(object: &serde_json::Map<String, Value>, key: &str) -> Option
 mod tests {
     use super::*;
     use crate::plugins::{
-        definition_authoring::{create_definition_draft, DefinitionDraftRegistry},
+        definition_authoring::DefinitionDraftRegistry,
+        history::{History, PendingCommandQueue},
         identity::ElementId,
         modeling::{
             definition::{
                 Definition, DefinitionId, DefinitionKind, DefinitionRegistry, Interface,
-                OverrideMap, ParameterDef, ParameterMetadata, ParameterSchema, ParamType,
-                OverridePolicy,
+                OverridePolicy, ParameterDef, ParameterMetadata, ParameterSchema, ParamType,
             },
             occurrence::OccurrenceIdentity,
         },
@@ -4073,6 +4165,8 @@ mod tests {
             .init_resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>()
             .init_resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
             .init_resource::<StatusBarData>()
+            .init_resource::<History>()
+            .init_resource::<PendingCommandQueue>()
             .init_resource::<crate::capability_registry::CapabilityRegistry>();
 
         let def_id = DefinitionId::new();
@@ -4181,6 +4275,8 @@ mod tests {
             .init_resource::<DefinitionDraftRegistry>()
             .init_resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
             .init_resource::<StatusBarData>()
+            .init_resource::<History>()
+            .init_resource::<PendingCommandQueue>()
             .init_resource::<crate::capability_registry::CapabilityRegistry>();
 
         let def_id = DefinitionId::new();
@@ -4272,5 +4368,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn promote_undo_restores_definition_default_and_occurrence_override() {
+        let (mut app, _entity, def_id) =
+            build_test_app_with_occurrence("width", 0.6, 0.8);
+
+        let params = serde_json::json!({ "parameter_name": "width" });
+        execute_promote_parameter_to_definition_default(app.world_mut(), &params)
+            .expect("promote should succeed");
+
+        app.world_mut()
+            .resource_mut::<PendingCommandQueue>()
+            .queue_undo();
+        apply_pending_history_commands(app.world_mut());
+
+        let drafts = app.world().resource::<DefinitionDraftRegistry>();
+        assert!(
+            drafts
+                .list()
+                .into_iter()
+                .all(|draft| draft.source_definition_id.as_ref() != Some(&def_id)),
+            "undo should remove the draft created by promote"
+        );
+
+        let mut occ_q = app.world_mut().query::<&OccurrenceIdentity>();
+        let identity = occ_q.iter(app.world()).next().unwrap();
+        assert_eq!(
+            identity.overrides.get("width"),
+            Some(&serde_json::json!(0.8))
+        );
     }
 }
