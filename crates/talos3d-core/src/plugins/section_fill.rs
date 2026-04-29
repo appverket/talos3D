@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::curation::MaterialSpecRegistry;
 use crate::plugins::{
     clipping_planes::ClipPlaneNode,
+    definition_preview_scene::PreviewOnly,
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
 };
 
@@ -386,13 +387,13 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
         return Vec::new();
     }
 
-    let mesh_query = world.try_query::<(
+    let mesh_query = world.try_query_filtered::<(
         Entity,
         &Mesh3d,
         &GlobalTransform,
         Option<&Visibility>,
         Option<&MaterialAssignment>,
-    )>();
+    ), Without<PreviewOnly>>();
     let Some(mut mesh_query) = mesh_query else {
         return Vec::new();
     };

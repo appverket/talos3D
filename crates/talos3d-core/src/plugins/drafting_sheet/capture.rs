@@ -24,6 +24,7 @@ use bevy::prelude::*;
 
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
+    definition_preview_scene::PreviewOnly,
     dimension_line::{
         dimension_line_midpoint, dimension_line_offset_vector,
         render_dimension_line_projected_primitives, DimensionLineNode, DimensionLineVisibility,
@@ -69,13 +70,13 @@ pub fn capture_sheet(world: &World, view: &SheetView) -> Option<DraftingSheet> {
     let ndc_to_paper = NdcToPaper { paper_w, paper_h };
 
     // 1) Collect visible mesh subjects and their triangles.
-    let mut subject_query = world.try_query::<(
+    let mut subject_query = world.try_query_filtered::<(
         Entity,
         &crate::plugins::identity::ElementId,
         &Mesh3d,
         &GlobalTransform,
         Option<&Visibility>,
-    )>()?;
+    ), Without<PreviewOnly>>()?;
     let mut subjects = Vec::new();
     for (entity, _eid, mesh_handle, mesh_transform, visibility) in subject_query.iter(world) {
         if visibility.is_some_and(|v| *v == Visibility::Hidden) {
