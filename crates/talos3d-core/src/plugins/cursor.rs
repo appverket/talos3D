@@ -249,7 +249,10 @@ fn update_cursor_world_pos(
 
     let use_scene_surface_cursor = matches!(
         active_tool.get(),
-        ActiveTool::PlaceDimensionLine | ActiveTool::PlaceGuideLine
+        ActiveTool::PlaceDimensionLine
+            | ActiveTool::PlaceGuideLine
+            | ActiveTool::PlaceTerrainElevationCurve
+            | ActiveTool::PlaceTerrainSpotElevation
     );
     let cursor_plane = if *active_tool.get() == ActiveTool::PlaceDimensionLine {
         dimension_annotation_plane(&drawing_plane, orbit, Some(camera_transform))
