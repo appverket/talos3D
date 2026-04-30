@@ -4186,6 +4186,7 @@ mod tests {
             interface: Interface {
                 parameters: ParameterSchema(vec![parameter]),
                 void_declaration: None,
+                external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
             representations: Vec::new(),
@@ -4296,6 +4297,7 @@ mod tests {
             interface: Interface {
                 parameters: ParameterSchema(vec![parameter]),
                 void_declaration: None,
+                external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
             representations: Vec::new(),

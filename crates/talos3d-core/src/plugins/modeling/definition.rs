@@ -543,12 +543,40 @@ pub struct CompoundDefinition {
 // ---------------------------------------------------------------------------
 
 /// The public interface of a `Definition` — the set of parameters that
-/// occurrences may query and override.
+/// occurrences may query and override, plus any external-context
+/// requirements harvested from boundary-spanning relations during
+/// SemanticAssembly promotion.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Interface {
     pub parameters: ParameterSchema,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub void_declaration: Option<VoidDeclaration>,
+    /// External-context requirements (`HostContract`,
+    /// `RequiredContext`, `AdvisoryContext`) produced by PP-A2DB-2
+    /// slice B's classifier. Populated during emission via
+    /// `with_external_context_requirements`. Slice C2 will consume
+    /// these to bind `HostContract` requirements into the hosting-
+    /// contract substrate; slice C4 will exercise their persistence
+    /// round-trip end-to-end.
+    ///
+    /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]`
+    /// keeps old project files loading and keeps projects without
+    /// any requirements bit-stable in the serialized output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_context_requirements:
+        Vec<crate::plugins::promotion::ExternalContextRequirement>,
+}
+
+impl Interface {
+    /// Builder helper for emitters: stamp the slice B requirements
+    /// onto the Definition's interface during body construction.
+    pub fn with_external_context_requirements(
+        mut self,
+        requirements: Vec<crate::plugins::promotion::ExternalContextRequirement>,
+    ) -> Self {
+        self.external_context_requirements = requirements;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,9 +1122,20 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
 }
 
 fn merge_interface(base: Interface, child: Interface) -> Interface {
+    // External-context requirements: the child wins when it has any;
+    // otherwise inherit from the base. This keeps the "promotion
+    // recorded these requirements on the parent and the derived
+    // variant didn't override" case clean while still allowing a
+    // derived definition to clear or replace the requirement set.
+    let external_context_requirements = if !child.external_context_requirements.is_empty() {
+        child.external_context_requirements
+    } else {
+        base.external_context_requirements
+    };
     Interface {
         parameters: merge_parameter_schema(base.parameters, child.parameters),
         void_declaration: child.void_declaration.or(base.void_declaration),
+        external_context_requirements,
     }
 }
 
@@ -1396,5 +1435,104 @@ mod pp_dhost_param_type_tests {
         assert!(parameter_ref
             .validate_value(&json!(false), "parameter reference")
             .is_err());
+    }
+}
+
+// === PP-A2DB-2 slice C1: external_context_requirements on Interface =======
+
+#[cfg(test)]
+mod pp_a2db_2_external_context_tests {
+    use super::*;
+    use crate::plugins::identity::ElementId;
+    use crate::plugins::promotion::{
+        ExternalContextRequirement, ExternalRelationClassification, RelationEndpoint,
+    };
+    use serde_json::json;
+
+    fn sample_requirement() -> ExternalContextRequirement {
+        ExternalContextRequirement {
+            relation_type: "hosted_on_wall".into(),
+            classification: ExternalRelationClassification::HostContract,
+            endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
+            descriptor_id: Some("hosted_on_wall".into()),
+            source_relation_id: ElementId(30),
+        }
+    }
+
+    #[test]
+    fn interface_default_has_empty_external_context_requirements() {
+        let i = Interface::default();
+        assert!(i.external_context_requirements.is_empty());
+    }
+
+    #[test]
+    fn interface_with_external_context_requirements_builder_writes_field() {
+        let req = sample_requirement();
+        let i = Interface::default().with_external_context_requirements(vec![req.clone()]);
+        assert_eq!(i.external_context_requirements, vec![req]);
+    }
+
+    #[test]
+    fn interface_skips_serializing_empty_external_context_requirements() {
+        let i = Interface::default();
+        let json = serde_json::to_string(&i).unwrap();
+        assert!(
+            !json.contains("external_context_requirements"),
+            "an empty list should not appear in the serialized form to keep \
+             pre-PP-A2DB-2 project files bit-stable; got: {json}"
+        );
+    }
+
+    #[test]
+    fn interface_serializes_non_empty_external_context_requirements() {
+        let i = Interface::default()
+            .with_external_context_requirements(vec![sample_requirement()]);
+        let json = serde_json::to_string(&i).unwrap();
+        assert!(json.contains("external_context_requirements"));
+        assert!(json.contains("hosted_on_wall"));
+        // Round-trip.
+        let back: Interface = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.external_context_requirements.len(), 1);
+        assert_eq!(
+            back.external_context_requirements[0].classification,
+            ExternalRelationClassification::HostContract
+        );
+    }
+
+    #[test]
+    fn interface_loads_pre_pp_a2db_2_project_with_field_missing() {
+        // Simulate an old project file that predates the new field.
+        let legacy = json!({
+            "parameters": [],
+            "void_declaration": null,
+        });
+        let i: Interface = serde_json::from_value(legacy).unwrap();
+        assert!(i.external_context_requirements.is_empty());
+    }
+
+    #[test]
+    fn merge_interface_inherits_requirements_from_base_when_child_is_empty() {
+        let base = Interface::default()
+            .with_external_context_requirements(vec![sample_requirement()]);
+        let child = Interface::default();
+        let merged = merge_interface(base.clone(), child);
+        assert_eq!(merged.external_context_requirements, base.external_context_requirements);
+    }
+
+    #[test]
+    fn merge_interface_replaces_requirements_when_child_has_any() {
+        let base = Interface::default()
+            .with_external_context_requirements(vec![sample_requirement()]);
+        let other = ExternalContextRequirement {
+            relation_type: "near_room".into(),
+            classification: ExternalRelationClassification::AdvisoryContext,
+            endpoint_in_definition: RelationEndpoint::SelfRoot,
+            descriptor_id: None,
+            source_relation_id: ElementId(31),
+        };
+        let child = Interface::default()
+            .with_external_context_requirements(vec![other.clone()]);
+        let merged = merge_interface(base, child);
+        assert_eq!(merged.external_context_requirements, vec![other]);
     }
 }

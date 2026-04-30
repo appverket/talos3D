@@ -13935,6 +13935,7 @@ fn build_definition_from_object(
         interface: Interface {
             parameters: parse_parameter_schema(object.get("parameters"))?,
             void_declaration: parse_optional_void_declaration(object.get("void_declaration"))?,
+            external_context_requirements: Vec::new(),
         },
         evaluators: parse_evaluators(object)?,
         representations: parse_representations(object)?,
