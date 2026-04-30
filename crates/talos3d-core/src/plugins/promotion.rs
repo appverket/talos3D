@@ -581,6 +581,501 @@ where
     }
 }
 
+// === SemanticAssembly source adapter =======================================
+
+/// Classification of one assembly member, supplied by the snapshot
+/// builder. The adapter uses this to enforce the PP-A2DB-1 *flatness*
+/// requirement (nested SemanticAssembly members are unsupported in this
+/// PP) and to decide whether ElementId preservation is appropriate per
+/// member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssemblyMemberKind {
+    /// A first-class authored entity (wall, slab, leaf geometry, etc.).
+    AuthoredEntity,
+    /// An Occurrence of an existing reusable Definition.
+    Occurrence,
+    /// Another `SemanticAssembly`. Unsupported in PP-A2DB-1; the adapter
+    /// surfaces this as a preview blocker rather than silently flattening.
+    NestedAssembly,
+}
+
+/// One member of a flat-assembly snapshot. Mirrors `AssemblyMemberRef`
+/// but ECS-free so promotion.rs stays decoupled from the Bevy world; the
+/// caller (typically `model_api.rs` in slice B) gathers the snapshot
+/// from world state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssemblyMemberSnapshot {
+    pub element_id: ElementId,
+    pub role: String,
+    pub kind: AssemblyMemberKind,
+    /// Definition id when `kind == Occurrence`. The promoted compound
+    /// `Definition` reuses this id as the child slot's `definition_id`.
+    /// `None` for authored leaves; the body builder creates a leaf
+    /// Definition for those members in slice B.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence_definition_id: Option<crate::plugins::modeling::definition::DefinitionId>,
+}
+
+/// Optional capability projection carried into the promoted Definition.
+/// Per the agreement, none of these fields are required to ratify a
+/// SemanticAssembly promotion — when absent, the adapter records the
+/// gap as a `capability_projection_outdated` warning rather than
+/// rejecting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssemblyCapabilityProjection {
+    pub assembly_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_vocabulary_version: Option<String>,
+}
+
+/// A live external reference into the assembly graph. Lets the source
+/// adapter compute the `SemanticGraphMigrationDiff` (which assemblies
+/// will be retargeted, which relations need to follow the new
+/// Occurrence, which memberships go orphaned).
+///
+/// The shape is intentionally narrow — only the fields needed by
+/// PP-A2DB-1's minimum migration diff. Slice B will broaden this when
+/// world-side retargeting lands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalAssemblyMembership {
+    /// The assembly that references one or more of this assembly's
+    /// members.
+    pub assembly_id: ElementId,
+    /// Members of *that* assembly (by `element_id`) that are targets of
+    /// the source assembly's promotion. The source adapter will
+    /// re-target these to the promoted Occurrence on commit.
+    pub member_targets: Vec<ElementId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalRelation {
+    pub relation_id: ElementId,
+    pub source: ElementId,
+    pub target: ElementId,
+    pub relation_type: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalGraph {
+    /// Assemblies (other than the source) that reference any source
+    /// member.
+    #[serde(default)]
+    pub memberships: Vec<ExternalAssemblyMembership>,
+    /// Relations (other than internal source-to-source) whose endpoints
+    /// touch a source member.
+    #[serde(default)]
+    pub relations: Vec<ExternalRelation>,
+}
+
+/// Pure input to `SemanticAssemblyPromotionSource::build_plan`. The
+/// adapter is ECS-free; the caller builds this struct from world state.
+#[derive(Debug, Clone)]
+pub struct SemanticAssemblyPromotionInput {
+    pub assembly_id: ElementId,
+    pub members: Vec<AssemblyMemberSnapshot>,
+    pub capability: AssemblyCapabilityProjection,
+    pub external_graph: ExternalGraph,
+    /// Original assembly-level parameters carried into the promoted
+    /// Definition's provenance (PP-A2DB-1 trivially passes them
+    /// through; rich parameter inference lands later).
+    pub source_parameters: serde_json::Value,
+    /// Original assembly-level metadata (label, etc.) carried into
+    /// provenance and migration warnings.
+    pub source_label: String,
+}
+
+/// Errors produced by `SemanticAssemblyPromotionSource::build_plan`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticAssemblyAdapterError {
+    /// The assembly had no members.
+    EmptyAssembly { assembly_id: ElementId },
+    /// One or more members were nested SemanticAssemblies. PP-A2DB-1
+    /// rejects this shape — the agreement defers nested-assembly
+    /// cascade to PP-A2DB-4.
+    UnsupportedNestedAssemblyMembers { offending_members: Vec<ElementId> },
+    /// A member had `kind == Occurrence` but no `occurrence_definition_id`.
+    OccurrenceMemberMissingDefinitionId { member: ElementId },
+}
+
+impl std::fmt::Display for SemanticAssemblyAdapterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyAssembly { assembly_id } => {
+                write!(f, "semantic-assembly adapter: assembly {assembly_id:?} has no members")
+            }
+            Self::UnsupportedNestedAssemblyMembers { offending_members } => write!(
+                f,
+                "semantic-assembly adapter: PP-A2DB-1 rejects nested SemanticAssembly members ({} found)",
+                offending_members.len()
+            ),
+            Self::OccurrenceMemberMissingDefinitionId { member } => write!(
+                f,
+                "semantic-assembly adapter: occurrence member {member:?} is missing occurrence_definition_id"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SemanticAssemblyAdapterError {}
+
+/// PP-A2DB-1 minimum surface for the migration diff that promotion
+/// preview shows the user before commit. Slice B (world retargeting)
+/// fills out `retargeted_assemblies`/`retargeted_relations` with the
+/// post-commit reality; this slice ships the data shape and the
+/// adapter-level "intended retargeting" that Preview displays.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticGraphMigrationDiff {
+    /// Other assemblies that hold any of the source members; their
+    /// `member_targets` will be retargeted to the promoted Occurrence
+    /// on commit. The surviving source assembly itself appears in this
+    /// list as a degenerate self-retarget.
+    #[serde(default)]
+    pub retargeted_assemblies: Vec<RetargetedAssembly>,
+    /// External relations whose endpoints touch a source member; on
+    /// commit they will be re-pointed to the promoted Occurrence.
+    #[serde(default)]
+    pub retargeted_relations: Vec<RetargetedRelation>,
+    /// Memberships that cannot be retargeted because the matching
+    /// member is dropped (e.g. a duplicate-role indexed slot would
+    /// require choosing a representative; the chosen one wins, the
+    /// rest go orphaned). PP-A2DB-1 surfaces these as warnings rather
+    /// than blocking emission.
+    #[serde(default)]
+    pub orphaned_memberships: Vec<OrphanedMembership>,
+    /// Free-form preview warnings (capability projection outdated,
+    /// duplicate role indexed, etc.).
+    #[serde(default)]
+    pub warnings: Vec<MigrationWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetargetedAssembly {
+    pub assembly_id: ElementId,
+    /// Source members that were referenced from this assembly.
+    pub from_members: Vec<ElementId>,
+    /// Per-source-member: the slot id under the new Occurrence that
+    /// will receive the retargeted reference. Slice B will look this
+    /// up via the emitter's `identity_map`; in slice A we record the
+    /// adapter's intended slot mapping.
+    pub to_slot_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetargetedRelation {
+    pub relation_id: ElementId,
+    pub original_source: ElementId,
+    pub original_target: ElementId,
+    pub relation_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrphanedMembership {
+    pub assembly_id: ElementId,
+    pub dropped_member: ElementId,
+    pub reason: OrphanReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrphanReason {
+    /// The member was a nested SemanticAssembly and was rejected. In
+    /// PP-A2DB-1 the whole promotion fails on this case, so the diff
+    /// is informational only; PP-A2DB-4 will treat it differently.
+    NestedAssemblyRejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MigrationWarning {
+    DuplicateRoleIndexed { role: String, count: usize },
+    CapabilityProjectionOutdated { detail: String },
+}
+
+/// The flat-assembly source adapter. Produces a compound
+/// `PromotionPlan` whose child slots match the assembly's members
+/// one-to-one (with indexed slot ids when roles repeat), plus the
+/// migration diff Preview displays before the user commits.
+///
+/// The adapter is ECS-free: the caller builds a
+/// `SemanticAssemblyPromotionInput` from world state and the adapter
+/// transforms it. World mutation lives in slice B.
+#[derive(Debug, Clone)]
+pub struct SemanticAssemblyPromotionSource {
+    /// Friendly name carried into the promoted `Definition` (the body
+    /// builder consumes this; the adapter just records it on
+    /// provenance).
+    pub name: String,
+    /// Whether the source assembly survives as a retargeted wrapper
+    /// after commit. Mirrors
+    /// `SourceReplacementPolicy::ReplaceWithOccurrence{
+    /// preserve_assembly_wrapper: true }` when set.
+    pub replace_source: bool,
+    /// AuthoringScript / agent attribution carried into provenance.
+    pub provenance: PromotionProvenance,
+}
+
+/// Full output of `SemanticAssemblyPromotionSource::build_plan`. The
+/// `PromotionSourceAdapter::build_plan` trait method only returns the
+/// plan, but the adapter also produces a migration diff that the MCP
+/// preview surfaces. Callers that need both go through
+/// `build_plan_and_diff` directly.
+#[derive(Debug, Clone)]
+pub struct SemanticAssemblyPromotionOutput {
+    pub plan: PromotionPlan,
+    pub migration_diff: SemanticGraphMigrationDiff,
+}
+
+impl SemanticAssemblyPromotionSource {
+    /// Adapter-native entry point. Returns the plan and the migration
+    /// diff in one pass; the trait method below delegates to this and
+    /// drops the diff.
+    pub fn build_plan_and_diff(
+        &self,
+        input: SemanticAssemblyPromotionInput,
+    ) -> Result<SemanticAssemblyPromotionOutput, SemanticAssemblyAdapterError> {
+        // Reject empty / nested-assembly inputs first; both are hard
+        // blocks per the agreement. Empty assemblies have nothing to
+        // promote; nested members defer to PP-A2DB-4.
+        if input.members.is_empty() {
+            return Err(SemanticAssemblyAdapterError::EmptyAssembly {
+                assembly_id: input.assembly_id,
+            });
+        }
+        let nested: Vec<ElementId> = input
+            .members
+            .iter()
+            .filter(|m| m.kind == AssemblyMemberKind::NestedAssembly)
+            .map(|m| m.element_id)
+            .collect();
+        if !nested.is_empty() {
+            return Err(SemanticAssemblyAdapterError::UnsupportedNestedAssemblyMembers {
+                offending_members: nested,
+            });
+        }
+        for member in &input.members {
+            if member.kind == AssemblyMemberKind::Occurrence
+                && member.occurrence_definition_id.is_none()
+            {
+                return Err(
+                    SemanticAssemblyAdapterError::OccurrenceMemberMissingDefinitionId {
+                        member: member.element_id,
+                    },
+                );
+            }
+        }
+
+        // === Member -> slot mapping ====================================
+        //
+        // Indexed slot ids when a role repeats: `wall`, `wall_2`,
+        // `wall_3`, ... PP-97 (collection slots) will replace this with
+        // a richer scheme; until then, indexed slots keep the slot id
+        // stable and unique within the Definition.
+        let mut role_counts: HashMap<&str, usize> = HashMap::new();
+        let mut child_slots: Vec<ChildSlotDef> = Vec::with_capacity(input.members.len());
+        let mut member_slot_ids: Vec<(ElementId, String)> = Vec::with_capacity(input.members.len());
+        let mut warnings: Vec<MigrationWarning> = Vec::new();
+        let mut role_role_counts: HashMap<String, usize> = HashMap::new();
+
+        for member in &input.members {
+            *role_role_counts.entry(member.role.clone()).or_insert(0) += 1;
+        }
+        for (role, count) in &role_role_counts {
+            if *count > 1 {
+                warnings.push(MigrationWarning::DuplicateRoleIndexed {
+                    role: role.clone(),
+                    count: *count,
+                });
+            }
+        }
+
+        for member in &input.members {
+            let count = role_counts.entry(member.role.as_str()).or_insert(0);
+            *count += 1;
+            let slot_id = if role_role_counts.get(&member.role).copied().unwrap_or(1) <= 1 {
+                member.role.clone()
+            } else {
+                format!("{}_{}", member.role, *count)
+            };
+            // Authored-leaf members borrow a placeholder DefinitionId
+            // ("draft.leaf:<element_id>"); slice B will replace this
+            // with the leaf Definition that the body builder produces.
+            // Occurrence members reuse their existing definition_id
+            // directly per the agreement.
+            let definition_id = match member.kind {
+                AssemblyMemberKind::Occurrence => member
+                    .occurrence_definition_id
+                    .clone()
+                    .expect("validated above"),
+                AssemblyMemberKind::AuthoredEntity => {
+                    crate::plugins::modeling::definition::DefinitionId(format!(
+                        "draft.leaf:{}",
+                        member.element_id.0
+                    ))
+                }
+                AssemblyMemberKind::NestedAssembly => unreachable!("rejected above"),
+            };
+            child_slots.push(ChildSlotDef {
+                slot_id: slot_id.clone(),
+                role: member.role.clone(),
+                definition_id,
+                parameter_bindings: Vec::new(),
+                transform_binding: TransformBinding::default(),
+                suppression_expr: None,
+            });
+            member_slot_ids.push((member.element_id, slot_id));
+        }
+
+        // === Capability projection =====================================
+        if input.capability.descriptor_id.is_none()
+            || input.capability.descriptor_version.is_none()
+        {
+            warnings.push(MigrationWarning::CapabilityProjectionOutdated {
+                detail: format!(
+                    "assembly_type='{}': descriptor_id={:?}, descriptor_version={:?}",
+                    input.capability.assembly_type,
+                    input.capability.descriptor_id,
+                    input.capability.descriptor_version,
+                ),
+            });
+        }
+
+        // === Plan ======================================================
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::SemanticAssembly {
+            assembly_id: input.assembly_id,
+        });
+        plan.output_shape = PromotionOutputShape::Compound {
+            child_slots: child_slots.clone(),
+        };
+        plan.validation.require_unique_slot_ids = true;
+        plan.provenance = PromotionProvenance {
+            agent: self
+                .provenance
+                .agent
+                .clone()
+                .or_else(|| Some("semantic_assembly".into())),
+            source_recipe_id: self.provenance.source_recipe_id.clone(),
+            authoring_script_payload: Some(serde_json::json!({
+                "kind": "semantic_assembly",
+                "name": self.name,
+                "label": input.source_label,
+                "assembly_type": input.capability.assembly_type,
+                "descriptor_id": input.capability.descriptor_id,
+                "descriptor_version": input.capability.descriptor_version,
+                "role_vocabulary_version": input.capability.role_vocabulary_version,
+                "members": input
+                    .members
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "element_id": m.element_id,
+                            "role": m.role,
+                            "kind": m.kind,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+                "source_parameters": input.source_parameters,
+            })),
+        };
+
+        if self.replace_source {
+            plan.source_replacement = SourceReplacementPolicy::ReplaceWithOccurrence {
+                preserve_assembly_wrapper: true,
+            };
+            plan.element_id_preservation = ElementIdPreservationPlan {
+                mode: ElementIdPreservationMode::PreserveWherePossible,
+                source_element_to_slot_realization: member_slot_ids.clone(),
+                conflict_policy: ElementIdConflictPolicy::PreserveOrReportBlocker,
+            };
+        }
+
+        // === Migration diff ============================================
+        // Self-retarget: the surviving source assembly's `members` field
+        // collapses into a single { target: promoted_occurrence_id,
+        // role: "realization" } reference on commit. Slice A records the
+        // intended retargeting; slice B applies it.
+        let mut retargeted_assemblies: Vec<RetargetedAssembly> = Vec::new();
+        let source_member_ids: Vec<ElementId> = input.members.iter().map(|m| m.element_id).collect();
+        if self.replace_source {
+            retargeted_assemblies.push(RetargetedAssembly {
+                assembly_id: input.assembly_id,
+                from_members: source_member_ids.clone(),
+                // Surviving source assembly collapses to one realization
+                // entry; the slot id is the empty leaf address (the new
+                // Occurrence is single-rooted from the surviving
+                // assembly's point of view).
+                to_slot_ids: vec![String::new()],
+            });
+        }
+
+        // External assemblies that hold any source member are recorded
+        // for retargeting. Each external `member_targets` entry maps to
+        // the slot id chosen above (or to the new Occurrence's leaf id
+        // for matching that didn't go through a slot).
+        let slot_lookup: HashMap<ElementId, String> =
+            member_slot_ids.iter().cloned().collect();
+        for ext in &input.external_graph.memberships {
+            if ext.assembly_id == input.assembly_id {
+                // Same as the self-retarget above; skip duplicate.
+                continue;
+            }
+            let mut from_members: Vec<ElementId> = Vec::new();
+            let mut to_slot_ids: Vec<String> = Vec::new();
+            for target in &ext.member_targets {
+                if let Some(slot) = slot_lookup.get(target) {
+                    from_members.push(*target);
+                    to_slot_ids.push(slot.clone());
+                }
+            }
+            if !from_members.is_empty() {
+                retargeted_assemblies.push(RetargetedAssembly {
+                    assembly_id: ext.assembly_id,
+                    from_members,
+                    to_slot_ids,
+                });
+            }
+        }
+
+        let source_member_set: HashSet<ElementId> = source_member_ids.iter().copied().collect();
+        let retargeted_relations: Vec<RetargetedRelation> = input
+            .external_graph
+            .relations
+            .iter()
+            .filter(|r| {
+                source_member_set.contains(&r.source) || source_member_set.contains(&r.target)
+            })
+            .map(|r| RetargetedRelation {
+                relation_id: r.relation_id,
+                original_source: r.source,
+                original_target: r.target,
+                relation_type: r.relation_type.clone(),
+            })
+            .collect();
+
+        let migration_diff = SemanticGraphMigrationDiff {
+            retargeted_assemblies,
+            retargeted_relations,
+            orphaned_memberships: Vec::new(),
+            warnings,
+        };
+
+        Ok(SemanticAssemblyPromotionOutput {
+            plan,
+            migration_diff,
+        })
+    }
+}
+
+impl PromotionSourceAdapter for SemanticAssemblyPromotionSource {
+    type SourceInput = SemanticAssemblyPromotionInput;
+    type Error = SemanticAssemblyAdapterError;
+
+    fn build_plan(&self, source: Self::SourceInput) -> Result<PromotionPlan, Self::Error> {
+        Ok(self.build_plan_and_diff(source)?.plan)
+    }
+}
+
 // === Tests =================================================================
 
 #[cfg(test)]
@@ -1086,5 +1581,300 @@ mod tests {
         let record = emitter.emit(plan).unwrap();
         assert!(record.identity_map.is_empty());
         assert_eq!(drafts.list().len(), 1);
+    }
+
+    // === SemanticAssemblyPromotionSource ===================================
+
+    fn member(
+        id: u64,
+        role: &str,
+        kind: AssemblyMemberKind,
+        occ_def: Option<&str>,
+    ) -> AssemblyMemberSnapshot {
+        AssemblyMemberSnapshot {
+            element_id: elem(id),
+            role: role.to_string(),
+            kind,
+            occurrence_definition_id: occ_def.map(|s| DefinitionId(s.to_string())),
+        }
+    }
+
+    fn assembly_input_for(members: Vec<AssemblyMemberSnapshot>) -> SemanticAssemblyPromotionInput {
+        SemanticAssemblyPromotionInput {
+            assembly_id: elem(100),
+            members,
+            capability: AssemblyCapabilityProjection {
+                assembly_type: "test_assembly".into(),
+                descriptor_id: Some("descriptor.test".into()),
+                descriptor_version: Some("1.0".into()),
+                role_vocabulary_version: Some("v1".into()),
+            },
+            external_graph: ExternalGraph::default(),
+            source_parameters: serde_json::Value::Null,
+            source_label: "Test Assembly".into(),
+        }
+    }
+
+    #[test]
+    fn assembly_adapter_rejects_empty_assembly() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "n".into(),
+            replace_source: false,
+            provenance: PromotionProvenance::default(),
+        };
+        let err = adapter
+            .build_plan_and_diff(assembly_input_for(Vec::new()))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            SemanticAssemblyAdapterError::EmptyAssembly { assembly_id: elem(100) }
+        );
+    }
+
+    #[test]
+    fn assembly_adapter_rejects_nested_assembly_members() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "n".into(),
+            replace_source: false,
+            provenance: PromotionProvenance::default(),
+        };
+        let input = assembly_input_for(vec![
+            member(1, "wall", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "subroom", AssemblyMemberKind::NestedAssembly, None),
+        ]);
+        let err = adapter.build_plan_and_diff(input).unwrap_err();
+        match err {
+            SemanticAssemblyAdapterError::UnsupportedNestedAssemblyMembers {
+                offending_members,
+            } => assert_eq!(offending_members, vec![elem(2)]),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assembly_adapter_rejects_occurrence_member_without_definition_id() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "n".into(),
+            replace_source: false,
+            provenance: PromotionProvenance::default(),
+        };
+        let input = assembly_input_for(vec![member(
+            7,
+            "anchor",
+            AssemblyMemberKind::Occurrence,
+            None,
+        )]);
+        let err = adapter.build_plan_and_diff(input).unwrap_err();
+        assert_eq!(
+            err,
+            SemanticAssemblyAdapterError::OccurrenceMemberMissingDefinitionId { member: elem(7) }
+        );
+    }
+
+    #[test]
+    fn assembly_adapter_emits_compound_plan_with_one_slot_per_unique_role() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door+Frame".into(),
+            replace_source: false,
+            provenance: PromotionProvenance::default(),
+        };
+        let input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+            member(
+                3,
+                "lock",
+                AssemblyMemberKind::Occurrence,
+                Some("hardware.lock"),
+            ),
+        ]);
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let slots = match &out.plan.output_shape {
+            PromotionOutputShape::Compound { child_slots } => child_slots,
+            other => panic!("expected compound plan, got {other:?}"),
+        };
+        let slot_ids: Vec<&str> = slots.iter().map(|s| s.slot_id.as_str()).collect();
+        assert_eq!(slot_ids, vec!["frame", "leaf", "lock"]);
+        // Occurrence member reuses its existing definition id; authored
+        // leaves get the placeholder draft.leaf:* id pending slice B.
+        assert_eq!(slots[2].definition_id, DefinitionId("hardware.lock".into()));
+        assert!(slots[0].definition_id.0.starts_with("draft.leaf:"));
+        // require_unique_slot_ids is enforced by validate_plan downstream.
+        assert!(out.plan.validation.require_unique_slot_ids);
+        // Provenance carries the AuthoringScript payload.
+        let payload = out.plan.provenance.authoring_script_payload.as_ref().unwrap();
+        assert_eq!(payload["kind"], "semantic_assembly");
+        assert_eq!(payload["assembly_type"], "test_assembly");
+    }
+
+    #[test]
+    fn assembly_adapter_indexes_duplicate_role_slots() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Wall Trio".into(),
+            replace_source: false,
+            provenance: PromotionProvenance::default(),
+        };
+        let input = assembly_input_for(vec![
+            member(1, "wall", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "wall", AssemblyMemberKind::AuthoredEntity, None),
+            member(3, "wall", AssemblyMemberKind::AuthoredEntity, None),
+            member(4, "roof", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let slots = match &out.plan.output_shape {
+            PromotionOutputShape::Compound { child_slots } => child_slots,
+            other => panic!("expected compound plan, got {other:?}"),
+        };
+        let slot_ids: Vec<&str> = slots.iter().map(|s| s.slot_id.as_str()).collect();
+        assert_eq!(slot_ids, vec!["wall_1", "wall_2", "wall_3", "roof"]);
+        let warning_count = out
+            .migration_diff
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, MigrationWarning::DuplicateRoleIndexed { .. }))
+            .count();
+        assert_eq!(warning_count, 1);
+    }
+
+    #[test]
+    fn assembly_adapter_with_replace_source_requests_full_preservation() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Replaced".into(),
+            replace_source: true,
+            provenance: PromotionProvenance::default(),
+        };
+        let input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        assert_eq!(
+            out.plan.source_replacement,
+            SourceReplacementPolicy::ReplaceWithOccurrence {
+                preserve_assembly_wrapper: true,
+            }
+        );
+        assert_eq!(
+            out.plan.element_id_preservation.mode,
+            ElementIdPreservationMode::PreserveWherePossible
+        );
+        assert_eq!(
+            out.plan
+                .element_id_preservation
+                .source_element_to_slot_realization,
+            vec![(elem(1), "frame".into()), (elem(2), "leaf".into())],
+        );
+        // Self-retarget appears in the diff.
+        assert!(out
+            .migration_diff
+            .retargeted_assemblies
+            .iter()
+            .any(|r| r.assembly_id == elem(100)));
+    }
+
+    #[test]
+    fn assembly_adapter_records_external_membership_retargets() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "House".into(),
+            replace_source: true,
+            provenance: PromotionProvenance::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "wall", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "wall", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        // External assembly references the first wall.
+        input.external_graph.memberships.push(ExternalAssemblyMembership {
+            assembly_id: elem(200),
+            member_targets: vec![elem(1)],
+        });
+        // External relation touches the second wall.
+        input.external_graph.relations.push(ExternalRelation {
+            relation_id: elem(300),
+            source: elem(2),
+            target: elem(999), // unrelated outsider
+            relation_type: "supports".into(),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        // Self-retarget + external retarget.
+        assert_eq!(out.migration_diff.retargeted_assemblies.len(), 2);
+        let external = out
+            .migration_diff
+            .retargeted_assemblies
+            .iter()
+            .find(|r| r.assembly_id == elem(200))
+            .unwrap();
+        assert_eq!(external.from_members, vec![elem(1)]);
+        assert_eq!(external.to_slot_ids, vec!["wall_1".to_string()]);
+        assert_eq!(out.migration_diff.retargeted_relations.len(), 1);
+        assert_eq!(out.migration_diff.retargeted_relations[0].relation_id, elem(300));
+    }
+
+    #[test]
+    fn assembly_adapter_warns_on_outdated_capability_projection() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Skinny".into(),
+            replace_source: false,
+            provenance: PromotionProvenance::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "wall",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.capability.descriptor_id = None;
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        assert!(out
+            .migration_diff
+            .warnings
+            .iter()
+            .any(|w| matches!(w, MigrationWarning::CapabilityProjectionOutdated { .. })));
+    }
+
+    #[test]
+    fn assembly_adapter_plan_runs_through_default_emitter_with_compound_body() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Window".into(),
+            replace_source: false,
+            provenance: PromotionProvenance {
+                agent: Some("test-suite".into()),
+                ..Default::default()
+            },
+        };
+        let input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "glazing", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        let plan = adapter.build_plan(input).unwrap();
+        let plan_draft_id = plan.draft_id.clone();
+
+        let mut drafts = DefinitionDraftRegistry::default();
+        let existing = HashSet::<ElementId>::new();
+        let mut emitter =
+            DefaultPromotionDraftEmitter::new(&mut drafts, &existing, |plan: &PromotionPlan| {
+                let mut def = crate::plugins::definition_authoring::blank_definition("Window");
+                if let PromotionOutputShape::Compound { child_slots } = &plan.output_shape {
+                    let compound = crate::plugins::modeling::definition::CompoundDefinition {
+                        child_slots: child_slots.clone(),
+                        ..Default::default()
+                    };
+                    def.compound = Some(compound);
+                }
+                Ok(def)
+            });
+        let record = emitter.emit(plan).unwrap();
+        assert_eq!(record.draft_id, plan_draft_id);
+        assert!(record.blockers.is_empty());
+
+        let stored = drafts.get(&plan_draft_id).unwrap();
+        let compound = stored
+            .working_copy
+            .compound
+            .as_ref()
+            .expect("compound body");
+        assert_eq!(compound.child_slots.len(), 2);
+        assert_eq!(compound.child_slots[0].slot_id, "frame");
+        assert_eq!(compound.child_slots[1].slot_id, "glazing");
     }
 }
