@@ -88,7 +88,9 @@ pub enum TextureColorSpace {
     Data,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TextureChannelIntent {
     #[default]
@@ -352,6 +354,50 @@ impl TextureRef {
             TextureRef::AssetPath(p) => p.split('/').last().unwrap_or(p),
             TextureRef::Embedded { .. } => "<embedded>",
         }
+    }
+}
+
+// ─── TextureCache ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TextureCacheKey {
+    pub path: String,
+    pub channel: TextureChannelIntent,
+}
+
+impl TextureCacheKey {
+    pub fn new(path: impl Into<String>, channel: TextureChannelIntent) -> Self {
+        Self {
+            path: path.into(),
+            channel,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct TextureCache {
+    handles: BTreeMap<TextureCacheKey, Handle<Image>>,
+}
+
+impl TextureCache {
+    pub fn get(&self, key: &TextureCacheKey) -> Option<&Handle<Image>> {
+        self.handles.get(key)
+    }
+
+    pub fn insert(&mut self, key: TextureCacheKey, handle: Handle<Image>) -> Option<Handle<Image>> {
+        self.handles.insert(key, handle)
+    }
+
+    pub fn contains(&self, key: &TextureCacheKey) -> bool {
+        self.handles.contains_key(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.handles.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
     }
 }
 
@@ -1075,6 +1121,7 @@ impl Plugin for MaterialPlugin {
 
         app.init_resource::<MaterialRegistry>()
             .init_resource::<TextureRegistry>()
+            .init_resource::<TextureCache>()
             .init_resource::<MaterialHandleCache>()
             .add_systems(Startup, seed_builtin_materials)
             .add_systems(
@@ -1579,6 +1626,25 @@ mod tests {
             serde_json::from_value(serde_json::to_value(mapping).unwrap()).unwrap();
 
         assert_eq!(parsed, mapping);
+    }
+
+    #[test]
+    fn texture_cache_reuses_path_channel_keys() {
+        let mut cache = TextureCache::default();
+        let base_key =
+            TextureCacheKey::new("textures/brick_orm.png", TextureChannelIntent::BaseColor);
+        let roughness_key = TextureCacheKey::new(
+            "textures/brick_orm.png",
+            TextureChannelIntent::MetallicRoughness,
+        );
+
+        assert!(cache.is_empty());
+        cache.insert(base_key.clone(), Handle::<Image>::default());
+
+        assert!(cache.contains(&base_key));
+        assert!(!cache.contains(&roughness_key));
+        assert!(cache.get(&base_key).is_some());
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]
