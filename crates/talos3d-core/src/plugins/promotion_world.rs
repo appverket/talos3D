@@ -109,6 +109,15 @@ pub fn gather_semantic_assembly_input(
         },
         external_graph,
         internal_relations,
+        // Slice B leaves the rules empty by default; PP-A2DB-2 slice C
+        // will populate this from the live capability registry. With
+        // the default `RelationClassificationRules` (empty map +
+        // `default_unknown = None`), every preserved relation stays
+        // `classification: None` and surfaces an
+        // `UnknownRelationDescriptor` warning — the safe default per
+        // the agreement.
+        relation_classification:
+            crate::plugins::promotion::RelationClassificationRules::default(),
         source_parameters: assembly.parameters.clone(),
         source_label: assembly.label.clone(),
     })
