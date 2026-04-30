@@ -278,8 +278,8 @@ pub fn sample_terminus_support_points(curves: &[ElevationCurve], spacing: f32) -
     }
 
     let mut accepted_links = BTreeSet::new();
-    for source_index in 0..endpoints.len() {
-        if let Some(candidate) = best_higher[source_index] {
+    for (source_index, candidate) in best_higher.iter().copied().enumerate() {
+        if let Some(candidate) = candidate {
             if best_lower[candidate.target_index]
                 .is_some_and(|reverse| reverse.target_index == source_index)
             {
