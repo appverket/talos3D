@@ -1100,6 +1100,9 @@ fn validate_opening_geometry(
     if opening.sill_height < 0.0 {
         return Err("Opening sill height must be non-negative".to_string());
     }
+    if opening.kind == OpeningKind::Door && opening.sill_height.abs() > f32::EPSILON {
+        return Err("Door openings must have sill_height 0.0".to_string());
+    }
     if opening.sill_height + opening.height > parent_wall.height {
         return Err("Opening must fit within the parent wall height".to_string());
     }
@@ -1438,5 +1441,43 @@ mod tests {
             wall_entity_ref.contains::<NeedsMesh>(),
             "opening edits must invalidate the parent wall mesh exactly once on commit",
         );
+    }
+
+    #[test]
+    fn door_opening_validation_requires_zero_sill_height() {
+        let parent_wall = Wall {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(4.0, 0.0),
+            height: 3.0,
+            thickness: 0.2,
+        };
+        let door = Opening {
+            width: 0.9,
+            height: 2.1,
+            sill_height: 0.2,
+            kind: OpeningKind::Door,
+        };
+
+        let error = validate_opening_geometry(&door, &parent_wall, 0.5).unwrap_err();
+
+        assert_eq!(error, "Door openings must have sill_height 0.0");
+    }
+
+    #[test]
+    fn door_opening_validation_accepts_zero_sill_height() {
+        let parent_wall = Wall {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(4.0, 0.0),
+            height: 3.0,
+            thickness: 0.2,
+        };
+        let door = Opening {
+            width: 0.9,
+            height: 2.1,
+            sill_height: 0.0,
+            kind: OpeningKind::Door,
+        };
+
+        validate_opening_geometry(&door, &parent_wall, 0.5).unwrap();
     }
 }
