@@ -686,7 +686,9 @@ mod tests {
         },
         modeling::{
             definition::{
-                DefinitionId, DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
+                Definition, DefinitionId, DefinitionKind, DefinitionLibrary,
+                DefinitionLibraryId, DefinitionLibraryScope, Interface, OverridePolicy,
+                ParameterDef, ParameterMetadata, ParameterSchema, ParamType,
             },
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
         },
@@ -774,6 +776,102 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(1)
         );
+    }
+
+    #[test]
+    fn load_project_restores_definition_occurrences_as_editable_roots() {
+        let definition_id = DefinitionId("test.window.definition".to_string());
+        let definition = Definition {
+            id: definition_id.clone(),
+            base_definition_id: None,
+            name: "Test Window".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![ParameterDef {
+                    name: "overall_width".to_string(),
+                    param_type: ParamType::Numeric,
+                    default_value: serde_json::json!(1.2),
+                    override_policy: OverridePolicy::Overridable,
+                    metadata: ParameterMetadata::default(),
+                }]),
+                void_declaration: None,
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            domain_data: Value::Null,
+        };
+
+        let mut source = World::new();
+        let mut source_factories = CapabilityRegistry::default();
+        source_factories.register_factory(OccurrenceFactory);
+        source.insert_resource(source_factories);
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        let mut source_definitions = DefinitionRegistry::default();
+        source_definitions.insert(definition);
+        source.insert_resource(source_definitions);
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+
+        let mut identity = OccurrenceIdentity::new(definition_id.clone(), 1);
+        identity
+            .overrides
+            .set("overall_width".to_string(), serde_json::json!(1.68));
+        source.spawn((
+            ElementId(42),
+            identity,
+            Transform::from_xyz(2.0, 0.0, 0.0),
+            Name::new("Saved reusable window"),
+        ));
+
+        let project = build_project_file(&mut source).expect("project should serialize");
+        assert!(project.entities.iter().any(|record| {
+            record.type_name == "occurrence"
+                && record
+                    .data
+                    .get("element_id")
+                    .and_then(Value::as_u64)
+                    == Some(42)
+        }));
+
+        let mut target = World::new();
+        let mut target_factories = CapabilityRegistry::default();
+        target_factories.register_factory(OccurrenceFactory);
+        target.insert_resource(target_factories);
+        target.insert_resource(bevy::prelude::Assets::<bevy::prelude::Mesh>::default());
+        target.insert_resource(MaterialRegistry::default());
+        target.insert_resource(DefinitionRegistry::default());
+        target.insert_resource(DefinitionLibraryRegistry::default());
+        target.insert_resource(NamedViewRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(OpaquePersistedEntities::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        let mut query = target.query::<(&ElementId, &OccurrenceIdentity, &Name, &Transform)>();
+        let restored = query
+            .iter(&target)
+            .find(|(element_id, _, _, _)| **element_id == ElementId(42))
+            .expect("saved occurrence root should be restored");
+        assert_eq!(restored.1.definition_id, definition_id);
+        assert_eq!(
+            restored.1.overrides.get("overall_width").and_then(Value::as_f64),
+            Some(1.68)
+        );
+        assert_eq!(restored.2.as_str(), "Saved reusable window");
+        assert_eq!(restored.3.translation, Vec3::new(2.0, 0.0, 0.0));
     }
 
     #[test]
