@@ -237,6 +237,214 @@ fn collect_external_graph(
     }
 }
 
+// === Commit step ===========================================================
+
+/// Counts of mutations applied by `apply_assembly_migration_diff`.
+/// Returned to the caller (Preview UI / MCP) so the user can see what
+/// the commit actually did vs what the diff predicted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedAssemblyMigration {
+    /// Number of `SemanticAssembly` entities whose `members` list was
+    /// rewritten. Always `>=` the number of `RetargetedAssembly`
+    /// entries in the diff for assemblies that were found in the
+    /// world.
+    pub assemblies_retargeted: usize,
+    /// Number of source-assembly `members` entries collapsed into a
+    /// single `realization` entry on the surviving wrapper.
+    pub source_members_collapsed: usize,
+    /// Number of external-assembly `members` entries retargeted to
+    /// the new occurrence (preserving each entry's original role).
+    pub external_member_retargets: usize,
+    /// Number of `SemanticRelation` entities whose `source` and/or
+    /// `target` was rewritten to the new occurrence.
+    pub relations_retargeted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssemblyCommitError {
+    /// A `RetargetedAssembly` named an assembly that does not exist
+    /// in the world. Surfaced as an error rather than silently
+    /// skipped because the migration diff is meant to reflect the
+    /// world snapshot and any drift indicates a stale Preview.
+    AssemblyNotFound { assembly_id: ElementId },
+    /// A `RetargetedRelation` named a relation that does not exist in
+    /// the world.
+    RelationNotFound { relation_id: ElementId },
+    /// The diff named an entity but it carries the wrong component
+    /// (e.g. an assembly id resolves to a non-`SemanticAssembly` entity
+    /// — the world drifted between Preview and Commit).
+    UnexpectedEntityShape { entity_id: ElementId, expected: &'static str },
+}
+
+impl std::fmt::Display for AssemblyCommitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AssemblyNotFound { assembly_id } => write!(
+                f,
+                "promotion commit: SemanticAssembly {assembly_id:?} not found in world"
+            ),
+            Self::RelationNotFound { relation_id } => write!(
+                f,
+                "promotion commit: SemanticRelation {relation_id:?} not found in world"
+            ),
+            Self::UnexpectedEntityShape { entity_id, expected } => write!(
+                f,
+                "promotion commit: entity {entity_id:?} is not a {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AssemblyCommitError {}
+
+/// Apply a `SemanticGraphMigrationDiff` to `world` after the shared
+/// emitter has produced a `DefinitionDraft` and the caller has spawned
+/// a new Occurrence at `new_occurrence_id`.
+///
+/// Per the agreement, the source assembly survives as a retargeted
+/// project-intent wrapper:
+/// `members: [{ target: new_occurrence_id, role: "realization" }]`.
+/// External assemblies that referenced any source member retain their
+/// original roles but point at the new Occurrence. Relations whose
+/// endpoints touched a source member are re-pointed to the new
+/// Occurrence.
+///
+/// **Source assembly identification.** Slice A's adapter records the
+/// source assembly's self-retarget with a single empty-slot entry in
+/// `to_slot_ids`. We use that as the discriminator: any
+/// `RetargetedAssembly` whose `to_slot_ids == [""]` is the source
+/// assembly; everything else is external.
+///
+/// **Atomicity.** Mutations are applied in a single pass. If any
+/// step fails, the function returns an error after the partially-
+/// applied changes; the caller is responsible for the larger commit-
+/// or-rollback envelope (slice B3 will wrap this in the MCP commit
+/// flow). PP-A2DB-1 keeps the rollback discipline at the MCP layer.
+pub fn apply_assembly_migration_diff(
+    world: &mut World,
+    diff: &crate::plugins::promotion::SemanticGraphMigrationDiff,
+    new_occurrence_id: ElementId,
+) -> Result<AppliedAssemblyMigration, AssemblyCommitError> {
+    let mut applied = AppliedAssemblyMigration {
+        assemblies_retargeted: 0,
+        source_members_collapsed: 0,
+        external_member_retargets: 0,
+        relations_retargeted: 0,
+    };
+
+    // Compute the union of all `from_members` across the diff; this is
+    // the set of source member ids that must be redirected to the new
+    // Occurrence. Relations only re-point endpoints that match a source
+    // member — endpoints pointing at unrelated entities stay put even
+    // if they happen to equal the diff's `original_target` field for a
+    // different reason (the `original_target` field on
+    // `RetargetedRelation` is a snapshot, not a request).
+    let source_member_set: std::collections::HashSet<ElementId> = diff
+        .retargeted_assemblies
+        .iter()
+        .flat_map(|r| r.from_members.iter().copied())
+        .collect();
+
+    for retargeted in &diff.retargeted_assemblies {
+        let entity = find_entity_with_element_id(world, retargeted.assembly_id)
+            .ok_or(AssemblyCommitError::AssemblyNotFound {
+                assembly_id: retargeted.assembly_id,
+            })?;
+
+        if !world.entity(entity).contains::<SemanticAssembly>() {
+            return Err(AssemblyCommitError::UnexpectedEntityShape {
+                entity_id: retargeted.assembly_id,
+                expected: "SemanticAssembly",
+            });
+        }
+
+        let is_source_assembly = is_source_assembly(retargeted);
+
+        let mut assembly = world.get_mut::<SemanticAssembly>(entity).expect("checked");
+        if is_source_assembly {
+            // Surviving wrapper shape per the agreement: a single
+            // realization entry pointing at the new Occurrence.
+            let collapsed = retargeted.from_members.len();
+            assembly.members.retain(|m| !retargeted.from_members.contains(&m.target));
+            assembly.members.push(super_assembly_member_ref(
+                new_occurrence_id,
+                "realization",
+            ));
+            applied.source_members_collapsed += collapsed;
+        } else {
+            // External assemblies retain each member entry's role and
+            // just retarget the `target` to the new Occurrence.
+            let mut retargeted_count = 0usize;
+            for m in assembly.members.iter_mut() {
+                if retargeted.from_members.contains(&m.target) {
+                    m.target = new_occurrence_id;
+                    retargeted_count += 1;
+                }
+            }
+            applied.external_member_retargets += retargeted_count;
+        }
+        applied.assemblies_retargeted += 1;
+    }
+
+    for relation_diff in &diff.retargeted_relations {
+        let entity = find_entity_with_element_id(world, relation_diff.relation_id)
+            .ok_or(AssemblyCommitError::RelationNotFound {
+                relation_id: relation_diff.relation_id,
+            })?;
+        if !world.entity(entity).contains::<SemanticRelation>() {
+            return Err(AssemblyCommitError::UnexpectedEntityShape {
+                entity_id: relation_diff.relation_id,
+                expected: "SemanticRelation",
+            });
+        }
+        let mut relation = world.get_mut::<SemanticRelation>(entity).expect("checked");
+        let mut touched = false;
+        // Only rewrite endpoints that pointed at a source member.
+        // Matching `original_source`/`original_target` is necessary
+        // (the diff is a snapshot) but NOT sufficient — an endpoint
+        // pointing at a non-source entity must stay put.
+        if relation.source == relation_diff.original_source
+            && source_member_set.contains(&relation_diff.original_source)
+        {
+            relation.source = new_occurrence_id;
+            touched = true;
+        }
+        if relation.target == relation_diff.original_target
+            && source_member_set.contains(&relation_diff.original_target)
+        {
+            relation.target = new_occurrence_id;
+            touched = true;
+        }
+        if touched {
+            applied.relations_retargeted += 1;
+        }
+    }
+
+    Ok(applied)
+}
+
+fn is_source_assembly(retargeted: &crate::plugins::promotion::RetargetedAssembly) -> bool {
+    retargeted.to_slot_ids.iter().any(|s| s.is_empty())
+}
+
+fn find_entity_with_element_id(world: &mut World, target: ElementId) -> Option<Entity> {
+    let mut q = world.try_query::<(Entity, &ElementId)>()?;
+    q.iter(world)
+        .find_map(|(entity, eid)| if *eid == target { Some(entity) } else { None })
+}
+
+/// Construct an `AssemblyMemberRef` without forcing the public
+/// re-export of the type into this module.
+fn super_assembly_member_ref(
+    target: ElementId,
+    role: &str,
+) -> crate::plugins::modeling::assembly::AssemblyMemberRef {
+    crate::plugins::modeling::assembly::AssemblyMemberRef {
+        target,
+        role: role.to_string(),
+    }
+}
+
 // === Tests =================================================================
 
 #[cfg(test)]
@@ -248,7 +456,8 @@ mod tests {
         occurrence::OccurrenceIdentity,
     };
     use crate::plugins::promotion::{
-        AssemblyMemberKind, SemanticAssemblyPromotionSource, SemanticAssemblyAdapterError,
+        AssemblyMemberKind, PromotionDraftEmitter, SemanticAssemblyAdapterError,
+        SemanticAssemblyPromotionSource,
     };
     use serde_json::json;
 
@@ -564,5 +773,352 @@ mod tests {
                 w,
                 crate::plugins::promotion::MigrationWarning::CapabilityProjectionOutdated { .. }
             )));
+    }
+
+    // === apply_assembly_migration_diff =====================================
+
+    fn diff_for_replace_source(
+        source_assembly_id: ElementId,
+        source_members: &[ElementId],
+    ) -> crate::plugins::promotion::SemanticGraphMigrationDiff {
+        crate::plugins::promotion::SemanticGraphMigrationDiff {
+            retargeted_assemblies: vec![
+                crate::plugins::promotion::RetargetedAssembly {
+                    assembly_id: source_assembly_id,
+                    from_members: source_members.to_vec(),
+                    to_slot_ids: vec![String::new()], // marker: source self-retarget
+                },
+            ],
+            retargeted_relations: Vec::new(),
+            orphaned_memberships: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn commit_collapses_source_assembly_to_realization_entry() {
+        let mut world = World::new();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(11));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![member(elem(10), "wall"), member(elem(11), "wall")],
+            serde_json::Value::Null,
+        );
+        let diff = diff_for_replace_source(elem(1), &[elem(10), elem(11)]);
+        let new_occ = elem(500);
+
+        let applied =
+            apply_assembly_migration_diff(&mut world, &diff, new_occ).unwrap();
+        assert_eq!(applied.assemblies_retargeted, 1);
+        assert_eq!(applied.source_members_collapsed, 2);
+        assert_eq!(applied.external_member_retargets, 0);
+        assert_eq!(applied.relations_retargeted, 0);
+
+        // Surviving wrapper now has exactly one realization member.
+        let mut q = world.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, survivor) = q
+            .iter(&world)
+            .find(|(eid, _)| **eid == elem(1))
+            .expect("source assembly survived");
+        assert_eq!(survivor.members.len(), 1);
+        assert_eq!(survivor.members[0].target, new_occ);
+        assert_eq!(survivor.members[0].role, "realization");
+    }
+
+    #[test]
+    fn commit_retargets_external_assembly_members_in_place() {
+        let mut world = World::new();
+        spawn_authored_leaf(&mut world, elem(10));
+        // External assembly references the source member with its own
+        // role.
+        spawn_assembly(
+            &mut world,
+            elem(2),
+            "context",
+            "C",
+            vec![
+                member(elem(10), "anchor"),
+                member(elem(99), "unrelated"),
+            ],
+            serde_json::Value::Null,
+        );
+        // Source assembly (so the diff's source-self-retarget can run
+        // through; not asserted here).
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![member(elem(10), "wall")],
+            serde_json::Value::Null,
+        );
+
+        let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
+            retargeted_assemblies: vec![
+                crate::plugins::promotion::RetargetedAssembly {
+                    assembly_id: elem(1),
+                    from_members: vec![elem(10)],
+                    to_slot_ids: vec![String::new()],
+                },
+                crate::plugins::promotion::RetargetedAssembly {
+                    assembly_id: elem(2),
+                    from_members: vec![elem(10)],
+                    to_slot_ids: vec!["wall".into()],
+                },
+            ],
+            retargeted_relations: Vec::new(),
+            orphaned_memberships: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let applied =
+            apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap();
+        assert_eq!(applied.assemblies_retargeted, 2);
+        assert_eq!(applied.source_members_collapsed, 1);
+        assert_eq!(applied.external_member_retargets, 1);
+
+        // External assembly's "anchor"-role member now points at the
+        // new Occurrence; the unrelated member is untouched.
+        let mut q = world.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, external) = q
+            .iter(&world)
+            .find(|(eid, _)| **eid == elem(2))
+            .expect("external assembly survived");
+        assert_eq!(external.members.len(), 2);
+        let anchor = external
+            .members
+            .iter()
+            .find(|m| m.role == "anchor")
+            .unwrap();
+        assert_eq!(anchor.target, elem(500));
+        let other = external
+            .members
+            .iter()
+            .find(|m| m.role == "unrelated")
+            .unwrap();
+        assert_eq!(other.target, elem(99));
+    }
+
+    #[test]
+    fn commit_retargets_external_relation_endpoints() {
+        let mut world = World::new();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(20));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![member(elem(10), "wall")],
+            serde_json::Value::Null,
+        );
+        // Relation 30: source=10, target=20 (source endpoint touches
+        // a source member).
+        world.spawn((
+            elem(30),
+            SemanticRelation {
+                source: elem(10),
+                target: elem(20),
+                relation_type: "supports".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+        // Relation 31: source=20, target=10 (target endpoint touches
+        // a source member).
+        world.spawn((
+            elem(31),
+            SemanticRelation {
+                source: elem(20),
+                target: elem(10),
+                relation_type: "bounds".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
+            retargeted_assemblies: vec![
+                crate::plugins::promotion::RetargetedAssembly {
+                    assembly_id: elem(1),
+                    from_members: vec![elem(10)],
+                    to_slot_ids: vec![String::new()],
+                },
+            ],
+            retargeted_relations: vec![
+                crate::plugins::promotion::RetargetedRelation {
+                    relation_id: elem(30),
+                    original_source: elem(10),
+                    original_target: elem(20),
+                    relation_type: "supports".into(),
+                },
+                crate::plugins::promotion::RetargetedRelation {
+                    relation_id: elem(31),
+                    original_source: elem(20),
+                    original_target: elem(10),
+                    relation_type: "bounds".into(),
+                },
+            ],
+            orphaned_memberships: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let applied =
+            apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap();
+        assert_eq!(applied.relations_retargeted, 2);
+
+        let mut q = world.query::<(&ElementId, &SemanticRelation)>();
+        for (eid, rel) in q.iter(&world) {
+            match eid.0 {
+                30 => {
+                    assert_eq!(rel.source, elem(500), "30 source rewritten");
+                    assert_eq!(rel.target, elem(20), "30 target untouched");
+                }
+                31 => {
+                    assert_eq!(rel.source, elem(20), "31 source untouched");
+                    assert_eq!(rel.target, elem(500), "31 target rewritten");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn commit_returns_assembly_not_found_when_diff_drifted() {
+        let mut world = World::new();
+        // No assembly in the world; diff names one anyway.
+        let diff = diff_for_replace_source(elem(99), &[elem(10)]);
+        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AssemblyCommitError::AssemblyNotFound { assembly_id: elem(99) }
+        );
+    }
+
+    #[test]
+    fn commit_returns_unexpected_entity_shape_when_id_resolves_to_non_assembly() {
+        let mut world = World::new();
+        // ElementId(99) on a leaf entity (NO SemanticAssembly).
+        spawn_authored_leaf(&mut world, elem(99));
+        let diff = diff_for_replace_source(elem(99), &[elem(10)]);
+        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AssemblyCommitError::UnexpectedEntityShape {
+                entity_id: elem(99),
+                expected: "SemanticAssembly",
+            }
+        );
+    }
+
+    #[test]
+    fn commit_returns_relation_not_found_when_diff_drifted() {
+        let mut world = World::new();
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![],
+            serde_json::Value::Null,
+        );
+        let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
+            retargeted_assemblies: vec![
+                crate::plugins::promotion::RetargetedAssembly {
+                    assembly_id: elem(1),
+                    from_members: Vec::new(),
+                    to_slot_ids: vec![String::new()],
+                },
+            ],
+            retargeted_relations: vec![
+                crate::plugins::promotion::RetargetedRelation {
+                    relation_id: elem(404),
+                    original_source: elem(10),
+                    original_target: elem(20),
+                    relation_type: "ghost".into(),
+                },
+            ],
+            orphaned_memberships: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AssemblyCommitError::RelationNotFound { relation_id: elem(404) }
+        );
+    }
+
+    #[test]
+    fn end_to_end_gather_adapter_emit_commit_cycle() {
+        // The integration covered: gather a flat assembly, run it
+        // through the adapter, emit through the shared default emitter
+        // with a compound body builder, then apply the migration diff
+        // back to the world. Verifies the four pieces (slice A
+        // adapter, slice B1 gather, slice B2 commit, PP-A2DB-0
+        // emitter) compose end-to-end.
+        let mut world = World::new();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_occurrence(&mut world, elem(11), "lib.window");
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![member(elem(10), "wall"), member(elem(11), "window")],
+            serde_json::Value::Null,
+        );
+
+        // Gather + adapter + emit
+        let input = gather_semantic_assembly_input(&world, elem(1)).unwrap();
+        let adapter = crate::plugins::promotion::SemanticAssemblyPromotionSource {
+            name: "House".into(),
+            replace_source: true,
+            provenance: Default::default(),
+        };
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        let mut drafts =
+            crate::plugins::definition_authoring::DefinitionDraftRegistry::default();
+        let existing = std::collections::HashSet::<ElementId>::new();
+        let mut emitter = crate::plugins::promotion::DefaultPromotionDraftEmitter::new(
+            &mut drafts,
+            &existing,
+            |plan: &crate::plugins::promotion::PromotionPlan| {
+                let mut def =
+                    crate::plugins::definition_authoring::blank_definition("House");
+                if let crate::plugins::promotion::PromotionOutputShape::Compound {
+                    child_slots,
+                } = &plan.output_shape
+                {
+                    def.compound = Some(crate::plugins::modeling::definition::CompoundDefinition {
+                        child_slots: child_slots.clone(),
+                        ..Default::default()
+                    });
+                }
+                Ok(def)
+            },
+        );
+        let _record = emitter.emit(out.plan.clone()).unwrap();
+
+        // Now commit the migration diff against the (mutable) world.
+        let new_occ = elem(900);
+        let applied = apply_assembly_migration_diff(&mut world, &out.migration_diff, new_occ)
+            .expect("commit succeeds");
+        assert_eq!(applied.source_members_collapsed, 2);
+
+        // Source assembly should now be a 1-member realization wrapper.
+        let mut q = world.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, survivor) = q
+            .iter(&world)
+            .find(|(eid, _)| **eid == elem(1))
+            .expect("source assembly survived");
+        assert_eq!(survivor.members.len(), 1);
+        assert_eq!(survivor.members[0].target, new_occ);
+        assert_eq!(survivor.members[0].role, "realization");
     }
 }
