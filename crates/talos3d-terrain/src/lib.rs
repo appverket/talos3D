@@ -6,6 +6,7 @@ pub mod reconstruction;
 pub mod review;
 pub mod snapshots;
 pub mod terrain_provider;
+pub mod visualization;
 
 use bevy::prelude::*;
 use talos3d_capability_api::{
