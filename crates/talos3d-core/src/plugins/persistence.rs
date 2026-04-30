@@ -1015,6 +1015,246 @@ mod tests {
             .domain_defaults
             .contains_key(crate::plugins::clipping_planes::SECTION_VIEW_METADATA_KEY));
     }
+
+    /// PP-A2DB-1 slice B3c: a project containing the post-commit
+    /// state of a flat-assembly Make Reusable round-trips through
+    /// save/load. Verifies that:
+    ///
+    /// - the surviving SemanticAssembly preserves its `realization`
+    ///   member shape on reload;
+    /// - the agreement's metadata block (promoted_definition_id,
+    ///   promoted_occurrence_id, source_member_snapshot_ref,
+    ///   source_relation_snapshot_ref) round-trips intact;
+    /// - the new Occurrence at the preserved ElementId reloads with
+    ///   the right OccurrenceIdentity;
+    /// - the promoted Definition (as registered in
+    ///   `DefinitionRegistry`) round-trips.
+    ///
+    /// The test assembles the post-commit state by running the full
+    /// PP-A2DB-1 pipeline directly: gather → adapter →
+    /// commit_assembly_promotion. The Definition is registered into
+    /// `DefinitionRegistry` directly (slice B3b will route this
+    /// through `publish_draft` once the MCP entry point lands).
+    #[test]
+    fn assembly_promotion_post_commit_state_round_trips_through_save_load() {
+        use crate::capability_registry::CapabilityRegistry;
+        use crate::plugins::modeling::assembly::{
+            AssemblyFactory, AssemblyMemberRef, RelationFactory, SemanticAssembly,
+        };
+        use crate::plugins::modeling::definition::{CompoundDefinition, ChildSlotDef};
+        use crate::plugins::promotion::{
+            PromotionOutputShape, SemanticAssemblyPromotionSource,
+        };
+        use crate::plugins::promotion_world::{
+            apply_assembly_migration_diff, gather_semantic_assembly_input,
+            spawn_promoted_occurrence, AssemblyPromotionMetadata,
+            commit_assembly_promotion, AssemblyCommitConfig,
+        };
+
+        // === Build the source world ===========================================
+        let mut source = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(AssemblyFactory);
+        registry.register_factory(RelationFactory);
+        registry.register_factory(OccurrenceFactory);
+        source.insert_resource(registry);
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        source.insert_resource(DefinitionRegistry::default());
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+        // Bump the allocator past the test ids we hand-pick to avoid
+        // colliding with the new occurrence id when allocating.
+        source
+            .resource_mut::<ElementIdAllocator>()
+            .set_next(900);
+
+        // Two leaf members and a flat assembly grouping them.
+        let wall_a = ElementId(10);
+        let wall_b = ElementId(11);
+        let assembly_id = ElementId(1);
+        source.spawn(wall_a);
+        source.spawn(wall_b);
+        source.spawn((
+            assembly_id,
+            SemanticAssembly {
+                assembly_type: "house".into(),
+                label: "Test House".into(),
+                members: vec![
+                    AssemblyMemberRef {
+                        target: wall_a,
+                        role: "wall".into(),
+                    },
+                    AssemblyMemberRef {
+                        target: wall_b,
+                        role: "wall".into(),
+                    },
+                ],
+                parameters: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+            },
+        ));
+
+        // === Run the full PP-A2DB-1 pipeline =================================
+        let input = gather_semantic_assembly_input(&source, assembly_id).unwrap();
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "House".into(),
+            replace_source: true,
+            provenance: Default::default(),
+        };
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        // Register a published Definition in the registry so the
+        // round-trip exercises the registry persistence path. The
+        // body mirrors the plan's compound shape.
+        let promoted_definition_id =
+            DefinitionId(format!("test.promoted.{}", out.plan.draft_id.0));
+        let mut promoted_def =
+            crate::plugins::definition_authoring::blank_definition("House");
+        promoted_def.id = promoted_definition_id.clone();
+        if let PromotionOutputShape::Compound { child_slots } = &out.plan.output_shape {
+            promoted_def.compound = Some(CompoundDefinition {
+                child_slots: child_slots.iter().cloned().collect::<Vec<ChildSlotDef>>(),
+                ..Default::default()
+            });
+        }
+        promoted_def.definition_version = 1;
+        source
+            .resource_mut::<DefinitionRegistry>()
+            .insert(promoted_def.clone());
+
+        // Apply the world commit cycle, preserving wall_a's id as the
+        // new Occurrence id.
+        let committed = commit_assembly_promotion(
+            &mut source,
+            &out.migration_diff,
+            AssemblyCommitConfig {
+                source_assembly_id: assembly_id,
+                source_member_ids: vec![wall_a, wall_b],
+                promoted_definition_id: promoted_definition_id.clone(),
+                promoted_definition_version: 1,
+                preserved_element_id: Some(wall_a),
+                source_member_snapshot_ref: Some("snap-mem-1".into()),
+                source_relation_snapshot_ref: Some("snap-rel-1".into()),
+            },
+        )
+        .expect("commit succeeds");
+        assert_eq!(committed.new_occurrence_id, wall_a);
+
+        // === Save and reload =================================================
+        let project = build_project_file(&mut source).expect("project should serialize");
+        let json = serde_json::to_string(&project).expect("project should serialize to JSON");
+        let project: ProjectFile =
+            serde_json::from_str(&json).expect("project should deserialize from JSON");
+
+        let mut target = World::new();
+        let mut target_registry = CapabilityRegistry::default();
+        target_registry.register_factory(AssemblyFactory);
+        target_registry.register_factory(RelationFactory);
+        target_registry.register_factory(OccurrenceFactory);
+        target.insert_resource(target_registry);
+        target.insert_resource(bevy::prelude::Assets::<bevy::prelude::Mesh>::default());
+        target.insert_resource(MaterialRegistry::default());
+        target.insert_resource(DefinitionRegistry::default());
+        target.insert_resource(DefinitionLibraryRegistry::default());
+        target.insert_resource(NamedViewRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(OpaquePersistedEntities::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        // === Verify the surviving SemanticAssembly ===========================
+        let mut q = target.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, survivor) = q
+            .iter(&target)
+            .find(|(eid, _)| **eid == assembly_id)
+            .expect("source assembly survives reload");
+        assert_eq!(survivor.members.len(), 1);
+        assert_eq!(survivor.members[0].target, wall_a);
+        assert_eq!(survivor.members[0].role, "realization");
+
+        let metadata = survivor
+            .metadata
+            .as_object()
+            .expect("metadata block survives reload as JSON object");
+        assert_eq!(
+            metadata["promoted_definition_id"],
+            serde_json::Value::String(promoted_definition_id.0.clone())
+        );
+        assert_eq!(
+            metadata["promoted_occurrence_id"]
+                .get("0")
+                .and_then(Value::as_u64)
+                .or_else(|| metadata["promoted_occurrence_id"].as_u64()),
+            Some(wall_a.0),
+            "promoted_occurrence_id round-trips with the preserved ElementId",
+        );
+        assert_eq!(
+            metadata["source_member_snapshot_ref"],
+            serde_json::Value::String("snap-mem-1".into()),
+        );
+        assert_eq!(
+            metadata["source_relation_snapshot_ref"],
+            serde_json::Value::String("snap-rel-1".into()),
+        );
+
+        // === Verify the new Occurrence reload ================================
+        let mut occ_q = target.query::<(&ElementId, &OccurrenceIdentity)>();
+        let (_, occurrence) = occ_q
+            .iter(&target)
+            .find(|(eid, _)| **eid == wall_a)
+            .expect("new occurrence reloads at the preserved id");
+        assert_eq!(occurrence.definition_id, promoted_definition_id);
+        assert_eq!(occurrence.definition_version, 1);
+
+        // === Verify the promoted Definition reload ===========================
+        let registry = target.resource::<DefinitionRegistry>();
+        let restored_def = registry
+            .get(&promoted_definition_id)
+            .expect("promoted definition reloads in DefinitionRegistry");
+        assert_eq!(restored_def.id, promoted_definition_id);
+        assert_eq!(restored_def.name, "House");
+        let compound = restored_def
+            .compound
+            .as_ref()
+            .expect("compound body reloads on the promoted definition");
+        // The flat assembly had 2 wall members → indexed slots
+        // wall_1, wall_2 in the plan → same slot ids on the
+        // round-tripped Definition's compound body.
+        assert_eq!(compound.child_slots.len(), 2);
+        let slot_ids: Vec<&str> = compound
+            .child_slots
+            .iter()
+            .map(|s| s.slot_id.as_str())
+            .collect();
+        assert_eq!(slot_ids, vec!["wall_1", "wall_2"]);
+
+        // === Sanity: the despawned non-preserved member is gone ==============
+        let mut id_q = target.query::<&ElementId>();
+        let count = id_q.iter(&target).filter(|eid| **eid == wall_b).count();
+        assert_eq!(count, 0, "wall_b was despawned during commit; reload preserves the absence");
+
+        // Suppress unused-import warning for helpers used only inside
+        // the `commit_assembly_promotion` orchestrator path; keep them
+        // imported so the test reads as a single-stop reference.
+        let _ = (apply_assembly_migration_diff, spawn_promoted_occurrence);
+        let _ = AssemblyPromotionMetadata {
+            promoted_definition_id: promoted_definition_id.clone(),
+            promoted_occurrence_id: wall_a,
+            source_member_snapshot_ref: None,
+            source_relation_snapshot_ref: None,
+        };
+    }
 }
 
 fn primary_shortcut_state(world: &mut World, key: KeyCode) -> (bool, bool) {
