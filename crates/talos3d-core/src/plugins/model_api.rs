@@ -1541,6 +1541,10 @@ enum ModelApiRequest {
         request: PrepareSiteSurfaceRequest,
         response: oneshot::Sender<ApiResult<crate::plugins::command_registry::CommandResult>>,
     },
+    TerrainCutFillAnalysis {
+        request: TerrainCutFillAnalysisRequest,
+        response: oneshot::Sender<ApiResult<crate::plugins::command_registry::CommandResult>>,
+    },
     GetEditingContext(oneshot::Sender<EditingContextInfo>),
     EnterGroup {
         element_id: u64,
@@ -2364,6 +2368,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::PrepareSiteSurface { request, response } => {
             let _ = response.send(handle_prepare_site_surface(world, request));
+        }
+        ModelApiRequest::TerrainCutFillAnalysis { request, response } => {
+            let _ = response.send(handle_terrain_cut_fill_analysis(world, request));
         }
         ModelApiRequest::GetEditingContext(response) => {
             let _ = response.send(get_editing_context(world));
@@ -3871,6 +3878,19 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::PrepareSiteSurface { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_terrain_cut_fill_analysis(
+        &self,
+        request: TerrainCutFillAnalysisRequest,
+    ) -> ApiResult<crate::plugins::command_registry::CommandResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::TerrainCutFillAnalysis { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -6147,6 +6167,21 @@ pub struct PrepareSiteSurfaceRequest {
     pub contour_interval: Option<f32>,
 }
 
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerrainCutFillAnalysisRequest {
+    pub existing_surface_id: u64,
+    #[serde(default)]
+    pub proposed_surface_id: Option<u64>,
+    #[serde(default)]
+    pub datum_y: Option<f32>,
+    #[serde(default)]
+    pub sample_spacing: Option<f32>,
+    #[serde(default)]
+    pub boundary: Vec<[f32; 2]>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -7746,6 +7781,21 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_prepare_site_surface(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "cut_fill_analysis",
+        description = "Compute terrain cut, fill, and net volumes between an existing terrain surface and either a proposed terrain surface or horizontal datum. This wraps the terrain.cut_fill_analysis command in a dedicated MCP tool."
+    )]
+    async fn cut_fill_analysis_tool(
+        &self,
+        Parameters(params): Parameters<TerrainCutFillAnalysisRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_terrain_cut_fill_analysis(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
@@ -12989,6 +13039,52 @@ pub fn handle_prepare_site_surface(
         let _ = handle_set_selection(world, previous_selection);
     }
 
+    Ok(result)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_terrain_cut_fill_analysis(
+    world: &mut World,
+    request: TerrainCutFillAnalysisRequest,
+) -> Result<crate::plugins::command_registry::CommandResult, String> {
+    use crate::plugins::command_registry::{CommandRegistry, CommandResult};
+
+    let mut parameters = serde_json::Map::new();
+    parameters.insert(
+        "existing_surface_id".to_string(),
+        Value::from(request.existing_surface_id),
+    );
+    if let Some(proposed_surface_id) = request.proposed_surface_id {
+        parameters.insert(
+            "proposed_surface_id".to_string(),
+            Value::from(proposed_surface_id),
+        );
+    }
+    if let Some(datum_y) = request.datum_y {
+        parameters.insert("datum_y".to_string(), Value::from(datum_y));
+    }
+    if let Some(sample_spacing) = request.sample_spacing {
+        parameters.insert("sample_spacing".to_string(), Value::from(sample_spacing));
+    }
+    if !request.boundary.is_empty() {
+        parameters.insert(
+            "boundary".to_string(),
+            Value::Array(
+                request
+                    .boundary
+                    .iter()
+                    .map(|point| serde_json::json!([point[0], point[1]]))
+                    .collect(),
+            ),
+        );
+    }
+
+    let handler = world
+        .resource::<CommandRegistry>()
+        .handler_for("terrain.cut_fill_analysis")
+        .ok_or_else(|| "Unknown command: terrain.cut_fill_analysis".to_string())?;
+    let result: CommandResult = handler(world, &Value::Object(parameters))?;
+    flush_model_api_write_pipeline(world);
     Ok(result)
 }
 
