@@ -1457,7 +1457,7 @@ mod tests {
 
     // ---- WallLoop resolver tests (ADR-034 slice 4) -----------------
 
-    fn unit_square_walls() -> Vec<((u64, DVec2, DVec2))> {
+    fn unit_square_walls() -> Vec<(u64, DVec2, DVec2)> {
         // 4 walls forming a 1x1 square at the origin.
         vec![
             (10, DVec2::new(0.0, 0.0), DVec2::new(1.0, 0.0)),
@@ -1602,7 +1602,6 @@ mod typereg_tests {
     use super::*;
     use crate::capability_registry::AuthoredEntityFactory;
     use crate::plugins::modeling::dependency_graph::EntityDependencies;
-    use bevy::prelude::*;
 
     #[test]
     fn foundation_factory_polyline_footprint_declares_no_edges() {

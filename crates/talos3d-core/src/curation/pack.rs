@@ -645,7 +645,7 @@ pub fn load_pack_open(
 mod tests {
     use super::*;
     use crate::curation::compatibility::VersionReq;
-    use crate::curation::entitlement::{AllowAllEntitlements, AlwaysDenyEntitlements};
+    use crate::curation::entitlement::AlwaysDenyEntitlements;
     use crate::curation::identity::{
         AssetId, AssetKindId, AssetRevision, PackId, PackRevision, SourceId,
     };

@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn reject_drops_without_mutating_registry() {
         let mut q = NominationQueue::default();
-        let mut reg = SourceRegistry::default();
+        let reg = SourceRegistry::default();
         let id = q.push(
             NominationKind::AddSource {
                 entry: sample_entry("a", "v1"),
