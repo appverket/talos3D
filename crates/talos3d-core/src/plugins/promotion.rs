@@ -4,10 +4,22 @@
 //! every Make Reusable flow lowers its source-specific work into a
 //! `PromotionPlan`, and a single shared `PromotionDraftEmitter` consumes
 //! plans regardless of source kind (selection / group / SemanticAssembly).
-//! This module ships only the data shapes, traits, and the
-//! validation/preservation invariants. Concrete source adapters and the
-//! actual draft emission land in subsequent slices (PP-A2DB-1 onward and
-//! PP-DPROMOTE-3).
+//!
+//! This module owns:
+//!
+//! - the data shapes for plans, preservation, validation, and emission
+//!   records;
+//! - the `PromotionSourceAdapter` and `PromotionDraftEmitter` traits;
+//! - the shared validation entry points (`validate_plan` and
+//!   `validate_element_id_preservation`);
+//! - a concrete `SelectionPromotionSource` that lifts a `Vec<ElementId>`
+//!   into a leaf `PromotionPlan` (the simplest source adapter; group and
+//!   SemanticAssembly adapters land in PP-DPROMOTE-3 and PP-A2DB-1
+//!   respectively);
+//! - a concrete `DefaultPromotionDraftEmitter` that runs the validation
+//!   gates, enforces ElementId preservation, and inserts a
+//!   `DefinitionDraft` into a `DefinitionDraftRegistry` via an injected
+//!   body builder.
 //!
 //! ElementId preservation is shared infrastructure, not SemanticAssembly-
 //! specific: `validate_element_id_preservation` reports the three blocker
@@ -20,9 +32,9 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::plugins::{
-    definition_authoring::DefinitionDraftId,
+    definition_authoring::{DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry},
     identity::ElementId,
-    modeling::definition::{ChildSlotDef, ParameterBinding, TransformBinding},
+    modeling::definition::{ChildSlotDef, Definition, ParameterBinding, TransformBinding},
 };
 
 // === Source kind ============================================================
@@ -367,6 +379,208 @@ pub fn validate_element_id_preservation(
     blockers
 }
 
+// === Selection source adapter ==============================================
+
+/// Errors produced by `SelectionPromotionSource::build_plan`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectionAdapterError {
+    /// The selection contained no element ids.
+    EmptySelection,
+    /// The configured `preservation_target` is not part of the supplied
+    /// selection.
+    PreservationTargetNotInSelection { target: ElementId },
+    /// `preservation_target` was set on a source adapter whose
+    /// `replace_source` flag is `false`. Preservation is only meaningful
+    /// when the source is being replaced.
+    PreservationRequestedWithoutReplaceSource,
+}
+
+impl std::fmt::Display for SelectionAdapterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptySelection => write!(f, "selection adapter: empty selection"),
+            Self::PreservationTargetNotInSelection { target } => write!(
+                f,
+                "selection adapter: preservation_target {target:?} is not in the selection"
+            ),
+            Self::PreservationRequestedWithoutReplaceSource => write!(
+                f,
+                "selection adapter: preservation_target requires replace_source = true"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SelectionAdapterError {}
+
+/// The pure input to `SelectionPromotionSource::build_plan`. Carries only
+/// the source element ids; the rest of the plan shape is configured on the
+/// adapter itself.
+#[derive(Debug, Clone)]
+pub struct SelectionPromotionInput {
+    pub source_ids: Vec<ElementId>,
+}
+
+/// Lifts a flat selection into a leaf `PromotionPlan`.
+///
+/// PP-A2DB-0 only ships the *boundary*; selection promotion produces a
+/// leaf plan because compound emission and slot decomposition land with
+/// PP-DPROMOTE-3. When `replace_source` is `true`, the produced plan
+/// carries a `ReplaceWithOccurrence` policy, and — if `preservation_target`
+/// is set — an `ElementIdPreservationPlan` requesting that the target's
+/// id be reused as the new Occurrence's id.
+#[derive(Debug, Clone, Default)]
+pub struct SelectionPromotionSource {
+    /// Friendly name carried in the produced `Definition` body via the
+    /// body builder.
+    pub name: String,
+    /// Whether the source elements should be replaced with an Occurrence
+    /// of the new Definition. `false` produces a `NoReplacement` plan.
+    pub replace_source: bool,
+    /// If `replace_source` is `true`, this id is the source element whose
+    /// `ElementId` is preserved as the realization id for the leaf
+    /// Occurrence. Must be present in `SelectionPromotionInput.source_ids`.
+    pub preservation_target: Option<ElementId>,
+    /// AuthoringScript / agent attribution carried into provenance.
+    pub provenance: PromotionProvenance,
+}
+
+impl PromotionSourceAdapter for SelectionPromotionSource {
+    type SourceInput = SelectionPromotionInput;
+    type Error = SelectionAdapterError;
+
+    fn build_plan(&self, source: Self::SourceInput) -> Result<PromotionPlan, Self::Error> {
+        if source.source_ids.is_empty() {
+            return Err(SelectionAdapterError::EmptySelection);
+        }
+        if !self.replace_source && self.preservation_target.is_some() {
+            return Err(SelectionAdapterError::PreservationRequestedWithoutReplaceSource);
+        }
+        if let Some(target) = self.preservation_target {
+            if !source.source_ids.contains(&target) {
+                return Err(SelectionAdapterError::PreservationTargetNotInSelection { target });
+            }
+        }
+
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Selection {
+            element_ids: source.source_ids.clone(),
+        });
+        plan.provenance = self.provenance.clone();
+
+        if self.replace_source {
+            plan.source_replacement = SourceReplacementPolicy::ReplaceWithOccurrence {
+                preserve_assembly_wrapper: false,
+            };
+            if let Some(target) = self.preservation_target {
+                plan.element_id_preservation = ElementIdPreservationPlan {
+                    mode: ElementIdPreservationMode::PreserveWherePossible,
+                    // Leaf realization uses the empty slot address per the
+                    // agreement; `validate_element_id_preservation` flags
+                    // non-empty slot addresses on leaf plans.
+                    source_element_to_slot_realization: vec![(target, String::new())],
+                    conflict_policy: ElementIdConflictPolicy::PreserveOrReportBlocker,
+                };
+            }
+        }
+
+        Ok(plan)
+    }
+}
+
+// === Default emitter =======================================================
+
+/// A reusable `PromotionDraftEmitter` that consumes any `PromotionPlan`,
+/// runs the shared validation gates, enforces ElementId preservation, and
+/// inserts a `DefinitionDraft` into a `DefinitionDraftRegistry`. The
+/// concrete `Definition` body is supplied by an injected body builder so
+/// that this emitter remains source-agnostic — selection promotion can
+/// build a leaf body, group/SemanticAssembly promotion can build a
+/// compound body, and the emitter does not need to know which.
+///
+/// The caller computes the set of `ElementId`s that exist outside the
+/// replacement set (typically `world_ids \ source_ids`) and passes it in;
+/// keeping that out of the emitter keeps `promotion.rs` ECS-free.
+pub struct DefaultPromotionDraftEmitter<'a, F>
+where
+    F: FnMut(&PromotionPlan) -> Result<Definition, PromotionEmissionError>,
+{
+    drafts: &'a mut DefinitionDraftRegistry,
+    existing_ids_outside_replacement_set: &'a HashSet<ElementId>,
+    body_builder: F,
+}
+
+impl<'a, F> DefaultPromotionDraftEmitter<'a, F>
+where
+    F: FnMut(&PromotionPlan) -> Result<Definition, PromotionEmissionError>,
+{
+    pub fn new(
+        drafts: &'a mut DefinitionDraftRegistry,
+        existing_ids_outside_replacement_set: &'a HashSet<ElementId>,
+        body_builder: F,
+    ) -> Self {
+        Self {
+            drafts,
+            existing_ids_outside_replacement_set,
+            body_builder,
+        }
+    }
+}
+
+impl<'a, F> PromotionDraftEmitter for DefaultPromotionDraftEmitter<'a, F>
+where
+    F: FnMut(&PromotionPlan) -> Result<Definition, PromotionEmissionError>,
+{
+    fn emit(
+        &mut self,
+        plan: PromotionPlan,
+    ) -> Result<PromotionEmissionRecord, PromotionEmissionError> {
+        // Run the shared pre-emission gates; this catches duplicate slot
+        // ids and missing-capability-descriptor cases at the boundary.
+        validate_plan(&plan)?;
+
+        // Enforce ElementId preservation. Per the agreement we surface
+        // blockers rather than silently rewriting ids; the registry stays
+        // untouched on conflict.
+        let blockers =
+            validate_element_id_preservation(&plan, self.existing_ids_outside_replacement_set);
+        if !blockers.is_empty() {
+            return Err(PromotionEmissionError::ElementIdPreservation(blockers));
+        }
+
+        // Build the body via the injected builder. The builder may itself
+        // surface a `PromotionEmissionError` (e.g. a domain-specific
+        // capability descriptor mismatch).
+        let body = (self.body_builder)(&plan)?;
+
+        // Identity map mirrors the (preserved) preservation plan. Because
+        // we already rejected blockers above, every entry here is a clean
+        // preservation that the downstream `SemanticGraphMigrationDiff`
+        // consumer can rely on.
+        let identity_map = match plan.element_id_preservation.mode {
+            ElementIdPreservationMode::None => Vec::new(),
+            ElementIdPreservationMode::PreserveWherePossible => plan
+                .element_id_preservation
+                .source_element_to_slot_realization
+                .clone(),
+        };
+
+        let draft = DefinitionDraft {
+            draft_id: plan.draft_id.clone(),
+            source_definition_id: None,
+            source_library_id: None,
+            working_copy: body,
+            dirty: true,
+        };
+        let inserted_id = self.drafts.insert(draft);
+
+        Ok(PromotionEmissionRecord {
+            draft_id: inserted_id,
+            identity_map,
+            blockers: Vec::new(),
+        })
+    }
+}
+
 // === Tests =================================================================
 
 #[cfg(test)]
@@ -582,5 +796,295 @@ mod tests {
         let err = PromotionEmissionError::DuplicateSlotId("x".into());
         assert_error(&err);
         assert_eq!(format!("{err}"), "validation: duplicate slot id `x`");
+    }
+
+    // === SelectionPromotionSource ==========================================
+
+    #[test]
+    fn selection_adapter_rejects_empty_selection() {
+        let adapter = SelectionPromotionSource::default();
+        let err = adapter
+            .build_plan(SelectionPromotionInput {
+                source_ids: Vec::new(),
+            })
+            .unwrap_err();
+        assert_eq!(err, SelectionAdapterError::EmptySelection);
+    }
+
+    #[test]
+    fn selection_adapter_rejects_preservation_without_replace_source() {
+        let adapter = SelectionPromotionSource {
+            name: "Custom Group".into(),
+            replace_source: false,
+            preservation_target: Some(elem(7)),
+            provenance: PromotionProvenance::default(),
+        };
+        let err = adapter
+            .build_plan(SelectionPromotionInput {
+                source_ids: vec![elem(7)],
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            SelectionAdapterError::PreservationRequestedWithoutReplaceSource
+        );
+    }
+
+    #[test]
+    fn selection_adapter_rejects_preservation_target_outside_selection() {
+        let adapter = SelectionPromotionSource {
+            name: "Custom".into(),
+            replace_source: true,
+            preservation_target: Some(elem(99)),
+            provenance: PromotionProvenance::default(),
+        };
+        let err = adapter
+            .build_plan(SelectionPromotionInput {
+                source_ids: vec![elem(1), elem(2)],
+            })
+            .unwrap_err();
+        assert_eq!(
+            err,
+            SelectionAdapterError::PreservationTargetNotInSelection { target: elem(99) }
+        );
+    }
+
+    #[test]
+    fn selection_adapter_emits_leaf_plan_with_no_replacement_by_default() {
+        let adapter = SelectionPromotionSource {
+            name: "leaf".into(),
+            replace_source: false,
+            preservation_target: None,
+            provenance: PromotionProvenance::default(),
+        };
+        let plan = adapter
+            .build_plan(SelectionPromotionInput {
+                source_ids: vec![elem(1), elem(2)],
+            })
+            .unwrap();
+        assert!(matches!(plan.output_shape, PromotionOutputShape::Leaf));
+        assert_eq!(
+            plan.source_kind,
+            PromotionSourceKind::Selection {
+                element_ids: vec![elem(1), elem(2)],
+            }
+        );
+        assert_eq!(plan.source_replacement, SourceReplacementPolicy::NoReplacement);
+        assert!(plan
+            .element_id_preservation
+            .source_element_to_slot_realization
+            .is_empty());
+    }
+
+    #[test]
+    fn selection_adapter_with_replace_source_requests_preservation() {
+        let adapter = SelectionPromotionSource {
+            name: "preserved".into(),
+            replace_source: true,
+            preservation_target: Some(elem(2)),
+            provenance: PromotionProvenance {
+                agent: Some("test".into()),
+                ..Default::default()
+            },
+        };
+        let plan = adapter
+            .build_plan(SelectionPromotionInput {
+                source_ids: vec![elem(1), elem(2), elem(3)],
+            })
+            .unwrap();
+        assert_eq!(
+            plan.source_replacement,
+            SourceReplacementPolicy::ReplaceWithOccurrence {
+                preserve_assembly_wrapper: false,
+            }
+        );
+        assert_eq!(
+            plan.element_id_preservation.mode,
+            ElementIdPreservationMode::PreserveWherePossible
+        );
+        assert_eq!(
+            plan.element_id_preservation
+                .source_element_to_slot_realization,
+            vec![(elem(2), String::new())],
+        );
+        assert_eq!(plan.provenance.agent.as_deref(), Some("test"));
+    }
+
+    // === DefaultPromotionDraftEmitter ======================================
+
+    fn leaf_body_builder()
+    -> impl FnMut(&PromotionPlan) -> Result<Definition, PromotionEmissionError> {
+        |plan| {
+            // Carry the selection size into the name so tests can verify
+            // the body builder actually saw the plan.
+            let count = match &plan.source_kind {
+                PromotionSourceKind::Selection { element_ids } => element_ids.len(),
+                PromotionSourceKind::Group { .. } => 1,
+                PromotionSourceKind::SemanticAssembly { .. } => 1,
+            };
+            Ok(crate::plugins::definition_authoring::blank_definition(format!(
+                "promoted-{count}"
+            )))
+        }
+    }
+
+    #[test]
+    fn default_emitter_inserts_draft_on_clean_emission() {
+        let mut drafts = DefinitionDraftRegistry::default();
+        let existing = HashSet::<ElementId>::new();
+        let plan = SelectionPromotionSource {
+            name: "clean".into(),
+            replace_source: false,
+            preservation_target: None,
+            provenance: PromotionProvenance::default(),
+        }
+        .build_plan(SelectionPromotionInput {
+            source_ids: vec![elem(10), elem(11)],
+        })
+        .unwrap();
+        let plan_draft_id = plan.draft_id.clone();
+
+        let mut emitter =
+            DefaultPromotionDraftEmitter::new(&mut drafts, &existing, leaf_body_builder());
+        let record = emitter.emit(plan).unwrap();
+
+        assert_eq!(record.draft_id, plan_draft_id);
+        assert!(record.blockers.is_empty());
+        assert!(record.identity_map.is_empty());
+        assert!(drafts.get(&plan_draft_id).is_some());
+        assert_eq!(
+            drafts.get(&plan_draft_id).unwrap().working_copy.name,
+            "promoted-2"
+        );
+    }
+
+    #[test]
+    fn default_emitter_writes_identity_map_on_replace_source_promotion() {
+        let mut drafts = DefinitionDraftRegistry::default();
+        let existing = HashSet::<ElementId>::new();
+        let plan = SelectionPromotionSource {
+            name: "preserved".into(),
+            replace_source: true,
+            preservation_target: Some(elem(2)),
+            provenance: PromotionProvenance::default(),
+        }
+        .build_plan(SelectionPromotionInput {
+            source_ids: vec![elem(1), elem(2), elem(3)],
+        })
+        .unwrap();
+
+        let mut emitter =
+            DefaultPromotionDraftEmitter::new(&mut drafts, &existing, leaf_body_builder());
+        let record = emitter.emit(plan).unwrap();
+
+        assert!(record.blockers.is_empty());
+        assert_eq!(record.identity_map, vec![(elem(2), String::new())]);
+        assert_eq!(drafts.list().len(), 1);
+    }
+
+    #[test]
+    fn default_emitter_returns_blockers_and_does_not_insert_on_conflict() {
+        let mut drafts = DefinitionDraftRegistry::default();
+        // The preservation target id is already live somewhere else in
+        // the world — that's a `TargetIdOccupiedOutsideReplacementSet`
+        // blocker, not a silent rewrite.
+        let mut existing = HashSet::<ElementId>::new();
+        existing.insert(elem(2));
+
+        let plan = SelectionPromotionSource {
+            name: "conflict".into(),
+            replace_source: true,
+            preservation_target: Some(elem(2)),
+            provenance: PromotionProvenance::default(),
+        }
+        .build_plan(SelectionPromotionInput {
+            source_ids: vec![elem(2)],
+        })
+        .unwrap();
+
+        let mut emitter =
+            DefaultPromotionDraftEmitter::new(&mut drafts, &existing, leaf_body_builder());
+        let err = emitter.emit(plan).unwrap_err();
+        match err {
+            PromotionEmissionError::ElementIdPreservation(blockers) => {
+                assert_eq!(blockers.len(), 1);
+                assert!(matches!(
+                    blockers[0],
+                    ElementIdBlocker::TargetIdOccupiedOutsideReplacementSet { target, .. }
+                        if target == elem(2)
+                ));
+            }
+            other => panic!("expected preservation blocker, got {other:?}"),
+        }
+        // Registry untouched.
+        assert_eq!(drafts.list().len(), 0);
+    }
+
+    #[test]
+    fn default_emitter_propagates_validate_plan_errors() {
+        let mut drafts = DefinitionDraftRegistry::default();
+        let existing = HashSet::<ElementId>::new();
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Selection {
+            element_ids: vec![elem(1)],
+        });
+        plan.output_shape = PromotionOutputShape::Compound {
+            child_slots: vec![child_slot("dup"), child_slot("dup")],
+        };
+        plan.validation.require_unique_slot_ids = true;
+
+        let mut emitter =
+            DefaultPromotionDraftEmitter::new(&mut drafts, &existing, leaf_body_builder());
+        let err = emitter.emit(plan).unwrap_err();
+        assert_eq!(err, PromotionEmissionError::DuplicateSlotId("dup".into()));
+        assert_eq!(drafts.list().len(), 0);
+    }
+
+    #[test]
+    fn default_emitter_propagates_body_builder_errors() {
+        let mut drafts = DefinitionDraftRegistry::default();
+        let existing = HashSet::<ElementId>::new();
+        let plan = SelectionPromotionSource {
+            name: "rejected".into(),
+            replace_source: false,
+            preservation_target: None,
+            provenance: PromotionProvenance::default(),
+        }
+        .build_plan(SelectionPromotionInput {
+            source_ids: vec![elem(1)],
+        })
+        .unwrap();
+
+        let mut emitter = DefaultPromotionDraftEmitter::new(&mut drafts, &existing, |_| {
+            Err(PromotionEmissionError::MissingCapabilityDescriptor(
+                "house".into(),
+            ))
+        });
+        let err = emitter.emit(plan).unwrap_err();
+        assert!(matches!(
+            err,
+            PromotionEmissionError::MissingCapabilityDescriptor(ref s) if s == "house"
+        ));
+        assert_eq!(drafts.list().len(), 0);
+    }
+
+    #[test]
+    fn default_emitter_does_not_emit_identity_map_when_preservation_is_off() {
+        // Even with a preservation map populated by hand, mode == None
+        // should yield an empty identity_map. Defensive against future
+        // adapter drift.
+        let mut drafts = DefinitionDraftRegistry::default();
+        let existing = HashSet::<ElementId>::new();
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Selection {
+            element_ids: vec![elem(1)],
+        });
+        plan.element_id_preservation.mode = ElementIdPreservationMode::None;
+        plan.element_id_preservation.source_element_to_slot_realization =
+            vec![(elem(1), String::new())];
+
+        let mut emitter =
+            DefaultPromotionDraftEmitter::new(&mut drafts, &existing, leaf_body_builder());
+        let record = emitter.emit(plan).unwrap();
+        assert!(record.identity_map.is_empty());
+        assert_eq!(drafts.list().len(), 1);
     }
 }
