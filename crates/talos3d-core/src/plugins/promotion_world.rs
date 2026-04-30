@@ -445,6 +445,228 @@ fn super_assembly_member_ref(
     }
 }
 
+// === Spawn / despawn / metadata helpers ====================================
+
+/// Spawn the new Occurrence entity for a promoted Definition.
+///
+/// `preserved_element_id` follows the `ElementIdPreservationPlan`:
+/// when set, the existing entity holding that id is despawned and the
+/// new Occurrence is spawned with the same `ElementId`, so external
+/// references (other assemblies, relations, agent-held ids) survive
+/// the promotion. When unset, a fresh `ElementId` is allocated from
+/// the world's `ElementIdAllocator`.
+///
+/// Returns the `ElementId` of the new Occurrence.
+pub fn spawn_promoted_occurrence(
+    world: &mut World,
+    definition_id: crate::plugins::modeling::definition::DefinitionId,
+    definition_version: crate::plugins::modeling::definition::DefinitionVersion,
+    preserved_element_id: Option<ElementId>,
+) -> ElementId {
+    let new_id = match preserved_element_id {
+        Some(id) => {
+            if let Some(entity) = find_entity_with_element_id(world, id) {
+                world.entity_mut(entity).despawn();
+            }
+            id
+        }
+        None => {
+            // `ElementIdAllocator::next_id` is `&self` (atomic), so a
+            // shared resource borrow suffices.
+            let allocator =
+                world.resource::<crate::plugins::identity::ElementIdAllocator>();
+            allocator.next_id()
+        }
+    };
+    world.spawn((
+        new_id,
+        crate::plugins::modeling::occurrence::OccurrenceIdentity::new(
+            definition_id,
+            definition_version,
+        ),
+    ));
+    new_id
+}
+
+/// Despawn every entity whose `ElementId` is in `source_members`,
+/// except the one matching `except_preserved` (which is now the new
+/// Occurrence). Returns the number of entities despawned.
+pub fn despawn_source_members(
+    world: &mut World,
+    source_members: &[ElementId],
+    except_preserved: Option<ElementId>,
+) -> usize {
+    let to_despawn: Vec<Entity> = {
+        let Some(mut q) = world.try_query::<(Entity, &ElementId)>() else {
+            return 0;
+        };
+        q.iter(world)
+            .filter_map(|(entity, eid)| {
+                if source_members.contains(eid) && Some(*eid) != except_preserved {
+                    Some(entity)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    let count = to_despawn.len();
+    for entity in to_despawn {
+        world.entity_mut(entity).despawn();
+    }
+    count
+}
+
+/// Metadata block written onto the surviving assembly's
+/// `SemanticAssembly.metadata` field per the
+/// `ASSEMBLY_TO_DEFINITION_BRIDGE_AGREEMENT.md` "SemanticAssembly
+/// Survival" section.
+#[derive(Debug, Clone)]
+pub struct AssemblyPromotionMetadata {
+    pub promoted_definition_id: crate::plugins::modeling::definition::DefinitionId,
+    pub promoted_occurrence_id: ElementId,
+    /// Opaque ref into AuthoringScript provenance for the original
+    /// member graph snapshot. The provenance store is not yet
+    /// formalized; for now this is a free-form id the caller chooses
+    /// (e.g. the `DefinitionDraftId` or a uuid).
+    pub source_member_snapshot_ref: Option<String>,
+    pub source_relation_snapshot_ref: Option<String>,
+}
+
+/// Merge `metadata` into the surviving assembly's
+/// `SemanticAssembly.metadata` JSON object. Existing keys are
+/// preserved; the four agreement-defined keys are written
+/// unconditionally.
+pub fn write_assembly_promotion_metadata(
+    world: &mut World,
+    source_assembly_id: ElementId,
+    metadata: &AssemblyPromotionMetadata,
+) -> Result<(), AssemblyCommitError> {
+    let entity = find_entity_with_element_id(world, source_assembly_id)
+        .ok_or(AssemblyCommitError::AssemblyNotFound {
+            assembly_id: source_assembly_id,
+        })?;
+    if !world.entity(entity).contains::<SemanticAssembly>() {
+        return Err(AssemblyCommitError::UnexpectedEntityShape {
+            entity_id: source_assembly_id,
+            expected: "SemanticAssembly",
+        });
+    }
+    let mut assembly = world.get_mut::<SemanticAssembly>(entity).expect("checked");
+
+    let mut object = match assembly.metadata.take() {
+        serde_json::Value::Object(map) => map,
+        // Replace any prior non-object value (Null, etc.) with a fresh
+        // map. The agreement requires the four keys to live as named
+        // metadata; non-object values would shadow that.
+        _ => serde_json::Map::new(),
+    };
+    object.insert(
+        "promoted_definition_id".into(),
+        serde_json::Value::String(metadata.promoted_definition_id.0.clone()),
+    );
+    object.insert(
+        "promoted_occurrence_id".into(),
+        serde_json::json!(metadata.promoted_occurrence_id),
+    );
+    if let Some(snapshot) = &metadata.source_member_snapshot_ref {
+        object.insert(
+            "source_member_snapshot_ref".into(),
+            serde_json::Value::String(snapshot.clone()),
+        );
+    }
+    if let Some(snapshot) = &metadata.source_relation_snapshot_ref {
+        object.insert(
+            "source_relation_snapshot_ref".into(),
+            serde_json::Value::String(snapshot.clone()),
+        );
+    }
+    assembly.metadata = serde_json::Value::Object(object);
+    Ok(())
+}
+
+// === Full commit orchestrator ==============================================
+
+/// Configuration for `commit_assembly_promotion`. The caller fills
+/// this from the `PromotionPlan` (definition id + version), the
+/// `PromotionEmissionRecord` (which entry of `identity_map` to
+/// preserve), and from AuthoringScript provenance (snapshot refs).
+#[derive(Debug, Clone)]
+pub struct AssemblyCommitConfig {
+    pub source_assembly_id: ElementId,
+    pub source_member_ids: Vec<ElementId>,
+    pub promoted_definition_id: crate::plugins::modeling::definition::DefinitionId,
+    pub promoted_definition_version:
+        crate::plugins::modeling::definition::DefinitionVersion,
+    pub preserved_element_id: Option<ElementId>,
+    pub source_member_snapshot_ref: Option<String>,
+    pub source_relation_snapshot_ref: Option<String>,
+}
+
+/// Result of a successful `commit_assembly_promotion` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedAssemblyPromotion {
+    pub new_occurrence_id: ElementId,
+    pub applied: AppliedAssemblyMigration,
+    pub source_members_despawned: usize,
+}
+
+/// Full world-side commit cycle for a SemanticAssembly Make Reusable
+/// flow. Orchestrates spawn -> apply (slice B2) -> despawn -> metadata
+/// in one call so the MCP layer (slice B3b) only needs a single
+/// commit invocation.
+///
+/// The diff is the same shape produced by
+/// `SemanticAssemblyPromotionSource::build_plan_and_diff`. The
+/// `source_member_ids` list is the union of every member id that the
+/// adapter recorded; on commit, all of those entities are despawned
+/// (except the one preserved as the new Occurrence). External
+/// references to preserved-but-now-occurrence ids are still valid
+/// because `spawn_promoted_occurrence` reuses the ElementId.
+pub fn commit_assembly_promotion(
+    world: &mut World,
+    diff: &crate::plugins::promotion::SemanticGraphMigrationDiff,
+    config: AssemblyCommitConfig,
+) -> Result<CommittedAssemblyPromotion, AssemblyCommitError> {
+    // 1. Spawn the new Occurrence — possibly reusing a preserved id.
+    let new_occ = spawn_promoted_occurrence(
+        world,
+        config.promoted_definition_id.clone(),
+        config.promoted_definition_version,
+        config.preserved_element_id,
+    );
+
+    // 2. Apply the migration diff (slice B2). Note that the source
+    //    assembly's `from_members` may include the preserved id; that's
+    //    fine — `apply_assembly_migration_diff` filters by the
+    //    `from_members` set it iterates, not by entity existence.
+    let applied = apply_assembly_migration_diff(world, diff, new_occ)?;
+
+    // 3. Despawn the leftover source members (those NOT preserved as
+    //    the new Occurrence). spawn_promoted_occurrence already
+    //    despawned the preserved id's old entity, so it's safe to skip
+    //    it here.
+    let despawned =
+        despawn_source_members(world, &config.source_member_ids, Some(new_occ));
+
+    // 4. Write the agreement metadata block onto the surviving
+    //    assembly. `apply_assembly_migration_diff` already collapsed
+    //    the source assembly's members; now we tag it with provenance.
+    let metadata = AssemblyPromotionMetadata {
+        promoted_definition_id: config.promoted_definition_id.clone(),
+        promoted_occurrence_id: new_occ,
+        source_member_snapshot_ref: config.source_member_snapshot_ref.clone(),
+        source_relation_snapshot_ref: config.source_relation_snapshot_ref.clone(),
+    };
+    write_assembly_promotion_metadata(world, config.source_assembly_id, &metadata)?;
+
+    Ok(CommittedAssemblyPromotion {
+        new_occurrence_id: new_occ,
+        applied,
+        source_members_despawned: despawned,
+    })
+}
+
 // === Tests =================================================================
 
 #[cfg(test)]
@@ -1120,5 +1342,290 @@ mod tests {
         assert_eq!(survivor.members.len(), 1);
         assert_eq!(survivor.members[0].target, new_occ);
         assert_eq!(survivor.members[0].role, "realization");
+    }
+
+    // === spawn / despawn / metadata helpers ================================
+
+    fn world_with_allocator() -> World {
+        let mut world = World::new();
+        world.insert_resource(crate::plugins::identity::ElementIdAllocator::default());
+        world
+    }
+
+    fn count_entities_with(world: &mut World, target: ElementId) -> usize {
+        let mut q = world.query::<&ElementId>();
+        q.iter(&world).filter(|eid| **eid == target).count()
+    }
+
+    #[test]
+    fn spawn_promoted_occurrence_with_fresh_id_allocates_via_resource() {
+        let mut world = world_with_allocator();
+        // Bump the allocator past 0 so the test can verify we got a
+        // truly fresh id, not just `ElementId(0)`.
+        world
+            .resource_mut::<crate::plugins::identity::ElementIdAllocator>()
+            .set_next(50);
+        let new_id = spawn_promoted_occurrence(
+            &mut world,
+            DefinitionId("lib.window".into()),
+            7u32,
+            None,
+        );
+        assert_eq!(new_id, ElementId(50));
+        // New entity carries OccurrenceIdentity referencing the right
+        // definition id and version.
+        let mut q = world.query::<(&ElementId, &OccurrenceIdentity)>();
+        let (_, identity) = q
+            .iter(&world)
+            .find(|(eid, _)| **eid == new_id)
+            .expect("new occurrence entity exists");
+        assert_eq!(identity.definition_id, DefinitionId("lib.window".into()));
+        assert_eq!(identity.definition_version, 7u32);
+    }
+
+    #[test]
+    fn spawn_promoted_occurrence_preserves_existing_element_id() {
+        let mut world = world_with_allocator();
+        // Pre-existing entity with ElementId(7); should be despawned
+        // and a new Occurrence spawned in its place with the same id.
+        spawn_authored_leaf(&mut world, elem(7));
+        let new_id = spawn_promoted_occurrence(
+            &mut world,
+            DefinitionId("lib.x".into()),
+            1u32,
+            Some(elem(7)),
+        );
+        assert_eq!(new_id, elem(7));
+        // Exactly one entity with id 7 — the old one was despawned.
+        assert_eq!(count_entities_with(&mut world, elem(7)), 1);
+        // It carries OccurrenceIdentity now.
+        let mut q = world.query::<(&ElementId, &OccurrenceIdentity)>();
+        assert!(q.iter(&world).any(|(eid, _)| *eid == elem(7)));
+    }
+
+    #[test]
+    fn spawn_promoted_occurrence_with_unmatched_preserved_id_still_spawns() {
+        let mut world = world_with_allocator();
+        // No entity has id 999. Caller asked to preserve it anyway —
+        // spawn behaves as a fresh spawn under that id.
+        let new_id = spawn_promoted_occurrence(
+            &mut world,
+            DefinitionId("lib.x".into()),
+            1u32,
+            Some(elem(999)),
+        );
+        assert_eq!(new_id, elem(999));
+        let mut q = world.query::<(&ElementId, &OccurrenceIdentity)>();
+        assert!(q.iter(&world).any(|(eid, _)| *eid == elem(999)));
+    }
+
+    #[test]
+    fn despawn_source_members_skips_preserved_id() {
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(11));
+        spawn_authored_leaf(&mut world, elem(12));
+        // Imagine elem(11) became the new Occurrence; despawn should
+        // leave it.
+        let despawned = despawn_source_members(
+            &mut world,
+            &[elem(10), elem(11), elem(12)],
+            Some(elem(11)),
+        );
+        assert_eq!(despawned, 2);
+        assert_eq!(count_entities_with(&mut world, elem(10)), 0);
+        assert_eq!(count_entities_with(&mut world, elem(11)), 1);
+        assert_eq!(count_entities_with(&mut world, elem(12)), 0);
+    }
+
+    #[test]
+    fn write_assembly_promotion_metadata_writes_four_keys_and_preserves_existing() {
+        let mut world = world_with_allocator();
+        // spawn_assembly's last arg is `parameters`, so we set
+        // `metadata` separately via a Bevy mutation right after spawn
+        // to seed a pre-existing metadata key.
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![],
+            serde_json::Value::Null,
+        );
+        {
+            let mut q = world.query::<(&ElementId, &mut SemanticAssembly)>();
+            for (eid, mut assembly) in q.iter_mut(&mut world) {
+                if *eid == elem(1) {
+                    assembly.metadata = serde_json::json!({ "preexisting": "kept" });
+                    break;
+                }
+            }
+        }
+        let metadata = AssemblyPromotionMetadata {
+            promoted_definition_id: DefinitionId("draft-foo".into()),
+            promoted_occurrence_id: elem(500),
+            source_member_snapshot_ref: Some("snap-mem".into()),
+            source_relation_snapshot_ref: Some("snap-rel".into()),
+        };
+        write_assembly_promotion_metadata(&mut world, elem(1), &metadata).unwrap();
+        let mut q = world.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, assembly) = q
+            .iter(&world)
+            .find(|(eid, _)| **eid == elem(1))
+            .unwrap();
+        let m = assembly.metadata.as_object().unwrap();
+        assert_eq!(m["promoted_definition_id"], serde_json::json!("draft-foo"));
+        assert_eq!(m["promoted_occurrence_id"], serde_json::json!(elem(500)));
+        assert_eq!(m["source_member_snapshot_ref"], serde_json::json!("snap-mem"));
+        assert_eq!(m["source_relation_snapshot_ref"], serde_json::json!("snap-rel"));
+        // Pre-existing metadata key is preserved.
+        assert_eq!(m["preexisting"], serde_json::json!("kept"));
+    }
+
+    #[test]
+    fn write_assembly_promotion_metadata_replaces_non_object_metadata() {
+        let mut world = world_with_allocator();
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![],
+            serde_json::Value::Null, // not an object
+        );
+        let metadata = AssemblyPromotionMetadata {
+            promoted_definition_id: DefinitionId("draft-foo".into()),
+            promoted_occurrence_id: elem(500),
+            source_member_snapshot_ref: None,
+            source_relation_snapshot_ref: None,
+        };
+        write_assembly_promotion_metadata(&mut world, elem(1), &metadata).unwrap();
+        let mut q = world.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, assembly) = q
+            .iter(&world)
+            .find(|(eid, _)| **eid == elem(1))
+            .unwrap();
+        let m = assembly.metadata.as_object().unwrap();
+        assert_eq!(m.len(), 2); // only the two non-Optional keys
+        assert!(m.contains_key("promoted_definition_id"));
+        assert!(m.contains_key("promoted_occurrence_id"));
+    }
+
+    #[test]
+    fn commit_assembly_promotion_orchestrates_full_world_cycle() {
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(11));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![member(elem(10), "wall"), member(elem(11), "wall")],
+            serde_json::Value::Null,
+        );
+        let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
+            retargeted_assemblies: vec![
+                crate::plugins::promotion::RetargetedAssembly {
+                    assembly_id: elem(1),
+                    from_members: vec![elem(10), elem(11)],
+                    to_slot_ids: vec![String::new()],
+                },
+            ],
+            retargeted_relations: Vec::new(),
+            orphaned_memberships: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let committed = commit_assembly_promotion(
+            &mut world,
+            &diff,
+            AssemblyCommitConfig {
+                source_assembly_id: elem(1),
+                source_member_ids: vec![elem(10), elem(11)],
+                promoted_definition_id: DefinitionId("draft-house".into()),
+                promoted_definition_version: 1u32,
+                preserved_element_id: Some(elem(10)),
+                source_member_snapshot_ref: Some("snap-1".into()),
+                source_relation_snapshot_ref: None,
+            },
+        )
+        .expect("commit succeeds");
+
+        // 1. New Occurrence id reuses the preserved member id.
+        assert_eq!(committed.new_occurrence_id, elem(10));
+        // 2. Source assembly collapsed to a single realization member.
+        assert_eq!(committed.applied.source_members_collapsed, 2);
+        // 3. The non-preserved source member (elem 11) was despawned.
+        assert_eq!(committed.source_members_despawned, 1);
+        assert_eq!(count_entities_with(&mut world, elem(11)), 0);
+        // 4. The preserved id now hosts an OccurrenceIdentity (the
+        //    old leaf was despawned; new occ took its id).
+        let mut q = world.query::<(&ElementId, &OccurrenceIdentity)>();
+        let (_, identity) =
+            q.iter(&world).find(|(eid, _)| **eid == elem(10)).unwrap();
+        assert_eq!(identity.definition_id, DefinitionId("draft-house".into()));
+        // 5. Surviving assembly's metadata block was written.
+        let mut qa = world.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, survivor) =
+            qa.iter(&world).find(|(eid, _)| **eid == elem(1)).unwrap();
+        let m = survivor.metadata.as_object().unwrap();
+        assert_eq!(m["promoted_definition_id"], serde_json::json!("draft-house"));
+        assert_eq!(m["promoted_occurrence_id"], serde_json::json!(elem(10)));
+        assert_eq!(m["source_member_snapshot_ref"], serde_json::json!("snap-1"));
+        // 6. Surviving assembly points at the new Occurrence with role
+        //    "realization".
+        assert_eq!(survivor.members.len(), 1);
+        assert_eq!(survivor.members[0].target, elem(10));
+        assert_eq!(survivor.members[0].role, "realization");
+    }
+
+    #[test]
+    fn commit_assembly_promotion_without_preservation_allocates_fresh_id() {
+        let mut world = world_with_allocator();
+        world
+            .resource_mut::<crate::plugins::identity::ElementIdAllocator>()
+            .set_next(900);
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "house",
+            "H",
+            vec![member(elem(10), "wall")],
+            serde_json::Value::Null,
+        );
+        let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
+            retargeted_assemblies: vec![
+                crate::plugins::promotion::RetargetedAssembly {
+                    assembly_id: elem(1),
+                    from_members: vec![elem(10)],
+                    to_slot_ids: vec![String::new()],
+                },
+            ],
+            retargeted_relations: Vec::new(),
+            orphaned_memberships: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let committed = commit_assembly_promotion(
+            &mut world,
+            &diff,
+            AssemblyCommitConfig {
+                source_assembly_id: elem(1),
+                source_member_ids: vec![elem(10)],
+                promoted_definition_id: DefinitionId("draft-x".into()),
+                promoted_definition_version: 1u32,
+                preserved_element_id: None,
+                source_member_snapshot_ref: None,
+                source_relation_snapshot_ref: None,
+            },
+        )
+        .expect("commit succeeds");
+        // Fresh id from the allocator.
+        assert_eq!(committed.new_occurrence_id, ElementId(900));
+        // All source members despawned; new occ at fresh id.
+        assert_eq!(committed.source_members_despawned, 1);
+        assert_eq!(count_entities_with(&mut world, elem(10)), 0);
+        assert_eq!(count_entities_with(&mut world, ElementId(900)), 1);
     }
 }
