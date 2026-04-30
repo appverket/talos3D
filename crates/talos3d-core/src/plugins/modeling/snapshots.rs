@@ -19,8 +19,8 @@ use crate::{
         identity::{ElementId, ElementIdAllocator},
         layers::LayerAssignment,
         materials::{
-            material_assignment_from_value, material_assignment_option_from_value,
-            MaterialAssignment,
+            material_assignment_display_id, material_assignment_from_value,
+            material_assignment_option_from_value, MaterialAssignment,
         },
         math::scale_point_around_center,
         modeling::{
@@ -206,6 +206,12 @@ impl AuthoredEntity for PolylineSnapshot {
                 elevation.survey_source_id.clone().map(PropertyValue::Text),
             ));
         }
+        fields.push(property_field(
+            "material",
+            PropertyValueKind::Text,
+            material_assignment_display_id(self.material_assignment.as_ref())
+                .map(PropertyValue::Text),
+        ));
         fields
     }
 
@@ -476,6 +482,12 @@ impl AuthoredEntity for TriangleMeshSnapshot {
                 Some(PropertyValue::Text(layer.clone())),
             ));
         }
+        fields.push(property_field(
+            "material",
+            PropertyValueKind::Text,
+            material_assignment_display_id(self.material_assignment.as_ref())
+                .map(PropertyValue::Text),
+        ));
         fields
     }
 
@@ -1315,6 +1327,12 @@ impl AuthoredEntity for EditableMeshSnapshot {
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.mesh.edge_count() as f32)),
             ),
+            property_field(
+                "material",
+                PropertyValueKind::Text,
+                material_assignment_display_id(self.material_assignment.as_ref())
+                    .map(PropertyValue::Text),
+            ),
         ]
     }
 
@@ -1637,7 +1655,7 @@ mod tests {
         };
 
         let fields = snapshot.property_fields();
-        assert_eq!(fields.len(), 2);
+        assert_eq!(fields.len(), 3);
         assert_eq!(fields[0].kind, PropertyValueKind::Vec3);
         assert_eq!(
             fields[0].value,
@@ -1667,6 +1685,21 @@ mod tests {
         assert_eq!(
             assigned.material_assignment(),
             Some(MaterialAssignment::new("mat.red"))
+        );
+        assert_eq!(
+            assigned
+                .property_fields()
+                .into_iter()
+                .find(|field| field.name == "material")
+                .and_then(|field| field.value),
+            Some(PropertyValue::Text("mat.red".to_string()))
+        );
+        assert_eq!(
+            snapshot
+                .set_property_json("material", &Value::String("mat.blue".to_string()))
+                .expect("material id string should assign")
+                .material_assignment(),
+            Some(MaterialAssignment::new("mat.blue"))
         );
         assert_eq!(
             assigned
