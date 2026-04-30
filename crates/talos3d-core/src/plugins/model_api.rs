@@ -18025,7 +18025,7 @@ pub fn handle_draft_rule_pack(
     let passage_preview: String = entry.text.chars().take(120).collect();
 
     let rust_skeleton = format!(
-        r#"// Auto-scaffolded by draft_rule_pack (PP78). Fill in the validator body.
+        r#"// Auto-scaffolded by draft_rule_pack (PP78). Complete the validator body before registering.
 // Source passage: {chunk_id}
 // "{passage_preview}..."
 
@@ -18038,18 +18038,17 @@ use talos3d_core::capability_registry::{{
 pub fn {ident}_constraint() -> ConstraintDescriptor {{
     ConstraintDescriptor {{
         id: ConstraintId("{ident}".into()),
-        label: "TODO: short label".into(),
-        description: "TODO: full description".into(),
+        label: "Draft {element_class} rule from {chunk_id}".into(),
+        description: "Draft validator scaffold generated from source passage {chunk_id}.".into(),
         applicability: Applicability {{
             element_classes: vec![ElementClassId("{class_ident}".into())],
             required_state: None,
         }},
         default_severity: Severity::Error,
-        rationale: "TODO: rationale".into(),
+        rationale: "Source-backed draft rule generated from passage {chunk_id}; author must encode the final validation criteria before registration.".into(),
         source_backlink: Some(PassageRef("{chunk_id}".into())),
         validator: Arc::new(|entity, world| {{
-            // TODO: implement validation logic
-            // Read parameters from entity components and return findings.
+            // Read parameters from entity components and return findings here.
             vec![]
         }}),
     }}
@@ -18061,8 +18060,8 @@ pub fn {ident}_constraint() -> ConstraintDescriptor {{
         rust_skeleton,
         backlink: chunk_id,
         notes: vec![
-            "Fill in the validator body — the skeleton returns no findings as-is.".into(),
-            "Replace TODO placeholders in label, description, and rationale.".into(),
+            "Complete the validator body before registering; the skeleton returns no findings as-is.".into(),
+            "Review the generated label, description, and rationale against the source passage.".into(),
             "Add the new constraint to your Plugin::build via app.register_constraint(…).".into(),
         ],
     })
@@ -21210,6 +21209,29 @@ mod tests {
         .expect_err("unknown source passage ref must fail");
 
         assert!(error.contains("unknown source passage ref"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn draft_rule_pack_scaffold_has_no_user_facing_todo_placeholders() {
+        let mut world = init_model_api_test_world();
+        seed_recipe_draft_corpus(&mut world);
+
+        let draft = handle_draft_rule_pack(
+            &world,
+            "SE/mono_truss".into(),
+            "roof_system".into(),
+        )
+        .expect("draft_rule_pack should generate a scaffold");
+
+        assert!(!draft.rust_skeleton.contains("TODO"));
+        assert!(!draft.notes.iter().any(|note| note.contains("TODO")));
+        assert!(draft
+            .rust_skeleton
+            .contains("Draft roof_system rule from SE/mono_truss"));
+        assert!(draft
+            .rust_skeleton
+            .contains("Complete the validator body before registering"));
     }
 
     #[cfg(feature = "model-api")]
