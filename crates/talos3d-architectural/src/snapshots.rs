@@ -15,7 +15,10 @@ use talos3d_core::{
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
-        materials::{material_assignment_option_from_value, MaterialAssignment},
+        materials::{
+            material_assignment_display_id, material_assignment_option_from_value,
+            MaterialAssignment,
+        },
         math::{draw_loop, rectangle_corners, scale_point_around_center},
         modeling::mesh_generation::NeedsMesh,
         snap::SnapKind,
@@ -238,6 +241,12 @@ impl AuthoredEntity for WallSnapshot {
                 Some(PropertyValue::Scalar(
                     self.wall.start.distance(self.wall.end),
                 )),
+            ),
+            property_field(
+                "material",
+                PropertyValueKind::Text,
+                material_assignment_display_id(self.material_assignment.as_ref())
+                    .map(PropertyValue::Text),
             ),
         ]
     }
@@ -522,6 +531,12 @@ impl AuthoredEntity for OpeningSnapshot {
                 "position_along_wall",
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.position_along_wall)),
+            ),
+            property_field(
+                "material",
+                PropertyValueKind::Text,
+                material_assignment_display_id(self.material_assignment.as_ref())
+                    .map(PropertyValue::Text),
             ),
         ]
     }
@@ -835,6 +850,12 @@ impl AuthoredEntity for BuildingPadSnapshot {
                         .map(|volume| format!("{volume:.3} m^3"))
                         .unwrap_or_else(|| "N/A".to_string()),
                 )),
+            ),
+            property_field(
+                "material",
+                PropertyValueKind::Text,
+                material_assignment_display_id(self.material_assignment.as_ref())
+                    .map(PropertyValue::Text),
             ),
         ]
     }
@@ -1829,6 +1850,21 @@ mod tests {
         assert_eq!(
             assigned.material_assignment(),
             Some(MaterialAssignment::new("mat.concrete"))
+        );
+        assert_eq!(
+            assigned
+                .property_fields()
+                .into_iter()
+                .find(|field| field.name == "material")
+                .and_then(|field| field.value),
+            Some(PropertyValue::Text("mat.concrete".to_string()))
+        );
+        assert_eq!(
+            snapshot
+                .set_property_json("material", &Value::String("mat.timber".to_string()))
+                .expect("material id string should assign")
+                .material_assignment(),
+            Some(MaterialAssignment::new("mat.timber"))
         );
         assert_eq!(
             assigned

@@ -5,14 +5,16 @@ use serde_json::Value;
 
 use crate::{
     authored_entity::{
-        AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, PropertyFieldDef, PushPullAffordance,
+        property_field, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, PropertyFieldDef,
+        PropertyValue, PropertyValueKind, PushPullAffordance,
     },
     capability_registry::FaceId,
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id, find_entity_by_element_id},
         identity::ElementId,
         materials::{
-            material_assignment_option_from_value, material_assignment_to_value, MaterialAssignment,
+            material_assignment_display_id, material_assignment_option_from_value,
+            material_assignment_to_value, MaterialAssignment,
         },
         modeling::primitives::ShapeRotation,
     },
@@ -120,7 +122,14 @@ where
     }
 
     fn property_fields(&self) -> Vec<PropertyFieldDef> {
-        self.primitive.property_fields(self.rotation.0)
+        let mut fields = self.primitive.property_fields(self.rotation.0);
+        fields.push(property_field(
+            "material",
+            PropertyValueKind::Text,
+            material_assignment_display_id(self.material_assignment.as_ref())
+                .map(PropertyValue::Text),
+        ));
+        fields
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {

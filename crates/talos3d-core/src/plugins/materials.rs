@@ -969,13 +969,27 @@ pub fn material_assignment_option_from_value(
     if value.is_null() {
         return Ok(None);
     }
+    if let Some(material_id) = value.as_str() {
+        let material_id = material_id.trim();
+        return if material_id.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(MaterialAssignment::new(material_id)))
+        };
+    }
     material_assignment_from_value(value)
         .map(Some)
-        .ok_or_else(|| "Expected a material assignment object or null".to_string())
+        .ok_or_else(|| {
+            "Expected a material assignment object, material id string, or null".to_string()
+        })
 }
 
 pub fn material_assignment_to_value(assignment: &MaterialAssignment) -> Value {
     serde_json::to_value(assignment).unwrap_or(Value::Null)
+}
+
+pub fn material_assignment_display_id(assignment: Option<&MaterialAssignment>) -> Option<String> {
+    assignment.and_then(|assignment| assignment.render_material_id(None))
 }
 
 // ─── Bevy material handles cache ─────────────────────────────────────────────
