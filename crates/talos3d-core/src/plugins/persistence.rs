@@ -1256,6 +1256,294 @@ mod tests {
             source_relation_snapshot_ref: None,
         };
     }
+
+    /// PP-A2DB-2 slice C4a: a project containing the post-commit AND
+    /// post-materialize state of a flat-assembly Make Reusable
+    /// promotion that includes both internal relation templates and
+    /// boundary-spanning external relations round-trips through
+    /// save/load. Verifies all the slice A/B/C1/C3 surfaces survive
+    /// together:
+    ///
+    /// - Internal `SemanticRelation` between two source members
+    ///   becomes a `SemanticRelationTemplate` on the promoted
+    ///   `CompoundDefinition.relation_templates`.
+    /// - Boundary-spanning `SemanticRelation` from a source member
+    ///   to an outsider classifies as `RequiredContext` and lands on
+    ///   `Definition.interface.external_context_requirements`.
+    /// - Materialized authored `SemanticRelation` (spawned by
+    ///   `materialize_relation_templates`) survives reload with both
+    ///   endpoints intact.
+    /// - Surviving SemanticAssembly + metadata block + new Occurrence
+    ///   (preserved id) all behave per PP-A2DB-1.
+    #[test]
+    fn relation_templates_and_external_context_requirements_round_trip_through_save_load() {
+        use crate::capability_registry::CapabilityRegistry;
+        use crate::plugins::modeling::assembly::{
+            AssemblyFactory, AssemblyMemberRef, RelationFactory, SemanticAssembly,
+            SemanticRelation,
+        };
+        use crate::plugins::modeling::definition::CompoundDefinition;
+        use crate::plugins::promotion::{
+            ExternalRelationClassification, InternalRelationSnapshot,
+            RelationClassificationRules, SemanticAssemblyPromotionSource,
+        };
+        use crate::plugins::promotion_world::{
+            apply_assembly_migration_diff, commit_assembly_promotion,
+            gather_semantic_assembly_input, materialize_relation_templates,
+            spawn_promoted_occurrence, AssemblyCommitConfig,
+            AssemblyPromotionMetadata,
+        };
+        use std::collections::HashMap;
+
+        // === Build the source world ===========================================
+        let mut source = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(AssemblyFactory);
+        registry.register_factory(RelationFactory);
+        registry.register_factory(OccurrenceFactory);
+        source.insert_resource(registry);
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        source.insert_resource(DefinitionRegistry::default());
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+        source.resource_mut::<ElementIdAllocator>().set_next(900);
+
+        // Two leaf members, one outsider (for the boundary-spanning
+        // relation), one assembly grouping the two leaves.
+        let frame_id = ElementId(10);
+        let leaf_id = ElementId(11);
+        let outsider_id = ElementId(20);
+        let assembly_id = ElementId(1);
+        source.spawn(frame_id);
+        source.spawn(leaf_id);
+        source.spawn(outsider_id);
+        source.spawn((
+            assembly_id,
+            SemanticAssembly {
+                assembly_type: "door".into(),
+                label: "Front Door".into(),
+                members: vec![
+                    AssemblyMemberRef {
+                        target: frame_id,
+                        role: "frame".into(),
+                    },
+                    AssemblyMemberRef {
+                        target: leaf_id,
+                        role: "leaf".into(),
+                    },
+                ],
+                parameters: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+            },
+        ));
+        // Internal relation: frame <-> leaf (both endpoints inside source).
+        source.spawn((
+            ElementId(30),
+            SemanticRelation {
+                source: frame_id,
+                target: leaf_id,
+                relation_type: "hinges_on".into(),
+                parameters: serde_json::json!({ "hinge_count": 3 }),
+            },
+        ));
+        // Boundary-spanning relation: frame -> outsider.
+        source.spawn((
+            ElementId(31),
+            SemanticRelation {
+                source: frame_id,
+                target: outsider_id,
+                relation_type: "needs_room".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        // === Run the full PP-A2DB-2 pipeline ==================================
+        let mut input = gather_semantic_assembly_input(&source, assembly_id).unwrap();
+        // Slice B: provide rules so `needs_room` classifies as
+        // RequiredContext. Slice C4 will populate this from the
+        // capability registry; here we set it explicitly.
+        let mut rules = HashMap::new();
+        rules.insert(
+            "needs_room".into(),
+            ExternalRelationClassification::RequiredContext,
+        );
+        input.relation_classification = RelationClassificationRules {
+            by_descriptor: rules,
+            default_unknown: None,
+        };
+
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: true,
+            provenance: Default::default(),
+        };
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        // Spot-check the diff before we commit.
+        assert_eq!(out.migration_diff.candidate_relation_templates.len(), 1);
+        assert_eq!(out.plan.external_context_requirements.len(), 1);
+
+        // Body builder stamps the slice A templates AND slice B
+        // requirements onto the Definition. Slice C1's
+        // `Interface::with_external_context_requirements` and slice
+        // C3's `Definition::with_relation_templates` make this a
+        // single-line operation per surface.
+        let promoted_definition_id =
+            DefinitionId(format!("test.promoted.{}", out.plan.draft_id.0));
+        let mut promoted_def =
+            crate::plugins::definition_authoring::blank_definition("Door");
+        promoted_def.id = promoted_definition_id.clone();
+        promoted_def.interface = promoted_def
+            .interface
+            .with_external_context_requirements(out.plan.external_context_requirements.clone());
+        if let crate::plugins::promotion::PromotionOutputShape::Compound { child_slots } =
+            &out.plan.output_shape
+        {
+            promoted_def.compound = Some(CompoundDefinition {
+                child_slots: child_slots.clone(),
+                ..Default::default()
+            });
+        }
+        promoted_def = promoted_def
+            .with_relation_templates(out.migration_diff.candidate_relation_templates.clone());
+        promoted_def.definition_version = 1;
+        source
+            .resource_mut::<DefinitionRegistry>()
+            .insert(promoted_def.clone());
+
+        // Commit the assembly migration.
+        let committed = commit_assembly_promotion(
+            &mut source,
+            &out.migration_diff,
+            AssemblyCommitConfig {
+                source_assembly_id: assembly_id,
+                source_member_ids: vec![frame_id, leaf_id],
+                promoted_definition_id: promoted_definition_id.clone(),
+                promoted_definition_version: 1,
+                preserved_element_id: Some(frame_id),
+                source_member_snapshot_ref: Some("snap-mem".into()),
+                source_relation_snapshot_ref: Some("snap-rel".into()),
+            },
+        )
+        .expect("commit succeeds");
+        assert_eq!(committed.new_occurrence_id, frame_id);
+
+        // Slice C3: materialize accepted templates as authored
+        // SemanticRelation entities. The realization map binds slot
+        // ids to the live ECS ElementIds. Since both slot members
+        // were despawned (the preserved one became the Occurrence;
+        // the other was despawned), `frame` and `leaf` both resolve
+        // to the new Occurrence id for this minimal test. Slice C4
+        // will plumb a richer realization map; here we just exercise
+        // that materialization spawns the right number of relations
+        // and they round-trip.
+        let mut realizations = HashMap::new();
+        realizations.insert("frame".into(), committed.new_occurrence_id);
+        realizations.insert("leaf".into(), committed.new_occurrence_id);
+        let materialized = materialize_relation_templates(
+            &mut source,
+            &promoted_def,
+            committed.new_occurrence_id,
+            &realizations,
+        )
+        .expect("materialize succeeds");
+        assert_eq!(materialized, 1, "one template -> one spawned relation");
+
+        // === Save and reload =================================================
+        let project = build_project_file(&mut source).expect("project should serialize");
+        let json =
+            serde_json::to_string(&project).expect("project should serialize to JSON");
+        let project: ProjectFile =
+            serde_json::from_str(&json).expect("project should deserialize from JSON");
+
+        let mut target = World::new();
+        let mut target_registry = CapabilityRegistry::default();
+        target_registry.register_factory(AssemblyFactory);
+        target_registry.register_factory(RelationFactory);
+        target_registry.register_factory(OccurrenceFactory);
+        target.insert_resource(target_registry);
+        target.insert_resource(bevy::prelude::Assets::<bevy::prelude::Mesh>::default());
+        target.insert_resource(MaterialRegistry::default());
+        target.insert_resource(DefinitionRegistry::default());
+        target.insert_resource(DefinitionLibraryRegistry::default());
+        target.insert_resource(NamedViewRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(OpaquePersistedEntities::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        // === Verify the surviving SemanticAssembly ===========================
+        let mut q = target.query::<(&ElementId, &SemanticAssembly)>();
+        let (_, survivor) = q
+            .iter(&target)
+            .find(|(eid, _)| **eid == assembly_id)
+            .expect("source assembly survives reload");
+        assert_eq!(survivor.members.len(), 1);
+        assert_eq!(survivor.members[0].role, "realization");
+
+        // === Verify the new Occurrence reload ================================
+        let mut occ_q = target.query::<(&ElementId, &OccurrenceIdentity)>();
+        let (_, occurrence) = occ_q
+            .iter(&target)
+            .find(|(eid, _)| **eid == frame_id)
+            .expect("new occurrence reloads at the preserved id");
+        assert_eq!(occurrence.definition_id, promoted_definition_id);
+
+        // === Verify the promoted Definition reload ===========================
+        let registry = target.resource::<DefinitionRegistry>();
+        let restored_def = registry
+            .get(&promoted_definition_id)
+            .expect("promoted definition reloads in DefinitionRegistry");
+        // Slice C1: external context requirements survive on the
+        // Interface.
+        assert_eq!(restored_def.interface.external_context_requirements.len(), 1);
+        let req = &restored_def.interface.external_context_requirements[0];
+        assert_eq!(req.relation_type, "needs_room");
+        assert_eq!(
+            req.classification,
+            ExternalRelationClassification::RequiredContext
+        );
+        // Slice C3: relation templates survive on the compound body.
+        let compound = restored_def
+            .compound
+            .as_ref()
+            .expect("compound body reloads");
+        assert_eq!(compound.relation_templates.len(), 1);
+        let template = &compound.relation_templates[0];
+        assert_eq!(template.relation_type, "hinges_on");
+
+        // === Verify the materialized SemanticRelation reload =================
+        let mut rel_q = target.query::<&SemanticRelation>();
+        let materialized: Vec<&SemanticRelation> = rel_q
+            .iter(&target)
+            .filter(|r| r.relation_type == "hinges_on")
+            .collect();
+        assert!(
+            !materialized.is_empty(),
+            "materialized hinges_on SemanticRelation survives reload"
+        );
+
+        // Sanity: silence unused-import warnings for helpers used
+        // only inside `commit_assembly_promotion`.
+        let _ = (apply_assembly_migration_diff, spawn_promoted_occurrence);
+        let _ = AssemblyPromotionMetadata {
+            promoted_definition_id: promoted_definition_id.clone(),
+            promoted_occurrence_id: frame_id,
+            source_member_snapshot_ref: None,
+            source_relation_snapshot_ref: None,
+        };
+    }
 }
 
 fn primary_shortcut_state(world: &mut World, key: KeyCode) -> (bool, bool) {

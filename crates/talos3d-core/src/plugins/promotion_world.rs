@@ -123,11 +123,25 @@ pub fn gather_semantic_assembly_input(
     })
 }
 
-/// Walk every `SemanticRelation` in the world; a relation is internal
-/// when *both* endpoints touch the promoting assembly — i.e. each
-/// endpoint is either the source assembly id itself or one of its
-/// source members. The PP-A2DB-2 adapter then classifies each
-/// internal relation into a `SemanticRelationTemplate` candidate.
+/// Walk every `SemanticRelation` in the world that **touches** the
+/// promoting assembly — i.e. at least one endpoint is the source
+/// assembly id itself or one of its source members. The PP-A2DB-2
+/// slice A adapter then classifies each: relations where BOTH
+/// endpoints resolve into the Definition (self or a slot) become
+/// `SemanticRelationTemplate` candidates; partial-touch relations
+/// (one endpoint inside, one outside) land in `preserved_relations`
+/// where slice B's `RelationClassificationRules` further classify
+/// them into `HostContract` / `RequiredContext` / `AdvisoryContext` /
+/// `DropWithAudit`.
+///
+/// Per the agreement: "During promotion, inspect SemanticRelations
+/// involving source assembly members" — that's the broader "at least
+/// one endpoint" predicate, not the strict "both endpoints" one.
+/// The two earlier slice B1 commits used the strict variant, which
+/// is why slice A's adapter routes endpoints with `Some/None`
+/// resolution into `preserved_relations`; this gather function
+/// broadens the input so slice B's classifier actually sees the
+/// boundary-spanning relations.
 fn collect_internal_relations(
     world: &World,
     source_assembly_id: ElementId,
@@ -141,7 +155,7 @@ fn collect_internal_relations(
         id == source_assembly_id || source_member_ids.contains(&id)
     };
     for (relation_id, relation) in q.iter(world) {
-        if endpoint_in_source(relation.source) && endpoint_in_source(relation.target) {
+        if endpoint_in_source(relation.source) || endpoint_in_source(relation.target) {
             out.push(crate::plugins::promotion::InternalRelationSnapshot {
                 relation_id: *relation_id,
                 source: relation.source,
@@ -1862,9 +1876,18 @@ mod tests {
             .iter()
             .map(|r| r.relation_id)
             .collect();
+        // Both fully-internal relations (30, 31) and the boundary-
+        // spanning relation (32) appear in `internal_relations` —
+        // gather collects every relation that touches the source so
+        // slice B's classifier can decide its fate. The adapter
+        // routes fully-internal relations into template candidates
+        // and partial-touch ones into `preserved_relations`.
         assert!(internal_ids.contains(&elem(30)));
         assert!(internal_ids.contains(&elem(31)));
-        assert!(!internal_ids.contains(&elem(32)));
+        assert!(internal_ids.contains(&elem(32)));
+        // The boundary-spanning relation is *also* in
+        // `external_graph.relations` so the migration diff's
+        // `retargeted_relations` rule still fires for it.
         assert!(input
             .external_graph
             .relations
