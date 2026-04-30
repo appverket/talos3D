@@ -4,7 +4,7 @@ use bevy::{
     prelude::*,
 };
 use delaunator::{triangulate, Point};
-use talos3d_core::plugins::modeling::primitives::TriangleMesh;
+use talos3d_core::plugins::{identity::ElementId, modeling::primitives::TriangleMesh};
 
 use crate::{
     components::{
@@ -13,7 +13,10 @@ use crate::{
     reconstruction::{
         sample_boundary_support_points, sample_curve_points, sample_interior_support_points,
     },
-    visualization::{visualization_for_mode, TerrainVisualizationMode, TerrainVisualizationState},
+    visualization::{
+        visualization_for_mode, CutFillVisualizationState, CutFillVisualizationTarget,
+        TerrainVisualizationMode, TerrainVisualizationState, TriangleVisualization,
+    },
 };
 
 const TERRAIN_SURFACE_COLOR: Color = Color::srgb(0.54, 0.62, 0.46);
@@ -23,6 +26,10 @@ const ELEVATION_MID_COLOR: [f32; 3] = [0.33, 0.72, 0.34];
 const ELEVATION_HIGH_COLOR: [f32; 3] = [0.65, 0.43, 0.22];
 const ELEVATION_PEAK_COLOR: [f32; 3] = [0.92, 0.92, 0.9];
 const TERRAIN_CONTOUR_COLOR: Color = Color::srgba(0.08, 0.09, 0.07, 0.9);
+const SHALLOW_CUT_COLOR: [f32; 4] = [0.95, 0.48, 0.14, 1.0];
+const DEEP_CUT_COLOR: [f32; 4] = [0.82, 0.12, 0.10, 1.0];
+const SHALLOW_FILL_COLOR: [f32; 4] = [0.20, 0.70, 0.32, 1.0];
+const DEEP_FILL_COLOR: [f32; 4] = [0.12, 0.38, 0.86, 1.0];
 const CONTOUR_EPSILON: f32 = 1.0e-4;
 type BreaklineSegment = (usize, usize);
 
@@ -46,9 +53,22 @@ impl TerrainSurfaceMaterial {
 type TerrainSurfaceMeshQueryItem<'a> = (
     Entity,
     &'a TerrainSurface,
+    Option<&'a ElementId>,
     Option<&'a Mesh3d>,
     Option<&'a MeshMaterial3d<StandardMaterial>>,
 );
+
+#[derive(Clone, Copy)]
+enum CutFillVisualizationComparison<'a> {
+    ProposedSurface(&'a TriangleMesh),
+    Datum(f32),
+}
+
+#[derive(Clone, Copy)]
+struct CutFillVisualizationInput<'a> {
+    comparison: CutFillVisualizationComparison<'a>,
+    boundary: &'a [Vec2],
+}
 
 impl Plugin for TerrainGenerationPlugin {
     fn build(&self, app: &mut App) {
@@ -102,11 +122,18 @@ fn regenerate_terrain_meshes(
     mut meshes: ResMut<Assets<Mesh>>,
     terrain_material: Res<TerrainSurfaceMaterial>,
     visualization_state: Res<TerrainVisualizationState>,
+    cut_fill_visualization: Option<Res<CutFillVisualizationState>>,
     surfaces: Query<TerrainSurfaceMeshQueryItem<'_>, With<NeedsTerrainMesh>>,
-    curves: Query<(&talos3d_core::plugins::identity::ElementId, &ElevationCurve)>,
+    surface_caches: Query<(&ElementId, &TerrainMeshCache)>,
+    curves: Query<(&ElementId, &ElevationCurve)>,
 ) {
-    for (entity, surface, mesh_handle, material_handle) in &surfaces {
+    for (entity, surface, element_id, mesh_handle, material_handle) in &surfaces {
         let cache = generate_terrain_mesh_cache(surface, &curves);
+        let cut_fill_input = cut_fill_visualization_input(
+            cut_fill_visualization.as_deref(),
+            element_id,
+            &surface_caches,
+        );
         upsert_terrain_mesh_entity(
             &mut commands,
             &mut meshes,
@@ -116,12 +143,39 @@ fn regenerate_terrain_meshes(
             &cache.mesh,
             terrain_material.for_surface(surface),
             *visualization_state,
+            cut_fill_input,
         );
         commands
             .entity(entity)
             .try_insert(cache)
             .try_remove::<NeedsTerrainMesh>();
     }
+}
+
+fn cut_fill_visualization_input<'a>(
+    state: Option<&'a CutFillVisualizationState>,
+    element_id: Option<&ElementId>,
+    surface_caches: &'a Query<(&ElementId, &TerrainMeshCache)>,
+) -> Option<CutFillVisualizationInput<'a>> {
+    let state = state?;
+    if element_id.copied() != Some(state.existing_surface_id) {
+        return None;
+    }
+    let comparison = match state.target {
+        CutFillVisualizationTarget::ProposedSurface(proposed_id) => {
+            let (_, cache) = surface_caches
+                .iter()
+                .find(|(element_id, _)| **element_id == proposed_id)?;
+            CutFillVisualizationComparison::ProposedSurface(&cache.mesh)
+        }
+        CutFillVisualizationTarget::Datum(datum_y) => {
+            CutFillVisualizationComparison::Datum(datum_y)
+        }
+    };
+    Some(CutFillVisualizationInput {
+        comparison,
+        boundary: &state.boundary,
+    })
 }
 
 fn terrain_surface_material(base_color: Color) -> StandardMaterial {
@@ -339,9 +393,10 @@ fn upsert_terrain_mesh_entity(
     primitive: &TriangleMesh,
     material: Handle<StandardMaterial>,
     visualization_state: TerrainVisualizationState,
+    cut_fill_visualization: Option<CutFillVisualizationInput<'_>>,
 ) {
     let mut entity_commands = commands.entity(entity);
-    let mesh = terrain_mesh_asset(primitive, visualization_state);
+    let mesh = terrain_mesh_asset(primitive, visualization_state, cut_fill_visualization);
     if let Some(mesh_handle) = mesh_handle {
         if let Some(existing_mesh) = meshes.get_mut(mesh_handle.id()) {
             *existing_mesh = mesh;
@@ -361,9 +416,12 @@ fn upsert_terrain_mesh_entity(
 fn terrain_mesh_asset(
     primitive: &TriangleMesh,
     visualization_state: TerrainVisualizationState,
+    cut_fill_visualization: Option<CutFillVisualizationInput<'_>>,
 ) -> Mesh {
     if visualization_state.mode != TerrainVisualizationMode::Standard {
-        if let Some(mesh) = visualized_terrain_mesh_asset(primitive, visualization_state) {
+        if let Some(mesh) =
+            visualized_terrain_mesh_asset(primitive, visualization_state, cut_fill_visualization)
+        {
             return mesh;
         }
     }
@@ -399,8 +457,15 @@ fn terrain_mesh_asset(
 fn visualized_terrain_mesh_asset(
     primitive: &TriangleMesh,
     visualization_state: TerrainVisualizationState,
+    cut_fill_visualization: Option<CutFillVisualizationInput<'_>>,
 ) -> Option<Mesh> {
-    let visualizations = visualization_for_mode(primitive, visualization_state);
+    let visualizations = if visualization_state.mode == TerrainVisualizationMode::CutFill {
+        cut_fill_visualization
+            .map(|input| cut_fill_visualization_for_mesh(primitive, input))
+            .unwrap_or_default()
+    } else {
+        visualization_for_mode(primitive, visualization_state)
+    };
     if visualizations.is_empty() {
         return None;
     }
@@ -448,6 +513,69 @@ fn visualized_terrain_mesh_asset(
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     Some(mesh)
+}
+
+fn cut_fill_visualization_for_mesh(
+    existing: &TriangleMesh,
+    input: CutFillVisualizationInput<'_>,
+) -> Vec<TriangleVisualization> {
+    let mut deltas = Vec::new();
+    for face in &existing.faces {
+        let Some((a, b, c)) = face_points(&existing.vertices, *face) else {
+            continue;
+        };
+        let centroid = Vec2::new((a.x + b.x + c.x) / 3.0, (a.z + b.z + c.z) / 3.0);
+        if input.boundary.len() >= 3 && !point_in_polygon(centroid, input.boundary) {
+            continue;
+        }
+        let existing_y = (a.y + b.y + c.y) / 3.0;
+        let Some(proposed_y) = comparison_elevation(input.comparison, centroid.x, centroid.y)
+        else {
+            continue;
+        };
+        let delta = proposed_y - existing_y;
+        if delta.abs() <= CONTOUR_EPSILON {
+            continue;
+        }
+        deltas.push((*face, delta));
+    }
+
+    let max_delta = deltas
+        .iter()
+        .map(|(_, delta)| delta.abs())
+        .fold(0.0_f32, f32::max)
+        .max(CONTOUR_EPSILON);
+    deltas
+        .into_iter()
+        .map(|(face, delta)| TriangleVisualization {
+            face,
+            value: delta,
+            color: cut_fill_delta_color(delta, max_delta),
+        })
+        .collect()
+}
+
+fn comparison_elevation(
+    comparison: CutFillVisualizationComparison<'_>,
+    x: f32,
+    z: f32,
+) -> Option<f32> {
+    match comparison {
+        CutFillVisualizationComparison::ProposedSurface(mesh) => {
+            sample_surface_elevation(mesh, x, z)
+        }
+        CutFillVisualizationComparison::Datum(datum_y) => Some(datum_y),
+    }
+}
+
+fn cut_fill_delta_color(delta: f32, max_delta: f32) -> [f32; 4] {
+    let deep = delta.abs() >= max_delta * 0.5;
+    match (delta < 0.0, deep) {
+        (true, false) => SHALLOW_CUT_COLOR,
+        (true, true) => DEEP_CUT_COLOR,
+        (false, false) => SHALLOW_FILL_COLOR,
+        (false, true) => DEEP_FILL_COLOR,
+    }
 }
 
 fn compute_triangle_mesh_normals(primitive: &TriangleMesh) -> Vec<Vec3> {
@@ -841,7 +969,7 @@ mod tests {
             name: None,
         };
 
-        let standard = terrain_mesh_asset(&terrain, TerrainVisualizationState::default());
+        let standard = terrain_mesh_asset(&terrain, TerrainVisualizationState::default(), None);
         assert!(standard.attribute(Mesh::ATTRIBUTE_COLOR).is_none());
 
         let visualized = terrain_mesh_asset(
@@ -850,6 +978,7 @@ mod tests {
                 mode: TerrainVisualizationMode::Slope,
                 elevation_band_width: 1.0,
             },
+            None,
         );
         let colors = visualized
             .attribute(Mesh::ATTRIBUTE_COLOR)
@@ -858,6 +987,50 @@ mod tests {
             VertexAttributeValues::Float32x4(values) => assert_eq!(values.len(), 3),
             other => panic!("unexpected color attribute format: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cut_fill_visualization_colors_cut_and_fill_faces() {
+        let existing = TriangleMesh {
+            vertices: vec![
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 1.0),
+                Vec3::new(2.0, 1.0, 0.0),
+                Vec3::new(3.0, 1.0, 0.0),
+                Vec3::new(2.0, 1.0, 1.0),
+            ],
+            faces: vec![[0, 1, 2], [3, 4, 5]],
+            normals: None,
+            name: None,
+        };
+        let proposed = TriangleMesh {
+            vertices: vec![
+                Vec3::new(0.0, 0.5, 0.0),
+                Vec3::new(1.0, 0.5, 0.0),
+                Vec3::new(0.0, 0.5, 1.0),
+                Vec3::new(2.0, 1.5, 0.0),
+                Vec3::new(3.0, 1.5, 0.0),
+                Vec3::new(2.0, 1.5, 1.0),
+            ],
+            faces: vec![[0, 1, 2], [3, 4, 5]],
+            normals: None,
+            name: None,
+        };
+
+        let map = cut_fill_visualization_for_mesh(
+            &existing,
+            CutFillVisualizationInput {
+                comparison: CutFillVisualizationComparison::ProposedSurface(&proposed),
+                boundary: &[],
+            },
+        );
+
+        assert_eq!(map.len(), 2);
+        assert!(map[0].value < 0.0);
+        assert!(map[1].value > 0.0);
+        assert_eq!(map[0].color, DEEP_CUT_COLOR);
+        assert_eq!(map[1].color, DEEP_FILL_COLOR);
     }
 
     #[test]

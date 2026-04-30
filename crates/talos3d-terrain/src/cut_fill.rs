@@ -1,5 +1,5 @@
-use bevy::prelude::Vec2;
-use talos3d_core::plugins::modeling::primitives::TriangleMesh;
+use bevy::prelude::{Resource, Vec2};
+use talos3d_core::plugins::{identity::ElementId, modeling::primitives::TriangleMesh};
 
 use crate::generation::sample_surface_elevation;
 
@@ -11,6 +11,27 @@ pub struct CutFillResult {
     pub fill_volume: f64,
     pub net_volume: f64,
     pub sample_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CutFillAnalysisTarget {
+    ProposedSurface(ElementId),
+    Datum(f32),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CutFillAnalysisSummary {
+    pub existing_surface_id: ElementId,
+    pub target: CutFillAnalysisTarget,
+    pub result: CutFillResult,
+    pub sample_spacing: f32,
+    pub boundary_vertex_count: usize,
+}
+
+#[derive(Resource, Debug, Clone, Default, PartialEq)]
+pub struct CutFillAnalysisPanelState {
+    pub visible: bool,
+    pub summary: Option<CutFillAnalysisSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
