@@ -165,6 +165,16 @@ pub struct PromotionPlan {
     pub validation: PromotionValidationRequirements,
     #[serde(default)]
     pub provenance: PromotionProvenance,
+    /// External-context requirements harvested from boundary-spanning
+    /// relations during PP-A2DB-2 classification. These describe what
+    /// the eventual Definition's instantiation requires from its
+    /// surrounding context (host walls, advisory adjacencies, etc.).
+    /// Slice C will mirror them onto
+    /// `Definition.interface.external_context_requirements`; for now
+    /// they live on the plan so emission and downstream Preview can
+    /// inspect them without touching the Definition data model.
+    #[serde(default)]
+    pub external_context_requirements: Vec<ExternalContextRequirement>,
 }
 
 impl PromotionPlan {
@@ -180,6 +190,7 @@ impl PromotionPlan {
             source_replacement: SourceReplacementPolicy::default(),
             validation: PromotionValidationRequirements::default(),
             provenance: PromotionProvenance::default(),
+            external_context_requirements: Vec::new(),
         }
     }
 
@@ -698,6 +709,12 @@ pub struct SemanticAssemblyPromotionInput {
     /// assembly (the assembly itself or a source member). Candidates
     /// for `SemanticRelationTemplate` on the promoted Definition.
     pub internal_relations: Vec<InternalRelationSnapshot>,
+    /// Caller-provided descriptor classification rules used by
+    /// PP-A2DB-2 slice B to classify each preserved relation. Slice C
+    /// will populate this from the live capability registry; slice B
+    /// keeps it explicit so the adapter remains deterministic and
+    /// unit-testable.
+    pub relation_classification: RelationClassificationRules,
     /// Original assembly-level parameters carried into the promoted
     /// Definition's provenance (PP-A2DB-1 trivially passes them
     /// through; rich parameter inference lands later).
@@ -823,9 +840,11 @@ pub struct SemanticRelationTemplate {
 /// A relation that the adapter could NOT lift into a template
 /// because at least one endpoint references something outside the
 /// promoted Definition (a sibling assembly, an unrelated authored
-/// entity, etc.). Slice A surfaces them for preview audit; slice B
-/// will replace this with descriptor-backed
-/// `ExternalRelationClassification`.
+/// entity, etc.). PP-A2DB-2 slice B classifies each entry through
+/// `RelationClassificationRules` into one of the four agreement-
+/// defined categories; entries with no matching descriptor stay
+/// `classification: None` and surface a
+/// `MigrationWarning::UnknownRelationDescriptor`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreservedRelation {
     pub relation_id: ElementId,
@@ -834,6 +853,84 @@ pub struct PreservedRelation {
     pub relation_type: String,
     #[serde(default)]
     pub parameters: serde_json::Value,
+    /// Classification assigned by `RelationClassificationRules` during
+    /// promotion. `None` means the descriptor was unknown to the
+    /// caller's rules (the agreement requires this to surface as a
+    /// warning, not as a silent `HostContract`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<ExternalRelationClassification>,
+}
+
+/// Per-relation classification per the
+/// `ASSEMBLY_TO_DEFINITION_BRIDGE_AGREEMENT.md` "External Relation
+/// Requirements" section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExternalRelationClassification {
+    /// The external relation describes a hosting contract: the
+    /// promoted Definition must be hosted by something that satisfies
+    /// the relation. Slice C binds this into the existing hosting-
+    /// contract substrate (ADR-044) and produces a required hosting
+    /// contract on `Definition.interface`.
+    HostContract,
+    /// The Definition's instantiation requires a satisfying context
+    /// (e.g. an adjacent room, a parent assembly). Stored in
+    /// `Definition.interface.external_context_requirements` (slice C);
+    /// surfaced today via `PromotionPlan.external_context_requirements`.
+    RequiredContext,
+    /// The Definition's instantiation may benefit from but does not
+    /// require the context. Same storage as `RequiredContext`; the
+    /// classification differentiates validation severity.
+    AdvisoryContext,
+    /// The relation has no Definition-level meaning post-promotion.
+    /// Drop with audit, never silently — PP-A2DB-2 emits a
+    /// `MigrationWarning::ExternalRelationDropped` so the audit trail
+    /// is preserved.
+    DropWithAudit,
+}
+
+/// One external-context requirement carried on the `PromotionPlan`
+/// (and, slice C, on `Definition.interface.external_context_requirements`).
+/// Surfaces both for preview UI and for placement-time validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalContextRequirement {
+    /// Relation type the external endpoint is expected to satisfy.
+    pub relation_type: String,
+    /// Classification per the agreement.
+    pub classification: ExternalRelationClassification,
+    /// Endpoint inside the promoted Definition that the requirement
+    /// is anchored to (which slot or `SelfRoot`).
+    pub endpoint_in_definition: RelationEndpoint,
+    /// Optional descriptor id that triggered this classification (for
+    /// UI / audit surfacing). `None` for descriptor-less defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor_id: Option<String>,
+    /// Original `SemanticRelation` `ElementId` so downstream tooling
+    /// can correlate the requirement back to the source relation.
+    pub source_relation_id: ElementId,
+}
+
+/// Caller-provided descriptor classification rules. Slice B accepts
+/// these on the input snapshot so adapters stay deterministic and
+/// unit-testable; slice C will populate this from the live capability
+/// registry's relation/role descriptors during gather.
+///
+/// The `descriptor_id` keys match a relation's `relation_type` (or a
+/// descriptor id encoded into a relation parameter, slice C will
+/// formalize this) — for slice B we use the `relation_type` directly.
+#[derive(Debug, Clone, Default)]
+pub struct RelationClassificationRules {
+    /// Map from a relation descriptor id (today: relation_type) to
+    /// its classification. Lookup misses default to
+    /// `default_unknown`.
+    pub by_descriptor: HashMap<String, ExternalRelationClassification>,
+    /// What to do when a relation's descriptor is not in the map.
+    /// Per the agreement, the safe default is `AdvisoryContext` or
+    /// `DropWithAudit`; both options surface the unknown via a
+    /// `MigrationWarning::UnknownRelationDescriptor`. Default is
+    /// `Some(AdvisoryContext)` — caller can disable defaulting by
+    /// setting this to `None`, which leaves
+    /// `PreservedRelation.classification = None`.
+    pub default_unknown: Option<ExternalRelationClassification>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -875,6 +972,24 @@ pub enum OrphanReason {
 pub enum MigrationWarning {
     DuplicateRoleIndexed { role: String, count: usize },
     CapabilityProjectionOutdated { detail: String },
+    /// PP-A2DB-2 slice B: a preserved relation's descriptor is not
+    /// present in the caller's `RelationClassificationRules`. Per the
+    /// agreement this is a hard "do not silently classify" condition;
+    /// the warning surfaces the relation so the user (or agent) can
+    /// either register a descriptor or accept the default fallback.
+    UnknownRelationDescriptor {
+        relation_id: ElementId,
+        relation_type: String,
+    },
+    /// PP-A2DB-2 slice B: a preserved relation was classified as
+    /// `DropWithAudit`. Recorded separately from
+    /// `UnknownRelationDescriptor` so audit consumers can distinguish
+    /// "intentionally dropped" from "unknown descriptor".
+    ExternalRelationDropped {
+        relation_id: ElementId,
+        relation_type: String,
+        reason: String,
+    },
 }
 
 /// The flat-assembly source adapter. Produces a compound
@@ -1153,6 +1268,7 @@ impl SemanticAssemblyPromotionSource {
         // recomputation.
         let mut candidate_relation_templates: Vec<SemanticRelationTemplate> = Vec::new();
         let mut preserved_relations: Vec<PreservedRelation> = Vec::new();
+        let mut external_context_requirements: Vec<ExternalContextRequirement> = Vec::new();
         for relation in &input.internal_relations {
             let subject = classify_relation_endpoint(
                 relation.source,
@@ -1164,7 +1280,7 @@ impl SemanticAssemblyPromotionSource {
                 input.assembly_id,
                 &slot_lookup,
             );
-            match (subject, object) {
+            match (subject.clone(), object.clone()) {
                 (Some(subject), Some(object)) => {
                     candidate_relation_templates.push(SemanticRelationTemplate {
                         subject,
@@ -1175,16 +1291,78 @@ impl SemanticAssemblyPromotionSource {
                     });
                 }
                 _ => {
+                    // PP-A2DB-2 slice B: classify the preserved
+                    // relation through the caller-provided rules.
+                    let descriptor_lookup = input
+                        .relation_classification
+                        .by_descriptor
+                        .get(&relation.relation_type)
+                        .copied();
+                    let classification = match descriptor_lookup {
+                        Some(c) => Some(c),
+                        None => {
+                            warnings.push(MigrationWarning::UnknownRelationDescriptor {
+                                relation_id: relation.relation_id,
+                                relation_type: relation.relation_type.clone(),
+                            });
+                            input.relation_classification.default_unknown
+                        }
+                    };
+                    let descriptor_id = if descriptor_lookup.is_some() {
+                        Some(relation.relation_type.clone())
+                    } else {
+                        None
+                    };
+
+                    // Endpoint anchored inside the Definition: prefer
+                    // the resolved (non-None) endpoint side so the
+                    // requirement records "what slot/self does the
+                    // external relation hang off of inside the new
+                    // Definition."
+                    let endpoint_in_definition = subject
+                        .clone()
+                        .or(object.clone())
+                        .unwrap_or(RelationEndpoint::SelfRoot);
+
+                    if let Some(c) = classification {
+                        match c {
+                            ExternalRelationClassification::HostContract
+                            | ExternalRelationClassification::RequiredContext
+                            | ExternalRelationClassification::AdvisoryContext => {
+                                external_context_requirements.push(ExternalContextRequirement {
+                                    relation_type: relation.relation_type.clone(),
+                                    classification: c,
+                                    endpoint_in_definition: endpoint_in_definition.clone(),
+                                    descriptor_id: descriptor_id.clone(),
+                                    source_relation_id: relation.relation_id,
+                                });
+                            }
+                            ExternalRelationClassification::DropWithAudit => {
+                                warnings.push(MigrationWarning::ExternalRelationDropped {
+                                    relation_id: relation.relation_id,
+                                    relation_type: relation.relation_type.clone(),
+                                    reason: "descriptor classification: DropWithAudit".into(),
+                                });
+                            }
+                        }
+                    }
+
                     preserved_relations.push(PreservedRelation {
                         relation_id: relation.relation_id,
                         source: relation.source,
                         target: relation.target,
                         relation_type: relation.relation_type.clone(),
                         parameters: relation.parameters.clone(),
+                        classification,
                     });
                 }
             }
         }
+
+        // Plumb the external-context requirements onto the plan so
+        // emission and downstream Preview can inspect them. Slice C
+        // will mirror them onto Definition.interface.
+        plan.external_context_requirements = external_context_requirements;
 
         let migration_diff = SemanticGraphMigrationDiff {
             retargeted_assemblies,
@@ -1766,6 +1944,7 @@ mod tests {
             },
             external_graph: ExternalGraph::default(),
             internal_relations: Vec::new(),
+            relation_classification: RelationClassificationRules::default(),
             source_parameters: serde_json::Value::Null,
             source_label: "Test Assembly".into(),
         }
@@ -2208,6 +2387,7 @@ mod tests {
                 target: elem(99),
                 relation_type: "anchored_to".into(),
                 parameters: serde_json::Value::Null,
+                classification: None,
             }],
             warnings: Vec::new(),
         };
@@ -2223,5 +2403,324 @@ mod tests {
             back.candidate_relation_templates[0].object,
             RelationEndpoint::Slot("frame".into())
         );
+    }
+
+    // === PP-A2DB-2 slice B: external relation classification ===============
+
+    fn rules_with(
+        rules: &[(&str, ExternalRelationClassification)],
+        default_unknown: Option<ExternalRelationClassification>,
+    ) -> RelationClassificationRules {
+        let mut by_descriptor = HashMap::new();
+        for (k, v) in rules {
+            by_descriptor.insert((*k).to_string(), *v);
+        }
+        RelationClassificationRules {
+            by_descriptor,
+            default_unknown,
+        }
+    }
+
+    #[test]
+    fn slice_b_classifies_host_contract_relation_into_external_context_requirement() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Window".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        // Boundary-spanning: source = source-member, target = outside.
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "hosted_on_wall".into(),
+            parameters: serde_json::Value::Null,
+        });
+        input.relation_classification = rules_with(
+            &[(
+                "hosted_on_wall",
+                ExternalRelationClassification::HostContract,
+            )],
+            None,
+        );
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        // Plan carries the external-context requirement.
+        assert_eq!(out.plan.external_context_requirements.len(), 1);
+        let req = &out.plan.external_context_requirements[0];
+        assert_eq!(req.relation_type, "hosted_on_wall");
+        assert_eq!(
+            req.classification,
+            ExternalRelationClassification::HostContract
+        );
+        assert_eq!(req.endpoint_in_definition, RelationEndpoint::Slot("frame".into()));
+        assert_eq!(req.descriptor_id.as_deref(), Some("hosted_on_wall"));
+        assert_eq!(req.source_relation_id, elem(30));
+
+        // Migration diff records the classification on the preserved relation.
+        let preserved = &out.migration_diff.preserved_relations[0];
+        assert_eq!(
+            preserved.classification,
+            Some(ExternalRelationClassification::HostContract)
+        );
+        // No UnknownRelationDescriptor warning when the descriptor is known.
+        assert!(!out
+            .migration_diff
+            .warnings
+            .iter()
+            .any(|w| matches!(w, MigrationWarning::UnknownRelationDescriptor { .. })));
+    }
+
+    #[test]
+    fn slice_b_classifies_required_and_advisory_context_into_requirements() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "needs_room".into(),
+            parameters: serde_json::Value::Null,
+        });
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(31),
+            source: elem(1),
+            target: elem(98),
+            relation_type: "near_window".into(),
+            parameters: serde_json::Value::Null,
+        });
+        input.relation_classification = rules_with(
+            &[
+                (
+                    "needs_room",
+                    ExternalRelationClassification::RequiredContext,
+                ),
+                (
+                    "near_window",
+                    ExternalRelationClassification::AdvisoryContext,
+                ),
+            ],
+            None,
+        );
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        let classifications: Vec<_> = out
+            .plan
+            .external_context_requirements
+            .iter()
+            .map(|r| (r.relation_type.as_str(), r.classification))
+            .collect();
+        assert!(classifications.contains(&(
+            "needs_room",
+            ExternalRelationClassification::RequiredContext,
+        )));
+        assert!(classifications.contains(&(
+            "near_window",
+            ExternalRelationClassification::AdvisoryContext,
+        )));
+    }
+
+    #[test]
+    fn slice_b_drop_with_audit_does_not_emit_requirement_but_records_warning() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "ephemeral_layout_hint".into(),
+            parameters: serde_json::Value::Null,
+        });
+        input.relation_classification = rules_with(
+            &[(
+                "ephemeral_layout_hint",
+                ExternalRelationClassification::DropWithAudit,
+            )],
+            None,
+        );
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        // No external-context requirement emitted for DropWithAudit.
+        assert!(out.plan.external_context_requirements.is_empty());
+        // But the preserved relation still records the classification
+        // and an ExternalRelationDropped warning surfaces.
+        let preserved = &out.migration_diff.preserved_relations[0];
+        assert_eq!(
+            preserved.classification,
+            Some(ExternalRelationClassification::DropWithAudit)
+        );
+        assert_eq!(
+            out.migration_diff
+                .warnings
+                .iter()
+                .filter(|w| matches!(w, MigrationWarning::ExternalRelationDropped { .. }))
+                .count(),
+            1,
+        );
+    }
+
+    #[test]
+    fn slice_b_unknown_descriptor_warns_and_falls_back_to_default() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "mystery_relation".into(),
+            parameters: serde_json::Value::Null,
+        });
+        // Empty rules; default unknowns to AdvisoryContext.
+        input.relation_classification =
+            rules_with(&[], Some(ExternalRelationClassification::AdvisoryContext));
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        // Warning emitted.
+        assert_eq!(
+            out.migration_diff
+                .warnings
+                .iter()
+                .filter(|w| matches!(w, MigrationWarning::UnknownRelationDescriptor { .. }))
+                .count(),
+            1,
+        );
+        // Classification fell back to AdvisoryContext...
+        assert_eq!(
+            out.migration_diff.preserved_relations[0].classification,
+            Some(ExternalRelationClassification::AdvisoryContext),
+        );
+        // ...and a requirement was emitted on the plan.
+        assert_eq!(out.plan.external_context_requirements.len(), 1);
+        // descriptor_id is None because the lookup missed (the
+        // requirement still records relation_type via its primary
+        // field).
+        assert!(out.plan.external_context_requirements[0].descriptor_id.is_none());
+    }
+
+    #[test]
+    fn slice_b_unknown_descriptor_with_no_default_leaves_classification_none() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "mystery_relation".into(),
+            parameters: serde_json::Value::Null,
+        });
+        // No fallback — strict mode.
+        input.relation_classification = rules_with(&[], None);
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        // Warning fired but no classification assigned and no
+        // requirement emitted.
+        assert!(out
+            .migration_diff
+            .warnings
+            .iter()
+            .any(|w| matches!(w, MigrationWarning::UnknownRelationDescriptor { .. })));
+        assert!(out.migration_diff.preserved_relations[0]
+            .classification
+            .is_none());
+        assert!(out.plan.external_context_requirements.is_empty());
+    }
+
+    #[test]
+    fn slice_b_classification_does_not_apply_to_internal_relations_lifted_into_templates() {
+        // Sanity check: the classifier only runs on the
+        // preserved_relations branch. A relation whose endpoints
+        // both map cleanly into the Definition becomes a template
+        // and never touches the rules map. Ensures we don't
+        // double-classify or accidentally drop templates.
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(2),
+            relation_type: "hinges_on".into(),
+            parameters: serde_json::Value::Null,
+        });
+        // Rules say `hinges_on` is HostContract. This MUST NOT apply
+        // since hinges_on is fully internal.
+        input.relation_classification = rules_with(
+            &[("hinges_on", ExternalRelationClassification::HostContract)],
+            None,
+        );
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        assert_eq!(out.migration_diff.candidate_relation_templates.len(), 1);
+        assert!(out.migration_diff.preserved_relations.is_empty());
+        assert!(out.plan.external_context_requirements.is_empty());
+        // No UnknownRelationDescriptor warning (the rule isn't even
+        // consulted) and no ExternalRelationDropped warning.
+        assert!(!out
+            .migration_diff
+            .warnings
+            .iter()
+            .any(|w| matches!(w, MigrationWarning::UnknownRelationDescriptor { .. })
+                || matches!(w, MigrationWarning::ExternalRelationDropped { .. })));
+    }
+
+    #[test]
+    fn slice_b_external_context_requirement_round_trips_through_serde() {
+        let req = ExternalContextRequirement {
+            relation_type: "hosted_on_wall".into(),
+            classification: ExternalRelationClassification::HostContract,
+            endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
+            descriptor_id: Some("hosted_on_wall".into()),
+            source_relation_id: elem(30),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ExternalContextRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, req);
     }
 }
