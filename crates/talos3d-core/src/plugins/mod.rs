@@ -45,6 +45,7 @@ pub mod palette;
 pub mod perf_stats;
 pub mod persistence;
 pub mod promotion;
+pub mod promotion_world;
 pub mod property_edit;
 pub mod recipe_drafts;
 pub mod refinement;
