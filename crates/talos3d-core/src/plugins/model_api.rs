@@ -14,6 +14,10 @@ use crate::capability_registry::CapabilityRegistry;
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
 use crate::curation::MaterialSpecBody;
 use crate::plugins::authoring_guidance::AuthoringGuidance;
+#[cfg(feature = "model-api")]
+use crate::plugins::hosting_contracts::{
+    HostingContractKindId, HostingValidationRequest, HostingValidationResult,
+};
 use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
 use crate::plugins::identity::ElementIdAllocator;
@@ -2025,6 +2029,14 @@ enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Vec<ValidationFindingInfo>>>,
     },
+    OccurrenceValidateHostFit {
+        request: ValidateHostFitRequest,
+        response: oneshot::Sender<ApiResult<HostingValidationResult>>,
+    },
+    DefinitionValidateHostContract {
+        request: ValidateDefinitionHostContractRequest,
+        response: oneshot::Sender<ApiResult<HostingValidationResult>>,
+    },
     ExplainFinding {
         finding_id: String,
         response: oneshot::Sender<ApiResult<serde_json::Value>>,
@@ -2963,6 +2975,12 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_run_validation(world, element_id));
+        }
+        ModelApiRequest::OccurrenceValidateHostFit { request, response } => {
+            let _ = response.send(handle_occurrence_validate_host_fit(world, request));
+        }
+        ModelApiRequest::DefinitionValidateHostContract { request, response } => {
+            let _ = response.send(handle_definition_validate_host_contract(world, request));
         }
         ModelApiRequest::ExplainFinding {
             finding_id,
@@ -4975,6 +4993,32 @@ impl ModelApiServer {
                 finding_id,
                 response,
             })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_occurrence_validate_host_fit(
+        &self,
+        request: ValidateHostFitRequest,
+    ) -> ApiResult<HostingValidationResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::OccurrenceValidateHostFit { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_definition_validate_host_contract(
+        &self,
+        request: ValidateDefinitionHostContractRequest,
+    ) -> ApiResult<HostingValidationResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DefinitionValidateHostContract { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -7108,6 +7152,29 @@ struct OccurrenceUpdateOverridesRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OccurrenceResolveRequest {
     element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateHostFitRequest {
+    contract_kind: String,
+    host_element_id: u64,
+    hosted_element_id: u64,
+    #[serde(default)]
+    contract_parameters: Value,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateDefinitionHostContractRequest {
+    definition_id: String,
+    contract_kind: String,
+    host_element_id: u64,
+    hosted_element_id: u64,
+    #[serde(default)]
+    contract_parameters: Value,
 }
 
 #[cfg(feature = "model-api")]
@@ -9589,6 +9656,21 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "definition.validate_host_contract",
+        description = "Validate a hosted Definition against a registered hosting contract. Requires: definition_id, contract_kind, host_element_id, hosted_element_id. Optional: contract_parameters."
+    )]
+    async fn definition_validate_host_contract_tool(
+        &self,
+        Parameters(params): Parameters<ValidateDefinitionHostContractRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_definition_validate_host_contract(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
         name = "definition.compile",
         description = "Compile a dependency summary for either a draft or a published definition. Requires either draft_id or definition_id. Optionally: library_id for library definitions."
     )]
@@ -9760,6 +9842,21 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_update_occurrence_overrides(params.element_id, params.overrides)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "occurrence.validate_host_fit",
+        description = "Validate a hosted occurrence against a registered hosting contract. Requires: contract_kind, host_element_id, hosted_element_id. Optional: contract_parameters."
+    )]
+    async fn occurrence_validate_host_fit_tool(
+        &self,
+        Parameters(params): Parameters<ValidateHostFitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_occurrence_validate_host_fit(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
@@ -13238,6 +13335,10 @@ fn parse_param_type(
         "Numeric" => Ok(ParamType::Numeric),
         "Boolean" => Ok(ParamType::Boolean),
         "StringVal" => Ok(ParamType::StringVal),
+        "AxisRef" => Ok(ParamType::AxisRef),
+        "ParameterRef" => Err(
+            "ParameterRef parameters must provide param_type as an object with side".to_string(),
+        ),
         "Enum" => Err("Enum parameters must provide param_type as an object or array".to_string()),
         other => Err(format!("Unsupported param_type '{other}'")),
     }
@@ -13247,7 +13348,7 @@ fn parse_param_type(
 fn parse_param_type_value(
     value: &Value,
 ) -> Result<crate::plugins::modeling::definition::ParamType, String> {
-    use crate::plugins::modeling::definition::ParamType;
+    use crate::plugins::modeling::definition::{BindingSide, ParamType};
 
     if let Some(string) = value.as_str() {
         return parse_param_type(Some(&Value::String(string.to_string())));
@@ -13262,6 +13363,23 @@ fn parse_param_type_value(
             "Numeric" => Ok(ParamType::Numeric),
             "Boolean" => Ok(ParamType::Boolean),
             "StringVal" => Ok(ParamType::StringVal),
+            "AxisRef" => Ok(ParamType::AxisRef),
+            "ParameterRef" => {
+                let side = object
+                    .get("side")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| "ParameterRef param_type requires a 'side'".to_string())?;
+                let side = match side {
+                    "Host" => BindingSide::Host,
+                    "Hosted" => BindingSide::Hosted,
+                    other => {
+                        return Err(format!(
+                            "ParameterRef side must be Host or Hosted, got '{other}'"
+                        ));
+                    }
+                };
+                Ok(ParamType::ParameterRef { side })
+            }
             "Enum" => {
                 let variants = object
                     .get("variants")
@@ -15429,6 +15547,52 @@ pub fn handle_update_occurrence_overrides(
 
     flush_model_api_write_pipeline(world);
     Ok(after_json)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_occurrence_validate_host_fit(
+    world: &World,
+    request: ValidateHostFitRequest,
+) -> ApiResult<HostingValidationResult> {
+    let contract_kind = HostingContractKindId(request.contract_kind);
+    let registry = world
+        .get_resource::<CapabilityRegistry>()
+        .ok_or_else(|| "CapabilityRegistry is not available".to_string())?;
+    let descriptor = registry
+        .hosting_contract_descriptor(&contract_kind)
+        .ok_or_else(|| format!("Hosting contract '{}' is not registered", contract_kind.0))?;
+
+    let validation_request = HostingValidationRequest {
+        contract_kind,
+        host_element_id: ElementId(request.host_element_id),
+        hosted_element_id: ElementId(request.hosted_element_id),
+        contract_parameters: request.contract_parameters,
+    };
+    Ok((descriptor.validator)(validation_request, world))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_definition_validate_host_contract(
+    world: &World,
+    request: ValidateDefinitionHostContractRequest,
+) -> ApiResult<HostingValidationResult> {
+    let definition_id = crate::plugins::modeling::definition::DefinitionId(request.definition_id);
+    let definitions = world
+        .get_resource::<crate::plugins::modeling::definition::DefinitionRegistry>()
+        .ok_or_else(|| "DefinitionRegistry is not available".to_string())?;
+    definitions
+        .get(&definition_id)
+        .ok_or_else(|| format!("Definition '{}' not found", definition_id.0))?;
+
+    handle_occurrence_validate_host_fit(
+        world,
+        ValidateHostFitRequest {
+            contract_kind: request.contract_kind,
+            host_element_id: request.host_element_id,
+            hosted_element_id: request.hosted_element_id,
+            contract_parameters: request.contract_parameters,
+        },
+    )
 }
 
 #[cfg(feature = "model-api")]

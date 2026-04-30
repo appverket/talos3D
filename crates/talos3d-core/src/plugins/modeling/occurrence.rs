@@ -980,6 +980,8 @@ fn validate_value_against_param_type(
         ParamType::Numeric if value.is_number() => Ok(()),
         ParamType::Boolean if value.is_boolean() => Ok(()),
         ParamType::StringVal if value.is_string() => Ok(()),
+        ParamType::AxisRef if value.is_string() => Ok(()),
+        ParamType::ParameterRef { .. } if value.is_string() => Ok(()),
         ParamType::Enum(variants) => {
             let Some(current) = value.as_str() else {
                 return Err(format!("{context} must resolve to an enum string"));
@@ -996,6 +998,12 @@ fn validate_value_against_param_type(
         ParamType::Numeric => Err(format!("{context} must resolve to a number")),
         ParamType::Boolean => Err(format!("{context} must resolve to a boolean")),
         ParamType::StringVal => Err(format!("{context} must resolve to a string")),
+        ParamType::AxisRef => Err(format!(
+            "{context} must resolve to a host-frame axis reference"
+        )),
+        ParamType::ParameterRef { side } => Err(format!(
+            "{context} must resolve to a parameter reference on the {side:?} side"
+        )),
     }
 }
 

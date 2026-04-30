@@ -133,6 +133,17 @@ pub enum ParamType {
     Enum(Vec<String>),
     /// Arbitrary UTF-8 text.
     StringVal,
+    /// Reference to a declared host-frame axis.
+    AxisRef,
+    /// Reference to a parameter on either the host or hosted side of a contract.
+    ParameterRef { side: BindingSide },
+}
+
+/// Which side of a hosting contract a parameter reference targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BindingSide {
+    Host,
+    Hosted,
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1180,8 @@ fn validate_param_type(param_type: &ParamType, value: &Value, context: &str) -> 
         ParamType::Numeric if value.is_number() => Ok(()),
         ParamType::Boolean if value.is_boolean() => Ok(()),
         ParamType::StringVal if value.is_string() => Ok(()),
+        ParamType::AxisRef if value.is_string() => Ok(()),
+        ParamType::ParameterRef { .. } if value.is_string() => Ok(()),
         ParamType::Enum(variants) => {
             let Some(string_value) = value.as_str() else {
                 return Err(format!("{context} must be a string enum value"));
@@ -1185,6 +1198,10 @@ fn validate_param_type(param_type: &ParamType, value: &Value, context: &str) -> 
         ParamType::Numeric => Err(format!("{context} must be numeric")),
         ParamType::Boolean => Err(format!("{context} must be boolean")),
         ParamType::StringVal => Err(format!("{context} must be a string")),
+        ParamType::AxisRef => Err(format!("{context} must be a host-frame axis reference")),
+        ParamType::ParameterRef { side } => Err(format!(
+            "{context} must be a parameter reference on the {side:?} side"
+        )),
     }
 }
 
@@ -1311,5 +1328,73 @@ mod adr_026_phase_6c_tests {
     fn update_policy_default_is_always() {
         let pol: UpdatePolicy = Default::default();
         assert_eq!(pol, UpdatePolicy::Always);
+    }
+}
+
+#[cfg(test)]
+mod pp_dhost_param_type_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn existing_param_types_still_deserialize_from_library_json() {
+        for (json_value, expected) in [
+            (json!("Numeric"), ParamType::Numeric),
+            (json!("Boolean"), ParamType::Boolean),
+            (json!("StringVal"), ParamType::StringVal),
+            (
+                json!({"Enum": ["a", "b"]}),
+                ParamType::Enum(vec!["a".into(), "b".into()]),
+            ),
+        ] {
+            let parsed: ParamType = serde_json::from_value(json_value).unwrap();
+            assert_eq!(parsed, expected);
+        }
+    }
+
+    #[test]
+    fn hosting_reference_param_types_round_trip() {
+        for param_type in [
+            ParamType::AxisRef,
+            ParamType::ParameterRef {
+                side: BindingSide::Host,
+            },
+            ParamType::ParameterRef {
+                side: BindingSide::Hosted,
+            },
+        ] {
+            let json = serde_json::to_value(&param_type).unwrap();
+            let parsed: ParamType = serde_json::from_value(json).unwrap();
+            assert_eq!(parsed, param_type);
+        }
+    }
+
+    #[test]
+    fn hosting_reference_param_types_validate_string_references() {
+        let axis = ParameterDef {
+            name: "host_normal_axis".into(),
+            param_type: ParamType::AxisRef,
+            default_value: json!("host.normal"),
+            override_policy: OverridePolicy::Locked,
+            metadata: ParameterMetadata::default(),
+        };
+        axis.validate_value(&json!("host.normal"), "axis").unwrap();
+        assert!(axis.validate_value(&json!(42), "axis").is_err());
+
+        let parameter_ref = ParameterDef {
+            name: "host_wall_thickness".into(),
+            param_type: ParamType::ParameterRef {
+                side: BindingSide::Host,
+            },
+            default_value: json!("wall_thickness"),
+            override_policy: OverridePolicy::Locked,
+            metadata: ParameterMetadata::default(),
+        };
+        parameter_ref
+            .validate_value(&json!("wall_thickness"), "parameter reference")
+            .unwrap();
+        assert!(parameter_ref
+            .validate_value(&json!(false), "parameter reference")
+            .is_err());
     }
 }

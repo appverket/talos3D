@@ -24,6 +24,7 @@ pub mod grid;
 pub mod guide_line;
 pub mod handles;
 pub mod history;
+pub mod hosting_contracts;
 pub mod icons;
 pub mod identity;
 pub mod import;
