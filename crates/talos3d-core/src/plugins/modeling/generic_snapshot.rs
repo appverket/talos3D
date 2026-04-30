@@ -11,7 +11,9 @@ use crate::{
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id, find_entity_by_element_id},
         identity::ElementId,
-        materials::{material_assignment_to_value, MaterialAssignment},
+        materials::{
+            material_assignment_option_from_value, material_assignment_to_value, MaterialAssignment,
+        },
         modeling::primitives::ShapeRotation,
     },
 };
@@ -122,12 +124,32 @@ where
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         let new_prim = self.primitive.set_property(property_name, value)?;
         Ok(PrimitiveSnapshot {
             element_id: self.element_id,
             primitive: new_prim,
             rotation: self.rotation,
             material_assignment: self.material_assignment.clone(),
+        }
+        .into())
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.material_assignment.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        Ok(PrimitiveSnapshot {
+            element_id: self.element_id,
+            primitive: self.primitive.clone(),
+            rotation: self.rotation,
+            material_assignment: assignment,
         }
         .into())
     }

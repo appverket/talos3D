@@ -15,6 +15,7 @@ use talos3d_core::{
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
+        materials::{material_assignment_option_from_value, MaterialAssignment},
         math::{draw_loop, rectangle_corners, scale_point_around_center},
         modeling::mesh_generation::NeedsMesh,
         snap::SnapKind,
@@ -35,11 +36,37 @@ const OUTLINE_PADDING_METRES: f32 = 0.03;
 const OPENING_PREVIEW_COLOR: Color = Color::srgba(0.35, 0.9, 1.0, 0.25);
 const OPENING_PREVIEW_DEPTH_BIAS_METRES: f32 = 0.01;
 
+fn sync_material_assignment(
+    world: &mut World,
+    entity: Entity,
+    assignment: &Option<MaterialAssignment>,
+) {
+    let mut entity_mut = world.entity_mut(entity);
+    if let Some(assignment) = assignment {
+        entity_mut.insert(assignment.clone());
+    } else {
+        entity_mut.remove::<MaterialAssignment>();
+    }
+}
+
+fn material_assignment_from_object(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<MaterialAssignment>, String> {
+    object
+        .get("material_assignment")
+        .or_else(|| object.get("material"))
+        .map(material_assignment_option_from_value)
+        .transpose()
+        .map(Option::flatten)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WallSnapshot {
     pub element_id: ElementId,
     pub wall: Wall,
     pub bim_data: BimData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_assignment: Option<MaterialAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +77,8 @@ pub struct OpeningSnapshot {
     pub parent_wall_element_id: ElementId,
     pub position_along_wall: f32,
     pub bim_data: BimData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_assignment: Option<MaterialAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +87,8 @@ pub struct BuildingPadSnapshot {
     pub building_pad: BuildingPad,
     #[serde(default)]
     pub excavation_volume: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_assignment: Option<MaterialAssignment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -120,6 +151,7 @@ impl AuthoredEntity for WallSnapshot {
                 thickness: self.wall.thickness,
             },
             bim_data: self.bim_data.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -143,6 +175,7 @@ impl AuthoredEntity for WallSnapshot {
                 thickness: self.wall.thickness,
             },
             bim_data: self.bim_data.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -167,6 +200,7 @@ impl AuthoredEntity for WallSnapshot {
                 thickness: self.wall.thickness,
             },
             bim_data: self.bim_data.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -209,6 +243,9 @@ impl AuthoredEntity for WallSnapshot {
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         let mut snapshot = self.clone();
         match property_name {
             "start" => snapshot.wall.start = wall_point_from_json(value)?,
@@ -222,6 +259,19 @@ impl AuthoredEntity for WallSnapshot {
                 ))
             }
         }
+        Ok(snapshot.into())
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.material_assignment.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        snapshot.material_assignment = assignment;
         Ok(snapshot.into())
     }
 
@@ -289,18 +339,22 @@ impl AuthoredEntity for WallSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
-        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+        let entity = if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             world
                 .entity_mut(entity)
                 .insert((self.wall.clone(), self.bim_data.clone(), NeedsMesh));
+            entity
         } else {
-            world.spawn((
-                self.element_id,
-                self.wall.clone(),
-                self.bim_data.clone(),
-                NeedsMesh,
-            ));
-        }
+            world
+                .spawn((
+                    self.element_id,
+                    self.wall.clone(),
+                    self.bim_data.clone(),
+                    NeedsMesh,
+                ))
+                .id()
+        };
+        sync_material_assignment(world, entity, &self.material_assignment);
     }
 
     fn apply_with_previous(&self, world: &mut World, previous: Option<&dyn AuthoredEntity>) {
@@ -324,6 +378,7 @@ impl AuthoredEntity for WallSnapshot {
                 self.bim_data.clone(),
                 wall_transform(&self.wall),
             ));
+            sync_material_assignment(world, entity, &self.material_assignment);
         } else {
             self.apply_to(world);
         }
@@ -399,6 +454,7 @@ impl AuthoredEntity for OpeningSnapshot {
             parent_wall_element_id: self.parent_wall_element_id,
             position_along_wall,
             bim_data: self.bim_data.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -436,6 +492,7 @@ impl AuthoredEntity for OpeningSnapshot {
             parent_wall_element_id: self.parent_wall_element_id,
             position_along_wall,
             bim_data: self.bim_data.clone(),
+            material_assignment: self.material_assignment.clone(),
         }
         .into()
     }
@@ -470,6 +527,9 @@ impl AuthoredEntity for OpeningSnapshot {
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         let mut snapshot = self.clone();
         match property_name {
             "width" => snapshot.opening.width = scalar_from_json(value)?,
@@ -496,6 +556,19 @@ impl AuthoredEntity for OpeningSnapshot {
                 ))
             }
         }
+        Ok(snapshot.into())
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.material_assignment.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        snapshot.material_assignment = assignment;
         Ok(snapshot.into())
     }
 
@@ -558,7 +631,7 @@ impl AuthoredEntity for OpeningSnapshot {
             return;
         };
 
-        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+        let entity = if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             world.entity_mut(entity).insert((
                 self.opening.clone(),
                 ParentWall {
@@ -567,17 +640,21 @@ impl AuthoredEntity for OpeningSnapshot {
                 },
                 self.bim_data.clone(),
             ));
+            entity
         } else {
-            world.spawn((
-                self.element_id,
-                self.opening.clone(),
-                ParentWall {
-                    wall_entity: parent_wall_entity,
-                    position_along_wall: self.position_along_wall,
-                },
-                self.bim_data.clone(),
-            ));
-        }
+            world
+                .spawn((
+                    self.element_id,
+                    self.opening.clone(),
+                    ParentWall {
+                        wall_entity: parent_wall_entity,
+                        position_along_wall: self.position_along_wall,
+                    },
+                    self.bim_data.clone(),
+                ))
+                .id()
+        };
+        sync_material_assignment(world, entity, &self.material_assignment);
 
         world.entity_mut(parent_wall_entity).insert(NeedsMesh);
     }
@@ -763,6 +840,9 @@ impl AuthoredEntity for BuildingPadSnapshot {
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         let mut snapshot = self.clone();
         match property_name {
             "pad_elevation" => snapshot.building_pad.pad_elevation = scalar_from_json(value)?,
@@ -776,6 +856,19 @@ impl AuthoredEntity for BuildingPadSnapshot {
         }
         validate_building_pad(&snapshot.building_pad)?;
         snapshot.excavation_volume = None;
+        Ok(snapshot.into())
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.material_assignment.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        snapshot.material_assignment = assignment;
         Ok(snapshot.into())
     }
 
@@ -832,22 +925,26 @@ impl AuthoredEntity for BuildingPadSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
-        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+        let entity = if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             world.entity_mut(entity).insert((
                 self.building_pad.clone(),
                 BuildingPadExcavation {
                     volume: self.excavation_volume,
                 },
             ));
+            entity
         } else {
-            world.spawn((
-                self.element_id,
-                self.building_pad.clone(),
-                BuildingPadExcavation {
-                    volume: self.excavation_volume,
-                },
-            ));
-        }
+            world
+                .spawn((
+                    self.element_id,
+                    self.building_pad.clone(),
+                    BuildingPadExcavation {
+                        volume: self.excavation_volume,
+                    },
+                ))
+                .id()
+        };
+        sync_material_assignment(world, entity, &self.material_assignment);
     }
 
     fn remove_from(&self, world: &mut World) {
@@ -889,6 +986,7 @@ impl AuthoredEntityFactory for WallFactory {
                 element_id,
                 wall: wall.clone(),
                 bim_data: bim_data.clone(),
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into(),
         )
@@ -934,6 +1032,7 @@ impl AuthoredEntityFactory for WallFactory {
                     .ok_or_else(|| "Missing required field 'thickness'".to_string())?,
             },
             bim_data: BimData::default(),
+            material_assignment: material_assignment_from_object(object)?,
         };
         validate_wall_geometry(&snapshot.wall)?;
         Ok(snapshot.into())
@@ -994,6 +1093,7 @@ impl AuthoredEntityFactory for WallFactory {
                     element_id: *element_id,
                     wall: wall.clone(),
                     bim_data: bim_data.clone(),
+                    material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
                 }
                 .center(),
             );
@@ -1059,6 +1159,7 @@ impl AuthoredEntityFactory for BuildingPadFactory {
                 element_id,
                 building_pad: building_pad.clone(),
                 excavation_volume,
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into(),
         )
@@ -1099,6 +1200,7 @@ impl AuthoredEntityFactory for BuildingPadFactory {
             element_id: world.resource::<ElementIdAllocator>().next_id(),
             building_pad,
             excavation_volume: None,
+            material_assignment: material_assignment_from_object(object)?,
         }
         .into())
     }
@@ -1191,6 +1293,7 @@ impl AuthoredEntityFactory for OpeningFactory {
                 parent_wall_element_id,
                 position_along_wall: parent_wall.position_along_wall,
                 bim_data: bim_data.clone(),
+                material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
             .into(),
         )
@@ -1262,6 +1365,7 @@ impl AuthoredEntityFactory for OpeningFactory {
                 .transpose()?
                 .ok_or_else(|| "Missing required field 'position_along_wall'".to_string())?,
             bim_data: BimData::default(),
+            material_assignment: material_assignment_from_object(object)?,
         };
         validate_opening_geometry(
             &snapshot.opening,
@@ -1682,6 +1786,7 @@ mod tests {
                 thickness: 0.2,
             },
             bim_data: BimData::default(),
+            material_assignment: None,
         };
 
         let fields = snapshot.property_fields();
@@ -1699,6 +1804,39 @@ mod tests {
             .expect("wall should expose computed length");
         assert_eq!(length.value, Some(PropertyValue::Scalar(4.0)));
         assert!(!length.editable);
+    }
+
+    #[test]
+    fn wall_material_assignment_can_be_set_through_property_json() {
+        let snapshot = WallSnapshot {
+            element_id: ElementId(9),
+            wall: Wall {
+                start: Vec2::new(1.0, 2.0),
+                end: Vec2::new(5.0, 2.0),
+                height: 3.0,
+                thickness: 0.2,
+            },
+            bim_data: BimData::default(),
+            material_assignment: None,
+        };
+        let assigned = snapshot
+            .set_property_json(
+                "material_assignment",
+                &serde_json::json!({ "type": "single", "spec": null, "render": "material_def.v1/mat.concrete" }),
+            )
+            .expect("material assignment property should parse");
+
+        assert_eq!(
+            assigned.material_assignment(),
+            Some(MaterialAssignment::new("mat.concrete"))
+        );
+        assert_eq!(
+            assigned
+                .set_property_json("material", &Value::Null)
+                .expect("null material assignment should clear")
+                .material_assignment(),
+            None
+        );
     }
 
     #[test]
@@ -1727,6 +1865,7 @@ mod tests {
                 thickness: 0.2,
             },
             bim_data: BimData::default(),
+            material_assignment: None,
         };
         let updated = WallSnapshot {
             element_id: ElementId(10),
@@ -1737,6 +1876,7 @@ mod tests {
                 thickness: 0.2,
             },
             bim_data: BimData::default(),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1766,6 +1906,7 @@ mod tests {
                 pad_elevation: 1.25,
             },
             excavation_volume: Some(12.3456),
+            material_assignment: None,
         };
 
         let fields = snapshot.property_fields();
@@ -1842,6 +1983,7 @@ mod tests {
                 thickness: 0.2,
             },
             bim_data: BimData::default(),
+            material_assignment: None,
         };
         let updated = WallSnapshot {
             element_id: ElementId(11),
@@ -1852,6 +1994,7 @@ mod tests {
                 thickness: 0.2,
             },
             bim_data: BimData::default(),
+            material_assignment: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1893,6 +2036,7 @@ mod tests {
             parent_wall_element_id: ElementId(20),
             position_along_wall: 0.5,
             bim_data: BimData::default(),
+            material_assignment: None,
         };
 
         snapshot.apply_to(&mut world);

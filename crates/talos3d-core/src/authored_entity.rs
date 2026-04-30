@@ -3,7 +3,7 @@ use std::{any::Any, fmt};
 use bevy::prelude::*;
 use serde_json::Value;
 
-use crate::plugins::identity::ElementId;
+use crate::plugins::{identity::ElementId, materials::MaterialAssignment};
 
 // --- Shared helpers for AuthoredEntity implementations ---
 
@@ -312,6 +312,19 @@ pub trait AuthoredEntity: Send + Sync + 'static {
 
     fn property_fields(&self) -> Vec<PropertyFieldDef>;
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String>;
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        None
+    }
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let _ = assignment;
+        Err(format!(
+            "{} snapshots do not support material assignment",
+            self.type_name()
+        ))
+    }
 
     fn handles(&self) -> Vec<HandleInfo>;
     fn bounds(&self) -> Option<EntityBounds> {
@@ -429,6 +442,17 @@ impl BoxedEntity {
 
     pub fn set_property_json(&self, property_name: &str, value: &Value) -> Result<Self, String> {
         self.0.set_property_json(property_name, value)
+    }
+
+    pub fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.0.material_assignment()
+    }
+
+    pub fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<Self, String> {
+        self.0.set_material_assignment(assignment)
     }
 
     pub fn handles(&self) -> Vec<HandleInfo> {

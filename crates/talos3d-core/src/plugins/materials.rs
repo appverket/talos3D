@@ -963,6 +963,17 @@ pub fn material_assignment_from_value(value: &Value) -> Option<MaterialAssignmen
         })
 }
 
+pub fn material_assignment_option_from_value(
+    value: &Value,
+) -> Result<Option<MaterialAssignment>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    material_assignment_from_value(value)
+        .map(Some)
+        .ok_or_else(|| "Expected a material assignment object or null".to_string())
+}
+
 pub fn material_assignment_to_value(assignment: &MaterialAssignment) -> Value {
     serde_json::to_value(assignment).unwrap_or(Value::Null)
 }

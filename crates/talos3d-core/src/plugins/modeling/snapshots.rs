@@ -18,7 +18,10 @@ use crate::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
         layers::LayerAssignment,
-        materials::{material_assignment_from_value, MaterialAssignment},
+        materials::{
+            material_assignment_from_value, material_assignment_option_from_value,
+            MaterialAssignment,
+        },
         math::scale_point_around_center,
         modeling::{
             editable_mesh::{EditableMesh, OperationLog, OperationOrigin},
@@ -207,6 +210,9 @@ impl AuthoredEntity for PolylineSnapshot {
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         let mut snapshot = self.clone();
         match property_name {
             "points" => snapshot.primitive.points = point_array(value)?,
@@ -242,6 +248,19 @@ impl AuthoredEntity for PolylineSnapshot {
                 ))
             }
         }
+        Ok(snapshot.into())
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.material_assignment.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        snapshot.material_assignment = assignment;
         Ok(snapshot.into())
     }
 
@@ -461,6 +480,9 @@ impl AuthoredEntity for TriangleMeshSnapshot {
     }
 
     fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         let mut snapshot = self.clone();
         match property_name {
             "name" => {
@@ -479,6 +501,19 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             }
             _ => return Err(invalid_property_error("triangle_mesh", &["name", "layer"])),
         }
+        Ok(snapshot.into())
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.material_assignment.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        snapshot.material_assignment = assignment;
         Ok(snapshot.into())
     }
 
@@ -1283,12 +1318,24 @@ impl AuthoredEntity for EditableMeshSnapshot {
         ]
     }
 
-    fn set_property_json(
-        &self,
-        _property_name: &str,
-        _value: &Value,
-    ) -> Result<BoxedEntity, String> {
+    fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        if matches!(property_name, "material" | "material_assignment") {
+            return self.set_material_assignment(material_assignment_option_from_value(value)?);
+        }
         Err("EditableMesh properties are not directly editable".to_string())
+    }
+
+    fn material_assignment(&self) -> Option<MaterialAssignment> {
+        self.material_assignment.clone()
+    }
+
+    fn set_material_assignment(
+        &self,
+        assignment: Option<MaterialAssignment>,
+    ) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        snapshot.material_assignment = assignment;
+        Ok(snapshot.into())
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
@@ -1568,6 +1615,7 @@ mod tests {
     use super::*;
     use crate::authored_entity::AuthoredEntity;
     use crate::plugins::identity::ElementId;
+    use crate::plugins::materials::MaterialAssignment;
     use crate::plugins::modeling::generic_snapshot::PrimitiveSnapshot;
     use crate::plugins::modeling::primitive_trait::Primitive;
 
@@ -1594,6 +1642,38 @@ mod tests {
         assert_eq!(
             fields[0].value,
             Some(PropertyValue::Vec3(Vec3::new(-2.0, 0.75, -1.0)))
+        );
+    }
+
+    #[test]
+    fn primitive_material_assignment_can_be_set_through_property_json() {
+        let snapshot = PlaneSnapshot {
+            element_id: ElementId(12),
+            primitive: PlanePrimitive {
+                corner_a: Vec2::ZERO,
+                corner_b: Vec2::ONE,
+                elevation: 0.0,
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+        };
+        let assigned = snapshot
+            .set_property_json(
+                "material_assignment",
+                &serde_json::json!({ "type": "single", "spec": null, "render": "material_def.v1/mat.red" }),
+            )
+            .expect("material assignment property should parse");
+
+        assert_eq!(
+            assigned.material_assignment(),
+            Some(MaterialAssignment::new("mat.red"))
+        );
+        assert_eq!(
+            assigned
+                .set_property_json("material_assignment", &Value::Null)
+                .expect("null material assignment should clear")
+                .material_assignment(),
+            None
         );
     }
 
