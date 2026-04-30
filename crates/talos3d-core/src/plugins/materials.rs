@@ -355,6 +355,55 @@ impl TextureRef {
     }
 }
 
+// ─── TextureMapping ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureProjection {
+    Triplanar,
+    Planar,
+    Box,
+    #[default]
+    Uv,
+}
+
+fn default_mapping_scale() -> Vec3 {
+    Vec3::ONE
+}
+
+fn default_mapping_blend_sharpness() -> f32 {
+    4.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextureMapping {
+    #[serde(default)]
+    pub projection: TextureProjection,
+    #[serde(default = "default_mapping_scale")]
+    pub scale: Vec3,
+    #[serde(default)]
+    pub offset: Vec3,
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default = "default_mapping_blend_sharpness")]
+    pub blend_sharpness: f32,
+}
+
+impl Default for TextureMapping {
+    fn default() -> Self {
+        Self {
+            projection: TextureProjection::Uv,
+            scale: default_mapping_scale(),
+            offset: Vec3::ZERO,
+            rotation: 0.0,
+            blend_sharpness: default_mapping_blend_sharpness(),
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct NeedsUv;
+
 // ─── MaterialDef ─────────────────────────────────────────────────────────────
 
 fn default_attenuation_distance() -> f32 {
@@ -506,6 +555,21 @@ impl MaterialDef {
             name: name.into(),
             ..Default::default()
         }
+    }
+
+    pub fn texture_mapping(&self) -> TextureMapping {
+        TextureMapping {
+            projection: TextureProjection::Uv,
+            scale: Vec3::new(self.uv_scale[0], self.uv_scale[1], 1.0),
+            offset: Vec3::ZERO,
+            rotation: self.uv_rotation,
+            blend_sharpness: default_mapping_blend_sharpness(),
+        }
+    }
+
+    pub fn set_texture_mapping(&mut self, mapping: TextureMapping) {
+        self.uv_scale = [mapping.scale.x, mapping.scale.y];
+        self.uv_rotation = mapping.rotation;
     }
 
     /// Build a Bevy `StandardMaterial` from this definition.
@@ -1475,6 +1539,46 @@ mod tests {
             serde_json::from_value(value).expect("null attenuation should deserialize");
 
         assert!(parsed.attenuation_distance.is_infinite());
+    }
+
+    #[test]
+    fn material_def_bridges_existing_uv_fields_to_texture_mapping() {
+        let mut material = MaterialDef::new("Mapping bridge");
+        material.set_texture_mapping(TextureMapping {
+            projection: TextureProjection::Planar,
+            scale: Vec3::new(0.25, 0.065, 0.25),
+            offset: Vec3::new(1.0, 0.0, -2.0),
+            rotation: 0.5,
+            blend_sharpness: 8.0,
+        });
+
+        assert_eq!(material.uv_scale, [0.25, 0.065]);
+        assert_eq!(material.uv_rotation, 0.5);
+        assert_eq!(
+            material.texture_mapping(),
+            TextureMapping {
+                projection: TextureProjection::Uv,
+                scale: Vec3::new(0.25, 0.065, 1.0),
+                offset: Vec3::ZERO,
+                rotation: 0.5,
+                blend_sharpness: 4.0,
+            }
+        );
+    }
+
+    #[test]
+    fn texture_mapping_round_trips_projection_scale_and_offset() {
+        let mapping = TextureMapping {
+            projection: TextureProjection::Triplanar,
+            scale: Vec3::new(0.25, 0.065, 0.25),
+            offset: Vec3::new(1.0, 0.0, -2.0),
+            rotation: 0.5,
+            blend_sharpness: 8.0,
+        };
+        let parsed: TextureMapping =
+            serde_json::from_value(serde_json::to_value(mapping).unwrap()).unwrap();
+
+        assert_eq!(parsed, mapping);
     }
 
     #[test]
