@@ -1545,6 +1545,10 @@ enum ModelApiRequest {
         request: TerrainCutFillAnalysisRequest,
         response: oneshot::Sender<ApiResult<crate::plugins::command_registry::CommandResult>>,
     },
+    TerrainElevationAt {
+        request: TerrainElevationAtRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     GetEditingContext(oneshot::Sender<EditingContextInfo>),
     EnterGroup {
         element_id: u64,
@@ -2371,6 +2375,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::TerrainCutFillAnalysis { request, response } => {
             let _ = response.send(handle_terrain_cut_fill_analysis(world, request));
+        }
+        ModelApiRequest::TerrainElevationAt { request, response } => {
+            let _ = response.send(handle_terrain_elevation_at(world, request));
         }
         ModelApiRequest::GetEditingContext(response) => {
             let _ = response.send(get_editing_context(world));
@@ -3891,6 +3898,19 @@ impl ModelApiServer {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::TerrainCutFillAnalysis { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_terrain_elevation_at(
+        &self,
+        request: TerrainElevationAtRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::TerrainElevationAt { request, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -6182,6 +6202,14 @@ pub struct TerrainCutFillAnalysisRequest {
     pub boundary: Vec<[f32; 2]>,
 }
 
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerrainElevationAtRequest {
+    pub x: f32,
+    pub z: f32,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -7796,6 +7824,21 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_terrain_cut_fill_analysis(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "elevation_at",
+        description = "Return terrain elevation at world X/Z coordinates using the registered TerrainProvider."
+    )]
+    async fn elevation_at_tool(
+        &self,
+        Parameters(params): Parameters<TerrainElevationAtRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_terrain_elevation_at(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
@@ -13086,6 +13129,32 @@ pub fn handle_terrain_cut_fill_analysis(
     let result: CommandResult = handler(world, &Value::Object(parameters))?;
     flush_model_api_write_pipeline(world);
     Ok(result)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_terrain_elevation_at(
+    world: &World,
+    request: TerrainElevationAtRequest,
+) -> Result<Value, String> {
+    let registry = world
+        .get_resource::<crate::capability_registry::TerrainProviderRegistry>()
+        .ok_or_else(|| "Terrain provider registry is unavailable".to_string())?;
+    let provider = registry
+        .provider()
+        .ok_or_else(|| "No terrain provider is registered".to_string())?;
+    let elevation = provider
+        .elevation_at(world, request.x, request.z)
+        .ok_or_else(|| {
+            format!(
+                "No terrain elevation found at x={}, z={}",
+                request.x, request.z
+            )
+        })?;
+    Ok(serde_json::json!({
+        "x": request.x,
+        "z": request.z,
+        "elevation": elevation,
+    }))
 }
 
 // --- Semantic Assembly / Relation handlers ---
