@@ -128,7 +128,8 @@ fn sync_property_panel_data(world: &mut World) {
         panel_data.semantic_kind = semantic_kind;
     }
 
-    let visible = !world.resource::<PropertyPanelData>().snapshots.is_empty();
+    let visible = !world.resource::<PropertyPanelData>().snapshots.is_empty()
+        && !world.resource::<PropertyEditState>().is_active();
     let mut panel_state = world.resource_mut::<PropertyPanelState>();
     panel_state.visible = visible;
     if !visible {
@@ -219,7 +220,6 @@ fn generated_part_semantic_kind(
     }
 }
 
-
 #[derive(Debug, Clone)]
 struct PropertyField {
     name: &'static str,
@@ -244,10 +244,8 @@ fn open_property_mode(world: &mut World) {
         let keys = world.resource::<ButtonInput<KeyCode>>();
         let transform_state = world.resource::<TransformState>();
         let property_edit_state = world.resource::<PropertyEditState>();
-        let property_panel_state = world.resource::<PropertyPanelState>();
         let palette_state = world.resource::<PaletteState>();
         !palette_state.is_open()
-            && !property_panel_state.visible
             && !property_edit_state.is_active()
             && transform_state.is_idle()
             && keys.just_pressed(KeyCode::Tab)
@@ -281,6 +279,11 @@ fn open_property_mode(world: &mut World) {
         active_index: 0,
         replace_on_next_input: true,
     });
+    let mut panel_state = world.resource_mut::<PropertyPanelState>();
+    panel_state.visible = false;
+    panel_state.interacting = false;
+    panel_state.active_field = None;
+    panel_state.buffer.clear();
 }
 
 pub(crate) fn collect_selected_snapshots(world: &mut World) -> Vec<BoxedEntity> {
@@ -598,4 +601,79 @@ pub(crate) fn parse_property_value(
         PropertyValueKind::Vec3 => PropertyValue::Vec3(parse_vec3(buffer)?),
         PropertyValueKind::Text => PropertyValue::Text(buffer.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability_registry::CapabilityRegistry;
+    use crate::plugins::{
+        identity::ElementId,
+        modeling::{
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, ShapeRotation},
+        },
+        selection::Selected,
+        transform::{ActiveTransformPreview, TransformState},
+    };
+
+    fn property_world() -> World {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+        world.insert_resource(PropertyEditState::default());
+        world.insert_resource(PropertyPanelState::default());
+        world.insert_resource(PropertyPanelData::default());
+        world.insert_resource(TransformState::default());
+        world.insert_resource(ActiveTransformPreview::default());
+        world.insert_resource(PaletteState::default());
+        world.insert_resource(StatusBarData::default());
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.spawn((
+            ElementId(1),
+            BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            ShapeRotation::default(),
+            Selected,
+        ));
+        world
+    }
+
+    #[test]
+    fn tab_opens_status_property_mode_even_when_property_panel_is_visible() {
+        let mut world = property_world();
+        world.resource_mut::<PropertyPanelState>().visible = true;
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Tab);
+
+        open_property_mode(&mut world);
+
+        assert!(world.resource::<PropertyEditState>().is_active());
+        assert!(
+            !world.resource::<PropertyPanelState>().visible,
+            "status-bar property mode should hide the panel while active",
+        );
+    }
+
+    #[test]
+    fn sync_property_panel_data_keeps_panel_hidden_while_status_property_mode_is_active() {
+        let mut world = property_world();
+        let snapshots = collect_selected_snapshots(&mut world);
+        world.resource_mut::<PropertyEditState>().session = Some(PropertySession {
+            originals: snapshots.clone(),
+            entity_type: selected_snapshots_type(&snapshots).unwrap(),
+            fields: build_property_fields(&snapshots),
+            active_index: 0,
+            replace_on_next_input: true,
+        });
+
+        sync_property_panel_data(&mut world);
+
+        assert!(!world.resource::<PropertyPanelState>().visible);
+        assert!(world.resource::<PropertyPanelData>().snapshots.len() == 1);
+    }
 }
