@@ -1125,6 +1125,22 @@ impl AuthoredEntityFactory for BuildingPadFactory {
             .unwrap_or_default()
     }
 
+    fn collect_snap_points(&self, world: &World, out: &mut Vec<SnapPoint>) {
+        let mut q = world.try_query::<&BuildingPad>().unwrap();
+        for building_pad in q.iter(world) {
+            for point in &building_pad.boundary {
+                out.push(SnapPoint {
+                    position: Vec3::new(point.x, building_pad.pad_elevation, point.y),
+                    kind: SnapKind::Endpoint,
+                });
+            }
+            out.push(SnapPoint {
+                position: building_pad_center(building_pad),
+                kind: SnapKind::Midpoint,
+            });
+        }
+    }
+
     fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
         let mut q = world.try_query::<EntityRef>().unwrap();
         for entity_ref in q.iter(world) {

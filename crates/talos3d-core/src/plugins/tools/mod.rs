@@ -19,6 +19,10 @@ impl Plugin for ToolPlugin {
             .add_systems(OnEnter(ActiveTool::PlaceGuideLine), enter_guide_line_tool)
             .add_systems(OnEnter(ActiveTool::PlaceWall), enter_wall_tool)
             .add_systems(OnEnter(ActiveTool::PlaceOpening), enter_opening_tool)
+            .add_systems(
+                OnEnter(ActiveTool::PlaceBuildingPad),
+                enter_building_pad_tool,
+            )
             .add_systems(OnEnter(ActiveTool::PlaceBox), enter_box_tool)
             .add_systems(OnEnter(ActiveTool::PlaceCylinder), enter_cylinder_tool)
             .add_systems(OnEnter(ActiveTool::PlaceSphere), enter_sphere_tool)
@@ -43,6 +47,7 @@ pub enum ActiveTool {
     PlaceGuideLine,
     PlaceWall,
     PlaceOpening,
+    PlaceBuildingPad,
     PlaceBox,
     PlaceCylinder,
     PlaceSphere,
@@ -126,6 +131,14 @@ fn enter_opening_tool(mut status_bar_data: ResMut<StatusBarData>) {
         &mut status_bar_data,
         "Opening",
         "Hover a wall and click to place opening",
+    );
+}
+
+fn enter_building_pad_tool(mut status_bar_data: ResMut<StatusBarData>) {
+    set_tool_status(
+        &mut status_bar_data,
+        "Building Pad",
+        "Click vertices \u{00b7} Enter to close",
     );
 }
 
