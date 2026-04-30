@@ -13,6 +13,7 @@ use crate::{
     reconstruction::{
         sample_boundary_support_points, sample_curve_points, sample_interior_support_points,
     },
+    visualization::{visualization_for_mode, TerrainVisualizationMode, TerrainVisualizationState},
 };
 
 const TERRAIN_SURFACE_COLOR: Color = Color::srgb(0.54, 0.62, 0.46);
@@ -51,7 +52,8 @@ type TerrainSurfaceMeshQueryItem<'a> = (
 
 impl Plugin for TerrainGenerationPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_terrain_material)
+        app.init_resource::<TerrainVisualizationState>()
+            .add_systems(Startup, setup_terrain_material)
             .add_systems(
                 Update,
                 (
@@ -99,6 +101,7 @@ fn regenerate_terrain_meshes(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     terrain_material: Res<TerrainSurfaceMaterial>,
+    visualization_state: Res<TerrainVisualizationState>,
     surfaces: Query<TerrainSurfaceMeshQueryItem<'_>, With<NeedsTerrainMesh>>,
     curves: Query<(&talos3d_core::plugins::identity::ElementId, &ElevationCurve)>,
 ) {
@@ -112,6 +115,7 @@ fn regenerate_terrain_meshes(
             material_handle,
             &cache.mesh,
             terrain_material.for_surface(surface),
+            *visualization_state,
         );
         commands
             .entity(entity)
@@ -334,9 +338,10 @@ fn upsert_terrain_mesh_entity(
     material_handle: Option<&MeshMaterial3d<StandardMaterial>>,
     primitive: &TriangleMesh,
     material: Handle<StandardMaterial>,
+    visualization_state: TerrainVisualizationState,
 ) {
     let mut entity_commands = commands.entity(entity);
-    let mesh = terrain_mesh_asset(primitive);
+    let mesh = terrain_mesh_asset(primitive, visualization_state);
     if let Some(mesh_handle) = mesh_handle {
         if let Some(existing_mesh) = meshes.get_mut(mesh_handle.id()) {
             *existing_mesh = mesh;
@@ -353,7 +358,16 @@ fn upsert_terrain_mesh_entity(
     entity_commands.try_insert(Transform::IDENTITY);
 }
 
-fn terrain_mesh_asset(primitive: &TriangleMesh) -> Mesh {
+fn terrain_mesh_asset(
+    primitive: &TriangleMesh,
+    visualization_state: TerrainVisualizationState,
+) -> Mesh {
+    if visualization_state.mode != TerrainVisualizationMode::Standard {
+        if let Some(mesh) = visualized_terrain_mesh_asset(primitive, visualization_state) {
+            return mesh;
+        }
+    }
+
     let positions: Vec<[f32; 3]> = primitive
         .vertices
         .iter()
@@ -380,6 +394,60 @@ fn terrain_mesh_asset(primitive: &TriangleMesh) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+fn visualized_terrain_mesh_asset(
+    primitive: &TriangleMesh,
+    visualization_state: TerrainVisualizationState,
+) -> Option<Mesh> {
+    let visualizations = visualization_for_mode(primitive, visualization_state);
+    if visualizations.is_empty() {
+        return None;
+    }
+
+    let source_uvs = planar_uvs(&primitive.vertices);
+    let mut positions = Vec::with_capacity(visualizations.len() * 3);
+    let mut normals = Vec::with_capacity(visualizations.len() * 3);
+    let mut uvs = Vec::with_capacity(visualizations.len() * 3);
+    let mut colors = Vec::with_capacity(visualizations.len() * 3);
+    for visualization in visualizations {
+        let Some((a, b, c)) = face_points(&primitive.vertices, visualization.face) else {
+            continue;
+        };
+        let normal = (b - a).cross(c - a).normalize_or_zero();
+        let normal = if normal.length_squared() <= f32::EPSILON {
+            Vec3::Y
+        } else {
+            normal.normalize()
+        };
+        for vertex_index in visualization.face {
+            let Some(vertex) = primitive.vertices.get(vertex_index as usize) else {
+                continue;
+            };
+            positions.push([vertex.x, vertex.y, vertex.z]);
+            normals.push([normal.x, normal.y, normal.z]);
+            uvs.push(
+                source_uvs
+                    .get(vertex_index as usize)
+                    .copied()
+                    .unwrap_or([0.0, 0.0]),
+            );
+            colors.push(visualization.color);
+        }
+    }
+    if positions.is_empty() {
+        return None;
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    Some(mesh)
 }
 
 fn compute_triangle_mesh_normals(primitive: &TriangleMesh) -> Vec<Vec3> {
@@ -662,6 +730,7 @@ fn lerp_color(start: [f32; 3], end: [f32; 3], t: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::mesh::VertexAttributeValues;
     use std::time::Instant;
     use talos3d_core::plugins::identity::ElementId;
 
@@ -757,6 +826,38 @@ mod tests {
             .world()
             .entity(surface_entity)
             .contains::<NeedsTerrainMesh>());
+    }
+
+    #[test]
+    fn active_visualization_mode_adds_vertex_colors_to_terrain_mesh() {
+        let terrain = TriangleMesh {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.5, 1.0),
+            ],
+            faces: vec![[0, 1, 2]],
+            normals: None,
+            name: None,
+        };
+
+        let standard = terrain_mesh_asset(&terrain, TerrainVisualizationState::default());
+        assert!(standard.attribute(Mesh::ATTRIBUTE_COLOR).is_none());
+
+        let visualized = terrain_mesh_asset(
+            &terrain,
+            TerrainVisualizationState {
+                mode: TerrainVisualizationMode::Slope,
+                elevation_band_width: 1.0,
+            },
+        );
+        let colors = visualized
+            .attribute(Mesh::ATTRIBUTE_COLOR)
+            .expect("slope visualization should add vertex colors");
+        match colors {
+            VertexAttributeValues::Float32x4(values) => assert_eq!(values.len(), 3),
+            other => panic!("unexpected color attribute format: {other:?}"),
+        }
     }
 
     #[test]
