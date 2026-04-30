@@ -44,6 +44,7 @@ pub mod palette;
 #[cfg(feature = "perf-stats")]
 pub mod perf_stats;
 pub mod persistence;
+pub mod promotion;
 pub mod property_edit;
 pub mod recipe_drafts;
 pub mod refinement;
