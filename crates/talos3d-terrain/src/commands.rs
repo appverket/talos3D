@@ -13,7 +13,7 @@ use talos3d_core::plugins::{
 
 use crate::{
     components::{
-        ElevationCurve, ElevationCurveType, TerrainMeshCache, TerrainSurface,
+        ElevationCurve, ElevationCurveType, TerrainMeshCache, TerrainSurface, TerrainSurfaceRole,
         DEFAULT_TERRAIN_CONTOUR_INTERVAL, DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE,
         DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING, DEFAULT_TERRAIN_MAX_TRIANGLE_AREA,
         DEFAULT_TERRAIN_MINIMUM_ANGLE,
@@ -253,6 +253,7 @@ fn execute_generate_surface(world: &mut World, _: &Value) -> Result<CommandResul
         surface: TerrainSurface {
             name: "Terrain Surface".to_string(),
             source_curve_ids,
+            role: TerrainSurfaceRole::Existing,
             datum_elevation: curves
                 .iter()
                 .map(|(_, curve)| curve.elevation)
@@ -402,6 +403,7 @@ fn execute_prepare_site_surface(
                 .iter()
                 .map(|(element_id, _)| *element_id)
                 .collect(),
+            role: TerrainSurfaceRole::Existing,
             datum_elevation: curve_snapshots
                 .iter()
                 .map(|(_, snapshot)| snapshot.curve.elevation)
@@ -582,6 +584,7 @@ fn execute_create_proposed_surface(
         element_id: proposed_surface_id,
         surface: TerrainSurface {
             name: proposed_name,
+            role: TerrainSurfaceRole::Proposed,
             source_curve_ids: curve_map
                 .iter()
                 .map(|(_, proposed_curve_id)| *proposed_curve_id)
@@ -627,6 +630,7 @@ fn execute_create_proposed_surface(
         output: Some(serde_json::json!({
             "source_surface_id": source_surface_id.0,
             "proposed_surface_id": proposed_surface_id.0,
+            "role": TerrainSurfaceRole::Proposed.as_str(),
             "source_curve_count": curve_map.len(),
             "curve_map": curve_map
                 .iter()
@@ -1019,6 +1023,7 @@ mod tests {
             TerrainSurface {
                 name: "Existing Site".to_string(),
                 source_curve_ids: vec![ElementId(10), ElementId(11)],
+                role: TerrainSurfaceRole::Existing,
                 datum_elevation: 1.0,
                 boundary: vec![
                     Vec2::new(0.0, 0.0),
@@ -1048,6 +1053,7 @@ mod tests {
             result.output.as_ref().unwrap()["source_curve_count"],
             json!(2)
         );
+        assert_eq!(result.output.as_ref().unwrap()["role"], json!("proposed"));
         let created = world
             .resource_mut::<Messages<CreateEntityCommand>>()
             .drain()
@@ -1065,6 +1071,10 @@ mod tests {
         assert_eq!(
             surface_json["TerrainSurface"]["surface"]["source_curve_ids"],
             json!([1000, 1001])
+        );
+        assert_eq!(
+            surface_json["TerrainSurface"]["surface"]["role"],
+            json!("proposed")
         );
         assert_eq!(
             surface_json["TerrainSurface"]["surface"]["drape_sample_spacing"],
@@ -1217,6 +1227,11 @@ mod tests {
         assert_eq!(
             curve_json["ElevationCurve"]["curve"]["points"][0],
             json!([-5.0, 10.0, 0.0])
+        );
+        let surface_json = created[1].snapshot.to_json();
+        assert_eq!(
+            surface_json["TerrainSurface"]["surface"]["role"],
+            json!("existing")
         );
     }
 

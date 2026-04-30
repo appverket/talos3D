@@ -7,13 +7,16 @@ use delaunator::{triangulate, Point};
 use talos3d_core::plugins::modeling::primitives::TriangleMesh;
 
 use crate::{
-    components::{ElevationCurve, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface},
+    components::{
+        ElevationCurve, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface, TerrainSurfaceRole,
+    },
     reconstruction::{
         sample_boundary_support_points, sample_curve_points, sample_interior_support_points,
     },
 };
 
 const TERRAIN_SURFACE_COLOR: Color = Color::srgb(0.54, 0.62, 0.46);
+const PROPOSED_TERRAIN_SURFACE_COLOR: Color = Color::srgb(0.36, 0.58, 0.86);
 const ELEVATION_LOW_COLOR: [f32; 3] = [0.22, 0.48, 0.82];
 const ELEVATION_MID_COLOR: [f32; 3] = [0.33, 0.72, 0.34];
 const ELEVATION_HIGH_COLOR: [f32; 3] = [0.65, 0.43, 0.22];
@@ -25,7 +28,19 @@ type BreaklineSegment = (usize, usize);
 pub struct TerrainGenerationPlugin;
 
 #[derive(Resource, Clone)]
-pub struct TerrainSurfaceMaterial(pub Handle<StandardMaterial>);
+pub struct TerrainSurfaceMaterial {
+    pub existing: Handle<StandardMaterial>,
+    pub proposed: Handle<StandardMaterial>,
+}
+
+impl TerrainSurfaceMaterial {
+    fn for_surface(&self, surface: &TerrainSurface) -> Handle<StandardMaterial> {
+        match surface.role {
+            TerrainSurfaceRole::Existing => self.existing.clone(),
+            TerrainSurfaceRole::Proposed => self.proposed.clone(),
+        }
+    }
+}
 
 type TerrainSurfaceMeshQueryItem<'a> = (
     Entity,
@@ -50,13 +65,10 @@ impl Plugin for TerrainGenerationPlugin {
 }
 
 fn setup_terrain_material(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
-    commands.insert_resource(TerrainSurfaceMaterial(materials.add(StandardMaterial {
-        base_color: TERRAIN_SURFACE_COLOR,
-        perceptual_roughness: 0.95,
-        metallic: 0.02,
-        cull_mode: None,
-        ..default()
-    })));
+    commands.insert_resource(TerrainSurfaceMaterial {
+        existing: materials.add(terrain_surface_material(TERRAIN_SURFACE_COLOR)),
+        proposed: materials.add(terrain_surface_material(PROPOSED_TERRAIN_SURFACE_COLOR)),
+    });
 }
 
 fn mark_terrain_surfaces_dirty_on_curve_changes(
@@ -99,12 +111,22 @@ fn regenerate_terrain_meshes(
             mesh_handle,
             material_handle,
             &cache.mesh,
-            terrain_material.0.clone(),
+            terrain_material.for_surface(surface),
         );
         commands
             .entity(entity)
             .try_insert(cache)
             .try_remove::<NeedsTerrainMesh>();
+    }
+}
+
+fn terrain_surface_material(base_color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color,
+        perceptual_roughness: 0.95,
+        metallic: 0.02,
+        cull_mode: None,
+        ..default()
     }
 }
 
@@ -702,6 +724,7 @@ mod tests {
         let surface = TerrainSurface {
             name: "Test".to_string(),
             source_curve_ids: vec![],
+            role: TerrainSurfaceRole::Existing,
             datum_elevation: 0.0,
             boundary: vec![],
             max_triangle_area: 25.0,
@@ -754,6 +777,7 @@ mod tests {
         let surface = TerrainSurface {
             name: "Filtered".to_string(),
             source_curve_ids: vec![],
+            role: TerrainSurfaceRole::Existing,
             datum_elevation: 0.0,
             boundary: vec![],
             max_triangle_area: 10.0,
@@ -799,6 +823,7 @@ mod tests {
         let surface = TerrainSurface {
             name: "Performance".to_string(),
             source_curve_ids: vec![],
+            role: TerrainSurfaceRole::Existing,
             datum_elevation: 0.0,
             boundary: vec![],
             max_triangle_area: 2.0,

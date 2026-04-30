@@ -32,6 +32,23 @@ impl ElevationCurveType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerrainSurfaceRole {
+    #[default]
+    Existing,
+    Proposed,
+}
+
+impl TerrainSurfaceRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Existing => "existing",
+            Self::Proposed => "proposed",
+        }
+    }
+}
+
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ElevationCurve {
     pub points: Vec<Vec3>,
@@ -45,6 +62,8 @@ pub struct ElevationCurve {
 pub struct TerrainSurface {
     pub name: String,
     pub source_curve_ids: Vec<ElementId>,
+    #[serde(default)]
+    pub role: TerrainSurfaceRole,
     pub datum_elevation: f32,
     pub boundary: Vec<Vec2>,
     pub max_triangle_area: f32,
@@ -60,6 +79,7 @@ impl TerrainSurface {
         Self {
             name,
             source_curve_ids,
+            role: TerrainSurfaceRole::Existing,
             datum_elevation: 0.0,
             boundary: Vec::new(),
             max_triangle_area: DEFAULT_TERRAIN_MAX_TRIANGLE_AREA,
