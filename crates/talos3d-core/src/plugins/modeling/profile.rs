@@ -171,24 +171,34 @@ impl Profile2d {
 
     /// Return a copy with reversed winding.
     pub fn reversed(&self) -> Self {
-        let mut all_points: Vec<Vec2> = std::iter::once(self.start)
-            .chain(self.segments.iter().map(|s| s.endpoint()))
-            .collect();
-
-        // Check if the last point closes back to start (explicit close).
-        let explicitly_closed = all_points.len() > 1
-            && (all_points.last().unwrap() - all_points[0]).length_squared() < 1e-6;
-        if explicitly_closed {
-            all_points.pop();
+        let mut current = self.start;
+        let mut edges = Vec::with_capacity(self.segments.len());
+        for segment in &self.segments {
+            let to = segment.endpoint();
+            edges.push((current, segment));
+            current = to;
         }
 
-        all_points.reverse();
-        let new_start = all_points[0];
-        // Reverse loses arc info — convert arcs to lines for now.
-        // TODO: preserve arc segments with negated bulge on reversal.
-        let new_segments: Vec<ProfileSegment> = all_points[1..]
+        if edges.is_empty() {
+            return self.clone();
+        }
+
+        let explicitly_closed = (current - self.start).length_squared() < 1e-6;
+        let new_start = if explicitly_closed {
+            self.start
+        } else {
+            current
+        };
+        let new_segments: Vec<ProfileSegment> = edges
             .iter()
-            .map(|&to| ProfileSegment::LineTo { to })
+            .rev()
+            .map(|(from, segment)| match segment {
+                ProfileSegment::LineTo { .. } => ProfileSegment::LineTo { to: *from },
+                ProfileSegment::ArcTo { bulge, .. } => ProfileSegment::ArcTo {
+                    to: *from,
+                    bulge: -*bulge,
+                },
+            })
             .collect();
 
         Profile2d {
@@ -1872,6 +1882,43 @@ mod tests {
         let pts = profile.tessellate(32);
         // Should have more than 5 points (4 line endpoints + arc subdivisions + start)
         assert!(pts.len() > 5);
+    }
+
+    #[test]
+    fn reversed_profile_preserves_arc_segments_with_negated_bulge() {
+        let profile = Profile2d {
+            start: Vec2::ZERO,
+            segments: vec![
+                ProfileSegment::LineTo {
+                    to: Vec2::new(2.0, 0.0),
+                },
+                ProfileSegment::ArcTo {
+                    to: Vec2::new(2.5, 0.5),
+                    bulge: 0.4142,
+                },
+                ProfileSegment::LineTo {
+                    to: Vec2::new(2.5, 2.0),
+                },
+            ],
+        };
+
+        let reversed = profile.reversed();
+
+        assert_eq!(reversed.start, Vec2::new(2.5, 2.0));
+        assert_eq!(
+            reversed.segments,
+            vec![
+                ProfileSegment::LineTo {
+                    to: Vec2::new(2.5, 0.5),
+                },
+                ProfileSegment::ArcTo {
+                    to: Vec2::new(2.0, 0.0),
+                    bulge: -0.4142,
+                },
+                ProfileSegment::LineTo { to: Vec2::ZERO },
+            ]
+        );
+        assert_eq!(reversed.reversed(), profile);
     }
 
     #[test]
