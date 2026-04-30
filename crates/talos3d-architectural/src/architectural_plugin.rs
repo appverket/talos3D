@@ -15,12 +15,14 @@ use talos3d_capability_api::{
     toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
     tools::ActiveTool,
 };
+use talos3d_core::capability_registry::TerrainProviderRegistry;
 
 use crate::{
+    components::{BuildingPad, BuildingPadExcavation},
     create_commands::ArchitecturalCreateCommandPlugin,
     hosted_layout::evaluate_hosted_layouts_and_placements,
     mesh_generation, rules,
-    snapshots::{OpeningFactory, WallFactory},
+    snapshots::{BuildingPadFactory, OpeningFactory, WallFactory},
     tools,
 };
 
@@ -237,6 +239,7 @@ impl Plugin for ArchitecturalPlugin {
                 ],
             }],
         })
+        .register_authored_entity_factory(BuildingPadFactory)
         .register_authored_entity_factory(WallFactory)
         .register_authored_entity_factory(OpeningFactory)
         .add_systems(Startup, setup_architectural_icons)
@@ -246,10 +249,32 @@ impl Plugin for ArchitecturalPlugin {
         .add_plugins(tools::ArchitecturalToolPlugin)
         .add_systems(
             Update,
-            evaluate_hosted_layouts_and_placements
-                .before(talos3d_core::plugins::modeling::occurrence::evaluate_occurrences)
-                .in_set(talos3d_core::plugins::modeling::mesh_generation::EvaluationSet::Evaluate),
+            (
+                evaluate_hosted_layouts_and_placements
+                    .before(talos3d_core::plugins::modeling::occurrence::evaluate_occurrences)
+                    .in_set(
+                        talos3d_core::plugins::modeling::mesh_generation::EvaluationSet::Evaluate,
+                    ),
+                update_building_pad_excavations,
+            ),
         );
+    }
+}
+
+fn update_building_pad_excavations(
+    mut commands: Commands,
+    terrain_registry: Option<Res<TerrainProviderRegistry>>,
+    pads: Query<(Entity, &BuildingPad)>,
+    world: &World,
+) {
+    let provider = terrain_registry.and_then(|registry| registry.provider());
+    for (entity, pad) in &pads {
+        let volume = provider.as_ref().and_then(|provider| {
+            provider.volume_above_datum(world, &pad.boundary, pad.pad_elevation)
+        });
+        commands
+            .entity(entity)
+            .insert(BuildingPadExcavation { volume });
     }
 }
 
@@ -283,5 +308,98 @@ fn setup_architectural_icons(
             bevy::asset::RenderAssetUsages::default(),
         );
         icon_registry.register(id, images.add(image));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use talos3d_core::{
+        capability_registry::{TerrainProvider, TerrainProviderRegistry},
+        plugins::modeling::primitives::TriangleMesh,
+    };
+
+    struct FixedVolumeTerrainProvider;
+
+    impl TerrainProvider for FixedVolumeTerrainProvider {
+        fn elevation_at(&self, _world: &World, _x: f32, _z: f32) -> Option<f32> {
+            Some(0.0)
+        }
+
+        fn surface_within_boundary(
+            &self,
+            _world: &World,
+            _boundary: &[Vec2],
+        ) -> Option<TriangleMesh> {
+            None
+        }
+
+        fn volume_above_datum(
+            &self,
+            _world: &World,
+            boundary: &[Vec2],
+            datum_y: f32,
+        ) -> Option<f64> {
+            Some(boundary.len() as f64 + f64::from(datum_y))
+        }
+    }
+
+    #[test]
+    fn building_pad_excavation_updates_from_terrain_provider() {
+        let mut app = App::new();
+        app.init_resource::<TerrainProviderRegistry>();
+        app.world_mut()
+            .resource_mut::<TerrainProviderRegistry>()
+            .register(FixedVolumeTerrainProvider);
+        app.add_systems(Update, update_building_pad_excavations);
+        let entity = app
+            .world_mut()
+            .spawn(BuildingPad {
+                boundary: vec![
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(2.0, 0.0),
+                    Vec2::new(2.0, 2.0),
+                    Vec2::new(0.0, 2.0),
+                ],
+                pad_elevation: 1.5,
+            })
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(entity)
+                .get::<BuildingPadExcavation>()
+                .map(|excavation| excavation.volume),
+            Some(Some(5.5))
+        );
+    }
+
+    #[test]
+    fn building_pad_excavation_is_na_without_terrain_provider() {
+        let mut app = App::new();
+        app.add_systems(Update, update_building_pad_excavations);
+        let entity = app
+            .world_mut()
+            .spawn(BuildingPad {
+                boundary: vec![
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(1.0, 0.0),
+                    Vec2::new(1.0, 1.0),
+                ],
+                pad_elevation: 0.0,
+            })
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world()
+                .entity(entity)
+                .get::<BuildingPadExcavation>()
+                .map(|excavation| excavation.volume),
+            Some(None)
+        );
     }
 }

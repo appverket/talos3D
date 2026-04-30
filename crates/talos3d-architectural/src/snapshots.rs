@@ -23,7 +23,9 @@ use talos3d_core::{
 };
 
 use crate::{
-    components::{BimData, Opening, OpeningKind, ParentWall, Wall},
+    components::{
+        BimData, BuildingPad, BuildingPadExcavation, Opening, OpeningKind, ParentWall, Wall,
+    },
     mesh_generation::{wall_rotation, wall_transform},
 };
 
@@ -51,9 +53,18 @@ pub struct OpeningSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildingPadSnapshot {
+    pub element_id: ElementId,
+    pub building_pad: BuildingPad,
+    #[serde(default)]
+    pub excavation_volume: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 enum ArchitecturalSnapshotJson {
     Wall(WallSnapshot),
     Opening(OpeningSnapshot),
+    BuildingPad(BuildingPadSnapshot),
 }
 
 impl From<WallSnapshot> for BoxedEntity {
@@ -64,6 +75,12 @@ impl From<WallSnapshot> for BoxedEntity {
 
 impl From<OpeningSnapshot> for BoxedEntity {
     fn from(snapshot: OpeningSnapshot) -> Self {
+        Self(Box::new(snapshot))
+    }
+}
+
+impl From<BuildingPadSnapshot> for BoxedEntity {
+    fn from(snapshot: BuildingPadSnapshot) -> Self {
         Self(Box::new(snapshot))
     }
 }
@@ -659,8 +676,204 @@ impl AuthoredEntity for OpeningSnapshot {
     }
 }
 
+impl AuthoredEntity for BuildingPadSnapshot {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn type_name(&self) -> &'static str {
+        "building_pad"
+    }
+
+    fn element_id(&self) -> ElementId {
+        self.element_id
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "Building Pad ({:.2} m, {} vertices)",
+            self.building_pad.pad_elevation,
+            self.building_pad.boundary.len()
+        )
+    }
+
+    fn center(&self) -> Vec3 {
+        building_pad_center(&self.building_pad)
+    }
+
+    fn translate_by(&self, delta: Vec3) -> BoxedEntity {
+        let mut snapshot = self.clone();
+        for point in &mut snapshot.building_pad.boundary {
+            *point += delta.xz();
+        }
+        snapshot.building_pad.pad_elevation += delta.y;
+        snapshot.into()
+    }
+
+    fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
+        let center = self.center();
+        let mut snapshot = self.clone();
+        for point in &mut snapshot.building_pad.boundary {
+            let rotated = center + rotation * (Vec3::new(point.x, center.y, point.y) - center);
+            *point = Vec2::new(rotated.x, rotated.z);
+        }
+        snapshot.into()
+    }
+
+    fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity {
+        let mut snapshot = self.clone();
+        let center_2d = center.xz();
+        for point in &mut snapshot.building_pad.boundary {
+            *point = Vec2::new(
+                center_2d.x + (point.x - center_2d.x) * factor.x,
+                center_2d.y + (point.y - center_2d.y) * factor.z,
+            );
+        }
+        snapshot.building_pad.pad_elevation =
+            center.y + (snapshot.building_pad.pad_elevation - center.y) * factor.y;
+        snapshot.into()
+    }
+
+    fn property_fields(&self) -> Vec<PropertyFieldDef> {
+        vec![
+            property_field(
+                "pad_elevation",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.building_pad.pad_elevation)),
+            ),
+            read_only_property_field(
+                "boundary_vertex_count",
+                "boundary vertex count",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(
+                    self.building_pad.boundary.len() as f32
+                )),
+            ),
+            read_only_property_field(
+                "excavation_volume",
+                "excavation volume",
+                PropertyValueKind::Text,
+                Some(PropertyValue::Text(
+                    self.excavation_volume
+                        .map(|volume| format!("{volume:.3} m^3"))
+                        .unwrap_or_else(|| "N/A".to_string()),
+                )),
+            ),
+        ]
+    }
+
+    fn set_property_json(&self, property_name: &str, value: &Value) -> Result<BoxedEntity, String> {
+        let mut snapshot = self.clone();
+        match property_name {
+            "pad_elevation" => snapshot.building_pad.pad_elevation = scalar_from_json(value)?,
+            "boundary" => snapshot.building_pad.boundary = building_pad_boundary_from_json(value)?,
+            _ => {
+                return Err(invalid_property_error(
+                    "building_pad",
+                    &["pad_elevation", "boundary"],
+                ))
+            }
+        }
+        validate_building_pad(&snapshot.building_pad)?;
+        snapshot.excavation_volume = None;
+        Ok(snapshot.into())
+    }
+
+    fn handles(&self) -> Vec<HandleInfo> {
+        let mut handles = vec![HandleInfo {
+            id: "center".to_string(),
+            position: self.center(),
+            kind: HandleKind::Center,
+            label: "Building pad center".to_string(),
+        }];
+        handles.extend(
+            self.building_pad
+                .boundary
+                .iter()
+                .enumerate()
+                .map(|(index, point)| HandleInfo {
+                    id: format!("boundary_{index}"),
+                    position: Vec3::new(point.x, self.building_pad.pad_elevation, point.y),
+                    kind: HandleKind::Vertex,
+                    label: format!("Boundary {}", index + 1),
+                }),
+        );
+        handles
+    }
+
+    fn bounds(&self) -> Option<EntityBounds> {
+        (!self.building_pad.boundary.is_empty()).then(|| {
+            bounds_from_points(
+                &self
+                    .building_pad
+                    .boundary
+                    .iter()
+                    .map(|point| Vec3::new(point.x, self.building_pad.pad_elevation, point.y))
+                    .collect::<Vec<_>>(),
+            )
+        })
+    }
+
+    fn drag_handle(&self, handle_id: &str, cursor: Vec3) -> Option<BoxedEntity> {
+        if handle_id == "center" {
+            return Some(self.translate_by(cursor - self.center()));
+        }
+        let index = handle_id.strip_prefix("boundary_")?.parse::<usize>().ok()?;
+        let mut snapshot = self.clone();
+        let point = snapshot.building_pad.boundary.get_mut(index)?;
+        *point = cursor.xz();
+        snapshot.excavation_volume = None;
+        Some(snapshot.into())
+    }
+
+    fn to_json(&self) -> Value {
+        serde_json::to_value(ArchitecturalSnapshotJson::BuildingPad(self.clone()))
+            .unwrap_or(Value::Null)
+    }
+
+    fn apply_to(&self, world: &mut World) {
+        if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+            world.entity_mut(entity).insert((
+                self.building_pad.clone(),
+                BuildingPadExcavation {
+                    volume: self.excavation_volume,
+                },
+            ));
+        } else {
+            world.spawn((
+                self.element_id,
+                self.building_pad.clone(),
+                BuildingPadExcavation {
+                    volume: self.excavation_volume,
+                },
+            ));
+        }
+    }
+
+    fn remove_from(&self, world: &mut World) {
+        despawn_by_element_id(world, self.element_id);
+    }
+
+    fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
+        draw_building_pad_outline(gizmos, &self.building_pad, color);
+    }
+
+    fn preview_line_count(&self) -> usize {
+        self.building_pad.boundary.len()
+    }
+
+    fn box_clone(&self) -> BoxedEntity {
+        self.clone().into()
+    }
+
+    fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+        other.type_name() == self.type_name() && other.to_json() == self.to_json()
+    }
+}
+
 pub struct WallFactory;
 pub struct OpeningFactory;
+pub struct BuildingPadFactory;
 
 impl AuthoredEntityFactory for WallFactory {
     fn type_name(&self) -> &'static str {
@@ -686,7 +899,7 @@ impl AuthoredEntityFactory for WallFactory {
             .map_err(|error| error.to_string())?
         {
             ArchitecturalSnapshotJson::Wall(snapshot) => Ok(snapshot.into()),
-            ArchitecturalSnapshotJson::Opening(_) => {
+            ArchitecturalSnapshotJson::Opening(_) | ArchitecturalSnapshotJson::BuildingPad(_) => {
                 Err("Snapshot JSON did not match the expected entity type".to_string())
             }
         }
@@ -830,6 +1043,117 @@ impl AuthoredEntityFactory for WallFactory {
     }
 }
 
+impl AuthoredEntityFactory for BuildingPadFactory {
+    fn type_name(&self) -> &'static str {
+        "building_pad"
+    }
+
+    fn capture_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
+        let element_id = *entity_ref.get::<ElementId>()?;
+        let building_pad = entity_ref.get::<BuildingPad>()?;
+        let excavation_volume = entity_ref
+            .get::<BuildingPadExcavation>()
+            .and_then(|excavation| excavation.volume);
+        Some(
+            BuildingPadSnapshot {
+                element_id,
+                building_pad: building_pad.clone(),
+                excavation_volume,
+            }
+            .into(),
+        )
+    }
+
+    fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String> {
+        match serde_json::from_value::<ArchitecturalSnapshotJson>(data.clone())
+            .map_err(|error| error.to_string())?
+        {
+            ArchitecturalSnapshotJson::BuildingPad(mut snapshot) => {
+                validate_building_pad(&snapshot.building_pad)?;
+                snapshot.excavation_volume = None;
+                Ok(snapshot.into())
+            }
+            ArchitecturalSnapshotJson::Wall(_) | ArchitecturalSnapshotJson::Opening(_) => {
+                Err("Snapshot JSON did not match the expected entity type".to_string())
+            }
+        }
+    }
+
+    fn from_create_request(&self, world: &World, request: &Value) -> Result<BoxedEntity, String> {
+        let object = request
+            .as_object()
+            .ok_or_else(|| "create_entity expects a JSON object".to_string())?;
+        let building_pad = BuildingPad {
+            boundary: object
+                .get("boundary")
+                .ok_or_else(|| "Missing required field 'boundary'".to_string())
+                .and_then(building_pad_boundary_from_json)?,
+            pad_elevation: object
+                .get("pad_elevation")
+                .map(scalar_from_json)
+                .transpose()?
+                .ok_or_else(|| "Missing required field 'pad_elevation'".to_string())?,
+        };
+        validate_building_pad(&building_pad)?;
+        Ok(BuildingPadSnapshot {
+            element_id: world.resource::<ElementIdAllocator>().next_id(),
+            building_pad,
+            excavation_volume: None,
+        }
+        .into())
+    }
+
+    fn draw_selection(&self, world: &World, entity: Entity, gizmos: &mut Gizmos, color: Color) {
+        let Ok(entity_ref) = world.get_entity(entity) else {
+            return;
+        };
+        let Some(building_pad) = entity_ref.get::<BuildingPad>() else {
+            return;
+        };
+        draw_building_pad_outline(gizmos, building_pad, color);
+    }
+
+    fn selection_line_count(&self, world: &World, entity: Entity) -> usize {
+        world
+            .get_entity(entity)
+            .ok()
+            .and_then(|entity_ref| {
+                entity_ref
+                    .get::<BuildingPad>()
+                    .map(|pad| pad.boundary.len())
+            })
+            .unwrap_or_default()
+    }
+
+    fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
+        let mut q = world.try_query::<EntityRef>().unwrap();
+        for entity_ref in q.iter(world) {
+            let (Some(element_id), Some(building_pad)) = (
+                entity_ref.get::<ElementId>(),
+                entity_ref.get::<BuildingPad>(),
+            ) else {
+                continue;
+            };
+            *summary
+                .entity_counts
+                .entry("building_pad".to_string())
+                .or_insert(0) += 1;
+            summary
+                .bounding_points
+                .push(building_pad_center(building_pad));
+            if let Some(volume) = entity_ref
+                .get::<BuildingPadExcavation>()
+                .and_then(|excavation| excavation.volume)
+            {
+                summary.metrics.insert(
+                    format!("building_pad_{}_excavation_volume", element_id.0),
+                    serde_json::json!(volume),
+                );
+            }
+        }
+    }
+}
+
 impl AuthoredEntityFactory for OpeningFactory {
     fn type_name(&self) -> &'static str {
         "opening"
@@ -861,7 +1185,7 @@ impl AuthoredEntityFactory for OpeningFactory {
             .map_err(|error| error.to_string())?
         {
             ArchitecturalSnapshotJson::Opening(snapshot) => Ok(snapshot.into()),
-            ArchitecturalSnapshotJson::Wall(_) => {
+            ArchitecturalSnapshotJson::Wall(_) | ArchitecturalSnapshotJson::BuildingPad(_) => {
                 Err("Snapshot JSON did not match the expected entity type".to_string())
             }
         }
@@ -1115,6 +1439,62 @@ fn validate_opening_geometry(
     Ok(())
 }
 
+fn building_pad_boundary_from_json(value: &Value) -> Result<Vec<Vec2>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| "building pad boundary must be an array of [x, z] points".to_string())?
+        .iter()
+        .map(vec2_from_json)
+        .collect()
+}
+
+fn validate_building_pad(building_pad: &BuildingPad) -> Result<(), String> {
+    if building_pad.boundary.len() < 3 {
+        return Err("building pad boundary must contain at least three vertices".to_string());
+    }
+    if polygon_area_abs(&building_pad.boundary) <= f32::EPSILON {
+        return Err("building pad boundary must enclose a non-zero area".to_string());
+    }
+    Ok(())
+}
+
+fn polygon_area_abs(points: &[Vec2]) -> f32 {
+    let mut area = 0.0;
+    for index in 0..points.len() {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    area.abs() * 0.5
+}
+
+fn building_pad_center(building_pad: &BuildingPad) -> Vec3 {
+    if building_pad.boundary.is_empty() {
+        return Vec3::new(0.0, building_pad.pad_elevation, 0.0);
+    }
+    let sum = building_pad
+        .boundary
+        .iter()
+        .fold(Vec2::ZERO, |acc, point| acc + *point);
+    let center = sum / building_pad.boundary.len() as f32;
+    Vec3::new(center.x, building_pad.pad_elevation, center.y)
+}
+
+fn draw_building_pad_outline(gizmos: &mut Gizmos, building_pad: &BuildingPad, color: Color) {
+    if building_pad.boundary.len() < 2 {
+        return;
+    }
+    for index in 0..building_pad.boundary.len() {
+        let a = building_pad.boundary[index];
+        let b = building_pad.boundary[(index + 1) % building_pad.boundary.len()];
+        gizmos.line(
+            Vec3::new(a.x, building_pad.pad_elevation, a.y),
+            Vec3::new(b.x, building_pad.pad_elevation, b.y),
+            color,
+        );
+    }
+}
+
 fn wall_axis_scale_factor(direction: Vec2, factor: Vec3) -> f32 {
     Vec2::new(direction.x * factor.x, direction.y * factor.z).length()
 }
@@ -1354,6 +1734,71 @@ mod tests {
             transform.translation,
             wall_transform(&updated.wall).translation
         );
+    }
+
+    #[test]
+    fn building_pad_properties_report_excavation_volume_or_na() {
+        let snapshot = BuildingPadSnapshot {
+            element_id: ElementId(30),
+            building_pad: BuildingPad {
+                boundary: vec![
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(2.0, 0.0),
+                    Vec2::new(2.0, 2.0),
+                    Vec2::new(0.0, 2.0),
+                ],
+                pad_elevation: 1.25,
+            },
+            excavation_volume: Some(12.3456),
+        };
+
+        let fields = snapshot.property_fields();
+        let volume = fields
+            .iter()
+            .find(|field| field.name == "excavation_volume")
+            .expect("building pad should expose excavation volume");
+        assert_eq!(
+            volume.value,
+            Some(PropertyValue::Text("12.346 m^3".to_string()))
+        );
+
+        let unavailable = BuildingPadSnapshot {
+            excavation_volume: None,
+            ..snapshot
+        };
+        let volume = unavailable
+            .property_fields()
+            .into_iter()
+            .find(|field| field.name == "excavation_volume")
+            .expect("building pad should expose N/A volume");
+        assert_eq!(volume.value, Some(PropertyValue::Text("N/A".to_string())));
+    }
+
+    #[test]
+    fn building_pad_factory_accepts_create_requests() {
+        let mut world = World::new();
+        world.insert_resource(ElementIdAllocator::default());
+        world.resource_mut::<ElementIdAllocator>().set_next(900);
+
+        let boxed = BuildingPadFactory
+            .from_create_request(
+                &world,
+                &serde_json::json!({
+                    "boundary": [[0.0, 0.0], [3.0, 0.0], [3.0, 2.0], [0.0, 2.0]],
+                    "pad_elevation": 0.75
+                }),
+            )
+            .expect("building pad create request should parse");
+        let snapshot = boxed
+            .0
+            .as_any()
+            .downcast_ref::<BuildingPadSnapshot>()
+            .expect("snapshot type should be building pad");
+
+        assert_eq!(snapshot.element_id, ElementId(900));
+        assert_eq!(snapshot.building_pad.boundary.len(), 4);
+        assert_eq!(snapshot.building_pad.pad_elevation, 0.75);
+        assert_eq!(snapshot.type_name(), "building_pad");
     }
 
     #[test]
