@@ -189,7 +189,7 @@ pub enum TransformMode {
     Scaling,
 }
 
-#[derive(Default, PartialEq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
 pub enum AxisConstraint {
     #[default]
     None,
@@ -2001,6 +2001,34 @@ mod tests {
         }
     }
 
+    fn transform_input_world(state: TransformState, keys: ButtonInput<KeyCode>) -> World {
+        let mut world = World::new();
+        world.insert_resource(InputOwnership::Modal(ModalKind::Transform));
+        world.insert_resource(state);
+        world.insert_resource(keys);
+        world
+    }
+
+    fn press_key(key: KeyCode) -> ButtonInput<KeyCode> {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(key);
+        keys
+    }
+
+    fn press_shift_key(key: KeyCode) -> ButtonInput<KeyCode> {
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        keys.press(key);
+        keys
+    }
+
+    fn assert_vec3_near(actual: Vec3, expected: Vec3) {
+        assert!(
+            actual.abs_diff_eq(expected, 0.0001),
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
     #[test]
     fn pending_mode_is_idle_for_visual_systems() {
         let mut state = TransformState::default();
@@ -2045,6 +2073,95 @@ mod tests {
         assert!(state.is_idle());
         assert!(!state.is_pending());
         assert_eq!(state.pending_mode, None);
+    }
+
+    #[test]
+    fn axis_input_toggles_axes_and_shift_selects_exclusion_planes() {
+        let mut world = transform_input_world(
+            TransformState {
+                mode: TransformMode::Moving,
+                ..Default::default()
+            },
+            press_key(KeyCode::KeyX),
+        );
+        handle_transform_input(&mut world);
+        assert_eq!(world.resource::<TransformState>().axis, AxisConstraint::X);
+
+        let mut world = transform_input_world(
+            TransformState {
+                mode: TransformMode::Moving,
+                axis: AxisConstraint::X,
+                ..Default::default()
+            },
+            press_key(KeyCode::KeyX),
+        );
+        handle_transform_input(&mut world);
+        assert_eq!(
+            world.resource::<TransformState>().axis,
+            AxisConstraint::None
+        );
+
+        let mut world = transform_input_world(
+            TransformState {
+                mode: TransformMode::Moving,
+                ..Default::default()
+            },
+            press_shift_key(KeyCode::KeyX),
+        );
+        handle_transform_input(&mut world);
+        assert_eq!(
+            world.resource::<TransformState>().axis,
+            AxisConstraint::PlaneYZ
+        );
+    }
+
+    #[test]
+    fn numeric_buffer_supports_negative_decimal_backspace_flow() {
+        let mut buffer = None;
+        push_minus(&mut buffer);
+        push_numeric_char(&mut buffer, '2');
+        push_numeric_char(&mut buffer, '.');
+        push_numeric_char(&mut buffer, '5');
+        assert_eq!(buffer.as_deref(), Some("-2.5"));
+
+        pop_numeric_char(&mut buffer);
+        assert_eq!(buffer.as_deref(), Some("-2."));
+        pop_numeric_char(&mut buffer);
+        assert_eq!(buffer.as_deref(), Some("-2"));
+        pop_numeric_char(&mut buffer);
+        assert_eq!(buffer, None);
+    }
+
+    #[test]
+    fn move_constraints_keep_default_xz_plane_and_exact_axis_numeric_values() {
+        assert_vec3_near(
+            apply_move_constraint(Vec3::new(1.0, 2.0, 3.0), AxisConstraint::None),
+            Vec3::new(1.0, 0.0, 3.0),
+        );
+        assert_vec3_near(
+            apply_move_constraint(Vec3::new(1.0, 2.0, 3.0), AxisConstraint::PlaneYZ),
+            Vec3::new(0.0, 2.0, 3.0),
+        );
+        assert_vec3_near(
+            numeric_move_delta(AxisConstraint::X, Vec3::ZERO, -2.5),
+            Vec3::new(-2.5, 0.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn numeric_scale_factor_supports_uniform_axis_and_plane_constraints() {
+        assert_vec3_near(
+            numeric_scale_factor(AxisConstraint::None, 2.0),
+            Vec3::splat(2.0),
+        );
+        assert_vec3_near(
+            numeric_scale_factor(AxisConstraint::Y, 0.5),
+            Vec3::new(1.0, 0.5, 1.0),
+        );
+        assert_vec3_near(
+            numeric_scale_factor(AxisConstraint::PlaneXY, 1.5),
+            Vec3::new(1.5, 1.5, 1.0),
+        );
     }
 
     #[test]
