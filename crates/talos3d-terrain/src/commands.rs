@@ -141,6 +141,30 @@ impl Plugin for TerrainCommandPlugin {
                 capability_id: Some("terrain".to_string()),
             },
             execute_cut_fill_analysis,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.create_proposed_surface".to_string(),
+                label: "Create Proposed Surface".to_string(),
+                description: "Duplicate an existing terrain surface and its source curves for proposed grading.".to_string(),
+                category: CommandCategory::Create,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "source_surface_id": {"type": "integer", "minimum": 0},
+                        "name": {"type": "string"}
+                    }
+                })),
+                default_shortcut: None,
+                icon: Some("icon.create".to_string()),
+                hint: Some("Create an independently editable proposed terrain surface from an existing surface".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_create_proposed_surface,
         );
     }
 }
@@ -518,6 +542,104 @@ fn execute_cut_fill_analysis(
     })
 }
 
+fn execute_create_proposed_surface(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let source_surface_id = optional_element_id(parameters, "source_surface_id")?
+        .map_or_else(|| selected_terrain_surface_id(world), Ok)?;
+    let source_surface = terrain_surface_by_id(world, source_surface_id)
+        .ok_or_else(|| format!("Terrain surface {} was not found", source_surface_id.0))?;
+
+    let mut curve_snapshots = Vec::with_capacity(source_surface.source_curve_ids.len());
+    let mut curve_map = Vec::with_capacity(source_surface.source_curve_ids.len());
+    {
+        let allocator = world.resource::<ElementIdAllocator>();
+        for source_curve_id in &source_surface.source_curve_ids {
+            let curve = elevation_curve_by_id(world, *source_curve_id).ok_or_else(|| {
+                format!(
+                    "Source curve {} for terrain surface {} was not found",
+                    source_curve_id.0, source_surface_id.0
+                )
+            })?;
+            let proposed_curve_id = allocator.next_id();
+            curve_map.push((*source_curve_id, proposed_curve_id));
+            curve_snapshots.push(ElevationCurveSnapshot {
+                element_id: proposed_curve_id,
+                curve,
+            });
+        }
+    }
+
+    let proposed_surface_id = world.resource::<ElementIdAllocator>().next_id();
+    let proposed_name = parameters
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Proposed {}", source_surface.name));
+    let proposed_surface = TerrainSurfaceSnapshot {
+        element_id: proposed_surface_id,
+        surface: TerrainSurface {
+            name: proposed_name,
+            source_curve_ids: curve_map
+                .iter()
+                .map(|(_, proposed_curve_id)| *proposed_curve_id)
+                .collect(),
+            ..source_surface
+        },
+    };
+
+    world
+        .resource_mut::<Messages<BeginCommandGroup>>()
+        .write(BeginCommandGroup {
+            label: "Create proposed terrain surface",
+        });
+
+    let mut create_events = world.resource_mut::<Messages<CreateEntityCommand>>();
+    for snapshot in &curve_snapshots {
+        create_events.write(CreateEntityCommand {
+            snapshot: snapshot.clone().into(),
+        });
+    }
+    create_events.write(CreateEntityCommand {
+        snapshot: proposed_surface.clone().into(),
+    });
+    let _ = create_events;
+
+    world
+        .resource_mut::<Messages<EndCommandGroup>>()
+        .write(EndCommandGroup);
+
+    if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
+        status_bar_data.set_feedback(
+            format!("Queued proposed terrain surface {}", proposed_surface_id.0),
+            2.5,
+        );
+    }
+
+    Ok(CommandResult {
+        created: curve_snapshots
+            .iter()
+            .map(|snapshot| snapshot.element_id.0)
+            .chain(std::iter::once(proposed_surface_id.0))
+            .collect(),
+        output: Some(serde_json::json!({
+            "source_surface_id": source_surface_id.0,
+            "proposed_surface_id": proposed_surface_id.0,
+            "source_curve_count": curve_map.len(),
+            "curve_map": curve_map
+                .iter()
+                .map(|(source, proposed)| serde_json::json!({
+                    "source_curve_id": source.0,
+                    "proposed_curve_id": proposed.0,
+                }))
+                .collect::<Vec<_>>(),
+        })),
+        ..CommandResult::empty()
+    })
+}
+
 fn required_element_id(parameters: &Value, key: &str) -> Result<ElementId, String> {
     optional_element_id(parameters, key)?.ok_or_else(|| format!("Missing required parameter {key}"))
 }
@@ -575,6 +697,38 @@ fn terrain_mesh_by_id(
         entity_ref
             .get::<TerrainMeshCache>()
             .map(|cache| cache.mesh.clone())
+    })
+}
+
+fn selected_terrain_surface_id(world: &World) -> Result<ElementId, String> {
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    q.iter(world)
+        .find_map(|entity_ref| {
+            if !entity_ref.contains::<Selected>() || !entity_ref.contains::<TerrainSurface>() {
+                return None;
+            }
+            entity_ref.get::<ElementId>().copied()
+        })
+        .ok_or_else(|| "Select a terrain surface or provide source_surface_id".to_string())
+}
+
+fn terrain_surface_by_id(world: &World, element_id: ElementId) -> Option<TerrainSurface> {
+    let mut q = world.try_query::<EntityRef>()?;
+    q.iter(world).find_map(|entity_ref| {
+        if entity_ref.get::<ElementId>() != Some(&element_id) {
+            return None;
+        }
+        entity_ref.get::<TerrainSurface>().cloned()
+    })
+}
+
+fn elevation_curve_by_id(world: &World, element_id: ElementId) -> Option<ElevationCurve> {
+    let mut q = world.try_query::<EntityRef>()?;
+    q.iter(world).find_map(|entity_ref| {
+        if entity_ref.get::<ElementId>() != Some(&element_id) {
+            return None;
+        }
+        entity_ref.get::<ElevationCurve>().cloned()
     })
 }
 
@@ -839,6 +993,104 @@ mod tests {
             },
             contour_segments: Vec::new(),
         }
+    }
+
+    fn sample_curve(elevation: f32) -> ElevationCurve {
+        ElevationCurve {
+            points: vec![
+                Vec3::new(0.0, elevation, 0.0),
+                Vec3::new(1.0, elevation, 0.0),
+            ],
+            elevation,
+            source_layer: "Contour".to_string(),
+            curve_type: ElevationCurveType::Major,
+            survey_source_id: None,
+        }
+    }
+
+    #[test]
+    fn proposed_surface_command_duplicates_surface_and_source_curves() {
+        let mut world = init_command_test_world();
+        world.resource_mut::<ElementIdAllocator>().set_next(1000);
+        world.spawn((ElementId(10), sample_curve(1.0)));
+        world.spawn((ElementId(11), sample_curve(2.0)));
+        world.spawn((
+            ElementId(20),
+            TerrainSurface {
+                name: "Existing Site".to_string(),
+                source_curve_ids: vec![ElementId(10), ElementId(11)],
+                datum_elevation: 1.0,
+                boundary: vec![
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(2.0, 0.0),
+                    Vec2::new(2.0, 2.0),
+                    Vec2::new(0.0, 2.0),
+                ],
+                max_triangle_area: 5.0,
+                minimum_angle: 12.0,
+                contour_interval: 0.5,
+                drape_sample_spacing: 0.25,
+                offset: Vec3::new(1.0, 0.0, 2.0),
+            },
+        ));
+
+        let result = execute_create_proposed_surface(
+            &mut world,
+            &json!({
+                "source_surface_id": 20,
+                "name": "Proposed Site"
+            }),
+        )
+        .expect("proposed surface command should succeed");
+
+        assert_eq!(result.created, vec![1000, 1001, 1002]);
+        assert_eq!(
+            result.output.as_ref().unwrap()["source_curve_count"],
+            json!(2)
+        );
+        let created = world
+            .resource_mut::<Messages<CreateEntityCommand>>()
+            .drain()
+            .collect::<Vec<_>>();
+        assert_eq!(created.len(), 3);
+        assert_eq!(created[0].snapshot.type_name(), "elevation_curve");
+        assert_eq!(created[1].snapshot.type_name(), "elevation_curve");
+        assert_eq!(created[2].snapshot.type_name(), "terrain_surface");
+
+        let surface_json = created[2].snapshot.to_json();
+        assert_eq!(
+            surface_json["TerrainSurface"]["surface"]["name"],
+            json!("Proposed Site")
+        );
+        assert_eq!(
+            surface_json["TerrainSurface"]["surface"]["source_curve_ids"],
+            json!([1000, 1001])
+        );
+        assert_eq!(
+            surface_json["TerrainSurface"]["surface"]["drape_sample_spacing"],
+            json!(0.25)
+        );
+    }
+
+    #[test]
+    fn proposed_surface_command_uses_selected_surface_when_id_is_omitted() {
+        let mut world = init_command_test_world();
+        world.resource_mut::<ElementIdAllocator>().set_next(2000);
+        world.spawn((ElementId(10), sample_curve(1.0)));
+        world.spawn((
+            ElementId(20),
+            Selected,
+            TerrainSurface::new("Existing Site".to_string(), vec![ElementId(10)]),
+        ));
+
+        let result = execute_create_proposed_surface(&mut world, &json!({}))
+            .expect("selected terrain surface should be used");
+
+        assert_eq!(result.created, vec![2000, 2001]);
+        assert_eq!(
+            result.output.as_ref().unwrap()["source_surface_id"],
+            json!(20)
+        );
     }
 
     #[test]
