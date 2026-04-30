@@ -13,6 +13,7 @@ use crate::capability_registry::CapabilityRegistry;
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
 use crate::curation::MaterialSpecBody;
+#[cfg(feature = "model-api")]
 use crate::plugins::authoring_guidance::AuthoringGuidance;
 #[cfg(feature = "model-api")]
 use crate::plugins::hosting_contracts::{
@@ -20963,6 +20964,7 @@ mod tests {
         assert_eq!(handle_list_lights(&world).len(), 1);
     }
 
+    #[cfg(feature = "model-api")]
     fn seed_recipe_draft_corpus(world: &mut World) {
         use crate::capability_registry::{CorpusProvenance, LicenseTag, PassageRef};
         use crate::plugins::corpus_gap::{CorpusGapQueue, CorpusPassageRegistry};
