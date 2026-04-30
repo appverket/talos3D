@@ -6,6 +6,7 @@ pub mod reconstruction;
 pub mod review;
 pub mod snapshots;
 pub mod terrain_provider;
+pub mod tools;
 pub mod visualization;
 
 use bevy::prelude::*;
@@ -23,6 +24,7 @@ use crate::{
     review::TerrainReviewPlugin,
     snapshots::{ElevationCurveFactory, TerrainSurfaceFactory},
     terrain_provider::TerrainProviderImpl,
+    tools::TerrainToolPlugin,
 };
 
 pub struct TerrainPlugin;
@@ -52,6 +54,7 @@ impl Plugin for TerrainPlugin {
             .register_terrain_provider(TerrainProviderImpl)
             .add_plugins(TerrainCommandPlugin)
             .add_plugins(TerrainGenerationPlugin)
-            .add_plugins(TerrainReviewPlugin);
+            .add_plugins(TerrainReviewPlugin)
+            .add_plugins(TerrainToolPlugin);
     }
 }

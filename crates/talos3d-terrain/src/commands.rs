@@ -4,6 +4,7 @@ use talos3d_capability_api::commands::{
     CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
 };
 use talos3d_core::plugins::{
+    command_registry::activate_tool_command,
     commands::{
         ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
         EndCommandGroup,
@@ -11,6 +12,7 @@ use talos3d_core::plugins::{
     identity::{ElementId, ElementIdAllocator},
     modeling::primitives::{ElevationMetadata, Polyline},
     selection::Selected,
+    tools::ActiveTool,
     ui::StatusBarData,
 };
 
@@ -203,6 +205,42 @@ impl Plugin for TerrainCommandPlugin {
                 capability_id: Some("terrain".to_string()),
             },
             execute_create_proposed_surface,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.draw_elevation_curve".to_string(),
+                label: "Draw Elevation Curve".to_string(),
+                description: "Activate direct elevation-curve drawing on a terrain surface.".to_string(),
+                category: CommandCategory::Create,
+                parameters: Some(serde_json::json!({"type": "object"})),
+                default_shortcut: None,
+                icon: Some("icon.create".to_string()),
+                hint: Some("Click terrain points, then press Enter to add an elevation curve".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: Some("PlaceTerrainElevationCurve".to_string()),
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_draw_elevation_curve,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.place_spot_elevation".to_string(),
+                label: "Place Spot Elevation".to_string(),
+                description: "Activate direct spot-elevation placement on a terrain surface.".to_string(),
+                category: CommandCategory::Create,
+                parameters: Some(serde_json::json!({"type": "object"})),
+                default_shortcut: None,
+                icon: Some("icon.create".to_string()),
+                hint: Some("Click terrain to add a spot elevation".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: Some("PlaceTerrainSpotElevation".to_string()),
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_place_spot_elevation,
         )
         .register_command(
             CommandDescriptor {
@@ -891,6 +929,14 @@ fn execute_create_proposed_surface(
         })),
         ..CommandResult::empty()
     })
+}
+
+fn execute_draw_elevation_curve(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    activate_tool_command(world, ActiveTool::PlaceTerrainElevationCurve)
+}
+
+fn execute_place_spot_elevation(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    activate_tool_command(world, ActiveTool::PlaceTerrainSpotElevation)
 }
 
 fn execute_add_elevation_curve(

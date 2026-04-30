@@ -23,7 +23,15 @@ impl Plugin for ToolPlugin {
             .add_systems(OnEnter(ActiveTool::PlaceCylinder), enter_cylinder_tool)
             .add_systems(OnEnter(ActiveTool::PlaceSphere), enter_sphere_tool)
             .add_systems(OnEnter(ActiveTool::PlacePlane), enter_plane_tool)
-            .add_systems(OnEnter(ActiveTool::PlacePolyline), enter_polyline_tool);
+            .add_systems(OnEnter(ActiveTool::PlacePolyline), enter_polyline_tool)
+            .add_systems(
+                OnEnter(ActiveTool::PlaceTerrainElevationCurve),
+                enter_terrain_elevation_curve_tool,
+            )
+            .add_systems(
+                OnEnter(ActiveTool::PlaceTerrainSpotElevation),
+                enter_terrain_spot_elevation_tool,
+            );
     }
 }
 
@@ -40,6 +48,8 @@ pub enum ActiveTool {
     PlaceSphere,
     PlacePlane,
     PlacePolyline,
+    PlaceTerrainElevationCurve,
+    PlaceTerrainSpotElevation,
 }
 
 #[derive(Component)]
@@ -140,6 +150,22 @@ fn enter_polyline_tool(mut status_bar_data: ResMut<StatusBarData>) {
         &mut status_bar_data,
         "Polyline",
         "Click to add points \u{00b7} Enter to finish",
+    );
+}
+
+fn enter_terrain_elevation_curve_tool(mut status_bar_data: ResMut<StatusBarData>) {
+    set_tool_status(
+        &mut status_bar_data,
+        "Elevation Curve",
+        "Click terrain points \u{00b7} Enter to finish",
+    );
+}
+
+fn enter_terrain_spot_elevation_tool(mut status_bar_data: ResMut<StatusBarData>) {
+    set_tool_status(
+        &mut status_bar_data,
+        "Spot Elevation",
+        "Click terrain to place spot elevation",
     );
 }
 
