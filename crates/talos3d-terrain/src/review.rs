@@ -124,22 +124,60 @@ fn draw_terrain_review_window(
             });
             ui.horizontal(|ui| {
                 ui.label("Contour");
-                ui.add(egui::DragValue::new(&mut snapshot.surface.contour_interval).speed(0.1).range(0.1..=100.0));
+                ui.add(
+                    egui::DragValue::new(&mut snapshot.surface.contour_interval)
+                        .speed(0.1)
+                        .range(0.1..=100.0),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("Max area");
-                ui.add(egui::DragValue::new(&mut snapshot.surface.max_triangle_area).speed(0.5).range(0.1..=100_000.0));
+                ui.add(
+                    egui::DragValue::new(&mut snapshot.surface.max_triangle_area)
+                        .speed(0.5)
+                        .range(0.1..=100_000.0),
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("Min angle");
-                ui.add(egui::DragValue::new(&mut snapshot.surface.minimum_angle).speed(0.5).range(0.1..=89.0));
+                ui.add(
+                    egui::DragValue::new(&mut snapshot.surface.minimum_angle)
+                        .speed(0.5)
+                        .range(0.1..=89.0),
+                );
             });
+            if let Some((mut min, mut max)) = boundary_bounds(&snapshot.surface.boundary) {
+                ui.separator();
+                ui.label("Boundary");
+                let mut changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Min X");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut min.x).speed(0.5))
+                        .changed();
+                    ui.label("Min Z");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut min.y).speed(0.5))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Max X");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut max.x).speed(0.5))
+                        .changed();
+                    ui.label("Max Z");
+                    changed |= ui
+                        .add(egui::DragValue::new(&mut max.y).speed(0.5))
+                        .changed();
+                });
+                if changed && min.x < max.x && min.y < max.y {
+                    snapshot.surface.boundary = rectangular_boundary(min, max);
+                }
+            }
             ui.label(
-                egui::RichText::new(
-                    "Preview is clipped to the selected-curve bounds until an explicit boundary editor is added.",
-                )
-                .small()
-                .color(REVIEW_TEXT_MUTED),
+                egui::RichText::new("Preview is clipped to the editable rectangular boundary.")
+                    .small()
+                    .color(REVIEW_TEXT_MUTED),
             );
 
             ui.separator();
@@ -183,4 +221,39 @@ fn cleanup_preview_entity(world: &mut World, preview_entity: Option<Entity>) {
         world.resource_mut::<Assets<Mesh>>().remove(mesh_id);
     }
     let _ = world.despawn(preview_entity);
+}
+
+fn boundary_bounds(boundary: &[Vec2]) -> Option<(Vec2, Vec2)> {
+    let mut points = boundary.iter().copied();
+    let first = points.next()?;
+    let mut min = first;
+    let mut max = first;
+    for point in points {
+        min = min.min(point);
+        max = max.max(point);
+    }
+    Some((min, max))
+}
+
+fn rectangular_boundary(min: Vec2, max: Vec2) -> Vec<Vec2> {
+    vec![
+        Vec2::new(min.x, min.y),
+        Vec2::new(max.x, min.y),
+        Vec2::new(max.x, max.y),
+        Vec2::new(min.x, max.y),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rectangular_boundary_preserves_editable_bounds() {
+        let boundary = rectangular_boundary(Vec2::new(-1.0, -2.0), Vec2::new(3.0, 4.0));
+        let (min, max) = boundary_bounds(&boundary).expect("boundary has bounds");
+
+        assert_eq!(min, Vec2::new(-1.0, -2.0));
+        assert_eq!(max, Vec2::new(3.0, 4.0));
+    }
 }

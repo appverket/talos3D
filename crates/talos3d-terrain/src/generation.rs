@@ -20,6 +20,7 @@ const ELEVATION_HIGH_COLOR: [f32; 3] = [0.65, 0.43, 0.22];
 const ELEVATION_PEAK_COLOR: [f32; 3] = [0.92, 0.92, 0.9];
 const TERRAIN_CONTOUR_COLOR: Color = Color::srgba(0.08, 0.09, 0.07, 0.9);
 const CONTOUR_EPSILON: f32 = 1.0e-4;
+type BreaklineSegment = (usize, usize);
 
 pub struct TerrainGenerationPlugin;
 
@@ -152,6 +153,7 @@ pub fn generate_terrain_mesh_cache(
 ) -> TerrainMeshCache {
     let effective_spacing = adaptive_sampling_spacing(surface);
     let mut source_points = Vec::new();
+    let mut sampled_curves = Vec::<Vec<Vec3>>::new();
     for source_id in &surface.source_curve_ids {
         let Some((_, curve)) = curves
             .iter()
@@ -159,11 +161,12 @@ pub fn generate_terrain_mesh_cache(
         else {
             continue;
         };
-        source_points.extend(
-            sample_curve_points(&curve.points, effective_spacing)
-                .into_iter()
-                .map(|point| point + surface.offset),
-        );
+        let sampled_curve = sample_curve_points(&curve.points, effective_spacing)
+            .into_iter()
+            .map(|point| point + surface.offset)
+            .collect::<Vec<_>>();
+        source_points.extend(sampled_curve.iter().copied());
+        sampled_curves.push(sampled_curve);
     }
 
     if !surface.boundary.is_empty() && !source_points.is_empty() {
@@ -184,6 +187,26 @@ pub fn generate_terrain_mesh_cache(
         return TerrainMeshCache::default();
     }
 
+    let breakline_segments = build_breakline_segments(&vertices, &sampled_curves);
+    let faces = build_terrain_faces(surface, &vertices, &breakline_segments);
+    let mesh = TriangleMesh {
+        vertices: vertices.clone(),
+        faces: faces.clone(),
+        normals: None,
+        name: Some(surface.name.clone()),
+    };
+    let contour_segments = generate_contour_segments(&vertices, &faces, surface.contour_interval);
+    TerrainMeshCache {
+        mesh,
+        contour_segments,
+    }
+}
+
+fn build_terrain_faces(
+    surface: &TerrainSurface,
+    vertices: &[Vec3],
+    breakline_segments: &[BreaklineSegment],
+) -> Vec<[u32; 3]> {
     let triangulation = triangulate(
         &vertices
             .iter()
@@ -197,7 +220,7 @@ pub fn generate_terrain_mesh_cache(
     let mut faces = Vec::new();
     for triangle in triangulation.triangles.chunks_exact(3) {
         let face = [triangle[0] as u32, triangle[1] as u32, triangle[2] as u32];
-        let Some((a, b, c)) = face_points(&vertices, face) else {
+        let Some((a, b, c)) = face_points(vertices, face) else {
             continue;
         };
         if (b - a).cross(c - a).length_squared() <= f32::EPSILON {
@@ -206,26 +229,21 @@ pub fn generate_terrain_mesh_cache(
         if triangle_area_xz(a, b, c) > surface.max_triangle_area.max(CONTOUR_EPSILON) {
             continue;
         }
+        if minimum_triangle_angle_degrees(a, b, c) < surface.minimum_angle.max(0.0) {
+            continue;
+        }
         if !surface.boundary.is_empty() {
             let centroid = Vec2::new((a.x + b.x + c.x) / 3.0, (a.z + b.z + c.z) / 3.0);
             if !point_in_polygon(centroid, &surface.boundary) {
                 continue;
             }
         }
+        if triangle_crosses_breakline(vertices, face, breakline_segments) {
+            continue;
+        }
         faces.push(face);
     }
-
-    let mesh = TriangleMesh {
-        vertices: vertices.clone(),
-        faces: faces.clone(),
-        normals: None,
-        name: Some(surface.name.clone()),
-    };
-    let contour_segments = generate_contour_segments(&vertices, &faces, surface.contour_interval);
-    TerrainMeshCache {
-        mesh,
-        contour_segments,
-    }
+    faces
 }
 
 fn adaptive_sampling_spacing(surface: &TerrainSurface) -> f32 {
@@ -381,6 +399,36 @@ fn dedupe_vertices(points: Vec<Vec3>) -> Vec<Vec3> {
     unique
 }
 
+fn build_breakline_segments(
+    vertices: &[Vec3],
+    sampled_curves: &[Vec<Vec3>],
+) -> Vec<BreaklineSegment> {
+    let mut segments = Vec::new();
+    for curve in sampled_curves {
+        for segment in curve.windows(2) {
+            if segment[0].distance_squared(segment[1]) <= CONTOUR_EPSILON {
+                continue;
+            }
+            let Some(start) = find_vertex_index(vertices, segment[0]) else {
+                continue;
+            };
+            let Some(end) = find_vertex_index(vertices, segment[1]) else {
+                continue;
+            };
+            if start != end {
+                segments.push((start, end));
+            }
+        }
+    }
+    segments
+}
+
+fn find_vertex_index(vertices: &[Vec3], point: Vec3) -> Option<usize> {
+    vertices
+        .iter()
+        .position(|candidate| candidate.distance_squared(point) <= CONTOUR_EPSILON)
+}
+
 fn planar_uvs(vertices: &[Vec3]) -> Vec<[f32; 2]> {
     if vertices.is_empty() {
         return Vec::new();
@@ -431,6 +479,65 @@ fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
 
 fn triangle_area_xz(a: Vec3, b: Vec3, c: Vec3) -> f32 {
     ((b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x)).abs() * 0.5
+}
+
+fn minimum_triangle_angle_degrees(a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    angle_degrees_xz(a.xz(), b.xz(), c.xz())
+        .min(angle_degrees_xz(b.xz(), c.xz(), a.xz()))
+        .min(angle_degrees_xz(c.xz(), a.xz(), b.xz()))
+}
+
+fn angle_degrees_xz(origin: Vec2, left: Vec2, right: Vec2) -> f32 {
+    let left = left - origin;
+    let right = right - origin;
+    if left.length_squared() <= CONTOUR_EPSILON || right.length_squared() <= CONTOUR_EPSILON {
+        return 0.0;
+    }
+    let dot = left.normalize().dot(right.normalize()).clamp(-1.0, 1.0);
+    dot.acos().to_degrees()
+}
+
+fn triangle_crosses_breakline(
+    vertices: &[Vec3],
+    face: [u32; 3],
+    breakline_segments: &[BreaklineSegment],
+) -> bool {
+    let edges = [
+        (face[0] as usize, face[1] as usize),
+        (face[1] as usize, face[2] as usize),
+        (face[2] as usize, face[0] as usize),
+    ];
+    edges.iter().any(|edge| {
+        breakline_segments.iter().any(|breakline| {
+            !shares_endpoint(*edge, *breakline)
+                && segments_properly_intersect_xz(
+                    vertices[edge.0],
+                    vertices[edge.1],
+                    vertices[breakline.0],
+                    vertices[breakline.1],
+                )
+        })
+    })
+}
+
+fn shares_endpoint(left: BreaklineSegment, right: BreaklineSegment) -> bool {
+    left.0 == right.0 || left.0 == right.1 || left.1 == right.0 || left.1 == right.1
+}
+
+fn segments_properly_intersect_xz(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> bool {
+    let a = a.xz();
+    let b = b.xz();
+    let c = c.xz();
+    let d = d.xz();
+    let o1 = orientation_xz(a, b, c);
+    let o2 = orientation_xz(a, b, d);
+    let o3 = orientation_xz(c, d, a);
+    let o4 = orientation_xz(c, d, b);
+    o1 * o2 < -CONTOUR_EPSILON && o3 * o4 < -CONTOUR_EPSILON
+}
+
+fn orientation_xz(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
 fn generate_contour_segments(
@@ -533,6 +640,7 @@ fn lerp_color(start: [f32; 3], end: [f32; 3], t: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn samples_triangle_height_inside_face() {
@@ -604,5 +712,110 @@ mod tests {
         };
 
         assert!((adaptive_sampling_spacing(&surface) - 0.75).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn minimum_angle_filter_rejects_sliver_triangles() {
+        let min_angle = minimum_triangle_angle_degrees(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(100.0, 0.0, 0.0),
+            Vec3::new(0.01, 0.0, 0.01),
+        );
+
+        assert!(min_angle < 1.0, "sliver min angle was {min_angle}");
+    }
+
+    #[test]
+    fn breakline_filter_rejects_triangle_edges_that_cross_source_segments() {
+        let vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(2.0, 0.0, 1.0),
+        ];
+        let breaklines = vec![(4, 5)];
+
+        assert!(triangle_crosses_breakline(
+            &vertices,
+            [0, 1, 3],
+            &breaklines
+        ));
+        assert!(!triangle_crosses_breakline(
+            &vertices,
+            [0, 4, 3],
+            &breaklines
+        ));
+    }
+
+    #[test]
+    fn generation_filters_breakline_crossings_and_low_quality_triangles() {
+        let surface = TerrainSurface {
+            name: "Filtered".to_string(),
+            source_curve_ids: vec![],
+            datum_elevation: 0.0,
+            boundary: vec![],
+            max_triangle_area: 10.0,
+            minimum_angle: 10.0,
+            drape_sample_spacing: 1.0,
+            contour_interval: 1.0,
+            offset: Vec3::ZERO,
+        };
+        let vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(2.0, 0.0, 1.0),
+        ];
+        let breaklines = vec![(4, 5)];
+
+        let faces = build_terrain_faces(&surface, &vertices, &breaklines);
+
+        assert!(!faces.is_empty());
+        assert!(faces.iter().all(|face| !triangle_crosses_breakline(
+            &vertices,
+            *face,
+            &breaklines
+        )));
+        assert!(faces.iter().all(|face| {
+            let (a, b, c) = face_points(&vertices, *face).expect("face indices are valid");
+            minimum_triangle_angle_degrees(a, b, c) >= surface.minimum_angle
+        }));
+    }
+
+    #[test]
+    fn ten_thousand_vertex_terrain_generation_stays_under_two_seconds() {
+        let mut vertices = Vec::with_capacity(10_000);
+        for z in 0..100 {
+            for x in 0..100 {
+                let x = x as f32;
+                let z = z as f32;
+                vertices.push(Vec3::new(x, (x * 0.03 + z * 0.02).sin(), z));
+            }
+        }
+        let surface = TerrainSurface {
+            name: "Performance".to_string(),
+            source_curve_ids: vec![],
+            datum_elevation: 0.0,
+            boundary: vec![],
+            max_triangle_area: 2.0,
+            minimum_angle: 0.1,
+            drape_sample_spacing: 1.0,
+            contour_interval: 1.0,
+            offset: Vec3::ZERO,
+        };
+
+        let start = Instant::now();
+        let faces = build_terrain_faces(&surface, &vertices, &[]);
+        let elapsed = start.elapsed();
+
+        assert!(!faces.is_empty());
+        assert!(
+            elapsed.as_secs_f32() < 2.0,
+            "10k vertex terrain generation took {elapsed:?}"
+        );
     }
 }
