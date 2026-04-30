@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod components;
+pub mod cut_fill;
 pub mod generation;
 pub mod reconstruction;
 pub mod review;
