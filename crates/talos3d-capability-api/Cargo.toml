@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 talos3d-core = { path = "../talos3d-core" }
+
+[dev-dependencies]
+serde_json = "1"
