@@ -40,6 +40,17 @@ pub struct Opening {
     pub kind: OpeningKind,
 }
 
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildingPad {
+    pub boundary: Vec<Vec2>,
+    pub pad_elevation: f32,
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct BuildingPadExcavation {
+    pub volume: Option<f64>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpeningKind {
