@@ -16,10 +16,10 @@ use talos3d_core::plugins::{
 
 use crate::{
     components::{
-        ElevationCurve, ElevationCurveType, TerrainMeshCache, TerrainSurface, TerrainSurfaceRole,
-        DEFAULT_TERRAIN_CONTOUR_INTERVAL, DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE,
-        DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING, DEFAULT_TERRAIN_MAX_TRIANGLE_AREA,
-        DEFAULT_TERRAIN_MINIMUM_ANGLE,
+        ElevationCurve, ElevationCurveType, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface,
+        TerrainSurfaceRole, DEFAULT_TERRAIN_CONTOUR_INTERVAL,
+        DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE, DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
+        DEFAULT_TERRAIN_MAX_TRIANGLE_AREA, DEFAULT_TERRAIN_MINIMUM_ANGLE,
     },
     cut_fill::{cut_fill_against_datum, cut_fill_between_surfaces, CutFillOptions, CutFillResult},
     reconstruction::{
@@ -28,6 +28,7 @@ use crate::{
     },
     review::TerrainGenerationReviewState,
     snapshots::{ElevationCurveSnapshot, TerrainSurfaceSnapshot},
+    visualization::{TerrainVisualizationMode, TerrainVisualizationState},
 };
 
 pub struct TerrainCommandPlugin;
@@ -144,6 +145,34 @@ impl Plugin for TerrainCommandPlugin {
                 capability_id: Some("terrain".to_string()),
             },
             execute_cut_fill_analysis,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.set_visualization_mode".to_string(),
+                label: "Set Terrain Visualization".to_string(),
+                description: "Switch terrain shading between standard, slope, aspect, and elevation bands.".to_string(),
+                category: CommandCategory::View,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["mode"],
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["standard", "slope", "aspect", "elevation_bands"]
+                        },
+                        "elevation_band_width": {"type": "number", "minimum": 0.0001}
+                    }
+                })),
+                default_shortcut: None,
+                icon: Some("icon.view".to_string()),
+                hint: Some("Set the active terrain visualization mode".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_set_visualization_mode,
         )
         .register_command(
             CommandDescriptor {
@@ -639,6 +668,60 @@ fn execute_cut_fill_analysis(
     })
 }
 
+fn execute_set_visualization_mode(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let mode = parameters
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(parse_visualization_mode)
+        .transpose()?
+        .ok_or_else(|| "Missing required parameter mode".to_string())?;
+    let requested_band_width = parameters
+        .get("elevation_band_width")
+        .map(|value| {
+            value
+                .as_f64()
+                .map(|value| value as f32)
+                .filter(|value| *value > 0.0)
+                .ok_or_else(|| "elevation_band_width must be a positive number".to_string())
+        })
+        .transpose()?;
+
+    let mut state = world
+        .get_resource::<TerrainVisualizationState>()
+        .copied()
+        .unwrap_or_default();
+    state.mode = mode;
+    if let Some(band_width) = requested_band_width {
+        state.elevation_band_width = band_width;
+    }
+    world.insert_resource(state);
+
+    let mut q = world.try_query::<(Entity, &TerrainSurface)>().unwrap();
+    let surface_entities = q.iter(world).map(|(entity, _)| entity).collect::<Vec<_>>();
+    for entity in &surface_entities {
+        world.entity_mut(*entity).insert(NeedsTerrainMesh);
+    }
+
+    if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
+        let hint = format!("Terrain visualization: {}", state.mode.label());
+        status_bar_data.hint = hint.clone();
+        status_bar_data.set_feedback(hint, 2.5);
+    }
+
+    Ok(CommandResult {
+        output: Some(serde_json::json!({
+            "mode": state.mode.as_str(),
+            "label": state.mode.label(),
+            "elevation_band_width": state.elevation_band_width,
+            "surface_count": surface_entities.len(),
+        })),
+        ..CommandResult::empty()
+    })
+}
+
 fn execute_create_proposed_surface(
     world: &mut World,
     parameters: &Value,
@@ -1061,6 +1144,16 @@ fn parse_elevation_curve_type(value: &str) -> Result<ElevationCurveType, String>
         "index" => Ok(ElevationCurveType::Index),
         "supplementary" => Ok(ElevationCurveType::Supplementary),
         _ => Err("curve_type must be one of: major, minor, index, supplementary".to_string()),
+    }
+}
+
+fn parse_visualization_mode(value: &str) -> Result<TerrainVisualizationMode, String> {
+    match value {
+        "standard" => Ok(TerrainVisualizationMode::Standard),
+        "slope" => Ok(TerrainVisualizationMode::Slope),
+        "aspect" => Ok(TerrainVisualizationMode::Aspect),
+        "elevation_bands" | "elevation-bands" => Ok(TerrainVisualizationMode::ElevationBands),
+        _ => Err("mode must be one of: standard, slope, aspect, elevation_bands".to_string()),
     }
 }
 
@@ -1623,6 +1716,40 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(deletes.len(), 1);
         assert_eq!(deletes[0].element_ids, vec![ElementId(10)]);
+    }
+
+    #[test]
+    fn visualization_mode_command_updates_state_status_and_marks_surfaces_dirty() {
+        let mut world = init_command_test_world();
+        let surface_entity = world
+            .spawn((
+                ElementId(20),
+                TerrainSurface::new("Existing Site".to_string(), vec![]),
+            ))
+            .id();
+
+        let result = execute_set_visualization_mode(
+            &mut world,
+            &json!({
+                "mode": "elevation_bands",
+                "elevation_band_width": 2.5
+            }),
+        )
+        .expect("visualization mode command should succeed");
+
+        let state = *world.resource::<TerrainVisualizationState>();
+        assert_eq!(state.mode, TerrainVisualizationMode::ElevationBands);
+        assert_eq!(state.elevation_band_width, 2.5);
+        assert!(world.entity(surface_entity).contains::<NeedsTerrainMesh>());
+        assert_eq!(
+            result.output.as_ref().unwrap()["mode"],
+            json!("elevation_bands")
+        );
+        assert_eq!(result.output.as_ref().unwrap()["surface_count"], json!(1));
+        assert_eq!(
+            world.resource::<StatusBarData>().hint,
+            "Terrain visualization: Elevation bands"
+        );
     }
 
     #[test]

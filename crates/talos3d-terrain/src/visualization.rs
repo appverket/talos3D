@@ -1,4 +1,4 @@
-use bevy::prelude::{Vec2, Vec3};
+use bevy::prelude::{Resource, Vec2, Vec3};
 use talos3d_core::plugins::modeling::primitives::TriangleMesh;
 
 const FLAT_SLOPE_COLOR: [f32; 4] = [0.16, 0.62, 0.24, 1.0];
@@ -16,6 +16,64 @@ pub struct TriangleVisualization {
     pub face: [u32; 3],
     pub value: f32,
     pub color: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerrainVisualizationMode {
+    #[default]
+    Standard,
+    Slope,
+    Aspect,
+    ElevationBands,
+}
+
+impl TerrainVisualizationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Slope => "slope",
+            Self::Aspect => "aspect",
+            Self::ElevationBands => "elevation_bands",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::Slope => "Slope",
+            Self::Aspect => "Aspect",
+            Self::ElevationBands => "Elevation bands",
+        }
+    }
+}
+
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct TerrainVisualizationState {
+    pub mode: TerrainVisualizationMode,
+    pub elevation_band_width: f32,
+}
+
+impl Default for TerrainVisualizationState {
+    fn default() -> Self {
+        Self {
+            mode: TerrainVisualizationMode::Standard,
+            elevation_band_width: 1.0,
+        }
+    }
+}
+
+pub fn visualization_for_mode(
+    mesh: &TriangleMesh,
+    state: TerrainVisualizationState,
+) -> Vec<TriangleVisualization> {
+    match state.mode {
+        TerrainVisualizationMode::Standard => Vec::new(),
+        TerrainVisualizationMode::Slope => slope_visualization(mesh),
+        TerrainVisualizationMode::Aspect => aspect_visualization(mesh),
+        TerrainVisualizationMode::ElevationBands => {
+            elevation_band_visualization(mesh, state.elevation_band_width)
+        }
+    }
 }
 
 pub fn slope_visualization(mesh: &TriangleMesh) -> Vec<TriangleVisualization> {
