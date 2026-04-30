@@ -19,6 +19,7 @@ use talos3d_core::{
 
 use crate::components::{
     ElevationCurve, ElevationCurveType, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface,
+    TerrainSurfaceRole,
 };
 
 const CURVE_SELECTION_RADIUS_METRES: f32 = 0.2;
@@ -301,6 +302,12 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
                 PropertyValueKind::Text,
                 Some(PropertyValue::Text(self.surface.name.clone())),
                 true,
+            ),
+            read_only_property_field(
+                "role",
+                "role",
+                PropertyValueKind::Text,
+                Some(PropertyValue::Text(self.surface.role.as_str().to_string())),
             ),
             property_field(
                 "contour_interval",
@@ -633,6 +640,11 @@ impl AuthoredEntityFactory for TerrainSurfaceFactory {
                         .get("source_curve_ids")
                         .ok_or_else(|| "Missing required field 'source_curve_ids'".to_string())?,
                 )?,
+                role: object
+                    .get("role")
+                    .map(terrain_surface_role_from_json)
+                    .transpose()?
+                    .unwrap_or_default(),
                 datum_elevation: object
                     .get("datum_elevation")
                     .map(scalar_from_json)
@@ -762,6 +774,17 @@ fn parse_curve_type(value: &str) -> Result<ElevationCurveType, String> {
         "index" => Ok(ElevationCurveType::Index),
         "supplementary" => Ok(ElevationCurveType::Supplementary),
         _ => Err("curve_type must be one of: major, minor, index, supplementary".to_string()),
+    }
+}
+
+fn terrain_surface_role_from_json(value: &Value) -> Result<TerrainSurfaceRole, String> {
+    match value
+        .as_str()
+        .ok_or_else(|| "role must be a string".to_string())?
+    {
+        "existing" => Ok(TerrainSurfaceRole::Existing),
+        "proposed" => Ok(TerrainSurfaceRole::Proposed),
+        _ => Err("role must be one of: existing, proposed".to_string()),
     }
 }
 
