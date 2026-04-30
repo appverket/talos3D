@@ -60,6 +60,7 @@ fn queue_create_wall_commands(world: &mut World) {
                     thickness: command.thickness,
                 },
                 bim_data: BimData::default(),
+                material_assignment: None,
             }
             .into(),
         );
@@ -98,6 +99,7 @@ fn queue_create_opening_commands(world: &mut World) {
                 parent_wall_element_id: command.parent_wall_element_id,
                 position_along_wall: command.position_along_wall,
                 bim_data: BimData::default(),
+                material_assignment: None,
             }
             .into(),
         );

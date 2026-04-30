@@ -147,6 +147,7 @@ fn finish_building_pad_on_enter(
                 pad_elevation,
             },
             excavation_volume: None,
+            material_assignment: None,
         }
         .into(),
     });
