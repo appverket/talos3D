@@ -71,11 +71,16 @@ mod tests {
         assert_eq!(libraries[0].scope, DefinitionLibraryScope::Bundled);
         assert_eq!(
             libraries[0].id,
-            DefinitionLibraryId("architecture.double-european-window".to_string())
+            DefinitionLibraryId("architecture.european-window-library".to_string())
         );
         assert!(libraries[0].definitions.contains_key(
             &crate::plugins::modeling::definition::DefinitionId(
                 "architecture.window.double-european".to_string(),
+            )
+        ));
+        assert!(libraries[0].definitions.contains_key(
+            &crate::plugins::modeling::definition::DefinitionId(
+                "architecture.window.european-single".to_string(),
             )
         ));
     }
@@ -97,7 +102,7 @@ mod tests {
         assert_eq!(
             registry
                 .get(&DefinitionLibraryId(
-                    "architecture.double-european-window".to_string()
+                    "architecture.european-window-library".to_string()
                 ))
                 .expect("library should exist")
                 .name,
