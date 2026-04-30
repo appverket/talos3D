@@ -21,14 +21,20 @@ use crate::{
         DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE, DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
         DEFAULT_TERRAIN_MAX_TRIANGLE_AREA, DEFAULT_TERRAIN_MINIMUM_ANGLE,
     },
-    cut_fill::{cut_fill_against_datum, cut_fill_between_surfaces, CutFillOptions, CutFillResult},
+    cut_fill::{
+        cut_fill_against_datum, cut_fill_between_surfaces, CutFillAnalysisPanelState,
+        CutFillAnalysisSummary, CutFillAnalysisTarget, CutFillOptions, CutFillResult,
+    },
     reconstruction::{
         estimate_terrain_boundary, planar_bounds_center, repair_elevation_curves,
         ContourRepairSettings,
     },
     review::TerrainGenerationReviewState,
     snapshots::{ElevationCurveSnapshot, TerrainSurfaceSnapshot},
-    visualization::{TerrainVisualizationMode, TerrainVisualizationState},
+    visualization::{
+        CutFillVisualizationState, CutFillVisualizationTarget, TerrainVisualizationMode,
+        TerrainVisualizationState,
+    },
 };
 
 pub struct TerrainCommandPlugin;
@@ -150,7 +156,7 @@ impl Plugin for TerrainCommandPlugin {
             CommandDescriptor {
                 id: "terrain.set_visualization_mode".to_string(),
                 label: "Set Terrain Visualization".to_string(),
-                description: "Switch terrain shading between standard, slope, aspect, and elevation bands.".to_string(),
+                description: "Switch terrain shading between standard, slope, aspect, elevation bands, and the latest cut/fill result.".to_string(),
                 category: CommandCategory::View,
                 parameters: Some(serde_json::json!({
                     "type": "object",
@@ -158,7 +164,7 @@ impl Plugin for TerrainCommandPlugin {
                     "properties": {
                         "mode": {
                             "type": "string",
-                            "enum": ["standard", "slope", "aspect", "elevation_bands"]
+                            "enum": ["standard", "slope", "aspect", "elevation_bands", "cut_fill"]
                         },
                         "elevation_band_width": {"type": "number", "minimum": 0.0001}
                     }
@@ -627,9 +633,10 @@ fn execute_cut_fill_analysis(
         .and_then(Value::as_f64)
         .map(|value| value as f32)
         .unwrap_or(DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING);
-    let options = CutFillOptions::new(sample_spacing).with_boundary(parse_boundary(parameters)?);
+    let boundary = parse_boundary(parameters)?;
+    let options = CutFillOptions::new(sample_spacing).with_boundary(boundary.clone());
 
-    let (result, comparison) = if let Some(proposed_id) =
+    let (result, target, comparison) = if let Some(proposed_id) =
         optional_element_id(parameters, "proposed_surface_id")?
     {
         let proposed = terrain_mesh_by_id(world, proposed_id)
@@ -638,16 +645,23 @@ fn execute_cut_fill_analysis(
             .ok_or_else(|| "Cut/fill analysis had no overlapping terrain samples".to_string())?;
         (
             result,
+            CutFillAnalysisTarget::ProposedSurface(proposed_id),
             serde_json::json!({ "proposed_surface_id": proposed_id.0 }),
         )
     } else if let Some(datum_y) = parameters.get("datum_y").and_then(Value::as_f64) {
         let datum_y = datum_y as f32;
         let result = cut_fill_against_datum(&existing, datum_y, &options)
             .ok_or_else(|| "Cut/fill analysis had no terrain samples".to_string())?;
-        (result, serde_json::json!({ "datum_y": datum_y }))
+        (
+            result,
+            CutFillAnalysisTarget::Datum(datum_y),
+            serde_json::json!({ "datum_y": datum_y }),
+        )
     } else {
         return Err("Provide either proposed_surface_id or datum_y".to_string());
     };
+
+    store_cut_fill_analysis(world, existing_id, target, result, &options);
 
     if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
         status_bar_data.set_feedback(format_cut_fill_feedback(&result), 3.0);
@@ -666,6 +680,63 @@ fn execute_cut_fill_analysis(
         })),
         ..CommandResult::empty()
     })
+}
+
+fn store_cut_fill_analysis(
+    world: &mut World,
+    existing_surface_id: ElementId,
+    target: CutFillAnalysisTarget,
+    result: CutFillResult,
+    options: &CutFillOptions,
+) {
+    let summary = CutFillAnalysisSummary {
+        existing_surface_id,
+        target,
+        result,
+        sample_spacing: options.sample_spacing,
+        boundary_vertex_count: options.boundary.len(),
+    };
+    if let Some(mut panel) = world.get_resource_mut::<CutFillAnalysisPanelState>() {
+        panel.visible = true;
+        panel.summary = Some(summary);
+    } else {
+        world.insert_resource(CutFillAnalysisPanelState {
+            visible: true,
+            summary: Some(summary),
+        });
+    }
+
+    let visualization_target = match target {
+        CutFillAnalysisTarget::ProposedSurface(id) => {
+            CutFillVisualizationTarget::ProposedSurface(id)
+        }
+        CutFillAnalysisTarget::Datum(y) => CutFillVisualizationTarget::Datum(y),
+    };
+    world.insert_resource(CutFillVisualizationState {
+        existing_surface_id,
+        target: visualization_target,
+        boundary: options.boundary.clone(),
+    });
+
+    let mut visualization_state = world
+        .get_resource::<TerrainVisualizationState>()
+        .copied()
+        .unwrap_or_default();
+    visualization_state.mode = TerrainVisualizationMode::CutFill;
+    world.insert_resource(visualization_state);
+
+    let Some(mut surfaces) = world.try_query::<(Entity, &ElementId, &TerrainSurface)>() else {
+        return;
+    };
+    let surface_entities = surfaces
+        .iter(world)
+        .filter_map(|(entity, element_id, _)| {
+            (*element_id == existing_surface_id).then_some(entity)
+        })
+        .collect::<Vec<_>>();
+    for entity in surface_entities {
+        world.entity_mut(entity).insert(NeedsTerrainMesh);
+    }
 }
 
 fn execute_set_visualization_mode(
@@ -1153,7 +1224,10 @@ fn parse_visualization_mode(value: &str) -> Result<TerrainVisualizationMode, Str
         "slope" => Ok(TerrainVisualizationMode::Slope),
         "aspect" => Ok(TerrainVisualizationMode::Aspect),
         "elevation_bands" | "elevation-bands" => Ok(TerrainVisualizationMode::ElevationBands),
-        _ => Err("mode must be one of: standard, slope, aspect, elevation_bands".to_string()),
+        "cut_fill" | "cut-fill" => Ok(TerrainVisualizationMode::CutFill),
+        _ => Err(
+            "mode must be one of: standard, slope, aspect, elevation_bands, cut_fill".to_string(),
+        ),
     }
 }
 
@@ -1775,12 +1849,31 @@ mod tests {
         assert_eq!(output["cut_volume"], json!(2.0));
         assert_eq!(output["fill_volume"], json!(0.0));
         assert_eq!(output["net_volume"], json!(2.0));
+        let panel = world.resource::<CutFillAnalysisPanelState>();
+        assert!(panel.visible);
+        let summary = panel.summary.as_ref().expect("summary is stored");
+        assert_eq!(summary.existing_surface_id, ElementId(10));
+        assert_eq!(
+            summary.target,
+            CutFillAnalysisTarget::ProposedSurface(ElementId(20))
+        );
+        assert_eq!(summary.result.sample_count, 4);
+        assert_eq!(
+            world.resource::<TerrainVisualizationState>().mode,
+            TerrainVisualizationMode::CutFill
+        );
     }
 
     #[test]
     fn cut_fill_command_supports_datum_and_boundary() {
         let mut world = init_command_test_world();
-        world.spawn((ElementId(10), flat_square(2.0)));
+        let surface_entity = world
+            .spawn((
+                ElementId(10),
+                TerrainSurface::new("Existing Site".to_string(), vec![]),
+                flat_square(2.0),
+            ))
+            .id();
 
         let result = execute_cut_fill_analysis(
             &mut world,
@@ -1799,6 +1892,11 @@ mod tests {
         assert_eq!(output["cut_volume"], json!(2.0));
         assert_eq!(output["net_volume"], json!(2.0));
         assert_eq!(output["boundary_vertex_count"], json!(4));
+        let panel = world.resource::<CutFillAnalysisPanelState>();
+        let summary = panel.summary.as_ref().expect("summary is stored");
+        assert_eq!(summary.target, CutFillAnalysisTarget::Datum(1.0));
+        assert_eq!(summary.boundary_vertex_count, 4);
+        assert!(world.entity(surface_entity).contains::<NeedsTerrainMesh>());
     }
 
     #[test]

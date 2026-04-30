@@ -10,6 +10,7 @@ use talos3d_core::{
 
 use crate::{
     components::{NeedsTerrainMesh, TerrainSurface},
+    cut_fill::{CutFillAnalysisPanelState, CutFillAnalysisTarget},
     snapshots::TerrainSurfaceSnapshot,
 };
 
@@ -20,9 +21,14 @@ pub struct TerrainReviewPlugin;
 impl Plugin for TerrainReviewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainGenerationReviewState>()
+            .init_resource::<CutFillAnalysisPanelState>()
             .add_systems(
                 Update,
-                (sync_terrain_preview_entity, draw_terrain_review_window),
+                (
+                    sync_terrain_preview_entity,
+                    draw_terrain_review_window,
+                    draw_cut_fill_analysis_window,
+                ),
             );
     }
 }
@@ -204,6 +210,77 @@ fn draw_terrain_review_window(
         review.preview_surface = None;
         status_bar_data.set_feedback("Terrain surface queued".to_string(), 2.0);
     }
+}
+
+fn draw_cut_fill_analysis_window(
+    mut contexts: EguiContexts,
+    mut panel: ResMut<CutFillAnalysisPanelState>,
+) {
+    let Some(summary) = panel.summary.clone() else {
+        return;
+    };
+    if !panel.visible {
+        return;
+    }
+
+    let mut visible = panel.visible;
+    egui::Window::new("Cut/Fill")
+        .resizable(false)
+        .default_width(300.0)
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 180.0))
+        .open(&mut visible)
+        .show(contexts.ctx_mut().unwrap(), |ui| {
+            egui::Grid::new("cut_fill_result_grid")
+                .num_columns(2)
+                .spacing(egui::vec2(16.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label("Existing");
+                    ui.label(format!("#{}", summary.existing_surface_id.0));
+                    ui.end_row();
+
+                    ui.label("Comparison");
+                    ui.label(cut_fill_target_label(summary.target));
+                    ui.end_row();
+
+                    ui.label("Cut");
+                    ui.label(format_volume(summary.result.cut_volume));
+                    ui.end_row();
+
+                    ui.label("Fill");
+                    ui.label(format_volume(summary.result.fill_volume));
+                    ui.end_row();
+
+                    ui.label("Net");
+                    ui.label(format_volume(summary.result.net_volume));
+                    ui.end_row();
+
+                    ui.label("Samples");
+                    ui.label(summary.result.sample_count.to_string());
+                    ui.end_row();
+
+                    ui.label("Spacing");
+                    ui.label(format!("{:.2} m", summary.sample_spacing));
+                    ui.end_row();
+
+                    ui.label("Boundary");
+                    ui.label(summary.boundary_vertex_count.to_string());
+                    ui.end_row();
+                });
+        });
+    panel.visible = visible;
+}
+
+fn cut_fill_target_label(target: CutFillAnalysisTarget) -> String {
+    match target {
+        CutFillAnalysisTarget::ProposedSurface(element_id) => {
+            format!("Surface #{}", element_id.0)
+        }
+        CutFillAnalysisTarget::Datum(datum_y) => format!("Datum {:.2} m", datum_y),
+    }
+}
+
+fn format_volume(volume: f64) -> String {
+    format!("{volume:.2} m3")
 }
 
 fn cleanup_preview_entity(world: &mut World, preview_entity: Option<Entity>) {

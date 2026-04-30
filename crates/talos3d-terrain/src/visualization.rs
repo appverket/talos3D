@@ -1,5 +1,5 @@
 use bevy::prelude::{Resource, Vec2, Vec3};
-use talos3d_core::plugins::modeling::primitives::TriangleMesh;
+use talos3d_core::plugins::{identity::ElementId, modeling::primitives::TriangleMesh};
 
 const FLAT_SLOPE_COLOR: [f32; 4] = [0.16, 0.62, 0.24, 1.0];
 const MODERATE_SLOPE_COLOR: [f32; 4] = [0.94, 0.78, 0.18, 1.0];
@@ -25,6 +25,7 @@ pub enum TerrainVisualizationMode {
     Slope,
     Aspect,
     ElevationBands,
+    CutFill,
 }
 
 impl TerrainVisualizationMode {
@@ -34,6 +35,7 @@ impl TerrainVisualizationMode {
             Self::Slope => "slope",
             Self::Aspect => "aspect",
             Self::ElevationBands => "elevation_bands",
+            Self::CutFill => "cut_fill",
         }
     }
 
@@ -43,6 +45,7 @@ impl TerrainVisualizationMode {
             Self::Slope => "Slope",
             Self::Aspect => "Aspect",
             Self::ElevationBands => "Elevation bands",
+            Self::CutFill => "Cut/fill",
         }
     }
 }
@@ -62,6 +65,19 @@ impl Default for TerrainVisualizationState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum CutFillVisualizationTarget {
+    ProposedSurface(ElementId),
+    Datum(f32),
+}
+
+#[derive(Resource, Debug, Clone, PartialEq)]
+pub struct CutFillVisualizationState {
+    pub existing_surface_id: ElementId,
+    pub target: CutFillVisualizationTarget,
+    pub boundary: Vec<Vec2>,
+}
+
 pub fn visualization_for_mode(
     mesh: &TriangleMesh,
     state: TerrainVisualizationState,
@@ -73,6 +89,7 @@ pub fn visualization_for_mode(
         TerrainVisualizationMode::ElevationBands => {
             elevation_band_visualization(mesh, state.elevation_band_width)
         }
+        TerrainVisualizationMode::CutFill => Vec::new(),
     }
 }
 
