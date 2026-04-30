@@ -4,7 +4,10 @@ use talos3d_capability_api::commands::{
     CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
 };
 use talos3d_core::plugins::{
-    commands::{BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup},
+    commands::{
+        ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
+        EndCommandGroup,
+    },
     identity::{ElementId, ElementIdAllocator},
     modeling::primitives::{ElevationMetadata, Polyline},
     selection::Selected,
@@ -165,6 +168,98 @@ impl Plugin for TerrainCommandPlugin {
                 capability_id: Some("terrain".to_string()),
             },
             execute_create_proposed_surface,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.add_elevation_curve".to_string(),
+                label: "Add Elevation Curve".to_string(),
+                description: "Add an editable elevation curve to an existing terrain surface.".to_string(),
+                category: CommandCategory::Create,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["points", "elevation"],
+                    "properties": {
+                        "surface_id": {"type": "integer", "minimum": 0},
+                        "points": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "array",
+                                "minItems": 2,
+                                "maxItems": 3,
+                                "items": {"type": "number"}
+                            }
+                        },
+                        "elevation": {"type": "number"},
+                        "source_layer": {"type": "string"},
+                        "curve_type": {"type": "string"}
+                    }
+                })),
+                default_shortcut: None,
+                icon: Some("icon.create".to_string()),
+                hint: Some("Append a new elevation curve to a terrain surface".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_add_elevation_curve,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.add_spot_elevation".to_string(),
+                label: "Add Spot Elevation".to_string(),
+                description: "Add a single-point elevation marker to an existing terrain surface.".to_string(),
+                category: CommandCategory::Create,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["point", "elevation"],
+                    "properties": {
+                        "surface_id": {"type": "integer", "minimum": 0},
+                        "point": {
+                            "type": "array",
+                            "minItems": 2,
+                            "maxItems": 3,
+                            "items": {"type": "number"}
+                        },
+                        "elevation": {"type": "number"},
+                        "source_layer": {"type": "string"}
+                    }
+                })),
+                default_shortcut: None,
+                icon: Some("icon.create".to_string()),
+                hint: Some("Append a spot elevation to a terrain surface".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_add_spot_elevation,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.delete_elevation_curve".to_string(),
+                label: "Delete Elevation Curve".to_string(),
+                description: "Delete an elevation curve and remove it from terrain surface source lists.".to_string(),
+                category: CommandCategory::Edit,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "curve_id": {"type": "integer", "minimum": 0}
+                    }
+                })),
+                default_shortcut: None,
+                icon: Some("icon.delete".to_string()),
+                hint: Some("Delete a terrain source curve and regenerate affected surfaces".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_delete_elevation_curve,
         );
     }
 }
@@ -644,8 +739,242 @@ fn execute_create_proposed_surface(
     })
 }
 
+fn execute_add_elevation_curve(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let elevation = required_scalar(parameters, "elevation")?;
+    let points = parse_elevation_points(
+        parameters
+            .get("points")
+            .ok_or_else(|| "Missing required parameter points".to_string())?,
+        elevation,
+        "points",
+    )?;
+    if points.is_empty() {
+        return Err("points must contain at least one point".to_string());
+    }
+    let curve_type = parameters
+        .get("curve_type")
+        .and_then(Value::as_str)
+        .map(parse_elevation_curve_type)
+        .transpose()?
+        .unwrap_or(ElevationCurveType::Supplementary);
+    let source_layer = parameters
+        .get("source_layer")
+        .and_then(Value::as_str)
+        .filter(|layer| !layer.trim().is_empty())
+        .unwrap_or("Edited Terrain")
+        .to_string();
+
+    add_elevation_curve_to_surface(
+        world,
+        parameters,
+        ElevationCurve {
+            points,
+            elevation,
+            source_layer,
+            curve_type,
+            survey_source_id: None,
+        },
+        "Add elevation curve",
+        "Queued elevation curve",
+    )
+}
+
+fn execute_add_spot_elevation(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let elevation = required_scalar(parameters, "elevation")?;
+    let mut points = parse_elevation_points(
+        parameters
+            .get("point")
+            .ok_or_else(|| "Missing required parameter point".to_string())?,
+        elevation,
+        "point",
+    )?;
+    if points.len() != 1 {
+        return Err("point must contain exactly one point".to_string());
+    }
+    let source_layer = parameters
+        .get("source_layer")
+        .and_then(Value::as_str)
+        .filter(|layer| !layer.trim().is_empty())
+        .unwrap_or("Spot Elevations")
+        .to_string();
+
+    add_elevation_curve_to_surface(
+        world,
+        parameters,
+        ElevationCurve {
+            points: points.drain(..).collect(),
+            elevation,
+            source_layer,
+            curve_type: ElevationCurveType::Supplementary,
+            survey_source_id: None,
+        },
+        "Add spot elevation",
+        "Queued spot elevation",
+    )
+}
+
+fn add_elevation_curve_to_surface(
+    world: &mut World,
+    parameters: &Value,
+    curve: ElevationCurve,
+    group_label: &'static str,
+    feedback_label: &'static str,
+) -> Result<CommandResult, String> {
+    let surface_id = optional_element_id(parameters, "surface_id")?
+        .map_or_else(|| selected_terrain_surface_id(world), Ok)?;
+    let source_surface = terrain_surface_by_id(world, surface_id)
+        .ok_or_else(|| format!("Terrain surface {} was not found", surface_id.0))?;
+    let curve_id = world.resource::<ElementIdAllocator>().next_id();
+    let mut updated_surface = source_surface.clone();
+    updated_surface.source_curve_ids.push(curve_id);
+
+    let before_surface = TerrainSurfaceSnapshot {
+        element_id: surface_id,
+        surface: source_surface,
+    };
+    let after_surface = TerrainSurfaceSnapshot {
+        element_id: surface_id,
+        surface: updated_surface,
+    };
+    let curve_snapshot = ElevationCurveSnapshot {
+        element_id: curve_id,
+        curve,
+    };
+
+    world
+        .resource_mut::<Messages<BeginCommandGroup>>()
+        .write(BeginCommandGroup { label: group_label });
+
+    world
+        .resource_mut::<Messages<CreateEntityCommand>>()
+        .write(CreateEntityCommand {
+            snapshot: curve_snapshot.clone().into(),
+        });
+    world
+        .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+        .write(ApplyEntityChangesCommand {
+            label: "Update terrain surface sources",
+            before: vec![before_surface.into()],
+            after: vec![after_surface.into()],
+        });
+    world
+        .resource_mut::<Messages<EndCommandGroup>>()
+        .write(EndCommandGroup);
+
+    if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
+        status_bar_data.set_feedback(format!("{feedback_label} {}", curve_id.0), 2.0);
+    }
+
+    Ok(CommandResult {
+        created: vec![curve_id.0],
+        output: Some(serde_json::json!({
+            "surface_id": surface_id.0,
+            "elevation_curve_id": curve_id.0,
+            "point_count": curve_snapshot.curve.points.len(),
+            "elevation": curve_snapshot.curve.elevation,
+        })),
+        ..CommandResult::empty()
+    })
+}
+
+fn execute_delete_elevation_curve(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let curve_id = optional_element_id(parameters, "curve_id")?
+        .map_or_else(|| selected_elevation_curve_id(world), Ok)?;
+    if elevation_curve_by_id(world, curve_id).is_none() {
+        return Err(format!("Elevation curve {} was not found", curve_id.0));
+    }
+
+    let mut before_surfaces = Vec::new();
+    let mut after_surfaces = Vec::new();
+    let mut affected_surface_ids = Vec::new();
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    for entity_ref in q.iter(world) {
+        let (Some(surface_id), Some(surface)) = (
+            entity_ref.get::<ElementId>().copied(),
+            entity_ref.get::<TerrainSurface>(),
+        ) else {
+            continue;
+        };
+        if !surface.source_curve_ids.contains(&curve_id) {
+            continue;
+        }
+        let mut updated_surface = surface.clone();
+        updated_surface
+            .source_curve_ids
+            .retain(|source_curve_id| *source_curve_id != curve_id);
+        before_surfaces.push(
+            TerrainSurfaceSnapshot {
+                element_id: surface_id,
+                surface: surface.clone(),
+            }
+            .into(),
+        );
+        after_surfaces.push(
+            TerrainSurfaceSnapshot {
+                element_id: surface_id,
+                surface: updated_surface,
+            }
+            .into(),
+        );
+        affected_surface_ids.push(surface_id.0);
+    }
+
+    world
+        .resource_mut::<Messages<BeginCommandGroup>>()
+        .write(BeginCommandGroup {
+            label: "Delete elevation curve",
+        });
+    if !before_surfaces.is_empty() {
+        world
+            .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+            .write(ApplyEntityChangesCommand {
+                label: "Update terrain surface sources",
+                before: before_surfaces,
+                after: after_surfaces,
+            });
+    }
+    world
+        .resource_mut::<Messages<DeleteEntitiesCommand>>()
+        .write(DeleteEntitiesCommand {
+            element_ids: vec![curve_id],
+        });
+    world
+        .resource_mut::<Messages<EndCommandGroup>>()
+        .write(EndCommandGroup);
+
+    if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
+        status_bar_data.set_feedback(format!("Queued elevation curve {}", curve_id.0), 2.0);
+    }
+
+    Ok(CommandResult {
+        deleted: vec![curve_id.0],
+        output: Some(serde_json::json!({
+            "curve_id": curve_id.0,
+            "removed_from_surface_ids": affected_surface_ids,
+        })),
+        ..CommandResult::empty()
+    })
+}
+
 fn required_element_id(parameters: &Value, key: &str) -> Result<ElementId, String> {
     optional_element_id(parameters, key)?.ok_or_else(|| format!("Missing required parameter {key}"))
+}
+
+fn required_scalar(parameters: &Value, key: &str) -> Result<f32, String> {
+    parameters
+        .get(key)
+        .and_then(Value::as_f64)
+        .map(|value| value as f32)
+        .ok_or_else(|| format!("Missing required numeric parameter {key}"))
 }
 
 fn optional_element_id(parameters: &Value, key: &str) -> Result<Option<ElementId>, String> {
@@ -689,6 +1018,52 @@ fn parse_boundary(parameters: &Value) -> Result<Vec<Vec2>, String> {
         .collect()
 }
 
+fn parse_elevation_points(value: &Value, elevation: f32, key: &str) -> Result<Vec<Vec3>, String> {
+    let point_values = if let Some(points) = value.as_array() {
+        if points.first().is_some_and(Value::is_number) {
+            vec![value]
+        } else {
+            points.iter().collect::<Vec<_>>()
+        }
+    } else {
+        return Err(format!("{key} must be a point array"));
+    };
+
+    point_values
+        .into_iter()
+        .map(|point| {
+            let Some(coords) = point.as_array() else {
+                return Err(format!("{key} entries must be [x, z] or [x, y, z] arrays"));
+            };
+            if !(coords.len() == 2 || coords.len() == 3) {
+                return Err(format!(
+                    "{key} entries must contain either two or three numbers"
+                ));
+            }
+            let x = coords[0]
+                .as_f64()
+                .ok_or_else(|| format!("{key} x coordinate must be a number"))?
+                as f32;
+            let z_index = if coords.len() == 2 { 1 } else { 2 };
+            let z = coords[z_index]
+                .as_f64()
+                .ok_or_else(|| format!("{key} z coordinate must be a number"))?
+                as f32;
+            Ok(Vec3::new(x, elevation, z))
+        })
+        .collect()
+}
+
+fn parse_elevation_curve_type(value: &str) -> Result<ElevationCurveType, String> {
+    match value {
+        "major" => Ok(ElevationCurveType::Major),
+        "minor" => Ok(ElevationCurveType::Minor),
+        "index" => Ok(ElevationCurveType::Index),
+        "supplementary" => Ok(ElevationCurveType::Supplementary),
+        _ => Err("curve_type must be one of: major, minor, index, supplementary".to_string()),
+    }
+}
+
 fn terrain_mesh_by_id(
     world: &World,
     element_id: ElementId,
@@ -714,6 +1089,18 @@ fn selected_terrain_surface_id(world: &World) -> Result<ElementId, String> {
             entity_ref.get::<ElementId>().copied()
         })
         .ok_or_else(|| "Select a terrain surface or provide source_surface_id".to_string())
+}
+
+fn selected_elevation_curve_id(world: &World) -> Result<ElementId, String> {
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    q.iter(world)
+        .find_map(|entity_ref| {
+            if !entity_ref.contains::<Selected>() || !entity_ref.contains::<ElevationCurve>() {
+                return None;
+            }
+            entity_ref.get::<ElementId>().copied()
+        })
+        .ok_or_else(|| "Select an elevation curve or provide curve_id".to_string())
 }
 
 fn terrain_surface_by_id(world: &World, element_id: ElementId) -> Option<TerrainSurface> {
@@ -973,6 +1360,7 @@ mod tests {
 
     fn init_command_test_world() -> World {
         let mut world = World::new();
+        world.insert_resource(Messages::<ApplyEntityChangesCommand>::default());
         world.insert_resource(Messages::<BeginCommandGroup>::default());
         world.insert_resource(Messages::<CreateEntityCommand>::default());
         world.insert_resource(Messages::<DeleteEntitiesCommand>::default());
@@ -1101,6 +1489,140 @@ mod tests {
             result.output.as_ref().unwrap()["source_surface_id"],
             json!(20)
         );
+    }
+
+    #[test]
+    fn add_elevation_curve_command_creates_curve_and_updates_surface_sources() {
+        let mut world = init_command_test_world();
+        world.resource_mut::<ElementIdAllocator>().set_next(3000);
+        world.spawn((
+            ElementId(20),
+            TerrainSurface::new("Existing Site".to_string(), vec![ElementId(10)]),
+        ));
+
+        let result = execute_add_elevation_curve(
+            &mut world,
+            &json!({
+                "surface_id": 20,
+                "points": [[0.0, 0.0], [2.0, 2.0]],
+                "elevation": 4.5,
+                "source_layer": "Design Contours",
+                "curve_type": "minor"
+            }),
+        )
+        .expect("add elevation curve should succeed");
+
+        assert_eq!(result.created, vec![3000]);
+        assert_eq!(result.output.as_ref().unwrap()["point_count"], json!(2));
+        let created = world
+            .resource_mut::<Messages<CreateEntityCommand>>()
+            .drain()
+            .collect::<Vec<_>>();
+        assert_eq!(created.len(), 1);
+        let curve_json = created[0].snapshot.to_json();
+        assert_eq!(curve_json["ElevationCurve"]["element_id"], json!(3000));
+        assert_eq!(
+            curve_json["ElevationCurve"]["curve"]["points"],
+            json!([[0.0, 4.5, 0.0], [2.0, 4.5, 2.0]])
+        );
+        assert_eq!(
+            curve_json["ElevationCurve"]["curve"]["curve_type"],
+            json!("Minor")
+        );
+
+        let changes = world
+            .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+            .drain()
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), 1);
+        let after_json = changes[0].after[0].to_json();
+        assert_eq!(
+            after_json["TerrainSurface"]["surface"]["source_curve_ids"],
+            json!([10, 3000])
+        );
+    }
+
+    #[test]
+    fn add_spot_elevation_command_appends_single_point_curve() {
+        let mut world = init_command_test_world();
+        world.resource_mut::<ElementIdAllocator>().set_next(4000);
+        world.spawn((
+            ElementId(20),
+            Selected,
+            TerrainSurface::new("Existing Site".to_string(), vec![]),
+        ));
+
+        let result = execute_add_spot_elevation(
+            &mut world,
+            &json!({
+                "point": [3.0, 7.0],
+                "elevation": 12.25
+            }),
+        )
+        .expect("add spot elevation should succeed");
+
+        assert_eq!(result.created, vec![4000]);
+        let created = world
+            .resource_mut::<Messages<CreateEntityCommand>>()
+            .drain()
+            .collect::<Vec<_>>();
+        let curve_json = created[0].snapshot.to_json();
+        assert_eq!(
+            curve_json["ElevationCurve"]["curve"]["points"],
+            json!([[3.0, 12.25, 7.0]])
+        );
+        assert_eq!(
+            curve_json["ElevationCurve"]["curve"]["source_layer"],
+            json!("Spot Elevations")
+        );
+    }
+
+    #[test]
+    fn delete_elevation_curve_command_prunes_surface_references_before_delete() {
+        let mut world = init_command_test_world();
+        world.spawn((ElementId(10), sample_curve(1.0)));
+        world.spawn((ElementId(11), sample_curve(2.0)));
+        world.spawn((
+            ElementId(20),
+            TerrainSurface::new(
+                "Existing Site".to_string(),
+                vec![ElementId(10), ElementId(11)],
+            ),
+        ));
+        world.spawn((
+            ElementId(21),
+            TerrainSurface::new("Proposed Site".to_string(), vec![ElementId(10)]),
+        ));
+
+        let result = execute_delete_elevation_curve(&mut world, &json!({ "curve_id": 10 }))
+            .expect("delete elevation curve should succeed");
+
+        assert_eq!(result.deleted, vec![10]);
+        assert_eq!(
+            result.output.as_ref().unwrap()["removed_from_surface_ids"],
+            json!([20, 21])
+        );
+        let changes = world
+            .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+            .drain()
+            .collect::<Vec<_>>();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].before.len(), 2);
+        let after_source_lists = changes[0]
+            .after
+            .iter()
+            .map(|snapshot| {
+                snapshot.to_json()["TerrainSurface"]["surface"]["source_curve_ids"].clone()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after_source_lists, vec![json!([11]), json!([])]);
+
+        let deletes = world
+            .resource_mut::<Messages<DeleteEntitiesCommand>>()
+            .drain()
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 1);
+        assert_eq!(deletes[0].element_ids, vec![ElementId(10)]);
     }
 
     #[test]

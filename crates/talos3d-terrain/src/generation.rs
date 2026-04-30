@@ -663,6 +663,7 @@ fn lerp_color(start: [f32; 3], end: [f32; 3], t: f32) -> [f32; 3] {
 mod tests {
     use super::*;
     use std::time::Instant;
+    use talos3d_core::plugins::identity::ElementId;
 
     #[test]
     fn samples_triangle_height_inside_face() {
@@ -717,6 +718,45 @@ mod tests {
         assert_eq!(uvs[0], [0.0, 0.0]);
         assert_eq!(uvs[1], [1.0, 0.0]);
         assert_eq!(uvs[2], [0.0, 1.0]);
+    }
+
+    #[test]
+    fn changing_source_curve_marks_terrain_surface_dirty() {
+        let mut app = App::new();
+        app.add_systems(Update, mark_terrain_surfaces_dirty_on_curve_changes);
+        let curve_entity = app
+            .world_mut()
+            .spawn((
+                ElementId(10),
+                ElevationCurve {
+                    points: vec![Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 1.0, 0.0)],
+                    elevation: 1.0,
+                    source_layer: "Contour".to_string(),
+                    curve_type: crate::components::ElevationCurveType::Major,
+                    survey_source_id: None,
+                },
+            ))
+            .id();
+        let surface_entity = app
+            .world_mut()
+            .spawn(TerrainSurface::new(
+                "Surface".to_string(),
+                vec![ElementId(10)],
+            ))
+            .id();
+
+        app.world_mut().clear_trackers();
+        app.world_mut()
+            .entity_mut(curve_entity)
+            .get_mut::<ElevationCurve>()
+            .expect("curve exists")
+            .elevation = 2.0;
+        app.update();
+
+        assert!(app
+            .world()
+            .entity(surface_entity)
+            .contains::<NeedsTerrainMesh>());
     }
 
     #[test]
