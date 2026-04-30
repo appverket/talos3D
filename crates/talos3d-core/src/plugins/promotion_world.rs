@@ -710,6 +710,129 @@ pub fn commit_assembly_promotion(
     })
 }
 
+// === Template materialization (PP-A2DB-2 slice C3) =========================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MaterializationError {
+    /// A `RelationEndpoint::Slot(slot_id)` referenced a slot that the
+    /// caller's realization map didn't resolve. The agreement requires
+    /// templates with unresolved endpoints to surface as an error
+    /// rather than silently spawn dangling relations.
+    UnknownSlot { slot_id: String },
+    /// `ElementIdAllocator` resource is not present in the world.
+    /// Materialization needs it to mint fresh ids for the new
+    /// `SemanticRelation` entities.
+    AllocatorMissing,
+}
+
+impl std::fmt::Display for MaterializationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownSlot { slot_id } => write!(
+                f,
+                "materialize: template references unknown slot id '{slot_id}'"
+            ),
+            Self::AllocatorMissing => write!(
+                f,
+                "materialize: ElementIdAllocator resource missing from world"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MaterializationError {}
+
+/// Walk every `SemanticRelationTemplate` on the given Definition's
+/// compound body and spawn one authored `SemanticRelation` entity per
+/// template, with endpoints resolved through the supplied
+/// `slot_id_to_realization_id` map. `RelationEndpoint::SelfRoot`
+/// resolves to `occurrence_root_id`. Returns the number of relations
+/// spawned.
+///
+/// Caller responsibilities:
+///
+/// - Provide `slot_id_to_realization_id` covering every slot the
+///   templates reference. Unknown slot ids surface as
+///   `MaterializationError::UnknownSlot`.
+/// - Have an `ElementIdAllocator` resource in the world (the same
+///   allocator used elsewhere for new ids).
+///
+/// Slice C4 will wire this into the actual Occurrence-creation
+/// pipeline so it runs automatically; for slice C3 it's a free-
+/// standing primitive callers invoke after they spawn an Occurrence.
+pub fn materialize_relation_templates(
+    world: &mut World,
+    definition: &crate::plugins::modeling::definition::Definition,
+    occurrence_root_id: ElementId,
+    slot_id_to_realization_id: &std::collections::HashMap<String, ElementId>,
+) -> Result<usize, MaterializationError> {
+    let Some(compound) = definition.compound.as_ref() else {
+        return Ok(0);
+    };
+    if compound.relation_templates.is_empty() {
+        return Ok(0);
+    }
+
+    // Pre-resolve every endpoint so we surface `UnknownSlot` errors
+    // before mutating the world. This keeps materialization atomic
+    // from the caller's point of view: either every template spawns
+    // or none do.
+    let mut resolved: Vec<(ElementId, ElementId, &crate::plugins::promotion::SemanticRelationTemplate)> =
+        Vec::with_capacity(compound.relation_templates.len());
+    for template in &compound.relation_templates {
+        let source = resolve_template_endpoint(
+            &template.subject,
+            occurrence_root_id,
+            slot_id_to_realization_id,
+        )?;
+        let target = resolve_template_endpoint(
+            &template.object,
+            occurrence_root_id,
+            slot_id_to_realization_id,
+        )?;
+        resolved.push((source, target, template));
+    }
+
+    if !world.contains_resource::<crate::plugins::identity::ElementIdAllocator>() {
+        return Err(MaterializationError::AllocatorMissing);
+    }
+
+    let mut count = 0usize;
+    for (source, target, template) in resolved {
+        let relation_id = world
+            .resource::<crate::plugins::identity::ElementIdAllocator>()
+            .next_id();
+        world.spawn((
+            relation_id,
+            crate::plugins::modeling::assembly::SemanticRelation {
+                source,
+                target,
+                relation_type: template.relation_type.clone(),
+                parameters: template.parameters.clone(),
+            },
+        ));
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn resolve_template_endpoint(
+    endpoint: &crate::plugins::promotion::RelationEndpoint,
+    occurrence_root_id: ElementId,
+    slot_id_to_realization_id: &std::collections::HashMap<String, ElementId>,
+) -> Result<ElementId, MaterializationError> {
+    use crate::plugins::promotion::RelationEndpoint;
+    match endpoint {
+        RelationEndpoint::SelfRoot => Ok(occurrence_root_id),
+        RelationEndpoint::Slot(slot_id) => slot_id_to_realization_id
+            .get(slot_id)
+            .copied()
+            .ok_or_else(|| MaterializationError::UnknownSlot {
+                slot_id: slot_id.clone(),
+            }),
+    }
+}
+
 // === Tests =================================================================
 
 #[cfg(test)]
@@ -1797,6 +1920,176 @@ mod tests {
         assert_eq!(
             template.object,
             crate::plugins::promotion::RelationEndpoint::Slot("leaf".into())
+        );
+    }
+
+    // === PP-A2DB-2 slice C3: template materialization ======================
+
+    fn template_definition(
+        templates: Vec<crate::plugins::promotion::SemanticRelationTemplate>,
+    ) -> crate::plugins::modeling::definition::Definition {
+        crate::plugins::definition_authoring::blank_definition("TemplateHost")
+            .with_relation_templates(templates)
+    }
+
+    fn template(
+        subject: crate::plugins::promotion::RelationEndpoint,
+        relation_type: &str,
+        object: crate::plugins::promotion::RelationEndpoint,
+    ) -> crate::plugins::promotion::SemanticRelationTemplate {
+        crate::plugins::promotion::SemanticRelationTemplate {
+            subject,
+            relation_type: relation_type.to_string(),
+            object,
+            parameters: serde_json::Value::Null,
+            source_relation_id: ElementId(0),
+        }
+    }
+
+    #[test]
+    fn materialize_returns_zero_when_definition_has_no_templates() {
+        let mut world = world_with_allocator();
+        let def = crate::plugins::definition_authoring::blank_definition("Empty");
+        let count = materialize_relation_templates(
+            &mut world,
+            &def,
+            elem(100),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn materialize_spawns_one_relation_per_template() {
+        use crate::plugins::promotion::RelationEndpoint;
+        let mut world = world_with_allocator();
+        let def = template_definition(vec![
+            template(
+                RelationEndpoint::SelfRoot,
+                "contains",
+                RelationEndpoint::Slot("frame".into()),
+            ),
+            template(
+                RelationEndpoint::Slot("frame".into()),
+                "hinges_on",
+                RelationEndpoint::Slot("leaf".into()),
+            ),
+        ]);
+        let mut realizations = std::collections::HashMap::new();
+        realizations.insert("frame".into(), elem(10));
+        realizations.insert("leaf".into(), elem(11));
+        let occ = elem(500);
+
+        let count = materialize_relation_templates(&mut world, &def, occ, &realizations)
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let mut q = world.query::<&SemanticRelation>();
+        let relations: Vec<&SemanticRelation> = q.iter(&world).collect();
+        assert_eq!(relations.len(), 2);
+        // Look up by relation_type since spawn order isn't part of
+        // the contract.
+        let contains = relations
+            .iter()
+            .find(|r| r.relation_type == "contains")
+            .expect("`contains` relation spawned");
+        assert_eq!(contains.source, occ); // SelfRoot -> occurrence root
+        assert_eq!(contains.target, elem(10)); // Slot("frame") -> realization
+        let hinges_on = relations
+            .iter()
+            .find(|r| r.relation_type == "hinges_on")
+            .expect("`hinges_on` relation spawned");
+        assert_eq!(hinges_on.source, elem(10));
+        assert_eq!(hinges_on.target, elem(11));
+    }
+
+    #[test]
+    fn materialize_returns_unknown_slot_error_and_does_not_mutate_world() {
+        use crate::plugins::promotion::RelationEndpoint;
+        let mut world = world_with_allocator();
+        let def = template_definition(vec![template(
+            RelationEndpoint::SelfRoot,
+            "needs_unknown",
+            RelationEndpoint::Slot("ghost".into()),
+        )]);
+        let realizations = std::collections::HashMap::new();
+        let err = materialize_relation_templates(&mut world, &def, elem(500), &realizations)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            MaterializationError::UnknownSlot { slot_id: "ghost".into() }
+        );
+        // No relation entities spawned.
+        let mut q = world.query::<&SemanticRelation>();
+        assert_eq!(q.iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn materialize_returns_allocator_missing_when_resource_absent() {
+        use crate::plugins::promotion::RelationEndpoint;
+        // World without the ElementIdAllocator resource.
+        let mut world = World::new();
+        let def = template_definition(vec![template(
+            RelationEndpoint::SelfRoot,
+            "contains",
+            RelationEndpoint::Slot("frame".into()),
+        )]);
+        let mut realizations = std::collections::HashMap::new();
+        realizations.insert("frame".into(), elem(10));
+        let err = materialize_relation_templates(&mut world, &def, elem(500), &realizations)
+            .unwrap_err();
+        assert_eq!(err, MaterializationError::AllocatorMissing);
+    }
+
+    #[test]
+    fn materialize_carries_template_parameters_verbatim_into_relation() {
+        use crate::plugins::promotion::RelationEndpoint;
+        let mut world = world_with_allocator();
+        let mut t = template(
+            RelationEndpoint::SelfRoot,
+            "load_path",
+            RelationEndpoint::Slot("post".into()),
+        );
+        t.parameters = serde_json::json!({ "shear_kn": 12.5 });
+        let def = template_definition(vec![t]);
+        let mut realizations = std::collections::HashMap::new();
+        realizations.insert("post".into(), elem(20));
+
+        materialize_relation_templates(&mut world, &def, elem(500), &realizations)
+            .expect("materialize succeeds");
+        let mut q = world.query::<&SemanticRelation>();
+        let r = q.iter(&world).next().expect("one relation spawned");
+        assert_eq!(r.parameters["shear_kn"], serde_json::json!(12.5));
+    }
+
+    #[test]
+    fn definition_with_relation_templates_round_trips_through_serde() {
+        use crate::plugins::promotion::RelationEndpoint;
+        let def = template_definition(vec![template(
+            RelationEndpoint::SelfRoot,
+            "contains",
+            RelationEndpoint::Slot("frame".into()),
+        )]);
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(json.contains("relation_templates"));
+        let back: crate::plugins::modeling::definition::Definition =
+            serde_json::from_str(&json).unwrap();
+        let compound = back.compound.expect("compound body survives reload");
+        assert_eq!(compound.relation_templates.len(), 1);
+        assert_eq!(compound.relation_templates[0].relation_type, "contains");
+    }
+
+    #[test]
+    fn empty_relation_templates_are_skipped_in_serialization() {
+        // Sanity: a Definition without templates must not start
+        // emitting `relation_templates: []` after this PP. Keeps
+        // existing project files bit-stable.
+        let def = crate::plugins::definition_authoring::blank_definition("NoTemplates");
+        let json = serde_json::to_string(&def).unwrap();
+        assert!(
+            !json.contains("relation_templates"),
+            "an empty list should not appear in the serialized form; got: {json}"
         );
     }
 }

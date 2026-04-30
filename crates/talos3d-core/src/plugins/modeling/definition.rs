@@ -536,6 +536,18 @@ pub struct CompoundDefinition {
     pub derived_parameters: Vec<DerivedParameterDef>,
     #[serde(default)]
     pub constraints: Vec<ConstraintDef>,
+    /// Accepted `SemanticRelationTemplate`s harvested by PP-A2DB-2
+    /// slice A's adapter classification. On Occurrence creation, the
+    /// `materialize_relation_templates` helper walks these and spawns
+    /// authored first-class `SemanticRelation` entities with
+    /// endpoints resolved through the slot realization map.
+    ///
+    /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]`
+    /// keeps pre-PP-A2DB-2 project files loading and keeps Definitions
+    /// without templates bit-stable in serialized form.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relation_templates:
+        Vec<crate::plugins::promotion::SemanticRelationTemplate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +629,21 @@ pub struct Definition {
 }
 
 impl Definition {
+    /// Stamp `templates` onto the Definition's compound body. If the
+    /// Definition was a leaf, this upgrades it to compound with an
+    /// otherwise-empty body. Returns `self` so it composes with other
+    /// builder helpers.
+    pub fn with_relation_templates(
+        mut self,
+        templates: Vec<crate::plugins::promotion::SemanticRelationTemplate>,
+    ) -> Self {
+        let compound = self
+            .compound
+            .get_or_insert_with(CompoundDefinition::default);
+        compound.relation_templates = templates;
+        self
+    }
+
     /// Validate internal structure and cross-definition references.
     pub fn validate_with<F>(&self, mut has_definition: F) -> Result<(), String>
     where
@@ -1169,6 +1196,15 @@ fn merge_compound_definition(
             constraints: merge_named_items(base.constraints, child.constraints, |constraint| {
                 constraint.id.clone()
             }),
+            // Same inherit-or-replace semantics as `merge_interface`'s
+            // external_context_requirements: a derived definition with
+            // a non-empty template list overrides; otherwise inherit
+            // from base.
+            relation_templates: if !child.relation_templates.is_empty() {
+                child.relation_templates
+            } else {
+                base.relation_templates
+            },
         }),
         (Some(base), None) => Some(base),
         (None, Some(child)) => Some(child),
