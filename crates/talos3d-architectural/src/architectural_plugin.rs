@@ -226,6 +226,24 @@ impl Plugin for ArchitecturalPlugin {
             },
             execute_place_opening,
         )
+        .register_command(
+            CommandDescriptor {
+                id: "architectural.create_building_pad".to_string(),
+                label: "Create Building Pad".to_string(),
+                description: "Activate building pad placement".to_string(),
+                category: CommandCategory::Create,
+                parameters: Some(serde_json::json!({"type":"object"})),
+                default_shortcut: None,
+                icon: Some("icon.architectural.building_pad".to_string()),
+                hint: Some("Click pad boundary vertices, then press Enter to close".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: Some("PlaceBuildingPad".to_string()),
+                capability_id: Some("architectural".to_string()),
+            },
+            execute_create_building_pad,
+        )
         .register_toolbar(ToolbarDescriptor {
             id: "architectural".to_string(),
             label: "Architectural".to_string(),
@@ -236,6 +254,7 @@ impl Plugin for ArchitecturalPlugin {
                 command_ids: vec![
                     "architectural.create_wall".to_string(),
                     "architectural.place_opening".to_string(),
+                    "architectural.create_building_pad".to_string(),
                 ],
             }],
         })
@@ -284,6 +303,10 @@ fn execute_create_wall(world: &mut World, _: &Value) -> Result<CommandResult, St
 
 fn execute_place_opening(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     activate_tool_command(world, ActiveTool::PlaceOpening)
+}
+
+fn execute_create_building_pad(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    activate_tool_command(world, ActiveTool::PlaceBuildingPad)
 }
 
 fn setup_architectural_icons(
