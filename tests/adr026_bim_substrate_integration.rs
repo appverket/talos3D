@@ -128,6 +128,7 @@ fn bim_substrate_composes_end_to_end() {
             VoidDeclaration::rectangular("opening_width_m", "opening_height_m")
                 .with_placement(VoidPlacement::at(DVec3::new(0.0, 1.0, 0.0))),
         ),
+        external_context_requirements: Vec::new(),
     };
 
     // ── Phase 6g: register the storey kind

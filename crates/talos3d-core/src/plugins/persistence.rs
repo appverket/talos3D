@@ -686,9 +686,9 @@ mod tests {
         },
         modeling::{
             definition::{
-                Definition, DefinitionId, DefinitionKind, DefinitionLibrary,
-                DefinitionLibraryId, DefinitionLibraryScope, Interface, OverridePolicy,
-                ParameterDef, ParameterMetadata, ParameterSchema, ParamType,
+                Definition, DefinitionId, DefinitionKind, DefinitionLibrary, DefinitionLibraryId,
+                DefinitionLibraryScope, Interface, OverridePolicy, ParamType, ParameterDef,
+                ParameterMetadata, ParameterSchema,
             },
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
         },
@@ -834,11 +834,7 @@ mod tests {
         let project = build_project_file(&mut source).expect("project should serialize");
         assert!(project.entities.iter().any(|record| {
             record.type_name == "occurrence"
-                && record
-                    .data
-                    .get("element_id")
-                    .and_then(Value::as_u64)
-                    == Some(42)
+                && record.data.get("element_id").and_then(Value::as_u64) == Some(42)
         }));
 
         let mut target = World::new();
@@ -868,7 +864,11 @@ mod tests {
             .expect("saved occurrence root should be restored");
         assert_eq!(restored.1.definition_id, definition_id);
         assert_eq!(
-            restored.1.overrides.get("overall_width").and_then(Value::as_f64),
+            restored
+                .1
+                .overrides
+                .get("overall_width")
+                .and_then(Value::as_f64),
             Some(1.68)
         );
         assert_eq!(restored.2.as_str(), "Saved reusable window");
@@ -1042,14 +1042,12 @@ mod tests {
         use crate::plugins::modeling::assembly::{
             AssemblyFactory, AssemblyMemberRef, RelationFactory, SemanticAssembly,
         };
-        use crate::plugins::modeling::definition::{CompoundDefinition, ChildSlotDef};
-        use crate::plugins::promotion::{
-            PromotionOutputShape, SemanticAssemblyPromotionSource,
-        };
+        use crate::plugins::modeling::definition::{ChildSlotDef, CompoundDefinition};
+        use crate::plugins::promotion::{PromotionOutputShape, SemanticAssemblyPromotionSource};
         use crate::plugins::promotion_world::{
-            apply_assembly_migration_diff, gather_semantic_assembly_input,
-            spawn_promoted_occurrence, AssemblyPromotionMetadata,
-            commit_assembly_promotion, AssemblyCommitConfig,
+            apply_assembly_migration_diff, commit_assembly_promotion,
+            gather_semantic_assembly_input, spawn_promoted_occurrence, AssemblyCommitConfig,
+            AssemblyPromotionMetadata,
         };
 
         // === Build the source world ===========================================
@@ -1070,9 +1068,7 @@ mod tests {
         source.insert_resource(OpaquePersistedEntities::default());
         // Bump the allocator past the test ids we hand-pick to avoid
         // colliding with the new occurrence id when allocating.
-        source
-            .resource_mut::<ElementIdAllocator>()
-            .set_next(900);
+        source.resource_mut::<ElementIdAllocator>().set_next(900);
 
         // Two leaf members and a flat assembly grouping them.
         let wall_a = ElementId(10);
@@ -1112,10 +1108,8 @@ mod tests {
         // Register a published Definition in the registry so the
         // round-trip exercises the registry persistence path. The
         // body mirrors the plan's compound shape.
-        let promoted_definition_id =
-            DefinitionId(format!("test.promoted.{}", out.plan.draft_id.0));
-        let mut promoted_def =
-            crate::plugins::definition_authoring::blank_definition("House");
+        let promoted_definition_id = DefinitionId(format!("test.promoted.{}", out.plan.draft_id.0));
+        let mut promoted_def = crate::plugins::definition_authoring::blank_definition("House");
         promoted_def.id = promoted_definition_id.clone();
         if let PromotionOutputShape::Compound { child_slots } = &out.plan.output_shape {
             promoted_def.compound = Some(CompoundDefinition {
@@ -1243,7 +1237,10 @@ mod tests {
         // === Sanity: the despawned non-preserved member is gone ==============
         let mut id_q = target.query::<&ElementId>();
         let count = id_q.iter(&target).filter(|eid| **eid == wall_b).count();
-        assert_eq!(count, 0, "wall_b was despawned during commit; reload preserves the absence");
+        assert_eq!(
+            count, 0,
+            "wall_b was despawned during commit; reload preserves the absence"
+        );
 
         // Suppress unused-import warning for helpers used only inside
         // the `commit_assembly_promotion` orchestrator path; keep them
@@ -1279,19 +1276,17 @@ mod tests {
     fn relation_templates_and_external_context_requirements_round_trip_through_save_load() {
         use crate::capability_registry::CapabilityRegistry;
         use crate::plugins::modeling::assembly::{
-            AssemblyFactory, AssemblyMemberRef, RelationFactory, SemanticAssembly,
-            SemanticRelation,
+            AssemblyFactory, AssemblyMemberRef, RelationFactory, SemanticAssembly, SemanticRelation,
         };
         use crate::plugins::modeling::definition::CompoundDefinition;
         use crate::plugins::promotion::{
-            ExternalRelationClassification, InternalRelationSnapshot,
-            RelationClassificationRules, SemanticAssemblyPromotionSource,
+            ExternalRelationClassification, RelationClassificationRules,
+            SemanticAssemblyPromotionSource,
         };
         use crate::plugins::promotion_world::{
             apply_assembly_migration_diff, commit_assembly_promotion,
             gather_semantic_assembly_input, materialize_relation_templates,
-            spawn_promoted_occurrence, AssemblyCommitConfig,
-            AssemblyPromotionMetadata,
+            spawn_promoted_occurrence, AssemblyCommitConfig, AssemblyPromotionMetadata,
         };
         use std::collections::HashMap;
 
@@ -1393,10 +1388,8 @@ mod tests {
         // `Interface::with_external_context_requirements` and slice
         // C3's `Definition::with_relation_templates` make this a
         // single-line operation per surface.
-        let promoted_definition_id =
-            DefinitionId(format!("test.promoted.{}", out.plan.draft_id.0));
-        let mut promoted_def =
-            crate::plugins::definition_authoring::blank_definition("Door");
+        let promoted_definition_id = DefinitionId(format!("test.promoted.{}", out.plan.draft_id.0));
+        let mut promoted_def = crate::plugins::definition_authoring::blank_definition("Door");
         promoted_def.id = promoted_definition_id.clone();
         promoted_def.interface = promoted_def
             .interface
@@ -1456,8 +1449,7 @@ mod tests {
 
         // === Save and reload =================================================
         let project = build_project_file(&mut source).expect("project should serialize");
-        let json =
-            serde_json::to_string(&project).expect("project should serialize to JSON");
+        let json = serde_json::to_string(&project).expect("project should serialize to JSON");
         let project: ProjectFile =
             serde_json::from_str(&json).expect("project should deserialize from JSON");
 
@@ -1507,7 +1499,10 @@ mod tests {
             .expect("promoted definition reloads in DefinitionRegistry");
         // Slice C1: external context requirements survive on the
         // Interface.
-        assert_eq!(restored_def.interface.external_context_requirements.len(), 1);
+        assert_eq!(
+            restored_def.interface.external_context_requirements.len(),
+            1
+        );
         let req = &restored_def.interface.external_context_requirements[0];
         assert_eq!(req.relation_type, "needs_room");
         assert_eq!(
