@@ -357,6 +357,28 @@ impl TextureRef {
 
 // ─── MaterialDef ─────────────────────────────────────────────────────────────
 
+fn default_attenuation_distance() -> f32 {
+    f32::INFINITY
+}
+
+fn serialize_attenuation_distance<S>(value: &f32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if value.is_finite() {
+        serializer.serialize_f32(*value)
+    } else {
+        serializer.serialize_none()
+    }
+}
+
+fn deserialize_attenuation_distance<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(f32::INFINITY))
+}
+
 /// The data definition of a material.  Serialisable, stored in `MaterialRegistry`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaterialDef {
@@ -386,6 +408,11 @@ pub struct MaterialDef {
     /// Index of refraction.
     pub ior: f32,
     /// Average absorption distance through the transmissive volume.
+    #[serde(
+        default = "default_attenuation_distance",
+        serialize_with = "serialize_attenuation_distance",
+        deserialize_with = "deserialize_attenuation_distance"
+    )]
     pub attenuation_distance: f32,
     /// Resulting color after travelling `attenuation_distance`.
     pub attenuation_color: [f32; 3],
@@ -1411,6 +1438,18 @@ mod tests {
             .expect("cedar builtin should exist");
         assert_eq!(cedar.anisotropy_strength, 0.0);
         assert_eq!(cedar.anisotropy_rotation, 0.0);
+    }
+
+    #[test]
+    fn material_def_accepts_null_attenuation_distance_from_json() {
+        let material = MaterialDef::new("Null attenuation");
+        let mut value = serde_json::to_value(&material).expect("material should serialize");
+        value["attenuation_distance"] = Value::Null;
+
+        let parsed: MaterialDef =
+            serde_json::from_value(value).expect("null attenuation should deserialize");
+
+        assert!(parsed.attenuation_distance.is_infinite());
     }
 
     #[test]
