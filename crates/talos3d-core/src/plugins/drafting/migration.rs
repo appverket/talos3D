@@ -101,7 +101,6 @@ fn translate_legacy_one(legacy: &Value, allocator: &ElementIdAllocator) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::prelude::*;
 
     #[test]
     fn translates_empty_to_none() {

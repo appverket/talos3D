@@ -1181,7 +1181,6 @@ mod typereg_tests {
     use crate::capability_registry::AuthoredEntityFactory;
     use crate::plugins::modeling::dependency_graph::EntityDependencies;
     use crate::plugins::modeling::profile::Profile2d;
-    use bevy::prelude::*;
 
     #[test]
     fn face_profile_feature_factory_declares_edge_on_parent() {

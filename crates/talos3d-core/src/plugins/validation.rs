@@ -579,13 +579,13 @@ mod tests {
 
     #[test]
     fn sweep_skips_non_applicable_entity() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
 
         // Register a constraint that only applies to "wall_assembly".
-        let mut emitted = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let emitted = std::sync::Arc::new(std::sync::Mutex::new(false));
         let emitted_clone = emitted.clone();
         world
             .resource_mut::<CapabilityRegistry>()
@@ -602,13 +602,15 @@ mod tests {
                 source_backlink: None,
                 role: ConstraintRole::Validation,
                 validator: Arc::new(move |_entity, _world| {
-                    *emitted_clone.lock().unwrap() = true;
+                    *emitted_clone
+                        .lock()
+                        .expect("constraint emission flag mutex poisoned") = true;
                     Vec::new()
                 }),
             });
 
         // Spawn entity with no ElementClassAssignment (not a wall).
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn((
             eid,
@@ -620,14 +622,16 @@ mod tests {
         validation_sweep_system(&mut world);
 
         assert!(
-            !*emitted.lock().unwrap(),
+            !*emitted
+                .lock()
+                .expect("constraint emission flag mutex poisoned"),
             "Validator must not run on non-applicable entity"
         );
     }
 
     #[test]
     fn sweep_runs_on_applicable_entity() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
@@ -647,18 +651,25 @@ mod tests {
                 source_backlink: None,
                 role: ConstraintRole::Validation,
                 validator: Arc::new(move |_entity, _world| {
-                    *called_clone.lock().unwrap() = true;
+                    *called_clone
+                        .lock()
+                        .expect("validator call flag mutex poisoned") = true;
                     Vec::new()
                 }),
             });
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn(eid);
 
         validation_sweep_system(&mut world);
 
-        assert!(*called.lock().unwrap(), "Validator must run on any entity");
+        assert!(
+            *called
+                .lock()
+                .expect("validator call flag mutex poisoned"),
+            "Validator must run on any entity"
+        );
     }
 
     #[test]
@@ -751,7 +762,7 @@ mod tests {
 
     #[test]
     fn sweep_canonicalizes_role_from_descriptor() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
@@ -764,7 +775,7 @@ mod tests {
                 1,
             ));
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn(eid);
 
@@ -778,7 +789,7 @@ mod tests {
 
     #[test]
     fn discovery_budget_caps_emissions_per_sweep() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
@@ -792,7 +803,7 @@ mod tests {
                 5,
             ));
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn(eid);
 
@@ -811,7 +822,7 @@ mod tests {
 
     #[test]
     fn discovery_budget_resets_each_sweep() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
@@ -824,7 +835,7 @@ mod tests {
                 5,
             ));
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn(eid);
 
@@ -841,7 +852,7 @@ mod tests {
 
     #[test]
     fn validation_findings_are_not_constrained_by_discovery_budget() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
@@ -854,7 +865,7 @@ mod tests {
                 10,
             ));
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn(eid);
 
@@ -872,7 +883,7 @@ mod tests {
 
     #[test]
     fn promotion_findings_block_when_severity_at_or_above_warning() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
@@ -885,7 +896,7 @@ mod tests {
                 1,
             ));
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn(eid);
 
@@ -899,7 +910,7 @@ mod tests {
 
     #[test]
     fn entity_has_unresolved_promotion_findings_returns_false_with_only_validation_findings() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
 
         let mut world = make_world_with_resources();
         world.insert_resource(ElementIdAllocator::default());
@@ -912,7 +923,7 @@ mod tests {
                 3,
             ));
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn(eid);
 
@@ -933,7 +944,7 @@ mod tests {
 
     #[test]
     fn declared_state_obligations_constraint_emits_for_constructible_unresolved() {
-        use crate::plugins::identity::{ElementId, ElementIdAllocator};
+        use crate::plugins::identity::ElementIdAllocator;
         use crate::plugins::refinement::{
             Obligation, ObligationId, ObligationSet, ObligationStatus,
         };
@@ -945,7 +956,7 @@ mod tests {
             .resource_mut::<CapabilityRegistry>()
             .register_constraint(declared_state_obligations_constraint());
 
-        let allocator = world.resource::<ElementIdAllocator>().clone();
+        let allocator = world.resource::<ElementIdAllocator>();
         let eid = allocator.next_id();
         world.spawn((
             eid,

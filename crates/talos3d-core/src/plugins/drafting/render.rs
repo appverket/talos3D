@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn radial_emits_R_prefix_text() {
+    fn radial_emits_r_prefix_text() {
         let style = DimensionStyle::engineering_mm();
         let input = DimensionInput {
             kind: DimensionKind::Radial { center: Vec3::ZERO },

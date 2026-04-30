@@ -733,7 +733,6 @@ mod typereg_tests {
     use super::*;
     use crate::capability_registry::AuthoredEntityFactory;
     use crate::plugins::modeling::dependency_graph::EntityDependencies;
-    use bevy::prelude::*;
 
     #[test]
     fn mirror_factory_declares_edge_on_source() {

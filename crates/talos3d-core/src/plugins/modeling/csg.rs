@@ -783,7 +783,6 @@ mod typereg_tests {
     use super::*;
     use crate::capability_registry::AuthoredEntityFactory;
     use crate::plugins::modeling::dependency_graph::EntityDependencies;
-    use bevy::prelude::*;
 
     #[test]
     fn csg_factory_declares_two_named_role_edges() {

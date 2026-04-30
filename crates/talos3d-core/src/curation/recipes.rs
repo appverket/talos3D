@@ -290,7 +290,6 @@ mod tests {
     use super::*;
     use crate::capability_registry::ElementClassId;
     use crate::curation::{
-        identity::AssetRevision,
         provenance::{Confidence, Lineage, Provenance},
         scope_trust::{Scope, Trust},
     };
@@ -476,7 +475,7 @@ mod tests {
     #[test]
     fn mirror_descriptors_is_idempotent() {
         use crate::capability_registry::{
-            GenerateFn, GenerateInput, GenerateOutput, ObligationTemplate, RecipeFamilyDescriptor,
+            GenerateInput, GenerateOutput, ObligationTemplate, RecipeFamilyDescriptor,
             RecipeParameter,
         };
         use std::sync::Arc;
