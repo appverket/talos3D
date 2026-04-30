@@ -10,6 +10,9 @@ use serde_json::Value;
 
 use crate::authored_entity::BoxedEntity;
 use crate::plugins::document_properties::DocumentProperties;
+use crate::plugins::hosting_contracts::{
+    HostingContractDescriptor, HostingContractInfo, HostingContractKindId,
+};
 use crate::plugins::identity::ElementId;
 use crate::plugins::modeling::dependency_graph::EntityDependencies;
 use crate::plugins::modeling::primitives::TriangleMesh;
@@ -1149,6 +1152,8 @@ pub struct CapabilityRegistry {
     assembly_pattern_descriptors: Vec<AssemblyPatternDescriptor>,
     assembly_pattern_index: HashMap<String, usize>,
     relation_type_descriptors: Vec<RelationTypeDescriptor>,
+    hosting_contract_descriptors: Vec<HostingContractDescriptor>,
+    hosting_contract_index: HashMap<String, usize>,
     // PP71
     element_class_descriptors: Vec<ElementClassDescriptor>,
     element_class_index: HashMap<String, usize>,
@@ -1319,6 +1324,21 @@ impl CapabilityRegistry {
         self.relation_type_descriptors.push(descriptor);
     }
 
+    /// Register a hosting contract descriptor. Panics if the kind is already registered.
+    pub fn register_hosting_contract(&mut self, descriptor: HostingContractDescriptor) {
+        assert!(
+            !self
+                .hosting_contract_index
+                .contains_key(descriptor.kind.0.as_str()),
+            "HostingContract '{}' was registered more than once",
+            descriptor.kind.0
+        );
+        let index = self.hosting_contract_descriptors.len();
+        self.hosting_contract_index
+            .insert(descriptor.kind.0.clone(), index);
+        self.hosting_contract_descriptors.push(descriptor);
+    }
+
     pub fn assembly_type_descriptors(&self) -> &[AssemblyTypeDescriptor] {
         &self.assembly_type_descriptors
     }
@@ -1338,6 +1358,24 @@ impl CapabilityRegistry {
 
     pub fn relation_type_descriptors(&self) -> &[RelationTypeDescriptor] {
         &self.relation_type_descriptors
+    }
+
+    /// Return all registered hosting contract descriptor summaries.
+    pub fn hosting_contract_descriptors(&self) -> Vec<HostingContractInfo> {
+        self.hosting_contract_descriptors
+            .iter()
+            .map(HostingContractInfo::from)
+            .collect()
+    }
+
+    /// Look up a hosting contract descriptor by kind.
+    pub fn hosting_contract_descriptor(
+        &self,
+        kind: &HostingContractKindId,
+    ) -> Option<&HostingContractDescriptor> {
+        self.hosting_contract_index
+            .get(kind.0.as_str())
+            .and_then(|&i| self.hosting_contract_descriptors.get(i))
     }
 
     // --- PP71: Element class descriptors ---
@@ -1585,6 +1623,10 @@ pub trait CapabilityRegistryAppExt {
 
     fn register_relation_type(&mut self, descriptor: RelationTypeDescriptor) -> &mut Self;
 
+    /// Register a `HostingContractDescriptor` (PP-DHOST-1). Initialises the
+    /// `CapabilityRegistry` resource if it does not yet exist.
+    fn register_hosting_contract(&mut self, descriptor: HostingContractDescriptor) -> &mut Self;
+
     /// Register an `ElementClassDescriptor` (PP71). Initialises the
     /// `CapabilityRegistry` resource if it does not yet exist.
     fn register_element_class(&mut self, descriptor: ElementClassDescriptor) -> &mut Self;
@@ -1686,6 +1728,17 @@ impl CapabilityRegistryAppExt for App {
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_relation_type(descriptor);
+        self
+    }
+
+    fn register_hosting_contract(&mut self, descriptor: HostingContractDescriptor) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_hosting_contract(descriptor);
         self
     }
 
