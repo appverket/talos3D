@@ -95,6 +95,8 @@ pub fn gather_semantic_assembly_input(
         members.iter().map(|m| m.element_id).collect();
 
     let external_graph = collect_external_graph(world, assembly_id, &source_member_ids);
+    let internal_relations =
+        collect_internal_relations(world, assembly_id, &source_member_ids);
 
     Ok(SemanticAssemblyPromotionInput {
         assembly_id,
@@ -106,9 +108,41 @@ pub fn gather_semantic_assembly_input(
             role_vocabulary_version: None,
         },
         external_graph,
+        internal_relations,
         source_parameters: assembly.parameters.clone(),
         source_label: assembly.label.clone(),
     })
+}
+
+/// Walk every `SemanticRelation` in the world; a relation is internal
+/// when *both* endpoints touch the promoting assembly — i.e. each
+/// endpoint is either the source assembly id itself or one of its
+/// source members. The PP-A2DB-2 adapter then classifies each
+/// internal relation into a `SemanticRelationTemplate` candidate.
+fn collect_internal_relations(
+    world: &World,
+    source_assembly_id: ElementId,
+    source_member_ids: &std::collections::HashSet<ElementId>,
+) -> Vec<crate::plugins::promotion::InternalRelationSnapshot> {
+    let mut out = Vec::new();
+    let Some(mut q) = world.try_query::<(&ElementId, &SemanticRelation)>() else {
+        return out;
+    };
+    let endpoint_in_source = |id: ElementId| -> bool {
+        id == source_assembly_id || source_member_ids.contains(&id)
+    };
+    for (relation_id, relation) in q.iter(world) {
+        if endpoint_in_source(relation.source) && endpoint_in_source(relation.target) {
+            out.push(crate::plugins::promotion::InternalRelationSnapshot {
+                relation_id: *relation_id,
+                source: relation.source,
+                target: relation.target,
+                relation_type: relation.relation_type.clone(),
+                parameters: relation.parameters.clone(),
+            });
+        }
+    }
+    out
 }
 
 fn read_assembly_component(
@@ -1013,6 +1047,8 @@ mod tests {
             ],
             retargeted_relations: Vec::new(),
             orphaned_memberships: Vec::new(),
+            candidate_relation_templates: Vec::new(),
+            preserved_relations: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -1094,6 +1130,8 @@ mod tests {
             ],
             retargeted_relations: Vec::new(),
             orphaned_memberships: Vec::new(),
+            candidate_relation_templates: Vec::new(),
+            preserved_relations: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1184,6 +1222,8 @@ mod tests {
                 },
             ],
             orphaned_memberships: Vec::new(),
+            candidate_relation_templates: Vec::new(),
+            preserved_relations: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1265,6 +1305,8 @@ mod tests {
                 },
             ],
             orphaned_memberships: Vec::new(),
+            candidate_relation_templates: Vec::new(),
+            preserved_relations: Vec::new(),
             warnings: Vec::new(),
         };
         let err = apply_assembly_migration_diff(&mut world, &diff, elem(500))
@@ -1534,6 +1576,8 @@ mod tests {
             ],
             retargeted_relations: Vec::new(),
             orphaned_memberships: Vec::new(),
+            candidate_relation_templates: Vec::new(),
+            preserved_relations: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1605,6 +1649,8 @@ mod tests {
             ],
             retargeted_relations: Vec::new(),
             orphaned_memberships: Vec::new(),
+            candidate_relation_templates: Vec::new(),
+            preserved_relations: Vec::new(),
             warnings: Vec::new(),
         };
         let committed = commit_assembly_promotion(
@@ -1627,5 +1673,121 @@ mod tests {
         assert_eq!(committed.source_members_despawned, 1);
         assert_eq!(count_entities_with(&mut world, elem(10)), 0);
         assert_eq!(count_entities_with(&mut world, ElementId(900)), 1);
+    }
+
+    // === PP-A2DB-2 slice A: gather collects internal relations =============
+
+    #[test]
+    fn gather_collects_internal_relations_for_template_classification() {
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(11));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "door",
+            "D",
+            vec![member(elem(10), "frame"), member(elem(11), "leaf")],
+            serde_json::Value::Null,
+        );
+        // Internal: both endpoints are source members.
+        world.spawn((
+            elem(30),
+            SemanticRelation {
+                source: elem(10),
+                target: elem(11),
+                relation_type: "hinges_on".into(),
+                parameters: serde_json::json!({ "hinge_count": 3 }),
+            },
+        ));
+        // Internal: source is the assembly itself, target is a member.
+        world.spawn((
+            elem(31),
+            SemanticRelation {
+                source: elem(1),
+                target: elem(10),
+                relation_type: "contains".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+        // External: target is outside the source.
+        spawn_authored_leaf(&mut world, elem(99));
+        world.spawn((
+            elem(32),
+            SemanticRelation {
+                source: elem(10),
+                target: elem(99),
+                relation_type: "anchored_to".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        let input = gather_semantic_assembly_input(&world, elem(1)).unwrap();
+        // Two internal relations gathered; the boundary-spanning one is
+        // captured by external_graph.relations instead.
+        let internal_ids: Vec<ElementId> = input
+            .internal_relations
+            .iter()
+            .map(|r| r.relation_id)
+            .collect();
+        assert!(internal_ids.contains(&elem(30)));
+        assert!(internal_ids.contains(&elem(31)));
+        assert!(!internal_ids.contains(&elem(32)));
+        assert!(input
+            .external_graph
+            .relations
+            .iter()
+            .any(|r| r.relation_id == elem(32)));
+
+        // The relation parameters should be preserved verbatim on the
+        // internal snapshot.
+        let r30 = input
+            .internal_relations
+            .iter()
+            .find(|r| r.relation_id == elem(30))
+            .unwrap();
+        assert_eq!(r30.parameters["hinge_count"], serde_json::json!(3));
+    }
+
+    #[test]
+    fn gathered_input_drives_relation_template_classification_end_to_end() {
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(11));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "door",
+            "D",
+            vec![member(elem(10), "frame"), member(elem(11), "leaf")],
+            serde_json::Value::Null,
+        );
+        world.spawn((
+            elem(30),
+            SemanticRelation {
+                source: elem(10),
+                target: elem(11),
+                relation_type: "hinges_on".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        let input = gather_semantic_assembly_input(&world, elem(1)).unwrap();
+        let adapter = crate::plugins::promotion::SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        assert_eq!(out.migration_diff.candidate_relation_templates.len(), 1);
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(
+            template.subject,
+            crate::plugins::promotion::RelationEndpoint::Slot("frame".into())
+        );
+        assert_eq!(
+            template.object,
+            crate::plugins::promotion::RelationEndpoint::Slot("leaf".into())
+        );
     }
 }

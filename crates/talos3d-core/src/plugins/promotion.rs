@@ -671,6 +671,21 @@ pub struct ExternalGraph {
     pub relations: Vec<ExternalRelation>,
 }
 
+/// One internal `SemanticRelation` snapshot — both endpoints either
+/// reference the source assembly itself (`self`) or one of its source
+/// members. Slice A's adapter classifies these into
+/// `SemanticRelationTemplate` candidates; slice B will source them
+/// from world state in `promotion_world.rs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalRelationSnapshot {
+    pub relation_id: ElementId,
+    pub source: ElementId,
+    pub target: ElementId,
+    pub relation_type: String,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+}
+
 /// Pure input to `SemanticAssemblyPromotionSource::build_plan`. The
 /// adapter is ECS-free; the caller builds this struct from world state.
 #[derive(Debug, Clone)]
@@ -679,6 +694,10 @@ pub struct SemanticAssemblyPromotionInput {
     pub members: Vec<AssemblyMemberSnapshot>,
     pub capability: AssemblyCapabilityProjection,
     pub external_graph: ExternalGraph,
+    /// Relations whose ECS source/target both touch the source
+    /// assembly (the assembly itself or a source member). Candidates
+    /// for `SemanticRelationTemplate` on the promoted Definition.
+    pub internal_relations: Vec<InternalRelationSnapshot>,
     /// Original assembly-level parameters carried into the promoted
     /// Definition's provenance (PP-A2DB-1 trivially passes them
     /// through; rich parameter inference lands later).
@@ -723,10 +742,10 @@ impl std::fmt::Display for SemanticAssemblyAdapterError {
 impl std::error::Error for SemanticAssemblyAdapterError {}
 
 /// PP-A2DB-1 minimum surface for the migration diff that promotion
-/// preview shows the user before commit. Slice B (world retargeting)
-/// fills out `retargeted_assemblies`/`retargeted_relations` with the
-/// post-commit reality; this slice ships the data shape and the
-/// adapter-level "intended retargeting" that Preview displays.
+/// preview shows the user before commit. PP-A2DB-2 slice A extends it
+/// with `candidate_relation_templates` and `preserved_relations` so
+/// internal source-internal relations become reusable templates while
+/// boundary-spanning relations are surfaced for audit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemanticGraphMigrationDiff {
     /// Other assemblies that hold any of the source members; their
@@ -746,10 +765,75 @@ pub struct SemanticGraphMigrationDiff {
     /// than blocking emission.
     #[serde(default)]
     pub orphaned_memberships: Vec<OrphanedMembership>,
+    /// Internal relations (both endpoints inside the source) lifted
+    /// into reusable `SemanticRelationTemplate` candidates. Accepted
+    /// templates land on the promoted Definition; rejection (or
+    /// "preserve as instance" instead) is a UX decision — slice A
+    /// records every internal relation as a candidate. PP-A2DB-2.
+    #[serde(default)]
+    pub candidate_relation_templates: Vec<SemanticRelationTemplate>,
+    /// Relations that touched a source member but had at least one
+    /// boundary-spanning endpoint, so they cannot become
+    /// `SemanticRelationTemplate` candidates without an
+    /// `ExternalContextRequirement` declaration. Slice A records them
+    /// verbatim; slice B will classify each as `HostContract` /
+    /// `RequiredContext` / `AdvisoryContext` / `DropWithAudit` per
+    /// the relation descriptor. PP-A2DB-2.
+    #[serde(default)]
+    pub preserved_relations: Vec<PreservedRelation>,
     /// Free-form preview warnings (capability projection outdated,
     /// duplicate role indexed, etc.).
     #[serde(default)]
     pub warnings: Vec<MigrationWarning>,
+}
+
+/// Where one endpoint of a `SemanticRelationTemplate` resolves inside
+/// the promoted Definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum RelationEndpoint {
+    /// The promoted Definition itself (typically the surviving
+    /// SemanticAssembly's wrapper Occurrence).
+    SelfRoot,
+    /// One of the Definition's child slots, addressed by `slot_id`.
+    Slot(String),
+}
+
+/// A relation whose endpoints both resolve into the promoted
+/// Definition (self or a child slot). Stored on the diff under
+/// `candidate_relation_templates`. PP-A2DB-2 slice A; slice C will
+/// store accepted templates on the Definition itself and materialize
+/// them as authored `SemanticRelation`s on Occurrence creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticRelationTemplate {
+    pub subject: RelationEndpoint,
+    pub relation_type: String,
+    pub object: RelationEndpoint,
+    /// Original relation parameters carried verbatim. Slice C will
+    /// normalize concrete-entity references inside this payload into
+    /// slot/parameter references; for slice A we preserve the
+    /// original JSON so the audit trail is complete.
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    /// The original relation's `ElementId` so downstream consumers
+    /// can correlate template <-> source.
+    pub source_relation_id: ElementId,
+}
+
+/// A relation that the adapter could NOT lift into a template
+/// because at least one endpoint references something outside the
+/// promoted Definition (a sibling assembly, an unrelated authored
+/// entity, etc.). Slice A surfaces them for preview audit; slice B
+/// will replace this with descriptor-backed
+/// `ExternalRelationClassification`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreservedRelation {
+    pub relation_id: ElementId,
+    pub source: ElementId,
+    pub target: ElementId,
+    pub relation_type: String,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1053,10 +1137,61 @@ impl SemanticAssemblyPromotionSource {
             })
             .collect();
 
+        // === Internal relation classification (PP-A2DB-2 slice A) =====
+        //
+        // For each `InternalRelationSnapshot` the caller provided, walk
+        // both endpoints. If both resolve cleanly to `self` (= the
+        // source assembly id) or one of the source members (which we
+        // can map to a slot id via `slot_lookup`), the relation
+        // becomes a `SemanticRelationTemplate` candidate. Otherwise
+        // the relation has at least one boundary-spanning endpoint;
+        // it goes into `preserved_relations` for slice B's
+        // descriptor-backed classification.
+        //
+        // The slot_lookup was built earlier and maps each source
+        // ElementId to its child-slot id; slice A reuses it without
+        // recomputation.
+        let mut candidate_relation_templates: Vec<SemanticRelationTemplate> = Vec::new();
+        let mut preserved_relations: Vec<PreservedRelation> = Vec::new();
+        for relation in &input.internal_relations {
+            let subject = classify_relation_endpoint(
+                relation.source,
+                input.assembly_id,
+                &slot_lookup,
+            );
+            let object = classify_relation_endpoint(
+                relation.target,
+                input.assembly_id,
+                &slot_lookup,
+            );
+            match (subject, object) {
+                (Some(subject), Some(object)) => {
+                    candidate_relation_templates.push(SemanticRelationTemplate {
+                        subject,
+                        relation_type: relation.relation_type.clone(),
+                        object,
+                        parameters: relation.parameters.clone(),
+                        source_relation_id: relation.relation_id,
+                    });
+                }
+                _ => {
+                    preserved_relations.push(PreservedRelation {
+                        relation_id: relation.relation_id,
+                        source: relation.source,
+                        target: relation.target,
+                        relation_type: relation.relation_type.clone(),
+                        parameters: relation.parameters.clone(),
+                    });
+                }
+            }
+        }
+
         let migration_diff = SemanticGraphMigrationDiff {
             retargeted_assemblies,
             retargeted_relations,
             orphaned_memberships: Vec::new(),
+            candidate_relation_templates,
+            preserved_relations,
             warnings,
         };
 
@@ -1074,6 +1209,26 @@ impl PromotionSourceAdapter for SemanticAssemblyPromotionSource {
     fn build_plan(&self, source: Self::SourceInput) -> Result<PromotionPlan, Self::Error> {
         Ok(self.build_plan_and_diff(source)?.plan)
     }
+}
+
+/// Map an internal-relation endpoint to a `RelationEndpoint` if
+/// possible. Endpoints pointing at the source assembly itself become
+/// `SelfRoot`; endpoints pointing at one of the source members
+/// become `Slot(slot_id)` via the adapter's slot lookup. Anything
+/// else (i.e. a boundary-spanning endpoint that the caller mistakenly
+/// included in `internal_relations`) returns `None` and lands in
+/// `preserved_relations` for audit.
+fn classify_relation_endpoint(
+    endpoint: ElementId,
+    assembly_id: ElementId,
+    slot_lookup: &HashMap<ElementId, String>,
+) -> Option<RelationEndpoint> {
+    if endpoint == assembly_id {
+        return Some(RelationEndpoint::SelfRoot);
+    }
+    slot_lookup
+        .get(&endpoint)
+        .map(|slot_id| RelationEndpoint::Slot(slot_id.clone()))
 }
 
 // === Tests =================================================================
@@ -1610,6 +1765,7 @@ mod tests {
                 role_vocabulary_version: Some("v1".into()),
             },
             external_graph: ExternalGraph::default(),
+            internal_relations: Vec::new(),
             source_parameters: serde_json::Value::Null,
             source_label: "Test Assembly".into(),
         }
@@ -1876,5 +2032,196 @@ mod tests {
         assert_eq!(compound.child_slots.len(), 2);
         assert_eq!(compound.child_slots[0].slot_id, "frame");
         assert_eq!(compound.child_slots[1].slot_id, "glazing");
+    }
+
+    // === PP-A2DB-2 slice A: relation templates =============================
+
+    fn internal_relation(
+        relation_id: u64,
+        source: ElementId,
+        target: ElementId,
+        relation_type: &str,
+    ) -> InternalRelationSnapshot {
+        InternalRelationSnapshot {
+            relation_id: elem(relation_id),
+            source,
+            target,
+            relation_type: relation_type.to_string(),
+            parameters: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn assembly_adapter_lifts_member_to_member_relation_into_template() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(internal_relation(
+            30,
+            elem(1),
+            elem(2),
+            "hinges_on",
+        ));
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        assert_eq!(out.migration_diff.candidate_relation_templates.len(), 1);
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(template.subject, RelationEndpoint::Slot("frame".into()));
+        assert_eq!(template.object, RelationEndpoint::Slot("leaf".into()));
+        assert_eq!(template.relation_type, "hinges_on");
+        assert_eq!(template.source_relation_id, elem(30));
+        assert!(out.migration_diff.preserved_relations.is_empty());
+    }
+
+    #[test]
+    fn assembly_adapter_lifts_self_to_member_relation_into_template() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Window".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        // The source assembly itself is the relation's source endpoint
+        // (as if the assembly "contains" the frame).
+        input.internal_relations.push(internal_relation(
+            30,
+            input.assembly_id,
+            elem(1),
+            "contains",
+        ));
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        assert_eq!(out.migration_diff.candidate_relation_templates.len(), 1);
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(template.subject, RelationEndpoint::SelfRoot);
+        assert_eq!(template.object, RelationEndpoint::Slot("frame".into()));
+    }
+
+    #[test]
+    fn assembly_adapter_preserves_relation_when_endpoint_is_outside_source() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        // The relation has one endpoint inside the source (frame=elem(1))
+        // and one endpoint that is neither the assembly itself nor a
+        // source member (elem(99)). It cannot be lifted into a template
+        // and lands in `preserved_relations`.
+        input.internal_relations.push(internal_relation(
+            31,
+            elem(1),
+            elem(99),
+            "anchored_to",
+        ));
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        assert!(out.migration_diff.candidate_relation_templates.is_empty());
+        assert_eq!(out.migration_diff.preserved_relations.len(), 1);
+        let preserved = &out.migration_diff.preserved_relations[0];
+        assert_eq!(preserved.relation_id, elem(31));
+        assert_eq!(preserved.source, elem(1));
+        assert_eq!(preserved.target, elem(99));
+        assert_eq!(preserved.relation_type, "anchored_to");
+    }
+
+    #[test]
+    fn assembly_adapter_uses_indexed_slot_id_for_template_endpoint() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Walls".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "wall", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "wall", AssemblyMemberKind::AuthoredEntity, None),
+            member(3, "wall", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        // Relation between wall #1 and wall #3 — the indexed slot id
+        // (`wall_1` / `wall_3`) must be the template's endpoint
+        // address, NOT the role.
+        input.internal_relations.push(internal_relation(
+            40,
+            elem(1),
+            elem(3),
+            "adjacent_to",
+        ));
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(template.subject, RelationEndpoint::Slot("wall_1".into()));
+        assert_eq!(template.object, RelationEndpoint::Slot("wall_3".into()));
+    }
+
+    #[test]
+    fn assembly_adapter_carries_relation_parameters_verbatim() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(2),
+            relation_type: "hinges_on".into(),
+            parameters: serde_json::json!({ "hinge_count": 3, "axis": "y" }),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(template.parameters["hinge_count"], serde_json::json!(3));
+        assert_eq!(template.parameters["axis"], serde_json::json!("y"));
+    }
+
+    #[test]
+    fn migration_diff_relation_fields_round_trip_through_serde() {
+        let diff = SemanticGraphMigrationDiff {
+            retargeted_assemblies: Vec::new(),
+            retargeted_relations: Vec::new(),
+            orphaned_memberships: Vec::new(),
+            candidate_relation_templates: vec![SemanticRelationTemplate {
+                subject: RelationEndpoint::SelfRoot,
+                relation_type: "contains".into(),
+                object: RelationEndpoint::Slot("frame".into()),
+                parameters: serde_json::json!({ "k": "v" }),
+                source_relation_id: elem(30),
+            }],
+            preserved_relations: vec![PreservedRelation {
+                relation_id: elem(31),
+                source: elem(1),
+                target: elem(99),
+                relation_type: "anchored_to".into(),
+                parameters: serde_json::Value::Null,
+            }],
+            warnings: Vec::new(),
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        let back: SemanticGraphMigrationDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.candidate_relation_templates.len(), 1);
+        assert_eq!(back.preserved_relations.len(), 1);
+        assert_eq!(
+            back.candidate_relation_templates[0].subject,
+            RelationEndpoint::SelfRoot
+        );
+        assert_eq!(
+            back.candidate_relation_templates[0].object,
+            RelationEndpoint::Slot("frame".into())
+        );
     }
 }
