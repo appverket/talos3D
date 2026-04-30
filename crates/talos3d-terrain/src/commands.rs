@@ -13,10 +13,12 @@ use talos3d_core::plugins::{
 
 use crate::{
     components::{
-        ElevationCurve, ElevationCurveType, TerrainSurface, DEFAULT_TERRAIN_CONTOUR_INTERVAL,
-        DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE, DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
-        DEFAULT_TERRAIN_MAX_TRIANGLE_AREA, DEFAULT_TERRAIN_MINIMUM_ANGLE,
+        ElevationCurve, ElevationCurveType, TerrainMeshCache, TerrainSurface,
+        DEFAULT_TERRAIN_CONTOUR_INTERVAL, DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE,
+        DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING, DEFAULT_TERRAIN_MAX_TRIANGLE_AREA,
+        DEFAULT_TERRAIN_MINIMUM_ANGLE,
     },
+    cut_fill::{cut_fill_against_datum, cut_fill_between_surfaces, CutFillOptions, CutFillResult},
     reconstruction::{
         estimate_terrain_boundary, planar_bounds_center, repair_elevation_curves,
         ContourRepairSettings,
@@ -103,6 +105,42 @@ impl Plugin for TerrainCommandPlugin {
                 capability_id: Some("terrain".to_string()),
             },
             execute_prepare_site_surface,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.cut_fill_analysis".to_string(),
+                label: "Cut/Fill Analysis".to_string(),
+                description: "Compute cut, fill, and net volumes between terrain surfaces or a datum.".to_string(),
+                category: CommandCategory::Custom("Analysis".to_string()),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["existing_surface_id"],
+                    "properties": {
+                        "existing_surface_id": {"type": "integer", "minimum": 0},
+                        "proposed_surface_id": {"type": "integer", "minimum": 0},
+                        "datum_y": {"type": "number"},
+                        "sample_spacing": {"type": "number", "minimum": 0.01},
+                        "boundary": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "items": {"type": "number"}
+                            }
+                        }
+                    }
+                })),
+                default_shortcut: None,
+                icon: Some("icon.measure".to_string()),
+                hint: Some("Compare an existing terrain surface to a proposed surface or datum".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_cut_fill_analysis,
         );
     }
 }
@@ -427,6 +465,126 @@ fn execute_prepare_site_surface(
     })
 }
 
+fn execute_cut_fill_analysis(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let existing_id = required_element_id(parameters, "existing_surface_id")?;
+    let existing = terrain_mesh_by_id(world, existing_id)
+        .ok_or_else(|| format!("Terrain surface {} has no generated mesh", existing_id.0))?;
+    let sample_spacing = parameters
+        .get("sample_spacing")
+        .and_then(Value::as_f64)
+        .map(|value| value as f32)
+        .unwrap_or(DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING);
+    let options = CutFillOptions::new(sample_spacing).with_boundary(parse_boundary(parameters)?);
+
+    let (result, comparison) = if let Some(proposed_id) =
+        optional_element_id(parameters, "proposed_surface_id")?
+    {
+        let proposed = terrain_mesh_by_id(world, proposed_id)
+            .ok_or_else(|| format!("Terrain surface {} has no generated mesh", proposed_id.0))?;
+        let result = cut_fill_between_surfaces(&existing, &proposed, &options)
+            .ok_or_else(|| "Cut/fill analysis had no overlapping terrain samples".to_string())?;
+        (
+            result,
+            serde_json::json!({ "proposed_surface_id": proposed_id.0 }),
+        )
+    } else if let Some(datum_y) = parameters.get("datum_y").and_then(Value::as_f64) {
+        let datum_y = datum_y as f32;
+        let result = cut_fill_against_datum(&existing, datum_y, &options)
+            .ok_or_else(|| "Cut/fill analysis had no terrain samples".to_string())?;
+        (result, serde_json::json!({ "datum_y": datum_y }))
+    } else {
+        return Err("Provide either proposed_surface_id or datum_y".to_string());
+    };
+
+    if let Some(mut status_bar_data) = world.get_resource_mut::<StatusBarData>() {
+        status_bar_data.set_feedback(format_cut_fill_feedback(&result), 3.0);
+    }
+
+    Ok(CommandResult {
+        output: Some(serde_json::json!({
+            "existing_surface_id": existing_id.0,
+            "comparison": comparison,
+            "cut_volume": result.cut_volume,
+            "fill_volume": result.fill_volume,
+            "net_volume": result.net_volume,
+            "sample_count": result.sample_count,
+            "sample_spacing": options.sample_spacing,
+            "boundary_vertex_count": options.boundary.len(),
+        })),
+        ..CommandResult::empty()
+    })
+}
+
+fn required_element_id(parameters: &Value, key: &str) -> Result<ElementId, String> {
+    optional_element_id(parameters, key)?.ok_or_else(|| format!("Missing required parameter {key}"))
+}
+
+fn optional_element_id(parameters: &Value, key: &str) -> Result<Option<ElementId>, String> {
+    parameters
+        .get(key)
+        .map(|value| {
+            value
+                .as_u64()
+                .map(ElementId)
+                .ok_or_else(|| format!("{key} must be an unsigned integer element id"))
+        })
+        .transpose()
+}
+
+fn parse_boundary(parameters: &Value) -> Result<Vec<Vec2>, String> {
+    let Some(boundary) = parameters.get("boundary") else {
+        return Ok(Vec::new());
+    };
+    let Some(points) = boundary.as_array() else {
+        return Err("boundary must be an array of [x, z] points".to_string());
+    };
+    points
+        .iter()
+        .map(|point| {
+            let Some(coords) = point.as_array() else {
+                return Err("boundary points must be [x, z] arrays".to_string());
+            };
+            if coords.len() != 2 {
+                return Err("boundary points must contain exactly two numbers".to_string());
+            }
+            let x = coords[0]
+                .as_f64()
+                .ok_or_else(|| "boundary x coordinate must be a number".to_string())?
+                as f32;
+            let z = coords[1]
+                .as_f64()
+                .ok_or_else(|| "boundary z coordinate must be a number".to_string())?
+                as f32;
+            Ok(Vec2::new(x, z))
+        })
+        .collect()
+}
+
+fn terrain_mesh_by_id(
+    world: &World,
+    element_id: ElementId,
+) -> Option<talos3d_core::plugins::modeling::primitives::TriangleMesh> {
+    let mut q = world.try_query::<EntityRef>()?;
+    q.iter(world).find_map(|entity_ref| {
+        if entity_ref.get::<ElementId>() != Some(&element_id) {
+            return None;
+        }
+        entity_ref
+            .get::<TerrainMeshCache>()
+            .map(|cache| cache.mesh.clone())
+    })
+}
+
+fn format_cut_fill_feedback(result: &CutFillResult) -> String {
+    format!(
+        "Cut {:.2} m^3, fill {:.2} m^3, net {:.2} m^3",
+        result.cut_volume, result.fill_volume, result.net_volume
+    )
+}
+
 fn selected_elevation_source_polylines(
     world: &World,
 ) -> Result<Vec<(ElementId, ElevationCurveSnapshot)>, String> {
@@ -653,7 +811,7 @@ fn canonicalize_layer_name(layer_name: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use talos3d_core::plugins::ui::StatusBarData;
+    use talos3d_core::plugins::{modeling::primitives::TriangleMesh, ui::StatusBarData};
 
     fn init_command_test_world() -> World {
         let mut world = World::new();
@@ -664,6 +822,88 @@ mod tests {
         world.insert_resource(ElementIdAllocator::default());
         world.insert_resource(StatusBarData::default());
         world
+    }
+
+    fn flat_square(elevation: f32) -> TerrainMeshCache {
+        TerrainMeshCache {
+            mesh: TriangleMesh {
+                vertices: vec![
+                    Vec3::new(0.0, elevation, 0.0),
+                    Vec3::new(2.0, elevation, 0.0),
+                    Vec3::new(2.0, elevation, 2.0),
+                    Vec3::new(0.0, elevation, 2.0),
+                ],
+                faces: vec![[0, 1, 2], [0, 2, 3]],
+                normals: None,
+                name: None,
+            },
+            contour_segments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cut_fill_command_outputs_surface_comparison() {
+        let mut world = init_command_test_world();
+        world.spawn((ElementId(10), flat_square(2.0)));
+        world.spawn((ElementId(20), flat_square(1.5)));
+
+        let result = execute_cut_fill_analysis(
+            &mut world,
+            &json!({
+                "existing_surface_id": 10,
+                "proposed_surface_id": 20,
+                "sample_spacing": 1.0
+            }),
+        )
+        .expect("cut/fill command should succeed");
+        let output = result.output.expect("command returns output");
+
+        assert_eq!(output["existing_surface_id"], json!(10));
+        assert_eq!(output["comparison"]["proposed_surface_id"], json!(20));
+        assert_eq!(output["sample_count"], json!(4));
+        assert_eq!(output["cut_volume"], json!(2.0));
+        assert_eq!(output["fill_volume"], json!(0.0));
+        assert_eq!(output["net_volume"], json!(2.0));
+    }
+
+    #[test]
+    fn cut_fill_command_supports_datum_and_boundary() {
+        let mut world = init_command_test_world();
+        world.spawn((ElementId(10), flat_square(2.0)));
+
+        let result = execute_cut_fill_analysis(
+            &mut world,
+            &json!({
+                "existing_surface_id": 10,
+                "datum_y": 1.0,
+                "sample_spacing": 1.0,
+                "boundary": [[0.0, 0.0], [1.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
+            }),
+        )
+        .expect("datum cut/fill command should succeed");
+        let output = result.output.expect("command returns output");
+
+        assert_eq!(output["comparison"]["datum_y"], json!(1.0));
+        assert_eq!(output["sample_count"], json!(2));
+        assert_eq!(output["cut_volume"], json!(2.0));
+        assert_eq!(output["net_volume"], json!(2.0));
+        assert_eq!(output["boundary_vertex_count"], json!(4));
+    }
+
+    #[test]
+    fn cut_fill_command_requires_comparison_target() {
+        let mut world = init_command_test_world();
+        world.spawn((ElementId(10), flat_square(2.0)));
+
+        let error = execute_cut_fill_analysis(
+            &mut world,
+            &json!({
+                "existing_surface_id": 10
+            }),
+        )
+        .expect_err("missing comparison should fail");
+
+        assert_eq!(error, "Provide either proposed_surface_id or datum_y");
     }
 
     #[test]
