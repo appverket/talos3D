@@ -1085,6 +1085,7 @@ mod tests {
                     param_type: ParamType::Numeric,
                     default_value: serde_json::json!(1.2),
                     override_policy: OverridePolicy::Overridable,
+                    geometry_affecting: true,
                     metadata: ParameterMetadata::default(),
                 }]),
                 void_declaration: None,

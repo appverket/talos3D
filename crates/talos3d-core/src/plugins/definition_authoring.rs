@@ -131,6 +131,10 @@ pub enum DefinitionPatch {
         name: String,
         override_policy: OverridePolicy,
     },
+    SetParameterGeometryAffecting {
+        name: String,
+        geometry_affecting: bool,
+    },
     RemoveParameter {
         name: String,
     },
@@ -1163,6 +1167,13 @@ fn apply_patch_to_definition(
         } => {
             let parameter = ensure_local_parameter(definition, effective_before, &name)?;
             parameter.override_policy = override_policy;
+        }
+        DefinitionPatch::SetParameterGeometryAffecting {
+            name,
+            geometry_affecting,
+        } => {
+            let parameter = ensure_local_parameter(definition, effective_before, &name)?;
+            parameter.geometry_affecting = geometry_affecting;
         }
         DefinitionPatch::RemoveParameter { name } => {
             definition
