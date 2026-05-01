@@ -1031,8 +1031,60 @@ impl Definition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefinitionLibraryScope {
     DocumentLocal,
+    /// Reusable definitions resident under a workspace library root
+    /// (`<workspace-root>/.talos3d/libraries/<library-id>/...`),
+    /// shared by everyone working in that workspace. Per
+    /// `LIBRARY_PUBLICATION_BOUNDARY_AGREEMENT.md` (PP-100),
+    /// workspace libraries may carry both mutable drafts and
+    /// (eventually) immutable released revisions; PP-LIBPUB-1 slice
+    /// 1 only adds the residency variant — released revisions land
+    /// in PP-LIBPUB-2.
+    WorkspaceLibrary,
     Bundled,
     ExternalFile,
+}
+
+/// Validation lifecycle for a workspace-library draft definition,
+/// per `LIBRARY_PUBLICATION_BOUNDARY_AGREEMENT.md` (PP-100). A draft
+/// can persist with `Blocked` status when host-contract / structural
+/// validation fails; the agreement requires this so blocked
+/// migration drafts can be staged for repair without being lost.
+///
+/// This is a per-`DefinitionLibrary` aggregate placeholder for slice
+/// 1. Per-definition draft status, content-addressed
+/// `DefinitionRevision`, and the `LockPolicy`/`SnapshotPolicy`
+/// orthogonal axes land in PP-LIBPUB-2.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DefinitionDraftStatus {
+    /// Draft is structurally valid (or has not been validated) and
+    /// can be instantiated.
+    Active,
+    /// Draft persists in a blocked state — typically a host-contract
+    /// failure during migration. Blocked drafts cannot become the
+    /// resolved dependency for any occurrence until validation
+    /// passes, but they are preserved on disk so users / agents can
+    /// repair them rather than restart from scratch.
+    Blocked {
+        /// Human-readable reason. Slice 1 uses a free-form string;
+        /// slice 2 will replace this with structured
+        /// `HostingValidationResult` / Definition validation
+        /// payloads.
+        reason: String,
+    },
+}
+
+impl Default for DefinitionDraftStatus {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
+impl DefinitionDraftStatus {
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, Self::Blocked { .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,6 +1098,14 @@ pub struct DefinitionLibrary {
     pub tags: Vec<String>,
     #[serde(default)]
     pub definitions: HashMap<DefinitionId, Definition>,
+    /// PP-100 / PP-LIBPUB-1: workspace-library draft validation
+    /// status. Defaults to `Active`; existing project files and
+    /// bundled libraries omit the field and serde fills the default.
+    /// Only meaningful when `scope == WorkspaceLibrary`; for other
+    /// scopes the field is preserved verbatim across save/load but
+    /// is not consulted by readers in slice 1.
+    #[serde(default)]
+    pub draft_status: DefinitionDraftStatus,
 }
 
 impl DefinitionLibrary {
@@ -1127,6 +1187,7 @@ impl DefinitionLibraryRegistry {
             source_path,
             tags: vec![],
             definitions: HashMap::new(),
+            draft_status: DefinitionDraftStatus::default(),
         };
         let id = library.id.clone();
         self.insert(library);
@@ -2452,6 +2513,7 @@ mod pp_099_material_assignment_relocation_tests {
             source_path: None,
             tags: Vec::new(),
             definitions: HashMap::new(),
+            draft_status: DefinitionDraftStatus::default(),
         };
         library.insert(legacy_material_def("foo.legacy", "foo.material"));
         library.insert(legacy_material_def("bar.legacy", "bar.material"));
@@ -2489,6 +2551,7 @@ mod pp_099_material_assignment_relocation_tests {
             source_path: None,
             tags: Vec::new(),
             definitions: HashMap::new(),
+            draft_status: DefinitionDraftStatus::default(),
         };
         lib_a.insert(legacy_material_def("a1", "amat1"));
         lib_a.insert(blank_definition_with_id("a2_clean"));
@@ -2500,6 +2563,7 @@ mod pp_099_material_assignment_relocation_tests {
             source_path: None,
             tags: Vec::new(),
             definitions: HashMap::new(),
+            draft_status: DefinitionDraftStatus::default(),
         };
         lib_b.insert(blank_definition_with_id("b1_clean"));
 
@@ -2512,5 +2576,142 @@ mod pp_099_material_assignment_relocation_tests {
         assert_eq!(reported_id, &lib_a_id);
         let id_strs: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
         assert_eq!(id_strs, vec!["a1"]);
+    }
+}
+
+// === PP-100 PP-LIBPUB-1 slice 1: workspace-library data shape =============
+
+#[cfg(test)]
+mod pp_100_workspace_library_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn empty_library_with_scope(
+        id: &str,
+        scope: DefinitionLibraryScope,
+    ) -> DefinitionLibrary {
+        DefinitionLibrary {
+            id: DefinitionLibraryId(id.to_string()),
+            name: format!("Library {id}"),
+            scope,
+            source_path: None,
+            tags: Vec::new(),
+            definitions: HashMap::new(),
+            draft_status: DefinitionDraftStatus::default(),
+        }
+    }
+
+    #[test]
+    fn definition_draft_status_default_is_active() {
+        let status = DefinitionDraftStatus::default();
+        assert_eq!(status, DefinitionDraftStatus::Active);
+        assert!(!status.is_blocked());
+    }
+
+    #[test]
+    fn workspace_library_scope_round_trips_through_serde() {
+        let lib = empty_library_with_scope("ws.acme", DefinitionLibraryScope::WorkspaceLibrary);
+        let bytes = serde_json::to_string(&lib).unwrap();
+        assert!(bytes.contains("WorkspaceLibrary"));
+        let back: DefinitionLibrary = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(back.scope, DefinitionLibraryScope::WorkspaceLibrary);
+    }
+
+    #[test]
+    fn legacy_library_json_without_draft_status_field_loads_as_active() {
+        // A pre-PP-100 bundled-library JSON serializes without the
+        // `draft_status` key. Serde must default it to Active so the
+        // file deserializes unchanged.
+        let legacy = json!({
+            "id": "architecture.european-window-library",
+            "name": "European Window Library",
+            "scope": "Bundled",
+            "tags": [],
+            "definitions": {}
+        });
+        let lib: DefinitionLibrary = serde_json::from_value(legacy).unwrap();
+        assert_eq!(lib.scope, DefinitionLibraryScope::Bundled);
+        assert_eq!(lib.draft_status, DefinitionDraftStatus::Active);
+    }
+
+    #[test]
+    fn legacy_library_scope_variants_still_deserialize() {
+        // PP-100 only ADDS a variant; existing scope values must
+        // continue to deserialize cleanly (no rename, no untagged
+        // shape change).
+        let document_local: DefinitionLibrary = serde_json::from_value(json!({
+            "id": "doc.lib",
+            "name": "Project local",
+            "scope": "DocumentLocal",
+            "tags": [],
+            "definitions": {}
+        }))
+        .unwrap();
+        assert_eq!(document_local.scope, DefinitionLibraryScope::DocumentLocal);
+
+        let bundled: DefinitionLibrary = serde_json::from_value(json!({
+            "id": "bundle.lib",
+            "name": "Bundled",
+            "scope": "Bundled",
+            "tags": [],
+            "definitions": {}
+        }))
+        .unwrap();
+        assert_eq!(bundled.scope, DefinitionLibraryScope::Bundled);
+
+        let external: DefinitionLibrary = serde_json::from_value(json!({
+            "id": "ext.lib",
+            "name": "External",
+            "scope": "ExternalFile",
+            "tags": [],
+            "definitions": {}
+        }))
+        .unwrap();
+        assert_eq!(external.scope, DefinitionLibraryScope::ExternalFile);
+    }
+
+    #[test]
+    fn blocked_draft_status_round_trips_with_reason() {
+        let mut lib =
+            empty_library_with_scope("ws.team", DefinitionLibraryScope::WorkspaceLibrary);
+        lib.draft_status = DefinitionDraftStatus::Blocked {
+            reason: "host_contract validation failed during migration: \
+                     wall_opening clearance envelope (id=op.1) collides with \
+                     adjacent column"
+                .to_string(),
+        };
+        let bytes = serde_json::to_string(&lib).unwrap();
+        assert!(bytes.contains("blocked"));
+        let back: DefinitionLibrary = serde_json::from_str(&bytes).unwrap();
+        match &back.draft_status {
+            DefinitionDraftStatus::Blocked { reason } => {
+                assert!(reason.contains("clearance envelope"));
+                assert!(reason.contains("op.1"));
+            }
+            other => panic!("expected Blocked draft_status after round-trip, got {other:?}"),
+        }
+        assert!(back.draft_status_is_blocked_helper_check());
+    }
+
+    #[test]
+    fn create_library_assigns_default_draft_status() {
+        let mut registry = DefinitionLibraryRegistry::default();
+        let id = registry.create_library(
+            "Workspace test",
+            DefinitionLibraryScope::WorkspaceLibrary,
+            None,
+        );
+        let lib = registry.get(&id).expect("library should exist");
+        assert_eq!(lib.draft_status, DefinitionDraftStatus::Active);
+        assert_eq!(lib.scope, DefinitionLibraryScope::WorkspaceLibrary);
+    }
+
+    /// Helper used by `blocked_draft_status_round_trips_with_reason`
+    /// — illustrates that the blocked check is inspectable on a
+    /// loaded library, not just on the freshly-constructed value.
+    impl DefinitionLibrary {
+        fn draft_status_is_blocked_helper_check(&self) -> bool {
+            self.draft_status.is_blocked()
+        }
     }
 }

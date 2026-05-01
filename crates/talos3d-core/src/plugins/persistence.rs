@@ -752,6 +752,7 @@ mod tests {
             source_path: None,
             tags: vec!["test".to_string()],
             definitions: default(),
+            draft_status: crate::plugins::modeling::definition::DefinitionDraftStatus::default(),
         });
         world.insert_resource(libraries);
 
