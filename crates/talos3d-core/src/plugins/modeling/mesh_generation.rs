@@ -11,6 +11,7 @@ use crate::plugins::modeling::{
     fillet::EvaluatedFillet,
     group::GroupEditMuted,
     mirror::EvaluatedMirror,
+    occurrence::{MeshCacheKey, RepresentationCache},
     primitive_trait::{MeshGenerator, MeshMaterialKind},
     primitives::{
         BoxPrimitive, CylinderPrimitive, ElevationMetadata, PlanePrimitive, Polyline,
@@ -42,6 +43,7 @@ type PrimitiveMeshQueryItem<'a, P> = (
     Option<&'a ShapeRotation>,
     Option<&'a Mesh3d>,
     Option<&'a MeshMaterial3d<StandardMaterial>>,
+    Option<&'a MeshCacheKey>,
 );
 type PolylineDrawQueryItem<'a> = (
     &'a Polyline,
@@ -185,6 +187,7 @@ fn setup_modeling_materials(
 fn spawn_primitive_meshes<P: MeshGenerator>(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut representation_cache: ResMut<RepresentationCache>,
     primitive_material: Res<PrimitiveMaterial>,
     plane_material: Res<PlaneMaterial>,
     query: Query<PrimitiveMeshQueryItem<P>, With<NeedsMesh>>,
@@ -192,22 +195,48 @@ fn spawn_primitive_meshes<P: MeshGenerator>(
 ) {
     #[cfg(feature = "perf-stats")]
     let mut regenerated = 0usize;
-    for (entity, prim, rotation, mesh_handle, material_handle) in &query {
+    for (entity, prim, rotation, mesh_handle, material_handle, cache_key) in &query {
         let rot = rotation.copied().unwrap_or_default();
-        let mesh = prim.to_bevy_mesh(rot.0);
         let transform = prim.entity_transform(rot.0);
         let material = match P::MATERIAL_KIND {
             MeshMaterialKind::Primitive => primitive_material.0.clone(),
             MeshMaterialKind::Plane => plane_material.0.clone(),
         };
-        upsert_mesh_entity(
-            &mut commands,
-            &mut meshes,
-            (entity, mesh_handle, material_handle),
-            mesh,
-            material,
-            transform,
-        );
+
+        if let Some(cache_key) = cache_key {
+            if let Some(cached_handle) = representation_cache.get(cache_key) {
+                attach_mesh_entity(
+                    &mut commands,
+                    (entity, material_handle),
+                    (*cached_handle).clone(),
+                    material,
+                    transform,
+                );
+                continue;
+            }
+
+            let mesh = prim.to_bevy_mesh(rot.0);
+            let mesh_handle = replace_mesh_entity(
+                &mut commands,
+                &mut meshes,
+                (entity, material_handle),
+                mesh,
+                material,
+                transform,
+            );
+            representation_cache.insert(cache_key.clone(), mesh_handle);
+        } else {
+            let mesh = prim.to_bevy_mesh(rot.0);
+            upsert_mesh_entity(
+                &mut commands,
+                &mut meshes,
+                (entity, mesh_handle, material_handle),
+                mesh,
+                material,
+                transform,
+            );
+        }
+
         #[cfg(feature = "perf-stats")]
         {
             regenerated += 1;
@@ -606,24 +635,59 @@ fn upsert_mesh_entity(
     mesh: Mesh,
     material: Handle<StandardMaterial>,
     transform: Transform,
-) {
+) -> Handle<Mesh> {
     let (entity, mesh_handle, material_handle) = existing;
     let mut entity_commands = commands.entity(entity);
 
-    if let Some(mesh_handle) = mesh_handle {
+    let handle = if let Some(mesh_handle) = mesh_handle {
         if let Some(existing_mesh) = meshes.get_mut(mesh_handle.id()) {
             *existing_mesh = mesh;
+            mesh_handle.0.clone()
         } else {
-            entity_commands.insert(Mesh3d(meshes.add(mesh)));
+            let handle = meshes.add(mesh);
+            entity_commands.insert(Mesh3d(handle.clone()));
+            handle
         }
     } else {
-        entity_commands.insert(Mesh3d(meshes.add(mesh)));
-    }
+        let handle = meshes.add(mesh);
+        entity_commands.insert(Mesh3d(handle.clone()));
+        handle
+    };
 
     if material_handle.is_none() {
         entity_commands.insert(MeshMaterial3d(material));
     }
 
+    entity_commands.remove::<NeedsMesh>().insert(transform);
+    handle
+}
+
+fn replace_mesh_entity(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    existing: (Entity, Option<&MeshMaterial3d<StandardMaterial>>),
+    mesh: Mesh,
+    material: Handle<StandardMaterial>,
+    transform: Transform,
+) -> Handle<Mesh> {
+    let handle = meshes.add(mesh);
+    attach_mesh_entity(commands, existing, handle.clone(), material, transform);
+    handle
+}
+
+fn attach_mesh_entity(
+    commands: &mut Commands,
+    existing: (Entity, Option<&MeshMaterial3d<StandardMaterial>>),
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+    transform: Transform,
+) {
+    let (entity, material_handle) = existing;
+    let mut entity_commands = commands.entity(entity);
+    entity_commands.insert(Mesh3d(mesh));
+    if material_handle.is_none() {
+        entity_commands.insert(MeshMaterial3d(material));
+    }
     entity_commands.remove::<NeedsMesh>().insert(transform);
 }
 
@@ -693,4 +757,92 @@ fn compute_triangle_mesh_normals(primitive: &TriangleMesh) -> Vec<Vec3> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod pp_098_mesh_generation_cache_tests {
+    use super::*;
+    use crate::plugins::modeling::definition::{
+        DefinitionId, DefinitionVersion, GeometryParamsHash, RepresentationKind,
+    };
+    use crate::plugins::modeling::profile::{Profile2d, ProfileExtrusion};
+
+    fn cache_key(id: &str) -> MeshCacheKey {
+        MeshCacheKey::new(
+            DefinitionId(id.to_string()),
+            1 as DefinitionVersion,
+            GeometryParamsHash("blake3:test".to_string()),
+            RepresentationKind::PrimaryGeometry,
+        )
+    }
+
+    fn extrusion() -> ProfileExtrusion {
+        ProfileExtrusion {
+            centre: Vec3::new(1.0, 2.0, 3.0),
+            profile: Profile2d::rectangle(2.0, 1.0),
+            height: 0.5,
+        }
+    }
+
+    fn test_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<RepresentationCache>()
+            .insert_resource(PrimitiveMaterial(Handle::default()))
+            .insert_resource(PlaneMaterial(Handle::default()))
+            .add_systems(Update, spawn_primitive_meshes::<ProfileExtrusion>);
+        app
+    }
+
+    #[test]
+    fn keyed_primitive_generation_populates_representation_cache() {
+        let mut app = test_app();
+        let key = cache_key("window");
+        let entity = app
+            .world_mut()
+            .spawn((
+                extrusion(),
+                ShapeRotation::default(),
+                NeedsMesh,
+                key.clone(),
+            ))
+            .id();
+
+        app.update();
+
+        let mesh_id = app.world().get::<Mesh3d>(entity).expect("mesh").id();
+        assert!(!app.world().entity(entity).contains::<NeedsMesh>());
+        let cached = app
+            .world_mut()
+            .resource_mut::<RepresentationCache>()
+            .get(&key)
+            .expect("cache entry");
+        assert_eq!(cached.id(), mesh_id);
+    }
+
+    #[test]
+    fn keyed_primitive_generation_uses_cached_mesh_handle_on_hit() {
+        let mut app = test_app();
+        let key = cache_key("window");
+        let seeded_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            ));
+        app.world_mut()
+            .resource_mut::<RepresentationCache>()
+            .insert(key.clone(), seeded_handle.clone());
+        let entity = app
+            .world_mut()
+            .spawn((extrusion(), ShapeRotation::default(), NeedsMesh, key))
+            .id();
+
+        app.update();
+
+        let mesh = app.world().get::<Mesh3d>(entity).expect("mesh");
+        assert_eq!(mesh.id(), seeded_handle.id());
+        assert!(!app.world().entity(entity).contains::<NeedsMesh>());
+    }
 }
