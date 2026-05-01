@@ -83,7 +83,7 @@ fn parse_bundled_definition_library(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::modeling::definition::DefinitionLibraryId;
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionLibraryId};
 
     #[test]
     fn bundled_libraries_use_bundled_scope() {
@@ -128,6 +128,46 @@ mod tests {
                 .expect("library should exist")
                 .name,
             "Custom Override"
+        );
+    }
+
+    #[test]
+    fn bundled_window_material_parameters_are_not_geometry_affecting() {
+        let library = bundled_definition_libraries()
+            .expect("bundled libraries should parse")
+            .into_iter()
+            .next()
+            .expect("one bundled library");
+        let mut checked = 0;
+
+        for definition_id in [
+            "architecture.window.double-european",
+            "architecture.window.double-european.greyline",
+            "architecture.window.european-single",
+            "architecture.window.european-single.greyline",
+        ] {
+            let definition = library
+                .definitions
+                .get(&DefinitionId(definition_id.to_string()))
+                .expect("bundled window definition should exist");
+            for parameter in &definition.interface.parameters.0 {
+                if parameter.name == "finish_color"
+                    || parameter.name.starts_with("material_")
+                    || parameter.name.contains("material_assignment")
+                {
+                    assert!(
+                        !parameter.geometry_affecting,
+                        "{definition_id} parameter '{}' should be material-only",
+                        parameter.name
+                    );
+                    checked += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            checked, 4,
+            "expected four bundled finish/material parameters"
         );
     }
 }

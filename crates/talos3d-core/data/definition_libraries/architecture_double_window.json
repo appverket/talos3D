@@ -331,6 +331,7 @@
               "param_type": "StringVal",
               "default_value": "greyline",
               "override_policy": "Locked",
+              "geometry_affecting": false,
               "metadata": {
                 "mutability": "Input"
               }
@@ -823,6 +824,7 @@
               "param_type": "StringVal",
               "default_value": "white",
               "override_policy": "Overridable",
+              "geometry_affecting": false,
               "metadata": {
                 "mutability": "Input"
               }
@@ -2424,6 +2426,7 @@
               "param_type": "StringVal",
               "default_value": "white",
               "override_policy": "Overridable",
+              "geometry_affecting": false,
               "metadata": {
                 "mutability": "Input"
               }
@@ -4084,6 +4087,7 @@
               "param_type": "StringVal",
               "default_value": "greyline",
               "override_policy": "Locked",
+              "geometry_affecting": false,
               "metadata": {
                 "mutability": "Input"
               }
