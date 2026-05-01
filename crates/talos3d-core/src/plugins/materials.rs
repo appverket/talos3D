@@ -388,6 +388,53 @@ impl TextureCache {
         self.handles.insert(key, handle)
     }
 
+    pub fn get_or_insert_with(
+        &mut self,
+        key: TextureCacheKey,
+        load: impl FnOnce() -> Option<Handle<Image>>,
+    ) -> Option<Handle<Image>> {
+        if let Some(handle) = self.get(&key) {
+            return Some(handle.clone());
+        }
+        let handle = load()?;
+        self.insert(key, handle.clone());
+        Some(handle)
+    }
+
+    pub fn load_asset_path(
+        &mut self,
+        path: &str,
+        channel: TextureChannelIntent,
+        asset_server: &AssetServer,
+    ) -> Handle<Image> {
+        let key = TextureCacheKey::new(path, channel);
+        self.get_or_insert_with(key, || Some(asset_server.load(path.to_string())))
+            .expect("asset path texture loads always return a handle")
+    }
+
+    pub fn load_texture_ref(
+        &mut self,
+        texture: &TextureRef,
+        intent: TextureChannelIntent,
+        asset_server: &AssetServer,
+        images: &mut Assets<Image>,
+        registry: Option<&TextureRegistry>,
+    ) -> Option<Handle<Image>> {
+        match texture {
+            TextureRef::AssetPath(path) => Some(self.load_asset_path(path, intent, asset_server)),
+            TextureRef::TextureAsset { id } => {
+                let asset = registry.and_then(|registry| registry.get(id))?;
+                match &asset.payload {
+                    TexturePayload::AssetPath(path) => {
+                        Some(self.load_asset_path(path, asset.channel_intent, asset_server))
+                    }
+                    TexturePayload::Embedded { .. } => asset.payload.load(asset_server, images),
+                }
+            }
+            TextureRef::Embedded { .. } => texture.load(asset_server, images, registry),
+        }
+    }
+
     pub fn contains(&self, key: &TextureCacheKey) -> bool {
         self.handles.contains_key(key)
     }
@@ -398,6 +445,22 @@ impl TextureCache {
 
     pub fn is_empty(&self) -> bool {
         self.handles.is_empty()
+    }
+}
+
+fn load_material_texture(
+    texture: Option<&TextureRef>,
+    intent: TextureChannelIntent,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+    texture_registry: Option<&TextureRegistry>,
+    texture_cache: &mut Option<&mut TextureCache>,
+) -> Option<Handle<Image>> {
+    let texture = texture?;
+    if let Some(cache) = texture_cache.as_deref_mut() {
+        cache.load_texture_ref(texture, intent, asset_server, images, texture_registry)
+    } else {
+        texture.load(asset_server, images, texture_registry)
     }
 }
 
@@ -628,6 +691,7 @@ impl MaterialDef {
         asset_server: &AssetServer,
         images: &mut Assets<Image>,
         texture_registry: Option<&TextureRegistry>,
+        mut texture_cache: Option<&mut TextureCache>,
     ) -> StandardMaterial {
         let [r, g, b, a] = self.base_color;
         let [sr, sg, sb] = self.specular_tint;
@@ -646,31 +710,51 @@ impl MaterialDef {
 
         StandardMaterial {
             base_color: Color::srgba(r, g, b, a),
-            base_color_texture: self
-                .base_color_texture
-                .as_ref()
-                .and_then(|t| t.load(asset_server, images, texture_registry)),
+            base_color_texture: load_material_texture(
+                self.base_color_texture.as_ref(),
+                TextureChannelIntent::BaseColor,
+                asset_server,
+                images,
+                texture_registry,
+                &mut texture_cache,
+            ),
             emissive: LinearRgba::new(er, eg, eb, self.emissive_exposure_weight),
-            emissive_texture: self
-                .emissive_texture
-                .as_ref()
-                .and_then(|t| t.load(asset_server, images, texture_registry)),
+            emissive_texture: load_material_texture(
+                self.emissive_texture.as_ref(),
+                TextureChannelIntent::Emissive,
+                asset_server,
+                images,
+                texture_registry,
+                &mut texture_cache,
+            ),
             perceptual_roughness: self.perceptual_roughness,
             metallic: self.metallic,
-            metallic_roughness_texture: self
-                .metallic_roughness_texture
-                .as_ref()
-                .and_then(|t| t.load(asset_server, images, texture_registry)),
+            metallic_roughness_texture: load_material_texture(
+                self.metallic_roughness_texture.as_ref(),
+                TextureChannelIntent::MetallicRoughness,
+                asset_server,
+                images,
+                texture_registry,
+                &mut texture_cache,
+            ),
             reflectance: self.reflectance,
             specular_tint: Color::srgb(sr, sg, sb),
-            normal_map_texture: self
-                .normal_map_texture
-                .as_ref()
-                .and_then(|t| t.load(asset_server, images, texture_registry)),
-            occlusion_texture: self
-                .occlusion_texture
-                .as_ref()
-                .and_then(|t| t.load(asset_server, images, texture_registry)),
+            normal_map_texture: load_material_texture(
+                self.normal_map_texture.as_ref(),
+                TextureChannelIntent::Normal,
+                asset_server,
+                images,
+                texture_registry,
+                &mut texture_cache,
+            ),
+            occlusion_texture: load_material_texture(
+                self.occlusion_texture.as_ref(),
+                TextureChannelIntent::Occlusion,
+                asset_server,
+                images,
+                texture_registry,
+                &mut texture_cache,
+            ),
             diffuse_transmission: self.diffuse_transmission,
             specular_transmission: self.specular_transmission,
             thickness: self.thickness,
@@ -1468,6 +1552,7 @@ fn apply_material_assignments(
     mut commands: Commands,
     registry: Res<MaterialRegistry>,
     texture_registry: Res<TextureRegistry>,
+    mut texture_cache: ResMut<TextureCache>,
     spec_registry: Option<Res<MaterialSpecRegistry>>,
     mut cache: ResMut<MaterialHandleCache>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
@@ -1504,6 +1589,7 @@ fn apply_material_assignments(
                             &asset_server,
                             &mut images,
                             Some(&texture_registry),
+                            Some(&mut texture_cache),
                         ))
                     })
                     .clone();
@@ -1645,6 +1731,30 @@ mod tests {
         assert!(!cache.contains(&roughness_key));
         assert!(cache.get(&base_key).is_some());
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn texture_cache_loader_runs_once_per_path_channel_key() {
+        let mut cache = TextureCache::default();
+        let key = TextureCacheKey::new("textures/brick.png", TextureChannelIntent::BaseColor);
+        let mut load_count = 0;
+
+        let first = cache
+            .get_or_insert_with(key.clone(), || {
+                load_count += 1;
+                Some(Handle::<Image>::default())
+            })
+            .expect("first load should insert handle");
+        let second = cache
+            .get_or_insert_with(key, || {
+                load_count += 1;
+                Some(Handle::<Image>::default())
+            })
+            .expect("second load should reuse handle");
+
+        assert_eq!(load_count, 1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(first.id(), second.id());
     }
 
     #[test]
