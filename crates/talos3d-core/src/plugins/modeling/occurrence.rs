@@ -505,26 +505,30 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn apply_with_previous(&self, world: &mut World, previous: Option<&dyn AuthoredEntity>) {
-        let identity_changed = previous
+        let Some(previous) = previous
             .and_then(|p| p.as_any().downcast_ref::<OccurrenceSnapshot>())
-            .map(|prev| {
-                let identity_json = serde_json::to_value(&self.identity).unwrap_or(Value::Null);
-                let prev_json = serde_json::to_value(&prev.identity).unwrap_or(Value::Null);
-                identity_json != prev_json
-                    || self.offset != prev.offset
-                    || self.rotation != prev.rotation
-                    || self.scale != prev.scale
-            })
-            .unwrap_or(true);
+        else {
+            self.apply_to(world);
+            return;
+        };
 
-        if identity_changed {
+        let registry = world.resource::<DefinitionRegistry>().clone();
+        let dirty = classify_occurrence_snapshot_change(&registry, self, previous);
+
+        if dirty.mesh_dirty || dirty.transform_dirty {
             self.apply_to(world);
         } else if let Some(entity) =
             crate::plugins::commands::find_entity_by_element_id(world, self.element_id)
         {
-            world
-                .entity_mut(entity)
-                .insert((self.identity.clone(), Name::new(self.label.clone())));
+            let mut entity_mut = world.entity_mut(entity);
+            entity_mut.insert((self.identity.clone(), Name::new(self.label.clone())));
+            if let Some(mut classification) = entity_mut.get_mut::<OccurrenceClassification>() {
+                if dirty.material_dirty {
+                    classification.mark_material_dirty();
+                }
+            } else {
+                entity_mut.insert(dirty);
+            }
         }
     }
 
@@ -554,6 +558,71 @@ impl AuthoredEntity for OccurrenceSnapshot {
     fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
         other.type_name() == self.type_name() && other.to_json() == self.to_json()
     }
+}
+
+fn classify_occurrence_snapshot_change(
+    registry: &DefinitionRegistry,
+    next: &OccurrenceSnapshot,
+    previous: &OccurrenceSnapshot,
+) -> OccurrenceClassification {
+    let mut dirty = OccurrenceClassification::clean();
+
+    if next.offset != previous.offset
+        || next.rotation != previous.rotation
+        || next.scale != previous.scale
+    {
+        dirty.mark_transform_dirty();
+    }
+
+    if next.identity.definition_id != previous.identity.definition_id
+        || next.identity.definition_version != previous.identity.definition_version
+        || next.identity.hosting != previous.identity.hosting
+    {
+        dirty.mark_mesh_dirty();
+    }
+
+    if next.identity.material_override != previous.identity.material_override {
+        dirty.mark_material_dirty();
+    }
+
+    classify_override_map_change(registry, &next.identity, &previous.identity, &mut dirty);
+    dirty
+}
+
+fn classify_override_map_change(
+    registry: &DefinitionRegistry,
+    next: &OccurrenceIdentity,
+    previous: &OccurrenceIdentity,
+    dirty: &mut OccurrenceClassification,
+) {
+    if next.overrides.0 == previous.overrides.0 {
+        return;
+    }
+
+    let Ok(definition) = registry.effective_definition(&next.definition_id) else {
+        dirty.mark_mesh_dirty();
+        return;
+    };
+
+    for name in changed_override_names(&next.overrides, &previous.overrides) {
+        match definition.interface.parameters.get(&name) {
+            Some(parameter) if !parameter.geometry_affecting => dirty.mark_material_dirty(),
+            Some(_) | None => dirty.mark_mesh_dirty(),
+        }
+    }
+}
+
+fn changed_override_names(next: &OverrideMap, previous: &OverrideMap) -> Vec<String> {
+    let mut names: Vec<String> = next
+        .0
+        .keys()
+        .chain(previous.0.keys())
+        .filter(|name| next.get(name) != previous.get(name))
+        .cloned()
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 impl From<OccurrenceSnapshot> for BoxedEntity {
@@ -1546,6 +1615,60 @@ fn remove_entity_mesh_assets(world: &mut World, entity: Entity) {
 #[cfg(test)]
 mod pp_098_dirty_taxonomy_tests {
     use super::*;
+    use crate::plugins::modeling::definition::{
+        DefinitionKind, Interface, OverridePolicy, ParameterDef, ParameterMetadata,
+        ParameterSchema,
+    };
+    use serde_json::json;
+
+    fn parameter(name: &str, geometry_affecting: bool) -> ParameterDef {
+        ParameterDef {
+            name: name.to_string(),
+            param_type: ParamType::StringVal,
+            default_value: json!("default"),
+            override_policy: OverridePolicy::Overridable,
+            geometry_affecting,
+            metadata: ParameterMetadata::default(),
+        }
+    }
+
+    fn registry_with_definition() -> (DefinitionRegistry, DefinitionId) {
+        let definition_id = DefinitionId("dirty.test".to_string());
+        let definition = Definition {
+            id: definition_id.clone(),
+            base_definition_id: None,
+            name: "Dirty Test".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![
+                    parameter("width", true),
+                    parameter("finish_color", false),
+                ]),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            material_assignment: None,
+            domain_data: Value::Null,
+        };
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition);
+        (registry, definition_id)
+    }
+
+    fn snapshot_with_override(
+        element_id: ElementId,
+        definition_id: DefinitionId,
+        name: &str,
+        value: Value,
+    ) -> OccurrenceSnapshot {
+        let mut identity = OccurrenceIdentity::new(definition_id, 1);
+        identity.overrides.set(name, value);
+        OccurrenceSnapshot::new(element_id, identity, "Occurrence")
+    }
 
     #[test]
     fn occurrence_classification_default_marks_all_channels_dirty() {
@@ -1593,6 +1716,41 @@ mod pp_098_dirty_taxonomy_tests {
             ),
             (false, false, false)
         );
+    }
+
+    #[test]
+    fn non_geometry_override_change_marks_material_not_mesh_dirty() {
+        let (registry, definition_id) = registry_with_definition();
+        let element_id = ElementId(1);
+        let previous = snapshot_with_override(
+            element_id,
+            definition_id.clone(),
+            "finish_color",
+            json!("white"),
+        );
+        let next =
+            snapshot_with_override(element_id, definition_id, "finish_color", json!("black"));
+
+        let dirty = classify_occurrence_snapshot_change(&registry, &next, &previous);
+
+        assert!(!dirty.mesh_dirty);
+        assert!(dirty.material_dirty);
+        assert!(!dirty.transform_dirty);
+    }
+
+    #[test]
+    fn geometry_override_change_marks_mesh_dirty() {
+        let (registry, definition_id) = registry_with_definition();
+        let element_id = ElementId(2);
+        let previous =
+            snapshot_with_override(element_id, definition_id.clone(), "width", json!(1.0));
+        let next = snapshot_with_override(element_id, definition_id, "width", json!(2.0));
+
+        let dirty = classify_occurrence_snapshot_change(&registry, &next, &previous);
+
+        assert!(dirty.mesh_dirty);
+        assert!(!dirty.material_dirty);
+        assert!(!dirty.transform_dirty);
     }
 }
 
