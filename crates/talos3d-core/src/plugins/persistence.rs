@@ -35,7 +35,8 @@ use crate::{
     },
 };
 
-const PROJECT_FILE_VERSION: u32 = 1;
+const PROJECT_FILE_MIN_SUPPORTED_VERSION: u32 = 1;
+const PROJECT_FILE_VERSION: u32 = 2;
 const FEEDBACK_DURATION_SECONDS: f32 = 2.0;
 const FILE_EXTENSION: &str = "talos3d";
 
@@ -426,10 +427,10 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         entities,
     } = project;
 
-    if version != PROJECT_FILE_VERSION {
+    if !(PROJECT_FILE_MIN_SUPPORTED_VERSION..=PROJECT_FILE_VERSION).contains(&version) {
         return Err(format!(
-            "Unsupported project version {} (expected {})",
-            version, PROJECT_FILE_VERSION
+            "Unsupported project version {} (supported {}..={})",
+            version, PROJECT_FILE_MIN_SUPPORTED_VERSION, PROJECT_FILE_VERSION
         ));
     }
 
@@ -716,9 +717,10 @@ mod tests {
         },
         modeling::{
             definition::{
-                Definition, DefinitionId, DefinitionKind, DefinitionLibrary, DefinitionLibraryId,
-                DefinitionLibraryScope, Interface, OverridePolicy, ParamType, ParameterDef,
-                ParameterMetadata, ParameterSchema,
+                AxisRef, ChildSlotDef, CompoundDefinition, Definition, DefinitionId,
+                DefinitionKind, DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
+                ExprNode, Interface, OverridePolicy, ParamType, ParameterDef, ParameterMetadata,
+                ParameterSchema, SlotCount, SlotLayout, SlotMultiplicity, TransformBinding,
             },
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
         },
@@ -806,6 +808,155 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(1)
         );
+    }
+
+    #[test]
+    fn collection_slot_definition_round_trips_through_project_version_two() {
+        let definition_id = DefinitionId("test.collection.parent".to_string());
+        let child_definition_id = DefinitionId("test.collection.child".to_string());
+        let definition = Definition {
+            id: definition_id.clone(),
+            base_definition_id: None,
+            name: "Collection Parent".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface::default(),
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: Some(CompoundDefinition {
+                child_slots: vec![ChildSlotDef {
+                    slot_id: "muntin".to_string(),
+                    role: "muntin".to_string(),
+                    definition_id: child_definition_id,
+                    parameter_bindings: Vec::new(),
+                    transform_binding: TransformBinding::default(),
+                    suppression_expr: None,
+                    multiplicity: SlotMultiplicity::Collection {
+                        count: SlotCount::Fixed(5),
+                        layout: SlotLayout::Linear {
+                            axis: AxisRef("x".to_string()),
+                            spacing: ExprNode::Literal {
+                                value: serde_json::json!(0.2),
+                            },
+                            origin: TransformBinding::default(),
+                        },
+                    },
+                }],
+                ..Default::default()
+            }),
+            material_assignment: None,
+            domain_data: Value::Null,
+        };
+
+        let mut source = World::new();
+        source.insert_resource(CapabilityRegistry::default());
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        let mut definitions = DefinitionRegistry::default();
+        definitions.insert(definition);
+        source.insert_resource(definitions);
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+
+        let project = build_project_file(&mut source).expect("project should serialize");
+        assert_eq!(
+            project.version, 2,
+            "new project files use the PP-097 collection-slot format version"
+        );
+        let json = serde_json::to_string(&project).expect("project should serialize to JSON");
+        assert!(
+            json.contains("\"multiplicity\""),
+            "collection-slot multiplicity is persisted explicitly"
+        );
+        let project: ProjectFile =
+            serde_json::from_str(&json).expect("project should deserialize from JSON");
+
+        let mut target = World::new();
+        target.insert_resource(CapabilityRegistry::default());
+        target.insert_resource(MaterialRegistry::default());
+        target.insert_resource(DefinitionRegistry::default());
+        target.insert_resource(DefinitionLibraryRegistry::default());
+        target.insert_resource(NamedViewRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(OpaquePersistedEntities::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        let restored = target
+            .resource::<DefinitionRegistry>()
+            .get(&definition_id)
+            .expect("definition survives project load");
+        let compound = restored
+            .compound
+            .as_ref()
+            .expect("compound definition survives project load");
+        let slot = &compound.child_slots[0];
+        match &slot.multiplicity {
+            SlotMultiplicity::Collection { count, layout } => {
+                assert!(matches!(count, SlotCount::Fixed(5)));
+                match layout {
+                    SlotLayout::Linear { axis, spacing, .. } => {
+                        assert_eq!(axis.0, "x");
+                        match spacing {
+                            ExprNode::Literal { value } => {
+                                assert_eq!(value, &serde_json::json!(0.2))
+                            }
+                            other => panic!("expected literal spacing after load, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected linear layout after load, got {other:?}"),
+                }
+            }
+            other => panic!("expected collection multiplicity after load, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_version_one_still_loads_after_collection_slot_format_bump() {
+        let mut world = World::new();
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(MaterialRegistry::default());
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(DefinitionLibraryRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+        world.insert_resource(History::default());
+        world.insert_resource(PendingCommandQueue::default());
+        world.insert_resource(PropertyEditState::default());
+        world.insert_resource(TransformState::default());
+        world.insert_resource(State::new(ActiveTool::Select));
+        world.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(
+            &mut world,
+            ProjectFile {
+                version: 1,
+                next_element_id: 1,
+                document_properties: Some(DocumentProperties::default()),
+                layers: None,
+                materials: None,
+                textures: None,
+                definitions: None,
+                definition_libraries: None,
+                named_views: None,
+                lighting: Some(SceneLightingSettings::default()),
+                sources: None,
+                nominations: None,
+                entities: Vec::new(),
+            },
+        )
+        .expect("version 1 projects should remain loadable");
     }
 
     #[test]
