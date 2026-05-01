@@ -28,9 +28,9 @@ use crate::{
         modeling::{
             definition::{
                 AxisRef, ChildSlotDef, ConstraintSeverity, Definition, DefinitionId,
-                DefinitionRegistry, DefinitionVersion, EvaluatorDecl, ExprNode,
-                GeometryParamsHash, OverrideMap, ParamType, RepresentationKind, SlotCount,
-                SlotLayout, SlotMultiplicity, TransformBinding,
+                DefinitionRegistry, DefinitionVersion, EvaluatorDecl, ExprNode, GeometryParamsHash,
+                OverrideMap, ParamType, RepresentationKind, SlotCount, SlotLayout,
+                SlotMultiplicity, TransformBinding,
             },
             mesh_generation::NeedsMesh,
             primitive_trait::Primitive,
@@ -505,8 +505,7 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn apply_with_previous(&self, world: &mut World, previous: Option<&dyn AuthoredEntity>) {
-        let Some(previous) = previous
-            .and_then(|p| p.as_any().downcast_ref::<OccurrenceSnapshot>())
+        let Some(previous) = previous.and_then(|p| p.as_any().downcast_ref::<OccurrenceSnapshot>())
         else {
             self.apply_to(world);
             return;
@@ -837,6 +836,7 @@ fn draw_occurrence_bounds(gizmos: &mut Gizmos, bounds: EntityBounds, color: Colo
 /// Mark all occurrences of changed definitions as needing re-evaluation.
 pub fn propagate_definition_changes(
     mut changed: ResMut<ChangedDefinitions>,
+    mut representation_cache: ResMut<RepresentationCache>,
     mut query: Query<(&OccurrenceIdentity, &mut OccurrenceClassification)>,
     mut commands: Commands,
 ) {
@@ -844,6 +844,8 @@ pub fn propagate_definition_changes(
     if ids.is_empty() {
         return;
     }
+
+    invalidate_changed_definition_cache(&ids, &mut representation_cache);
 
     for (identity, mut classification) in &mut query {
         if ids.contains(&identity.definition_id) {
@@ -856,6 +858,7 @@ pub fn propagate_definition_changes(
 /// Full-entity variant that can insert the `NeedsEval` marker.
 pub fn propagate_definition_changes_with_commands(
     mut changed: ResMut<ChangedDefinitions>,
+    mut representation_cache: ResMut<RepresentationCache>,
     query: Query<(Entity, &OccurrenceIdentity)>,
     mut commands: Commands,
 ) {
@@ -864,11 +867,22 @@ pub fn propagate_definition_changes_with_commands(
         return;
     }
 
+    invalidate_changed_definition_cache(&ids, &mut representation_cache);
+
     for (entity, identity) in &query {
         if ids.contains(&identity.definition_id) {
             commands.entity(entity).insert(NeedsEval);
         }
     }
+}
+
+fn invalidate_changed_definition_cache(
+    ids: &[DefinitionId],
+    representation_cache: &mut RepresentationCache,
+) -> usize {
+    ids.iter()
+        .map(|id| representation_cache.invalidate_definition(id))
+        .sum()
 }
 
 /// Re-evaluate occurrences that have the `NeedsEval` marker component.
@@ -1616,8 +1630,7 @@ fn remove_entity_mesh_assets(world: &mut World, entity: Entity) {
 mod pp_098_dirty_taxonomy_tests {
     use super::*;
     use crate::plugins::modeling::definition::{
-        DefinitionKind, Interface, OverridePolicy, ParameterDef, ParameterMetadata,
-        ParameterSchema,
+        DefinitionKind, Interface, OverridePolicy, ParameterDef, ParameterMetadata, ParameterSchema,
     };
     use serde_json::json;
 
@@ -1833,5 +1846,42 @@ mod pp_098_representation_cache_tests {
         assert_eq!(removed, 1);
         assert!(!cache.contains_key(&old));
         assert!(cache.contains_key(&current));
+    }
+
+    #[test]
+    fn changed_definition_propagation_invalidates_matching_cache_entries() {
+        let mut app = App::new();
+        app.init_resource::<ChangedDefinitions>()
+            .init_resource::<RepresentationCache>()
+            .add_systems(Update, propagate_definition_changes_with_commands);
+
+        let window_key = key("window", 1, "blake3:a");
+        let window_next_key = key("window", 2, "blake3:b");
+        let door_key = key("door", 1, "blake3:c");
+        {
+            let mut cache = app.world_mut().resource_mut::<RepresentationCache>();
+            cache.insert(window_key.clone(), Handle::<Mesh>::default());
+            cache.insert(window_next_key.clone(), Handle::<Mesh>::default());
+            cache.insert(door_key.clone(), Handle::<Mesh>::default());
+        }
+
+        let entity = app
+            .world_mut()
+            .spawn((
+                OccurrenceIdentity::new(DefinitionId("window".to_string()), 1),
+                OccurrenceClassification::clean(),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<ChangedDefinitions>()
+            .mark_changed(DefinitionId("window".to_string()));
+
+        app.update();
+
+        let cache = app.world().resource::<RepresentationCache>();
+        assert!(!cache.contains_key(&window_key));
+        assert!(!cache.contains_key(&window_next_key));
+        assert!(cache.contains_key(&door_key));
+        assert!(app.world().entity(entity).contains::<NeedsEval>());
     }
 }
