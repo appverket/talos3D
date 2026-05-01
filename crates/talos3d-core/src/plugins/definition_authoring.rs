@@ -12,11 +12,11 @@ use crate::plugins::{
     commands::{enqueue_create_definition, enqueue_update_definition},
     history::apply_pending_history_commands,
     modeling::definition::{
-        AnchorDef, ChildSlotDef, CompoundDefinition, ConstraintDef, Definition, DefinitionId,
-        DefinitionKind, DefinitionLibraryId, DefinitionLibraryRegistry, DefinitionRegistry,
-        DerivedParameterDef, EvaluatorDecl, ExprNode, Interface, OverridePolicy, ParameterBinding,
-        ParameterDef, ParameterMetadata, ParameterSchema, RepresentationDecl, SlotMultiplicity,
-        TransformBinding,
+        AnchorDef, AxisRef, ChildSlotDef, CompoundDefinition, ConstraintDef, Definition,
+        DefinitionId, DefinitionKind, DefinitionLibraryId, DefinitionLibraryRegistry,
+        DefinitionRegistry, DerivedParameterDef, EvaluatorDecl, ExprNode, Interface,
+        OverridePolicy, ParameterBinding, ParameterDef, ParameterMetadata, ParameterSchema,
+        RepresentationDecl, SlotCount, SlotLayout, SlotMultiplicity, TransformBinding,
     },
 };
 
@@ -588,6 +588,7 @@ pub fn explain_definition(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let resolved_collection_slots = explain_resolved_collection_slots(&effective);
 
     Ok(json!({
         "raw_full": raw_definition,
@@ -596,8 +597,379 @@ pub fn explain_definition(
         "inherited_parameter_names": inherited_parameters,
         "local_child_slot_ids": local_slots,
         "inherited_child_slot_ids": inherited_slots,
+        "resolved_collection_slots": resolved_collection_slots,
         "compile": compile,
     }))
+}
+
+fn explain_resolved_collection_slots(definition: &Definition) -> Vec<Value> {
+    let Some(compound) = &definition.compound else {
+        return Vec::new();
+    };
+    let mut values = definition
+        .interface
+        .parameters
+        .0
+        .iter()
+        .map(|param| (param.name.clone(), param.default_value.clone()))
+        .collect::<HashMap<_, _>>();
+    for derived in &compound.derived_parameters {
+        if let Ok(value) = evaluate_authoring_expr(&derived.expr, &values) {
+            values.insert(derived.name.clone(), value);
+        }
+    }
+
+    compound
+        .child_slots
+        .iter()
+        .filter_map(|slot| match &slot.multiplicity {
+            SlotMultiplicity::Single => None,
+            SlotMultiplicity::Collection { layout, count } => Some(
+                match explain_collection_slot(slot, layout, count, &values) {
+                    Ok(value) => value,
+                    Err(error) => json!({
+                        "slot_id": slot.slot_id,
+                        "resolution_error": error,
+                    }),
+                },
+            ),
+        })
+        .collect()
+}
+
+fn explain_collection_slot(
+    slot: &ChildSlotDef,
+    layout: &SlotLayout,
+    count: &SlotCount,
+    values: &HashMap<String, Value>,
+) -> Result<Value, String> {
+    let instances = resolve_collection_instance_translations(slot, layout, count, values)?;
+    Ok(json!({
+        "slot_id": slot.slot_id,
+        "count": instances.len(),
+        "layout": serde_json::to_value(layout).unwrap_or(Value::Null),
+        "instances": instances
+            .into_iter()
+            .map(|(index, translation)| json!({
+                "index": index,
+                "slot_path": format!("{}[{}]", slot.slot_id, index),
+                "translation": [translation[0], translation[1], translation[2]],
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+fn resolve_collection_instance_translations(
+    slot: &ChildSlotDef,
+    layout: &SlotLayout,
+    count: &SlotCount,
+    values: &HashMap<String, Value>,
+) -> Result<Vec<(usize, [f32; 3])>, String> {
+    let requested_count = resolve_authoring_slot_count(&slot.slot_id, count, values)?;
+    match layout {
+        SlotLayout::Linear {
+            axis,
+            spacing,
+            origin,
+        } => {
+            let axis = authoring_axis_vector(axis)?;
+            let spacing = evaluate_authoring_expr_f32(spacing, values)?;
+            let origin = evaluate_authoring_transform_binding(origin, &slot.slot_id, values)?;
+            Ok((0..requested_count)
+                .map(|index| {
+                    (
+                        index,
+                        add_vec3(origin, scale_vec3(axis, spacing * (index as f32 + 1.0))),
+                    )
+                })
+                .collect())
+        }
+        SlotLayout::Grid {
+            axis_u,
+            count_u,
+            spacing_u,
+            axis_v,
+            count_v,
+            spacing_v,
+            origin,
+        } => {
+            let u_count = resolve_authoring_expr_count(&slot.slot_id, "count_u", count_u, values)?;
+            let v_count = resolve_authoring_expr_count(&slot.slot_id, "count_v", count_v, values)?;
+            let grid_count = u_count.checked_mul(v_count).ok_or_else(|| {
+                format!(
+                    "Collection slot '{}' grid count overflows usize",
+                    slot.slot_id
+                )
+            })?;
+            if requested_count != grid_count {
+                return Err(format!(
+                    "Collection slot '{}' count ({requested_count}) must match layout count ({grid_count})",
+                    slot.slot_id
+                ));
+            }
+            let axis_u = authoring_axis_vector(axis_u)?;
+            let axis_v = authoring_axis_vector(axis_v)?;
+            let spacing_u = evaluate_authoring_expr_f32(spacing_u, values)?;
+            let spacing_v = evaluate_authoring_expr_f32(spacing_v, values)?;
+            let origin = evaluate_authoring_transform_binding(origin, &slot.slot_id, values)?;
+            let mut instances = Vec::with_capacity(grid_count);
+            for v in 0..v_count {
+                for u in 0..u_count {
+                    let index = v * u_count + u;
+                    let translation = add_vec3(
+                        add_vec3(origin, scale_vec3(axis_u, spacing_u * (u as f32 + 1.0))),
+                        scale_vec3(axis_v, spacing_v * (v as f32 + 1.0)),
+                    );
+                    instances.push((index, translation));
+                }
+            }
+            Ok(instances)
+        }
+        SlotLayout::BySpacingFromHost { host_param, axis } => {
+            let axis = authoring_axis_vector(axis)?;
+            let spacing = values
+                .get(&host_param.name)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| {
+                    format!(
+                        "Collection slot '{}' host spacing parameter '{}' must resolve to a number",
+                        slot.slot_id, host_param.name
+                    )
+                })? as f32;
+            Ok((0..requested_count)
+                .map(|index| (index, scale_vec3(axis, spacing * (index as f32 + 1.0))))
+                .collect())
+        }
+        SlotLayout::LitePattern { pattern } => {
+            let pattern = evaluate_authoring_expr(pattern, values)?;
+            let pattern = pattern.as_str().ok_or_else(|| {
+                format!(
+                    "Collection slot '{}' lite pattern must resolve to a string",
+                    slot.slot_id
+                )
+            })?;
+            let (u_count, v_count) = parse_authoring_lite_pattern_dims(&slot.slot_id, pattern)?;
+            let pattern_count = u_count.checked_mul(v_count).ok_or_else(|| {
+                format!(
+                    "Collection slot '{}' lite pattern count overflows usize",
+                    slot.slot_id
+                )
+            })?;
+            if requested_count != pattern_count {
+                return Err(format!(
+                    "Collection slot '{}' count ({requested_count}) must match layout count ({pattern_count})",
+                    slot.slot_id
+                ));
+            }
+            let mut instances = Vec::with_capacity(pattern_count);
+            for v in 0..v_count {
+                for u in 0..u_count {
+                    let index = v * u_count + u;
+                    instances.push((index, [u as f32, v as f32, 0.0]));
+                }
+            }
+            Ok(instances)
+        }
+    }
+}
+
+fn resolve_authoring_slot_count(
+    slot_id: &str,
+    count: &SlotCount,
+    values: &HashMap<String, Value>,
+) -> Result<usize, String> {
+    match count {
+        SlotCount::Fixed(count) => usize::try_from(*count).map_err(|_| {
+            format!("Collection slot '{slot_id}' fixed count does not fit this platform")
+        }),
+        SlotCount::DerivedFromExpr(expr) => {
+            resolve_authoring_expr_count(slot_id, "count", expr, values)
+        }
+    }
+}
+
+fn resolve_authoring_expr_count(
+    slot_id: &str,
+    field: &str,
+    expr: &ExprNode,
+    values: &HashMap<String, Value>,
+) -> Result<usize, String> {
+    let value = evaluate_authoring_expr_f64(expr, values)?;
+    if value < 0.0 || value.fract().abs() > f64::EPSILON {
+        return Err(format!(
+            "Collection slot '{slot_id}' {field} must resolve to a non-negative integer"
+        ));
+    }
+    if value > usize::MAX as f64 {
+        return Err(format!(
+            "Collection slot '{slot_id}' {field} is too large for this platform"
+        ));
+    }
+    Ok(value as usize)
+}
+
+fn evaluate_authoring_transform_binding(
+    binding: &TransformBinding,
+    slot_id: &str,
+    values: &HashMap<String, Value>,
+) -> Result<[f32; 3], String> {
+    let Some(translation) = &binding.translation else {
+        return Ok([0.0, 0.0, 0.0]);
+    };
+    if translation.len() != 3 {
+        return Err(format!(
+            "Child slot '{slot_id}' collection origin must contain exactly 3 expressions"
+        ));
+    }
+    Ok([
+        evaluate_authoring_expr_f32(&translation[0], values)?,
+        evaluate_authoring_expr_f32(&translation[1], values)?,
+        evaluate_authoring_expr_f32(&translation[2], values)?,
+    ])
+}
+
+fn authoring_axis_vector(axis: &AxisRef) -> Result<[f32; 3], String> {
+    match axis.0.as_str() {
+        "x" | "X" | "u" | "U" | "horizontal" => Ok([1.0, 0.0, 0.0]),
+        "y" | "Y" | "v" | "V" | "vertical" => Ok([0.0, 1.0, 0.0]),
+        "z" | "Z" | "w" | "W" | "depth" => Ok([0.0, 0.0, 1.0]),
+        other => Err(format!(
+            "Unknown collection slot axis '{other}'; expected x/y/z or u/v/w"
+        )),
+    }
+}
+
+fn parse_authoring_lite_pattern_dims(
+    slot_id: &str,
+    pattern: &str,
+) -> Result<(usize, usize), String> {
+    let normalized = pattern.trim().replace(['X', '*'], "x").replace('×', "x");
+    let Some((u, v)) = normalized.split_once('x') else {
+        return Err(format!(
+            "Collection slot '{slot_id}' lite pattern '{pattern}' must use '<columns>x<rows>'"
+        ));
+    };
+    let u = u.trim().parse::<usize>().map_err(|_| {
+        format!("Collection slot '{slot_id}' lite pattern '{pattern}' has invalid column count")
+    })?;
+    let v = v.trim().parse::<usize>().map_err(|_| {
+        format!("Collection slot '{slot_id}' lite pattern '{pattern}' has invalid row count")
+    })?;
+    if u == 0 || v == 0 {
+        return Err(format!(
+            "Collection slot '{slot_id}' lite pattern '{pattern}' must have non-zero dimensions"
+        ));
+    }
+    Ok((u, v))
+}
+
+fn evaluate_authoring_expr(
+    expr: &ExprNode,
+    values: &HashMap<String, Value>,
+) -> Result<Value, String> {
+    match expr {
+        ExprNode::Literal { value } => Ok(value.clone()),
+        ExprNode::ParamRef { path } => lookup_authoring_expr_value(path, values),
+        ExprNode::Add { left, right } => Ok(Value::from(
+            evaluate_authoring_expr_f64(left, values)?
+                + evaluate_authoring_expr_f64(right, values)?,
+        )),
+        ExprNode::Sub { left, right } => Ok(Value::from(
+            evaluate_authoring_expr_f64(left, values)?
+                - evaluate_authoring_expr_f64(right, values)?,
+        )),
+        ExprNode::Mul { left, right } => Ok(Value::from(
+            evaluate_authoring_expr_f64(left, values)?
+                * evaluate_authoring_expr_f64(right, values)?,
+        )),
+        ExprNode::Div { left, right } => Ok(Value::from(
+            evaluate_authoring_expr_f64(left, values)?
+                / evaluate_authoring_expr_f64(right, values)?,
+        )),
+        ExprNode::Min { left, right } => Ok(Value::from(
+            evaluate_authoring_expr_f64(left, values)?
+                .min(evaluate_authoring_expr_f64(right, values)?),
+        )),
+        ExprNode::Max { left, right } => Ok(Value::from(
+            evaluate_authoring_expr_f64(left, values)?
+                .max(evaluate_authoring_expr_f64(right, values)?),
+        )),
+        ExprNode::Eq { left, right } => Ok(Value::Bool(
+            evaluate_authoring_expr(left, values)? == evaluate_authoring_expr(right, values)?,
+        )),
+        ExprNode::Gt { left, right } => Ok(Value::Bool(
+            evaluate_authoring_expr_f64(left, values)?
+                > evaluate_authoring_expr_f64(right, values)?,
+        )),
+        ExprNode::Lt { left, right } => Ok(Value::Bool(
+            evaluate_authoring_expr_f64(left, values)?
+                < evaluate_authoring_expr_f64(right, values)?,
+        )),
+        ExprNode::And { nodes } => {
+            for node in nodes {
+                if !evaluate_authoring_expr(node, values)?
+                    .as_bool()
+                    .ok_or_else(|| "expression must evaluate to a boolean value".to_string())?
+                {
+                    return Ok(Value::Bool(false));
+                }
+            }
+            Ok(Value::Bool(true))
+        }
+        ExprNode::IfElse {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            if evaluate_authoring_expr(condition, values)?
+                .as_bool()
+                .ok_or_else(|| "expression must evaluate to a boolean value".to_string())?
+            {
+                evaluate_authoring_expr(when_true, values)
+            } else {
+                evaluate_authoring_expr(when_false, values)
+            }
+        }
+    }
+}
+
+fn evaluate_authoring_expr_f64(
+    expr: &ExprNode,
+    values: &HashMap<String, Value>,
+) -> Result<f64, String> {
+    evaluate_authoring_expr(expr, values)?
+        .as_f64()
+        .ok_or_else(|| "expression must evaluate to a numeric value".to_string())
+}
+
+fn evaluate_authoring_expr_f32(
+    expr: &ExprNode,
+    values: &HashMap<String, Value>,
+) -> Result<f32, String> {
+    Ok(evaluate_authoring_expr_f64(expr, values)? as f32)
+}
+
+fn lookup_authoring_expr_value(
+    path: &str,
+    values: &HashMap<String, Value>,
+) -> Result<Value, String> {
+    if let Some(value) = values.get(path) {
+        return Ok(value.clone());
+    }
+    if let Some(last_segment) = path.rsplit('.').next() {
+        if let Some(value) = values.get(last_segment) {
+            return Ok(value.clone());
+        }
+    }
+    Err(format!("Expression references unknown parameter '{path}'"))
+}
+
+fn add_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+
+fn scale_vec3(value: [f32; 3], scale: f32) -> [f32; 3] {
+    [value[0] * scale, value[1] * scale, value[2] * scale]
 }
 
 pub fn apply_patch_to_draft(
