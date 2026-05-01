@@ -1984,6 +1984,7 @@ mod pp_098_occurrence_cache_tests {
         DefinitionKind, Interface, OverridePolicy, ParameterDef, ParameterMetadata,
         ParameterSchema, RectangularExtrusionEvaluator,
     };
+    use crate::plugins::modeling::mesh_generation::{spawn_primitive_meshes, PlaneMaterial};
 
     fn numeric_parameter(name: &str, default_value: f64) -> ParameterDef {
         ParameterDef {
@@ -2281,5 +2282,133 @@ mod pp_098_occurrence_cache_tests {
             .expect("classification");
         assert!(!classification.mesh_dirty);
         assert!(classification.material_dirty);
+    }
+
+    #[test]
+    fn geometry_override_regenerates_only_changed_occurrence_cache_entry() {
+        let definition = rectangular_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity =
+            OccurrenceIdentity::new(definition.id.clone(), definition.definition_version);
+        let resolved = registry
+            .resolve_params_checked(&definition.id, &identity.overrides)
+            .expect("resolved params");
+        let resolved_values = resolved_param_values(&resolved);
+        let default_key = mesh_cache_key_for_definition(&definition, &resolved_values);
+
+        let mut next_identity = identity.clone();
+        next_identity.overrides.set("width", json!(3.0));
+        let changed_resolved = registry
+            .resolve_params_checked(&definition.id, &next_identity.overrides)
+            .expect("changed resolved params");
+        let changed_values = resolved_param_values(&changed_resolved);
+        let changed_key = mesh_cache_key_for_definition(&definition, &changed_values);
+        assert_ne!(changed_key, default_key);
+
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<RepresentationCache>()
+            .insert_resource(PrimitiveMaterial(Handle::default()))
+            .insert_resource(PlaneMaterial(Handle::default()))
+            .add_systems(Update, spawn_primitive_meshes::<ProfileExtrusion>);
+        app.world_mut().insert_resource(registry.clone());
+
+        let cached_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            ));
+        app.world_mut()
+            .resource_mut::<RepresentationCache>()
+            .insert(default_key.clone(), cached_handle.clone());
+
+        {
+            let world = app.world_mut();
+            render_occurrence(
+                world,
+                &registry,
+                ElementId(300),
+                &identity,
+                Transform::from_translation(Vec3::new(3.0, 0.0, 2.0)),
+                Some("changed"),
+            )
+            .expect("render changed occurrence");
+            render_occurrence(
+                world,
+                &registry,
+                ElementId(301),
+                &identity,
+                Transform::from_translation(Vec3::new(6.0, 0.0, 2.0)),
+                Some("unchanged"),
+            )
+            .expect("render unchanged occurrence");
+        }
+
+        let previous = OccurrenceSnapshot::new(ElementId(300), identity, "changed");
+        let next = OccurrenceSnapshot::new(ElementId(300), next_identity, "changed");
+        next.apply_with_previous(app.world_mut(), Some(&previous));
+
+        {
+            let world = app.world_mut();
+            let changed_entity =
+                crate::plugins::commands::find_entity_by_element_id(world, ElementId(300))
+                    .expect("changed occurrence entity");
+            let unchanged_entity =
+                crate::plugins::commands::find_entity_by_element_id(world, ElementId(301))
+                    .expect("unchanged occurrence entity");
+            let changed_ref = world.entity(changed_entity);
+            assert_eq!(changed_ref.get::<MeshCacheKey>(), Some(&changed_key));
+            assert!(changed_ref.get::<NeedsMesh>().is_some());
+
+            let unchanged_ref = world.entity(unchanged_entity);
+            assert_eq!(
+                unchanged_ref.get::<Mesh3d>().expect("unchanged mesh").id(),
+                cached_handle.id()
+            );
+            assert!(unchanged_ref.get::<NeedsMesh>().is_none());
+            assert_eq!(
+                world.resource::<RepresentationCache>().len(),
+                1,
+                "changed geometry should not populate the cache before mesh generation"
+            );
+        }
+
+        app.update();
+
+        let world = app.world_mut();
+        let changed_entity =
+            crate::plugins::commands::find_entity_by_element_id(world, ElementId(300))
+                .expect("changed occurrence entity");
+        let unchanged_entity =
+            crate::plugins::commands::find_entity_by_element_id(world, ElementId(301))
+                .expect("unchanged occurrence entity");
+        let changed_mesh_id = world
+            .entity(changed_entity)
+            .get::<Mesh3d>()
+            .expect("changed mesh")
+            .id();
+        assert_ne!(changed_mesh_id, cached_handle.id());
+        assert!(world.entity(changed_entity).get::<NeedsMesh>().is_none());
+        assert_eq!(
+            world
+                .resource_mut::<RepresentationCache>()
+                .get(&changed_key)
+                .expect("changed cache entry")
+                .id(),
+            changed_mesh_id
+        );
+        assert_eq!(world.resource::<RepresentationCache>().len(), 2);
+        assert_eq!(
+            world
+                .entity(unchanged_entity)
+                .get::<Mesh3d>()
+                .expect("unchanged mesh")
+                .id(),
+            cached_handle.id()
+        );
     }
 }

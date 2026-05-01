@@ -184,7 +184,7 @@ fn setup_modeling_materials(
     })));
 }
 
-fn spawn_primitive_meshes<P: MeshGenerator>(
+pub(crate) fn spawn_primitive_meshes<P: MeshGenerator>(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut representation_cache: ResMut<RepresentationCache>,
