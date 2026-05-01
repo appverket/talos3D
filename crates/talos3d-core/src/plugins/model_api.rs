@@ -4,20 +4,22 @@ use std::collections::HashMap;
 use bevy::window::PrimaryWindow;
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 #[cfg(feature = "model-api")]
 use serde_json::json;
-use serde_json::Value;
 
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
+use crate::curation::MaterialSpecBody;
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
-use crate::curation::MaterialSpecBody;
 #[cfg(feature = "model-api")]
 use crate::plugins::authoring_guidance::AuthoringGuidance;
 #[cfg(feature = "model-api")]
 use crate::plugins::hosting_contracts::{
-    HostingContractKindId, HostingValidationRequest, HostingValidationResult,
+    HostAffectedRegion, HostingCheckId, HostingCheckStatus, HostingContractKindId,
+    HostingValidationCheck, HostingValidationRequest, HostingValidationResult,
+    HostingValidationStatus, MeasuredValue,
 };
 use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
@@ -28,7 +30,7 @@ use crate::plugins::materials::MaterialDef;
 use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
-use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
+use crate::plugins::modeling::semantics::{GeometrySemantics, geometry_semantics_for_snapshot};
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::RenderSettings;
 #[cfg(feature = "model-api")]
@@ -36,28 +38,28 @@ use crate::plugins::render_pipeline::RenderTonemapping;
 #[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
-        apply_orbit_state, focus_orbit_camera_on_bounds,
-        perspective_distance_to_orthographic_scale, CameraProjectionMode, OrbitCamera,
+        CameraProjectionMode, OrbitCamera, apply_orbit_state, focus_orbit_camera_on_bounds,
+        perspective_distance_to_orthographic_scale,
     },
     commands::{
-        find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
-        BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
-        ResolvedDeleteEntitiesCommand,
+        ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
+        EndCommandGroup, ResolvedDeleteEntitiesCommand, find_entity_by_element_id,
+        queue_command_events,
     },
     document_properties::DocumentProperties,
-    history::{apply_pending_history_commands, HistorySet},
-    import::{import_file_now, ImportRegistry, ImporterDescriptor},
+    history::{HistorySet, apply_pending_history_commands},
+    import::{ImportRegistry, ImporterDescriptor, import_file_now},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     lighting::{
-        create_daylight_rig, scene_light_object_exposed, SceneLightNode, SceneLightingSettings,
+        SceneLightNode, SceneLightingSettings, create_daylight_rig, scene_light_object_exposed,
     },
-    materials::{normalize_material_textures, MaterialRegistry, TextureRef, TextureRegistry},
+    materials::{MaterialRegistry, TextureRef, TextureRegistry, normalize_material_textures},
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
     selection::Selected,
     toolbar::{
-        update_toolbar_layout_entry, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
-        ToolbarSection,
+        ToolbarDock, ToolbarLayoutState, ToolbarRegistry, ToolbarSection,
+        update_toolbar_layout_entry,
     },
 };
 
@@ -66,28 +68,29 @@ use std::{
     env, fs,
     net::TcpListener as StdTcpListener,
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "model-api")]
 use rmcp::{
+    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     schemars::JsonSchema,
-    tool, tool_handler, tool_router, transport, ErrorData as McpError, ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router, transport,
 };
 
 #[cfg(feature = "model-api")]
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 
 #[cfg(feature = "model-api")]
 use tokio::sync::oneshot;
 #[cfg(feature = "model-api")]
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[cfg(feature = "model-api")]
 pub struct ModelApiPlugin;
@@ -11109,7 +11112,7 @@ pub fn handle_bim_material_get_effective(
     request: BimMaterialGetEffectiveRequest,
 ) -> Result<Value, String> {
     use crate::plugins::modeling::bim_material_assignment::{
-        effective_assignment, BimMaterialAssignmentOverride, BimMaterialAssignmentRegistry,
+        BimMaterialAssignmentOverride, BimMaterialAssignmentRegistry, effective_assignment,
     };
 
     ensure_bim_material_registry(world);
@@ -11762,7 +11765,7 @@ fn create_box_request_json(request: &CreateBoxRequest) -> Result<Value, String> 
     let center = request.center.unwrap_or([0.0, 0.0, 0.0]);
     let half_extents = match (request.half_extents, request.size) {
         (Some(_), Some(_)) => {
-            return Err("create_box expects either `size` or `half_extents`, not both".to_string())
+            return Err("create_box expects either `size` or `half_extents`, not both".to_string());
         }
         (Some(half_extents), None) => half_extents,
         (None, Some(size)) => {
@@ -11774,7 +11777,7 @@ fn create_box_request_json(request: &CreateBoxRequest) -> Result<Value, String> 
             [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5]
         }
         (None, None) => {
-            return Err("create_box requires either `size` or `half_extents`".to_string())
+            return Err("create_box requires either `size` or `half_extents`".to_string());
         }
     };
     if half_extents
@@ -12804,8 +12807,8 @@ fn handle_place_sheet_dimension(
     request: PlaceSheetDimensionRequest,
 ) -> Result<u64, String> {
     use crate::plugins::drafting_sheet::{
-        sheet_paper_to_world, sheet_view_from_active_camera, DEFAULT_MARGIN_MM,
-        DEFAULT_SCALE_DENOMINATOR,
+        DEFAULT_MARGIN_MM, DEFAULT_SCALE_DENOMINATOR, sheet_paper_to_world,
+        sheet_view_from_active_camera,
     };
     let scale = request
         .scale_denominator
@@ -15253,6 +15256,416 @@ fn infer_wall_rotation(snapshot: &BoxedEntity) -> Option<Quat> {
 }
 
 #[cfg(feature = "model-api")]
+const WALL_OPENING_HOSTING_CONTRACT_KIND: &str = "architecture::wall_opening";
+#[cfg(feature = "model-api")]
+const HOSTED_OPENING_MIN_REMAINING_WALL: f32 = 0.05;
+#[cfg(feature = "model-api")]
+const HOSTED_OPENING_GEOMETRY_TOLERANCE: f32 = 0.01;
+#[cfg(feature = "model-api")]
+const HOSTED_OPENING_PLACEMENT_TOLERANCE: f32 = 0.02;
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Copy)]
+struct HostedOpeningAxes {
+    normal: SpatialAxis,
+    in_plane: [SpatialAxis; 2],
+}
+
+#[cfg(feature = "model-api")]
+fn axis_extent(bounds: crate::authored_entity::EntityBounds, axis: SpatialAxis) -> f32 {
+    axis.bounds_max(bounds) - axis.bounds_min(bounds)
+}
+
+#[cfg(feature = "model-api")]
+fn shortest_positive_axis(bounds: crate::authored_entity::EntityBounds) -> Option<SpatialAxis> {
+    [SpatialAxis::X, SpatialAxis::Y, SpatialAxis::Z]
+        .into_iter()
+        .filter(|axis| axis_extent(bounds, *axis) > f32::EPSILON)
+        .min_by(|a, b| axis_extent(bounds, *a).total_cmp(&axis_extent(bounds, *b)))
+}
+
+#[cfg(feature = "model-api")]
+fn hosted_opening_axes(
+    host_bounds: crate::authored_entity::EntityBounds,
+) -> Option<HostedOpeningAxes> {
+    let normal = shortest_positive_axis(host_bounds)?;
+    let in_plane = match normal {
+        SpatialAxis::X => [SpatialAxis::Y, SpatialAxis::Z],
+        SpatialAxis::Y => [SpatialAxis::X, SpatialAxis::Z],
+        SpatialAxis::Z => [SpatialAxis::X, SpatialAxis::Y],
+    };
+    Some(HostedOpeningAxes { normal, in_plane })
+}
+
+#[cfg(feature = "model-api")]
+fn axis_name(axis: SpatialAxis) -> &'static str {
+    match axis {
+        SpatialAxis::X => "x",
+        SpatialAxis::Y => "y",
+        SpatialAxis::Z => "z",
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn validation_measured(value: impl Into<Value>, unit: &str) -> MeasuredValue {
+    MeasuredValue {
+        value: value.into(),
+        unit: unit.to_string(),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn hosted_opening_check(
+    id: &str,
+    label: &str,
+    status: HostingCheckStatus,
+    message: impl Into<String>,
+    measured_value: Option<MeasuredValue>,
+    expected_value: Option<MeasuredValue>,
+    affected_region: Option<&str>,
+) -> HostingValidationCheck {
+    use crate::plugins::modeling::definition::ConstraintSeverity;
+
+    HostingValidationCheck {
+        id: HostingCheckId(id.to_string()),
+        label: label.to_string(),
+        severity: if matches!(status, HostingCheckStatus::Warning) {
+            ConstraintSeverity::Warning
+        } else {
+            ConstraintSeverity::Error
+        },
+        status,
+        message: message.into(),
+        measured_value,
+        expected_value,
+        affected_region: affected_region.map(|region| HostAffectedRegion(region.to_string())),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn status_from_hosting_checks(checks: &[HostingValidationCheck]) -> HostingValidationStatus {
+    if checks
+        .iter()
+        .any(|check| matches!(check.status, HostingCheckStatus::Failed))
+    {
+        HostingValidationStatus::Blocked
+    } else if checks
+        .iter()
+        .any(|check| matches!(check.status, HostingCheckStatus::Warning))
+    {
+        HostingValidationStatus::Warning
+    } else {
+        HostingValidationStatus::Passed
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn opening_id_from_contract_parameters(parameters: &Value) -> Option<ElementId> {
+    parameters
+        .get("opening_element_id")
+        .and_then(Value::as_u64)
+        .map(ElementId)
+}
+
+#[cfg(feature = "model-api")]
+fn opening_id_from_occurrence(world: &World, occurrence_id: ElementId) -> Option<ElementId> {
+    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+
+    let mut query = world.try_query::<EntityRef>()?;
+    query
+        .iter(world)
+        .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(occurrence_id))
+        .and_then(|entity_ref| entity_ref.get::<OccurrenceIdentity>())
+        .and_then(|identity| identity.hosting.as_ref())
+        .and_then(|hosting| hosting.opening_element_id)
+}
+
+#[cfg(feature = "model-api")]
+fn wall_opening_validation_result(
+    contract_kind: HostingContractKindId,
+    host_element_id: ElementId,
+    hosted_element_id: ElementId,
+    host_snapshot: Option<BoxedEntity>,
+    opening_snapshot: Option<BoxedEntity>,
+    hosted_center: Option<Vec3>,
+) -> HostingValidationResult {
+    let mut checks = Vec::new();
+
+    let Some(host_snapshot) = host_snapshot else {
+        checks.push(hosted_opening_check(
+            "host.exists",
+            "Host Exists",
+            HostingCheckStatus::Failed,
+            format!("Host entity {} does not exist.", host_element_id.0),
+            None,
+            None,
+            Some("host"),
+        ));
+        return HostingValidationResult {
+            contract_kind,
+            host_element_id,
+            hosted_element_id,
+            status: status_from_hosting_checks(&checks),
+            checks,
+        };
+    };
+    let Some(opening_snapshot) = opening_snapshot else {
+        checks.push(hosted_opening_check(
+            "opening.exists",
+            "Opening Exists",
+            HostingCheckStatus::Failed,
+            "Hosted wall openings require an explicit opening entity.",
+            None,
+            None,
+            Some("opening"),
+        ));
+        return HostingValidationResult {
+            contract_kind,
+            host_element_id,
+            hosted_element_id,
+            status: status_from_hosting_checks(&checks),
+            checks,
+        };
+    };
+
+    let host_bounds = alignment_bounds(&host_snapshot);
+    let opening_bounds = alignment_bounds(&opening_snapshot);
+    let Some(axes) = hosted_opening_axes(host_bounds) else {
+        checks.push(hosted_opening_check(
+            "host.thickness_axis",
+            "Host Thickness Axis",
+            HostingCheckStatus::Failed,
+            "Host wall must have a measurable thickness axis.",
+            None,
+            None,
+            Some("host"),
+        ));
+        return HostingValidationResult {
+            contract_kind,
+            host_element_id,
+            hosted_element_id,
+            status: status_from_hosting_checks(&checks),
+            checks,
+        };
+    };
+
+    let opening_center = opening_bounds.center();
+    let host_thickness = axis_extent(host_bounds, axes.normal);
+    let opening_thickness = axis_extent(opening_bounds, axes.normal);
+
+    let axis_alignment_status =
+        if (opening_thickness - host_thickness).abs() <= HOSTED_OPENING_GEOMETRY_TOLERANCE {
+            HostingCheckStatus::Passed
+        } else {
+            HostingCheckStatus::Failed
+        };
+    checks.push(hosted_opening_check(
+        "opening.normal_alignment",
+        "Opening Normal Alignment",
+        axis_alignment_status,
+        if axis_alignment_status == HostingCheckStatus::Passed {
+            format!(
+                "Opening cuts through the host thickness axis ({}).",
+                axis_name(axes.normal)
+            )
+        } else {
+            format!(
+                "Opening must span the host wall thickness axis ({}) without rotating out of plane.",
+                axis_name(axes.normal)
+            )
+        },
+        Some(validation_measured(opening_thickness as f64, "model_units")),
+        Some(validation_measured(host_thickness as f64, "model_units")),
+        Some("opening"),
+    ));
+
+    let normal_min_delta = opening_bounds.min_axis(axes.normal) - host_bounds.min_axis(axes.normal);
+    let normal_max_delta = host_bounds.max_axis(axes.normal) - opening_bounds.max_axis(axes.normal);
+    let thickness_status = if normal_min_delta >= -HOSTED_OPENING_GEOMETRY_TOLERANCE
+        && normal_max_delta >= -HOSTED_OPENING_GEOMETRY_TOLERANCE
+    {
+        HostingCheckStatus::Passed
+    } else {
+        HostingCheckStatus::Failed
+    };
+    checks.push(hosted_opening_check(
+        "opening.thickness_containment",
+        "Opening Thickness Containment",
+        thickness_status,
+        if thickness_status == HostingCheckStatus::Passed {
+            "Opening depth is contained by the host wall thickness.".to_string()
+        } else {
+            "Opening cannot extend outside the host wall thickness.".to_string()
+        },
+        Some(validation_measured(opening_thickness as f64, "model_units")),
+        Some(validation_measured(host_thickness as f64, "model_units")),
+        Some("opening"),
+    ));
+
+    for axis in axes.in_plane {
+        let remaining_min = opening_bounds.min_axis(axis) - host_bounds.min_axis(axis);
+        let remaining_max = host_bounds.max_axis(axis) - opening_bounds.max_axis(axis);
+        let remaining = remaining_min.min(remaining_max);
+        let status =
+            if remaining + HOSTED_OPENING_GEOMETRY_TOLERANCE >= HOSTED_OPENING_MIN_REMAINING_WALL {
+                HostingCheckStatus::Passed
+            } else {
+                HostingCheckStatus::Failed
+            };
+        checks.push(hosted_opening_check(
+            &format!("opening.remaining_wall.{}", axis_name(axis)),
+            &format!("Remaining Wall {}", axis_name(axis).to_uppercase()),
+            status,
+            if status == HostingCheckStatus::Passed {
+                format!(
+                    "Opening leaves wall material on both sides along {}.",
+                    axis_name(axis)
+                )
+            } else {
+                format!(
+                    "Opening must leave at least {:.2} model units of wall on both sides along {}.",
+                    HOSTED_OPENING_MIN_REMAINING_WALL,
+                    axis_name(axis)
+                )
+            },
+            Some(validation_measured(remaining as f64, "model_units")),
+            Some(validation_measured(
+                HOSTED_OPENING_MIN_REMAINING_WALL as f64,
+                "model_units",
+            )),
+            Some("host"),
+        ));
+    }
+
+    if let Some(hosted_center) = hosted_center {
+        let mut worst_in_plane_delta = 0.0f32;
+        for axis in axes.in_plane {
+            worst_in_plane_delta = worst_in_plane_delta
+                .max((axis.component(hosted_center) - axis.component(opening_center)).abs());
+        }
+        let out_of_plane_delta =
+            (axes.normal.component(hosted_center) - axes.normal.component(opening_center)).abs();
+        let in_plane_status = if worst_in_plane_delta <= HOSTED_OPENING_PLACEMENT_TOLERANCE {
+            HostingCheckStatus::Passed
+        } else {
+            HostingCheckStatus::Failed
+        };
+        checks.push(hosted_opening_check(
+            "hosted.center_in_opening",
+            "Hosted Center In Opening",
+            in_plane_status,
+            if in_plane_status == HostingCheckStatus::Passed {
+                "Hosted occurrence is centered in the opening plane.".to_string()
+            } else {
+                "Hosted occurrence center must stay in the authored opening.".to_string()
+            },
+            Some(validation_measured(
+                worst_in_plane_delta as f64,
+                "model_units",
+            )),
+            Some(validation_measured(
+                HOSTED_OPENING_PLACEMENT_TOLERANCE as f64,
+                "model_units",
+            )),
+            Some("opening"),
+        ));
+
+        let allowed_normal_offset = host_thickness * 0.5 + HOSTED_OPENING_PLACEMENT_TOLERANCE;
+        let normal_status = if out_of_plane_delta <= allowed_normal_offset {
+            HostingCheckStatus::Passed
+        } else {
+            HostingCheckStatus::Failed
+        };
+        checks.push(hosted_opening_check(
+            "hosted.center_on_wall_depth",
+            "Hosted Center On Wall Depth",
+            normal_status,
+            if normal_status == HostingCheckStatus::Passed {
+                "Hosted occurrence remains within the wall depth.".to_string()
+            } else {
+                "Hosted occurrence cannot be displaced clear of the wall depth.".to_string()
+            },
+            Some(validation_measured(
+                out_of_plane_delta as f64,
+                "model_units",
+            )),
+            Some(validation_measured(
+                allowed_normal_offset as f64,
+                "model_units",
+            )),
+            Some("opening"),
+        ));
+    }
+
+    HostingValidationResult {
+        contract_kind,
+        host_element_id,
+        hosted_element_id,
+        status: status_from_hosting_checks(&checks),
+        checks,
+    }
+}
+
+#[cfg(feature = "model-api")]
+trait EntityBoundsAxisExt {
+    fn min_axis(&self, axis: SpatialAxis) -> f32;
+    fn max_axis(&self, axis: SpatialAxis) -> f32;
+}
+
+#[cfg(feature = "model-api")]
+impl EntityBoundsAxisExt for crate::authored_entity::EntityBounds {
+    fn min_axis(&self, axis: SpatialAxis) -> f32 {
+        axis.component(self.min)
+    }
+
+    fn max_axis(&self, axis: SpatialAxis) -> f32 {
+        axis.component(self.max)
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn validate_preflight_hosted_wall_opening(
+    world: &World,
+    hosted_request: &Value,
+    hosted_context: &crate::plugins::modeling::occurrence::HostedOccurrenceContext,
+) -> ApiResult<()> {
+    let Some(host_id) = hosted_context.host_element_id else {
+        return Ok(());
+    };
+    let Some(opening_id) = hosted_context.opening_element_id else {
+        return Ok(());
+    };
+
+    let hosted_center = hosted_request
+        .get("offset")
+        .and_then(|value| serde_json::from_value::<[f32; 3]>(value.clone()).ok())
+        .map(|[x, y, z]| Vec3::new(x, y, z));
+    let result = wall_opening_validation_result(
+        HostingContractKindId(WALL_OPENING_HOSTING_CONTRACT_KIND.to_string()),
+        host_id,
+        ElementId(0),
+        capture_entity_snapshot(world, host_id),
+        capture_entity_snapshot(world, opening_id),
+        hosted_center,
+    );
+
+    if result.status == HostingValidationStatus::Blocked {
+        let failed = result
+            .checks
+            .iter()
+            .filter(|check| check.status == HostingCheckStatus::Failed)
+            .map(|check| format!("{}: {}", check.label, check.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "Hosted wall opening failed building sanity checks: {failed}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
 fn validate_relation_descriptor(
     world: &World,
     relation_type: &str,
@@ -15533,6 +15946,7 @@ pub fn handle_instantiate_hosted_definition(
             serde_json::from_value(value)
                 .map_err(|error| format!("Invalid hosting context: {error}"))
         })?;
+    validate_preflight_hosted_wall_opening(world, &hosted_request, &hosted_context)?;
     let (element_id, occurrence_snapshot) =
         build_occurrence_snapshot_for_place(world, hosted_request)?;
 
@@ -15760,17 +16174,36 @@ pub fn handle_occurrence_validate_host_fit(
     let registry = world
         .get_resource::<CapabilityRegistry>()
         .ok_or_else(|| "CapabilityRegistry is not available".to_string())?;
-    let descriptor = registry
-        .hosting_contract_descriptor(&contract_kind)
-        .ok_or_else(|| format!("Hosting contract '{}' is not registered", contract_kind.0))?;
-
     let validation_request = HostingValidationRequest {
-        contract_kind,
+        contract_kind: contract_kind.clone(),
         host_element_id: ElementId(request.host_element_id),
         hosted_element_id: ElementId(request.hosted_element_id),
         contract_parameters: request.contract_parameters,
     };
-    Ok((descriptor.validator)(validation_request, world))
+    if let Some(descriptor) = registry.hosting_contract_descriptor(&contract_kind) {
+        return Ok((descriptor.validator)(validation_request, world));
+    }
+
+    if contract_kind.0 == WALL_OPENING_HOSTING_CONTRACT_KIND {
+        let opening_id = opening_id_from_contract_parameters(
+            &validation_request.contract_parameters,
+        )
+        .or_else(|| opening_id_from_occurrence(world, validation_request.hosted_element_id));
+        return Ok(wall_opening_validation_result(
+            validation_request.contract_kind,
+            validation_request.host_element_id,
+            validation_request.hosted_element_id,
+            capture_entity_snapshot(world, validation_request.host_element_id),
+            opening_id.and_then(|id| capture_entity_snapshot(world, id)),
+            capture_entity_snapshot(world, validation_request.hosted_element_id)
+                .map(|snapshot| snapshot.center()),
+        ));
+    }
+
+    Err(format!(
+        "Hosting contract '{}' is not registered",
+        contract_kind.0
+    ))
 }
 
 #[cfg(feature = "model-api")]
@@ -16556,8 +16989,8 @@ pub fn handle_bim_property_set_set(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::definition::DefinitionId;
     use crate::plugins::modeling::property_sets::{
-        set_property_validated, PropertySetChangeKind, PropertySetChanged, PropertySetMap,
-        PropertySetSchemaRegistry, PropertyValue,
+        PropertySetChangeKind, PropertySetChanged, PropertySetMap, PropertySetSchemaRegistry,
+        PropertyValue, set_property_validated,
     };
     use bevy::ecs::message::Messages;
 
@@ -16809,8 +17242,8 @@ pub fn handle_bim_spatial_assign(
     container_kind: &str,
 ) -> Result<Value, String> {
     use crate::plugins::modeling::spatial_container::{
-        validate_assignment, SpatialContainerKind, SpatialContainerKindRegistry,
-        SpatialContainmentGraph, SpatialMembership,
+        SpatialContainerKind, SpatialContainerKindRegistry, SpatialContainmentGraph,
+        SpatialMembership, validate_assignment,
     };
 
     let child = ElementId(child_element_id);
@@ -17244,7 +17677,7 @@ pub fn handle_get_claim_grounding(
     element_id: u64,
     path_filter: Option<String>,
 ) -> ApiResult<Vec<ClaimGroundingEntry>> {
-    use crate::capability_registry::{effective_promotion_critical_paths, ElementClassAssignment};
+    use crate::capability_registry::{ElementClassAssignment, effective_promotion_critical_paths};
     use crate::plugins::refinement::{ClaimGrounding, RefinementStateComponent};
 
     let eid = ElementId(element_id);
@@ -17316,8 +17749,8 @@ pub fn handle_promote_refinement(
     overrides: serde_json::Value,
 ) -> ApiResult<PromoteRefinementResult> {
     use crate::plugins::refinement::{
-        apply_promote_refinement, ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState,
-        RefinementStateComponent,
+        ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState, RefinementStateComponent,
+        apply_promote_refinement,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -17389,7 +17822,7 @@ fn handle_demote_refinement(
     target_state_str: String,
 ) -> ApiResult<DemoteRefinementResult> {
     use crate::plugins::refinement::{
-        apply_demote_refinement, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
+        DemoteRefinementRequest, RefinementState, RefinementStateComponent, apply_demote_refinement,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -17436,7 +17869,7 @@ pub fn handle_run_validation(
     element_id: u64,
 ) -> ApiResult<Vec<ValidationFindingInfo>> {
     use crate::plugins::refinement::{
-        validate_declared_state_obligations, ObligationSet, RefinementStateComponent,
+        ObligationSet, RefinementStateComponent, validate_declared_state_obligations,
     };
 
     let eid = ElementId(element_id);
@@ -17548,7 +17981,9 @@ fn handle_explain_finding(_world: &World, finding_id: String) -> ApiResult<serde
             "source": "ADR-038 §11 / PP70 acceptance criteria"
         }))
     } else {
-        Err(format!("Unknown finding_id '{finding_id}'. Only findings produced by run_validation are known to this endpoint."))
+        Err(format!(
+            "Unknown finding_id '{finding_id}'. Only findings produced by run_validation are known to this endpoint."
+        ))
     }
 }
 
@@ -17904,11 +18339,11 @@ fn handle_preview_promotion(
     overrides: serde_json::Value,
 ) -> ApiResult<PreviewPromotionResult> {
     use crate::plugins::refinement::{
-        apply_demote_refinement, ClaimPath, DemoteRefinementRequest, RefinementState,
-        RefinementStateComponent,
+        ClaimPath, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
+        apply_demote_refinement,
     };
     use crate::plugins::refinement::{
-        apply_promote_refinement, PromoteRefinementRequest, RecipeId,
+        PromoteRefinementRequest, RecipeId, apply_promote_refinement,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -18798,9 +19233,9 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
-    use serde_json::json;
     #[cfg(feature = "model-api")]
     use serde_json::Value;
+    use serde_json::json;
     #[cfg(feature = "model-api")]
     use std::{
         fs,
@@ -19072,15 +19507,19 @@ mod tests {
         let details = get_entity_details(&world, ElementId(element_id))
             .expect("guide line details should exist");
         assert_eq!(details.entity_type, "guide_line");
-        assert!(details
-            .properties
-            .iter()
-            .any(|property| property.name == "direction"));
+        assert!(
+            details
+                .properties
+                .iter()
+                .any(|property| property.name == "direction")
+        );
 
         let entities = list_entities(&world);
-        assert!(entities
-            .iter()
-            .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line"));
+        assert!(
+            entities
+                .iter()
+                .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line")
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -19156,14 +19595,18 @@ mod tests {
         let details = get_entity_details(&world, ElementId(element_id))
             .expect("dimension line details should exist");
         assert_eq!(details.entity_type, "dimension_line");
-        assert!(details
-            .properties
-            .iter()
-            .any(|property| property.name == "extension"));
-        assert!(details
-            .properties
-            .iter()
-            .any(|property| property.name == "length"));
+        assert!(
+            details
+                .properties
+                .iter()
+                .any(|property| property.name == "extension")
+        );
+        assert!(
+            details
+                .properties
+                .iter()
+                .any(|property| property.name == "length")
+        );
 
         let entities = list_entities(&world);
         assert!(entities.iter().any(|entry| {
@@ -19247,10 +19690,12 @@ mod tests {
         let saved_path = handle_take_screenshot(&mut world, screenshot_path.to_str().unwrap())
             .expect("take_screenshot should queue a capture");
         assert_eq!(saved_path, screenshot_path.to_string_lossy().to_string());
-        assert!(world
-            .resource::<crate::plugins::drawing_export::ViewportExportState>()
-            .pending
-            .is_some());
+        assert!(
+            world
+                .resource::<crate::plugins::drawing_export::ViewportExportState>()
+                .pending
+                .is_some()
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -20372,14 +20817,18 @@ mod tests {
                 .unwrap()["default_value"],
             json!(5.0)
         );
-        assert!(explain
-            .local_parameter_names
-            .iter()
-            .any(|name| name == "height"));
-        assert!(explain
-            .inherited_parameter_names
-            .iter()
-            .any(|name| name == "width"));
+        assert!(
+            explain
+                .local_parameter_names
+                .iter()
+                .any(|name| name == "height")
+        );
+        assert!(
+            explain
+                .inherited_parameter_names
+                .iter()
+                .any(|name| name == "width")
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -20599,7 +21048,9 @@ mod tests {
                 .iter()
                 .map(|(generated, _)| generated.slot_path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["lite[0]", "lite[1]", "lite[2]", "lite[3]", "lite[4]", "lite[5]"]
+            vec![
+                "lite[0]", "lite[1]", "lite[2]", "lite[3]", "lite[4]", "lite[5]"
+            ]
         );
         assert!((generated_parts[0].1.centre.x - -0.25).abs() < 0.0001);
         assert!((generated_parts[0].1.centre.y - -0.2).abs() < 0.0001);
@@ -20694,7 +21145,9 @@ mod tests {
                 .iter()
                 .map(|(generated, _)| generated.slot_path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["pane[0]", "pane[1]", "pane[2]", "pane[3]", "pane[4]", "pane[5]"]
+            vec![
+                "pane[0]", "pane[1]", "pane[2]", "pane[3]", "pane[4]", "pane[5]"
+            ]
         );
         assert_eq!(generated_parts[0].1.centre.x, 0.0);
         assert_eq!(generated_parts[0].1.centre.y, 0.0);
@@ -21080,12 +21533,16 @@ mod tests {
 
         assert_eq!(instantiated.definition_id, definition.definition_id);
         assert_eq!(instantiated.imported_definition_ids.len(), 2);
-        assert!(instantiated
-            .imported_definition_ids
-            .contains(&definition.definition_id));
-        assert!(instantiated
-            .imported_definition_ids
-            .contains(&base_definition.definition_id));
+        assert!(
+            instantiated
+                .imported_definition_ids
+                .contains(&definition.definition_id)
+        );
+        assert!(
+            instantiated
+                .imported_definition_ids
+                .contains(&base_definition.definition_id)
+        );
 
         let resolved = handle_resolve_occurrence(&target_world, instantiated.element_id)
             .expect("instantiated occurrence should resolve");
@@ -21097,12 +21554,7 @@ mod tests {
     }
 
     #[cfg(feature = "model-api")]
-    #[test]
-    fn hosted_definition_instantiation_derives_anchors_and_relation() {
-        use crate::plugins::history::PendingCommandQueue;
-        use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink};
-
-        let mut world = init_model_api_test_world();
+    fn register_hosted_on_relation(world: &mut World) {
         world
             .resource_mut::<CapabilityRegistry>()
             .register_relation_type(crate::capability_registry::RelationTypeDescriptor {
@@ -21116,6 +21568,16 @@ mod tests {
                 external_classification: None,
                 host_contract_kind: None,
             });
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn hosted_definition_instantiation_derives_anchors_and_relation() {
+        use crate::plugins::history::PendingCommandQueue;
+        use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink};
+
+        let mut world = init_model_api_test_world();
+        register_hosted_on_relation(&mut world);
 
         let host_id = handle_create_entity(
             &mut world,
@@ -21171,9 +21633,11 @@ mod tests {
         assert_eq!(explanation.label, "HostedWindow");
         assert_eq!(explanation.hosting["host_element_id"], json!(host_id));
         assert_eq!(explanation.hosting["opening_element_id"], json!(opening_id));
-        assert!(explanation.hosting["anchors"]
-            .as_array()
-            .is_some_and(|anchors| anchors.len() >= 3));
+        assert!(
+            explanation.hosting["anchors"]
+                .as_array()
+                .is_some_and(|anchors| anchors.len() >= 3)
+        );
 
         let relations = handle_query_relations(
             &world,
@@ -21220,6 +21684,172 @@ mod tests {
         let opening_entity = find_entity_by_element_id(&mut world, ElementId(opening_id))
             .expect("opening entity should remain after undo");
         assert!(world.get::<OpeningContext>(opening_entity).is_none());
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn hosted_definition_instantiation_rejects_perpendicular_opening_proxy() {
+        let mut world = init_model_api_test_world();
+        register_hosted_on_relation(&mut world);
+
+        let host_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.5, 0.0],
+                "half_extents": [2.0, 1.5, 0.15]
+            }),
+        )
+        .expect("host should be created");
+        let perpendicular_opening_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.2, 0.0],
+                "half_extents": [0.6, 0.15, 0.8]
+            }),
+        )
+        .expect("opening proxy should be created");
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+
+        let err = handle_instantiate_hosted_definition(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "label": "BadHostedWindow",
+                "hosting": {
+                    "host_element_id": host_id,
+                    "opening_element_id": perpendicular_opening_id
+                }
+            }),
+        )
+        .expect_err("perpendicular opening should be rejected");
+
+        assert!(err.contains("Opening Normal Alignment"), "{err}");
+        assert!(err.contains("Opening Thickness Containment"), "{err}");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn hosted_definition_instantiation_requires_remaining_wall_around_opening() {
+        let mut world = init_model_api_test_world();
+        register_hosted_on_relation(&mut world);
+
+        let host_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.5, 0.0],
+                "half_extents": [2.0, 1.5, 0.15]
+            }),
+        )
+        .expect("host should be created");
+        let edge_to_edge_opening_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.5, 0.0],
+                "half_extents": [2.0, 1.0, 0.15]
+            }),
+        )
+        .expect("opening proxy should be created");
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+
+        let err = handle_instantiate_hosted_definition(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "label": "BadHostedWindow",
+                "hosting": {
+                    "host_element_id": host_id,
+                    "opening_element_id": edge_to_edge_opening_id
+                }
+            }),
+        )
+        .expect_err("edge-to-edge opening should be rejected");
+
+        assert!(err.contains("Remaining Wall X"), "{err}");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn occurrence_validate_host_fit_uses_core_wall_opening_fallback() {
+        let mut world = init_model_api_test_world();
+        register_hosted_on_relation(&mut world);
+
+        let host_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.5, 0.0],
+                "half_extents": [2.0, 1.5, 0.15]
+            }),
+        )
+        .expect("host should be created");
+        let opening_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.2, 0.0],
+                "half_extents": [0.6, 0.8, 0.15]
+            }),
+        )
+        .expect("opening proxy should be created");
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+        let instantiated = handle_instantiate_hosted_definition(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "label": "HostedWindow",
+                "hosting": {
+                    "host_element_id": host_id,
+                    "opening_element_id": opening_id
+                }
+            }),
+        )
+        .expect("hosted occurrence should be instantiated");
+
+        let result = handle_occurrence_validate_host_fit(
+            &world,
+            ValidateHostFitRequest {
+                contract_kind: WALL_OPENING_HOSTING_CONTRACT_KIND.to_string(),
+                host_element_id: host_id,
+                hosted_element_id: instantiated.element_id,
+                contract_parameters: json!({
+                    "opening_element_id": opening_id
+                }),
+            },
+        )
+        .expect("fallback validator should run");
+
+        assert_eq!(result.status, HostingValidationStatus::Passed);
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|check| check.id.0 == "opening.normal_alignment")
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -21458,12 +22088,8 @@ mod tests {
             .entity_mut(entity)
             .insert(OccurrenceClassification::clean());
 
-        handle_update_occurrence_overrides(
-            &mut world,
-            occ_id,
-            json!({ "finish_color": "black" }),
-        )
-        .expect("non-geometry override update should succeed");
+        handle_update_occurrence_overrides(&mut world, occ_id, json!({ "finish_color": "black" }))
+            .expect("non-geometry override update should succeed");
 
         let classification = world
             .get::<OccurrenceClassification>(entity)
@@ -21869,21 +22495,21 @@ mod tests {
         let mut world = init_model_api_test_world();
         seed_recipe_draft_corpus(&mut world);
 
-        let draft = handle_draft_rule_pack(
-            &world,
-            "SE/mono_truss".into(),
-            "roof_system".into(),
-        )
-        .expect("draft_rule_pack should generate a scaffold");
+        let draft = handle_draft_rule_pack(&world, "SE/mono_truss".into(), "roof_system".into())
+            .expect("draft_rule_pack should generate a scaffold");
 
         assert!(!draft.rust_skeleton.contains("TODO"));
         assert!(!draft.notes.iter().any(|note| note.contains("TODO")));
-        assert!(draft
-            .rust_skeleton
-            .contains("Draft roof_system rule from SE/mono_truss"));
-        assert!(draft
-            .rust_skeleton
-            .contains("Complete the validator body before registering"));
+        assert!(
+            draft
+                .rust_skeleton
+                .contains("Draft roof_system rule from SE/mono_truss")
+        );
+        assert!(
+            draft
+                .rust_skeleton
+                .contains("Complete the validator body before registering")
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -22529,9 +23155,11 @@ mod tests {
                 }
             ))
         );
-        assert!(!world
-            .resource::<crate::plugins::materials::MaterialRegistry>()
-            .contains("paint_white"));
+        assert!(
+            !world
+                .resource::<crate::plugins::materials::MaterialRegistry>()
+                .contains("paint_white")
+        );
     }
 
     #[cfg(feature = "model-api")]
@@ -22589,10 +23217,12 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![PropertySetSchema::new("Pset_WallCommon").with_property(
-                PropertyDef::new("FireRating", PropertyValueType::Text)
-                    .required_for(ExportProfile::new("IFC4")),
-            )],
+            vec![
+                PropertySetSchema::new("Pset_WallCommon").with_property(
+                    PropertyDef::new("FireRating", PropertyValueType::Text)
+                        .required_for(ExportProfile::new("IFC4")),
+                ),
+            ],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<
@@ -22647,8 +23277,10 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![PropertySetSchema::new("Pset_WallCommon")
-                .with_property(PropertyDef::new("FireRating", PropertyValueType::Text))],
+            vec![
+                PropertySetSchema::new("Pset_WallCommon")
+                    .with_property(PropertyDef::new("FireRating", PropertyValueType::Text)),
+            ],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<
@@ -22779,9 +23411,11 @@ mod tests {
     #[test]
     fn bim_exchange_identity_errors_for_missing_element_or_blank_inputs() {
         let mut world = init_model_api_test_world();
-        assert!(handle_bim_exchange_identity_get(&mut world, 999, "ifc")
-            .unwrap_err()
-            .contains("not found"));
+        assert!(
+            handle_bim_exchange_identity_get(&mut world, 999, "ifc")
+                .unwrap_err()
+                .contains("not found")
+        );
         assert!(
             handle_bim_exchange_identity_assign(&mut world, 999, "", "x")
                 .unwrap_err()
@@ -22829,8 +23463,10 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![PropertySetSchema::new("Pset_WallCommon")
-                .with_property(PropertyDef::new("LoadBearing", PropertyValueType::Boolean))],
+            vec![
+                PropertySetSchema::new("Pset_WallCommon")
+                    .with_property(PropertyDef::new("LoadBearing", PropertyValueType::Boolean)),
+            ],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<PropertySetChanged>::default());
