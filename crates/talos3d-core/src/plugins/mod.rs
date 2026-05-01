@@ -65,3 +65,4 @@ pub mod ui;
 pub mod units;
 pub mod validation;
 pub mod vector_drawing;
+pub mod workspace_library_root;
