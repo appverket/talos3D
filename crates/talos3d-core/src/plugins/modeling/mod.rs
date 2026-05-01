@@ -753,6 +753,14 @@ impl Plugin for ModelingPlugin {
                     profile_feature::propagate_feature_parent_changes,
                     profile_feature::evaluate_face_profile_features,
                     evaluate_occurrences,
+                    // PP-A2DB-2 slice C4e: after Occurrences are
+                    // evaluated, run the SelfRoot relation-template
+                    // materializer. The system is idempotent (slice
+                    // C4c marker), so scheduling it every Update
+                    // tick is safe — it spawns nothing for
+                    // occurrences whose templates already
+                    // materialized.
+                    crate::plugins::promotion_world::materialize_self_root_templates_for_occurrences,
                 )
                     .chain()
                     .in_set(mesh_generation::EvaluationSet::Evaluate),
