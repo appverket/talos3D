@@ -985,6 +985,76 @@ pub fn auto_materialize_self_root_templates(
     Ok(count)
 }
 
+/// Bevy system that walks every Occurrence in the world and runs
+/// `auto_materialize_self_root_templates` for each. Idempotent —
+/// safe to schedule every frame — because the per-Occurrence marker
+/// keeps subsequent calls returning `Ok(0)` for already-spawned
+/// templates.
+///
+/// Per-Occurrence errors are logged via `bevy::log::warn!` and the
+/// pass continues; aborting on the first failure would prevent the
+/// rest of the world from materializing, which is the wrong
+/// semantics here. Errors are surfaced through warn-level log so
+/// they're visible without crashing the loop.
+///
+/// Schedule wiring (this system into the modeling plugin's
+/// post-evaluate stage) is intentionally a follow-up — splitting it
+/// lets this function be reviewed and tested in isolation.
+pub fn materialize_self_root_templates_for_occurrences(world: &mut World) {
+    // Snapshot the (occurrence_id, definition_id) pairs first so we
+    // don't hold a query active while mutating the world inside the
+    // auto-materializer.
+    let snapshots: Vec<(ElementId, crate::plugins::modeling::definition::DefinitionId)> = {
+        let Some(mut q) = world
+            .try_query::<(&ElementId, &crate::plugins::modeling::occurrence::OccurrenceIdentity)>()
+        else {
+            return;
+        };
+        q.iter(world)
+            .map(|(eid, identity)| (*eid, identity.definition_id.clone()))
+            .collect()
+    };
+    if snapshots.is_empty() {
+        return;
+    }
+
+    // Snapshot every Definition we'll need so we can iterate without
+    // borrowing the registry across the world mutation. The cost is
+    // a clone per unique definition id; the alternative is more
+    // complicated borrow gymnastics.
+    let defs: std::collections::HashMap<
+        crate::plugins::modeling::definition::DefinitionId,
+        crate::plugins::modeling::definition::Definition,
+    > = {
+        let registry = world
+            .resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        snapshots
+            .iter()
+            .filter_map(|(_, def_id)| {
+                registry
+                    .effective_definition(def_id)
+                    .ok()
+                    .map(|def| (def_id.clone(), def))
+            })
+            .collect()
+    };
+
+    for (occ_id, def_id) in snapshots {
+        let Some(def) = defs.get(&def_id) else {
+            continue;
+        };
+        if let Err(err) = auto_materialize_self_root_templates(world, def, occ_id) {
+            bevy::log::warn!(
+                "auto-materialize self-root templates failed for occurrence {:?} \
+                 (definition '{}'): {}",
+                occ_id,
+                def_id,
+                err
+            );
+        }
+    }
+}
+
 // === Tests =================================================================
 
 #[cfg(test)]
@@ -2562,5 +2632,158 @@ mod tests {
         let count =
             auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!(count, 0);
+    }
+
+    // === PP-A2DB-2 slice C4d: per-occurrence materializer system ===========
+
+    fn world_with_definition_registry(
+        defs: Vec<crate::plugins::modeling::definition::Definition>,
+    ) -> World {
+        let mut world = world_with_allocator();
+        let mut registry =
+            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        for def in defs {
+            registry.insert(def);
+        }
+        world.insert_resource(registry);
+        world
+    }
+
+    #[test]
+    fn materialize_system_is_a_no_op_when_world_has_no_occurrences() {
+        let mut world = world_with_definition_registry(Vec::new());
+        materialize_self_root_templates_for_occurrences(&mut world);
+        let mut q = world.query::<&SemanticRelation>();
+        assert_eq!(q.iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn materialize_system_spawns_relations_for_occurrence_with_self_root_templates() {
+        let mut world = world_with_allocator();
+        let def_id = DefinitionId("door.proto".to_string());
+        let mut def =
+            crate::plugins::definition_authoring::blank_definition("DoorProto");
+        def.id = def_id.clone();
+        def = def.with_relation_templates(vec![self_root_template(
+            "self_marker",
+            elem(30),
+        )]);
+        let mut registry =
+            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        registry.insert(def);
+        world.insert_resource(registry);
+        spawn_occurrence(&mut world, elem(500), &def_id.0);
+
+        materialize_self_root_templates_for_occurrences(&mut world);
+
+        let mut q = world.query::<(&SemanticRelation, &MaterializedFromTemplate)>();
+        let spawned: Vec<_> = q.iter(&world).collect();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(spawned[0].0.relation_type, "self_marker");
+        assert_eq!(spawned[0].1.for_occurrence, elem(500));
+    }
+
+    #[test]
+    fn materialize_system_is_idempotent_across_repeated_runs() {
+        let mut world = world_with_allocator();
+        let def_id = DefinitionId("door.proto".to_string());
+        let mut def =
+            crate::plugins::definition_authoring::blank_definition("DoorProto");
+        def.id = def_id.clone();
+        def = def.with_relation_templates(vec![self_root_template(
+            "self_marker",
+            elem(30),
+        )]);
+        let mut registry =
+            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        registry.insert(def);
+        world.insert_resource(registry);
+        spawn_occurrence(&mut world, elem(500), &def_id.0);
+
+        materialize_self_root_templates_for_occurrences(&mut world);
+        materialize_self_root_templates_for_occurrences(&mut world);
+        materialize_self_root_templates_for_occurrences(&mut world);
+
+        let mut q = world.query::<&SemanticRelation>();
+        assert_eq!(
+            q.iter(&world).count(),
+            1,
+            "three runs of the system must not duplicate-spawn"
+        );
+    }
+
+    #[test]
+    fn materialize_system_handles_multiple_occurrences_independently() {
+        let mut world = world_with_allocator();
+        let def_a = DefinitionId("def.a".to_string());
+        let def_b = DefinitionId("def.b".to_string());
+        let mut a =
+            crate::plugins::definition_authoring::blank_definition("A");
+        a.id = def_a.clone();
+        a = a.with_relation_templates(vec![self_root_template("a_marker", elem(30))]);
+        let mut b =
+            crate::plugins::definition_authoring::blank_definition("B");
+        b.id = def_b.clone();
+        b = b.with_relation_templates(vec![self_root_template("b_marker", elem(31))]);
+        let mut registry =
+            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        registry.insert(a);
+        registry.insert(b);
+        world.insert_resource(registry);
+        spawn_occurrence(&mut world, elem(500), &def_a.0);
+        spawn_occurrence(&mut world, elem(501), &def_b.0);
+        spawn_occurrence(&mut world, elem(502), &def_a.0); // second of A
+
+        materialize_self_root_templates_for_occurrences(&mut world);
+
+        let mut q = world.query::<(&SemanticRelation, &MaterializedFromTemplate)>();
+        let by_occ: std::collections::HashMap<u64, Vec<&str>> = {
+            let mut m = std::collections::HashMap::<u64, Vec<&str>>::new();
+            for (rel, marker) in q.iter(&world) {
+                m.entry(marker.for_occurrence.0)
+                    .or_default()
+                    .push(rel.relation_type.as_str());
+            }
+            m
+        };
+        assert_eq!(by_occ.get(&500), Some(&vec!["a_marker"]));
+        assert_eq!(by_occ.get(&501), Some(&vec!["b_marker"]));
+        assert_eq!(by_occ.get(&502), Some(&vec!["a_marker"]));
+    }
+
+    #[test]
+    fn materialize_system_skips_occurrence_whose_definition_is_missing() {
+        let mut world = world_with_allocator();
+        // Empty registry — Occurrence's definition won't resolve.
+        let registry =
+            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        world.insert_resource(registry);
+        spawn_occurrence(&mut world, elem(500), "ghost.def");
+
+        // Should not panic; just skip.
+        materialize_self_root_templates_for_occurrences(&mut world);
+        let mut q = world.query::<&SemanticRelation>();
+        assert_eq!(q.iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn materialize_system_does_nothing_when_definition_has_no_self_root_templates() {
+        let mut world = world_with_allocator();
+        let def_id = DefinitionId("slot.only".to_string());
+        let mut def =
+            crate::plugins::definition_authoring::blank_definition("SlotOnly");
+        def.id = def_id.clone();
+        def = def.with_relation_templates(vec![slot_self_template(
+            "hosts", "frame", elem(30),
+        )]);
+        let mut registry =
+            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        registry.insert(def);
+        world.insert_resource(registry);
+        spawn_occurrence(&mut world, elem(500), &def_id.0);
+
+        materialize_self_root_templates_for_occurrences(&mut world);
+        let mut q = world.query::<&SemanticRelation>();
+        assert_eq!(q.iter(&world).count(), 0);
     }
 }
