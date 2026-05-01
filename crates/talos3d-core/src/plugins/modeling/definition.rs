@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::void_declaration::VoidDeclaration;
+use crate::plugins::materials::MaterialAssignment;
 
 // ---------------------------------------------------------------------------
 // Global counters
@@ -800,6 +801,16 @@ pub struct Definition {
     /// Optional composition graph for compound definitions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compound: Option<CompoundDefinition>,
+    /// Default material assignment for occurrences of this Definition.
+    ///
+    /// Per ADR-026 / ADR-043 / ADR-044 and the material architecture
+    /// agreement, material is a first-class core slot rather than a
+    /// `domain_data.architectural.material_assignment.material_id`
+    /// JSON poke. PP-099 / PP-MATREL-1 slice 1 lands the data shape
+    /// additively; legacy JSON sites continue to work in parallel
+    /// until follow-up slices migrate them and remove the helper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_assignment: Option<MaterialAssignment>,
     /// Domain-specific extension payload owned by higher-level products.
     ///
     /// Core treats this as opaque JSON and round-trips it unchanged.
@@ -807,7 +818,48 @@ pub struct Definition {
     pub domain_data: Value,
 }
 
+/// Provenance reported by `Definition::resolve_material_assignment` and
+/// downstream `occurrence.resolve` callers, describing where the
+/// resolved `MaterialAssignment` originated.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialProvenance {
+    /// No material assignment is set anywhere in the resolution chain.
+    None,
+    /// The Definition's `material_assignment` default is in effect.
+    DefinitionDefault,
+    /// The OccurrenceIdentity's `material_override` is shadowing the
+    /// Definition default.
+    OccurrenceOverride,
+    /// The Definition inherits a material from a base definition (no
+    /// override at this level). Reserved for use once
+    /// `merge_definition` resolves a non-trivial inheritance chain.
+    InheritedSpecialization,
+}
+
 impl Definition {
+    /// Resolve the effective material assignment for an occurrence of
+    /// this Definition, given an optional `OccurrenceIdentity::material_override`.
+    ///
+    /// Resolution rule (per PP-099 acceptance):
+    /// `OccurrenceIdentity.material_override` shadows
+    /// `Definition.material_assignment`. The returned tuple's
+    /// `MaterialProvenance` reports which slot the resolved binding came
+    /// from, including `None` when neither side carries an assignment.
+    pub fn resolve_material_assignment<'a>(
+        &'a self,
+        occurrence_override: Option<&'a MaterialAssignment>,
+    ) -> (Option<&'a MaterialAssignment>, MaterialProvenance) {
+        if let Some(over) = occurrence_override {
+            return (Some(over), MaterialProvenance::OccurrenceOverride);
+        }
+        match &self.material_assignment {
+            Some(default) => (Some(default), MaterialProvenance::DefinitionDefault),
+            None => (None, MaterialProvenance::None),
+        }
+    }
+
     /// Stamp `templates` onto the Definition's compound body. If the
     /// Definition was a leaf, this upgrades it to compound with an
     /// otherwise-empty body. Returns `self` so it composes with other
@@ -1300,6 +1352,7 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
         evaluators,
         representations,
         compound,
+        material_assignment,
         domain_data,
     } = child;
 
@@ -1323,6 +1376,7 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
             representations
         },
         compound: merge_compound_definition(base.compound, compound),
+        material_assignment: material_assignment.or(base.material_assignment),
         domain_data: merge_json_values(base.domain_data, domain_data),
     }
 }
@@ -1931,5 +1985,251 @@ mod pp_097_slot_multiplicity_tests {
             }
             _ => panic!("expected BySpacingFromHost after round-trip"),
         }
+    }
+}
+
+// === PP-099 PP-MATREL-1 slice 1: material assignment relocation ============
+
+#[cfg(test)]
+mod pp_099_material_assignment_relocation_tests {
+    use super::*;
+    use crate::plugins::materials::{
+        MaterialAssignment, MaterialBinding, MaterialLayer, MaterialLayerSet,
+    };
+    use serde_json::json;
+
+    fn blank_definition_with_id(id: &str) -> Definition {
+        Definition {
+            id: DefinitionId(id.to_string()),
+            base_definition_id: None,
+            name: format!("Test {id}"),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema::default(),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            material_assignment: None,
+            domain_data: serde_json::Value::Null,
+        }
+    }
+
+    fn single(material_id: &str) -> MaterialAssignment {
+        MaterialAssignment::Single(MaterialBinding::render_only(material_id))
+    }
+
+    #[test]
+    fn definition_default_has_no_material_assignment() {
+        let def = blank_definition_with_id("a");
+        assert!(def.material_assignment.is_none());
+    }
+
+    #[test]
+    fn definition_loads_legacy_json_without_material_assignment_field() {
+        // A pre-PP-099 definition serialized without the field must
+        // still deserialize cleanly with `material_assignment: None`.
+        let legacy = json!({
+            "id": "lib.window",
+            "name": "Window",
+            "definition_kind": "Solid",
+            "definition_version": 1,
+            "interface": {
+                "parameters": [],
+                "external_context_requirements": []
+            },
+            "evaluators": [],
+            "representations": [],
+            "domain_data": null
+        });
+        let def: Definition = serde_json::from_value(legacy).unwrap();
+        assert!(def.material_assignment.is_none());
+    }
+
+    #[test]
+    fn definition_with_single_binding_round_trips_through_serde() {
+        let mut def = blank_definition_with_id("b");
+        def.material_assignment = Some(single("oak.solid"));
+        let bytes = serde_json::to_string(&def).unwrap();
+        // The serialized form should expose a `material_assignment`
+        // tagged-union shape rather than nesting it under domain_data.
+        assert!(bytes.contains("material_assignment"));
+        let back: Definition = serde_json::from_str(&bytes).unwrap();
+        assert!(matches!(
+            back.material_assignment,
+            Some(MaterialAssignment::Single(_))
+        ));
+        let render = back
+            .material_assignment
+            .as_ref()
+            .and_then(|a| a.render_material_id(None));
+        assert_eq!(render.as_deref(), Some("oak.solid"));
+    }
+
+    #[test]
+    fn definition_with_layer_set_round_trips_through_serde() {
+        let mut def = blank_definition_with_id("wall");
+        def.material_assignment = Some(MaterialAssignment::LayerSet(MaterialLayerSet {
+            layers: vec![
+                MaterialLayer {
+                    name: Some("gypsum_outer".into()),
+                    thickness_mm: Some(13.0),
+                    binding: MaterialBinding::render_only("gypsum.gwb"),
+                },
+                MaterialLayer {
+                    name: Some("studs_with_insulation".into()),
+                    thickness_mm: Some(140.0),
+                    binding: MaterialBinding::render_only("rockwool.batt"),
+                },
+                MaterialLayer {
+                    name: Some("vapour_barrier".into()),
+                    thickness_mm: Some(0.2),
+                    binding: MaterialBinding::render_only("polyethylene.vapour"),
+                },
+                MaterialLayer {
+                    name: Some("gypsum_inner".into()),
+                    thickness_mm: Some(13.0),
+                    binding: MaterialBinding::render_only("gypsum.gwb"),
+                },
+            ],
+        }));
+        let bytes = serde_json::to_string(&def).unwrap();
+        let back: Definition = serde_json::from_str(&bytes).unwrap();
+        match &back.material_assignment {
+            Some(MaterialAssignment::LayerSet(set)) => {
+                assert_eq!(set.layers.len(), 4);
+                let names: Vec<_> = set.layers.iter().map(|l| l.name.clone()).collect();
+                assert_eq!(
+                    names,
+                    vec![
+                        Some("gypsum_outer".into()),
+                        Some("studs_with_insulation".into()),
+                        Some("vapour_barrier".into()),
+                        Some("gypsum_inner".into()),
+                    ]
+                );
+            }
+            other => panic!("expected LayerSet after round-trip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn occurrence_identity_default_has_no_material_override() {
+        use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+        let identity = OccurrenceIdentity::new(DefinitionId("d".into()), 1);
+        assert!(identity.material_override.is_none());
+    }
+
+    #[test]
+    fn occurrence_identity_loads_legacy_json_without_material_override_field() {
+        use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+        let legacy = json!({
+            "definition_id": "lib.window",
+            "definition_version": 1,
+            "overrides": {},
+            "domain_data": null
+        });
+        let identity: OccurrenceIdentity = serde_json::from_value(legacy).unwrap();
+        assert!(identity.material_override.is_none());
+    }
+
+    #[test]
+    fn occurrence_identity_with_material_override_round_trips() {
+        use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+        let mut identity = OccurrenceIdentity::new(DefinitionId("d".into()), 1);
+        identity.material_override = Some(single("walnut.veneer"));
+        let bytes = serde_json::to_string(&identity).unwrap();
+        assert!(bytes.contains("material_override"));
+        let back: OccurrenceIdentity = serde_json::from_str(&bytes).unwrap();
+        let render = back
+            .material_override
+            .as_ref()
+            .and_then(|a| a.render_material_id(None));
+        assert_eq!(render.as_deref(), Some("walnut.veneer"));
+    }
+
+    #[test]
+    fn resolve_returns_none_when_neither_default_nor_override_is_set() {
+        let def = blank_definition_with_id("e");
+        let (resolved, prov) = def.resolve_material_assignment(None);
+        assert!(resolved.is_none());
+        assert_eq!(prov, MaterialProvenance::None);
+    }
+
+    #[test]
+    fn resolve_returns_definition_default_when_override_absent() {
+        let mut def = blank_definition_with_id("f");
+        def.material_assignment = Some(single("oak.solid"));
+        let (resolved, prov) = def.resolve_material_assignment(None);
+        assert_eq!(prov, MaterialProvenance::DefinitionDefault);
+        assert_eq!(
+            resolved.and_then(|a| a.render_material_id(None)).as_deref(),
+            Some("oak.solid"),
+        );
+    }
+
+    #[test]
+    fn resolve_override_shadows_definition_default() {
+        let mut def = blank_definition_with_id("g");
+        def.material_assignment = Some(single("oak.solid"));
+        let over = single("walnut.veneer");
+        let (resolved, prov) = def.resolve_material_assignment(Some(&over));
+        assert_eq!(prov, MaterialProvenance::OccurrenceOverride);
+        assert_eq!(
+            resolved.and_then(|a| a.render_material_id(None)).as_deref(),
+            Some("walnut.veneer"),
+        );
+    }
+
+    #[test]
+    fn resolve_override_reports_override_provenance_even_with_no_default() {
+        let def = blank_definition_with_id("h");
+        let over = single("brushed.steel");
+        let (resolved, prov) = def.resolve_material_assignment(Some(&over));
+        assert_eq!(prov, MaterialProvenance::OccurrenceOverride);
+        assert_eq!(
+            resolved.and_then(|a| a.render_material_id(None)).as_deref(),
+            Some("brushed.steel"),
+        );
+    }
+
+    #[test]
+    fn merge_definition_child_material_overrides_base() {
+        // When the child definition has a material_assignment and the
+        // base also has one, the child wins (mirrors how `evaluators`,
+        // `representations`, and other declarable slots merge).
+        let mut base = blank_definition_with_id("base");
+        base.material_assignment = Some(single("base.material"));
+        let mut child = blank_definition_with_id("child");
+        child.base_definition_id = Some(base.id.clone());
+        child.material_assignment = Some(single("child.material"));
+
+        let merged = merge_definition(base, child);
+        let render = merged
+            .material_assignment
+            .as_ref()
+            .and_then(|a| a.render_material_id(None));
+        assert_eq!(render.as_deref(), Some("child.material"));
+    }
+
+    #[test]
+    fn merge_definition_inherits_base_material_when_child_unset() {
+        // If the derived (child) definition does not set its own
+        // material_assignment, the merge should inherit the base's.
+        let mut base = blank_definition_with_id("base2");
+        base.material_assignment = Some(single("base.material"));
+        let mut child = blank_definition_with_id("child2");
+        child.base_definition_id = Some(base.id.clone());
+        child.material_assignment = None;
+
+        let merged = merge_definition(base, child);
+        let render = merged
+            .material_assignment
+            .as_ref()
+            .and_then(|a| a.render_material_id(None));
+        assert_eq!(render.as_deref(), Some("base.material"));
     }
 }

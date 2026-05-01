@@ -14105,6 +14105,7 @@ fn build_definition_from_object(
         evaluators: parse_evaluators(object)?,
         representations: parse_representations(object)?,
         compound: parse_optional_compound(object)?,
+        material_assignment: None,
         domain_data: object.get("domain_data").cloned().unwrap_or(Value::Null),
     })
 }

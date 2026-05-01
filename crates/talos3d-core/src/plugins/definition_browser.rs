@@ -4192,6 +4192,7 @@ mod tests {
             evaluators: Vec::new(),
             representations: Vec::new(),
             compound: None,
+            material_assignment: None,
             domain_data: serde_json::Value::Null,
         };
         app.world_mut()
@@ -4303,6 +4304,7 @@ mod tests {
             evaluators: Vec::new(),
             representations: Vec::new(),
             compound: None,
+            material_assignment: None,
             domain_data: serde_json::Value::Null,
         };
         app.world_mut()

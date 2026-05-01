@@ -801,6 +801,7 @@ mod tests {
             evaluators: Vec::new(),
             representations: Vec::new(),
             compound: None,
+            material_assignment: None,
             domain_data: Value::Null,
         };
 

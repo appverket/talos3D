@@ -240,6 +240,7 @@ pub fn blank_definition(name: impl Into<String>) -> Definition {
         evaluators: Vec::new(),
         representations: Vec::new(),
         compound: None,
+        material_assignment: None,
         domain_data: Value::Null,
     }
 }
@@ -305,6 +306,7 @@ pub fn derive_definition_from_base(
         evaluators: Vec::new(),
         representations: Vec::new(),
         compound: None,
+        material_assignment: None,
         domain_data: Value::Null,
     }
 }
