@@ -1996,6 +1996,17 @@ mod pp_098_occurrence_cache_tests {
         }
     }
 
+    fn string_parameter(name: &str, default_value: &str, geometry_affecting: bool) -> ParameterDef {
+        ParameterDef {
+            name: name.to_string(),
+            param_type: ParamType::StringVal,
+            default_value: json!(default_value),
+            override_policy: OverridePolicy::Overridable,
+            geometry_affecting,
+            metadata: ParameterMetadata::default(),
+        }
+    }
+
     fn rectangular_definition() -> Definition {
         Definition {
             id: DefinitionId("cached.window".to_string()),
@@ -2008,6 +2019,7 @@ mod pp_098_occurrence_cache_tests {
                     numeric_parameter("width", 2.0),
                     numeric_parameter("depth", 0.25),
                     numeric_parameter("height", 1.5),
+                    string_parameter("finish_color", "white", false),
                 ]),
                 void_declaration: None,
                 external_context_requirements: Vec::new(),
@@ -2166,5 +2178,108 @@ mod pp_098_occurrence_cache_tests {
         );
         assert!(entity_ref.get::<ProfileExtrusion>().is_none());
         assert!(entity_ref.get::<NeedsMesh>().is_none());
+    }
+
+    #[test]
+    fn identical_occurrences_share_one_cached_mesh_handle() {
+        let definition = rectangular_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity =
+            OccurrenceIdentity::new(definition.id.clone(), definition.definition_version);
+        let resolved = registry
+            .resolve_params_checked(&definition.id, &identity.overrides)
+            .expect("resolved params");
+        let resolved_values = resolved_param_values(&resolved);
+        let cache_key = mesh_cache_key_for_definition(&definition, &resolved_values);
+
+        let mut world = world_with_cache();
+        let cached_handle = world.resource_mut::<Assets<Mesh>>().add(Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        ));
+        world
+            .resource_mut::<RepresentationCache>()
+            .insert(cache_key, cached_handle.clone());
+
+        for index in 0..12 {
+            render_occurrence(
+                &mut world,
+                &registry,
+                ElementId(100 + index),
+                &identity,
+                Transform::from_translation(Vec3::new(index as f32, 0.0, 0.0)),
+                Some("cached"),
+            )
+            .expect("render occurrence");
+        }
+
+        assert_eq!(world.resource::<RepresentationCache>().len(), 1);
+        for index in 0..12 {
+            let entity = crate::plugins::commands::find_entity_by_element_id(
+                &mut world,
+                ElementId(100 + index),
+            )
+            .expect("occurrence entity");
+            assert_eq!(
+                world.entity(entity).get::<Mesh3d>().expect("mesh").id(),
+                cached_handle.id()
+            );
+        }
+    }
+
+    #[test]
+    fn material_only_override_preserves_cached_mesh_handle() {
+        let definition = rectangular_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity =
+            OccurrenceIdentity::new(definition.id.clone(), definition.definition_version);
+        let resolved = registry
+            .resolve_params_checked(&definition.id, &identity.overrides)
+            .expect("resolved params");
+        let resolved_values = resolved_param_values(&resolved);
+        let cache_key = mesh_cache_key_for_definition(&definition, &resolved_values);
+
+        let mut world = world_with_cache();
+        world.insert_resource(registry.clone());
+        let cached_handle = world.resource_mut::<Assets<Mesh>>().add(Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        ));
+        world
+            .resource_mut::<RepresentationCache>()
+            .insert(cache_key, cached_handle.clone());
+
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(200),
+            &identity,
+            Transform::from_translation(Vec3::new(3.0, 0.0, 2.0)),
+            Some("cached"),
+        )
+        .expect("render occurrence");
+
+        let previous = OccurrenceSnapshot::new(ElementId(200), identity.clone(), "cached");
+        let mut next_identity = identity;
+        next_identity.overrides.set("finish_color", json!("black"));
+        let next = OccurrenceSnapshot::new(ElementId(200), next_identity, "cached");
+        next.apply_with_previous(&mut world, Some(&previous));
+
+        let entity =
+            crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(200))
+                .expect("occurrence entity");
+        let entity_ref = world.entity(entity);
+        assert_eq!(
+            entity_ref.get::<Mesh3d>().expect("mesh").id(),
+            cached_handle.id()
+        );
+        assert!(entity_ref.get::<NeedsMesh>().is_none());
+        let classification = entity_ref
+            .get::<OccurrenceClassification>()
+            .expect("classification");
+        assert!(!classification.mesh_dirty);
+        assert!(classification.material_dirty);
     }
 }
