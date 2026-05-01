@@ -860,6 +860,47 @@ impl Definition {
         }
     }
 
+    /// Migrate a legacy
+    /// `domain_data.architectural.material_assignment.material_id`
+    /// JSON poke into the new `Definition.material_assignment` slot.
+    ///
+    /// Behavior (PP-099 / PP-MATREL-1 slice 2):
+    /// - If `self.material_assignment` is already `Some`, this is a
+    ///   no-op (one-shot, idempotent — the new field always wins).
+    /// - Otherwise, if `domain_data.architectural.material_assignment.material_id`
+    ///   is a non-empty string `M`, the field is populated with
+    ///   `Some(MaterialAssignment::Single(MaterialBinding::render_only(M)))`.
+    /// - The legacy `domain_data` block is **not** stripped on
+    ///   migration. Existing readers that consult
+    ///   `domain_data.architectural.material_assignment` continue to
+    ///   see the legacy data until slice 3 rewires them to prefer
+    ///   the new slot.
+    ///
+    /// Returns `true` when migration produced a change, `false`
+    /// otherwise. The boolean lets callers (e.g. project load,
+    /// bundled-library seed) report aggregate counts without
+    /// reparsing.
+    pub fn migrate_legacy_material_assignment(&mut self) -> bool {
+        if self.material_assignment.is_some() {
+            return false;
+        }
+        let material_id = self
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .and_then(|ma| ma.get("material_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(material_id) = material_id else {
+            return false;
+        };
+        self.material_assignment = Some(MaterialAssignment::Single(
+            crate::plugins::materials::MaterialBinding::render_only(material_id),
+        ));
+        true
+    }
+
     /// Stamp `templates` onto the Definition's compound body. If the
     /// Definition was a leaf, this upgrades it to compound with an
     /// otherwise-empty body. Returns `self` so it composes with other
@@ -1025,6 +1066,23 @@ impl DefinitionLibrary {
     pub fn insert(&mut self, definition: Definition) {
         self.definitions.insert(definition.id.clone(), definition);
     }
+
+    /// Run the PP-099 slice 2 legacy-material migration across every
+    /// definition in the library. Returns the ids of definitions that
+    /// were migrated, in deterministic order so callers can log a
+    /// stable advisory.
+    pub fn migrate_legacy_material_assignments(&mut self) -> Vec<DefinitionId> {
+        let mut migrated: Vec<DefinitionId> = self
+            .definitions
+            .iter_mut()
+            .filter_map(|(id, def)| {
+                def.migrate_legacy_material_assignment()
+                    .then(|| id.clone())
+            })
+            .collect();
+        migrated.sort_by(|a, b| a.0.cmp(&b.0));
+        migrated
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1098,6 +1156,30 @@ impl DefinitionLibraryRegistry {
             .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
         library.insert(definition);
         Ok(())
+    }
+
+    /// Run the PP-099 slice 2 legacy-material migration across every
+    /// definition in every library. Returns a per-library map keyed
+    /// by `DefinitionLibraryId` whose value is the deterministic list
+    /// of migrated definition ids in that library. Empty libraries
+    /// are omitted from the map.
+    pub fn migrate_legacy_material_assignments(
+        &mut self,
+    ) -> Vec<(DefinitionLibraryId, Vec<DefinitionId>)> {
+        let mut report: Vec<(DefinitionLibraryId, Vec<DefinitionId>)> = self
+            .libraries
+            .iter_mut()
+            .filter_map(|(id, library)| {
+                let migrated = library.migrate_legacy_material_assignments();
+                if migrated.is_empty() {
+                    None
+                } else {
+                    Some((id.clone(), migrated))
+                }
+            })
+            .collect();
+        report.sort_by(|(a, _), (b, _)| a.0.cmp(&b.0));
+        report
     }
 }
 
@@ -1178,6 +1260,23 @@ impl DefinitionRegistry {
     /// Remove a definition, returning it if it existed.
     pub fn remove(&mut self, id: &DefinitionId) -> Option<Definition> {
         self.definitions.remove(id)
+    }
+
+    /// Run the PP-099 slice 2 legacy-material migration across every
+    /// definition in the registry. Returns the ids of definitions
+    /// that were migrated, in deterministic order so callers can log
+    /// a stable advisory.
+    pub fn migrate_legacy_material_assignments(&mut self) -> Vec<DefinitionId> {
+        let mut migrated: Vec<DefinitionId> = self
+            .definitions
+            .iter_mut()
+            .filter_map(|(id, def)| {
+                def.migrate_legacy_material_assignment()
+                    .then(|| id.clone())
+            })
+            .collect();
+        migrated.sort_by(|a, b| a.0.cmp(&b.0));
+        migrated
     }
 
     /// Validate a definition against the current registry.
@@ -2233,5 +2332,185 @@ mod pp_099_material_assignment_relocation_tests {
             .as_ref()
             .and_then(|a| a.render_material_id(None));
         assert_eq!(render.as_deref(), Some("base.material"));
+    }
+
+    // === PP-099 PP-MATREL-1 slice 2: load-path migration tests ============
+
+    fn legacy_material_def(id: &str, legacy_material_id: &str) -> Definition {
+        let mut def = blank_definition_with_id(id);
+        def.domain_data = json!({
+            "architectural": {
+                "material_assignment": { "material_id": legacy_material_id }
+            }
+        });
+        def
+    }
+
+    #[test]
+    fn migrate_no_op_when_no_legacy_data_present() {
+        let mut def = blank_definition_with_id("clean");
+        let migrated = def.migrate_legacy_material_assignment();
+        assert!(!migrated);
+        assert!(def.material_assignment.is_none());
+    }
+
+    #[test]
+    fn migrate_populates_new_field_from_legacy_material_id() {
+        let mut def = legacy_material_def("legacy", "builtin.glass.blue_tint_glazing_80");
+        let migrated = def.migrate_legacy_material_assignment();
+        assert!(migrated);
+        let render = def
+            .material_assignment
+            .as_ref()
+            .and_then(|a| a.render_material_id(None));
+        assert_eq!(render.as_deref(), Some("builtin.glass.blue_tint_glazing_80"));
+    }
+
+    #[test]
+    fn migrate_leaves_legacy_domain_data_intact() {
+        // Slice 2 design: don't strip on migration. Existing readers
+        // that consult `domain_data.architectural.material_assignment`
+        // continue to see the legacy data until slice 3 rewires them.
+        let mut def = legacy_material_def("legacy", "builtin.oak");
+        def.migrate_legacy_material_assignment();
+        let still_there = def
+            .domain_data
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .and_then(|ma| ma.get("material_id"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(still_there, Some("builtin.oak"));
+    }
+
+    #[test]
+    fn migrate_is_idempotent_when_new_field_already_set() {
+        // If the new field is already set, the migration is a no-op
+        // even if legacy data is also present (the new field always
+        // wins).
+        let mut def = legacy_material_def("both", "loser.material");
+        def.material_assignment = Some(single("winner.material"));
+        let migrated = def.migrate_legacy_material_assignment();
+        assert!(!migrated);
+        let render = def
+            .material_assignment
+            .as_ref()
+            .and_then(|a| a.render_material_id(None));
+        assert_eq!(render.as_deref(), Some("winner.material"));
+    }
+
+    #[test]
+    fn migrate_treats_empty_or_missing_legacy_string_as_no_op() {
+        // Empty string and missing material_id key both leave the
+        // new field None.
+        let mut empty = blank_definition_with_id("empty_legacy");
+        empty.domain_data = json!({
+            "architectural": { "material_assignment": { "material_id": "  " } }
+        });
+        assert!(!empty.migrate_legacy_material_assignment());
+        assert!(empty.material_assignment.is_none());
+
+        let mut shapeless = blank_definition_with_id("shapeless_legacy");
+        shapeless.domain_data = json!({
+            "architectural": { "material_assignment": { "other": 1 } }
+        });
+        assert!(!shapeless.migrate_legacy_material_assignment());
+        assert!(shapeless.material_assignment.is_none());
+    }
+
+    #[test]
+    fn migrate_running_twice_is_a_no_op_after_first_pass() {
+        let mut def = legacy_material_def("twice", "builtin.copper");
+        assert!(def.migrate_legacy_material_assignment());
+        // Second pass should report no change because the new field
+        // is now populated.
+        assert!(!def.migrate_legacy_material_assignment());
+    }
+
+    #[test]
+    fn registry_bulk_migration_returns_sorted_ids() {
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(legacy_material_def("zeta.def", "z"));
+        registry.insert(legacy_material_def("alpha.def", "a"));
+        registry.insert(blank_definition_with_id("clean.def"));
+
+        let migrated = registry.migrate_legacy_material_assignments();
+        let ids: Vec<&str> = migrated.iter().map(|id| id.0.as_str()).collect();
+        assert_eq!(ids, vec!["alpha.def", "zeta.def"]);
+
+        // Idempotent: a second pass yields no migrations.
+        assert!(registry
+            .migrate_legacy_material_assignments()
+            .is_empty());
+    }
+
+    #[test]
+    fn library_bulk_migration_visits_every_definition() {
+        let mut library = DefinitionLibrary {
+            id: DefinitionLibraryId("lib.test".to_string()),
+            name: "Test".to_string(),
+            scope: DefinitionLibraryScope::DocumentLocal,
+            source_path: None,
+            tags: Vec::new(),
+            definitions: HashMap::new(),
+        };
+        library.insert(legacy_material_def("foo.legacy", "foo.material"));
+        library.insert(legacy_material_def("bar.legacy", "bar.material"));
+        library.insert(blank_definition_with_id("baz.clean"));
+
+        let migrated = library.migrate_legacy_material_assignments();
+        let ids: Vec<&str> = migrated.iter().map(|id| id.0.as_str()).collect();
+        assert_eq!(ids, vec!["bar.legacy", "foo.legacy"]);
+
+        // After migration, the new field is populated on the migrated
+        // entries and untouched on the clean entry.
+        let foo = library.get(&DefinitionId("foo.legacy".into())).unwrap();
+        let render = foo
+            .material_assignment
+            .as_ref()
+            .and_then(|a| a.render_material_id(None));
+        assert_eq!(render.as_deref(), Some("foo.material"));
+        assert!(library
+            .get(&DefinitionId("baz.clean".into()))
+            .unwrap()
+            .material_assignment
+            .is_none());
+    }
+
+    #[test]
+    fn library_registry_bulk_migration_reports_per_library() {
+        let mut registry = DefinitionLibraryRegistry::default();
+        let lib_a_id = DefinitionLibraryId("lib.a".to_string());
+        let lib_b_id = DefinitionLibraryId("lib.b".to_string());
+
+        let mut lib_a = DefinitionLibrary {
+            id: lib_a_id.clone(),
+            name: "A".to_string(),
+            scope: DefinitionLibraryScope::DocumentLocal,
+            source_path: None,
+            tags: Vec::new(),
+            definitions: HashMap::new(),
+        };
+        lib_a.insert(legacy_material_def("a1", "amat1"));
+        lib_a.insert(blank_definition_with_id("a2_clean"));
+
+        let mut lib_b = DefinitionLibrary {
+            id: lib_b_id.clone(),
+            name: "B".to_string(),
+            scope: DefinitionLibraryScope::DocumentLocal,
+            source_path: None,
+            tags: Vec::new(),
+            definitions: HashMap::new(),
+        };
+        lib_b.insert(blank_definition_with_id("b1_clean"));
+
+        registry.insert(lib_a);
+        registry.insert(lib_b);
+
+        let report = registry.migrate_legacy_material_assignments();
+        assert_eq!(report.len(), 1, "lib.b had no legacy data, should be omitted");
+        let (reported_id, ids) = &report[0];
+        assert_eq!(reported_id, &lib_a_id);
+        let id_strs: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
+        assert_eq!(id_strs, vec!["a1"]);
     }
 }
