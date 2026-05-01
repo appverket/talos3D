@@ -990,6 +990,21 @@ pub enum MigrationWarning {
         relation_type: String,
         reason: String,
     },
+    /// PP-A2DB-2 slice C4f: a relation parameter contained a
+    /// `$entity_ref` that pointed at an entity outside the source
+    /// (so it can't be rewritten to a slot/self reference). The
+    /// agreement requires this to surface as a preview warning
+    /// rather than silently leak project-specific ElementIds into
+    /// the reusable Definition's templates.
+    ConcreteReferenceInTemplate {
+        relation_id: ElementId,
+        /// JSON-pointer-style path within `parameters` where the
+        /// concrete reference lives (e.g. `/anchor_to`,
+        /// `/peers/0/target`).
+        parameter_path: String,
+        /// The concrete `ElementId` the parameter referenced.
+        target_id: ElementId,
+    },
 }
 
 /// The flat-assembly source adapter. Produces a compound
@@ -1282,11 +1297,24 @@ impl SemanticAssemblyPromotionSource {
             );
             match (subject.clone(), object.clone()) {
                 (Some(subject), Some(object)) => {
+                    // PP-A2DB-2 slice C4f: rewrite `$entity_ref`
+                    // markers in the parameters JSON. In-source
+                    // references collapse to `$self_root` /
+                    // `$slot_ref`; out-of-source references stay
+                    // verbatim and surface a warning so the user can
+                    // decide their fate.
+                    let parameters = rewrite_template_parameters(
+                        &relation.parameters,
+                        relation.relation_id,
+                        input.assembly_id,
+                        &slot_lookup,
+                        &mut warnings,
+                    );
                     candidate_relation_templates.push(SemanticRelationTemplate {
                         subject,
                         relation_type: relation.relation_type.clone(),
                         object,
-                        parameters: relation.parameters.clone(),
+                        parameters,
                         source_relation_id: relation.relation_id,
                     });
                 }
@@ -1407,6 +1435,100 @@ fn classify_relation_endpoint(
     slot_lookup
         .get(&endpoint)
         .map(|slot_id| RelationEndpoint::Slot(slot_id.clone()))
+}
+
+/// PP-A2DB-2 slice C4f: walk a relation's `parameters` JSON and
+/// rewrite `{"$entity_ref": <u64>}` markers into slot/self
+/// references whenever the referenced ElementId is inside the
+/// source assembly. Concrete references that point outside the
+/// source produce a `MigrationWarning::ConcreteReferenceInTemplate`
+/// so the user can decide what to do, rather than silently leaking
+/// project-specific ElementIds into the reusable Definition.
+///
+/// Rewrite rules:
+///
+/// - `{"$entity_ref": <id>}` where id == source assembly id ->
+///   `{"$self_root": true}`
+/// - `{"$entity_ref": <id>}` where id is a source member ->
+///   `{"$slot_ref": "<slot_id>"}`
+/// - `{"$entity_ref": <id>}` otherwise -> left verbatim, warning
+///   pushed.
+///
+/// Other JSON values (numbers, strings, plain objects, arrays) are
+/// preserved as-is. Existing relation parameters that don't follow
+/// the convention are unaffected.
+fn rewrite_template_parameters(
+    parameters: &serde_json::Value,
+    relation_id: ElementId,
+    assembly_id: ElementId,
+    slot_lookup: &HashMap<ElementId, String>,
+    warnings: &mut Vec<MigrationWarning>,
+) -> serde_json::Value {
+    fn walk(
+        value: &serde_json::Value,
+        path: &str,
+        relation_id: ElementId,
+        assembly_id: ElementId,
+        slot_lookup: &HashMap<ElementId, String>,
+        warnings: &mut Vec<MigrationWarning>,
+    ) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                // Detect the `$entity_ref` marker as a single-key
+                // object pointing at a u64 id.
+                if map.len() == 1 {
+                    if let Some(id_value) = map.get("$entity_ref") {
+                        if let Some(id) = id_value.as_u64() {
+                            let target = ElementId(id);
+                            if target == assembly_id {
+                                return serde_json::json!({ "$self_root": true });
+                            }
+                            if let Some(slot_id) = slot_lookup.get(&target) {
+                                return serde_json::json!({ "$slot_ref": slot_id });
+                            }
+                            warnings.push(
+                                MigrationWarning::ConcreteReferenceInTemplate {
+                                    relation_id,
+                                    parameter_path: path.to_string(),
+                                    target_id: target,
+                                },
+                            );
+                            return value.clone();
+                        }
+                    }
+                }
+                let mut out = serde_json::Map::with_capacity(map.len());
+                for (k, v) in map {
+                    let child_path = format!("{path}/{k}");
+                    out.insert(
+                        k.clone(),
+                        walk(v, &child_path, relation_id, assembly_id, slot_lookup, warnings),
+                    );
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(items) => {
+                let rewritten: Vec<serde_json::Value> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let child_path = format!("{path}/{i}");
+                        walk(v, &child_path, relation_id, assembly_id, slot_lookup, warnings)
+                    })
+                    .collect();
+                serde_json::Value::Array(rewritten)
+            }
+            _ => value.clone(),
+        }
+    }
+    walk(
+        parameters,
+        "",
+        relation_id,
+        assembly_id,
+        slot_lookup,
+        warnings,
+    )
 }
 
 // === Tests =================================================================
@@ -2722,5 +2844,221 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: ExternalContextRequirement = serde_json::from_str(&json).unwrap();
         assert_eq!(back, req);
+    }
+
+    // === PP-A2DB-2 slice C4f: concrete-entity reference rewriting ==========
+
+    #[test]
+    fn slice_c4f_rewrites_assembly_self_reference_to_self_root() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(2),
+            relation_type: "anchored".into(),
+            // The assembly_id used by `assembly_input_for` is elem(100).
+            parameters: serde_json::json!({
+                "anchor_to": { "$entity_ref": 100 },
+            }),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(
+            template.parameters["anchor_to"],
+            serde_json::json!({ "$self_root": true })
+        );
+    }
+
+    #[test]
+    fn slice_c4f_rewrites_member_reference_to_slot_ref() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(2),
+            relation_type: "hinged".into(),
+            parameters: serde_json::json!({
+                "pivots_on": { "$entity_ref": 1 },
+            }),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(
+            template.parameters["pivots_on"],
+            serde_json::json!({ "$slot_ref": "frame" })
+        );
+    }
+
+    #[test]
+    fn slice_c4f_warns_on_concrete_reference_outside_source() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(2),
+            relation_type: "anchored".into(),
+            parameters: serde_json::json!({
+                "outside_anchor": { "$entity_ref": 99 },
+            }),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        // Verbatim survival.
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(
+            template.parameters["outside_anchor"],
+            serde_json::json!({ "$entity_ref": 99 })
+        );
+        // Warning surfaced.
+        let count = out
+            .migration_diff
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, MigrationWarning::ConcreteReferenceInTemplate { .. }))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn slice_c4f_walks_nested_objects_and_arrays() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(2),
+            relation_type: "rich".into(),
+            parameters: serde_json::json!({
+                "config": {
+                    "primary": { "$entity_ref": 1 },
+                    "secondary": [
+                        { "$entity_ref": 2 },
+                        { "$entity_ref": 100 },
+                        { "scalar": 5 },
+                    ],
+                },
+            }),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        assert_eq!(
+            template.parameters["config"]["primary"],
+            serde_json::json!({ "$slot_ref": "frame" })
+        );
+        assert_eq!(
+            template.parameters["config"]["secondary"][0],
+            serde_json::json!({ "$slot_ref": "leaf" })
+        );
+        assert_eq!(
+            template.parameters["config"]["secondary"][1],
+            serde_json::json!({ "$self_root": true })
+        );
+        assert_eq!(
+            template.parameters["config"]["secondary"][2]["scalar"],
+            serde_json::json!(5)
+        );
+    }
+
+    #[test]
+    fn slice_c4f_does_not_touch_non_entity_ref_objects() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(2),
+            relation_type: "plain".into(),
+            parameters: serde_json::json!({
+                "hinge_count": 3,
+                "axis": "y",
+                "metadata": { "label": "left" },
+            }),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let template = &out.migration_diff.candidate_relation_templates[0];
+        // Plain values pass through verbatim.
+        assert_eq!(template.parameters["hinge_count"], serde_json::json!(3));
+        assert_eq!(template.parameters["axis"], serde_json::json!("y"));
+        assert_eq!(
+            template.parameters["metadata"]["label"],
+            serde_json::json!("left")
+        );
+    }
+
+    #[test]
+    fn slice_c4f_warning_carries_path_for_nested_orphan() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1, "frame", AssemblyMemberKind::AuthoredEntity, None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(1),
+            relation_type: "with_orphan".into(),
+            parameters: serde_json::json!({
+                "peers": [
+                    { "target": { "$entity_ref": 999 } },
+                ],
+            }),
+        });
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let warning = out
+            .migration_diff
+            .warnings
+            .iter()
+            .find_map(|w| match w {
+                MigrationWarning::ConcreteReferenceInTemplate {
+                    relation_id,
+                    parameter_path,
+                    target_id,
+                } => Some((*relation_id, parameter_path.clone(), *target_id)),
+                _ => None,
+            })
+            .expect("warning emitted");
+        assert_eq!(warning.0, elem(30));
+        assert_eq!(warning.2, elem(999));
+        assert_eq!(warning.1, "/peers/0/target");
     }
 }
