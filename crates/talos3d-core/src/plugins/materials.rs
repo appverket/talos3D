@@ -72,6 +72,7 @@ impl TextureAssetId {
 pub enum TextureSourceFormat {
     Png,
     Jpeg,
+    Ktx2,
     Webp,
     Hdr,
     Exr,
@@ -160,6 +161,8 @@ impl TexturePayload {
                     TextureSourceFormat::Png
                 } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
                     TextureSourceFormat::Jpeg
+                } else if lower.ends_with(".ktx2") {
+                    TextureSourceFormat::Ktx2
                 } else if lower.ends_with(".webp") {
                     TextureSourceFormat::Webp
                 } else if lower.ends_with(".hdr") {
@@ -1712,6 +1715,25 @@ mod tests {
             serde_json::from_value(serde_json::to_value(mapping).unwrap()).unwrap();
 
         assert_eq!(parsed, mapping);
+    }
+
+    #[test]
+    fn texture_asset_paths_classify_supported_source_formats() {
+        for (path, expected) in [
+            ("textures/brick.png", TextureSourceFormat::Png),
+            ("textures/wood.JPEG", TextureSourceFormat::Jpeg),
+            ("textures/compressed.KTX2", TextureSourceFormat::Ktx2),
+            ("textures/albedo.webp", TextureSourceFormat::Webp),
+            ("textures/studio.hdr", TextureSourceFormat::Hdr),
+            ("textures/height.exr", TextureSourceFormat::Exr),
+            ("textures/raw.bin", TextureSourceFormat::Unknown),
+        ] {
+            assert_eq!(
+                TexturePayload::AssetPath(path.to_string()).source_format(),
+                expected,
+                "{path} should classify as {expected:?}"
+            );
+        }
     }
 
     #[test]
