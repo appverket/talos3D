@@ -1429,6 +1429,11 @@ impl AuthoredEntityFactory for OpeningFactory {
 
         let mut __q = world.try_query::<EntityRef>().unwrap();
         for entity_ref in __q.iter(world) {
+            if entity_ref
+                .contains::<talos3d_core::plugins::modeling::void_declaration::OpeningContext>()
+            {
+                continue;
+            }
             let (Some(opening), Some(parent_wall)) =
                 (entity_ref.get::<Opening>(), entity_ref.get::<ParentWall>())
             else {
@@ -1485,6 +1490,11 @@ impl AuthoredEntityFactory for OpeningFactory {
             std::collections::HashMap::new();
         let mut __q = world.try_query::<EntityRef>().unwrap();
         for entity_ref in __q.iter(world) {
+            if entity_ref
+                .contains::<talos3d_core::plugins::modeling::void_declaration::OpeningContext>()
+            {
+                continue;
+            }
             let Some(snapshot) = self.capture_snapshot(&entity_ref, world) else {
                 continue;
             };

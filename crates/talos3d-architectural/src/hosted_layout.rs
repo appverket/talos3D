@@ -604,6 +604,7 @@ mod tests {
             param_type: ParamType::Numeric,
             default_value: json!(0.0),
             override_policy: OverridePolicy::Overridable,
+            geometry_affecting: true,
             metadata: ParameterMetadata::default(),
         }
     }

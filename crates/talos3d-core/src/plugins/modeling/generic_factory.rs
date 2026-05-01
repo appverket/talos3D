@@ -11,7 +11,7 @@ use crate::{
     plugins::{
         identity::ElementId,
         materials::{material_assignment_from_value, MaterialAssignment},
-        modeling::primitives::ShapeRotation,
+        modeling::{primitives::ShapeRotation, void_declaration::OpeningContext},
     },
 };
 
@@ -137,6 +137,9 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
 
         let mut query = world.try_query::<EntityRef>().unwrap();
         for entity_ref in query.iter(world) {
+            if entity_ref.contains::<OpeningContext>() {
+                continue;
+            }
             let Some(primitive) = entity_ref.get::<P>() else {
                 continue;
             };
@@ -203,6 +206,9 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
     fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
         let mut query = world.try_query::<EntityRef>().unwrap();
         for entity_ref in query.iter(world) {
+            if entity_ref.contains::<OpeningContext>() {
+                continue;
+            }
             let Some(primitive) = entity_ref.get::<P>() else {
                 continue;
             };

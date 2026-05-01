@@ -1297,7 +1297,7 @@ pub fn list_entities(world: &World) -> Vec<EntityEntry> {
 
     let mut q = world.try_query::<EntityRef>().unwrap();
     for entity_ref in q.iter(world) {
-        let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
+        let Some(snapshot) = registry.capture_user_facing_snapshot(&entity_ref, world) else {
             continue;
         };
 
@@ -12238,8 +12238,19 @@ fn handle_get_instance_info(world: &World) -> InstanceInfo {
 
 #[cfg(feature = "model-api")]
 fn handle_get_selection(world: &mut World) -> Vec<u64> {
-    let mut query = world.query_filtered::<&ElementId, With<Selected>>();
-    query.iter(world).map(|id| id.0).collect()
+    let selected: Vec<(Entity, u64)> = {
+        let mut query = world.query_filtered::<(Entity, &ElementId), With<Selected>>();
+        query.iter(world).map(|(entity, id)| (entity, id.0)).collect()
+    };
+    let registry = world.resource::<CapabilityRegistry>();
+    selected
+        .into_iter()
+        .filter_map(|(entity, id)| {
+            registry
+                .is_user_facing_entity(world, entity)
+                .then_some(id)
+        })
+        .collect()
 }
 
 #[cfg(feature = "model-api")]
@@ -12248,9 +12259,9 @@ fn handle_set_selection(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<
 
     let target_ids: HashSet<ElementId> = element_ids.iter().copied().map(ElementId).collect();
 
-    // Verify all target entities exist
+    // Verify all target entities exist and are part of the user-facing model.
     for eid in &target_ids {
-        ensure_entity_exists(world, *eid)?;
+        ensure_user_editable_entity(world, *eid, "selected")?;
     }
 
     // Remove Selected from all currently selected entities
@@ -17243,7 +17254,7 @@ pub fn handle_delete_entities(world: &mut World, element_ids: Vec<u64>) -> Resul
 
     let ids: Vec<ElementId> = element_ids.into_iter().map(ElementId).collect();
     for element_id in &ids {
-        ensure_entity_exists(world, *element_id)?;
+        ensure_user_editable_entity(world, *element_id, "deleted")?;
     }
 
     let expanded_ids = world
@@ -17265,6 +17276,9 @@ pub fn handle_transform(
     world: &mut World,
     request: TransformToolRequest,
 ) -> Result<Vec<Value>, String> {
+    for element_id in &request.element_ids {
+        ensure_user_editable_entity(world, ElementId(*element_id), "transformed")?;
+    }
     let snapshots = capture_snapshots_by_ids(world, &request.element_ids)?;
     if snapshots.is_empty() {
         return Err("No entities found for the given IDs".to_string());
@@ -17298,6 +17312,7 @@ pub fn handle_set_property(
     property_name: &str,
     value: Value,
 ) -> Result<Value, String> {
+    ensure_user_editable_entity(world, ElementId(element_id), "edited")?;
     let snapshot = capture_snapshot_by_id(world, ElementId(element_id))?;
     let updated = snapshot.set_property_json(property_name, &value)?;
     send_event(
@@ -17792,6 +17807,29 @@ fn ensure_entity_exists(world: &World, element_id: ElementId) -> ApiResult<()> {
         Ok(())
     } else {
         Err(format!("Entity not found: {}", element_id.0))
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn ensure_user_editable_entity(
+    world: &World,
+    element_id: ElementId,
+    operation: &str,
+) -> ApiResult<()> {
+    ensure_entity_exists(world, element_id)?;
+    let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
+        return Err(format!("Entity not found: {}", element_id.0));
+    };
+    if world
+        .resource::<CapabilityRegistry>()
+        .is_user_facing_entity(world, entity)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "Entity {} is an internal wall opening proxy and cannot be {operation}; edit the host wall or owning occurrence instead",
+            element_id.0
+        ))
     }
 }
 
@@ -19668,6 +19706,44 @@ mod tests {
         assert_eq!(summary.entity_counts.get("plane"), Some(&1));
         assert_eq!(summary.entity_counts.get("polyline"), Some(&1));
         assert!(summary.bounding_box.is_some());
+    }
+
+    #[test]
+    fn internal_void_proxies_are_hidden_from_user_model_listing_and_summary() {
+        use crate::plugins::modeling::void_declaration::OpeningContext;
+
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+
+        world.spawn((
+            ElementId(1),
+            BoxPrimitive {
+                centre: Vec3::new(0.0, 1.5, 0.0),
+                half_extents: Vec3::new(3.0, 1.5, 0.15),
+            },
+            ShapeRotation::default(),
+        ));
+        world.spawn((
+            ElementId(2),
+            BoxPrimitive {
+                centre: Vec3::new(0.0, 1.2, 0.0),
+                half_extents: Vec3::new(0.6, 0.8, 0.15),
+            },
+            ShapeRotation::default(),
+            OpeningContext {
+                host: ElementId(1),
+                filling: Some(ElementId(3)),
+            },
+        ));
+
+        let entities = list_entities(&world);
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].element_id, 1);
+
+        let summary = model_summary(&world);
+        assert_eq!(summary.entity_counts.get("box"), Some(&1));
     }
 
     #[test]
@@ -22159,6 +22235,39 @@ mod tests {
                 filling: Some(ElementId(instantiated.element_id)),
             })
         );
+        let user_entities = list_entities(&world);
+        assert!(
+            user_entities
+                .iter()
+                .any(|entry| entry.element_id == host_id && entry.entity_type == "box"),
+            "the host wall proxy should remain user-facing"
+        );
+        assert!(
+            user_entities.iter().any(|entry| {
+                entry.element_id == instantiated.element_id && entry.entity_type == "occurrence"
+            }),
+            "the filling occurrence should remain user-facing"
+        );
+        assert!(
+            user_entities
+                .iter()
+                .all(|entry| entry.element_id != opening_id),
+            "the opening proxy should be internal after it is linked to the filling"
+        );
+        let selection_error = handle_set_selection(&mut world, vec![opening_id])
+            .expect_err("internal opening proxy should not be selectable");
+        assert!(selection_error.contains("internal wall opening proxy"));
+        let transform_error = handle_transform(
+            &mut world,
+            TransformToolRequest {
+                element_ids: vec![opening_id],
+                operation: "move".to_string(),
+                axis: Some("X".to_string()),
+                value: json!(0.25),
+            },
+        )
+        .expect_err("internal opening proxy should not be transformable");
+        assert!(transform_error.contains("internal wall opening proxy"));
         let filling_entity =
             find_entity_by_element_id(&mut world, ElementId(instantiated.element_id))
                 .expect("filling entity should exist");

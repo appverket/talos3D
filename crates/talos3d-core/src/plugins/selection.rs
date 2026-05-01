@@ -30,6 +30,7 @@ use crate::{
             primitives::ShapeRotation,
             profile::ProfileExtrusion,
             profile_feature::{FaceProfileFeature, FeatureOperand},
+            void_declaration::OpeningContext,
         },
         tools::ActiveTool,
         transform::{PivotPoint, TransformMode, TransformState, TransformVisualSystems},
@@ -63,6 +64,7 @@ type BoxSelectEntityQueryItem = (
     Option<&'static bevy::camera::primitives::Aabb>,
     Has<SceneLightNode>,
     Has<GroupEditMuted>,
+    Has<OpeningContext>,
 );
 type GroupMembershipQueryItem = (Entity, &'static ElementId, &'static GroupMembers);
 
@@ -133,6 +135,7 @@ pub struct Selected;
 type MeshSelectableQueryFilter = (
     Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
     Without<PreviewOnly>,
+    Without<OpeningContext>,
 );
 
 #[derive(SystemParam)]
@@ -678,12 +681,15 @@ fn choose_selection_hit(
 }
 
 fn selection_hit_entity(world: &mut World, ray: Ray3d) -> Option<Entity> {
-    let custom_hit = world
-        .resource::<CapabilityRegistry>()
+    let registry = world.resource::<CapabilityRegistry>();
+    let custom_hit = registry
         .factories()
         .iter()
         .filter_map(|factory| factory.hit_test(world, ray))
-        .filter(|hit| entity_is_visible(world, hit.entity))
+        .filter(|hit| {
+            entity_is_visible(world, hit.entity)
+                && registry.is_user_facing_entity(world, hit.entity)
+        })
         .min_by(|left, right| left.distance.total_cmp(&right.distance));
     let mut system_state: bevy::ecs::system::SystemState<SelectionHitTest> =
         bevy::ecs::system::SystemState::new(world);
@@ -803,6 +809,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 aabb,
                 is_scene_light,
                 is_muted,
+                is_internal_opening,
             ) in &cx.entity_query
             {
                 if visibility.copied() == Some(Visibility::Hidden) {
@@ -814,6 +821,10 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 }
 
                 if is_muted {
+                    continue;
+                }
+
+                if is_internal_opening {
                     continue;
                 }
 
