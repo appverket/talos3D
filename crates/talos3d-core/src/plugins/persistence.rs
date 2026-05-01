@@ -1369,6 +1369,7 @@ mod tests {
         );
         input.relation_classification = RelationClassificationRules {
             by_descriptor: rules,
+            host_contract_kinds: std::collections::HashMap::new(),
             default_unknown: None,
         };
 

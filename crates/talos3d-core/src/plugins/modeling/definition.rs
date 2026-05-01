@@ -589,6 +589,23 @@ impl Interface {
         self.external_context_requirements = requirements;
         self
     }
+
+    /// PP-A2DB-2 slice C2: filter
+    /// `external_context_requirements` to entries whose
+    /// `classification` is `HostContract`. Lets validators /
+    /// instantiation paths walk just the hosting-contract subset
+    /// without re-implementing the filter at every call site.
+    pub fn iter_host_contract_requirements(
+        &self,
+    ) -> impl Iterator<Item = &crate::plugins::promotion::ExternalContextRequirement> + '_
+    {
+        self.external_context_requirements.iter().filter(|req| {
+            matches!(
+                req.classification,
+                crate::plugins::promotion::ExternalRelationClassification::HostContract
+            )
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,6 +1508,7 @@ mod pp_a2db_2_external_context_tests {
             classification: ExternalRelationClassification::HostContract,
             endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
             descriptor_id: Some("hosted_on_wall".into()),
+            host_contract_kind: None,
             source_relation_id: ElementId(30),
         }
     }
@@ -1564,6 +1582,7 @@ mod pp_a2db_2_external_context_tests {
             classification: ExternalRelationClassification::AdvisoryContext,
             endpoint_in_definition: RelationEndpoint::SelfRoot,
             descriptor_id: None,
+            host_contract_kind: None,
             source_relation_id: ElementId(31),
         };
         let child = Interface::default()

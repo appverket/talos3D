@@ -20677,6 +20677,7 @@ mod tests {
                 parameter_schema: json!({}),
                 participates_in_dependency_graph: true,
                 external_classification: None,
+                host_contract_kind: None,
             });
 
         let host_id = handle_create_entity(
