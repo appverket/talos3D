@@ -234,7 +234,7 @@ impl ChangedDefinitions {
 
 pub const DEFAULT_REPRESENTATION_CACHE_CAPACITY: usize = 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MeshCacheKey {
     pub definition_id: DefinitionId,
     pub definition_version: DefinitionVersion,
