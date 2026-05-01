@@ -106,6 +106,17 @@ impl fmt::Display for DefinitionLibraryId {
 /// Monotonically increasing version stamp on a `Definition`.
 pub type DefinitionVersion = u32;
 
+/// Stable digest of the geometry-affecting parameter values for a
+/// Definition occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GeometryParamsHash(pub String);
+
+impl GeometryParamsHash {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DefinitionKind
 // ---------------------------------------------------------------------------
@@ -854,6 +865,36 @@ pub enum MaterialProvenance {
 }
 
 impl Definition {
+    /// Compute the deterministic digest PP-098 uses for future mesh cache keys.
+    ///
+    /// Only parameters marked `geometry_affecting` contribute to the hash.
+    /// Parameter names are sorted so authoring-order churn does not split the
+    /// cache, and nested JSON object keys are canonicalized before hashing.
+    pub fn geometry_params_hash(
+        &self,
+        resolved_params: &HashMap<String, Value>,
+    ) -> GeometryParamsHash {
+        let mut params: Vec<&ParameterDef> = self
+            .interface
+            .parameters
+            .0
+            .iter()
+            .filter(|param| param.geometry_affecting)
+            .collect();
+        params.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let mut hasher = blake3::Hasher::new();
+        hash_tag(&mut hasher, "talos3d.geometry_params_hash.v1");
+        for param in params {
+            hash_tag(&mut hasher, "param");
+            hash_str(&mut hasher, &param.name);
+            let value = resolved_params.get(&param.name).unwrap_or(&param.default_value);
+            hash_canonical_json_value(&mut hasher, value);
+        }
+
+        GeometryParamsHash(format!("blake3:{}", hasher.finalize().to_hex()))
+    }
+
     /// Resolve the effective material assignment for an occurrence of
     /// this Definition, given an optional `OccurrenceIdentity::material_override`.
     ///
@@ -1036,6 +1077,50 @@ impl Definition {
         }
 
         Ok(())
+    }
+}
+
+fn hash_tag(hasher: &mut blake3::Hasher, tag: &str) {
+    hash_str(hasher, tag);
+}
+
+fn hash_str(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_canonical_json_value(hasher: &mut blake3::Hasher, value: &Value) {
+    match value {
+        Value::Null => hash_tag(hasher, "null"),
+        Value::Bool(value) => {
+            hash_tag(hasher, "bool");
+            hasher.update(&[*value as u8]);
+        }
+        Value::Number(value) => {
+            hash_tag(hasher, "number");
+            hash_str(hasher, &value.to_string());
+        }
+        Value::String(value) => {
+            hash_tag(hasher, "string");
+            hash_str(hasher, value);
+        }
+        Value::Array(values) => {
+            hash_tag(hasher, "array");
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for value in values {
+                hash_canonical_json_value(hasher, value);
+            }
+        }
+        Value::Object(values) => {
+            hash_tag(hasher, "object");
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            let mut entries: Vec<_> = values.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (key, value) in entries {
+                hash_str(hasher, key);
+                hash_canonical_json_value(hasher, value);
+            }
+        }
     }
 }
 
@@ -2194,6 +2279,127 @@ mod pp_097_slot_multiplicity_tests {
             }
             _ => panic!("expected BySpacingFromHost after round-trip"),
         }
+    }
+}
+
+// === PP-098 PP-INSTANCE-1 slice 2: geometry parameter hashing ==============
+
+#[cfg(test)]
+mod pp_098_geometry_param_hash_tests {
+    use super::*;
+    use serde_json::{json, Map};
+    use std::collections::HashMap;
+
+    fn parameter(name: &str, default_value: Value, geometry_affecting: bool) -> ParameterDef {
+        ParameterDef {
+            name: name.to_string(),
+            param_type: ParamType::StringVal,
+            default_value,
+            override_policy: OverridePolicy::Overridable,
+            geometry_affecting,
+            metadata: ParameterMetadata::default(),
+        }
+    }
+
+    fn definition_with_params(params: Vec<ParameterDef>) -> Definition {
+        Definition {
+            id: DefinitionId("hash.test".to_string()),
+            base_definition_id: None,
+            name: "Hash Test".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(params),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            material_assignment: None,
+            domain_data: Value::Null,
+        }
+    }
+
+    #[test]
+    fn geometry_params_hash_ignores_non_geometry_parameters() {
+        let definition = definition_with_params(vec![
+            parameter("finish_color", json!("white"), false),
+            parameter("width", json!(1.0), true),
+        ]);
+        let mut values = HashMap::new();
+        values.insert("width".to_string(), json!(2.0));
+        values.insert("finish_color".to_string(), json!("red"));
+        let red = definition.geometry_params_hash(&values);
+
+        values.insert("finish_color".to_string(), json!("blue"));
+        let blue = definition.geometry_params_hash(&values);
+
+        values.insert("width".to_string(), json!(3.0));
+        let wider = definition.geometry_params_hash(&values);
+
+        assert_eq!(red, blue);
+        assert_ne!(red, wider);
+    }
+
+    #[test]
+    fn geometry_params_hash_uses_defaults_for_missing_resolved_values() {
+        let definition = definition_with_params(vec![
+            parameter("finish_color", json!("white"), false),
+            parameter("width", json!(1.0), true),
+        ]);
+        let empty = HashMap::new();
+        let from_defaults = definition.geometry_params_hash(&empty);
+
+        let mut explicit = HashMap::new();
+        explicit.insert("width".to_string(), json!(1.0));
+        explicit.insert("finish_color".to_string(), json!("black"));
+        let from_explicit = definition.geometry_params_hash(&explicit);
+
+        assert_eq!(from_defaults, from_explicit);
+    }
+
+    #[test]
+    fn geometry_params_hash_is_independent_of_parameter_declaration_order() {
+        let first = definition_with_params(vec![
+            parameter("width", json!(1.0), true),
+            parameter("height", json!(2.0), true),
+        ]);
+        let second = definition_with_params(vec![
+            parameter("height", json!(2.0), true),
+            parameter("width", json!(1.0), true),
+        ]);
+        let mut values = HashMap::new();
+        values.insert("width".to_string(), json!(3.0));
+        values.insert("height".to_string(), json!(4.0));
+
+        assert_eq!(
+            first.geometry_params_hash(&values),
+            second.geometry_params_hash(&values)
+        );
+    }
+
+    #[test]
+    fn geometry_params_hash_canonicalizes_nested_object_keys() {
+        let definition = definition_with_params(vec![parameter("profile", json!(null), true)]);
+
+        let mut object_a = Map::new();
+        object_a.insert("outer".to_string(), json!({"width": 3.0, "height": 4.0}));
+        object_a.insert("inner".to_string(), json!({"height": 1.0, "width": 2.0}));
+
+        let mut object_b = Map::new();
+        object_b.insert("inner".to_string(), json!({"width": 2.0, "height": 1.0}));
+        object_b.insert("outer".to_string(), json!({"height": 4.0, "width": 3.0}));
+
+        let mut values_a = HashMap::new();
+        values_a.insert("profile".to_string(), Value::Object(object_a));
+        let mut values_b = HashMap::new();
+        values_b.insert("profile".to_string(), Value::Object(object_b));
+
+        assert_eq!(
+            definition.geometry_params_hash(&values_a),
+            definition.geometry_params_hash(&values_b)
+        );
     }
 }
 
