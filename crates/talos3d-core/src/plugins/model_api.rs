@@ -1099,6 +1099,8 @@ pub struct DefinitionExplainResult {
     pub inherited_parameter_names: Vec<String>,
     pub local_child_slot_ids: Vec<String>,
     pub inherited_child_slot_ids: Vec<String>,
+    #[serde(default)]
+    pub resolved_collection_slots: Vec<Value>,
     pub compile: DefinitionCompileResult,
 }
 
@@ -14076,6 +14078,13 @@ fn definition_explain_value_to_result(value: Value) -> ApiResult<DefinitionExpla
             .unwrap_or_else(|| serde_json::json!([])),
     )
     .map_err(|error| error.to_string())?;
+    let resolved_collection_slots = serde_json::from_value::<Vec<Value>>(
+        object
+            .get("resolved_collection_slots")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
+    )
+    .map_err(|error| error.to_string())?;
     let compile_summary =
         serde_json::from_value::<crate::plugins::definition_authoring::DefinitionCompileSummary>(
             object
@@ -14094,6 +14103,7 @@ fn definition_explain_value_to_result(value: Value) -> ApiResult<DefinitionExpla
         inherited_parameter_names,
         local_child_slot_ids,
         inherited_child_slot_ids,
+        resolved_collection_slots,
         compile,
     })
 }
@@ -20728,6 +20738,25 @@ mod tests {
         assert_eq!(compile.collection_slots.len(), 1);
         assert_eq!(compile.collection_slots[0].slot_id, "frame");
 
+        let explain = handle_explain_definition(&world, json!({ "draft_id": draft.draft_id }))
+            .expect("explain should succeed");
+        assert_eq!(explain.resolved_collection_slots.len(), 1);
+        assert_eq!(
+            explain.resolved_collection_slots[0]["slot_id"],
+            json!("frame")
+        );
+        assert_eq!(explain.resolved_collection_slots[0]["count"], json!(2));
+        assert_eq!(
+            explain.resolved_collection_slots[0]["instances"][0]["slot_path"],
+            json!("frame[0]")
+        );
+        let translation = explain.resolved_collection_slots[0]["instances"][1]["translation"]
+            .as_array()
+            .expect("translation should be an array");
+        assert_eq!(translation[0], json!(0.0));
+        assert_eq!(translation[1], json!(0.0));
+        assert!((translation[2].as_f64().unwrap() - 0.4).abs() < 0.0001);
+
         handle_patch_definition_draft(
             &mut world,
             json!({
@@ -20740,6 +20769,51 @@ mod tests {
         let compile = handle_compile_definition(&world, json!({ "draft_id": draft.draft_id }))
             .expect("compile should succeed");
         assert!(compile.collection_slots.is_empty());
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn bundled_double_european_window_remains_single_slot_definition() {
+        let mut world = init_model_api_test_world();
+        {
+            let mut libraries = world
+                .resource_mut::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>(
+            );
+            crate::plugins::bundled_definition_libraries::apply_bundled_definition_libraries(
+                &mut libraries,
+            )
+            .expect("bundled libraries should load");
+        }
+
+        let explain = handle_explain_definition(
+            &world,
+            json!({
+                "library_id": "architecture.european-window-library",
+                "definition_id": "architecture.window.double-european"
+            }),
+        )
+        .expect("bundled double window should explain");
+        assert!(explain.compile.collection_slots.is_empty());
+        assert!(explain.resolved_collection_slots.is_empty());
+
+        let instantiated = handle_instantiate_definition(
+            &mut world,
+            json!({
+                "library_id": "architecture.european-window-library",
+                "definition_id": "architecture.window.double-european"
+            }),
+        )
+        .expect("bundled double window should instantiate");
+        let occurrence = handle_explain_occurrence(&world, instantiated.element_id)
+            .expect("bundled occurrence should explain");
+        let slot_paths = occurrence
+            .generated_parts
+            .iter()
+            .map(|part| part.slot_path.as_str())
+            .collect::<Vec<_>>();
+        assert!(slot_paths.iter().any(|slot| *slot == "left_window"));
+        assert!(slot_paths.iter().any(|slot| *slot == "right_window"));
+        assert!(!slot_paths.iter().any(|slot| slot.contains('[')));
     }
 
     #[cfg(feature = "model-api")]
