@@ -85,6 +85,13 @@ pub struct OccurrenceIdentity {
     pub definition_version: DefinitionVersion,
     /// Parameter values that override the definition's defaults.
     pub overrides: OverrideMap,
+    /// Per-occurrence material override that shadows
+    /// `Definition.material_assignment` when set (PP-099 / PP-MATREL-1
+    /// slice 1). `None` means the occurrence inherits the Definition's
+    /// default material binding via
+    /// `Definition::resolve_material_assignment`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_override: Option<MaterialAssignment>,
     /// Domain-specific extension payload owned by higher-level products.
     ///
     /// Core does not interpret this value and excludes it from geometric
@@ -103,6 +110,7 @@ impl OccurrenceIdentity {
             definition_id,
             definition_version,
             overrides: OverrideMap::default(),
+            material_override: None,
             domain_data: Value::Null,
             hosting: None,
         }
