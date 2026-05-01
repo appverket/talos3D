@@ -15,7 +15,8 @@ use crate::plugins::{
         AnchorDef, ChildSlotDef, CompoundDefinition, ConstraintDef, Definition, DefinitionId,
         DefinitionKind, DefinitionLibraryId, DefinitionLibraryRegistry, DefinitionRegistry,
         DerivedParameterDef, EvaluatorDecl, ExprNode, Interface, OverridePolicy, ParameterBinding,
-        ParameterDef, ParameterMetadata, ParameterSchema, RepresentationDecl, TransformBinding,
+        ParameterDef, ParameterMetadata, ParameterSchema, RepresentationDecl, SlotMultiplicity,
+        TransformBinding,
     },
 };
 
@@ -180,6 +181,13 @@ pub enum DefinitionPatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         suppression_expr: Option<ExprNode>,
     },
+    SetChildSlotMultiplicity {
+        slot_id: String,
+        multiplicity: SlotMultiplicity,
+    },
+    RemoveChildSlotMultiplicity {
+        slot_id: String,
+    },
     /// Typed patch that writes (or clears) the architectural material assignment
     /// stored at `domain_data.architectural.material_assignment.material_id`.
     ///
@@ -204,9 +212,18 @@ pub struct DefinitionCompileSummary {
     pub nodes: Vec<String>,
     pub edges: Vec<DefinitionDependencyEdge>,
     pub child_slot_count: usize,
+    #[serde(default)]
+    pub collection_slots: Vec<DefinitionCollectionSlotSummary>,
     pub derived_parameter_count: usize,
     pub constraint_count: usize,
     pub anchor_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefinitionCollectionSlotSummary {
+    pub slot_id: String,
+    pub count: Value,
+    pub layout: Value,
 }
 
 pub fn create_definition_draft(
@@ -431,6 +448,12 @@ pub fn compile_definition_summary(
             }
         }
 
+        let collection_slots = compound
+            .child_slots
+            .iter()
+            .filter_map(collection_slot_summary)
+            .collect::<Vec<_>>();
+
         nodes.sort();
         nodes.dedup();
         dedup_edges(&mut edges);
@@ -440,6 +463,7 @@ pub fn compile_definition_summary(
             nodes,
             edges,
             child_slot_count: compound.child_slots.len(),
+            collection_slots,
             derived_parameter_count: compound.derived_parameters.len(),
             constraint_count: compound.constraints.len(),
             anchor_count: compound.anchors.len(),
@@ -453,10 +477,22 @@ pub fn compile_definition_summary(
         nodes,
         edges,
         child_slot_count: 0,
+        collection_slots: Vec::new(),
         derived_parameter_count: 0,
         constraint_count: 0,
         anchor_count: 0,
     })
+}
+
+fn collection_slot_summary(slot: &ChildSlotDef) -> Option<DefinitionCollectionSlotSummary> {
+    match &slot.multiplicity {
+        SlotMultiplicity::Single => None,
+        SlotMultiplicity::Collection { layout, count } => Some(DefinitionCollectionSlotSummary {
+            slot_id: slot.slot_id.clone(),
+            count: serde_json::to_value(count).unwrap_or(Value::Null),
+            layout: serde_json::to_value(layout).unwrap_or(Value::Null),
+        }),
+    }
 }
 
 fn dedup_edges(edges: &mut Vec<DefinitionDependencyEdge>) {
@@ -844,6 +880,19 @@ fn apply_patch_to_definition(
         } => {
             let slot = ensure_local_child_slot(definition, effective_before, &slot_id)?;
             slot.suppression_expr = suppression_expr;
+        }
+        DefinitionPatch::SetChildSlotMultiplicity {
+            slot_id,
+            multiplicity,
+        } => {
+            let slot = ensure_local_child_slot(definition, effective_before, &slot_id)?;
+            slot.multiplicity = multiplicity;
+            slot.validate_multiplicity()
+                .map_err(|error| error.to_string())?;
+        }
+        DefinitionPatch::RemoveChildSlotMultiplicity { slot_id } => {
+            let slot = ensure_local_child_slot(definition, effective_before, &slot_id)?;
+            slot.multiplicity = SlotMultiplicity::Single;
         }
         DefinitionPatch::SetDomainDataMaterial { material_id } => {
             // Ensure domain_data is an object.

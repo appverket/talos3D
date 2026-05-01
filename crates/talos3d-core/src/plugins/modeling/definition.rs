@@ -951,6 +951,8 @@ impl Definition {
                         self.name, slot.slot_id, slot.definition_id
                     ));
                 }
+                slot.validate_multiplicity()
+                    .map_err(|error| error.to_string())?;
                 if let Some(translation) = &slot.transform_binding.translation {
                     if translation.len() != 3 {
                         return Err(format!(
