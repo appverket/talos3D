@@ -2398,6 +2398,7 @@ fn draw_context_definition_root(
                         parameter_bindings: Vec::new(),
                         transform_binding: Default::default(),
                         suppression_expr: None,
+                        multiplicity: Default::default(),
                     };
                     let slot_id = slot.slot_id.clone();
                     if let Err(error) = apply_patch_to_draft(

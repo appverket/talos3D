@@ -511,6 +511,138 @@ pub struct TransformBinding {
     pub translation: Option<Vec<ExprNode>>,
 }
 
+// ---------------------------------------------------------------------------
+// Slot multiplicity (PP-097 PP-DPROMOTE-3a slice 1)
+// ---------------------------------------------------------------------------
+
+/// Reference to a declared host-frame axis. Matches the
+/// `ParamType::AxisRef` parameter convention; carrying a typed
+/// newtype here keeps `SlotLayout` self-documenting without
+/// forcing every layout author to remember the stringly-typed
+/// convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AxisRef(pub String);
+
+/// Reference to a parameter on either the host or hosted side of
+/// a hosting contract. Same lift-out-of-`ParamType` motivation as
+/// `AxisRef`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParameterRef {
+    pub side: BindingSide,
+    pub name: String,
+}
+
+/// How many children a `Collection` slot expands into. `Fixed`
+/// resolves at definition time; `DerivedFromExpr` resolves at
+/// occurrence-evaluation time and must yield a non-negative
+/// integer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SlotCount {
+    Fixed(u32),
+    DerivedFromExpr(ExprNode),
+}
+
+/// Layout strategy for a `Collection` slot. PP-097 slice 1 ships
+/// the data shape; the evaluation expansion (turning N children
+/// into N evaluated occurrences with their resolved transforms)
+/// lands in slice 2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SlotLayout {
+    /// N children laid out along an axis with constant spacing.
+    Linear {
+        axis: AxisRef,
+        spacing: ExprNode,
+        #[serde(default)]
+        origin: TransformBinding,
+    },
+    /// N×M children laid out on a 2D grid.
+    Grid {
+        axis_u: AxisRef,
+        count_u: ExprNode,
+        spacing_u: ExprNode,
+        axis_v: AxisRef,
+        count_v: ExprNode,
+        spacing_v: ExprNode,
+        #[serde(default)]
+        origin: TransformBinding,
+    },
+    /// Children spaced according to a host-supplied parameter
+    /// along an axis (e.g. truss spacing driven by a roof
+    /// system's parameter).
+    BySpacingFromHost {
+        host_param: ParameterRef,
+        axis: AxisRef,
+    },
+    /// Pattern-named layout (e.g. "3x2", "horizontal-3"). The
+    /// pattern string is interpreted by domain-specific layout
+    /// providers in slice 2.
+    LitePattern { pattern: ExprNode },
+}
+
+/// Whether a child slot stands for a single child or a
+/// deterministic collection of N children.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SlotMultiplicity {
+    /// One child. The default; existing slots round-trip as
+    /// `Single` after a deserialize-from-old-JSON without the
+    /// `multiplicity` key.
+    Single,
+    /// N children laid out per a `SlotLayout`. The generated
+    /// children expose stable indexed `slot_path`s of the form
+    /// `slot_id[index]` (slice 2 — the evaluation expansion).
+    Collection {
+        layout: SlotLayout,
+        count: SlotCount,
+    },
+}
+
+impl Default for SlotMultiplicity {
+    fn default() -> Self {
+        Self::Single
+    }
+}
+
+impl SlotMultiplicity {
+    /// Returns `true` for any `Collection` variant.
+    pub fn is_collection(&self) -> bool {
+        matches!(self, Self::Collection { .. })
+    }
+}
+
+/// Errors produced by [`ChildSlotDef::validate_multiplicity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotMultiplicityValidationError {
+    /// `Collection { count: Fixed(0), .. }` is rejected at
+    /// validation. Authors who want a slot to be empty should
+    /// use the existing `suppression_expr` on a `Single` slot;
+    /// `count: DerivedFromExpr(...)` is allowed to evaluate to 0
+    /// at runtime per the agreement.
+    FixedZeroCount { slot_id: String },
+    /// A `Collection` slot must not have a `suppression_expr`.
+    /// Authors should set the count instead.
+    SuppressionOnCollection { slot_id: String },
+}
+
+impl std::fmt::Display for SlotMultiplicityValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::FixedZeroCount { slot_id } => write!(
+                f,
+                "slot '{slot_id}': SlotCount::Fixed(0) is rejected; \
+                 use a Single slot with `suppression_expr` for an empty slot, \
+                 or DerivedFromExpr that evaluates to 0 at runtime",
+            ),
+            Self::SuppressionOnCollection { slot_id } => write!(
+                f,
+                "slot '{slot_id}': Collection slots cannot carry \
+                 `suppression_expr`; set `count` instead",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SlotMultiplicityValidationError {}
+
 /// A reusable child slot within a compound definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildSlotDef {
@@ -523,6 +655,36 @@ pub struct ChildSlotDef {
     pub transform_binding: TransformBinding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suppression_expr: Option<ExprNode>,
+    /// PP-097 slice 1: whether this slot stands for a single child
+    /// (default, backwards compatible) or a deterministic
+    /// collection of N children. `#[serde(default)]` keeps
+    /// pre-PP-097 project files and bundled libraries loading as
+    /// `Single` without migration.
+    #[serde(default)]
+    pub multiplicity: SlotMultiplicity,
+}
+
+impl ChildSlotDef {
+    /// Validate the multiplicity-related invariants spelled out
+    /// in the PP-097 acceptance criteria.
+    pub fn validate_multiplicity(&self) -> Result<(), SlotMultiplicityValidationError> {
+        match &self.multiplicity {
+            SlotMultiplicity::Single => Ok(()),
+            SlotMultiplicity::Collection { count, .. } => {
+                if matches!(count, SlotCount::Fixed(0)) {
+                    return Err(SlotMultiplicityValidationError::FixedZeroCount {
+                        slot_id: self.slot_id.clone(),
+                    });
+                }
+                if self.suppression_expr.is_some() {
+                    return Err(SlotMultiplicityValidationError::SuppressionOnCollection {
+                        slot_id: self.slot_id.clone(),
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Composition graph attached to a root definition.
@@ -1589,5 +1751,185 @@ mod pp_a2db_2_external_context_tests {
             .with_external_context_requirements(vec![other.clone()]);
         let merged = merge_interface(base, child);
         assert_eq!(merged.external_context_requirements, vec![other]);
+    }
+}
+
+// === PP-097 PP-DPROMOTE-3a slice 1: slot multiplicity data shape ============
+
+#[cfg(test)]
+mod pp_097_slot_multiplicity_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn slot_with(multiplicity: SlotMultiplicity) -> ChildSlotDef {
+        ChildSlotDef {
+            slot_id: "lite".to_string(),
+            role: "lite".to_string(),
+            definition_id: DefinitionId("pane".to_string()),
+            parameter_bindings: Vec::new(),
+            transform_binding: TransformBinding::default(),
+            suppression_expr: None,
+            multiplicity,
+        }
+    }
+
+    #[test]
+    fn slot_multiplicity_default_is_single() {
+        let m = SlotMultiplicity::default();
+        assert!(matches!(m, SlotMultiplicity::Single));
+        assert!(!m.is_collection());
+    }
+
+    #[test]
+    fn slot_multiplicity_collection_reports_is_collection() {
+        let m = SlotMultiplicity::Collection {
+            layout: SlotLayout::Linear {
+                axis: AxisRef("x".into()),
+                spacing: ExprNode::Literal { value: json!(1.0) },
+                origin: TransformBinding::default(),
+            },
+            count: SlotCount::Fixed(3),
+        };
+        assert!(m.is_collection());
+    }
+
+    #[test]
+    fn child_slot_default_loads_pre_pp097_json_as_single() {
+        // Pre-PP-097 JSON: no `multiplicity` key.
+        let legacy = json!({
+            "slot_id": "frame",
+            "role": "frame",
+            "definition_id": "lib.frame",
+            "parameter_bindings": [],
+            "transform_binding": {},
+            "suppression_expr": null,
+        });
+        let slot: ChildSlotDef = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(slot.multiplicity, SlotMultiplicity::Single));
+    }
+
+    #[test]
+    fn child_slot_collection_round_trips_through_serde() {
+        let original = slot_with(SlotMultiplicity::Collection {
+            layout: SlotLayout::Linear {
+                axis: AxisRef("u".into()),
+                spacing: ExprNode::Literal { value: json!(0.5) },
+                origin: TransformBinding::default(),
+            },
+            count: SlotCount::Fixed(4),
+        });
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains("Collection"));
+        let back: ChildSlotDef = serde_json::from_str(&json).unwrap();
+        assert!(back.multiplicity.is_collection());
+    }
+
+    #[test]
+    fn validate_rejects_fixed_zero_collection_count() {
+        let slot = slot_with(SlotMultiplicity::Collection {
+            layout: SlotLayout::Linear {
+                axis: AxisRef("u".into()),
+                spacing: ExprNode::Literal { value: json!(0.5) },
+                origin: TransformBinding::default(),
+            },
+            count: SlotCount::Fixed(0),
+        });
+        let err = slot.validate_multiplicity().unwrap_err();
+        assert!(matches!(
+            err,
+            SlotMultiplicityValidationError::FixedZeroCount { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_collection_with_suppression_expr() {
+        let mut slot = slot_with(SlotMultiplicity::Collection {
+            layout: SlotLayout::Linear {
+                axis: AxisRef("u".into()),
+                spacing: ExprNode::Literal { value: json!(0.5) },
+                origin: TransformBinding::default(),
+            },
+            count: SlotCount::Fixed(2),
+        });
+        slot.suppression_expr = Some(ExprNode::Literal { value: json!(false) });
+        let err = slot.validate_multiplicity().unwrap_err();
+        assert!(matches!(
+            err,
+            SlotMultiplicityValidationError::SuppressionOnCollection { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_single_with_suppression_expr() {
+        let mut slot = slot_with(SlotMultiplicity::Single);
+        slot.suppression_expr = Some(ExprNode::Literal { value: json!(true) });
+        assert!(slot.validate_multiplicity().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_derived_count_zero_at_definition_time() {
+        // DerivedFromExpr is evaluated at runtime; the validator
+        // should not pre-reject expressions that may resolve to 0.
+        // (The agreement requires runtime errors via
+        // ConstraintSeverity::Error when the expression evaluates
+        // to a negative or non-integer value; that's the
+        // evaluation-time validator's job in slice 2.)
+        let slot = slot_with(SlotMultiplicity::Collection {
+            layout: SlotLayout::Linear {
+                axis: AxisRef("u".into()),
+                spacing: ExprNode::Literal { value: json!(0.5) },
+                origin: TransformBinding::default(),
+            },
+            count: SlotCount::DerivedFromExpr(ExprNode::Literal { value: json!(0.0) }),
+        });
+        assert!(slot.validate_multiplicity().is_ok());
+    }
+
+    #[test]
+    fn slot_layout_grid_round_trips() {
+        let layout = SlotLayout::Grid {
+            axis_u: AxisRef("u".into()),
+            count_u: ExprNode::Literal { value: json!(3) },
+            spacing_u: ExprNode::Literal { value: json!(0.5) },
+            axis_v: AxisRef("v".into()),
+            count_v: ExprNode::Literal { value: json!(2) },
+            spacing_v: ExprNode::Literal { value: json!(0.4) },
+            origin: TransformBinding::default(),
+        };
+        let json_str = serde_json::to_string(&layout).unwrap();
+        let back: SlotLayout = serde_json::from_str(&json_str).unwrap();
+        match back {
+            SlotLayout::Grid {
+                count_u, count_v, ..
+            } => match (count_u, count_v) {
+                (ExprNode::Literal { value: u }, ExprNode::Literal { value: v }) => {
+                    assert_eq!(u, json!(3));
+                    assert_eq!(v, json!(2));
+                }
+                other => panic!("count_u/count_v should round-trip as Literal: {other:?}"),
+            },
+            _ => panic!("expected Grid layout after round-trip"),
+        }
+    }
+
+    #[test]
+    fn slot_layout_by_spacing_from_host_round_trips() {
+        let layout = SlotLayout::BySpacingFromHost {
+            host_param: ParameterRef {
+                side: BindingSide::Host,
+                name: "truss_spacing_mm".into(),
+            },
+            axis: AxisRef("x".into()),
+        };
+        let json = serde_json::to_string(&layout).unwrap();
+        let back: SlotLayout = serde_json::from_str(&json).unwrap();
+        match back {
+            SlotLayout::BySpacingFromHost { host_param, axis } => {
+                assert_eq!(host_param.side, BindingSide::Host);
+                assert_eq!(host_param.name, "truss_spacing_mm");
+                assert_eq!(axis.0, "x");
+            }
+            _ => panic!("expected BySpacingFromHost after round-trip"),
+        }
     }
 }
