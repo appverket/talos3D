@@ -2124,6 +2124,17 @@ mod pp_098_occurrence_cache_tests {
             .expect("generated occurrence part")
     }
 
+    fn mesh_id_for_element(world: &mut World, element_id: ElementId) -> AssetId<Mesh> {
+        let entity = crate::plugins::commands::find_entity_by_element_id(world, element_id)
+            .expect("occurrence entity");
+        world.entity(entity).get::<Mesh3d>().expect("mesh").id()
+    }
+
+    fn needs_mesh_count(world: &mut World) -> usize {
+        let mut query = world.query_filtered::<Entity, With<NeedsMesh>>();
+        query.iter(world).count()
+    }
+
     #[test]
     fn render_occurrence_attaches_cached_mesh_without_profile_extrusion() {
         let definition = rectangular_definition();
@@ -2682,5 +2693,102 @@ mod pp_098_occurrence_cache_tests {
         assert!(left_ref.get::<NeedsMesh>().is_none());
         assert!(right_ref.get::<NeedsMesh>().is_none());
         assert_eq!(world.resource::<RepresentationCache>().len(), 3);
+    }
+
+    #[test]
+    fn mixed_occurrence_edits_keep_cache_and_mesh_work_bounded() {
+        const OCCURRENCE_COUNT: usize = 200;
+        const FRAME_COUNT: usize = 100;
+        const GEOMETRY_WIDTHS: [f64; 5] = [2.5, 3.0, 3.5, 4.0, 4.5];
+
+        let definition = rectangular_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let mut identities =
+            vec![
+                OccurrenceIdentity::new(definition.id.clone(), definition.definition_version);
+                OCCURRENCE_COUNT
+            ];
+
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<RepresentationCache>()
+            .insert_resource(PrimitiveMaterial(Handle::default()))
+            .insert_resource(PlaneMaterial(Handle::default()))
+            .insert_resource(registry.clone())
+            .add_systems(Update, spawn_primitive_meshes::<ProfileExtrusion>);
+
+        for (index, identity) in identities.iter().enumerate() {
+            render_occurrence(
+                app.world_mut(),
+                &registry,
+                ElementId(index as u64),
+                identity,
+                Transform::from_translation(Vec3::new(index as f32, 0.0, 0.0)),
+                Some("soak"),
+            )
+            .expect("render occurrence");
+        }
+        assert_eq!(needs_mesh_count(app.world_mut()), OCCURRENCE_COUNT);
+        app.update();
+        assert_eq!(needs_mesh_count(app.world_mut()), 0);
+        assert_eq!(app.world().resource::<RepresentationCache>().len(), 1);
+
+        let default_mesh_id = mesh_id_for_element(app.world_mut(), ElementId(0));
+        for index in 1..OCCURRENCE_COUNT {
+            assert_eq!(
+                mesh_id_for_element(app.world_mut(), ElementId(index as u64)),
+                default_mesh_id
+            );
+        }
+
+        for frame in 0..FRAME_COUNT {
+            let index = frame % OCCURRENCE_COUNT;
+            let element_id = ElementId(index as u64);
+            let previous_identity = identities[index].clone();
+            let previous = OccurrenceSnapshot::new(element_id, previous_identity.clone(), "soak");
+            let mut next_identity = previous_identity;
+
+            if frame % 2 == 0 {
+                let before_mesh_id = mesh_id_for_element(app.world_mut(), element_id);
+                next_identity
+                    .overrides
+                    .set("finish_color", json!(format!("finish-{frame}")));
+                let next = OccurrenceSnapshot::new(element_id, next_identity.clone(), "soak");
+                next.apply_with_previous(app.world_mut(), Some(&previous));
+
+                assert_eq!(needs_mesh_count(app.world_mut()), 0);
+                assert_eq!(
+                    mesh_id_for_element(app.world_mut(), element_id),
+                    before_mesh_id
+                );
+            } else {
+                let width = GEOMETRY_WIDTHS[(frame / 2) % GEOMETRY_WIDTHS.len()];
+                next_identity.overrides.set("width", json!(width));
+                let next = OccurrenceSnapshot::new(element_id, next_identity.clone(), "soak");
+                next.apply_with_previous(app.world_mut(), Some(&previous));
+
+                assert!(needs_mesh_count(app.world_mut()) <= 1);
+                app.update();
+                assert_eq!(needs_mesh_count(app.world_mut()), 0);
+                assert!(
+                    app.world().resource::<RepresentationCache>().len()
+                        <= GEOMETRY_WIDTHS.len() + 1
+                );
+            }
+
+            identities[index] = next_identity;
+        }
+
+        let mut distinct_mesh_ids = Vec::new();
+        for index in 0..OCCURRENCE_COUNT {
+            let mesh_id = mesh_id_for_element(app.world_mut(), ElementId(index as u64));
+            if !distinct_mesh_ids.contains(&mesh_id) {
+                distinct_mesh_ids.push(mesh_id);
+            }
+        }
+        assert!(distinct_mesh_ids.len() <= GEOMETRY_WIDTHS.len() + 1);
+        assert!(app.world().resource::<RepresentationCache>().len() <= GEOMETRY_WIDTHS.len() + 1);
     }
 }
