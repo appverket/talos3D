@@ -126,18 +126,57 @@ impl OccurrenceIdentity {
 // OccurrenceClassification — ECS component
 // ---------------------------------------------------------------------------
 
-/// Lightweight classification component tracking whether the occurrence's
-/// mesh is up to date.
+/// Lightweight classification component tracking which occurrence channels
+/// are up to date.
 #[derive(Debug, Clone, Component)]
 pub struct OccurrenceClassification {
     /// When `true` the occurrence needs to be re-evaluated by
     /// `evaluate_occurrences`.
     pub mesh_dirty: bool,
+    /// When `true` material assignment or finish data needs to be rebound.
+    pub material_dirty: bool,
+    /// When `true` the occurrence transform needs to be propagated without
+    /// necessarily rebuilding geometry.
+    pub transform_dirty: bool,
+}
+
+impl OccurrenceClassification {
+    pub fn dirty_all() -> Self {
+        Self {
+            mesh_dirty: true,
+            material_dirty: true,
+            transform_dirty: true,
+        }
+    }
+
+    pub fn clean() -> Self {
+        Self {
+            mesh_dirty: false,
+            material_dirty: false,
+            transform_dirty: false,
+        }
+    }
+
+    pub fn mark_mesh_dirty(&mut self) {
+        self.mesh_dirty = true;
+    }
+
+    pub fn mark_material_dirty(&mut self) {
+        self.material_dirty = true;
+    }
+
+    pub fn mark_transform_dirty(&mut self) {
+        self.transform_dirty = true;
+    }
+
+    pub fn clear_all(&mut self) {
+        *self = Self::clean();
+    }
 }
 
 impl Default for OccurrenceClassification {
     fn default() -> Self {
-        Self { mesh_dirty: true }
+        Self::dirty_all()
     }
 }
 
@@ -739,7 +778,7 @@ pub fn propagate_definition_changes(
 
     for (identity, mut classification) in &mut query {
         if ids.contains(&identity.definition_id) {
-            classification.mesh_dirty = true;
+            classification.mark_mesh_dirty();
         }
         let _ = &mut commands;
     }
@@ -802,9 +841,9 @@ pub fn evaluate_occurrences(world: &mut World) {
         if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
             entity_mut.remove::<NeedsEval>();
             if let Some(mut classification) = entity_mut.get_mut::<OccurrenceClassification>() {
-                classification.mesh_dirty = false;
+                classification.clear_all();
             } else {
-                entity_mut.insert(OccurrenceClassification { mesh_dirty: false });
+                entity_mut.insert(OccurrenceClassification::clean());
             }
         }
     }
@@ -878,7 +917,7 @@ fn render_occurrence(
     if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
         entity_mut.insert((
             identity.clone(),
-            OccurrenceClassification { mesh_dirty: false },
+            OccurrenceClassification::clean(),
             transform,
         ));
     }
@@ -897,7 +936,7 @@ fn ensure_occurrence_root_entity(
         if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
             entity_mut.insert((
                 identity.clone(),
-                OccurrenceClassification { mesh_dirty: false },
+                OccurrenceClassification::clean(),
                 transform,
             ));
             if let Some(label) = label {
@@ -909,7 +948,7 @@ fn ensure_occurrence_root_entity(
         let mut entity = world.spawn((
             element_id,
             identity.clone(),
-            OccurrenceClassification { mesh_dirty: false },
+            OccurrenceClassification::clean(),
             transform,
             GlobalTransform::default(),
         ));
@@ -1501,6 +1540,59 @@ fn remove_entity_mesh_assets(world: &mut World, entity: Entity) {
     let mesh_asset_id = world.get::<Mesh3d>(entity).map(|mesh| mesh.id());
     if let Some(mesh_asset_id) = mesh_asset_id {
         world.resource_mut::<Assets<Mesh>>().remove(mesh_asset_id);
+    }
+}
+
+#[cfg(test)]
+mod pp_098_dirty_taxonomy_tests {
+    use super::*;
+
+    #[test]
+    fn occurrence_classification_default_marks_all_channels_dirty() {
+        let classification = OccurrenceClassification::default();
+
+        assert!(classification.mesh_dirty);
+        assert!(classification.material_dirty);
+        assert!(classification.transform_dirty);
+    }
+
+    #[test]
+    fn occurrence_classification_clean_marks_all_channels_clean() {
+        let classification = OccurrenceClassification::clean();
+
+        assert!(!classification.mesh_dirty);
+        assert!(!classification.material_dirty);
+        assert!(!classification.transform_dirty);
+    }
+
+    #[test]
+    fn occurrence_classification_channels_can_be_marked_independently() {
+        let mut classification = OccurrenceClassification::clean();
+
+        classification.mark_material_dirty();
+        assert!(!classification.mesh_dirty);
+        assert!(classification.material_dirty);
+        assert!(!classification.transform_dirty);
+
+        classification.mark_transform_dirty();
+        assert!(!classification.mesh_dirty);
+        assert!(classification.material_dirty);
+        assert!(classification.transform_dirty);
+
+        classification.mark_mesh_dirty();
+        assert!(classification.mesh_dirty);
+        assert!(classification.material_dirty);
+        assert!(classification.transform_dirty);
+
+        classification.clear_all();
+        assert_eq!(
+            (
+                classification.mesh_dirty,
+                classification.material_dirty,
+                classification.transform_dirty
+            ),
+            (false, false, false)
+        );
     }
 }
 

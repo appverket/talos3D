@@ -21406,7 +21406,7 @@ mod tests {
         };
         world
             .entity_mut(entity)
-            .insert(OccurrenceClassification { mesh_dirty: false });
+            .insert(OccurrenceClassification::clean());
 
         // Directly mutate opaque domain data on the component. This must not
         // force a geometry re-evaluation.
