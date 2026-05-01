@@ -4,15 +4,15 @@ use std::collections::HashMap;
 use bevy::window::PrimaryWindow;
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 #[cfg(feature = "model-api")]
 use serde_json::json;
+use serde_json::Value;
 
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
-use crate::curation::MaterialSpecBody;
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
+use crate::curation::MaterialSpecBody;
 #[cfg(feature = "model-api")]
 use crate::plugins::authoring_guidance::AuthoringGuidance;
 #[cfg(feature = "model-api")]
@@ -30,7 +30,7 @@ use crate::plugins::materials::MaterialDef;
 use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
-use crate::plugins::modeling::semantics::{GeometrySemantics, geometry_semantics_for_snapshot};
+use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::RenderSettings;
 #[cfg(feature = "model-api")]
@@ -38,28 +38,28 @@ use crate::plugins::render_pipeline::RenderTonemapping;
 #[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
-        CameraProjectionMode, OrbitCamera, apply_orbit_state, focus_orbit_camera_on_bounds,
-        perspective_distance_to_orthographic_scale,
+        apply_orbit_state, focus_orbit_camera_on_bounds,
+        perspective_distance_to_orthographic_scale, CameraProjectionMode, OrbitCamera,
     },
     commands::{
-        ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
-        EndCommandGroup, ResolvedDeleteEntitiesCommand, find_entity_by_element_id,
-        queue_command_events,
+        find_entity_by_element_id, queue_command_events, ApplyEntityChangesCommand,
+        BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
+        ResolvedDeleteEntitiesCommand,
     },
     document_properties::DocumentProperties,
-    history::{HistorySet, apply_pending_history_commands},
-    import::{ImportRegistry, ImporterDescriptor, import_file_now},
+    history::{apply_pending_history_commands, HistorySet},
+    import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     lighting::{
-        SceneLightNode, SceneLightingSettings, create_daylight_rig, scene_light_object_exposed,
+        create_daylight_rig, scene_light_object_exposed, SceneLightNode, SceneLightingSettings,
     },
-    materials::{MaterialRegistry, TextureRef, TextureRegistry, normalize_material_textures},
+    materials::{normalize_material_textures, MaterialRegistry, TextureRef, TextureRegistry},
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
     selection::Selected,
     toolbar::{
-        ToolbarDock, ToolbarLayoutState, ToolbarRegistry, ToolbarSection,
-        update_toolbar_layout_entry,
+        update_toolbar_layout_entry, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
+        ToolbarSection,
     },
 };
 
@@ -68,29 +68,28 @@ use std::{
     env, fs,
     net::TcpListener as StdTcpListener,
     path::{Path, PathBuf},
-    sync::{Mutex, mpsc},
+    sync::{mpsc, Mutex},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(feature = "model-api")]
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     schemars::JsonSchema,
-    tool, tool_handler, tool_router, transport,
+    tool, tool_handler, tool_router, transport, ErrorData as McpError, ServerHandler, ServiceExt,
 };
 
 #[cfg(feature = "model-api")]
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 
 #[cfg(feature = "model-api")]
 use tokio::sync::oneshot;
 #[cfg(feature = "model-api")]
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
 #[cfg(feature = "model-api")]
 pub struct ModelApiPlugin;
@@ -1042,6 +1041,15 @@ pub struct InstantiateDefinitionResult {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MakeOccurrenceUniqueResult {
+    pub element_id: u64,
+    pub previous_definition_id: String,
+    pub new_definition_id: String,
+    pub copied_definition_ids: Vec<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DefinitionDraftEntry {
     pub draft_id: String,
     pub source_definition_id: Option<String>,
@@ -1909,6 +1917,10 @@ enum ModelApiRequest {
         overrides: Value,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    MakeOccurrenceUnique {
+        request: OccurrenceMakeUniqueRequest,
+        response: oneshot::Sender<ApiResult<MakeOccurrenceUniqueResult>>,
+    },
     ExplainOccurrence {
         element_id: u64,
         response: oneshot::Sender<ApiResult<OccurrenceExplainResult>>,
@@ -2768,6 +2780,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             let _ = response.send(handle_update_occurrence_overrides(
                 world, element_id, overrides,
             ));
+        }
+        ModelApiRequest::MakeOccurrenceUnique { request, response } => {
+            let _ = response.send(handle_make_occurrence_unique(world, request));
         }
         ModelApiRequest::ExplainOccurrence {
             element_id,
@@ -5775,6 +5790,19 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_make_occurrence_unique(
+        &self,
+        request: OccurrenceMakeUniqueRequest,
+    ) -> ApiResult<MakeOccurrenceUniqueResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::MakeOccurrenceUnique { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_explain_occurrence(
         &self,
         element_id: u64,
@@ -7224,6 +7252,21 @@ struct DefinitionLibraryExportRequest {
 struct OccurrenceUpdateOverridesRequest {
     element_id: u64,
     overrides: Value,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OccurrenceMakeUniqueRequest {
+    element_id: u64,
+    name: Option<String>,
+    #[serde(default = "default_copy_definition_dependencies")]
+    copy_dependencies: bool,
+}
+
+#[cfg(feature = "model-api")]
+fn default_copy_definition_dependencies() -> bool {
+    true
 }
 
 #[cfg(feature = "model-api")]
@@ -9957,6 +10000,21 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "occurrence.make_unique",
+        description = "Detach one occurrence from its shared definition by copying its effective definition tree and repointing only that occurrence at the new initially-identical definition. Requires: element_id. Optional: name, copy_dependencies (default true)."
+    )]
+    async fn occurrence_make_unique_tool(
+        &self,
+        Parameters(params): Parameters<OccurrenceMakeUniqueRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_make_occurrence_unique(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
         name = "occurrence.validate_host_fit",
         description = "Validate a hosted occurrence against a registered hosting contract. Requires: contract_kind, host_element_id, hosted_element_id. Optional: contract_parameters."
     )]
@@ -11112,7 +11170,7 @@ pub fn handle_bim_material_get_effective(
     request: BimMaterialGetEffectiveRequest,
 ) -> Result<Value, String> {
     use crate::plugins::modeling::bim_material_assignment::{
-        BimMaterialAssignmentOverride, BimMaterialAssignmentRegistry, effective_assignment,
+        effective_assignment, BimMaterialAssignmentOverride, BimMaterialAssignmentRegistry,
     };
 
     ensure_bim_material_registry(world);
@@ -12807,8 +12865,8 @@ fn handle_place_sheet_dimension(
     request: PlaceSheetDimensionRequest,
 ) -> Result<u64, String> {
     use crate::plugins::drafting_sheet::{
-        DEFAULT_MARGIN_MM, DEFAULT_SCALE_DENOMINATOR, sheet_paper_to_world,
-        sheet_view_from_active_camera,
+        sheet_paper_to_world, sheet_view_from_active_camera, DEFAULT_MARGIN_MM,
+        DEFAULT_SCALE_DENOMINATOR,
     };
     let scale = request
         .scale_denominator
@@ -16107,7 +16165,7 @@ pub fn handle_update_occurrence_overrides(
     element_id: u64,
     overrides: Value,
 ) -> ApiResult<Value> {
-    use crate::plugins::commands::ApplyEntityChangesCommand;
+    use crate::plugins::commands::enqueue_apply_entity_changes;
     use crate::plugins::modeling::occurrence::OccurrenceIdentity;
 
     let eid = ElementId(element_id);
@@ -16152,17 +16210,341 @@ pub fn handle_update_occurrence_overrides(
     }
 
     let after_json = after.to_json();
+    let mut before_snapshots = vec![before];
+    let mut after_snapshots = vec![after];
+    let occurrence_after = after_snapshots
+        .first()
+        .ok_or_else(|| "Updated occurrence snapshot missing".to_string())?
+        .clone();
+    append_host_opening_sync_snapshots(
+        world,
+        eid,
+        &occurrence_after,
+        &mut before_snapshots,
+        &mut after_snapshots,
+    )?;
 
-    world
-        .resource_mut::<Messages<ApplyEntityChangesCommand>>()
-        .write(ApplyEntityChangesCommand {
+    enqueue_apply_entity_changes(
+        world,
+        ApplyEntityChangesCommand {
             label: "Update occurrence overrides",
-            before: vec![before],
-            after: vec![after],
-        });
+            before: before_snapshots,
+            after: after_snapshots,
+        },
+    );
 
     flush_model_api_write_pipeline(world);
     Ok(after_json)
+}
+
+#[cfg(feature = "model-api")]
+fn occurrence_snapshot(
+    snapshot: &BoxedEntity,
+) -> Option<&crate::plugins::modeling::occurrence::OccurrenceSnapshot> {
+    snapshot
+        .0
+        .as_any()
+        .downcast_ref::<crate::plugins::modeling::occurrence::OccurrenceSnapshot>()
+}
+
+#[cfg(feature = "model-api")]
+fn relation_dimension_axes(
+    host_snapshot: Option<&BoxedEntity>,
+    opening_snapshot: &BoxedEntity,
+) -> Option<(SpatialAxis, SpatialAxis, SpatialAxis)> {
+    let host_bounds = host_snapshot
+        .and_then(BoxedEntity::bounds)
+        .unwrap_or_else(|| alignment_bounds(opening_snapshot));
+    let axes = hosted_opening_axes(host_bounds)?;
+    let height_axis = if axes.in_plane.contains(&SpatialAxis::Y) {
+        SpatialAxis::Y
+    } else {
+        axes.in_plane[1]
+    };
+    let width_axis = axes
+        .in_plane
+        .into_iter()
+        .find(|axis| *axis != height_axis)
+        .unwrap_or(axes.in_plane[0]);
+    Some((width_axis, height_axis, axes.normal))
+}
+
+#[cfg(feature = "model-api")]
+fn set_axis_value(values: &mut [f32; 3], axis: SpatialAxis, value: f32) {
+    match axis {
+        SpatialAxis::X => values[0] = value,
+        SpatialAxis::Y => values[1] = value,
+        SpatialAxis::Z => values[2] = value,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn ensure_json_object(value: &mut Value) {
+    if !value.is_object() {
+        *value = Value::Object(Default::default());
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn opening_size_from_occurrence(
+    world: &World,
+    identity: &crate::plugins::modeling::occurrence::OccurrenceIdentity,
+) -> ApiResult<Option<(f32, f32)>> {
+    use crate::plugins::modeling::definition::DefinitionRegistry;
+    use crate::plugins::modeling::void_declaration::VoidShape;
+
+    let registry = world.resource::<DefinitionRegistry>();
+    let definition = registry.effective_definition(&identity.definition_id)?;
+    let Some(void_declaration) = definition.interface.void_declaration.as_ref() else {
+        return Ok(None);
+    };
+    let VoidShape::Rectangular {
+        width_param,
+        height_param,
+    } = &void_declaration.shape
+    else {
+        return Ok(None);
+    };
+    let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
+    let width = resolved
+        .get(width_param)
+        .and_then(|param| param.value.as_f64())
+        .ok_or_else(|| {
+            format!(
+                "Void width parameter '{}' must resolve to a number",
+                width_param
+            )
+        })? as f32;
+    let height = resolved
+        .get(height_param)
+        .and_then(|param| param.value.as_f64())
+        .ok_or_else(|| {
+            format!(
+                "Void height parameter '{}' must resolve to a number",
+                height_param
+            )
+        })? as f32;
+    if width <= 0.0 || height <= 0.0 {
+        return Err("Hosted occurrence void dimensions must be greater than zero".to_string());
+    }
+    Ok(Some((width, height)))
+}
+
+#[cfg(feature = "model-api")]
+fn append_host_opening_sync_snapshots(
+    world: &World,
+    occurrence_id: ElementId,
+    occurrence_after: &BoxedEntity,
+    before_snapshots: &mut Vec<BoxedEntity>,
+    after_snapshots: &mut Vec<BoxedEntity>,
+) -> ApiResult<()> {
+    use crate::plugins::modeling::assembly::{RelationSnapshot, SemanticRelation};
+
+    let Some(snapshot) = occurrence_snapshot(occurrence_after) else {
+        return Ok(());
+    };
+    let Some(hosting) = snapshot.identity.hosting.as_ref() else {
+        return Ok(());
+    };
+    let Some((opening_width, opening_height)) =
+        opening_size_from_occurrence(world, &snapshot.identity)?
+    else {
+        return Ok(());
+    };
+
+    if let Some(opening_id) = hosting.opening_element_id {
+        if let Some(opening_before) = capture_entity_snapshot(world, opening_id) {
+            if opening_before.type_name() == "box" {
+                let host_before = hosting
+                    .host_element_id
+                    .and_then(|id| capture_entity_snapshot(world, id));
+                if let Some((width_axis, height_axis, _normal_axis)) =
+                    relation_dimension_axes(host_before.as_ref(), &opening_before)
+                {
+                    let json = opening_before.to_json();
+                    if let Some(raw_half_extents) = json.get("half_extents") {
+                        let mut half_extents: [f32; 3] =
+                            serde_json::from_value(raw_half_extents.clone()).map_err(|_| {
+                                "Opening proxy half_extents must be a [x, y, z] array".to_string()
+                            })?;
+                        set_axis_value(&mut half_extents, width_axis, opening_width * 0.5);
+                        set_axis_value(&mut half_extents, height_axis, opening_height * 0.5);
+                        let opening_after = opening_before
+                            .set_property_json("half_extents", &json!(half_extents))?;
+                        before_snapshots.push(opening_before);
+                        after_snapshots.push(opening_after);
+                    }
+                }
+            }
+        }
+    }
+
+    let Some(mut query) = world.try_query::<(&ElementId, &SemanticRelation)>() else {
+        return Ok(());
+    };
+    for (relation_id, relation) in query.iter(world) {
+        if relation.source != occurrence_id || relation.relation_type != "hosted_on" {
+            continue;
+        }
+        let mut parameters = relation.parameters.clone();
+        ensure_json_object(&mut parameters);
+        if let Some(object) = parameters.as_object_mut() {
+            object.insert("window_width_m".to_string(), json!(opening_width));
+            object.insert("opening_width_m".to_string(), json!(opening_width));
+            object.insert("window_height_m".to_string(), json!(opening_height));
+            object.insert("opening_height_m".to_string(), json!(opening_height));
+        }
+        if parameters == relation.parameters {
+            continue;
+        }
+        before_snapshots.push(
+            RelationSnapshot {
+                element_id: *relation_id,
+                relation: relation.clone(),
+            }
+            .into(),
+        );
+        after_snapshots.push(
+            RelationSnapshot {
+                element_id: *relation_id,
+                relation: SemanticRelation {
+                    parameters,
+                    ..relation.clone()
+                },
+            }
+            .into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn copy_effective_definition_tree(
+    registry: &crate::plugins::modeling::definition::DefinitionRegistry,
+    source_id: &crate::plugins::modeling::definition::DefinitionId,
+    root_name: Option<&str>,
+    copy_dependencies: bool,
+    copied: &mut HashMap<
+        crate::plugins::modeling::definition::DefinitionId,
+        crate::plugins::modeling::definition::DefinitionId,
+    >,
+    definitions: &mut Vec<crate::plugins::modeling::definition::Definition>,
+) -> ApiResult<crate::plugins::modeling::definition::DefinitionId> {
+    use crate::plugins::modeling::definition::DefinitionId;
+
+    if let Some(existing) = copied.get(source_id) {
+        return Ok(existing.clone());
+    }
+
+    let source = registry.effective_definition(source_id)?;
+    let new_id = DefinitionId::new();
+    copied.insert(source_id.clone(), new_id.clone());
+
+    let mut copy = source.clone();
+    copy.id = new_id.clone();
+    copy.base_definition_id = None;
+    copy.definition_version = 1;
+    copy.name = root_name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} Copy", source.name));
+
+    if copy_dependencies {
+        if let Some(compound) = copy.compound.as_mut() {
+            for slot in &mut compound.child_slots {
+                let child_new_id = copy_effective_definition_tree(
+                    registry,
+                    &slot.definition_id,
+                    None,
+                    true,
+                    copied,
+                    definitions,
+                )?;
+                slot.definition_id = child_new_id;
+            }
+        }
+    }
+
+    definitions.push(copy);
+    Ok(new_id)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_make_occurrence_unique(
+    world: &mut World,
+    request: OccurrenceMakeUniqueRequest,
+) -> ApiResult<MakeOccurrenceUniqueResult> {
+    use crate::plugins::commands::{enqueue_apply_entity_changes, enqueue_create_definition};
+    use crate::plugins::history::PendingCommandQueue;
+    use crate::plugins::modeling::definition::DefinitionRegistry;
+
+    let occurrence_id = ElementId(request.element_id);
+    let before = capture_entity_snapshot(world, occurrence_id)
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let occurrence = occurrence_snapshot(&before)
+        .ok_or_else(|| format!("Entity {} is not an occurrence", request.element_id))?;
+    let previous_definition_id = occurrence.identity.definition_id.clone();
+
+    let mut copied = HashMap::new();
+    let mut copied_definitions = Vec::new();
+    let new_definition_id = {
+        let registry = world.resource::<DefinitionRegistry>();
+        copy_effective_definition_tree(
+            registry,
+            &previous_definition_id,
+            request.name.as_deref(),
+            request.copy_dependencies,
+            &mut copied,
+            &mut copied_definitions,
+        )?
+    };
+
+    let mut preview = world.resource::<DefinitionRegistry>().clone();
+    for definition in &copied_definitions {
+        preview.validate_definition(definition)?;
+        preview.insert(definition.clone());
+    }
+
+    let new_definition = copied_definitions
+        .iter()
+        .find(|definition| definition.id == new_definition_id)
+        .ok_or_else(|| "Copied root definition was not generated".to_string())?;
+
+    let mut after_occurrence = occurrence.clone();
+    after_occurrence.identity.definition_id = new_definition_id.clone();
+    after_occurrence.identity.definition_version = new_definition.definition_version;
+    preview.validate_overrides(
+        &after_occurrence.identity.definition_id,
+        &after_occurrence.identity.overrides,
+    )?;
+
+    let copied_definition_ids = copied_definitions
+        .iter()
+        .map(|definition| definition.id.to_string())
+        .collect::<Vec<_>>();
+
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .begin_group("Make occurrence unique");
+    for definition in copied_definitions {
+        enqueue_create_definition(world, definition);
+    }
+    enqueue_apply_entity_changes(
+        world,
+        ApplyEntityChangesCommand {
+            label: "Make occurrence unique",
+            before: vec![before],
+            after: vec![BoxedEntity(Box::new(after_occurrence))],
+        },
+    );
+    world.resource_mut::<PendingCommandQueue>().end_group();
+    flush_model_api_write_pipeline(world);
+
+    Ok(MakeOccurrenceUniqueResult {
+        element_id: request.element_id,
+        previous_definition_id: previous_definition_id.to_string(),
+        new_definition_id: new_definition_id.to_string(),
+        copied_definition_ids,
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -16989,8 +17371,8 @@ pub fn handle_bim_property_set_set(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::definition::DefinitionId;
     use crate::plugins::modeling::property_sets::{
-        PropertySetChangeKind, PropertySetChanged, PropertySetMap, PropertySetSchemaRegistry,
-        PropertyValue, set_property_validated,
+        set_property_validated, PropertySetChangeKind, PropertySetChanged, PropertySetMap,
+        PropertySetSchemaRegistry, PropertyValue,
     };
     use bevy::ecs::message::Messages;
 
@@ -17242,8 +17624,8 @@ pub fn handle_bim_spatial_assign(
     container_kind: &str,
 ) -> Result<Value, String> {
     use crate::plugins::modeling::spatial_container::{
-        SpatialContainerKind, SpatialContainerKindRegistry, SpatialContainmentGraph,
-        SpatialMembership, validate_assignment,
+        validate_assignment, SpatialContainerKind, SpatialContainerKindRegistry,
+        SpatialContainmentGraph, SpatialMembership,
     };
 
     let child = ElementId(child_element_id);
@@ -17677,7 +18059,7 @@ pub fn handle_get_claim_grounding(
     element_id: u64,
     path_filter: Option<String>,
 ) -> ApiResult<Vec<ClaimGroundingEntry>> {
-    use crate::capability_registry::{ElementClassAssignment, effective_promotion_critical_paths};
+    use crate::capability_registry::{effective_promotion_critical_paths, ElementClassAssignment};
     use crate::plugins::refinement::{ClaimGrounding, RefinementStateComponent};
 
     let eid = ElementId(element_id);
@@ -17749,8 +18131,8 @@ pub fn handle_promote_refinement(
     overrides: serde_json::Value,
 ) -> ApiResult<PromoteRefinementResult> {
     use crate::plugins::refinement::{
-        ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState, RefinementStateComponent,
-        apply_promote_refinement,
+        apply_promote_refinement, ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState,
+        RefinementStateComponent,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -17822,7 +18204,7 @@ fn handle_demote_refinement(
     target_state_str: String,
 ) -> ApiResult<DemoteRefinementResult> {
     use crate::plugins::refinement::{
-        DemoteRefinementRequest, RefinementState, RefinementStateComponent, apply_demote_refinement,
+        apply_demote_refinement, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -17869,7 +18251,7 @@ pub fn handle_run_validation(
     element_id: u64,
 ) -> ApiResult<Vec<ValidationFindingInfo>> {
     use crate::plugins::refinement::{
-        ObligationSet, RefinementStateComponent, validate_declared_state_obligations,
+        validate_declared_state_obligations, ObligationSet, RefinementStateComponent,
     };
 
     let eid = ElementId(element_id);
@@ -18339,11 +18721,11 @@ fn handle_preview_promotion(
     overrides: serde_json::Value,
 ) -> ApiResult<PreviewPromotionResult> {
     use crate::plugins::refinement::{
-        ClaimPath, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
-        apply_demote_refinement,
+        apply_demote_refinement, ClaimPath, DemoteRefinementRequest, RefinementState,
+        RefinementStateComponent,
     };
     use crate::plugins::refinement::{
-        PromoteRefinementRequest, RecipeId, apply_promote_refinement,
+        apply_promote_refinement, PromoteRefinementRequest, RecipeId,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -19233,9 +19615,9 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
+    use serde_json::json;
     #[cfg(feature = "model-api")]
     use serde_json::Value;
-    use serde_json::json;
     #[cfg(feature = "model-api")]
     use std::{
         fs,
@@ -19507,19 +19889,15 @@ mod tests {
         let details = get_entity_details(&world, ElementId(element_id))
             .expect("guide line details should exist");
         assert_eq!(details.entity_type, "guide_line");
-        assert!(
-            details
-                .properties
-                .iter()
-                .any(|property| property.name == "direction")
-        );
+        assert!(details
+            .properties
+            .iter()
+            .any(|property| property.name == "direction"));
 
         let entities = list_entities(&world);
-        assert!(
-            entities
-                .iter()
-                .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line")
-        );
+        assert!(entities
+            .iter()
+            .any(|entry| entry.element_id == element_id && entry.entity_type == "guide_line"));
     }
 
     #[cfg(feature = "model-api")]
@@ -19595,18 +19973,14 @@ mod tests {
         let details = get_entity_details(&world, ElementId(element_id))
             .expect("dimension line details should exist");
         assert_eq!(details.entity_type, "dimension_line");
-        assert!(
-            details
-                .properties
-                .iter()
-                .any(|property| property.name == "extension")
-        );
-        assert!(
-            details
-                .properties
-                .iter()
-                .any(|property| property.name == "length")
-        );
+        assert!(details
+            .properties
+            .iter()
+            .any(|property| property.name == "extension"));
+        assert!(details
+            .properties
+            .iter()
+            .any(|property| property.name == "length"));
 
         let entities = list_entities(&world);
         assert!(entities.iter().any(|entry| {
@@ -19690,12 +20064,10 @@ mod tests {
         let saved_path = handle_take_screenshot(&mut world, screenshot_path.to_str().unwrap())
             .expect("take_screenshot should queue a capture");
         assert_eq!(saved_path, screenshot_path.to_string_lossy().to_string());
-        assert!(
-            world
-                .resource::<crate::plugins::drawing_export::ViewportExportState>()
-                .pending
-                .is_some()
-        );
+        assert!(world
+            .resource::<crate::plugins::drawing_export::ViewportExportState>()
+            .pending
+            .is_some());
     }
 
     #[cfg(feature = "model-api")]
@@ -20817,18 +21189,14 @@ mod tests {
                 .unwrap()["default_value"],
             json!(5.0)
         );
-        assert!(
-            explain
-                .local_parameter_names
-                .iter()
-                .any(|name| name == "height")
-        );
-        assert!(
-            explain
-                .inherited_parameter_names
-                .iter()
-                .any(|name| name == "width")
-        );
+        assert!(explain
+            .local_parameter_names
+            .iter()
+            .any(|name| name == "height"));
+        assert!(explain
+            .inherited_parameter_names
+            .iter()
+            .any(|name| name == "width"));
     }
 
     #[cfg(feature = "model-api")]
@@ -21048,9 +21416,7 @@ mod tests {
                 .iter()
                 .map(|(generated, _)| generated.slot_path.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "lite[0]", "lite[1]", "lite[2]", "lite[3]", "lite[4]", "lite[5]"
-            ]
+            vec!["lite[0]", "lite[1]", "lite[2]", "lite[3]", "lite[4]", "lite[5]"]
         );
         assert!((generated_parts[0].1.centre.x - -0.25).abs() < 0.0001);
         assert!((generated_parts[0].1.centre.y - -0.2).abs() < 0.0001);
@@ -21145,9 +21511,7 @@ mod tests {
                 .iter()
                 .map(|(generated, _)| generated.slot_path.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "pane[0]", "pane[1]", "pane[2]", "pane[3]", "pane[4]", "pane[5]"
-            ]
+            vec!["pane[0]", "pane[1]", "pane[2]", "pane[3]", "pane[4]", "pane[5]"]
         );
         assert_eq!(generated_parts[0].1.centre.x, 0.0);
         assert_eq!(generated_parts[0].1.centre.y, 0.0);
@@ -21477,6 +21841,142 @@ mod tests {
 
     #[cfg(feature = "model-api")]
     #[test]
+    fn hosted_occurrence_resize_updates_opening_proxy_and_relation() {
+        let mut world = init_model_api_test_world();
+        register_hosted_on_relation(&mut world);
+
+        let host_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.5, 0.0],
+                "half_extents": [2.0, 1.5, 0.15]
+            }),
+        )
+        .expect("host should be created");
+        let opening_id = handle_create_entity(
+            &mut world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.2, 0.0],
+                "half_extents": [0.6, 0.8, 0.15]
+            }),
+        )
+        .expect("opening proxy should be created");
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+        let instantiated = handle_instantiate_hosted_definition(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "label": "HostedWindow",
+                "hosting": {
+                    "host_element_id": host_id,
+                    "opening_element_id": opening_id
+                }
+            }),
+        )
+        .expect("hosted occurrence should be instantiated");
+
+        handle_update_occurrence_overrides(
+            &mut world,
+            instantiated.element_id,
+            json!({
+                "overall_width": 0.9,
+                "overall_height": 1.1
+            }),
+        )
+        .expect("hosted resize should update occurrence and opening");
+
+        let opening_snapshot = capture_entity_snapshot(&world, ElementId(opening_id))
+            .expect("opening proxy should still exist");
+        let half_extents: [f32; 3] =
+            serde_json::from_value(opening_snapshot.to_json()["half_extents"].clone())
+                .expect("box half extents should be present");
+        assert!((half_extents[0] - 0.45).abs() < 1e-5);
+        assert!((half_extents[1] - 0.55).abs() < 1e-5);
+        assert!((half_extents[2] - 0.15).abs() < 1e-5);
+
+        let relations = handle_query_relations(
+            &world,
+            Some(instantiated.element_id),
+            Some(host_id),
+            Some("hosted_on".to_string()),
+        );
+        assert_eq!(relations.len(), 1);
+        assert!((relations[0].parameters["window_width_m"].as_f64().unwrap() - 0.9).abs() < 1e-5);
+        assert!((relations[0].parameters["window_height_m"].as_f64().unwrap() - 1.1).abs() < 1e-5);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn occurrence_make_unique_copies_definition_tree_and_repoints_only_target() {
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+
+        let occ_a = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": compound.definition_id, "label": "WindowA" }),
+        )
+        .expect("occurrence A should be placed");
+        let occ_b = handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": compound.definition_id, "label": "WindowB" }),
+        )
+        .expect("occurrence B should be placed");
+
+        let result = handle_make_occurrence_unique(
+            &mut world,
+            OccurrenceMakeUniqueRequest {
+                element_id: occ_a,
+                name: Some("WindowA Unique".to_string()),
+                copy_dependencies: true,
+            },
+        )
+        .expect("make unique should succeed");
+
+        assert_eq!(result.previous_definition_id, compound.definition_id);
+        assert_ne!(result.new_definition_id, compound.definition_id);
+        assert_eq!(result.copied_definition_ids.len(), 2);
+
+        let explained_a =
+            handle_explain_occurrence(&world, occ_a).expect("A should explain after make unique");
+        let explained_b =
+            handle_explain_occurrence(&world, occ_b).expect("B should explain after make unique");
+
+        assert_eq!(explained_a.definition_id, result.new_definition_id);
+        assert_eq!(explained_b.definition_id, compound.definition_id);
+        assert_eq!(explained_a.generated_parts.len(), 1);
+        assert_eq!(explained_b.generated_parts.len(), 1);
+        assert_ne!(
+            explained_a.generated_parts[0].definition_id,
+            child.definition_id
+        );
+        assert_eq!(
+            explained_b.generated_parts[0].definition_id,
+            child.definition_id
+        );
+
+        let copied = handle_get_definition(&world, result.new_definition_id.clone())
+            .expect("copied definition should exist");
+        assert_eq!(copied.name, "WindowA Unique");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
     fn definition_library_workflow_exports_imports_and_instantiates() {
         let mut source_world = init_model_api_test_world();
         let base_definition =
@@ -21533,16 +22033,12 @@ mod tests {
 
         assert_eq!(instantiated.definition_id, definition.definition_id);
         assert_eq!(instantiated.imported_definition_ids.len(), 2);
-        assert!(
-            instantiated
-                .imported_definition_ids
-                .contains(&definition.definition_id)
-        );
-        assert!(
-            instantiated
-                .imported_definition_ids
-                .contains(&base_definition.definition_id)
-        );
+        assert!(instantiated
+            .imported_definition_ids
+            .contains(&definition.definition_id));
+        assert!(instantiated
+            .imported_definition_ids
+            .contains(&base_definition.definition_id));
 
         let resolved = handle_resolve_occurrence(&target_world, instantiated.element_id)
             .expect("instantiated occurrence should resolve");
@@ -21633,11 +22129,9 @@ mod tests {
         assert_eq!(explanation.label, "HostedWindow");
         assert_eq!(explanation.hosting["host_element_id"], json!(host_id));
         assert_eq!(explanation.hosting["opening_element_id"], json!(opening_id));
-        assert!(
-            explanation.hosting["anchors"]
-                .as_array()
-                .is_some_and(|anchors| anchors.len() >= 3)
-        );
+        assert!(explanation.hosting["anchors"]
+            .as_array()
+            .is_some_and(|anchors| anchors.len() >= 3));
 
         let relations = handle_query_relations(
             &world,
@@ -21844,12 +22338,10 @@ mod tests {
         .expect("fallback validator should run");
 
         assert_eq!(result.status, HostingValidationStatus::Passed);
-        assert!(
-            result
-                .checks
-                .iter()
-                .any(|check| check.id.0 == "opening.normal_alignment")
-        );
+        assert!(result
+            .checks
+            .iter()
+            .any(|check| check.id.0 == "opening.normal_alignment"));
     }
 
     #[cfg(feature = "model-api")]
@@ -22500,16 +22992,12 @@ mod tests {
 
         assert!(!draft.rust_skeleton.contains("TODO"));
         assert!(!draft.notes.iter().any(|note| note.contains("TODO")));
-        assert!(
-            draft
-                .rust_skeleton
-                .contains("Draft roof_system rule from SE/mono_truss")
-        );
-        assert!(
-            draft
-                .rust_skeleton
-                .contains("Complete the validator body before registering")
-        );
+        assert!(draft
+            .rust_skeleton
+            .contains("Draft roof_system rule from SE/mono_truss"));
+        assert!(draft
+            .rust_skeleton
+            .contains("Complete the validator body before registering"));
     }
 
     #[cfg(feature = "model-api")]
@@ -23155,11 +23643,9 @@ mod tests {
                 }
             ))
         );
-        assert!(
-            !world
-                .resource::<crate::plugins::materials::MaterialRegistry>()
-                .contains("paint_white")
-        );
+        assert!(!world
+            .resource::<crate::plugins::materials::MaterialRegistry>()
+            .contains("paint_white"));
     }
 
     #[cfg(feature = "model-api")]
@@ -23217,12 +23703,10 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![
-                PropertySetSchema::new("Pset_WallCommon").with_property(
-                    PropertyDef::new("FireRating", PropertyValueType::Text)
-                        .required_for(ExportProfile::new("IFC4")),
-                ),
-            ],
+            vec![PropertySetSchema::new("Pset_WallCommon").with_property(
+                PropertyDef::new("FireRating", PropertyValueType::Text)
+                    .required_for(ExportProfile::new("IFC4")),
+            )],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<
@@ -23277,10 +23761,8 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![
-                PropertySetSchema::new("Pset_WallCommon")
-                    .with_property(PropertyDef::new("FireRating", PropertyValueType::Text)),
-            ],
+            vec![PropertySetSchema::new("Pset_WallCommon")
+                .with_property(PropertyDef::new("FireRating", PropertyValueType::Text))],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<
@@ -23411,11 +23893,9 @@ mod tests {
     #[test]
     fn bim_exchange_identity_errors_for_missing_element_or_blank_inputs() {
         let mut world = init_model_api_test_world();
-        assert!(
-            handle_bim_exchange_identity_get(&mut world, 999, "ifc")
-                .unwrap_err()
-                .contains("not found")
-        );
+        assert!(handle_bim_exchange_identity_get(&mut world, 999, "ifc")
+            .unwrap_err()
+            .contains("not found"));
         assert!(
             handle_bim_exchange_identity_assign(&mut world, 999, "", "x")
                 .unwrap_err()
@@ -23463,10 +23943,8 @@ mod tests {
         let mut registry = PropertySetSchemaRegistry::default();
         registry.register(
             DefinitionId("wall.lf_v1".into()),
-            vec![
-                PropertySetSchema::new("Pset_WallCommon")
-                    .with_property(PropertyDef::new("LoadBearing", PropertyValueType::Boolean)),
-            ],
+            vec![PropertySetSchema::new("Pset_WallCommon")
+                .with_property(PropertyDef::new("LoadBearing", PropertyValueType::Boolean))],
         );
         world.insert_resource(registry);
         world.insert_resource(bevy::ecs::message::Messages::<PropertySetChanged>::default());
