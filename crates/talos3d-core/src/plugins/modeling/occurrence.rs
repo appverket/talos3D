@@ -32,7 +32,7 @@ use crate::{
                 OverrideMap, ParamType, RepresentationKind, SlotCount, SlotLayout,
                 SlotMultiplicity, TransformBinding,
             },
-            mesh_generation::NeedsMesh,
+            mesh_generation::{NeedsMesh, PrimitiveMaterial},
             primitive_trait::Primitive,
             primitives::ShapeRotation,
             profile::{Profile2d, ProfileExtrusion},
@@ -962,16 +962,25 @@ fn render_occurrence(
     let definition = registry.effective_definition(&identity.definition_id)?;
     let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
     let state = evaluate_definition_state(&definition, &resolved)?;
+    let cache_key = mesh_cache_key_for_definition(&definition, &state.values);
 
     if let Some(extrusion) =
         build_rectangular_extrusion_from_values(&definition, &state.values, transform.translation)
     {
-        apply_mesh_primitive(
+        if !apply_cached_occurrence_mesh(
             world,
-            element_id,
-            extrusion,
-            ShapeRotation(transform.rotation),
-        );
+            root_entity,
+            &cache_key,
+            extrusion.entity_transform(transform.rotation),
+        ) {
+            apply_mesh_primitive(
+                world,
+                element_id,
+                extrusion,
+                ShapeRotation(transform.rotation),
+            );
+            world.entity_mut(root_entity).insert(cache_key);
+        }
         apply_occurrence_material_assignment(world, root_entity, &definition);
     } else {
         clear_occurrence_root_geometry(world, root_entity);
@@ -1095,6 +1104,7 @@ fn spawn_compound_slot_instance(
     let child_definition = registry.effective_definition(&slot.definition_id)?;
     let resolved = registry.resolve_bound_params_checked(&slot.definition_id, &child_overrides)?;
     let state = evaluate_definition_state(&child_definition, &resolved)?;
+    let cache_key = mesh_cache_key_for_definition(&child_definition, &state.values);
     let local_translation =
         evaluate_translation(slot, parent_values)? + context.local_translation_offset;
     let world_translation =
@@ -1113,6 +1123,7 @@ fn spawn_compound_slot_instance(
                 slot_path: context.slot_path.clone(),
                 definition_id: slot.definition_id.clone(),
             },
+            cache_key,
         ));
         apply_spawned_material_assignment(&mut entity, &child_definition);
     }
@@ -1553,6 +1564,56 @@ fn build_rectangular_extrusion_from_values(
     })
 }
 
+fn mesh_cache_key_for_definition(
+    definition: &Definition,
+    resolved: &HashMap<String, Value>,
+) -> MeshCacheKey {
+    MeshCacheKey::new(
+        definition.id.clone(),
+        definition.definition_version,
+        definition.geometry_params_hash(resolved),
+        RepresentationKind::PrimaryGeometry,
+    )
+}
+
+fn apply_cached_occurrence_mesh(
+    world: &mut World,
+    entity: Entity,
+    cache_key: &MeshCacheKey,
+    transform: Transform,
+) -> bool {
+    let Some(cached_handle) = world
+        .get_resource_mut::<RepresentationCache>()
+        .and_then(|mut cache| cache.get(cache_key).map(|handle| (*handle).clone()))
+    else {
+        return false;
+    };
+
+    let material = world
+        .get_resource::<PrimitiveMaterial>()
+        .map(|material| material.0.clone());
+    if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
+        entity_mut.remove::<(ProfileExtrusion, ShapeRotation, NeedsMesh)>();
+        entity_mut.insert((
+            Mesh3d(cached_handle),
+            Visibility::Visible,
+            transform,
+            cache_key.clone(),
+        ));
+        if entity_mut
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .is_none()
+        {
+            if let Some(material) = material {
+                entity_mut.insert(MeshMaterial3d(material));
+            }
+        }
+        true
+    } else {
+        false
+    }
+}
+
 fn clear_occurrence_root_geometry(world: &mut World, entity: Entity) {
     remove_entity_mesh_assets(world, entity);
     if let Ok(mut entity_mut) = world.get_entity_mut(entity) {
@@ -1561,6 +1622,7 @@ fn clear_occurrence_root_geometry(world: &mut World, entity: Entity) {
             ShapeRotation,
             NeedsMesh,
             Mesh3d,
+            MeshCacheKey,
             MeshMaterial3d<StandardMaterial>,
         )>();
     }
@@ -1620,6 +1682,9 @@ fn despawn_generated_entity(world: &mut World, entity: Entity) {
 }
 
 fn remove_entity_mesh_assets(world: &mut World, entity: Entity) {
+    if world.get::<MeshCacheKey>(entity).is_some() {
+        return;
+    }
     let mesh_asset_id = world.get::<Mesh3d>(entity).map(|mesh| mesh.id());
     if let Some(mesh_asset_id) = mesh_asset_id {
         world.resource_mut::<Assets<Mesh>>().remove(mesh_asset_id);
@@ -1883,5 +1948,146 @@ mod pp_098_representation_cache_tests {
         assert!(!cache.contains_key(&window_next_key));
         assert!(cache.contains_key(&door_key));
         assert!(app.world().entity(entity).contains::<NeedsEval>());
+    }
+}
+
+#[cfg(test)]
+mod pp_098_occurrence_cache_tests {
+    use super::*;
+    use bevy::{asset::RenderAssetUsages, mesh::PrimitiveTopology};
+    use serde_json::json;
+
+    use crate::plugins::modeling::definition::{
+        DefinitionKind, Interface, OverridePolicy, ParameterDef, ParameterMetadata,
+        ParameterSchema, RectangularExtrusionEvaluator,
+    };
+
+    fn numeric_parameter(name: &str, default_value: f64) -> ParameterDef {
+        ParameterDef {
+            name: name.to_string(),
+            param_type: ParamType::Numeric,
+            default_value: json!(default_value),
+            override_policy: OverridePolicy::Overridable,
+            geometry_affecting: true,
+            metadata: ParameterMetadata::default(),
+        }
+    }
+
+    fn rectangular_definition() -> Definition {
+        Definition {
+            id: DefinitionId("cached.window".to_string()),
+            base_definition_id: None,
+            name: "Cached Window".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![
+                    numeric_parameter("width", 2.0),
+                    numeric_parameter("depth", 0.25),
+                    numeric_parameter("height", 1.5),
+                ]),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: vec![EvaluatorDecl::RectangularExtrusion(
+                RectangularExtrusionEvaluator {
+                    width_param: "width".to_string(),
+                    depth_param: "depth".to_string(),
+                    height_param: "height".to_string(),
+                },
+            )],
+            representations: Vec::new(),
+            compound: None,
+            material_assignment: None,
+            domain_data: Value::Null,
+        }
+    }
+
+    fn world_with_cache() -> World {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(RepresentationCache::default());
+        world.insert_resource(PrimitiveMaterial(Handle::default()));
+        world
+    }
+
+    #[test]
+    fn render_occurrence_attaches_cached_mesh_without_profile_extrusion() {
+        let definition = rectangular_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity =
+            OccurrenceIdentity::new(definition.id.clone(), definition.definition_version);
+        let resolved = registry
+            .resolve_params_checked(&definition.id, &identity.overrides)
+            .expect("resolved params");
+        let state = evaluate_definition_state(&definition, &resolved).expect("state");
+        let cache_key = mesh_cache_key_for_definition(&definition, &state.values);
+
+        let mut world = world_with_cache();
+        let cached_handle = world.resource_mut::<Assets<Mesh>>().add(Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        ));
+        world
+            .resource_mut::<RepresentationCache>()
+            .insert(cache_key.clone(), cached_handle.clone());
+
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(1),
+            &identity,
+            Transform::from_translation(Vec3::new(3.0, 0.0, 2.0)),
+            Some("cached"),
+        )
+        .expect("render occurrence");
+
+        let entity = crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(1))
+            .expect("occurrence entity");
+        let entity_ref = world.entity(entity);
+        assert_eq!(
+            entity_ref.get::<Mesh3d>().expect("mesh").id(),
+            cached_handle.id()
+        );
+        assert!(entity_ref.get::<MeshCacheKey>().is_some());
+        assert!(entity_ref
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .is_some());
+        assert!(entity_ref.get::<ProfileExtrusion>().is_none());
+        assert!(entity_ref.get::<NeedsMesh>().is_none());
+    }
+
+    #[test]
+    fn render_occurrence_tags_cache_miss_for_mesh_generation() {
+        let definition = rectangular_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity =
+            OccurrenceIdentity::new(definition.id.clone(), definition.definition_version);
+        let resolved = registry
+            .resolve_params_checked(&definition.id, &identity.overrides)
+            .expect("resolved params");
+        let state = evaluate_definition_state(&definition, &resolved).expect("state");
+        let cache_key = mesh_cache_key_for_definition(&definition, &state.values);
+        let mut world = world_with_cache();
+
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(2),
+            &identity,
+            Transform::from_translation(Vec3::new(1.0, 0.0, 1.0)),
+            Some("miss"),
+        )
+        .expect("render occurrence");
+
+        let entity = crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(2))
+            .expect("occurrence entity");
+        let entity_ref = world.entity(entity);
+        assert_eq!(entity_ref.get::<MeshCacheKey>(), Some(&cache_key));
+        assert!(entity_ref.get::<ProfileExtrusion>().is_some());
+        assert!(entity_ref.get::<NeedsMesh>().is_some());
+        assert!(entity_ref.get::<Mesh3d>().is_none());
     }
 }
