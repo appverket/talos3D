@@ -64,7 +64,7 @@ use crate::{
             group::{GroupEditContext, GroupFactory},
             occurrence::{
                 evaluate_occurrences, propagate_definition_changes_with_commands,
-                ChangedDefinitions, OccurrenceFactory,
+                ChangedDefinitions, OccurrenceFactory, RepresentationCache,
             },
             primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive, SpherePrimitive},
             profile::{ProfileExtrusion, ProfileRevolve, ProfileSweep},
@@ -101,6 +101,7 @@ impl Plugin for ModelingPlugin {
             .init_resource::<DefinitionRegistry>()
             .init_resource::<DefinitionLibraryRegistry>()
             .init_resource::<ChangedDefinitions>()
+            .init_resource::<RepresentationCache>()
             .register_workbench(
                 WorkbenchDescriptor::new("modeling", "Modeling")
                     .with_description("Foundational geometric modeling capabilities")

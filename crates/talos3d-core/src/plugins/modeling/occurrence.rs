@@ -5,8 +5,11 @@
 //! and an `OccurrenceClassification` (dirty flag). The ECS evaluation
 //! systems consume these components to produce geometry.
 
-use std::any::Any;
-use std::collections::HashMap;
+use std::{
+    any::Any,
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -25,8 +28,9 @@ use crate::{
         modeling::{
             definition::{
                 AxisRef, ChildSlotDef, ConstraintSeverity, Definition, DefinitionId,
-                DefinitionRegistry, DefinitionVersion, EvaluatorDecl, ExprNode, OverrideMap,
-                ParamType, SlotCount, SlotLayout, SlotMultiplicity, TransformBinding,
+                DefinitionRegistry, DefinitionVersion, EvaluatorDecl, ExprNode,
+                GeometryParamsHash, OverrideMap, ParamType, RepresentationKind, SlotCount,
+                SlotLayout, SlotMultiplicity, TransformBinding,
             },
             mesh_generation::NeedsMesh,
             primitive_trait::Primitive,
@@ -182,6 +186,143 @@ impl ChangedDefinitions {
     /// Drain and return all pending changed definition ids.
     pub fn drain(&mut self) -> Vec<DefinitionId> {
         std::mem::take(&mut self.definitions)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RepresentationCache — Bevy resource
+// ---------------------------------------------------------------------------
+
+pub const DEFAULT_REPRESENTATION_CACHE_CAPACITY: usize = 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MeshCacheKey {
+    pub definition_id: DefinitionId,
+    pub definition_version: DefinitionVersion,
+    pub geometry_params_hash: GeometryParamsHash,
+    pub representation_kind: RepresentationKind,
+}
+
+impl MeshCacheKey {
+    pub fn new(
+        definition_id: DefinitionId,
+        definition_version: DefinitionVersion,
+        geometry_params_hash: GeometryParamsHash,
+        representation_kind: RepresentationKind,
+    ) -> Self {
+        Self {
+            definition_id,
+            definition_version,
+            geometry_params_hash,
+            representation_kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Resource)]
+pub struct RepresentationCache {
+    capacity: usize,
+    entries: HashMap<MeshCacheKey, Arc<Handle<Mesh>>>,
+    lru: VecDeque<MeshCacheKey>,
+}
+
+impl Default for RepresentationCache {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_REPRESENTATION_CACHE_CAPACITY)
+    }
+}
+
+impl RepresentationCache {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn contains_key(&self, key: &MeshCacheKey) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    pub fn get(&mut self, key: &MeshCacheKey) -> Option<Arc<Handle<Mesh>>> {
+        let handle = self.entries.get(key).cloned()?;
+        self.touch(key);
+        Some(handle)
+    }
+
+    pub fn insert(&mut self, key: MeshCacheKey, handle: Handle<Mesh>) -> Arc<Handle<Mesh>> {
+        self.insert_shared(key, Arc::new(handle))
+    }
+
+    pub fn insert_shared(
+        &mut self,
+        key: MeshCacheKey,
+        handle: Arc<Handle<Mesh>>,
+    ) -> Arc<Handle<Mesh>> {
+        if self.capacity == 0 {
+            self.clear();
+            return handle;
+        }
+
+        self.entries.insert(key.clone(), handle.clone());
+        self.touch(&key);
+        self.evict_to_capacity();
+        handle
+    }
+
+    pub fn invalidate_definition(&mut self, definition_id: &DefinitionId) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|key, _| &key.definition_id != definition_id);
+        self.lru.retain(|key| &key.definition_id != definition_id);
+        before - self.entries.len()
+    }
+
+    pub fn invalidate_definition_version(
+        &mut self,
+        definition_id: &DefinitionId,
+        definition_version: DefinitionVersion,
+    ) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|key, _| {
+            &key.definition_id != definition_id || key.definition_version != definition_version
+        });
+        self.lru.retain(|key| {
+            &key.definition_id != definition_id || key.definition_version != definition_version
+        });
+        before - self.entries.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
+
+    fn touch(&mut self, key: &MeshCacheKey) {
+        self.lru.retain(|existing| existing != key);
+        self.lru.push_back(key.clone());
+    }
+
+    fn evict_to_capacity(&mut self) {
+        while self.entries.len() > self.capacity {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
     }
 }
 
@@ -1360,5 +1501,87 @@ fn remove_entity_mesh_assets(world: &mut World, entity: Entity) {
     let mesh_asset_id = world.get::<Mesh3d>(entity).map(|mesh| mesh.id());
     if let Some(mesh_asset_id) = mesh_asset_id {
         world.resource_mut::<Assets<Mesh>>().remove(mesh_asset_id);
+    }
+}
+
+#[cfg(test)]
+mod pp_098_representation_cache_tests {
+    use super::*;
+
+    fn key(id: &str, version: DefinitionVersion, hash: &str) -> MeshCacheKey {
+        MeshCacheKey::new(
+            DefinitionId(id.to_string()),
+            version,
+            GeometryParamsHash(hash.to_string()),
+            RepresentationKind::PrimaryGeometry,
+        )
+    }
+
+    #[test]
+    fn representation_cache_default_capacity_is_1024() {
+        let cache = RepresentationCache::default();
+        assert_eq!(cache.capacity(), DEFAULT_REPRESENTATION_CACHE_CAPACITY);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn representation_cache_hit_returns_shared_mesh_handle_arc() {
+        let mut cache = RepresentationCache::with_capacity(4);
+        let key = key("window", 1, "blake3:a");
+        let inserted = cache.insert(key.clone(), Handle::<Mesh>::default());
+        let hit = cache.get(&key).expect("cache hit");
+
+        assert!(Arc::ptr_eq(&inserted, &hit));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn representation_cache_evicts_least_recently_used_entry() {
+        let mut cache = RepresentationCache::with_capacity(2);
+        let a = key("window", 1, "blake3:a");
+        let b = key("window", 1, "blake3:b");
+        let c = key("window", 1, "blake3:c");
+
+        cache.insert(a.clone(), Handle::<Mesh>::default());
+        cache.insert(b.clone(), Handle::<Mesh>::default());
+        assert!(cache.get(&a).is_some(), "hit should refresh recency");
+        cache.insert(c.clone(), Handle::<Mesh>::default());
+
+        assert!(cache.contains_key(&a));
+        assert!(!cache.contains_key(&b));
+        assert!(cache.contains_key(&c));
+    }
+
+    #[test]
+    fn representation_cache_invalidates_definition_entries() {
+        let mut cache = RepresentationCache::with_capacity(4);
+        let window_a = key("window", 1, "blake3:a");
+        let window_b = key("window", 2, "blake3:b");
+        let door = key("door", 1, "blake3:c");
+        cache.insert(window_a.clone(), Handle::<Mesh>::default());
+        cache.insert(window_b.clone(), Handle::<Mesh>::default());
+        cache.insert(door.clone(), Handle::<Mesh>::default());
+
+        let removed = cache.invalidate_definition(&DefinitionId("window".to_string()));
+
+        assert_eq!(removed, 2);
+        assert!(!cache.contains_key(&window_a));
+        assert!(!cache.contains_key(&window_b));
+        assert!(cache.contains_key(&door));
+    }
+
+    #[test]
+    fn representation_cache_can_invalidate_one_definition_version() {
+        let mut cache = RepresentationCache::with_capacity(4);
+        let old = key("window", 1, "blake3:a");
+        let current = key("window", 2, "blake3:b");
+        cache.insert(old.clone(), Handle::<Mesh>::default());
+        cache.insert(current.clone(), Handle::<Mesh>::default());
+
+        let removed = cache.invalidate_definition_version(&DefinitionId("window".to_string()), 1);
+
+        assert_eq!(removed, 1);
+        assert!(!cache.contains_key(&old));
+        assert!(cache.contains_key(&current));
     }
 }
