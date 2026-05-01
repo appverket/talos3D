@@ -206,9 +206,24 @@ pub struct ParameterDef {
     pub default_value: serde_json::Value,
     /// Whether and how occurrences may override this parameter.
     pub override_policy: OverridePolicy,
+    /// Whether this parameter can affect generated geometry.
+    ///
+    /// PP-098 uses this to separate cache-key inputs from material /
+    /// presentation-only inputs. The default is `true` so older
+    /// project files keep conservative invalidation semantics.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub geometry_affecting: bool,
     /// Optional metadata for authoring and validation.
     #[serde(default)]
     pub metadata: ParameterMetadata,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl ParameterDef {
@@ -1846,6 +1861,7 @@ mod pp_dhost_param_type_tests {
             param_type: ParamType::AxisRef,
             default_value: json!("host.normal"),
             override_policy: OverridePolicy::Locked,
+            geometry_affecting: true,
             metadata: ParameterMetadata::default(),
         };
         axis.validate_value(&json!("host.normal"), "axis").unwrap();
@@ -1858,6 +1874,7 @@ mod pp_dhost_param_type_tests {
             },
             default_value: json!("wall_thickness"),
             override_policy: OverridePolicy::Locked,
+            geometry_affecting: true,
             metadata: ParameterMetadata::default(),
         };
         parameter_ref
@@ -1866,6 +1883,36 @@ mod pp_dhost_param_type_tests {
         assert!(parameter_ref
             .validate_value(&json!(false), "parameter reference")
             .is_err());
+    }
+
+    #[test]
+    fn parameter_geometry_affecting_defaults_true_for_legacy_json() {
+        let parameter: ParameterDef = serde_json::from_value(json!({
+            "name": "finish_color",
+            "param_type": "StringVal",
+            "default_value": "white",
+            "override_policy": "Overridable"
+        }))
+        .unwrap();
+
+        assert!(parameter.geometry_affecting);
+    }
+
+    #[test]
+    fn parameter_geometry_affecting_false_round_trips_explicitly() {
+        let parameter = ParameterDef {
+            name: "finish_color".into(),
+            param_type: ParamType::StringVal,
+            default_value: json!("white"),
+            override_policy: OverridePolicy::Overridable,
+            geometry_affecting: false,
+            metadata: ParameterMetadata::default(),
+        };
+
+        let value = serde_json::to_value(&parameter).unwrap();
+        assert_eq!(value["geometry_affecting"], json!(false));
+        let back: ParameterDef = serde_json::from_value(value).unwrap();
+        assert!(!back.geometry_affecting);
     }
 }
 

@@ -13668,12 +13668,17 @@ fn parse_parameter_schema(
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             let override_policy = parse_override_policy(object.get("override_policy"))?;
+            let geometry_affecting = object
+                .get("geometry_affecting")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             let metadata = parse_parameter_metadata(object.get("metadata"))?;
             Ok(ParameterDef {
                 name,
                 param_type,
                 default_value,
                 override_policy,
+                geometry_affecting,
                 metadata,
             })
         })
@@ -20769,6 +20774,41 @@ mod tests {
         let compile = handle_compile_definition(&world, json!({ "draft_id": draft.draft_id }))
             .expect("compile should succeed");
         assert!(compile.collection_slots.is_empty());
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn draft_patch_sets_parameter_geometry_affecting() {
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let draft = handle_create_definition_draft(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound draft should be created");
+
+        let patched = handle_patch_definition_draft(
+            &mut world,
+            json!({
+                "draft_id": draft.draft_id,
+                "patch": {
+                    "op": "set_parameter_geometry_affecting",
+                    "name": "finish_color",
+                    "geometry_affecting": false
+                }
+            }),
+        )
+        .expect("draft should accept geometry_affecting patch");
+
+        let parameter = patched.full["interface"]["parameters"]
+            .as_array()
+            .expect("parameters should be an array")
+            .iter()
+            .find(|parameter| parameter["name"] == json!("finish_color"))
+            .expect("finish_color parameter should exist");
+        assert_eq!(parameter["geometry_affecting"], json!(false));
     }
 
     #[cfg(feature = "model-api")]

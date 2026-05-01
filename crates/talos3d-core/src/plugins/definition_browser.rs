@@ -3897,6 +3897,7 @@ fn build_parameter_from_state(
         param_type,
         default_value: parse_json_or_string(&state.new_parameter_default),
         override_policy,
+        geometry_affecting: true,
         metadata: crate::plugins::modeling::definition::ParameterMetadata {
             unit: (!state.new_parameter_unit.trim().is_empty())
                 .then_some(state.new_parameter_unit.trim().to_string()),
@@ -4176,6 +4177,7 @@ mod tests {
             param_type: ParamType::Numeric,
             default_value: serde_json::json!(definition_default),
             override_policy: OverridePolicy::Overridable,
+            geometry_affecting: true,
             metadata: ParameterMetadata::default(),
         };
         let definition = Definition {
@@ -4288,6 +4290,7 @@ mod tests {
             param_type: ParamType::Numeric,
             default_value: serde_json::json!(0.6_f64),
             override_policy: OverridePolicy::Overridable,
+            geometry_affecting: true,
             metadata: ParameterMetadata::default(),
         };
         let definition = Definition {
