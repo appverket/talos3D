@@ -48,6 +48,7 @@ pub fn register_support_graph_relations(app: &mut App) {
         valid_target_types: Vec::new(),
         parameter_schema: serde_json::json!({}),
         participates_in_dependency_graph: true,
+        external_classification: None,
     });
     app.register_relation_type(RelationTypeDescriptor {
         relation_type: "fastened_to".to_string(),
@@ -59,6 +60,7 @@ pub fn register_support_graph_relations(app: &mut App) {
         valid_target_types: Vec::new(),
         parameter_schema: serde_json::json!({}),
         participates_in_dependency_graph: false,
+        external_classification: None,
     });
     app.register_relation_type(RelationTypeDescriptor {
         relation_type: "hangs_from".to_string(),
@@ -69,6 +71,7 @@ pub fn register_support_graph_relations(app: &mut App) {
         valid_target_types: Vec::new(),
         parameter_schema: serde_json::json!({}),
         participates_in_dependency_graph: true,
+        external_classification: None,
     });
     app.register_relation_type(RelationTypeDescriptor {
         relation_type: "spans_between".to_string(),
@@ -79,6 +82,7 @@ pub fn register_support_graph_relations(app: &mut App) {
         valid_target_types: Vec::new(),
         parameter_schema: serde_json::json!({}),
         participates_in_dependency_graph: true,
+        external_classification: None,
     });
     app.register_relation_type(RelationTypeDescriptor {
         relation_type: "braced_by".to_string(),
@@ -89,6 +93,7 @@ pub fn register_support_graph_relations(app: &mut App) {
         valid_target_types: Vec::new(),
         parameter_schema: serde_json::json!({}),
         participates_in_dependency_graph: false,
+        external_classification: None,
     });
 }
 

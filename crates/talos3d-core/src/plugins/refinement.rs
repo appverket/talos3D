@@ -974,6 +974,7 @@ pub fn register_refinement_relations(app: &mut App) {
             }
         }),
         participates_in_dependency_graph: false,
+        external_classification: None,
     });
 
     app.register_relation_type(RelationTypeDescriptor {
@@ -992,6 +993,7 @@ pub fn register_refinement_relations(app: &mut App) {
             }
         }),
         participates_in_dependency_graph: false,
+        external_classification: None,
     });
 }
 

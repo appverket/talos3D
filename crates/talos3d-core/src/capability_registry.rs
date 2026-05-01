@@ -158,6 +158,17 @@ pub struct RelationTypeDescriptor {
     /// Most semantic relations (adjacent_to, bounds) are query/validation-only.
     /// Some (hosted_on) may drive re-evaluation when the target changes.
     pub participates_in_dependency_graph: bool,
+    /// PP-A2DB-2 slice C4b: classification used by the
+    /// SemanticAssembly Make Reusable adapter when one of this
+    /// relation type's instances has an endpoint outside the
+    /// promoted source. `None` means "no declared classification";
+    /// the adapter then surfaces an
+    /// `UnknownRelationDescriptor` warning during preview rather
+    /// than silently picking a default. Domain crates should set
+    /// this on relation descriptors that participate in promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_classification:
+        Option<crate::plugins::promotion::ExternalRelationClassification>,
 }
 
 /// One ordered member/layer within a reusable assembly pattern.

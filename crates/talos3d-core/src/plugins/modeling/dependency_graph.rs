@@ -1128,6 +1128,7 @@ mod tests {
             valid_target_types: Vec::new(),
             parameter_schema: serde_json::json!({}),
             participates_in_dependency_graph,
+            external_classification: None,
         }
     }
 

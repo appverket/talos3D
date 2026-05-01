@@ -109,18 +109,54 @@ pub fn gather_semantic_assembly_input(
         },
         external_graph,
         internal_relations,
-        // Slice B leaves the rules empty by default; PP-A2DB-2 slice C
-        // will populate this from the live capability registry. With
-        // the default `RelationClassificationRules` (empty map +
-        // `default_unknown = None`), every preserved relation stays
-        // `classification: None` and surfaces an
-        // `UnknownRelationDescriptor` warning — the safe default per
-        // the agreement.
+        // No-registry default: empty rules + `default_unknown = None`.
+        // Every preserved relation stays `classification: None` and
+        // surfaces an `UnknownRelationDescriptor` warning — the safe
+        // default per the agreement. Callers that want descriptor-
+        // backed classification go through
+        // `gather_semantic_assembly_input_with_capability` (PP-A2DB-2
+        // slice C4b) which seeds the rules from the live capability
+        // registry.
         relation_classification:
             crate::plugins::promotion::RelationClassificationRules::default(),
         source_parameters: assembly.parameters.clone(),
         source_label: assembly.label.clone(),
     })
+}
+
+/// Gather variant that seeds `RelationClassificationRules` from the
+/// live capability registry. Walks every `RelationTypeDescriptor`
+/// whose `external_classification` is `Some(_)` and folds it into the
+/// `by_descriptor` map. `default_unknown` stays `None` per the
+/// agreement (unknown descriptors must surface as warnings, not
+/// silently classify).
+///
+/// Domain crates declare `external_classification` on their relation
+/// descriptors at registration time
+/// (`register_relation_type(RelationTypeDescriptor { ...,
+/// external_classification: Some(...), ... })`). Slice C4b doesn't
+/// alter the in-tree descriptors — none of talos3d-core's current
+/// relation types declare a classification yet — but the surface is
+/// now ready for talos3d-architecture and other domain crates to
+/// fill in.
+pub fn gather_semantic_assembly_input_with_capability(
+    world: &World,
+    capability: &crate::capability_registry::CapabilityRegistry,
+    assembly_id: ElementId,
+) -> Result<SemanticAssemblyPromotionInput, AssemblyGatherError> {
+    let mut input = gather_semantic_assembly_input(world, assembly_id)?;
+    let mut by_descriptor = std::collections::HashMap::new();
+    for desc in capability.relation_type_descriptors() {
+        if let Some(classification) = desc.external_classification {
+            by_descriptor.insert(desc.relation_type.clone(), classification);
+        }
+    }
+    input.relation_classification =
+        crate::plugins::promotion::RelationClassificationRules {
+            by_descriptor,
+            default_unknown: None,
+        };
+    Ok(input)
 }
 
 /// Walk every `SemanticRelation` in the world that **touches** the
@@ -2113,6 +2149,167 @@ mod tests {
         assert!(
             !json.contains("relation_templates"),
             "an empty list should not appear in the serialized form; got: {json}"
+        );
+    }
+
+    // === PP-A2DB-2 slice C4b: capability-registry-driven rules =============
+
+    fn relation_descriptor_with_classification(
+        relation_type: &str,
+        classification: Option<crate::plugins::promotion::ExternalRelationClassification>,
+    ) -> crate::capability_registry::RelationTypeDescriptor {
+        crate::capability_registry::RelationTypeDescriptor {
+            relation_type: relation_type.into(),
+            label: relation_type.into(),
+            description: String::new(),
+            valid_source_types: Vec::new(),
+            valid_target_types: Vec::new(),
+            parameter_schema: serde_json::Value::Null,
+            participates_in_dependency_graph: false,
+            external_classification: classification,
+        }
+    }
+
+    #[test]
+    fn gather_with_capability_seeds_rules_from_registered_relation_descriptors() {
+        use crate::capability_registry::CapabilityRegistry;
+        use crate::plugins::promotion::ExternalRelationClassification;
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "door",
+            "Door",
+            vec![member(elem(10), "frame")],
+            serde_json::Value::Null,
+        );
+
+        let mut registry = CapabilityRegistry::default();
+        registry.register_relation_type(relation_descriptor_with_classification(
+            "hosted_on_wall",
+            Some(ExternalRelationClassification::HostContract),
+        ));
+        registry.register_relation_type(relation_descriptor_with_classification(
+            "needs_room",
+            Some(ExternalRelationClassification::RequiredContext),
+        ));
+        // A descriptor without a classification — must NOT appear in
+        // the seeded rules.
+        registry.register_relation_type(relation_descriptor_with_classification(
+            "ad_hoc",
+            None,
+        ));
+
+        let input =
+            gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
+        assert_eq!(
+            input.relation_classification.by_descriptor.len(),
+            2,
+            "only descriptors with Some(classification) are seeded"
+        );
+        assert_eq!(
+            input
+                .relation_classification
+                .by_descriptor
+                .get("hosted_on_wall"),
+            Some(&ExternalRelationClassification::HostContract),
+        );
+        assert_eq!(
+            input
+                .relation_classification
+                .by_descriptor
+                .get("needs_room"),
+            Some(&ExternalRelationClassification::RequiredContext),
+        );
+        assert!(input
+            .relation_classification
+            .by_descriptor
+            .get("ad_hoc")
+            .is_none());
+        // `default_unknown` stays None — unknown descriptors must
+        // surface as warnings, not silently classify.
+        assert!(input.relation_classification.default_unknown.is_none());
+    }
+
+    #[test]
+    fn gather_with_capability_returns_empty_rules_when_registry_has_no_classified_descriptors() {
+        use crate::capability_registry::CapabilityRegistry;
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "door",
+            "Door",
+            vec![member(elem(10), "frame")],
+            serde_json::Value::Null,
+        );
+
+        let mut registry = CapabilityRegistry::default();
+        // Single descriptor without classification.
+        registry.register_relation_type(relation_descriptor_with_classification(
+            "lonely",
+            None,
+        ));
+        let input =
+            gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
+        assert!(input.relation_classification.by_descriptor.is_empty());
+    }
+
+    #[test]
+    fn gather_with_capability_drives_adapter_classification_end_to_end() {
+        use crate::capability_registry::CapabilityRegistry;
+        use crate::plugins::promotion::{
+            ExternalRelationClassification, SemanticAssemblyPromotionSource,
+        };
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(20)); // outsider
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "door",
+            "Door",
+            vec![member(elem(10), "frame")],
+            serde_json::Value::Null,
+        );
+        // Boundary-spanning relation: frame -> outsider with type
+        // `hosted_on_wall`.
+        world.spawn((
+            elem(30),
+            SemanticRelation {
+                source: elem(10),
+                target: elem(20),
+                relation_type: "hosted_on_wall".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        let mut registry = CapabilityRegistry::default();
+        registry.register_relation_type(relation_descriptor_with_classification(
+            "hosted_on_wall",
+            Some(ExternalRelationClassification::HostContract),
+        ));
+
+        let input =
+            gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        // The boundary-spanning relation classifies as HostContract
+        // and a corresponding ExternalContextRequirement appears on
+        // the plan — without the test having to set the rules
+        // manually.
+        assert_eq!(out.plan.external_context_requirements.len(), 1);
+        let req = &out.plan.external_context_requirements[0];
+        assert_eq!(req.relation_type, "hosted_on_wall");
+        assert_eq!(
+            req.classification,
+            ExternalRelationClassification::HostContract
         );
     }
 }
