@@ -11,6 +11,7 @@ use crate::plugins::identity::ElementId;
 use crate::plugins::modeling::definition::{ConstraintSeverity, ParameterSchema};
 
 /// Stable identifier for a hosting contract kind.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HostingContractKindId(pub String);
 

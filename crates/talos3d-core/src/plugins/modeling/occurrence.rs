@@ -24,8 +24,9 @@ use crate::{
         materials::{material_assignment_from_value, MaterialAssignment},
         modeling::{
             definition::{
-                ChildSlotDef, ConstraintSeverity, Definition, DefinitionId, DefinitionRegistry,
-                DefinitionVersion, EvaluatorDecl, ExprNode, OverrideMap, ParamType,
+                AxisRef, ChildSlotDef, ConstraintSeverity, Definition, DefinitionId,
+                DefinitionRegistry, DefinitionVersion, EvaluatorDecl, ExprNode, OverrideMap,
+                ParamType, SlotCount, SlotLayout, SlotMultiplicity, TransformBinding,
             },
             mesh_generation::NeedsMesh,
             primitive_trait::Primitive,
@@ -681,6 +682,7 @@ struct CompoundSpawnContext {
     parent_translation: Vec3,
     parent_rotation: Quat,
     slot_path: String,
+    local_translation_offset: Vec3,
 }
 
 fn render_occurrence(
@@ -726,6 +728,7 @@ fn render_occurrence(
                     parent_translation: transform.translation,
                     parent_rotation: transform.rotation,
                     slot_path: slot.slot_id.clone(),
+                    local_translation_offset: Vec3::ZERO,
                 },
             )?;
         }
@@ -781,6 +784,39 @@ fn spawn_compound_slot(
     parent_values: &HashMap<String, Value>,
     context: CompoundSpawnContext,
 ) -> Result<(), String> {
+    match &slot.multiplicity {
+        SlotMultiplicity::Single => {
+            spawn_compound_slot_instance(world, registry, slot, parent_values, context)
+        }
+        SlotMultiplicity::Collection { layout, count } => {
+            let instances = resolve_collection_instances(slot, layout, count, parent_values)?;
+            for instance in instances {
+                spawn_compound_slot_instance(
+                    world,
+                    registry,
+                    slot,
+                    parent_values,
+                    CompoundSpawnContext {
+                        owner: context.owner,
+                        parent_translation: context.parent_translation,
+                        parent_rotation: context.parent_rotation,
+                        slot_path: format!("{}[{}]", context.slot_path, instance.index),
+                        local_translation_offset: instance.translation,
+                    },
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn spawn_compound_slot_instance(
+    world: &mut World,
+    registry: &DefinitionRegistry,
+    slot: &ChildSlotDef,
+    parent_values: &HashMap<String, Value>,
+    context: CompoundSpawnContext,
+) -> Result<(), String> {
     if let Some(expr) = &slot.suppression_expr {
         if !evaluate_expr_bool(expr, parent_values)? {
             return Ok(());
@@ -796,7 +832,8 @@ fn spawn_compound_slot(
     let child_definition = registry.effective_definition(&slot.definition_id)?;
     let resolved = registry.resolve_bound_params_checked(&slot.definition_id, &child_overrides)?;
     let state = evaluate_definition_state(&child_definition, &resolved)?;
-    let local_translation = evaluate_translation(slot, parent_values)?;
+    let local_translation =
+        evaluate_translation(slot, parent_values)? + context.local_translation_offset;
     let world_translation =
         context.parent_translation + context.parent_rotation * local_translation;
 
@@ -829,12 +866,228 @@ fn spawn_compound_slot(
                     parent_translation: world_translation,
                     parent_rotation: context.parent_rotation,
                     slot_path: format!("{}.{}", context.slot_path, child_slot.slot_id),
+                    local_translation_offset: Vec3::ZERO,
                 },
             )?;
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct CollectionInstance {
+    index: usize,
+    translation: Vec3,
+}
+
+fn resolve_collection_instances(
+    slot: &ChildSlotDef,
+    layout: &SlotLayout,
+    count: &SlotCount,
+    values: &HashMap<String, Value>,
+) -> Result<Vec<CollectionInstance>, String> {
+    let requested_count = resolve_slot_count(&slot.slot_id, count, values)?;
+    match layout {
+        SlotLayout::Linear {
+            axis,
+            spacing,
+            origin,
+        } => {
+            let axis = axis_vector(axis)?;
+            let spacing = evaluate_expr_f32(spacing, values)?;
+            let origin = evaluate_transform_binding(origin, &slot.slot_id, values)?;
+            Ok((0..requested_count)
+                .map(|index| CollectionInstance {
+                    index,
+                    translation: origin + axis * spacing * (index as f32 + 1.0),
+                })
+                .collect())
+        }
+        SlotLayout::Grid {
+            axis_u,
+            count_u,
+            spacing_u,
+            axis_v,
+            count_v,
+            spacing_v,
+            origin,
+        } => {
+            let u_count = resolve_expr_count(&slot.slot_id, "count_u", count_u, values)?;
+            let v_count = resolve_expr_count(&slot.slot_id, "count_v", count_v, values)?;
+            let grid_count = u_count.checked_mul(v_count).ok_or_else(|| {
+                format!(
+                    "Collection slot '{}' grid count overflows usize",
+                    slot.slot_id
+                )
+            })?;
+            ensure_layout_count_matches(slot, requested_count, grid_count)?;
+            let axis_u = axis_vector(axis_u)?;
+            let axis_v = axis_vector(axis_v)?;
+            let spacing_u = evaluate_expr_f32(spacing_u, values)?;
+            let spacing_v = evaluate_expr_f32(spacing_v, values)?;
+            let origin = evaluate_transform_binding(origin, &slot.slot_id, values)?;
+            let mut instances = Vec::with_capacity(grid_count);
+            for v in 0..v_count {
+                for u in 0..u_count {
+                    let index = v * u_count + u;
+                    instances.push(CollectionInstance {
+                        index,
+                        translation: origin
+                            + axis_u * spacing_u * (u as f32 + 1.0)
+                            + axis_v * spacing_v * (v as f32 + 1.0),
+                    });
+                }
+            }
+            Ok(instances)
+        }
+        SlotLayout::BySpacingFromHost { host_param, axis } => {
+            let axis = axis_vector(axis)?;
+            let spacing = values
+                .get(&host_param.name)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| {
+                    format!(
+                        "Collection slot '{}' host spacing parameter '{}' must resolve to a number",
+                        slot.slot_id, host_param.name
+                    )
+                })? as f32;
+            Ok((0..requested_count)
+                .map(|index| CollectionInstance {
+                    index,
+                    translation: axis * spacing * (index as f32 + 1.0),
+                })
+                .collect())
+        }
+        SlotLayout::LitePattern { pattern } => {
+            let pattern = evaluate_expr(pattern, values)?;
+            let pattern = pattern.as_str().ok_or_else(|| {
+                format!(
+                    "Collection slot '{}' lite pattern must resolve to a string",
+                    slot.slot_id
+                )
+            })?;
+            let (u_count, v_count) = parse_lite_pattern_dims(&slot.slot_id, pattern)?;
+            let pattern_count = u_count.checked_mul(v_count).ok_or_else(|| {
+                format!(
+                    "Collection slot '{}' lite pattern count overflows usize",
+                    slot.slot_id
+                )
+            })?;
+            ensure_layout_count_matches(slot, requested_count, pattern_count)?;
+            let mut instances = Vec::with_capacity(pattern_count);
+            for v in 0..v_count {
+                for u in 0..u_count {
+                    let index = v * u_count + u;
+                    instances.push(CollectionInstance {
+                        index,
+                        translation: Vec3::new(u as f32, v as f32, 0.0),
+                    });
+                }
+            }
+            Ok(instances)
+        }
+    }
+}
+
+fn ensure_layout_count_matches(
+    slot: &ChildSlotDef,
+    requested_count: usize,
+    layout_count: usize,
+) -> Result<(), String> {
+    if requested_count == layout_count {
+        Ok(())
+    } else {
+        Err(format!(
+            "Collection slot '{}' count ({requested_count}) must match layout count ({layout_count})",
+            slot.slot_id
+        ))
+    }
+}
+
+fn resolve_slot_count(
+    slot_id: &str,
+    count: &SlotCount,
+    values: &HashMap<String, Value>,
+) -> Result<usize, String> {
+    match count {
+        SlotCount::Fixed(count) => usize::try_from(*count).map_err(|_| {
+            format!("Collection slot '{slot_id}' fixed count does not fit this platform")
+        }),
+        SlotCount::DerivedFromExpr(expr) => resolve_expr_count(slot_id, "count", expr, values),
+    }
+}
+
+fn resolve_expr_count(
+    slot_id: &str,
+    field: &str,
+    expr: &ExprNode,
+    values: &HashMap<String, Value>,
+) -> Result<usize, String> {
+    let value = evaluate_expr_f64(expr, values)?;
+    if value < 0.0 || value.fract().abs() > f64::EPSILON {
+        return Err(format!(
+            "Collection slot '{slot_id}' {field} must resolve to a non-negative integer"
+        ));
+    }
+    if value > usize::MAX as f64 {
+        return Err(format!(
+            "Collection slot '{slot_id}' {field} is too large for this platform"
+        ));
+    }
+    Ok(value as usize)
+}
+
+fn evaluate_transform_binding(
+    binding: &TransformBinding,
+    slot_id: &str,
+    values: &HashMap<String, Value>,
+) -> Result<Vec3, String> {
+    let Some(translation) = &binding.translation else {
+        return Ok(Vec3::ZERO);
+    };
+    if translation.len() != 3 {
+        return Err(format!(
+            "Child slot '{slot_id}' collection origin must contain exactly 3 expressions"
+        ));
+    }
+    Ok(Vec3::new(
+        evaluate_expr_f32(&translation[0], values)?,
+        evaluate_expr_f32(&translation[1], values)?,
+        evaluate_expr_f32(&translation[2], values)?,
+    ))
+}
+
+fn axis_vector(axis: &AxisRef) -> Result<Vec3, String> {
+    match axis.0.as_str() {
+        "x" | "X" | "u" | "U" | "horizontal" => Ok(Vec3::X),
+        "y" | "Y" | "v" | "V" | "vertical" => Ok(Vec3::Y),
+        "z" | "Z" | "w" | "W" | "depth" => Ok(Vec3::Z),
+        other => Err(format!(
+            "Unknown collection slot axis '{other}'; expected x/y/z or u/v/w"
+        )),
+    }
+}
+
+fn parse_lite_pattern_dims(slot_id: &str, pattern: &str) -> Result<(usize, usize), String> {
+    let normalized = pattern.trim().replace(['X', '*'], "x").replace('×', "x");
+    let Some((u, v)) = normalized.split_once('x') else {
+        return Err(format!(
+            "Collection slot '{slot_id}' lite pattern '{pattern}' must use '<columns>x<rows>'"
+        ));
+    };
+    let u = u.trim().parse::<usize>().map_err(|_| {
+        format!("Collection slot '{slot_id}' lite pattern '{pattern}' has invalid column count")
+    })?;
+    let v = v.trim().parse::<usize>().map_err(|_| {
+        format!("Collection slot '{slot_id}' lite pattern '{pattern}' has invalid row count")
+    })?;
+    if u == 0 || v == 0 {
+        return Err(format!(
+            "Collection slot '{slot_id}' lite pattern '{pattern}' must have non-zero dimensions"
+        ));
+    }
+    Ok((u, v))
 }
 
 fn evaluate_definition_state(

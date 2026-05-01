@@ -1074,9 +1074,19 @@ pub struct DefinitionCompileResult {
     pub nodes: Vec<String>,
     pub edges: Vec<DefinitionCompileEdge>,
     pub child_slot_count: usize,
+    #[serde(default)]
+    pub collection_slots: Vec<DefinitionCollectionSlotResult>,
     pub derived_parameter_count: usize,
     pub constraint_count: usize,
     pub anchor_count: usize,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionCollectionSlotResult {
+    pub slot_id: String,
+    pub count: Value,
+    pub layout: Value,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -14016,6 +14026,15 @@ fn compile_summary_to_result(
             })
             .collect(),
         child_slot_count: summary.child_slot_count,
+        collection_slots: summary
+            .collection_slots
+            .into_iter()
+            .map(|slot| DefinitionCollectionSlotResult {
+                slot_id: slot.slot_id,
+                count: slot.count,
+                layout: slot.layout,
+            })
+            .collect(),
         derived_parameter_count: summary.derived_parameter_count,
         constraint_count: summary.constraint_count,
         anchor_count: summary.anchor_count,
@@ -20418,6 +20437,309 @@ mod tests {
         assert_eq!(max.x - min.x, 1.8);
         assert_eq!(max.y - min.y, 0.14);
         assert_eq!(generated_parts[0].1.height, 1.6);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn collection_slot_linear_expands_with_indexed_slot_paths() {
+        use crate::plugins::modeling::{
+            occurrence::GeneratedOccurrencePart, profile::ProfileExtrusion,
+        };
+
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let mut request = make_compound_window_request(&child.definition_id);
+        let slot = &mut request["compound"]["child_slots"][0];
+        slot["slot_id"] = json!("muntin");
+        slot["multiplicity"] = json!({
+            "Collection": {
+                "layout": {
+                    "Linear": {
+                        "axis": "x",
+                        "spacing": {
+                            "kind": "div",
+                            "left": { "kind": "param_ref", "path": "overall_width" },
+                            "right": { "kind": "literal", "value": 6.0 }
+                        },
+                        "origin": {
+                            "translation": [
+                                {
+                                    "kind": "mul",
+                                    "left": { "kind": "param_ref", "path": "overall_width" },
+                                    "right": { "kind": "literal", "value": -0.5 }
+                                },
+                                { "kind": "literal", "value": 0.0 },
+                                { "kind": "literal", "value": 0.0 }
+                            ]
+                        }
+                    }
+                },
+                "count": { "Fixed": 5 }
+            }
+        });
+        let compound = handle_create_definition(&mut world, request)
+            .expect("compound definition should be created");
+
+        let occurrence_id = handle_place_occurrence(
+            &mut world,
+            json!({
+                "definition_id": compound.definition_id,
+                "overrides": {
+                    "overall_width": 1.8,
+                    "overall_height": 1.6
+                }
+            }),
+        )
+        .expect("compound occurrence should be placed");
+
+        let mut generated_parts: Vec<(GeneratedOccurrencePart, ProfileExtrusion)> = world
+            .query::<(&GeneratedOccurrencePart, &ProfileExtrusion)>()
+            .iter(&world)
+            .map(|(generated, extrusion)| (generated.clone(), extrusion.clone()))
+            .collect();
+        generated_parts.sort_by(|left, right| left.0.slot_path.cmp(&right.0.slot_path));
+
+        assert_eq!(generated_parts.len(), 5);
+        assert_eq!(
+            generated_parts
+                .iter()
+                .map(|(generated, _)| generated.slot_path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "muntin[0]",
+                "muntin[1]",
+                "muntin[2]",
+                "muntin[3]",
+                "muntin[4]"
+            ]
+        );
+        assert_eq!(generated_parts[0].0.owner, ElementId(occurrence_id));
+        let centers = generated_parts
+            .iter()
+            .map(|(_, extrusion)| (extrusion.centre.x * 10.0).round() / 10.0)
+            .collect::<Vec<_>>();
+        assert_eq!(centers, vec![-0.6, -0.3, 0.0, 0.3, 0.6]);
+
+        let explanation =
+            handle_explain_occurrence(&world, occurrence_id).expect("explain should succeed");
+        assert_eq!(explanation.generated_parts.len(), 5);
+        assert_eq!(explanation.generated_parts[0].slot_path, "muntin[0]");
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn collection_slot_grid_expands_deterministically() {
+        use crate::plugins::modeling::{
+            occurrence::GeneratedOccurrencePart, profile::ProfileExtrusion,
+        };
+
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let mut request = make_compound_window_request(&child.definition_id);
+        let slot = &mut request["compound"]["child_slots"][0];
+        slot["slot_id"] = json!("lite");
+        slot["multiplicity"] = json!({
+            "Collection": {
+                "layout": {
+                    "Grid": {
+                        "axis_u": "x",
+                        "count_u": { "kind": "literal", "value": 3.0 },
+                        "spacing_u": { "kind": "literal", "value": 0.25 },
+                        "axis_v": "y",
+                        "count_v": { "kind": "literal", "value": 2.0 },
+                        "spacing_v": { "kind": "literal", "value": 0.4 },
+                        "origin": {
+                            "translation": [
+                                { "kind": "literal", "value": -0.5 },
+                                { "kind": "literal", "value": -0.6 },
+                                { "kind": "literal", "value": 0.0 }
+                            ]
+                        }
+                    }
+                },
+                "count": { "Fixed": 6 }
+            }
+        });
+        let compound = handle_create_definition(&mut world, request)
+            .expect("compound definition should be created");
+
+        handle_place_occurrence(
+            &mut world,
+            json!({ "definition_id": compound.definition_id }),
+        )
+        .expect("grid compound occurrence should be placed");
+
+        let mut generated_parts: Vec<(GeneratedOccurrencePart, ProfileExtrusion)> = world
+            .query::<(&GeneratedOccurrencePart, &ProfileExtrusion)>()
+            .iter(&world)
+            .map(|(generated, extrusion)| (generated.clone(), extrusion.clone()))
+            .collect();
+        generated_parts.sort_by(|left, right| left.0.slot_path.cmp(&right.0.slot_path));
+        assert_eq!(
+            generated_parts
+                .iter()
+                .map(|(generated, _)| generated.slot_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lite[0]", "lite[1]", "lite[2]", "lite[3]", "lite[4]", "lite[5]"]
+        );
+        assert!((generated_parts[0].1.centre.x - -0.25).abs() < 0.0001);
+        assert!((generated_parts[0].1.centre.y - -0.2).abs() < 0.0001);
+        assert!((generated_parts[5].1.centre.x - 0.25).abs() < 0.0001);
+        assert!((generated_parts[5].1.centre.y - 0.2).abs() < 0.0001);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn collection_slot_by_spacing_and_lite_pattern_expand_deterministically() {
+        use crate::plugins::modeling::{
+            occurrence::GeneratedOccurrencePart, profile::ProfileExtrusion,
+        };
+
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+
+        let mut by_spacing_request = make_compound_window_request(&child.definition_id);
+        let slot = &mut by_spacing_request["compound"]["child_slots"][0];
+        slot["slot_id"] = json!("truss");
+        slot["multiplicity"] = json!({
+            "Collection": {
+                "layout": {
+                    "BySpacingFromHost": {
+                        "host_param": { "side": "Host", "name": "wall_thickness" },
+                        "axis": "z"
+                    }
+                },
+                "count": { "Fixed": 3 }
+            }
+        });
+        let by_spacing = handle_create_definition(&mut world, by_spacing_request)
+            .expect("by-spacing compound definition should be created");
+        handle_place_occurrence(
+            &mut world,
+            json!({
+                "definition_id": by_spacing.definition_id,
+                "overrides": { "wall_thickness": 0.2 }
+            }),
+        )
+        .expect("by-spacing occurrence should be placed");
+
+        let mut generated_parts: Vec<(GeneratedOccurrencePart, ProfileExtrusion)> = world
+            .query::<(&GeneratedOccurrencePart, &ProfileExtrusion)>()
+            .iter(&world)
+            .filter(|(generated, _)| generated.slot_path.starts_with("truss"))
+            .map(|(generated, extrusion)| (generated.clone(), extrusion.clone()))
+            .collect();
+        generated_parts.sort_by(|left, right| left.0.slot_path.cmp(&right.0.slot_path));
+        assert_eq!(
+            generated_parts
+                .iter()
+                .map(|(generated, _)| generated.slot_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["truss[0]", "truss[1]", "truss[2]"]
+        );
+        let z_centers = generated_parts
+            .iter()
+            .map(|(_, extrusion)| (extrusion.centre.z * 10.0).round() / 10.0)
+            .collect::<Vec<_>>();
+        assert_eq!(z_centers, vec![0.2, 0.4, 0.6]);
+
+        let mut lite_request = make_compound_window_request(&child.definition_id);
+        let slot = &mut lite_request["compound"]["child_slots"][0];
+        slot["slot_id"] = json!("pane");
+        slot["multiplicity"] = json!({
+            "Collection": {
+                "layout": {
+                    "LitePattern": {
+                        "pattern": { "kind": "literal", "value": "3x2" }
+                    }
+                },
+                "count": { "Fixed": 6 }
+            }
+        });
+        let lite = handle_create_definition(&mut world, lite_request)
+            .expect("lite compound definition should be created");
+        handle_place_occurrence(&mut world, json!({ "definition_id": lite.definition_id }))
+            .expect("lite occurrence should be placed");
+
+        let mut generated_parts: Vec<(GeneratedOccurrencePart, ProfileExtrusion)> = world
+            .query::<(&GeneratedOccurrencePart, &ProfileExtrusion)>()
+            .iter(&world)
+            .filter(|(generated, _)| generated.slot_path.starts_with("pane"))
+            .map(|(generated, extrusion)| (generated.clone(), extrusion.clone()))
+            .collect();
+        generated_parts.sort_by(|left, right| left.0.slot_path.cmp(&right.0.slot_path));
+        assert_eq!(
+            generated_parts
+                .iter()
+                .map(|(generated, _)| generated.slot_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pane[0]", "pane[1]", "pane[2]", "pane[3]", "pane[4]", "pane[5]"]
+        );
+        assert_eq!(generated_parts[0].1.centre.x, 0.0);
+        assert_eq!(generated_parts[0].1.centre.y, 0.0);
+        assert_eq!(generated_parts[5].1.centre.x, 2.0);
+        assert_eq!(generated_parts[5].1.centre.y, 1.0);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn draft_patch_sets_and_removes_child_slot_multiplicity_summary() {
+        let mut world = init_model_api_test_world();
+
+        let child = handle_create_definition(&mut world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let draft = handle_create_definition_draft(
+            &mut world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound draft should be created");
+
+        handle_patch_definition_draft(
+            &mut world,
+            json!({
+                "draft_id": draft.draft_id,
+                "patch": {
+                    "op": "set_child_slot_multiplicity",
+                    "slot_id": "frame",
+                    "multiplicity": {
+                        "Collection": {
+                            "layout": {
+                                "BySpacingFromHost": {
+                                    "host_param": { "side": "Host", "name": "wall_thickness" },
+                                    "axis": "z"
+                                }
+                            },
+                            "count": { "Fixed": 2 }
+                        }
+                    }
+                }
+            }),
+        )
+        .expect("draft should accept multiplicity patch");
+
+        let compile = handle_compile_definition(&world, json!({ "draft_id": draft.draft_id }))
+            .expect("compile should succeed");
+        assert_eq!(compile.collection_slots.len(), 1);
+        assert_eq!(compile.collection_slots[0].slot_id, "frame");
+
+        handle_patch_definition_draft(
+            &mut world,
+            json!({
+                "draft_id": draft.draft_id,
+                "patch": { "op": "remove_child_slot_multiplicity", "slot_id": "frame" }
+            }),
+        )
+        .expect("draft should remove multiplicity patch");
+
+        let compile = handle_compile_definition(&world, json!({ "draft_id": draft.draft_id }))
+            .expect("compile should succeed");
+        assert!(compile.collection_slots.is_empty());
     }
 
     #[cfg(feature = "model-api")]

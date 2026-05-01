@@ -864,6 +864,7 @@ pub struct PreservedRelation {
 /// Per-relation classification per the
 /// `ASSEMBLY_TO_DEFINITION_BRIDGE_AGREEMENT.md` "External Relation
 /// Requirements" section.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExternalRelationClassification {
     /// The external relation describes a hosting contract: the
