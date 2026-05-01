@@ -1155,6 +1155,7 @@ impl SemanticAssemblyPromotionSource {
                 parameter_bindings: Vec::new(),
                 transform_binding: TransformBinding::default(),
                 suppression_expr: None,
+                multiplicity: Default::default(),
             });
             member_slot_ids.push((member.element_id, slot_id));
         }
@@ -1585,6 +1586,7 @@ mod tests {
             parameter_bindings: Vec::new(),
             transform_binding: TransformBinding::default(),
             suppression_expr: None,
+            multiplicity: Default::default(),
         }
     }
 
