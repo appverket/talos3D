@@ -29,7 +29,7 @@ use crate::{
             definition::{
                 AxisRef, ChildSlotDef, ConstraintSeverity, Definition, DefinitionId,
                 DefinitionRegistry, DefinitionVersion, EvaluatorDecl, ExprNode, GeometryParamsHash,
-                OverrideMap, ParamType, RepresentationKind, SlotCount, SlotLayout,
+                OverrideMap, ParamType, RepresentationKind, ResolvedParam, SlotCount, SlotLayout,
                 SlotMultiplicity, TransformBinding,
             },
             mesh_generation::{NeedsMesh, PrimitiveMaterial},
@@ -961,8 +961,24 @@ fn render_occurrence(
 
     let definition = registry.effective_definition(&identity.definition_id)?;
     let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
+    let resolved_values = resolved_param_values(&resolved);
+    let cache_key = mesh_cache_key_for_definition(&definition, &resolved_values);
+
+    if definition.compound.is_none()
+        && apply_cached_occurrence_mesh(world, root_entity, &cache_key, transform)
+    {
+        apply_occurrence_material_assignment(world, root_entity, &definition);
+        if let Ok(mut entity_mut) = world.get_entity_mut(root_entity) {
+            entity_mut.insert((
+                identity.clone(),
+                OccurrenceClassification::clean(),
+                transform,
+            ));
+        }
+        return Ok(());
+    }
+
     let state = evaluate_definition_state(&definition, &resolved)?;
-    let cache_key = mesh_cache_key_for_definition(&definition, &state.values);
 
     if let Some(extrusion) =
         build_rectangular_extrusion_from_values(&definition, &state.values, transform.translation)
@@ -1576,6 +1592,13 @@ fn mesh_cache_key_for_definition(
     )
 }
 
+fn resolved_param_values(resolved: &HashMap<String, ResolvedParam>) -> HashMap<String, Value> {
+    resolved
+        .iter()
+        .map(|(name, param)| (name.clone(), param.value.clone()))
+        .collect()
+}
+
 fn apply_cached_occurrence_mesh(
     world: &mut World,
     entity: Entity,
@@ -2003,6 +2026,17 @@ mod pp_098_occurrence_cache_tests {
         }
     }
 
+    fn malformed_rectangular_evaluator_definition() -> Definition {
+        let mut definition = rectangular_definition();
+        let Some(EvaluatorDecl::RectangularExtrusion(evaluator)) =
+            definition.evaluators.first_mut()
+        else {
+            panic!("expected rectangular evaluator");
+        };
+        evaluator.width_param = "missing_width".to_string();
+        definition
+    }
+
     fn world_with_cache() -> World {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
@@ -2089,5 +2123,48 @@ mod pp_098_occurrence_cache_tests {
         assert!(entity_ref.get::<ProfileExtrusion>().is_some());
         assert!(entity_ref.get::<NeedsMesh>().is_some());
         assert!(entity_ref.get::<Mesh3d>().is_none());
+    }
+
+    #[test]
+    fn render_occurrence_cache_hit_short_circuits_rectangular_evaluator() {
+        let definition = malformed_rectangular_evaluator_definition();
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(definition.clone());
+        let identity =
+            OccurrenceIdentity::new(definition.id.clone(), definition.definition_version);
+        let resolved = registry
+            .resolve_params_checked(&definition.id, &identity.overrides)
+            .expect("resolved params");
+        let resolved_values = resolved_param_values(&resolved);
+        let cache_key = mesh_cache_key_for_definition(&definition, &resolved_values);
+
+        let mut world = world_with_cache();
+        let cached_handle = world.resource_mut::<Assets<Mesh>>().add(Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        ));
+        world
+            .resource_mut::<RepresentationCache>()
+            .insert(cache_key, cached_handle.clone());
+
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(3),
+            &identity,
+            Transform::from_translation(Vec3::new(3.0, 0.0, 2.0)),
+            Some("cached"),
+        )
+        .expect("cache hit render should not need rectangular evaluator params");
+
+        let entity = crate::plugins::commands::find_entity_by_element_id(&mut world, ElementId(3))
+            .expect("occurrence entity");
+        let entity_ref = world.entity(entity);
+        assert_eq!(
+            entity_ref.get::<Mesh3d>().expect("mesh").id(),
+            cached_handle.id()
+        );
+        assert!(entity_ref.get::<ProfileExtrusion>().is_none());
+        assert!(entity_ref.get::<NeedsMesh>().is_none());
     }
 }
