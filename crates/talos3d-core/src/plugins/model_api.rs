@@ -20676,6 +20676,7 @@ mod tests {
                 valid_target_types: vec!["box".to_string()],
                 parameter_schema: json!({}),
                 participates_in_dependency_graph: true,
+                external_classification: None,
             });
 
         let host_id = handle_create_entity(
