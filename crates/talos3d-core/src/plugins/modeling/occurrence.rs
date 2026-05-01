@@ -1981,8 +1981,8 @@ mod pp_098_occurrence_cache_tests {
     use serde_json::json;
 
     use crate::plugins::modeling::definition::{
-        DefinitionKind, Interface, OverridePolicy, ParameterDef, ParameterMetadata,
-        ParameterSchema, RectangularExtrusionEvaluator,
+        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterBinding,
+        ParameterDef, ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator,
     };
     use crate::plugins::modeling::mesh_generation::{spawn_primitive_meshes, PlaneMaterial};
 
@@ -2056,12 +2056,72 @@ mod pp_098_occurrence_cache_tests {
         definition
     }
 
+    fn compound_definition(child_definition_id: DefinitionId) -> Definition {
+        Definition {
+            id: DefinitionId("cached.compound".to_string()),
+            base_definition_id: None,
+            name: "Cached Compound".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![numeric_parameter("left_width", 2.0)]),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: Some(CompoundDefinition {
+                child_slots: vec![
+                    ChildSlotDef {
+                        slot_id: "left".to_string(),
+                        role: "lite".to_string(),
+                        definition_id: child_definition_id.clone(),
+                        parameter_bindings: vec![ParameterBinding {
+                            target_param: "width".to_string(),
+                            expr: ExprNode::ParamRef {
+                                path: "left_width".to_string(),
+                            },
+                        }],
+                        transform_binding: TransformBinding::default(),
+                        suppression_expr: None,
+                        multiplicity: SlotMultiplicity::Single,
+                    },
+                    ChildSlotDef {
+                        slot_id: "right".to_string(),
+                        role: "lite".to_string(),
+                        definition_id: child_definition_id,
+                        parameter_bindings: vec![ParameterBinding {
+                            target_param: "width".to_string(),
+                            expr: ExprNode::Literal { value: json!(1.25) },
+                        }],
+                        transform_binding: TransformBinding::default(),
+                        suppression_expr: None,
+                        multiplicity: SlotMultiplicity::Single,
+                    },
+                ],
+                ..Default::default()
+            }),
+            material_assignment: None,
+            domain_data: Value::Null,
+        }
+    }
+
     fn world_with_cache() -> World {
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(RepresentationCache::default());
         world.insert_resource(PrimitiveMaterial(Handle::default()));
         world
+    }
+
+    fn generated_part_entity(world: &mut World, owner: ElementId, slot_path: &str) -> Entity {
+        let mut query = world.query::<(Entity, &GeneratedOccurrencePart)>();
+        query
+            .iter(world)
+            .find_map(|(entity, part)| {
+                (part.owner == owner && part.slot_path == slot_path).then_some(entity)
+            })
+            .expect("generated occurrence part")
     }
 
     #[test]
@@ -2536,5 +2596,91 @@ mod pp_098_occurrence_cache_tests {
             assert!(entity_ref.get::<NeedsEval>().is_none());
             assert!(entity_ref.get::<NeedsMesh>().is_none());
         }
+    }
+
+    #[test]
+    fn compound_geometry_change_regenerates_only_changed_child_cache_entry() {
+        let child = rectangular_definition();
+        let compound = compound_definition(child.id.clone());
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(child);
+        registry.insert(compound.clone());
+        let identity = OccurrenceIdentity::new(compound.id.clone(), compound.definition_version);
+
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<RepresentationCache>()
+            .insert_resource(PrimitiveMaterial(Handle::default()))
+            .insert_resource(PlaneMaterial(Handle::default()))
+            .insert_resource(registry.clone())
+            .add_systems(Update, spawn_primitive_meshes::<ProfileExtrusion>);
+
+        render_occurrence(
+            app.world_mut(),
+            &registry,
+            ElementId(500),
+            &identity,
+            Transform::default(),
+            Some("compound"),
+        )
+        .expect("render compound occurrence");
+        app.update();
+
+        let (left_key, left_mesh_id, right_key, right_mesh_id) = {
+            let world = app.world_mut();
+            let left = generated_part_entity(world, ElementId(500), "left");
+            let right = generated_part_entity(world, ElementId(500), "right");
+            let left_ref = world.entity(left);
+            let right_ref = world.entity(right);
+            (
+                left_ref.get::<MeshCacheKey>().expect("left key").clone(),
+                left_ref.get::<Mesh3d>().expect("left mesh").id(),
+                right_ref.get::<MeshCacheKey>().expect("right key").clone(),
+                right_ref.get::<Mesh3d>().expect("right mesh").id(),
+            )
+        };
+        assert_ne!(left_key, right_key);
+        assert_eq!(app.world().resource::<RepresentationCache>().len(), 2);
+
+        let previous = OccurrenceSnapshot::new(ElementId(500), identity.clone(), "compound");
+        let mut next_identity = identity;
+        next_identity.overrides.set("left_width", json!(3.0));
+        let next = OccurrenceSnapshot::new(ElementId(500), next_identity, "compound");
+        next.apply_with_previous(app.world_mut(), Some(&previous));
+
+        {
+            let world = app.world_mut();
+            let left = generated_part_entity(world, ElementId(500), "left");
+            let right = generated_part_entity(world, ElementId(500), "right");
+            let left_ref = world.entity(left);
+            let right_ref = world.entity(right);
+            assert_ne!(left_ref.get::<MeshCacheKey>(), Some(&left_key));
+            assert_eq!(right_ref.get::<MeshCacheKey>(), Some(&right_key));
+            assert!(left_ref.get::<NeedsMesh>().is_some());
+            assert!(right_ref.get::<NeedsMesh>().is_some());
+            assert_eq!(world.resource::<RepresentationCache>().len(), 2);
+        }
+
+        app.update();
+
+        let world = app.world_mut();
+        let left = generated_part_entity(world, ElementId(500), "left");
+        let right = generated_part_entity(world, ElementId(500), "right");
+        let left_ref = world.entity(left);
+        let right_ref = world.entity(right);
+        let next_left_key = left_ref.get::<MeshCacheKey>().expect("left key");
+        let next_left_mesh_id = left_ref.get::<Mesh3d>().expect("left mesh").id();
+
+        assert_ne!(next_left_key, &left_key);
+        assert_ne!(next_left_mesh_id, left_mesh_id);
+        assert_eq!(right_ref.get::<MeshCacheKey>(), Some(&right_key));
+        assert_eq!(
+            right_ref.get::<Mesh3d>().expect("right mesh").id(),
+            right_mesh_id
+        );
+        assert!(left_ref.get::<NeedsMesh>().is_none());
+        assert!(right_ref.get::<NeedsMesh>().is_none());
+        assert_eq!(world.resource::<RepresentationCache>().len(), 3);
     }
 }
