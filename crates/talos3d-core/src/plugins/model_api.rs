@@ -21430,6 +21430,51 @@ mod tests {
 
     #[cfg(feature = "model-api")]
     #[test]
+    fn non_geometry_override_update_marks_material_dirty_without_mesh_dirty() {
+        use crate::plugins::modeling::occurrence::OccurrenceClassification;
+
+        let mut world = init_model_api_test_world();
+        let mut request = make_rect_extrusion_request();
+        request["parameters"].as_array_mut().unwrap().push(json!({
+            "name": "finish_color",
+            "param_type": "StringVal",
+            "default_value": "white",
+            "override_policy": "Overridable",
+            "geometry_affecting": false
+        }));
+        let def = handle_create_definition(&mut world, request)
+            .expect("create definition should succeed");
+        let occ_id =
+            handle_place_occurrence(&mut world, json!({ "definition_id": def.definition_id }))
+                .expect("place occurrence should succeed");
+        let eid = ElementId(occ_id);
+        let entity = {
+            let mut q = world.query::<(bevy::prelude::Entity, &ElementId)>();
+            q.iter(&world)
+                .find_map(|(e, id)| (*id == eid).then_some(e))
+                .expect("occurrence entity should exist")
+        };
+        world
+            .entity_mut(entity)
+            .insert(OccurrenceClassification::clean());
+
+        handle_update_occurrence_overrides(
+            &mut world,
+            occ_id,
+            json!({ "finish_color": "black" }),
+        )
+        .expect("non-geometry override update should succeed");
+
+        let classification = world
+            .get::<OccurrenceClassification>(entity)
+            .expect("classification should still exist");
+        assert!(!classification.mesh_dirty);
+        assert!(classification.material_dirty);
+        assert!(!classification.transform_dirty);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
     fn render_settings_round_trip_and_validate() {
         let mut world = init_model_api_test_world();
 
