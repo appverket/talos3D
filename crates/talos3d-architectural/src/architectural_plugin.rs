@@ -136,6 +136,8 @@ impl Plugin for ArchitecturalPlugin {
                 }
             }),
             participates_in_dependency_graph: true,
+            external_classification: None,
+            host_contract_kind: None,
         })
         .register_relation_type(RelationTypeDescriptor {
             relation_type: "layout_on_host".into(),
@@ -157,6 +159,8 @@ impl Plugin for ArchitecturalPlugin {
                 "required": ["members", "start_offset_m", "total_width_m"]
             }),
             participates_in_dependency_graph: true,
+            external_classification: None,
+            host_contract_kind: None,
         })
         .register_relation_type(RelationTypeDescriptor {
             relation_type: "bounds".into(),
@@ -166,6 +170,8 @@ impl Plugin for ArchitecturalPlugin {
             valid_target_types: vec!["room".into()],
             parameter_schema: serde_json::json!({}),
             participates_in_dependency_graph: false,
+            external_classification: None,
+            host_contract_kind: None,
         })
         .register_relation_type(RelationTypeDescriptor {
             relation_type: "adjacent_to".into(),
@@ -175,6 +181,8 @@ impl Plugin for ArchitecturalPlugin {
             valid_target_types: vec!["room".into()],
             parameter_schema: serde_json::json!({}),
             participates_in_dependency_graph: false,
+            external_classification: None,
+            host_contract_kind: None,
         })
         .register_relation_type(RelationTypeDescriptor {
             relation_type: "supports".into(),
@@ -184,6 +192,8 @@ impl Plugin for ArchitecturalPlugin {
             valid_target_types: vec!["storey".into(), "roof_system".into()],
             parameter_schema: serde_json::json!({}),
             participates_in_dependency_graph: false,
+            external_classification: None,
+            host_contract_kind: None,
         })
         // PP71–PP74 element classes, recipe families, and architectural
         // validators now live in the `talos3d-architecture-core` crate
