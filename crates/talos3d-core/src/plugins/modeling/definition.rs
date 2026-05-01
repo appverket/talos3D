@@ -273,7 +273,7 @@ impl ParameterSchema {
 
 /// Higher-level semantic purpose of a representation within a
 /// definition. Matches ADR-026 §5 `RepresentationKind`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RepresentationKind {
     /// The primary geometry used for rendering and analysis.
     PrimaryGeometry,
