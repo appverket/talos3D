@@ -517,8 +517,38 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
             }
         }
     }
-    world.insert_resource(definitions.unwrap_or_default());
-    world.insert_resource(definition_libraries.unwrap_or_default());
+    let mut definitions = definitions.unwrap_or_default();
+    let migrated_def_ids = definitions.migrate_legacy_material_assignments();
+    if !migrated_def_ids.is_empty() {
+        info!(
+            "PP-099: migrated {} project definition(s) from legacy domain_data \
+             material_assignment to Definition.material_assignment: {}",
+            migrated_def_ids.len(),
+            migrated_def_ids
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    world.insert_resource(definitions);
+    let mut definition_libraries = definition_libraries.unwrap_or_default();
+    for (library_id, migrated) in
+        definition_libraries.migrate_legacy_material_assignments()
+    {
+        info!(
+            "PP-099: migrated {} definition(s) in project library '{}' \
+             from legacy domain_data material_assignment: {}",
+            migrated.len(),
+            library_id.0,
+            migrated
+                .iter()
+                .map(|id| id.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    world.insert_resource(definition_libraries);
     if let Some(mut libraries) = world.get_resource_mut::<DefinitionLibraryRegistry>() {
         if let Err(error) = apply_bundled_definition_libraries(&mut libraries) {
             error!("Failed to restore bundled definition libraries after project load: {error}");

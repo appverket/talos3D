@@ -26,10 +26,31 @@ fn seed_bundled_definition_libraries(mut libraries: ResMut<DefinitionLibraryRegi
 pub fn apply_bundled_definition_libraries(
     libraries: &mut DefinitionLibraryRegistry,
 ) -> Result<(), String> {
-    for library in bundled_definition_libraries()? {
-        if libraries.get(&library.id).is_none() {
-            libraries.insert(library);
+    for mut library in bundled_definition_libraries()? {
+        if libraries.get(&library.id).is_some() {
+            continue;
         }
+        // PP-099 / PP-MATREL-1 slice 2: migrate any legacy
+        // domain_data.architectural.material_assignment.material_id
+        // poke on bundled definitions into the new
+        // Definition.material_assignment slot before insert. Idempotent
+        // when a bundled JSON has already been rewritten (slice 3) to
+        // populate the new field directly.
+        let migrated = library.migrate_legacy_material_assignments();
+        if !migrated.is_empty() {
+            info!(
+                "PP-099: migrated {} bundled definition(s) in '{}' from legacy \
+                 domain_data material_assignment: {}",
+                migrated.len(),
+                library.id.0,
+                migrated
+                    .iter()
+                    .map(|id| id.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        libraries.insert(library);
     }
     Ok(())
 }
