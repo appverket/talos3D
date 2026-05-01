@@ -2039,6 +2039,12 @@ mod pp_098_occurrence_cache_tests {
         }
     }
 
+    fn rectangular_definition_with_version(version: DefinitionVersion) -> Definition {
+        let mut definition = rectangular_definition();
+        definition.definition_version = version;
+        definition
+    }
+
     fn malformed_rectangular_evaluator_definition() -> Definition {
         let mut definition = rectangular_definition();
         let Some(EvaluatorDecl::RectangularExtrusion(evaluator)) =
@@ -2410,5 +2416,125 @@ mod pp_098_occurrence_cache_tests {
                 .id(),
             cached_handle.id()
         );
+    }
+
+    #[test]
+    fn definition_version_bump_rebuilds_occurrences_with_one_new_cache_entry() {
+        let definition_v1 = rectangular_definition_with_version(1);
+        let definition_v2 = rectangular_definition_with_version(2);
+        let mut registry_v1 = DefinitionRegistry::default();
+        registry_v1.insert(definition_v1.clone());
+        let identity =
+            OccurrenceIdentity::new(definition_v1.id.clone(), definition_v1.definition_version);
+        let resolved_v1 = registry_v1
+            .resolve_params_checked(&definition_v1.id, &identity.overrides)
+            .expect("resolved v1 params");
+        let values_v1 = resolved_param_values(&resolved_v1);
+        let key_v1 = mesh_cache_key_for_definition(&definition_v1, &values_v1);
+
+        let mut registry_v2 = DefinitionRegistry::default();
+        registry_v2.insert(definition_v2.clone());
+        let resolved_v2 = registry_v2
+            .resolve_params_checked(&definition_v2.id, &identity.overrides)
+            .expect("resolved v2 params");
+        let values_v2 = resolved_param_values(&resolved_v2);
+        let key_v2 = mesh_cache_key_for_definition(&definition_v2, &values_v2);
+        assert_ne!(key_v2, key_v1);
+
+        let mut app = App::new();
+        app.init_resource::<ChangedDefinitions>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<RepresentationCache>()
+            .insert_resource(PrimitiveMaterial(Handle::default()))
+            .insert_resource(PlaneMaterial(Handle::default()))
+            .insert_resource(registry_v1.clone())
+            .add_systems(
+                Update,
+                (
+                    propagate_definition_changes_with_commands,
+                    evaluate_occurrences,
+                    spawn_primitive_meshes::<ProfileExtrusion>,
+                )
+                    .chain(),
+            );
+
+        let v1_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            ));
+        app.world_mut()
+            .resource_mut::<RepresentationCache>()
+            .insert(key_v1.clone(), v1_handle.clone());
+
+        {
+            let world = app.world_mut();
+            render_occurrence(
+                world,
+                &registry_v1,
+                ElementId(400),
+                &identity,
+                Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
+                Some("versioned-a"),
+            )
+            .expect("render first occurrence");
+            render_occurrence(
+                world,
+                &registry_v1,
+                ElementId(401),
+                &identity,
+                Transform::from_translation(Vec3::new(4.0, 0.0, 1.0)),
+                Some("versioned-b"),
+            )
+            .expect("render second occurrence");
+        }
+
+        for element_id in [ElementId(400), ElementId(401)] {
+            let world = app.world_mut();
+            let entity = crate::plugins::commands::find_entity_by_element_id(world, element_id)
+                .expect("occurrence entity");
+            assert_eq!(
+                world.entity(entity).get::<Mesh3d>().expect("v1 mesh").id(),
+                v1_handle.id()
+            );
+        }
+
+        app.world_mut().insert_resource(registry_v2);
+        app.world_mut()
+            .resource_mut::<ChangedDefinitions>()
+            .mark_changed(definition_v1.id.clone());
+
+        app.update();
+
+        {
+            let cache = app.world().resource::<RepresentationCache>();
+            assert!(!cache.contains_key(&key_v1));
+            assert!(cache.contains_key(&key_v2));
+            assert_eq!(cache.len(), 1);
+        }
+        let v2_mesh_id = app
+            .world_mut()
+            .resource_mut::<RepresentationCache>()
+            .get(&key_v2)
+            .expect("v2 cache entry")
+            .id();
+        assert_ne!(v2_mesh_id, v1_handle.id());
+
+        for element_id in [ElementId(400), ElementId(401)] {
+            let world = app.world_mut();
+            let entity = crate::plugins::commands::find_entity_by_element_id(world, element_id)
+                .expect("occurrence entity");
+            let entity_ref = world.entity(entity);
+            assert_eq!(entity_ref.get::<MeshCacheKey>(), Some(&key_v2));
+            assert_eq!(
+                entity_ref.get::<Mesh3d>().expect("v2 mesh").id(),
+                v2_mesh_id
+            );
+            assert!(entity_ref.get::<NeedsEval>().is_none());
+            assert!(entity_ref.get::<NeedsMesh>().is_none());
+        }
     }
 }
