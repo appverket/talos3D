@@ -1300,6 +1300,30 @@ impl CapabilityRegistry {
             .find_map(|factory| factory.capture_snapshot(entity_ref, world))
     }
 
+    pub fn capture_user_facing_snapshot(
+        &self,
+        entity_ref: &EntityRef,
+        world: &World,
+    ) -> Option<BoxedEntity> {
+        if self.is_internal_void_proxy(entity_ref) {
+            return None;
+        }
+
+        self.capture_snapshot(entity_ref, world)
+    }
+
+    pub fn is_user_facing_entity(&self, world: &World, entity: Entity) -> bool {
+        let Ok(entity_ref) = world.get_entity(entity) else {
+            return false;
+        };
+        self.capture_user_facing_snapshot(&entity_ref, world)
+            .is_some()
+    }
+
+    fn is_internal_void_proxy(&self, entity_ref: &EntityRef) -> bool {
+        entity_ref.contains::<crate::plugins::modeling::void_declaration::OpeningContext>()
+    }
+
     pub fn build_model_summary(&self, world: &World) -> ModelSummaryAccumulator {
         let mut summary = ModelSummaryAccumulator {
             entity_counts: HashMap::new(),
