@@ -1129,6 +1129,7 @@ mod tests {
             parameter_schema: serde_json::json!({}),
             participates_in_dependency_graph,
             external_classification: None,
+            host_contract_kind: None,
         }
     }
 

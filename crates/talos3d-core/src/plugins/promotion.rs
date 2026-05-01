@@ -904,6 +904,15 @@ pub struct ExternalContextRequirement {
     /// UI / audit surfacing). `None` for descriptor-less defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor_id: Option<String>,
+    /// PP-A2DB-2 slice C2: when `classification == HostContract`, the
+    /// `HostingContractKindId` the promoted Definition's
+    /// instantiation must satisfy. Downstream validation uses this
+    /// to construct `HostingValidationRequest` against the ADR-044
+    /// substrate. `None` means HostContract is declared but no
+    /// specific kind is bound (placeholder / draft descriptor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_contract_kind:
+        Option<crate::plugins::hosting_contracts::HostingContractKindId>,
     /// Original `SemanticRelation` `ElementId` so downstream tooling
     /// can correlate the requirement back to the source relation.
     pub source_relation_id: ElementId,
@@ -923,6 +932,15 @@ pub struct RelationClassificationRules {
     /// its classification. Lookup misses default to
     /// `default_unknown`.
     pub by_descriptor: HashMap<String, ExternalRelationClassification>,
+    /// PP-A2DB-2 slice C2: when a descriptor's classification is
+    /// `HostContract`, this map carries the
+    /// `HostingContractKindId` that the requirement should bind to
+    /// the ADR-044 substrate. Keys match `by_descriptor`. Missing
+    /// entries are allowed — the requirement is then emitted with
+    /// `host_contract_kind = None`, which downstream surfaces as
+    /// "HostContract declared but no kind bound."
+    pub host_contract_kinds:
+        HashMap<String, crate::plugins::hosting_contracts::HostingContractKindId>,
     /// What to do when a relation's descriptor is not in the map.
     /// Per the agreement, the safe default is `AdvisoryContext` or
     /// `DropWithAudit`; both options surface the unknown via a
@@ -1357,11 +1375,28 @@ impl SemanticAssemblyPromotionSource {
                             ExternalRelationClassification::HostContract
                             | ExternalRelationClassification::RequiredContext
                             | ExternalRelationClassification::AdvisoryContext => {
+                                // PP-A2DB-2 slice C2: bind the
+                                // hosting-contract kind for HostContract
+                                // requirements. Other classifications
+                                // ignore the lookup; carrying `None`
+                                // keeps the field defaulted.
+                                let host_contract_kind = if c
+                                    == ExternalRelationClassification::HostContract
+                                {
+                                    input
+                                        .relation_classification
+                                        .host_contract_kinds
+                                        .get(&relation.relation_type)
+                                        .cloned()
+                                } else {
+                                    None
+                                };
                                 external_context_requirements.push(ExternalContextRequirement {
                                     relation_type: relation.relation_type.clone(),
                                     classification: c,
                                     endpoint_in_definition: endpoint_in_definition.clone(),
                                     descriptor_id: descriptor_id.clone(),
+                                    host_contract_kind,
                                     source_relation_id: relation.relation_id,
                                 });
                             }
@@ -2539,6 +2574,7 @@ mod tests {
         }
         RelationClassificationRules {
             by_descriptor,
+            host_contract_kinds: HashMap::new(),
             default_unknown,
         }
     }
@@ -2839,6 +2875,7 @@ mod tests {
             classification: ExternalRelationClassification::HostContract,
             endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
             descriptor_id: Some("hosted_on_wall".into()),
+            host_contract_kind: None,
             source_relation_id: elem(30),
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -3060,5 +3097,178 @@ mod tests {
         assert_eq!(warning.0, elem(30));
         assert_eq!(warning.2, elem(999));
         assert_eq!(warning.1, "/peers/0/target");
+    }
+
+    // === PP-A2DB-2 slice C2: hosting-contract integration ==================
+
+    #[test]
+    fn slice_c2_host_contract_requirement_carries_host_contract_kind_from_rules() {
+        use crate::plugins::hosting_contracts::HostingContractKindId;
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Window".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "hosted_on_wall".into(),
+            parameters: serde_json::Value::Null,
+        });
+        let mut rules =
+            rules_with(&[("hosted_on_wall", ExternalRelationClassification::HostContract)], None);
+        rules.host_contract_kinds.insert(
+            "hosted_on_wall".into(),
+            HostingContractKindId("architecture::wall_opening".into()),
+        );
+        input.relation_classification = rules;
+
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let req = &out.plan.external_context_requirements[0];
+        assert_eq!(
+            req.host_contract_kind,
+            Some(HostingContractKindId(
+                "architecture::wall_opening".into(),
+            ))
+        );
+    }
+
+    #[test]
+    fn slice_c2_required_context_does_not_carry_host_contract_kind() {
+        use crate::plugins::hosting_contracts::HostingContractKindId;
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "needs_room".into(),
+            parameters: serde_json::Value::Null,
+        });
+        let mut rules = rules_with(
+            &[("needs_room", ExternalRelationClassification::RequiredContext)],
+            None,
+        );
+        // Even if a host_contract_kinds entry exists for this descriptor,
+        // it must NOT propagate when classification != HostContract.
+        rules.host_contract_kinds.insert(
+            "needs_room".into(),
+            HostingContractKindId("not.a.host.contract".into()),
+        );
+        input.relation_classification = rules;
+
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let req = &out.plan.external_context_requirements[0];
+        assert_eq!(
+            req.classification,
+            ExternalRelationClassification::RequiredContext
+        );
+        assert_eq!(req.host_contract_kind, None);
+    }
+
+    #[test]
+    fn slice_c2_host_contract_without_kind_emits_requirement_with_kind_none() {
+        // HostContract is declared but no kind binding — the
+        // requirement should still emit with `host_contract_kind:
+        // None`. Validation downstream surfaces the gap; the
+        // promotion boundary doesn't reject.
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Bare".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
+        input.internal_relations.push(InternalRelationSnapshot {
+            relation_id: elem(30),
+            source: elem(1),
+            target: elem(99),
+            relation_type: "hosted_on_unknown".into(),
+            parameters: serde_json::Value::Null,
+        });
+        let rules = rules_with(
+            &[(
+                "hosted_on_unknown",
+                ExternalRelationClassification::HostContract,
+            )],
+            None,
+        );
+        // Note: no host_contract_kinds entry for `hosted_on_unknown`.
+        input.relation_classification = rules;
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let req = &out.plan.external_context_requirements[0];
+        assert_eq!(
+            req.classification,
+            ExternalRelationClassification::HostContract
+        );
+        assert_eq!(req.host_contract_kind, None);
+    }
+
+    #[test]
+    fn slice_c2_external_context_requirement_round_trips_with_host_contract_kind() {
+        use crate::plugins::hosting_contracts::HostingContractKindId;
+        let req = ExternalContextRequirement {
+            relation_type: "hosted_on_wall".into(),
+            classification: ExternalRelationClassification::HostContract,
+            endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
+            descriptor_id: Some("hosted_on_wall".into()),
+            host_contract_kind: Some(HostingContractKindId(
+                "architecture::wall_opening".into(),
+            )),
+            source_relation_id: elem(30),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: ExternalContextRequirement = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, req);
+    }
+
+    #[test]
+    fn slice_c2_interface_iter_host_contract_requirements_filters_correctly() {
+        use crate::plugins::hosting_contracts::HostingContractKindId;
+        use crate::plugins::modeling::definition::Interface;
+        let host = ExternalContextRequirement {
+            relation_type: "hosted_on_wall".into(),
+            classification: ExternalRelationClassification::HostContract,
+            endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
+            descriptor_id: None,
+            host_contract_kind: Some(HostingContractKindId(
+                "architecture::wall_opening".into(),
+            )),
+            source_relation_id: elem(30),
+        };
+        let advisory = ExternalContextRequirement {
+            relation_type: "near_window".into(),
+            classification: ExternalRelationClassification::AdvisoryContext,
+            endpoint_in_definition: RelationEndpoint::SelfRoot,
+            descriptor_id: None,
+            host_contract_kind: None,
+            source_relation_id: elem(31),
+        };
+        let interface = Interface::default()
+            .with_external_context_requirements(vec![host.clone(), advisory.clone()]);
+        let host_only: Vec<&ExternalContextRequirement> =
+            interface.iter_host_contract_requirements().collect();
+        assert_eq!(host_only.len(), 1);
+        assert_eq!(host_only[0], &host);
     }
 }

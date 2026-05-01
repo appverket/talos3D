@@ -169,6 +169,19 @@ pub struct RelationTypeDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_classification:
         Option<crate::plugins::promotion::ExternalRelationClassification>,
+    /// PP-A2DB-2 slice C2: when `external_classification` is
+    /// `HostContract`, this names the `HostingContractKindId` the
+    /// promoted Definition's instantiation must satisfy. Lets
+    /// downstream validation construct `HostingValidationRequest`
+    /// instances against the ADR-044 substrate.
+    ///
+    /// `None` is allowed — the classification can be declared
+    /// without a specific kind binding (useful for placeholder /
+    /// draft descriptors). Validation downstream surfaces a
+    /// diagnostic when a HostContract requirement has no kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_contract_kind:
+        Option<crate::plugins::hosting_contracts::HostingContractKindId>,
 }
 
 /// One ordered member/layer within a reusable assembly pattern.

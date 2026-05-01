@@ -146,14 +146,23 @@ pub fn gather_semantic_assembly_input_with_capability(
 ) -> Result<SemanticAssemblyPromotionInput, AssemblyGatherError> {
     let mut input = gather_semantic_assembly_input(world, assembly_id)?;
     let mut by_descriptor = std::collections::HashMap::new();
+    let mut host_contract_kinds = std::collections::HashMap::new();
     for desc in capability.relation_type_descriptors() {
         if let Some(classification) = desc.external_classification {
             by_descriptor.insert(desc.relation_type.clone(), classification);
+            // PP-A2DB-2 slice C2: carry the host-contract kind through
+            // when the descriptor declares one; the adapter copies it
+            // onto each emitted ExternalContextRequirement whose
+            // classification is HostContract.
+            if let Some(kind) = desc.host_contract_kind.clone() {
+                host_contract_kinds.insert(desc.relation_type.clone(), kind);
+            }
         }
     }
     input.relation_classification =
         crate::plugins::promotion::RelationClassificationRules {
             by_descriptor,
+            host_contract_kinds,
             default_unknown: None,
         };
     Ok(input)
@@ -2339,6 +2348,7 @@ mod tests {
             parameter_schema: serde_json::Value::Null,
             participates_in_dependency_graph: false,
             external_classification: classification,
+            host_contract_kind: None,
         }
     }
 
@@ -2786,4 +2796,74 @@ mod tests {
         let mut q = world.query::<&SemanticRelation>();
         assert_eq!(q.iter(&world).count(), 0);
     }
+    // === PP-A2DB-2 slice C2: gather plumbs host_contract_kind ==============
+
+    #[test]
+    fn gather_with_capability_seeds_host_contract_kinds_from_descriptors() {
+        use crate::capability_registry::{CapabilityRegistry, RelationTypeDescriptor};
+        use crate::plugins::hosting_contracts::HostingContractKindId;
+        use crate::plugins::promotion::{
+            ExternalRelationClassification, SemanticAssemblyPromotionSource,
+        };
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_authored_leaf(&mut world, elem(99));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "door",
+            "Door",
+            vec![member(elem(10), "frame")],
+            serde_json::Value::Null,
+        );
+        world.spawn((
+            elem(30),
+            SemanticRelation {
+                source: elem(10),
+                target: elem(99),
+                relation_type: "hosted_on_wall".into(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        let mut registry = CapabilityRegistry::default();
+        registry.register_relation_type(RelationTypeDescriptor {
+            relation_type: "hosted_on_wall".into(),
+            label: "Hosted on wall".into(),
+            description: "Door/window mounted in a wall opening.".into(),
+            valid_source_types: Vec::new(),
+            valid_target_types: Vec::new(),
+            parameter_schema: serde_json::Value::Null,
+            participates_in_dependency_graph: false,
+            external_classification: Some(ExternalRelationClassification::HostContract),
+            host_contract_kind: Some(HostingContractKindId(
+                "architecture::wall_opening".into(),
+            )),
+        });
+
+        let input =
+            gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
+        assert_eq!(
+            input.relation_classification.host_contract_kinds.get("hosted_on_wall"),
+            Some(&HostingContractKindId(
+                "architecture::wall_opening".into(),
+            )),
+        );
+
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Door".into(),
+            replace_source: false,
+            provenance: Default::default(),
+        };
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        assert_eq!(out.plan.external_context_requirements.len(), 1);
+        let req = &out.plan.external_context_requirements[0];
+        assert_eq!(
+            req.host_contract_kind,
+            Some(HostingContractKindId(
+                "architecture::wall_opening".into(),
+            )),
+        );
+    }
+
 }
