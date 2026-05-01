@@ -883,6 +883,108 @@ fn resolve_template_endpoint(
     }
 }
 
+// === Auto-materialization for SelfRoot-only templates (slice C4c) ==========
+
+/// Marker component attached to every `SemanticRelation` entity
+/// spawned by `auto_materialize_self_root_templates`. Lets re-
+/// evaluation of an Occurrence detect which template instances
+/// already exist and avoid spawning duplicates.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterializedFromTemplate {
+    pub for_occurrence: ElementId,
+    /// `SemanticRelationTemplate.source_relation_id` — stable across
+    /// re-evaluations because templates live on the (immutable
+    /// post-publish) Definition.
+    pub source_relation_id: ElementId,
+}
+
+/// Idempotent auto-materializer for SelfRoot-only relation templates.
+///
+/// Filters the Definition's `compound.relation_templates` to entries
+/// whose subject AND object are both `RelationEndpoint::SelfRoot`,
+/// then spawns one `SemanticRelation` for each template that does
+/// not already have a corresponding `MaterializedFromTemplate` marker
+/// on the world (keyed by `(occurrence_root_id, source_relation_id)`).
+///
+/// Slot-referencing templates are skipped silently — they need a
+/// realization map that's only available at promotion-commit time
+/// (slice C3's explicit `materialize_relation_templates`). The
+/// agreement allows partial materialization: SelfRoot-only templates
+/// land at evaluate time; slot-referencing templates land at
+/// promotion-commit time when the slot realizations are known.
+///
+/// Returns the number of newly-spawned relations (zero on subsequent
+/// idempotent calls).
+pub fn auto_materialize_self_root_templates(
+    world: &mut World,
+    definition: &crate::plugins::modeling::definition::Definition,
+    occurrence_root_id: ElementId,
+) -> Result<usize, MaterializationError> {
+    let Some(compound) = definition.compound.as_ref() else {
+        return Ok(0);
+    };
+    if compound.relation_templates.is_empty() {
+        return Ok(0);
+    }
+
+    // Collect already-materialized template ids for this occurrence
+    // so we can skip them on re-evaluation. The marker is stamped on
+    // the SemanticRelation entity itself.
+    let already_materialized: std::collections::HashSet<ElementId> =
+        match world.try_query::<&MaterializedFromTemplate>() {
+            Some(mut q) => q
+                .iter(world)
+                .filter(|m| m.for_occurrence == occurrence_root_id)
+                .map(|m| m.source_relation_id)
+                .collect(),
+            None => std::collections::HashSet::new(),
+        };
+
+    let templates_to_spawn: Vec<&crate::plugins::promotion::SemanticRelationTemplate> = compound
+        .relation_templates
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.subject,
+                crate::plugins::promotion::RelationEndpoint::SelfRoot
+            ) && matches!(
+                t.object,
+                crate::plugins::promotion::RelationEndpoint::SelfRoot
+            )
+        })
+        .filter(|t| !already_materialized.contains(&t.source_relation_id))
+        .collect();
+    if templates_to_spawn.is_empty() {
+        return Ok(0);
+    }
+
+    if !world.contains_resource::<crate::plugins::identity::ElementIdAllocator>() {
+        return Err(MaterializationError::AllocatorMissing);
+    }
+
+    let mut count = 0usize;
+    for template in templates_to_spawn {
+        let relation_id = world
+            .resource::<crate::plugins::identity::ElementIdAllocator>()
+            .next_id();
+        world.spawn((
+            relation_id,
+            crate::plugins::modeling::assembly::SemanticRelation {
+                source: occurrence_root_id,
+                target: occurrence_root_id,
+                relation_type: template.relation_type.clone(),
+                parameters: template.parameters.clone(),
+            },
+            MaterializedFromTemplate {
+                for_occurrence: occurrence_root_id,
+                source_relation_id: template.source_relation_id,
+            },
+        ));
+        count += 1;
+    }
+    Ok(count)
+}
+
 // === Tests =================================================================
 
 #[cfg(test)]
@@ -2311,5 +2413,154 @@ mod tests {
             req.classification,
             ExternalRelationClassification::HostContract
         );
+    }
+
+    // === PP-A2DB-2 slice C4c: idempotent self-root materializer ============
+
+    fn self_root_template(
+        relation_type: &str,
+        source_relation_id: ElementId,
+    ) -> crate::plugins::promotion::SemanticRelationTemplate {
+        crate::plugins::promotion::SemanticRelationTemplate {
+            subject: crate::plugins::promotion::RelationEndpoint::SelfRoot,
+            relation_type: relation_type.into(),
+            object: crate::plugins::promotion::RelationEndpoint::SelfRoot,
+            parameters: serde_json::Value::Null,
+            source_relation_id,
+        }
+    }
+
+    fn slot_self_template(
+        relation_type: &str,
+        slot_id: &str,
+        source_relation_id: ElementId,
+    ) -> crate::plugins::promotion::SemanticRelationTemplate {
+        crate::plugins::promotion::SemanticRelationTemplate {
+            subject: crate::plugins::promotion::RelationEndpoint::SelfRoot,
+            relation_type: relation_type.into(),
+            object: crate::plugins::promotion::RelationEndpoint::Slot(slot_id.into()),
+            parameters: serde_json::Value::Null,
+            source_relation_id,
+        }
+    }
+
+    #[test]
+    fn auto_materialize_returns_zero_when_definition_has_no_compound() {
+        let mut world = world_with_allocator();
+        let def = crate::plugins::definition_authoring::blank_definition("Empty");
+        let count =
+            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn auto_materialize_spawns_self_root_templates_on_first_call() {
+        let mut world = world_with_allocator();
+        let def = crate::plugins::definition_authoring::blank_definition("WithTemplates")
+            .with_relation_templates(vec![
+                self_root_template("contains_self", elem(30)),
+                self_root_template("self_marker", elem(31)),
+            ]);
+        let count =
+            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        assert_eq!(count, 2);
+
+        let mut q = world.query::<(&SemanticRelation, &MaterializedFromTemplate)>();
+        let spawned: Vec<_> = q.iter(&world).collect();
+        assert_eq!(spawned.len(), 2);
+        for (rel, marker) in spawned {
+            assert_eq!(rel.source, elem(500));
+            assert_eq!(rel.target, elem(500));
+            assert_eq!(marker.for_occurrence, elem(500));
+        }
+    }
+
+    #[test]
+    fn auto_materialize_is_idempotent_across_calls() {
+        let mut world = world_with_allocator();
+        let def = crate::plugins::definition_authoring::blank_definition("Idempotent")
+            .with_relation_templates(vec![self_root_template("self_marker", elem(30))]);
+
+        // First call spawns one.
+        let first =
+            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        assert_eq!(first, 1);
+        // Second call spawns nothing (already materialized).
+        let second =
+            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        assert_eq!(second, 0);
+        // Still exactly one SemanticRelation in the world.
+        let mut q = world.query::<&SemanticRelation>();
+        assert_eq!(q.iter(&world).count(), 1);
+    }
+
+    #[test]
+    fn auto_materialize_skips_slot_referencing_templates_without_error() {
+        let mut world = world_with_allocator();
+        let def = crate::plugins::definition_authoring::blank_definition("MixedTemplates")
+            .with_relation_templates(vec![
+                self_root_template("self_marker", elem(30)),
+                // Slot-referencing template — must be skipped silently.
+                slot_self_template("hosts", "frame", elem(31)),
+            ]);
+        let count =
+            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        assert_eq!(count, 1, "only the SelfRoot template spawned");
+        let mut q = world.query::<&SemanticRelation>();
+        let relations: Vec<&SemanticRelation> = q.iter(&world).collect();
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].relation_type, "self_marker");
+    }
+
+    #[test]
+    fn auto_materialize_keeps_separate_state_per_occurrence() {
+        let mut world = world_with_allocator();
+        let def = crate::plugins::definition_authoring::blank_definition("PerOcc")
+            .with_relation_templates(vec![self_root_template("self_marker", elem(30))]);
+        // Two occurrences sharing the Definition: each should get its
+        // own materialized relation on first call, and idempotency
+        // applies independently.
+        let a = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let b = auto_materialize_self_root_templates(&mut world, &def, elem(501)).unwrap();
+        let a_again =
+            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        assert_eq!((a, b, a_again), (1, 1, 0));
+        let mut q = world.query::<(&SemanticRelation, &MaterializedFromTemplate)>();
+        let mut for_500 = 0;
+        let mut for_501 = 0;
+        for (_, marker) in q.iter(&world) {
+            if marker.for_occurrence == elem(500) {
+                for_500 += 1;
+            } else if marker.for_occurrence == elem(501) {
+                for_501 += 1;
+            }
+        }
+        assert_eq!((for_500, for_501), (1, 1));
+    }
+
+    #[test]
+    fn auto_materialize_returns_allocator_missing_when_resource_absent() {
+        let mut world = World::new();
+        let def = crate::plugins::definition_authoring::blank_definition("NoAllocator")
+            .with_relation_templates(vec![self_root_template("self_marker", elem(30))]);
+        let err = auto_materialize_self_root_templates(&mut world, &def, elem(500))
+            .unwrap_err();
+        assert_eq!(err, MaterializationError::AllocatorMissing);
+    }
+
+    #[test]
+    fn auto_materialize_with_only_slot_templates_returns_zero_without_touching_allocator() {
+        // Defensive: if every template references a slot, the
+        // function returns 0 BEFORE checking the allocator. This
+        // matters for occurrences that haven't yet been compound-
+        // expanded — the slot realization map isn't ready, and we
+        // shouldn't spuriously fail the allocator check on a
+        // legitimate skip.
+        let mut world = World::new();
+        let def = crate::plugins::definition_authoring::blank_definition("SlotsOnly")
+            .with_relation_templates(vec![slot_self_template("hosts", "frame", elem(30))]);
+        let count =
+            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        assert_eq!(count, 0);
     }
 }
