@@ -481,6 +481,7 @@ pub(crate) fn enqueue_create_box(world: &mut World, command: CreateBoxCommand) -
             },
             rotation: ShapeRotation::default(),
             material_assignment: None,
+            opening_context: None,
         }
         .into(),
     );
@@ -503,6 +504,7 @@ pub(crate) fn enqueue_create_cylinder(
             },
             rotation: ShapeRotation::default(),
             material_assignment: None,
+            opening_context: None,
         }
         .into(),
     );
@@ -521,6 +523,7 @@ pub(crate) fn enqueue_create_sphere(world: &mut World, command: CreateSphereComm
             },
             rotation: ShapeRotation::default(),
             material_assignment: None,
+            opening_context: None,
         }
         .into(),
     );
@@ -540,6 +543,7 @@ pub(crate) fn enqueue_create_plane(world: &mut World, command: CreatePlaneComman
             },
             rotation: ShapeRotation::default(),
             material_assignment: None,
+            opening_context: None,
         }
         .into(),
     );
@@ -614,6 +618,7 @@ pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEnti
 struct ApplyVoidPlacementHistoryCommand {
     outcome: VoidPlacementOutcome,
     prior_opening_context: Option<OpeningContext>,
+    prior_opening_visibility: Option<Visibility>,
     prior_filling_link: Option<VoidLink>,
 }
 
@@ -633,13 +638,15 @@ impl EditorCommand for ApplyVoidPlacementHistoryCommand {
 
         self.prior_opening_context =
             opening_entity.and_then(|entity| world.get::<OpeningContext>(entity).copied());
+        self.prior_opening_visibility =
+            opening_entity.and_then(|entity| world.get::<Visibility>(entity).copied());
         self.prior_filling_link =
             filling_entity.and_then(|entity| world.get::<VoidLink>(entity).copied());
 
         if let Some(entity) = opening_entity {
             world
                 .entity_mut(entity)
-                .insert(self.outcome.opening_context);
+                .insert((self.outcome.opening_context, Visibility::Hidden));
         }
         if let Some(entity) = filling_entity {
             world.entity_mut(entity).insert(self.outcome.filling_link);
@@ -653,6 +660,9 @@ impl EditorCommand for ApplyVoidPlacementHistoryCommand {
             } else {
                 world.entity_mut(entity).remove::<OpeningContext>();
             }
+            world
+                .entity_mut(entity)
+                .insert(self.prior_opening_visibility.unwrap_or(Visibility::Visible));
         }
 
         if let Some(filling) = self.outcome.opening_context.filling {
@@ -674,6 +684,7 @@ pub(crate) fn enqueue_apply_void_placement(world: &mut World, outcome: VoidPlace
         .push_command(Box::new(ApplyVoidPlacementHistoryCommand {
             outcome,
             prior_opening_context: None,
+            prior_opening_visibility: None,
             prior_filling_link: None,
         }));
 }
@@ -707,7 +718,10 @@ pub(crate) fn apply_mesh_primitive<T: Bundle + Clone>(
         let is_feature_operand = world
             .get::<crate::plugins::modeling::profile_feature::FeatureOperand>(entity)
             .is_some();
-        let visibility = if is_csg_operand || is_feature_operand {
+        let is_opening_context = world
+            .get::<crate::plugins::modeling::void_declaration::OpeningContext>(entity)
+            .is_some();
+        let visibility = if is_csg_operand || is_feature_operand || is_opening_context {
             Visibility::Hidden
         } else {
             Visibility::Visible

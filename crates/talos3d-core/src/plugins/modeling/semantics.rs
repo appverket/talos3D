@@ -521,6 +521,7 @@ mod tests {
             },
             rotation: ShapeRotation::default(),
             material_assignment: None,
+            opening_context: None,
         }
         .into();
 

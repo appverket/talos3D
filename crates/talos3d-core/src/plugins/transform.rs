@@ -1027,6 +1027,7 @@ fn feature_push_pull_snapshot(
             },
             rotation: profile.rotation,
             material_assignment: profile.material_assignment.clone(),
+            opening_context: profile.opening_context,
         }
         .into(),
     )

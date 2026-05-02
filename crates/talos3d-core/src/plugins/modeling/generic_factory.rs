@@ -55,6 +55,7 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
                     .copied()
                     .unwrap_or_default(),
                 material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
+                opening_context: entity_ref.get::<OpeningContext>().copied(),
             }
             .into(),
         )
@@ -77,11 +78,17 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
         let material_assignment = data
             .get("material_assignment")
             .and_then(material_assignment_from_value);
+        let opening_context = data
+            .get("opening_context")
+            .map(|value| serde_json::from_value::<OpeningContext>(value.clone()))
+            .transpose()
+            .map_err(|e| format!("Invalid opening_context in persisted JSON: {e}"))?;
         Ok(PrimitiveSnapshot {
             element_id,
             primitive,
             rotation,
             material_assignment,
+            opening_context,
         }
         .into())
     }
@@ -104,6 +111,7 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             primitive,
             rotation,
             material_assignment,
+            opening_context: None,
         }
         .into())
     }
