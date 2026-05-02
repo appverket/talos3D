@@ -16,7 +16,7 @@ use crate::{
             material_assignment_display_id, material_assignment_option_from_value,
             material_assignment_to_value, MaterialAssignment,
         },
-        modeling::primitives::ShapeRotation,
+        modeling::{primitives::ShapeRotation, void_declaration::OpeningContext},
     },
 };
 
@@ -30,6 +30,7 @@ pub struct PrimitiveSnapshot<P: Primitive> {
     pub primitive: P,
     pub rotation: ShapeRotation,
     pub material_assignment: Option<MaterialAssignment>,
+    pub opening_context: Option<OpeningContext>,
 }
 
 impl<P: Primitive> PartialEq for PrimitiveSnapshot<P>
@@ -41,6 +42,7 @@ where
             && self.primitive == other.primitive
             && self.rotation == other.rotation
             && self.material_assignment == other.material_assignment
+            && self.opening_context == other.opening_context
     }
 }
 
@@ -74,6 +76,7 @@ where
             primitive: self.primitive.translated(delta),
             rotation: self.rotation,
             material_assignment: self.material_assignment.clone(),
+            opening_context: self.opening_context,
         }
         .into()
     }
@@ -85,6 +88,7 @@ where
             primitive: new_primitive,
             rotation: ShapeRotation(new_rotation),
             material_assignment: self.material_assignment.clone(),
+            opening_context: self.opening_context,
         }
         .into()
     }
@@ -95,6 +99,7 @@ where
             primitive: self.primitive.scaled(factor, center),
             rotation: self.rotation,
             material_assignment: self.material_assignment.clone(),
+            opening_context: self.opening_context,
         }
         .into()
     }
@@ -110,6 +115,7 @@ where
                     primitive: new_prim,
                     rotation: ShapeRotation(new_rot),
                     material_assignment: self.material_assignment.clone(),
+                    opening_context: self.opening_context,
                 }
                 .into(),
             ),
@@ -142,6 +148,7 @@ where
             primitive: new_prim,
             rotation: self.rotation,
             material_assignment: self.material_assignment.clone(),
+            opening_context: self.opening_context,
         }
         .into())
     }
@@ -159,6 +166,7 @@ where
             primitive: self.primitive.clone(),
             rotation: self.rotation,
             material_assignment: assignment,
+            opening_context: self.opening_context,
         }
         .into())
     }
@@ -181,6 +189,7 @@ where
                 primitive: new_prim,
                 rotation: self.rotation,
                 material_assignment: self.material_assignment.clone(),
+                opening_context: self.opening_context,
             }
             .into(),
         )
@@ -207,6 +216,12 @@ where
                     material_assignment_to_value(material_assignment),
                 );
             }
+            if let Some(opening_context) = &self.opening_context {
+                object.insert(
+                    "opening_context".to_string(),
+                    serde_json::to_value(opening_context).unwrap_or(Value::Null),
+                );
+            }
         }
         json
     }
@@ -224,6 +239,11 @@ where
                 entity_mut.insert(material_assignment.clone());
             } else {
                 entity_mut.remove::<MaterialAssignment>();
+            }
+            if let Some(opening_context) = self.opening_context {
+                entity_mut.insert((opening_context, Visibility::Hidden));
+            } else {
+                entity_mut.remove::<OpeningContext>();
             }
         }
     }
@@ -251,6 +271,11 @@ where
                 entity_mut.insert(material_assignment.clone());
             } else {
                 entity_mut.remove::<MaterialAssignment>();
+            }
+            if let Some(opening_context) = self.opening_context {
+                entity_mut.insert((opening_context, Visibility::Hidden));
+            } else {
+                entity_mut.remove::<OpeningContext>();
             }
         } else {
             self.apply_to(world);

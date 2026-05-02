@@ -12240,16 +12240,15 @@ fn handle_get_instance_info(world: &World) -> InstanceInfo {
 fn handle_get_selection(world: &mut World) -> Vec<u64> {
     let selected: Vec<(Entity, u64)> = {
         let mut query = world.query_filtered::<(Entity, &ElementId), With<Selected>>();
-        query.iter(world).map(|(entity, id)| (entity, id.0)).collect()
+        query
+            .iter(world)
+            .map(|(entity, id)| (entity, id.0))
+            .collect()
     };
     let registry = world.resource::<CapabilityRegistry>();
     selected
         .into_iter()
-        .filter_map(|(entity, id)| {
-            registry
-                .is_user_facing_entity(world, entity)
-                .then_some(id)
-        })
+        .filter_map(|(entity, id)| registry.is_user_facing_entity(world, entity).then_some(id))
         .collect()
 }
 
@@ -12763,12 +12762,14 @@ fn handle_split_box_face(
         primitive: prim_a,
         rotation,
         material_assignment: None,
+        opening_context: None,
     };
     let snapshot_b: PrimitiveSnapshot<BoxPrimitive> = PrimitiveSnapshot {
         element_id: id_b,
         primitive: prim_b,
         rotation,
         material_assignment: None,
+        opening_context: None,
     };
     let group_snapshot = GroupSnapshot {
         element_id: group_id,
@@ -22147,6 +22148,7 @@ mod tests {
     fn hosted_definition_instantiation_derives_anchors_and_relation() {
         use crate::plugins::history::PendingCommandQueue;
         use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink};
+        use bevy::prelude::Visibility;
 
         let mut world = init_model_api_test_world();
         register_hosted_on_relation(&mut world);
@@ -22235,6 +22237,11 @@ mod tests {
                 filling: Some(ElementId(instantiated.element_id)),
             })
         );
+        assert_eq!(
+            world.get::<Visibility>(opening_entity),
+            Some(&Visibility::Hidden),
+            "linked opening proxies are implementation geometry and must not render"
+        );
         let user_entities = list_entities(&world);
         assert!(
             user_entities
@@ -22287,6 +22294,97 @@ mod tests {
         let opening_entity = find_entity_by_element_id(&mut world, ElementId(opening_id))
             .expect("opening entity should remain after undo");
         assert!(world.get::<OpeningContext>(opening_entity).is_none());
+        assert_eq!(
+            world.get::<Visibility>(opening_entity),
+            Some(&Visibility::Visible)
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn hosted_opening_proxy_stays_internal_after_project_round_trip() {
+        use crate::plugins::modeling::void_declaration::OpeningContext;
+        use bevy::prelude::Visibility;
+
+        let mut source_world = init_model_api_test_world();
+        register_hosted_on_relation(&mut source_world);
+
+        let host_id = handle_create_entity(
+            &mut source_world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.5, 0.0],
+                "half_extents": [2.0, 1.5, 0.15]
+            }),
+        )
+        .expect("host should be created");
+        let opening_id = handle_create_entity(
+            &mut source_world,
+            json!({
+                "type": "box",
+                "centre": [4.0, 1.2, 0.0],
+                "half_extents": [0.6, 0.8, 0.15]
+            }),
+        )
+        .expect("opening proxy should be created");
+
+        let child = handle_create_definition(&mut source_world, make_locked_member_request())
+            .expect("locked child definition should be created");
+        let compound = handle_create_definition(
+            &mut source_world,
+            make_compound_window_request(&child.definition_id),
+        )
+        .expect("compound definition should be created");
+        let instantiated = handle_instantiate_hosted_definition(
+            &mut source_world,
+            json!({
+                "definition_id": compound.definition_id,
+                "label": "HostedWindow",
+                "hosting": {
+                    "host_element_id": host_id,
+                    "opening_element_id": opening_id
+                }
+            }),
+        )
+        .expect("hosted occurrence should be instantiated");
+
+        let path =
+            temp_json_path("talos3d-hosted-opening-proxy-roundtrip").with_extension("talos3d");
+        handle_save_project(&mut source_world, path.to_str().unwrap_or_default())
+            .expect("project should save");
+
+        let mut loaded_world = init_model_api_test_world();
+        register_hosted_on_relation(&mut loaded_world);
+        handle_load_project(&mut loaded_world, path.to_str().unwrap_or_default())
+            .expect("project should load");
+
+        let opening_entity = find_entity_by_element_id(&mut loaded_world, ElementId(opening_id))
+            .expect("opening entity should be reloaded for the void relationship");
+        assert_eq!(
+            loaded_world.get::<OpeningContext>(opening_entity),
+            Some(&OpeningContext {
+                host: ElementId(host_id),
+                filling: Some(ElementId(instantiated.element_id)),
+            })
+        );
+        assert_eq!(
+            loaded_world.get::<Visibility>(opening_entity),
+            Some(&Visibility::Hidden),
+            "persisted opening proxies must remain non-rendering after load"
+        );
+
+        let user_entities = list_entities(&loaded_world);
+        assert!(
+            user_entities
+                .iter()
+                .all(|entry| entry.element_id != opening_id),
+            "persisted opening proxy must remain hidden from user-facing entity lists"
+        );
+        let selection_error = handle_set_selection(&mut loaded_world, vec![opening_id])
+            .expect_err("persisted internal opening proxy should not be selectable");
+        assert!(selection_error.contains("internal wall opening proxy"));
+
+        let _ = fs::remove_file(path);
     }
 
     #[cfg(feature = "model-api")]
