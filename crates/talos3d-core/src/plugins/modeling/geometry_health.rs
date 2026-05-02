@@ -22,7 +22,7 @@ impl Default for GeometryHealthOptions {
         Self {
             distance_tolerance: 1e-5,
             normal_dot_tolerance: 1e-4,
-            area_tolerance: 1e-8,
+            area_tolerance: 1e-6,
         }
     }
 }
