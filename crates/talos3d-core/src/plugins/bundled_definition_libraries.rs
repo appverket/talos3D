@@ -83,7 +83,13 @@ fn parse_bundled_definition_library(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::modeling::definition::{DefinitionId, DefinitionLibraryId};
+    use crate::plugins::materials::{
+        BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80, BUILTIN_MATERIAL_WINDOW_DARK_GASKET,
+        BUILTIN_MATERIAL_WINDOW_HARDWARE_STEEL, BUILTIN_MATERIAL_WINDOW_WHITE_FRAME,
+    };
+    use crate::plugins::modeling::definition::{
+        DefinitionId, DefinitionLibraryId, ParameterScaleBehavior,
+    };
 
     #[test]
     fn bundled_libraries_use_bundled_scope() {
@@ -169,5 +175,176 @@ mod tests {
             checked, 4,
             "expected four bundled finish/material parameters"
         );
+    }
+
+    #[test]
+    fn bundled_european_double_window_defaults_to_white_hollow_parts() {
+        let library = bundled_definition_libraries()
+            .expect("bundled libraries should parse")
+            .into_iter()
+            .next()
+            .expect("one bundled library");
+
+        for definition_id in [
+            "architecture.window.double-european",
+            "architecture.window.european-single",
+        ] {
+            let definition = library
+                .definitions
+                .get(&DefinitionId(definition_id.to_string()))
+                .expect("window definition should exist");
+            assert!(
+                definition.evaluators.is_empty(),
+                "{definition_id} must not emit a solid slab over its compound parts"
+            );
+            assert_eq!(
+                definition
+                    .material_assignment
+                    .as_ref()
+                    .and_then(|assignment| assignment.render_material_id(None))
+                    .as_deref(),
+                Some(BUILTIN_MATERIAL_WINDOW_WHITE_FRAME),
+                "{definition_id} should default to white frame material"
+            );
+        }
+
+        let double = library
+            .definitions
+            .get(&DefinitionId(
+                "architecture.window.double-european".to_string(),
+            ))
+            .expect("double window definition should exist");
+        let double_slots = &double
+            .compound
+            .as_ref()
+            .expect("double window should be compound")
+            .child_slots;
+        assert!(
+            double_slots
+                .iter()
+                .all(|slot| slot.definition_id.0 != "architecture.window.european-single"),
+            "the default double window should be one two-leaf casement, not two nested single-window units"
+        );
+        for required_slot in ["left_sash", "right_sash", "left_handle", "right_handle"] {
+            assert!(
+                double_slots
+                    .iter()
+                    .any(|slot| slot.slot_id == required_slot),
+                "double window should include {required_slot}"
+            );
+        }
+        let scale_behavior = |name: &str| {
+            double
+                .interface
+                .parameters
+                .0
+                .iter()
+                .find(|parameter| parameter.name == name)
+                .and_then(|parameter| parameter.metadata.scale_behavior)
+        };
+        assert_eq!(
+            scale_behavior("overall_width"),
+            Some(ParameterScaleBehavior::ScaleWithOccurrence)
+        );
+        assert_eq!(
+            scale_behavior("overall_height"),
+            Some(ParameterScaleBehavior::ScaleWithOccurrence)
+        );
+        assert_eq!(
+            scale_behavior("frame_face_width"),
+            Some(ParameterScaleBehavior::FixedWorld),
+            "frame face width is a construction invariant, not a generic scale target"
+        );
+        assert_eq!(
+            scale_behavior("glazing_thickness"),
+            Some(ParameterScaleBehavior::FixedWorld)
+        );
+        assert_eq!(
+            scale_behavior("sash_split"),
+            Some(ParameterScaleBehavior::Ratio)
+        );
+        assert_eq!(
+            scale_behavior("finish_color"),
+            Some(ParameterScaleBehavior::Semantic)
+        );
+
+        for definition_id in ["architecture.window.frame", "architecture.window.sash"] {
+            let definition = library
+                .definitions
+                .get(&DefinitionId(definition_id.to_string()))
+                .expect("component definition should exist");
+            assert!(definition.evaluators.is_empty());
+            assert_eq!(
+                definition
+                    .compound
+                    .as_ref()
+                    .map(|compound| compound.child_slots.len()),
+                Some(4),
+                "{definition_id} should be composed from two stiles and two rails"
+            );
+            assert_eq!(
+                definition
+                    .material_assignment
+                    .as_ref()
+                    .and_then(|assignment| assignment.render_material_id(None))
+                    .as_deref(),
+                Some(BUILTIN_MATERIAL_WINDOW_WHITE_FRAME)
+            );
+        }
+
+        let glazing = library
+            .definitions
+            .get(&DefinitionId("architecture.window.glazing".to_string()))
+            .expect("glazing definition should exist");
+        assert_eq!(
+            glazing
+                .material_assignment
+                .as_ref()
+                .and_then(|assignment| assignment.render_material_id(None))
+                .as_deref(),
+            Some(BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80)
+        );
+
+        let muntin = library
+            .definitions
+            .get(&DefinitionId("architecture.window.muntin".to_string()))
+            .expect("muntin definition should exist");
+        assert_eq!(
+            muntin
+                .material_assignment
+                .as_ref()
+                .and_then(|assignment| assignment.render_material_id(None))
+                .as_deref(),
+            Some(BUILTIN_MATERIAL_WINDOW_WHITE_FRAME),
+            "muntins are frame members, not glazing"
+        );
+
+        for (definition_id, material_id) in [
+            (
+                "architecture.window.handle",
+                BUILTIN_MATERIAL_WINDOW_HARDWARE_STEEL,
+            ),
+            (
+                "architecture.window.hinge",
+                BUILTIN_MATERIAL_WINDOW_HARDWARE_STEEL,
+            ),
+            (
+                "architecture.window.gasket",
+                BUILTIN_MATERIAL_WINDOW_DARK_GASKET,
+            ),
+        ] {
+            let definition = library
+                .definitions
+                .get(&DefinitionId(definition_id.to_string()))
+                .expect("required window subpart definition should exist");
+            assert_eq!(
+                definition
+                    .material_assignment
+                    .as_ref()
+                    .and_then(|assignment| assignment.render_material_id(None))
+                    .as_deref(),
+                Some(material_id)
+            );
+        }
     }
 }

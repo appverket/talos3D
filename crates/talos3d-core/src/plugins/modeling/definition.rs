@@ -185,6 +185,21 @@ pub enum ParameterMutability {
     Derived,
 }
 
+/// How a parameter should respond when an occurrence is resized or scaled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParameterScaleBehavior {
+    /// The value represents an overall product extent and may be stretched.
+    ScaleWithOccurrence,
+    /// The value is a construction/product constant in model units.
+    FixedWorld,
+    /// The value is dimensionless and survives scale unchanged.
+    Ratio,
+    /// The value is semantic state, not dimensional geometry.
+    #[default]
+    Semantic,
+}
+
 /// Extended metadata used by agents and UI when authoring parameters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParameterMetadata {
@@ -200,6 +215,8 @@ pub struct ParameterMetadata {
     pub category: Option<String>,
     #[serde(default)]
     pub mutability: ParameterMutability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_behavior: Option<ParameterScaleBehavior>,
 }
 
 // ---------------------------------------------------------------------------
@@ -735,8 +752,7 @@ pub struct CompoundDefinition {
     /// keeps pre-PP-A2DB-2 project files loading and keeps Definitions
     /// without templates bit-stable in serialized form.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub relation_templates:
-        Vec<crate::plugins::promotion::SemanticRelationTemplate>,
+    pub relation_templates: Vec<crate::plugins::promotion::SemanticRelationTemplate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -764,8 +780,7 @@ pub struct Interface {
     /// keeps old project files loading and keeps projects without
     /// any requirements bit-stable in the serialized output.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external_context_requirements:
-        Vec<crate::plugins::promotion::ExternalContextRequirement>,
+    pub external_context_requirements: Vec<crate::plugins::promotion::ExternalContextRequirement>,
 }
 
 impl Interface {
@@ -786,8 +801,7 @@ impl Interface {
     /// without re-implementing the filter at every call site.
     pub fn iter_host_contract_requirements(
         &self,
-    ) -> impl Iterator<Item = &crate::plugins::promotion::ExternalContextRequirement> + '_
-    {
+    ) -> impl Iterator<Item = &crate::plugins::promotion::ExternalContextRequirement> + '_ {
         self.external_context_requirements.iter().filter(|req| {
             matches!(
                 req.classification,
@@ -888,7 +902,9 @@ impl Definition {
         for param in params {
             hash_tag(&mut hasher, "param");
             hash_str(&mut hasher, &param.name);
-            let value = resolved_params.get(&param.name).unwrap_or(&param.default_value);
+            let value = resolved_params
+                .get(&param.name)
+                .unwrap_or(&param.default_value);
             hash_canonical_json_value(&mut hasher, value);
         }
 
@@ -1235,10 +1251,7 @@ impl DefinitionLibrary {
         let mut migrated: Vec<DefinitionId> = self
             .definitions
             .iter_mut()
-            .filter_map(|(id, def)| {
-                def.migrate_legacy_material_assignment()
-                    .then(|| id.clone())
-            })
+            .filter_map(|(id, def)| def.migrate_legacy_material_assignment().then(|| id.clone()))
             .collect();
         migrated.sort_by(|a, b| a.0.cmp(&b.0));
         migrated
@@ -1431,10 +1444,7 @@ impl DefinitionRegistry {
         let mut migrated: Vec<DefinitionId> = self
             .definitions
             .iter_mut()
-            .filter_map(|(id, def)| {
-                def.migrate_legacy_material_assignment()
-                    .then(|| id.clone())
-            })
+            .filter_map(|(id, def)| def.migrate_legacy_material_assignment().then(|| id.clone()))
             .collect();
         migrated.sort_by(|a, b| a.0.cmp(&b.0));
         migrated
@@ -1999,6 +2009,29 @@ mod pp_dhost_param_type_tests {
         let back: ParameterDef = serde_json::from_value(value).unwrap();
         assert!(!back.geometry_affecting);
     }
+
+    #[test]
+    fn parameter_scale_behavior_round_trips_explicitly() {
+        let parameter: ParameterDef = serde_json::from_value(json!({
+            "name": "frame_face_width",
+            "param_type": "Numeric",
+            "default_value": 0.05,
+            "override_policy": "Overridable",
+            "metadata": {
+                "unit": "m",
+                "mutability": "Input",
+                "scale_behavior": "fixed_world"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            parameter.metadata.scale_behavior,
+            Some(ParameterScaleBehavior::FixedWorld)
+        );
+        let value = serde_json::to_value(&parameter).unwrap();
+        assert_eq!(value["metadata"]["scale_behavior"], json!("fixed_world"));
+    }
 }
 
 // === PP-A2DB-2 slice C1: external_context_requirements on Interface =======
@@ -2049,8 +2082,7 @@ mod pp_a2db_2_external_context_tests {
 
     #[test]
     fn interface_serializes_non_empty_external_context_requirements() {
-        let i = Interface::default()
-            .with_external_context_requirements(vec![sample_requirement()]);
+        let i = Interface::default().with_external_context_requirements(vec![sample_requirement()]);
         let json = serde_json::to_string(&i).unwrap();
         assert!(json.contains("external_context_requirements"));
         assert!(json.contains("hosted_on_wall"));
@@ -2076,17 +2108,20 @@ mod pp_a2db_2_external_context_tests {
 
     #[test]
     fn merge_interface_inherits_requirements_from_base_when_child_is_empty() {
-        let base = Interface::default()
-            .with_external_context_requirements(vec![sample_requirement()]);
+        let base =
+            Interface::default().with_external_context_requirements(vec![sample_requirement()]);
         let child = Interface::default();
         let merged = merge_interface(base.clone(), child);
-        assert_eq!(merged.external_context_requirements, base.external_context_requirements);
+        assert_eq!(
+            merged.external_context_requirements,
+            base.external_context_requirements
+        );
     }
 
     #[test]
     fn merge_interface_replaces_requirements_when_child_has_any() {
-        let base = Interface::default()
-            .with_external_context_requirements(vec![sample_requirement()]);
+        let base =
+            Interface::default().with_external_context_requirements(vec![sample_requirement()]);
         let other = ExternalContextRequirement {
             relation_type: "near_room".into(),
             classification: ExternalRelationClassification::AdvisoryContext,
@@ -2095,8 +2130,7 @@ mod pp_a2db_2_external_context_tests {
             host_contract_kind: None,
             source_relation_id: ElementId(31),
         };
-        let child = Interface::default()
-            .with_external_context_requirements(vec![other.clone()]);
+        let child = Interface::default().with_external_context_requirements(vec![other.clone()]);
         let merged = merge_interface(base, child);
         assert_eq!(merged.external_context_requirements, vec![other]);
     }
@@ -2199,7 +2233,9 @@ mod pp_097_slot_multiplicity_tests {
             },
             count: SlotCount::Fixed(2),
         });
-        slot.suppression_expr = Some(ExprNode::Literal { value: json!(false) });
+        slot.suppression_expr = Some(ExprNode::Literal {
+            value: json!(false),
+        });
         let err = slot.validate_multiplicity().unwrap_err();
         assert!(matches!(
             err,
@@ -2677,7 +2713,10 @@ mod pp_099_material_assignment_relocation_tests {
             .material_assignment
             .as_ref()
             .and_then(|a| a.render_material_id(None));
-        assert_eq!(render.as_deref(), Some("builtin.glass.blue_tint_glazing_80"));
+        assert_eq!(
+            render.as_deref(),
+            Some("builtin.glass.blue_tint_glazing_80")
+        );
     }
 
     #[test]
@@ -2752,9 +2791,7 @@ mod pp_099_material_assignment_relocation_tests {
         assert_eq!(ids, vec!["alpha.def", "zeta.def"]);
 
         // Idempotent: a second pass yields no migrations.
-        assert!(registry
-            .migrate_legacy_material_assignments()
-            .is_empty());
+        assert!(registry.migrate_legacy_material_assignments().is_empty());
     }
 
     #[test]
@@ -2824,7 +2861,11 @@ mod pp_099_material_assignment_relocation_tests {
         registry.insert(lib_b);
 
         let report = registry.migrate_legacy_material_assignments();
-        assert_eq!(report.len(), 1, "lib.b had no legacy data, should be omitted");
+        assert_eq!(
+            report.len(),
+            1,
+            "lib.b had no legacy data, should be omitted"
+        );
         let (reported_id, ids) = &report[0];
         assert_eq!(reported_id, &lib_a_id);
         let id_strs: Vec<&str> = ids.iter().map(|id| id.0.as_str()).collect();
@@ -2839,10 +2880,7 @@ mod pp_100_workspace_library_tests {
     use super::*;
     use serde_json::json;
 
-    fn empty_library_with_scope(
-        id: &str,
-        scope: DefinitionLibraryScope,
-    ) -> DefinitionLibrary {
+    fn empty_library_with_scope(id: &str, scope: DefinitionLibraryScope) -> DefinitionLibrary {
         DefinitionLibrary {
             id: DefinitionLibraryId(id.to_string()),
             name: format!("Library {id}"),
@@ -2925,8 +2963,7 @@ mod pp_100_workspace_library_tests {
 
     #[test]
     fn blocked_draft_status_round_trips_with_reason() {
-        let mut lib =
-            empty_library_with_scope("ws.team", DefinitionLibraryScope::WorkspaceLibrary);
+        let mut lib = empty_library_with_scope("ws.team", DefinitionLibraryScope::WorkspaceLibrary);
         lib.draft_status = DefinitionDraftStatus::Blocked {
             reason: "host_contract validation failed during migration: \
                      wall_opening clearance envelope (id=op.1) collides with \
