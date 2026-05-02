@@ -15,6 +15,7 @@ pub mod generic_snapshot;
 pub mod geometry_health;
 pub mod ghost_geometry;
 pub mod group;
+pub mod host_chart;
 pub mod mesh_generation;
 pub mod mirror;
 pub mod occurrence;
