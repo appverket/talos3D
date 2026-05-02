@@ -242,6 +242,15 @@ mod tests {
                 .find(|parameter| parameter.name == name)
                 .and_then(|parameter| parameter.metadata.scale_behavior)
         };
+        let default_bool = |name: &str| {
+            double
+                .interface
+                .parameters
+                .0
+                .iter()
+                .find(|parameter| parameter.name == name)
+                .and_then(|parameter| parameter.default_value.as_bool())
+        };
         assert_eq!(
             scale_behavior("overall_width"),
             Some(ParameterScaleBehavior::ScaleWithOccurrence)
@@ -267,6 +276,45 @@ mod tests {
             scale_behavior("finish_color"),
             Some(ParameterScaleBehavior::Semantic)
         );
+        assert_eq!(
+            scale_behavior("sash_depth"),
+            Some(ParameterScaleBehavior::FixedWorld)
+        );
+        assert_eq!(default_bool("has_mullion"), Some(false));
+        for trim_toggle in [
+            "has_interior_casing",
+            "has_stool",
+            "has_apron",
+            "has_exterior_sill",
+            "has_weatherboard",
+        ] {
+            assert_eq!(
+                default_bool(trim_toggle),
+                Some(false),
+                "{trim_toggle} should not be part of the default reusable window unit"
+            );
+        }
+        let derived_names: Vec<&str> = double
+            .compound
+            .as_ref()
+            .expect("double window should be compound")
+            .derived_parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect();
+        for required_derived in [
+            "frame_install_z",
+            "sash_install_z",
+            "glazing_install_z",
+            "gasket_install_z",
+            "hardware_install_z",
+            "hinge_install_z",
+        ] {
+            assert!(
+                derived_names.contains(&required_derived),
+                "window should define {required_derived} to keep frame, sash, glazing, seals, and hardware off coplanar depth planes"
+            );
+        }
 
         for definition_id in ["architecture.window.frame", "architecture.window.sash"] {
             let definition = library
