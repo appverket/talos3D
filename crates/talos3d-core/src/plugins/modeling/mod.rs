@@ -12,6 +12,7 @@ pub mod fillet;
 pub mod foundation;
 pub mod generic_factory;
 pub mod generic_snapshot;
+pub mod geometry_health;
 pub mod ghost_geometry;
 pub mod group;
 pub mod mesh_generation;
