@@ -480,18 +480,71 @@ impl ChartSpaceOpeningFeature {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChartHostEvaluation {
+    pub mesh: TriangleMesh,
+    pub face_provenance: Vec<CaeFaceProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaeFaceProvenance {
+    pub generated_face_index: usize,
+    pub owner_kind: CaeFaceOwnerKind,
+    pub owner_ref: Option<ElementId>,
+    pub opening_index: Option<usize>,
+    pub hosted_fill_ref: Option<ElementId>,
+    pub role: CaeGeneratedFaceRole,
+    pub triangle_start: usize,
+    pub triangle_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaeFaceOwnerKind {
+    Host,
+    OpeningFeature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CaeGeneratedFaceRole {
+    HostExteriorSurface,
+    HostInteriorSurface,
+    HostBoundary { side: ChartBoundarySide },
+    OpeningReveal { side: ChartBoundarySide },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChartBoundarySide {
+    UMin,
+    UMax,
+    VMin,
+    VMax,
+}
+
 pub fn evaluate_chart_host_mesh_with_openings(
     chart: &HostChart,
     openings: &[ChartSpaceOpeningFeature],
 ) -> Result<TriangleMesh, GeometryHealthReport> {
+    evaluate_chart_host_with_provenance(chart, openings).map(|evaluation| evaluation.mesh)
+}
+
+pub fn evaluate_chart_host_with_provenance(
+    chart: &HostChart,
+    openings: &[ChartSpaceOpeningFeature],
+) -> Result<ChartHostEvaluation, GeometryHealthReport> {
     let mut validation_issues = Vec::new();
     let mut opening_rects = Vec::new();
 
-    for opening in openings {
+    for (opening_index, opening) in openings.iter().enumerate() {
         let report = chart.validate_opening(opening);
         validation_issues.extend(report.issues);
         if let Some(bounds) = opening.profile_loop_2d.bounds() {
             opening_rects.push(OpeningRect {
+                opening_index,
+                host_ref: opening.host_ref,
+                hosted_fill_ref: opening.hosted_fill_ref,
                 u_min: bounds.min.x,
                 u_max: bounds.max.x,
                 v_min: bounds.min.y,
@@ -508,6 +561,7 @@ pub fn evaluate_chart_host_mesh_with_openings(
 
     let u_domain = chart.u_domain();
     let v_domain = chart.v_domain();
+    let host_ref = shared_host_ref(&opening_rects);
     let mut u_breakpoints = vec![u_domain.min, u_domain.max];
     let mut v_breakpoints = vec![v_domain.min, v_domain.max];
 
@@ -554,12 +608,14 @@ pub fn evaluate_chart_host_mesh_with_openings(
                 chart.offset_point_at(Vec2::new(u1, v0), 1.0),
                 chart.offset_point_at(Vec2::new(u1, v1), 1.0),
                 chart.offset_point_at(Vec2::new(u0, v1), 1.0),
+                CaeFaceIntent::host(host_ref, CaeGeneratedFaceRole::HostExteriorSurface),
             );
             builder.add_quad(
                 chart.offset_point_at(Vec2::new(u0, v0), -1.0),
                 chart.offset_point_at(Vec2::new(u0, v1), -1.0),
                 chart.offset_point_at(Vec2::new(u1, v1), -1.0),
                 chart.offset_point_at(Vec2::new(u1, v0), -1.0),
+                CaeFaceIntent::host(host_ref, CaeGeneratedFaceRole::HostInteriorSurface),
             );
 
             if !u_neighbor_is_solid(
@@ -576,6 +632,13 @@ pub fn evaluate_chart_host_mesh_with_openings(
                     chart.offset_point_at(Vec2::new(u0, v1), 1.0),
                     chart.offset_point_at(Vec2::new(u0, v1), -1.0),
                     chart.offset_point_at(Vec2::new(u0, v0), -1.0),
+                    edge_face_intent(
+                        &opening_rects,
+                        Vec2::new(u0, (v0 + v1) * 0.5),
+                        ChartBoundarySide::UMin,
+                        breakpoint_epsilon(u_domain, v_domain),
+                        host_ref,
+                    ),
                 );
             }
             if !u_neighbor_is_solid(&solid_cells, u_index, v_index, u_cells, v_cells, 1, wraps_u) {
@@ -584,6 +647,13 @@ pub fn evaluate_chart_host_mesh_with_openings(
                     chart.offset_point_at(Vec2::new(u1, v0), -1.0),
                     chart.offset_point_at(Vec2::new(u1, v1), -1.0),
                     chart.offset_point_at(Vec2::new(u1, v1), 1.0),
+                    edge_face_intent(
+                        &opening_rects,
+                        Vec2::new(u1, (v0 + v1) * 0.5),
+                        ChartBoundarySide::UMax,
+                        breakpoint_epsilon(u_domain, v_domain),
+                        host_ref,
+                    ),
                 );
             }
             if v_index == 0 || !solid_cells[cell_index(u_index, v_index - 1, v_cells)] {
@@ -592,6 +662,13 @@ pub fn evaluate_chart_host_mesh_with_openings(
                     chart.offset_point_at(Vec2::new(u0, v0), -1.0),
                     chart.offset_point_at(Vec2::new(u1, v0), -1.0),
                     chart.offset_point_at(Vec2::new(u1, v0), 1.0),
+                    edge_face_intent(
+                        &opening_rects,
+                        Vec2::new((u0 + u1) * 0.5, v0),
+                        ChartBoundarySide::VMin,
+                        breakpoint_epsilon(u_domain, v_domain),
+                        host_ref,
+                    ),
                 );
             }
             if v_index + 1 == v_cells || !solid_cells[cell_index(u_index, v_index + 1, v_cells)] {
@@ -600,16 +677,26 @@ pub fn evaluate_chart_host_mesh_with_openings(
                     chart.offset_point_at(Vec2::new(u1, v1), 1.0),
                     chart.offset_point_at(Vec2::new(u1, v1), -1.0),
                     chart.offset_point_at(Vec2::new(u0, v1), -1.0),
+                    edge_face_intent(
+                        &opening_rects,
+                        Vec2::new((u0 + u1) * 0.5, v1),
+                        ChartBoundarySide::VMax,
+                        breakpoint_epsilon(u_domain, v_domain),
+                        host_ref,
+                    ),
                 );
             }
         }
     }
 
-    Ok(builder.into_triangle_mesh("chart-host-with-openings"))
+    Ok(builder.into_evaluation("chart-host-with-openings"))
 }
 
 #[derive(Debug, Clone, Copy)]
 struct OpeningRect {
+    opening_index: usize,
+    host_ref: ElementId,
+    hosted_fill_ref: Option<ElementId>,
     u_min: f32,
     u_max: f32,
     v_min: f32,
@@ -622,27 +709,125 @@ impl OpeningRect {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CaeFaceIntent {
+    owner_kind: CaeFaceOwnerKind,
+    owner_ref: Option<ElementId>,
+    opening_index: Option<usize>,
+    hosted_fill_ref: Option<ElementId>,
+    role: CaeGeneratedFaceRole,
+}
+
+impl CaeFaceIntent {
+    fn host(owner_ref: Option<ElementId>, role: CaeGeneratedFaceRole) -> Self {
+        Self {
+            owner_kind: CaeFaceOwnerKind::Host,
+            owner_ref,
+            opening_index: None,
+            hosted_fill_ref: None,
+            role,
+        }
+    }
+
+    fn opening(opening: OpeningRect, side: ChartBoundarySide) -> Self {
+        Self {
+            owner_kind: CaeFaceOwnerKind::OpeningFeature,
+            owner_ref: Some(opening.host_ref),
+            opening_index: Some(opening.opening_index),
+            hosted_fill_ref: opening.hosted_fill_ref,
+            role: CaeGeneratedFaceRole::OpeningReveal { side },
+        }
+    }
+}
+
 #[derive(Default)]
 struct MeshBuilder {
     vertices: Vec<Vec3>,
     faces: Vec<[u32; 3]>,
+    face_provenance: Vec<CaeFaceProvenance>,
 }
 
 impl MeshBuilder {
-    fn add_quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
+    fn add_quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3, intent: CaeFaceIntent) {
         let base = self.vertices.len() as u32;
+        let triangle_start = self.faces.len();
         self.vertices.extend([a, b, c, d]);
         self.faces.push([base, base + 1, base + 2]);
         self.faces.push([base, base + 2, base + 3]);
+        self.face_provenance.push(CaeFaceProvenance {
+            generated_face_index: self.face_provenance.len(),
+            owner_kind: intent.owner_kind,
+            owner_ref: intent.owner_ref,
+            opening_index: intent.opening_index,
+            hosted_fill_ref: intent.hosted_fill_ref,
+            role: intent.role,
+            triangle_start,
+            triangle_count: self.faces.len() - triangle_start,
+        });
     }
 
-    fn into_triangle_mesh(self, name: impl Into<String>) -> TriangleMesh {
-        TriangleMesh {
-            vertices: self.vertices,
-            faces: self.faces,
-            normals: None,
-            name: Some(name.into()),
+    fn into_evaluation(self, name: impl Into<String>) -> ChartHostEvaluation {
+        ChartHostEvaluation {
+            mesh: TriangleMesh {
+                vertices: self.vertices,
+                faces: self.faces,
+                normals: None,
+                name: Some(name.into()),
+            },
+            face_provenance: self.face_provenance,
         }
+    }
+}
+
+fn shared_host_ref(openings: &[OpeningRect]) -> Option<ElementId> {
+    let first = openings.first()?.host_ref;
+    openings
+        .iter()
+        .all(|opening| opening.host_ref == first)
+        .then_some(first)
+}
+
+fn breakpoint_epsilon(u_domain: ChartDomain, v_domain: ChartDomain) -> f32 {
+    (u_domain.length().abs().max(v_domain.length().abs()) * 1e-5).max(1e-6)
+}
+
+fn edge_face_intent(
+    openings: &[OpeningRect],
+    edge_midpoint: Vec2,
+    edge_side: ChartBoundarySide,
+    epsilon: f32,
+    host_ref: Option<ElementId>,
+) -> CaeFaceIntent {
+    let (sample_point, opening_side) = match edge_side {
+        ChartBoundarySide::UMin => (
+            Vec2::new(edge_midpoint.x - epsilon, edge_midpoint.y),
+            ChartBoundarySide::UMax,
+        ),
+        ChartBoundarySide::UMax => (
+            Vec2::new(edge_midpoint.x + epsilon, edge_midpoint.y),
+            ChartBoundarySide::UMin,
+        ),
+        ChartBoundarySide::VMin => (
+            Vec2::new(edge_midpoint.x, edge_midpoint.y - epsilon),
+            ChartBoundarySide::VMax,
+        ),
+        ChartBoundarySide::VMax => (
+            Vec2::new(edge_midpoint.x, edge_midpoint.y + epsilon),
+            ChartBoundarySide::VMin,
+        ),
+    };
+
+    if let Some(opening) = openings
+        .iter()
+        .copied()
+        .find(|opening| opening.contains(sample_point))
+    {
+        CaeFaceIntent::opening(opening, opening_side)
+    } else {
+        CaeFaceIntent::host(
+            host_ref,
+            CaeGeneratedFaceRole::HostBoundary { side: edge_side },
+        )
     }
 }
 
@@ -847,6 +1032,91 @@ mod tests {
 
         assert!(report.is_clean(), "{report:#?}");
         assert!(!mesh.faces.is_empty());
+    }
+
+    #[test]
+    fn planar_chart_host_evaluation_records_semantic_face_provenance() {
+        let chart = HostChart::planar(
+            "wall_face",
+            PlanarHostChart::new(
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                ChartDomain::new(0.0, 4.0),
+                ChartDomain::new(0.0, 3.0),
+                0.2,
+            ),
+        );
+        let opening = ChartSpaceOpeningFeature::new(
+            ElementId(7),
+            "wall_face",
+            ChartSpaceProfileLoop::rectangle(Vec2::new(1.2, 0.9), Vec2::new(2.2, 2.1)),
+        )
+        .with_hosted_fill(ElementId(9));
+
+        let evaluation = evaluate_chart_host_with_provenance(&chart, &[opening]).unwrap();
+        let report = check_triangle_mesh_health(&evaluation.mesh);
+
+        assert!(report.is_clean(), "{report:#?}");
+        assert_eq!(
+            evaluation.face_provenance.len() * 2,
+            evaluation.mesh.faces.len()
+        );
+        assert!(evaluation.face_provenance.iter().all(|provenance| {
+            provenance.triangle_count == 2
+                && provenance.triangle_start + provenance.triangle_count
+                    <= evaluation.mesh.faces.len()
+        }));
+        assert!(evaluation
+            .face_provenance
+            .iter()
+            .any(|provenance| provenance.role == CaeGeneratedFaceRole::HostExteriorSurface));
+        assert!(evaluation
+            .face_provenance
+            .iter()
+            .any(|provenance| provenance.role == CaeGeneratedFaceRole::HostInteriorSurface));
+        assert!(evaluation.face_provenance.iter().any(|provenance| {
+            matches!(provenance.role, CaeGeneratedFaceRole::OpeningReveal { .. })
+                && provenance.owner_kind == CaeFaceOwnerKind::OpeningFeature
+                && provenance.opening_index == Some(0)
+                && provenance.hosted_fill_ref == Some(ElementId(9))
+        }));
+        assert!(evaluation.face_provenance.iter().any(|provenance| {
+            matches!(provenance.role, CaeGeneratedFaceRole::HostBoundary { .. })
+                && provenance.owner_kind == CaeFaceOwnerKind::Host
+                && provenance.owner_ref == Some(ElementId(7))
+        }));
+    }
+
+    #[test]
+    fn cylindrical_chart_host_evaluation_records_opening_reveals() {
+        let chart = HostChart::cylindrical(
+            "turret_outer_shell",
+            CylindricalHostChart::new(
+                Vec3::ZERO,
+                2.0,
+                ChartDomain::new(-PI, PI),
+                ChartDomain::new(0.0, 5.0),
+                Vec3::X,
+                Vec3::Y,
+                0.25,
+            ),
+        );
+        let opening = ChartSpaceOpeningFeature::new(
+            ElementId(11),
+            "turret_outer_shell",
+            ChartSpaceProfileLoop::rectangle(Vec2::new(-0.35, 1.0), Vec2::new(0.35, 2.5)),
+        );
+
+        let evaluation = evaluate_chart_host_with_provenance(&chart, &[opening]).unwrap();
+        let report = check_triangle_mesh_health(&evaluation.mesh);
+
+        assert!(report.is_clean(), "{report:#?}");
+        assert!(evaluation.face_provenance.iter().any(|provenance| {
+            matches!(provenance.role, CaeGeneratedFaceRole::OpeningReveal { .. })
+                && provenance.owner_kind == CaeFaceOwnerKind::OpeningFeature
+                && provenance.owner_ref == Some(ElementId(11))
+        }));
     }
 
     #[test]
