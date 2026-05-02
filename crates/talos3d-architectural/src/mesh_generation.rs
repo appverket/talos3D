@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy::{
     asset::RenderAssetUsages,
-    mesh::{Indices, MeshVertexAttribute, PrimitiveTopology, VertexAttributeValues},
+    mesh::{Indices, PrimitiveTopology},
 };
 
 use talos3d_core::plugins::modeling::mesh_generation::NeedsMesh;
@@ -149,39 +149,163 @@ fn wall_mesh_with_openings(wall: &Wall, openings: &[OpeningRect]) -> Mesh {
     sort_and_dedup_breakpoints(&mut x_breakpoints);
     sort_and_dedup_breakpoints(&mut y_breakpoints);
 
-    let mut combined_mesh = empty_mesh();
-    for x_window in x_breakpoints.windows(2) {
-        let [x_min, x_max] = [x_window[0], x_window[1]];
+    let x_cells = x_breakpoints.len().saturating_sub(1);
+    let y_cells = y_breakpoints.len().saturating_sub(1);
+    let mut solid_cells = vec![false; x_cells * y_cells];
+
+    for x_index in 0..x_cells {
+        let x_min = x_breakpoints[x_index];
+        let x_max = x_breakpoints[x_index + 1];
         if x_max - x_min <= f32::EPSILON {
             continue;
         }
 
-        for y_window in y_breakpoints.windows(2) {
-            let [y_min, y_max] = [y_window[0], y_window[1]];
+        for y_index in 0..y_cells {
+            let y_min = y_breakpoints[y_index];
+            let y_max = y_breakpoints[y_index + 1];
             if y_max - y_min <= f32::EPSILON {
                 continue;
             }
 
             let center_x = (x_min + x_max) * 0.5;
             let center_y = (y_min + y_max) * 0.5;
-            if openings.iter().any(|opening| {
+            let inside_opening = openings.iter().any(|opening| {
                 center_x > opening.x_min
                     && center_x < opening.x_max
                     && center_y > opening.y_min
                     && center_y < opening.y_max
-            }) {
-                continue;
-            }
-
-            let segment_mesh = Mesh::from(Cuboid::new(x_max - x_min, y_max - y_min, thickness));
-            // Match `wall_mesh()` local coordinates so the entity transform stays identical.
-            let segment_translation =
-                Vec3::new(center_x - length * 0.5, center_y - vertical_origin, 0.0);
-            append_translated_mesh(&mut combined_mesh, &segment_mesh, segment_translation);
+            });
+            solid_cells[cell_index(x_index, y_index, y_cells)] = !inside_opening;
         }
     }
 
-    combined_mesh
+    let mut mesh = MeshBuilder::new();
+    let front_z = -thickness * 0.5;
+    let back_z = thickness * 0.5;
+
+    for x_index in 0..x_cells {
+        for y_index in 0..y_cells {
+            if !solid_cells[cell_index(x_index, y_index, y_cells)] {
+                continue;
+            }
+
+            let x_min = x_breakpoints[x_index] - length * 0.5;
+            let x_max = x_breakpoints[x_index + 1] - length * 0.5;
+            let y_min = y_breakpoints[y_index] - vertical_origin;
+            let y_max = y_breakpoints[y_index + 1] - vertical_origin;
+
+            mesh.add_quad(
+                [
+                    [x_min, y_min, front_z],
+                    [x_min, y_max, front_z],
+                    [x_max, y_max, front_z],
+                    [x_max, y_min, front_z],
+                ],
+                [0.0, 0.0, -1.0],
+            );
+            mesh.add_quad(
+                [
+                    [x_min, y_min, back_z],
+                    [x_max, y_min, back_z],
+                    [x_max, y_max, back_z],
+                    [x_min, y_max, back_z],
+                ],
+                [0.0, 0.0, 1.0],
+            );
+
+            if !is_solid_cell(
+                &solid_cells,
+                x_cells,
+                y_cells,
+                x_index as isize - 1,
+                y_index as isize,
+            ) {
+                mesh.add_quad(
+                    [
+                        [x_min, y_min, front_z],
+                        [x_min, y_min, back_z],
+                        [x_min, y_max, back_z],
+                        [x_min, y_max, front_z],
+                    ],
+                    [-1.0, 0.0, 0.0],
+                );
+            }
+            if !is_solid_cell(
+                &solid_cells,
+                x_cells,
+                y_cells,
+                x_index as isize + 1,
+                y_index as isize,
+            ) {
+                mesh.add_quad(
+                    [
+                        [x_max, y_min, front_z],
+                        [x_max, y_max, front_z],
+                        [x_max, y_max, back_z],
+                        [x_max, y_min, back_z],
+                    ],
+                    [1.0, 0.0, 0.0],
+                );
+            }
+            if !is_solid_cell(
+                &solid_cells,
+                x_cells,
+                y_cells,
+                x_index as isize,
+                y_index as isize - 1,
+            ) {
+                mesh.add_quad(
+                    [
+                        [x_min, y_min, front_z],
+                        [x_max, y_min, front_z],
+                        [x_max, y_min, back_z],
+                        [x_min, y_min, back_z],
+                    ],
+                    [0.0, -1.0, 0.0],
+                );
+            }
+            if !is_solid_cell(
+                &solid_cells,
+                x_cells,
+                y_cells,
+                x_index as isize,
+                y_index as isize + 1,
+            ) {
+                mesh.add_quad(
+                    [
+                        [x_min, y_max, front_z],
+                        [x_min, y_max, back_z],
+                        [x_max, y_max, back_z],
+                        [x_max, y_max, front_z],
+                    ],
+                    [0.0, 1.0, 0.0],
+                );
+            }
+        }
+    }
+
+    mesh.finish()
+}
+
+fn cell_index(x_index: usize, y_index: usize, y_cells: usize) -> usize {
+    x_index * y_cells + y_index
+}
+
+fn is_solid_cell(
+    solid_cells: &[bool],
+    x_cells: usize,
+    y_cells: usize,
+    x_index: isize,
+    y_index: isize,
+) -> bool {
+    if x_index < 0 || y_index < 0 {
+        return false;
+    }
+    let (x_index, y_index) = (x_index as usize, y_index as usize);
+    if x_index >= x_cells || y_index >= y_cells {
+        return false;
+    }
+    solid_cells[cell_index(x_index, y_index, y_cells)]
 }
 
 fn opening_rect(wall: &Wall, opening: &Opening, parent_wall: &ParentWall) -> Option<OpeningRect> {
@@ -210,94 +334,50 @@ fn sort_and_dedup_breakpoints(values: &mut Vec<f32>) {
     values.dedup_by(|a, b| (*a - *b).abs() < f32::EPSILON);
 }
 
-fn empty_mesh() -> Mesh {
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, Vec::<[f32; 2]>::new());
-    mesh.insert_indices(Indices::U32(Vec::new()));
-    mesh
+struct MeshBuilder {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
 }
 
-fn append_translated_mesh(target: &mut Mesh, source: &Mesh, translation: Vec3) {
-    let source_positions = match source.attribute(Mesh::ATTRIBUTE_POSITION) {
-        Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
-        _ => return,
-    };
-    let source_normals = match source.attribute(Mesh::ATTRIBUTE_NORMAL) {
-        Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
-        _ => return,
-    };
-    let source_uvs = match source.attribute(Mesh::ATTRIBUTE_UV_0) {
-        Some(VertexAttributeValues::Float32x2(values)) => values.clone(),
-        _ => return,
-    };
-    let source_indices = match source.indices() {
-        Some(Indices::U32(values)) => values.clone(),
-        Some(Indices::U16(values)) => values.iter().map(|index| u32::from(*index)).collect(),
-        None => return,
-    };
+impl MeshBuilder {
+    fn new() -> Self {
+        Self {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            uvs: Vec::new(),
+            indices: Vec::new(),
+        }
+    }
 
-    let vertex_offset = match target.attribute(Mesh::ATTRIBUTE_POSITION) {
-        Some(VertexAttributeValues::Float32x3(values)) => values.len() as u32,
-        _ => 0,
-    };
+    fn add_quad(&mut self, vertices: [[f32; 3]; 4], normal: [f32; 3]) {
+        let base = self.positions.len() as u32;
+        self.positions.extend(vertices);
+        self.normals.extend([normal; 4]);
+        self.uvs
+            .extend([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
 
-    let translated_positions: Vec<[f32; 3]> = source_positions
-        .into_iter()
-        .map(|position| {
-            [
-                position[0] + translation.x,
-                position[1] + translation.y,
-                position[2] + translation.z,
-            ]
-        })
-        .collect();
-    let translated_indices: Vec<u32> = source_indices
-        .into_iter()
-        .map(|index| index + vertex_offset)
-        .collect();
-
-    extend_attribute_vec3(target, Mesh::ATTRIBUTE_POSITION, translated_positions);
-    extend_attribute_vec3(target, Mesh::ATTRIBUTE_NORMAL, source_normals);
-    extend_attribute_vec2(target, Mesh::ATTRIBUTE_UV_0, source_uvs);
-    extend_indices(target, translated_indices);
-}
-
-fn extend_attribute_vec3(mesh: &mut Mesh, attribute: MeshVertexAttribute, values: Vec<[f32; 3]>) {
-    let mut combined = match mesh.remove_attribute(attribute) {
-        Some(VertexAttributeValues::Float32x3(existing)) => existing,
-        _ => Vec::new(),
-    };
-    combined.extend(values);
-    mesh.insert_attribute(attribute, combined);
-}
-
-fn extend_attribute_vec2(mesh: &mut Mesh, attribute: MeshVertexAttribute, values: Vec<[f32; 2]>) {
-    let mut combined = match mesh.remove_attribute(attribute) {
-        Some(VertexAttributeValues::Float32x2(existing)) => existing,
-        _ => Vec::new(),
-    };
-    combined.extend(values);
-    mesh.insert_attribute(attribute, combined);
-}
-
-fn extend_indices(mesh: &mut Mesh, values: Vec<u32>) {
-    let mut combined = match mesh.remove_indices() {
-        Some(Indices::U32(existing)) => existing,
-        Some(Indices::U16(existing)) => existing.into_iter().map(u32::from).collect(),
-        None => Vec::new(),
-    };
-    combined.extend(values);
-    mesh.insert_indices(Indices::U32(combined));
+    fn finish(self) -> Mesh {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        mesh.insert_indices(Indices::U32(self.indices));
+        mesh
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::mesh::VertexAttributeValues;
 
     fn mesh_y_bounds(mesh: &Mesh) -> (f32, f32) {
         let Some(VertexAttributeValues::Float32x3(positions)) =
@@ -312,6 +392,14 @@ mod tests {
             .fold((f32::INFINITY, f32::NEG_INFINITY), |(min_y, max_y), y| {
                 (min_y.min(y), max_y.max(y))
             })
+    }
+
+    fn triangle_count(mesh: &Mesh) -> usize {
+        match mesh.indices() {
+            Some(Indices::U32(indices)) => indices.len() / 3,
+            Some(Indices::U16(indices)) => indices.len() / 3,
+            None => 0,
+        }
     }
 
     #[test]
@@ -340,5 +428,29 @@ mod tests {
             (max_y - wall.height * 0.5).abs() < 1e-5,
             "max_y was {max_y}"
         );
+    }
+
+    #[test]
+    fn wall_mesh_with_openings_omits_internal_block_faces() {
+        let wall = Wall {
+            start: Vec2::ZERO,
+            end: Vec2::new(4.0, 0.0),
+            height: 3.0,
+            thickness: 0.2,
+        };
+        let openings = [OpeningRect {
+            x_min: 1.4,
+            x_max: 2.6,
+            y_min: 0.9,
+            y_max: 2.4,
+        }];
+
+        let mesh = wall_mesh_with_openings(&wall, &openings);
+
+        // One centered opening creates eight solid elevation cells. A cuboid
+        // per cell would emit 96 triangles and duplicate internal faces. The
+        // wall surface only needs 64 triangles: front/back cells plus exterior
+        // perimeter and opening reveal faces.
+        assert_eq!(triangle_count(&mesh), 64);
     }
 }
