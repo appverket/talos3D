@@ -431,6 +431,7 @@ impl Default for OpeningClearancePolicy {
 
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChartSpaceOpeningFeature {
+    pub feature_ref: Option<ElementId>,
     pub host_ref: ElementId,
     pub chart_ref: String,
     pub profile_loop_2d: ChartSpaceProfileLoop,
@@ -449,6 +450,7 @@ impl ChartSpaceOpeningFeature {
         profile_loop_2d: ChartSpaceProfileLoop,
     ) -> Self {
         Self {
+            feature_ref: None,
             host_ref,
             chart_ref: chart_ref.into(),
             profile_loop_2d,
@@ -457,6 +459,11 @@ impl ChartSpaceOpeningFeature {
             hosted_fill_ref: None,
             structural_role: None,
         }
+    }
+
+    pub fn with_feature_ref(mut self, feature_ref: ElementId) -> Self {
+        self.feature_ref = Some(feature_ref);
+        self
     }
 
     pub fn with_hosted_fill(mut self, hosted_fill_ref: ElementId) -> Self {
@@ -486,11 +493,23 @@ pub struct ChartHostEvaluation {
     pub face_provenance: Vec<CaeFaceProvenance>,
 }
 
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaeFaceProvenanceMap {
+    pub faces: Vec<CaeFaceProvenance>,
+}
+
+impl CaeFaceProvenanceMap {
+    pub fn new(faces: Vec<CaeFaceProvenance>) -> Self {
+        Self { faces }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaeFaceProvenance {
     pub generated_face_index: usize,
     pub owner_kind: CaeFaceOwnerKind,
     pub owner_ref: Option<ElementId>,
+    pub host_ref: Option<ElementId>,
     pub opening_index: Option<usize>,
     pub hosted_fill_ref: Option<ElementId>,
     pub role: CaeGeneratedFaceRole,
@@ -543,6 +562,7 @@ pub fn evaluate_chart_host_with_provenance(
         if let Some(bounds) = opening.profile_loop_2d.bounds() {
             opening_rects.push(OpeningRect {
                 opening_index,
+                feature_ref: opening.feature_ref,
                 host_ref: opening.host_ref,
                 hosted_fill_ref: opening.hosted_fill_ref,
                 u_min: bounds.min.x,
@@ -695,6 +715,7 @@ pub fn evaluate_chart_host_with_provenance(
 #[derive(Debug, Clone, Copy)]
 struct OpeningRect {
     opening_index: usize,
+    feature_ref: Option<ElementId>,
     host_ref: ElementId,
     hosted_fill_ref: Option<ElementId>,
     u_min: f32,
@@ -713,6 +734,7 @@ impl OpeningRect {
 struct CaeFaceIntent {
     owner_kind: CaeFaceOwnerKind,
     owner_ref: Option<ElementId>,
+    host_ref: Option<ElementId>,
     opening_index: Option<usize>,
     hosted_fill_ref: Option<ElementId>,
     role: CaeGeneratedFaceRole,
@@ -723,6 +745,7 @@ impl CaeFaceIntent {
         Self {
             owner_kind: CaeFaceOwnerKind::Host,
             owner_ref,
+            host_ref: owner_ref,
             opening_index: None,
             hosted_fill_ref: None,
             role,
@@ -732,7 +755,8 @@ impl CaeFaceIntent {
     fn opening(opening: OpeningRect, side: ChartBoundarySide) -> Self {
         Self {
             owner_kind: CaeFaceOwnerKind::OpeningFeature,
-            owner_ref: Some(opening.host_ref),
+            owner_ref: opening.feature_ref,
+            host_ref: Some(opening.host_ref),
             opening_index: Some(opening.opening_index),
             hosted_fill_ref: opening.hosted_fill_ref,
             role: CaeGeneratedFaceRole::OpeningReveal { side },
@@ -758,6 +782,7 @@ impl MeshBuilder {
             generated_face_index: self.face_provenance.len(),
             owner_kind: intent.owner_kind,
             owner_ref: intent.owner_ref,
+            host_ref: intent.host_ref,
             opening_index: intent.opening_index,
             hosted_fill_ref: intent.hosted_fill_ref,
             role: intent.role,
@@ -959,6 +984,7 @@ mod tests {
             "wall_face",
             ChartSpaceProfileLoop::rectangle(Vec2::new(1.0, 0.8), Vec2::new(2.2, 2.0)),
         )
+        .with_feature_ref(ElementId(8))
         .with_hosted_fill(ElementId(9))
         .with_clearance(OpeningClearancePolicy::Uniform { margin: 0.015 })
         .with_depth(OpeningDepthPolicy::ThroughHost)
@@ -1052,6 +1078,7 @@ mod tests {
             "wall_face",
             ChartSpaceProfileLoop::rectangle(Vec2::new(1.2, 0.9), Vec2::new(2.2, 2.1)),
         )
+        .with_feature_ref(ElementId(8))
         .with_hosted_fill(ElementId(9));
 
         let evaluation = evaluate_chart_host_with_provenance(&chart, &[opening]).unwrap();
@@ -1078,6 +1105,8 @@ mod tests {
         assert!(evaluation.face_provenance.iter().any(|provenance| {
             matches!(provenance.role, CaeGeneratedFaceRole::OpeningReveal { .. })
                 && provenance.owner_kind == CaeFaceOwnerKind::OpeningFeature
+                && provenance.owner_ref == Some(ElementId(8))
+                && provenance.host_ref == Some(ElementId(7))
                 && provenance.opening_index == Some(0)
                 && provenance.hosted_fill_ref == Some(ElementId(9))
         }));
@@ -1085,6 +1114,7 @@ mod tests {
             matches!(provenance.role, CaeGeneratedFaceRole::HostBoundary { .. })
                 && provenance.owner_kind == CaeFaceOwnerKind::Host
                 && provenance.owner_ref == Some(ElementId(7))
+                && provenance.host_ref == Some(ElementId(7))
         }));
     }
 
@@ -1106,7 +1136,8 @@ mod tests {
             ElementId(11),
             "turret_outer_shell",
             ChartSpaceProfileLoop::rectangle(Vec2::new(-0.35, 1.0), Vec2::new(0.35, 2.5)),
-        );
+        )
+        .with_feature_ref(ElementId(12));
 
         let evaluation = evaluate_chart_host_with_provenance(&chart, &[opening]).unwrap();
         let report = check_triangle_mesh_health(&evaluation.mesh);
@@ -1115,7 +1146,8 @@ mod tests {
         assert!(evaluation.face_provenance.iter().any(|provenance| {
             matches!(provenance.role, CaeGeneratedFaceRole::OpeningReveal { .. })
                 && provenance.owner_kind == CaeFaceOwnerKind::OpeningFeature
-                && provenance.owner_ref == Some(ElementId(11))
+                && provenance.owner_ref == Some(ElementId(12))
+                && provenance.host_ref == Some(ElementId(11))
         }));
     }
 
