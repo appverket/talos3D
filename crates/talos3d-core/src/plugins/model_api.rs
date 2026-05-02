@@ -13674,7 +13674,9 @@ fn parse_override_policy(
 fn parse_parameter_metadata(
     value: Option<&Value>,
 ) -> Result<crate::plugins::modeling::definition::ParameterMetadata, String> {
-    use crate::plugins::modeling::definition::{ParameterMetadata, ParameterMutability};
+    use crate::plugins::modeling::definition::{
+        ParameterMetadata, ParameterMutability, ParameterScaleBehavior,
+    };
 
     let Some(value) = value else {
         return Ok(ParameterMetadata::default());
@@ -13691,6 +13693,17 @@ fn parse_parameter_metadata(
         "Derived" => ParameterMutability::Derived,
         other => return Err(format!("Unsupported parameter mutability '{other}'")),
     };
+    let scale_behavior = object
+        .get("scale_behavior")
+        .and_then(|value| value.as_str())
+        .map(|value| match value {
+            "scale_with_occurrence" => Ok(ParameterScaleBehavior::ScaleWithOccurrence),
+            "fixed_world" => Ok(ParameterScaleBehavior::FixedWorld),
+            "ratio" => Ok(ParameterScaleBehavior::Ratio),
+            "semantic" => Ok(ParameterScaleBehavior::Semantic),
+            other => Err(format!("Unsupported parameter scale_behavior '{other}'")),
+        })
+        .transpose()?;
 
     Ok(ParameterMetadata {
         unit: object
@@ -13705,6 +13718,7 @@ fn parse_parameter_metadata(
             .and_then(|value| value.as_str())
             .map(str::to_string),
         mutability,
+        scale_behavior,
     })
 }
 

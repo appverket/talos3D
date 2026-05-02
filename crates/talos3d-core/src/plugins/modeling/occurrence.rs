@@ -1677,10 +1677,16 @@ fn apply_spawned_material_assignment(entity: &mut EntityWorldMut<'_>, definition
 
 fn definition_material_assignment(definition: &Definition) -> Option<MaterialAssignment> {
     definition
-        .domain_data
-        .get("architectural")
-        .and_then(|architectural| architectural.get("material_assignment"))
-        .and_then(material_assignment_from_value)
+        .resolve_material_assignment(None)
+        .0
+        .cloned()
+        .or_else(|| {
+            definition
+                .domain_data
+                .get("architectural")
+                .and_then(|architectural| architectural.get("material_assignment"))
+                .and_then(material_assignment_from_value)
+        })
 }
 
 fn cleanup_generated_occurrence_parts(world: &mut World, owner: ElementId) {
