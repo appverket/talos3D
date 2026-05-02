@@ -7,6 +7,16 @@ use bevy::{
 use talos3d_core::plugins::modeling::mesh_generation::NeedsMesh;
 #[cfg(feature = "perf-stats")]
 use talos3d_core::plugins::perf_stats::{add_mesh_regen_count, PerfStats};
+use talos3d_core::plugins::{
+    identity::ElementId,
+    modeling::{
+        host_chart::{
+            evaluate_chart_host_mesh_with_openings, ChartDomain, ChartSpaceOpeningFeature,
+            ChartSpaceProfileLoop, HostChart, PlanarHostChart,
+        },
+        primitives::TriangleMesh,
+    },
+};
 
 use crate::components::{Opening, ParentWall, Wall};
 
@@ -133,179 +143,38 @@ pub fn wall_mesh(wall: &Wall) -> Mesh {
 }
 
 fn wall_mesh_with_openings(wall: &Wall, openings: &[OpeningRect]) -> Mesh {
+    triangle_mesh_to_bevy_mesh(&wall_triangle_mesh_with_openings(wall, openings))
+}
+
+fn wall_triangle_mesh_with_openings(wall: &Wall, openings: &[OpeningRect]) -> TriangleMesh {
     let length = wall.start.distance(wall.end);
-    let thickness = wall.thickness;
-    let mut x_breakpoints = vec![0.0, length];
-    let mut y_breakpoints = vec![0.0, wall.height];
-    let vertical_origin = wall.height * 0.5;
+    let chart = HostChart::planar(
+        "wall_local",
+        PlanarHostChart::new(
+            Vec3::new(-length * 0.5, -wall.height * 0.5, 0.0),
+            Vec3::X,
+            Vec3::Y,
+            ChartDomain::new(0.0, length),
+            ChartDomain::new(0.0, wall.height),
+            wall.thickness,
+        ),
+    );
+    let opening_features: Vec<ChartSpaceOpeningFeature> = openings
+        .iter()
+        .map(|opening| {
+            ChartSpaceOpeningFeature::new(
+                ElementId(0),
+                "wall_local",
+                ChartSpaceProfileLoop::rectangle(
+                    Vec2::new(opening.x_min, opening.y_min),
+                    Vec2::new(opening.x_max, opening.y_max),
+                ),
+            )
+        })
+        .collect();
 
-    for opening in openings {
-        x_breakpoints.push(opening.x_min);
-        x_breakpoints.push(opening.x_max);
-        y_breakpoints.push(opening.y_min);
-        y_breakpoints.push(opening.y_max);
-    }
-
-    sort_and_dedup_breakpoints(&mut x_breakpoints);
-    sort_and_dedup_breakpoints(&mut y_breakpoints);
-
-    let x_cells = x_breakpoints.len().saturating_sub(1);
-    let y_cells = y_breakpoints.len().saturating_sub(1);
-    let mut solid_cells = vec![false; x_cells * y_cells];
-
-    for x_index in 0..x_cells {
-        let x_min = x_breakpoints[x_index];
-        let x_max = x_breakpoints[x_index + 1];
-        if x_max - x_min <= f32::EPSILON {
-            continue;
-        }
-
-        for y_index in 0..y_cells {
-            let y_min = y_breakpoints[y_index];
-            let y_max = y_breakpoints[y_index + 1];
-            if y_max - y_min <= f32::EPSILON {
-                continue;
-            }
-
-            let center_x = (x_min + x_max) * 0.5;
-            let center_y = (y_min + y_max) * 0.5;
-            let inside_opening = openings.iter().any(|opening| {
-                center_x > opening.x_min
-                    && center_x < opening.x_max
-                    && center_y > opening.y_min
-                    && center_y < opening.y_max
-            });
-            solid_cells[cell_index(x_index, y_index, y_cells)] = !inside_opening;
-        }
-    }
-
-    let mut mesh = MeshBuilder::new();
-    let front_z = -thickness * 0.5;
-    let back_z = thickness * 0.5;
-
-    for x_index in 0..x_cells {
-        for y_index in 0..y_cells {
-            if !solid_cells[cell_index(x_index, y_index, y_cells)] {
-                continue;
-            }
-
-            let x_min = x_breakpoints[x_index] - length * 0.5;
-            let x_max = x_breakpoints[x_index + 1] - length * 0.5;
-            let y_min = y_breakpoints[y_index] - vertical_origin;
-            let y_max = y_breakpoints[y_index + 1] - vertical_origin;
-
-            mesh.add_quad(
-                [
-                    [x_min, y_min, front_z],
-                    [x_min, y_max, front_z],
-                    [x_max, y_max, front_z],
-                    [x_max, y_min, front_z],
-                ],
-                [0.0, 0.0, -1.0],
-            );
-            mesh.add_quad(
-                [
-                    [x_min, y_min, back_z],
-                    [x_max, y_min, back_z],
-                    [x_max, y_max, back_z],
-                    [x_min, y_max, back_z],
-                ],
-                [0.0, 0.0, 1.0],
-            );
-
-            if !is_solid_cell(
-                &solid_cells,
-                x_cells,
-                y_cells,
-                x_index as isize - 1,
-                y_index as isize,
-            ) {
-                mesh.add_quad(
-                    [
-                        [x_min, y_min, front_z],
-                        [x_min, y_min, back_z],
-                        [x_min, y_max, back_z],
-                        [x_min, y_max, front_z],
-                    ],
-                    [-1.0, 0.0, 0.0],
-                );
-            }
-            if !is_solid_cell(
-                &solid_cells,
-                x_cells,
-                y_cells,
-                x_index as isize + 1,
-                y_index as isize,
-            ) {
-                mesh.add_quad(
-                    [
-                        [x_max, y_min, front_z],
-                        [x_max, y_max, front_z],
-                        [x_max, y_max, back_z],
-                        [x_max, y_min, back_z],
-                    ],
-                    [1.0, 0.0, 0.0],
-                );
-            }
-            if !is_solid_cell(
-                &solid_cells,
-                x_cells,
-                y_cells,
-                x_index as isize,
-                y_index as isize - 1,
-            ) {
-                mesh.add_quad(
-                    [
-                        [x_min, y_min, front_z],
-                        [x_max, y_min, front_z],
-                        [x_max, y_min, back_z],
-                        [x_min, y_min, back_z],
-                    ],
-                    [0.0, -1.0, 0.0],
-                );
-            }
-            if !is_solid_cell(
-                &solid_cells,
-                x_cells,
-                y_cells,
-                x_index as isize,
-                y_index as isize + 1,
-            ) {
-                mesh.add_quad(
-                    [
-                        [x_min, y_max, front_z],
-                        [x_min, y_max, back_z],
-                        [x_max, y_max, back_z],
-                        [x_max, y_max, front_z],
-                    ],
-                    [0.0, 1.0, 0.0],
-                );
-            }
-        }
-    }
-
-    mesh.finish()
-}
-
-fn cell_index(x_index: usize, y_index: usize, y_cells: usize) -> usize {
-    x_index * y_cells + y_index
-}
-
-fn is_solid_cell(
-    solid_cells: &[bool],
-    x_cells: usize,
-    y_cells: usize,
-    x_index: isize,
-    y_index: isize,
-) -> bool {
-    if x_index < 0 || y_index < 0 {
-        return false;
-    }
-    let (x_index, y_index) = (x_index as usize, y_index as usize);
-    if x_index >= x_cells || y_index >= y_cells {
-        return false;
-    }
-    solid_cells[cell_index(x_index, y_index, y_cells)]
+    evaluate_chart_host_mesh_with_openings(&chart, &opening_features)
+        .expect("wall openings are clamped into the wall chart domain")
 }
 
 fn opening_rect(wall: &Wall, opening: &Opening, parent_wall: &ParentWall) -> Option<OpeningRect> {
@@ -329,55 +198,73 @@ fn opening_rect(wall: &Wall, opening: &Opening, parent_wall: &ParentWall) -> Opt
     })
 }
 
-fn sort_and_dedup_breakpoints(values: &mut Vec<f32>) {
-    values.sort_by(|a, b| a.total_cmp(b));
-    values.dedup_by(|a, b| (*a - *b).abs() < f32::EPSILON);
+fn triangle_mesh_to_bevy_mesh(triangle_mesh: &TriangleMesh) -> Mesh {
+    let positions: Vec<[f32; 3]> = triangle_mesh
+        .vertices
+        .iter()
+        .map(|vertex| [vertex.x, vertex.y, vertex.z])
+        .collect();
+    let normals: Vec<[f32; 3]> = compute_triangle_mesh_normals(triangle_mesh)
+        .into_iter()
+        .map(|normal| [normal.x, normal.y, normal.z])
+        .collect();
+    let indices: Vec<u32> = triangle_mesh
+        .faces
+        .iter()
+        .flat_map(|face| face.iter().copied())
+        .collect();
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![[0.0, 0.0]; triangle_mesh.vertices.len()],
+    );
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
 }
 
-struct MeshBuilder {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    uvs: Vec<[f32; 2]>,
-    indices: Vec<u32>,
-}
+fn compute_triangle_mesh_normals(triangle_mesh: &TriangleMesh) -> Vec<Vec3> {
+    let mut normals = vec![Vec3::ZERO; triangle_mesh.vertices.len()];
 
-impl MeshBuilder {
-    fn new() -> Self {
-        Self {
-            positions: Vec::new(),
-            normals: Vec::new(),
-            uvs: Vec::new(),
-            indices: Vec::new(),
+    for face in &triangle_mesh.faces {
+        let [a, b, c] = *face;
+        let (Some(a), Some(b), Some(c)) = (
+            triangle_mesh.vertices.get(a as usize).copied(),
+            triangle_mesh.vertices.get(b as usize).copied(),
+            triangle_mesh.vertices.get(c as usize).copied(),
+        ) else {
+            continue;
+        };
+        let normal = (b - a).cross(c - a).normalize_or_zero();
+        for vertex_index in face {
+            if let Some(accumulator) = normals.get_mut(*vertex_index as usize) {
+                *accumulator += normal;
+            }
         }
     }
 
-    fn add_quad(&mut self, vertices: [[f32; 3]; 4], normal: [f32; 3]) {
-        let base = self.positions.len() as u32;
-        self.positions.extend(vertices);
-        self.normals.extend([normal; 4]);
-        self.uvs
-            .extend([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
-        self.indices
-            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    fn finish(self) -> Mesh {
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        );
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
-        mesh.insert_indices(Indices::U32(self.indices));
-        mesh
-    }
+    normals
+        .into_iter()
+        .map(|normal| {
+            if normal.length_squared() <= f32::EPSILON {
+                Vec3::Y
+            } else {
+                normal.normalize()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bevy::mesh::VertexAttributeValues;
+    use talos3d_core::plugins::modeling::geometry_health::check_triangle_mesh_health;
 
     fn mesh_y_bounds(mesh: &Mesh) -> (f32, f32) {
         let Some(VertexAttributeValues::Float32x3(positions)) =
@@ -452,5 +339,26 @@ mod tests {
         // wall surface only needs 64 triangles: front/back cells plus exterior
         // perimeter and opening reveal faces.
         assert_eq!(triangle_count(&mesh), 64);
+    }
+
+    #[test]
+    fn wall_mesh_with_openings_has_clean_cae_health() {
+        let wall = Wall {
+            start: Vec2::ZERO,
+            end: Vec2::new(4.0, 0.0),
+            height: 3.0,
+            thickness: 0.2,
+        };
+        let openings = [OpeningRect {
+            x_min: 1.4,
+            x_max: 2.6,
+            y_min: 0.9,
+            y_max: 2.4,
+        }];
+
+        let triangle_mesh = wall_triangle_mesh_with_openings(&wall, &openings);
+        let report = check_triangle_mesh_health(&triangle_mesh);
+
+        assert!(report.is_clean(), "{report:#?}");
     }
 }
