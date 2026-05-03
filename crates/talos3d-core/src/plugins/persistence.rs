@@ -35,8 +35,9 @@ use crate::{
     },
 };
 
-const PROJECT_FILE_MIN_SUPPORTED_VERSION: u32 = 1;
-const PROJECT_FILE_VERSION: u32 = 2;
+const PROJECT_FILE_VERSION: u32 = 3;
+const PROJECT_FILE_MIN_SUPPORTED_VERSION: u32 = PROJECT_FILE_VERSION;
+const PROJECT_FORMAT_TAG: &str = "adr049-opening-feature";
 const FEEDBACK_DURATION_SECONDS: f32 = 2.0;
 const FILE_EXTENSION: &str = "talos3d";
 
@@ -69,6 +70,8 @@ pub struct OpaquePersistedEntities(pub Vec<PersistedEntityRecord>);
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectFile {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_by: Option<ProjectCreatedBy>,
     next_element_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     document_properties: Option<DocumentProperties>,
@@ -96,6 +99,23 @@ struct ProjectFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nominations: Option<Vec<Nomination>>,
     entities: Vec<PersistedEntityRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ProjectCreatedBy {
+    app: String,
+    app_version: String,
+    project_format_version: u32,
+    format_tag: String,
+}
+
+fn current_project_created_by() -> ProjectCreatedBy {
+    ProjectCreatedBy {
+        app: "talos3d".to_string(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        project_format_version: PROJECT_FILE_VERSION,
+        format_tag: PROJECT_FORMAT_TAG.to_string(),
+    }
 }
 
 // --- Shortcut handlers ---
@@ -395,6 +415,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
+        created_by: Some(current_project_created_by()),
         next_element_id: world.resource::<ElementIdAllocator>().next_value(),
         document_properties: Some(doc_props),
         layers,
@@ -413,6 +434,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
 fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     let ProjectFile {
         version,
+        created_by,
         mut next_element_id,
         document_properties,
         layers,
@@ -431,6 +453,21 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         return Err(format!(
             "Unsupported project version {} (supported {}..={})",
             version, PROJECT_FILE_MIN_SUPPORTED_VERSION, PROJECT_FILE_VERSION
+        ));
+    }
+    let created_by = created_by.ok_or_else(|| {
+        format!("Project version {version} is missing the created_by project format tag")
+    })?;
+    if created_by.project_format_version != version {
+        return Err(format!(
+            "Project created_by format version {} does not match file version {}",
+            created_by.project_format_version, version
+        ));
+    }
+    if created_by.format_tag != PROJECT_FORMAT_TAG {
+        return Err(format!(
+            "Unsupported project format tag '{}' (expected '{}')",
+            created_by.format_tag, PROJECT_FORMAT_TAG
         ));
     }
 
@@ -930,8 +967,16 @@ mod tests {
 
         let project = build_project_file(&mut source).expect("project should serialize");
         assert_eq!(
-            project.version, 2,
-            "new project files use the PP-097 collection-slot format version"
+            project.version, PROJECT_FILE_VERSION,
+            "new project files use the current project format version"
+        );
+        assert_eq!(
+            project
+                .created_by
+                .as_ref()
+                .map(|tag| tag.format_tag.as_str()),
+            Some(PROJECT_FORMAT_TAG),
+            "new project files carry a producer/format tag"
         );
         let json = serde_json::to_string(&project).expect("project should serialize to JSON");
         assert!(
@@ -1033,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn project_version_one_still_loads_after_collection_slot_format_bump() {
+    fn project_version_one_is_rejected_after_opening_feature_format_bump() {
         let mut world = World::new();
         world.insert_resource(CapabilityRegistry::default());
         world.insert_resource(MaterialRegistry::default());
@@ -1049,10 +1094,11 @@ mod tests {
         world.insert_resource(State::new(ActiveTool::Select));
         world.insert_resource(NextState::<ActiveTool>::default());
 
-        load_project(
+        let error = load_project(
             &mut world,
             ProjectFile {
                 version: 1,
+                created_by: None,
                 next_element_id: 1,
                 document_properties: Some(DocumentProperties::default()),
                 layers: None,
@@ -1067,7 +1113,68 @@ mod tests {
                 entities: Vec::new(),
             },
         )
-        .expect("version 1 projects should remain loadable");
+        .expect_err("version 1 projects should be rejected after the format break");
+
+        assert!(error.contains("Unsupported project version 1"));
+    }
+
+    #[test]
+    fn current_project_version_requires_created_by_format_tag() {
+        let mut world = World::new();
+
+        let error = load_project(
+            &mut world,
+            ProjectFile {
+                version: PROJECT_FILE_VERSION,
+                created_by: None,
+                next_element_id: 1,
+                document_properties: None,
+                layers: None,
+                materials: None,
+                textures: None,
+                definitions: None,
+                definition_libraries: None,
+                named_views: None,
+                lighting: None,
+                sources: None,
+                nominations: None,
+                entities: Vec::new(),
+            },
+        )
+        .expect_err("current project files must declare their producer format");
+
+        assert!(error.contains("missing the created_by project format tag"));
+    }
+
+    #[test]
+    fn current_project_version_rejects_unexpected_created_by_format_tag() {
+        let mut world = World::new();
+
+        let error = load_project(
+            &mut world,
+            ProjectFile {
+                version: PROJECT_FILE_VERSION,
+                created_by: Some(ProjectCreatedBy {
+                    format_tag: "pre-adr049".to_string(),
+                    ..current_project_created_by()
+                }),
+                next_element_id: 1,
+                document_properties: None,
+                layers: None,
+                materials: None,
+                textures: None,
+                definitions: None,
+                definition_libraries: None,
+                named_views: None,
+                lighting: None,
+                sources: None,
+                nominations: None,
+                entities: Vec::new(),
+            },
+        )
+        .expect_err("current project files must use the expected producer format tag");
+
+        assert!(error.contains("Unsupported project format tag 'pre-adr049'"));
     }
 
     #[test]
@@ -1267,6 +1374,7 @@ mod tests {
 
         let project = ProjectFile {
             version: PROJECT_FILE_VERSION,
+            created_by: Some(current_project_created_by()),
             next_element_id: 100,
             document_properties: Some(DocumentProperties::default()),
             layers: None,

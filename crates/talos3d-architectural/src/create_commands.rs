@@ -6,7 +6,7 @@ use talos3d_core::plugins::{
 };
 
 use crate::{
-    components::{BimData, Opening, OpeningKind, Wall},
+    components::{BimData, Opening, OpeningFeature, OpeningKind, Wall},
     snapshots::{OpeningSnapshot, WallSnapshot},
 };
 
@@ -85,19 +85,28 @@ fn queue_create_opening_commands(world: &mut World) {
         };
 
         let element_id = world.resource_mut::<ElementIdAllocator>().next_id();
+        let opening = Opening {
+            width: command.width,
+            height: command.height,
+            sill_height: command.sill_height,
+            kind: command.kind,
+        };
+        let opening_feature = OpeningFeature::rectangular_wall(
+            command.parent_wall_element_id,
+            &parent_wall,
+            &opening,
+            command.position_along_wall,
+        )
+        .expect("opening command geometry is constrained by the placement tool");
         enqueue_create_boxed_entity(
             world,
             OpeningSnapshot {
                 element_id,
-                opening: Opening {
-                    width: command.width,
-                    height: command.height,
-                    sill_height: command.sill_height,
-                    kind: command.kind,
-                },
+                opening,
                 parent_wall,
                 parent_wall_element_id: command.parent_wall_element_id,
                 position_along_wall: command.position_along_wall,
+                opening_feature,
                 bim_data: BimData::default(),
                 material_assignment: None,
             }
