@@ -798,7 +798,6 @@ fn draw_silhouette_edge_overlay(
 ) {
     if viewport_export_state.annotation_overlays_suppressed()
         || !settings.visible_edge_overlay_enabled
-        || !settings.paper_fill_enabled
     {
         return;
     }
