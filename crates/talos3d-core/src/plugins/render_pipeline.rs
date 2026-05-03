@@ -360,7 +360,7 @@ fn execute_toggle_grid(world: &mut World, _: &Value) -> Result<CommandResult, St
 
 fn execute_toggle_outline(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     update_render_settings(world, "", |settings| {
-        settings.visible_edge_overlay_enabled = !settings.visible_edge_overlay_enabled;
+        settings.contour_overlay_enabled = !settings.contour_overlay_enabled;
     })
 }
 
