@@ -671,17 +671,18 @@ fn draw_model_edge_overlays(
         let Ok(entity_ref) = world.get_entity(entity) else {
             continue;
         };
-        let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
-            continue;
-        };
-        if drawing_overlay_excluded(snapshot.type_name()) {
+        let type_name = registry
+            .capture_snapshot(&entity_ref, world)
+            .map(|snapshot| snapshot.type_name())
+            .unwrap_or("triangle_mesh");
+        if drawing_overlay_excluded(type_name) {
             continue;
         }
         subjects.push(MeshOverlaySubject {
             entity,
             mesh_handle: mesh_handle.0.clone(),
             mesh_transform: *mesh_transform,
-            type_name: snapshot.type_name(),
+            type_name,
         });
     }
 
