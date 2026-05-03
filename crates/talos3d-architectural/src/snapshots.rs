@@ -28,7 +28,8 @@ use talos3d_core::{
 
 use crate::{
     components::{
-        BimData, BuildingPad, BuildingPadExcavation, Opening, OpeningKind, ParentWall, Wall,
+        BimData, BuildingPad, BuildingPadExcavation, Opening, OpeningFeature, OpeningKind,
+        ParentWall, Wall,
     },
     mesh_generation::{wall_rotation, wall_transform},
 };
@@ -79,6 +80,7 @@ pub struct OpeningSnapshot {
     pub parent_wall: Wall,
     pub parent_wall_element_id: ElementId,
     pub position_along_wall: f32,
+    pub opening_feature: OpeningFeature,
     pub bim_data: BimData,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material_assignment: Option<MaterialAssignment>,
@@ -110,6 +112,23 @@ impl From<WallSnapshot> for BoxedEntity {
 impl From<OpeningSnapshot> for BoxedEntity {
     fn from(snapshot: OpeningSnapshot) -> Self {
         Self(Box::new(snapshot))
+    }
+}
+
+impl OpeningSnapshot {
+    fn canonical_opening_feature(&self) -> OpeningFeature {
+        OpeningFeature::rectangular_wall(
+            self.parent_wall_element_id,
+            &self.parent_wall,
+            &self.opening,
+            self.position_along_wall,
+        )
+        .expect("OpeningSnapshot geometry is validated before canonical feature sync")
+    }
+
+    fn with_synced_opening_feature(mut self) -> Self {
+        self.opening_feature = self.canonical_opening_feature();
+        self
     }
 }
 
@@ -462,9 +481,11 @@ impl AuthoredEntity for OpeningSnapshot {
             parent_wall: self.parent_wall.clone(),
             parent_wall_element_id: self.parent_wall_element_id,
             position_along_wall,
+            opening_feature: self.opening_feature.clone(),
             bim_data: self.bim_data.clone(),
             material_assignment: self.material_assignment.clone(),
         }
+        .with_synced_opening_feature()
         .into()
     }
 
@@ -500,9 +521,11 @@ impl AuthoredEntity for OpeningSnapshot {
             parent_wall: self.parent_wall.clone(),
             parent_wall_element_id: self.parent_wall_element_id,
             position_along_wall,
+            opening_feature: self.opening_feature.clone(),
             bim_data: self.bim_data.clone(),
             material_assignment: self.material_assignment.clone(),
         }
+        .with_synced_opening_feature()
         .into()
     }
 
@@ -571,7 +594,7 @@ impl AuthoredEntity for OpeningSnapshot {
                 ))
             }
         }
-        Ok(snapshot.into())
+        Ok(snapshot.with_synced_opening_feature().into())
     }
 
     fn material_assignment(&self) -> Option<MaterialAssignment> {
@@ -630,13 +653,16 @@ impl AuthoredEntity for OpeningSnapshot {
                 position_along_wall: (distance_along_wall / wall_length).clamp(0.0, 1.0),
                 ..self.clone()
             }
+            .with_synced_opening_feature()
             .into(),
         )
     }
 
     fn to_json(&self) -> Value {
-        serde_json::to_value(ArchitecturalSnapshotJson::Opening(self.clone()))
-            .unwrap_or(Value::Null)
+        serde_json::to_value(ArchitecturalSnapshotJson::Opening(
+            self.clone().with_synced_opening_feature(),
+        ))
+        .unwrap_or(Value::Null)
     }
 
     fn apply_to(&self, world: &mut World) {
@@ -649,6 +675,7 @@ impl AuthoredEntity for OpeningSnapshot {
         let entity = if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             world.entity_mut(entity).insert((
                 self.opening.clone(),
+                self.opening_feature.clone(),
                 ParentWall {
                     wall_entity: parent_wall_entity,
                     position_along_wall: self.position_along_wall,
@@ -661,6 +688,7 @@ impl AuthoredEntity for OpeningSnapshot {
                 .spawn((
                     self.element_id,
                     self.opening.clone(),
+                    self.opening_feature.clone(),
                     ParentWall {
                         wall_entity: parent_wall_entity,
                         position_along_wall: self.position_along_wall,
@@ -1301,6 +1329,7 @@ impl AuthoredEntityFactory for OpeningFactory {
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
         let element_id = *entity_ref.get::<ElementId>()?;
         let opening = entity_ref.get::<Opening>()?;
+        let opening_feature = entity_ref.get::<OpeningFeature>()?;
         let parent_wall = entity_ref.get::<ParentWall>()?;
         let bim_data = entity_ref.get::<BimData>()?;
         let parent_wall_ref = world.get_entity(parent_wall.wall_entity).ok()?;
@@ -1313,9 +1342,11 @@ impl AuthoredEntityFactory for OpeningFactory {
                 parent_wall: wall.clone(),
                 parent_wall_element_id,
                 position_along_wall: parent_wall.position_along_wall,
+                opening_feature: opening_feature.clone(),
                 bim_data: bim_data.clone(),
                 material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
             }
+            .with_synced_opening_feature()
             .into(),
         )
     }
@@ -1385,6 +1416,19 @@ impl AuthoredEntityFactory for OpeningFactory {
                 .map(scalar_from_json)
                 .transpose()?
                 .ok_or_else(|| "Missing required field 'position_along_wall'".to_string())?,
+            opening_feature: OpeningFeature {
+                host_ref: parent_wall_element_id,
+                chart_anchor: OpeningFeature::WALL_EXTERIOR_CHART_ANCHOR.to_string(),
+                profile_loop_2d:
+                    talos3d_core::plugins::modeling::host_chart::ChartSpaceProfileLoop::new(
+                        Vec::new(),
+                    ),
+                depth_policy: Default::default(),
+                clearance_policy: Default::default(),
+                hosted_fill_ref: None,
+                structural_role: None,
+                operation: Default::default(),
+            },
             bim_data: BimData::default(),
             material_assignment: material_assignment_from_object(object)?,
         };
@@ -1393,7 +1437,7 @@ impl AuthoredEntityFactory for OpeningFactory {
             &snapshot.parent_wall,
             snapshot.position_along_wall,
         )?;
-        Ok(snapshot.into())
+        Ok(snapshot.with_synced_opening_feature().into())
     }
 
     fn draw_selection(&self, world: &World, entity: Entity, gizmos: &mut Gizmos, color: Color) {
@@ -2081,6 +2125,23 @@ mod tests {
             },
             parent_wall_element_id: ElementId(20),
             position_along_wall: 0.5,
+            opening_feature: OpeningFeature::rectangular_wall(
+                ElementId(20),
+                &Wall {
+                    start: Vec2::new(0.0, 0.0),
+                    end: Vec2::new(4.0, 0.0),
+                    height: 3.0,
+                    thickness: 0.2,
+                },
+                &Opening {
+                    width: 1.2,
+                    height: 1.5,
+                    sill_height: 0.9,
+                    kind: OpeningKind::Window,
+                },
+                0.5,
+            )
+            .unwrap(),
             bim_data: BimData::default(),
             material_assignment: None,
         };
@@ -2091,6 +2152,12 @@ mod tests {
         assert!(
             wall_entity_ref.contains::<NeedsMesh>(),
             "opening edits must invalidate the parent wall mesh exactly once on commit",
+        );
+        let opening_entity = find_entity_by_element_id(&mut world, ElementId(21)).unwrap();
+        let opening_entity_ref = world.entity(opening_entity);
+        assert!(
+            opening_entity_ref.contains::<OpeningFeature>(),
+            "new opening snapshots must author the canonical OpeningFeature component"
         );
     }
 

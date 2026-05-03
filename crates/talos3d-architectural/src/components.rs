@@ -1,5 +1,9 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use talos3d_core::plugins::{
+    identity::ElementId,
+    modeling::host_chart::{ChartSpaceProfileLoop, OpeningClearancePolicy, OpeningDepthPolicy},
+};
 
 /// Architectural wall definition.
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +60,70 @@ pub struct BuildingPadExcavation {
 pub enum OpeningKind {
     Window,
     Door,
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpeningFeature {
+    pub host_ref: ElementId,
+    pub chart_anchor: String,
+    pub profile_loop_2d: ChartSpaceProfileLoop,
+    #[serde(default)]
+    pub depth_policy: OpeningDepthPolicy,
+    #[serde(default)]
+    pub clearance_policy: OpeningClearancePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_fill_ref: Option<ElementId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_role: Option<String>,
+    #[serde(default)]
+    pub operation: OpeningFeatureOperation,
+}
+
+impl OpeningFeature {
+    pub const WALL_EXTERIOR_CHART_ANCHOR: &'static str = "wall_exterior";
+
+    pub fn rectangular_wall(
+        host_ref: ElementId,
+        wall: &Wall,
+        opening: &Opening,
+        position_along_wall: f32,
+    ) -> Option<Self> {
+        let wall_length = wall.length();
+        if wall_length <= f32::EPSILON || opening.width <= 0.0 || opening.height <= 0.0 {
+            return None;
+        }
+
+        let center_x = position_along_wall.clamp(0.0, 1.0) * wall_length;
+        let half_width = opening.width * 0.5;
+        let x_min = (center_x - half_width).clamp(0.0, wall_length);
+        let x_max = (center_x + half_width).clamp(0.0, wall_length);
+        let y_min = opening.sill_height.clamp(0.0, wall.height);
+        let y_max = (opening.sill_height + opening.height).clamp(0.0, wall.height);
+
+        (x_max - x_min > f32::EPSILON && y_max - y_min > f32::EPSILON).then_some(Self {
+            host_ref,
+            chart_anchor: Self::WALL_EXTERIOR_CHART_ANCHOR.to_string(),
+            profile_loop_2d: ChartSpaceProfileLoop::rectangle(
+                Vec2::new(x_min, y_min),
+                Vec2::new(x_max, y_max),
+            ),
+            depth_policy: OpeningDepthPolicy::ThroughHost,
+            clearance_policy: OpeningClearancePolicy::None,
+            hosted_fill_ref: None,
+            structural_role: Some(match opening.kind {
+                OpeningKind::Window => "window".to_string(),
+                OpeningKind::Door => "door".to_string(),
+            }),
+            operation: OpeningFeatureOperation::Cut,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OpeningFeatureOperation {
+    #[default]
+    Cut,
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]

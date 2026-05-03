@@ -12,14 +12,15 @@ use talos3d_core::plugins::{
     modeling::{
         host_chart::{
             evaluate_chart_host_with_provenance, CaeFaceProvenanceMap, ChartDomain,
-            ChartHostEvaluation, ChartSpaceOpeningFeature, ChartSpaceProfileLoop, HostChart,
-            PlanarHostChart,
+            ChartHostEvaluation, ChartSpaceOpeningFeature, HostChart, PlanarHostChart,
         },
         primitives::TriangleMesh,
     },
 };
+#[cfg(test)]
+use talos3d_core::plugins::modeling::host_chart::ChartSpaceProfileLoop;
 
-use crate::components::{Opening, ParentWall, Wall};
+use crate::components::{OpeningFeature, OpeningFeatureOperation, Wall};
 
 pub struct ArchitecturalMeshPlugin;
 
@@ -49,9 +50,10 @@ type WallMeshQuery<'w, 's> = Query<
     With<NeedsMesh>,
 >;
 
-type OpeningQuery<'w, 's> =
-    Query<'w, 's, (&'static ElementId, &'static Opening, &'static ParentWall), Without<NeedsMesh>>;
+type OpeningFeatureQuery<'w, 's> =
+    Query<'w, 's, (&'static ElementId, &'static OpeningFeature), Without<NeedsMesh>>;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct OpeningRect {
     feature_ref: ElementId,
@@ -74,29 +76,27 @@ fn spawn_wall_meshes(
     mut meshes: ResMut<Assets<Mesh>>,
     wall_material: Res<WallMaterial>,
     query: WallMeshQuery,
-    openings: OpeningQuery,
+    opening_features: OpeningFeatureQuery,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     #[cfg(feature = "perf-stats")]
     let mut regenerated = 0usize;
     for (entity, wall_element_id, wall, mesh_handle, material_handle) in &query {
-        let wall_openings: Vec<OpeningRect> = openings
+        let wall_openings: Vec<ChartSpaceOpeningFeature> = opening_features
             .iter()
-            .filter_map(|(opening_element_id, opening, parent_wall)| {
-                (parent_wall.wall_entity == entity).then_some(opening_rect(
+            .filter_map(|(opening_element_id, opening_feature)| {
+                opening_feature_to_chart_space(
+                    *wall_element_id,
                     *opening_element_id,
-                    wall,
-                    opening,
-                    parent_wall,
-                ))
+                    opening_feature,
+                )
             })
-            .flatten()
             .collect();
         let (mesh, provenance_map) = if wall_openings.is_empty() {
             (wall_mesh(wall), None)
         } else {
             let evaluation =
-                wall_chart_evaluation_with_openings(wall, *wall_element_id, &wall_openings);
+                wall_chart_evaluation_with_opening_features(wall, *wall_element_id, &wall_openings);
             let mesh = triangle_mesh_to_bevy_mesh(&evaluation.mesh);
             (
                 mesh,
@@ -158,6 +158,7 @@ pub fn wall_mesh(wall: &Wall) -> Mesh {
     Mesh::from(Cuboid::new(length, wall.height, wall.thickness))
 }
 
+#[cfg(test)]
 fn wall_mesh_with_openings(wall: &Wall, openings: &[OpeningRect]) -> Mesh {
     triangle_mesh_to_bevy_mesh(&wall_triangle_mesh_with_openings(
         wall,
@@ -166,6 +167,7 @@ fn wall_mesh_with_openings(wall: &Wall, openings: &[OpeningRect]) -> Mesh {
     ))
 }
 
+#[cfg(test)]
 fn wall_triangle_mesh_with_openings(
     wall: &Wall,
     wall_element_id: ElementId,
@@ -174,23 +176,12 @@ fn wall_triangle_mesh_with_openings(
     wall_chart_evaluation_with_openings(wall, wall_element_id, openings).mesh
 }
 
+#[cfg(test)]
 fn wall_chart_evaluation_with_openings(
     wall: &Wall,
     wall_element_id: ElementId,
     openings: &[OpeningRect],
 ) -> ChartHostEvaluation {
-    let length = wall.start.distance(wall.end);
-    let chart = HostChart::planar(
-        "wall_local",
-        PlanarHostChart::new(
-            Vec3::new(-length * 0.5, -wall.height * 0.5, 0.0),
-            Vec3::X,
-            Vec3::Y,
-            ChartDomain::new(0.0, length),
-            ChartDomain::new(0.0, wall.height),
-            wall.thickness,
-        ),
-    );
     let opening_features: Vec<ChartSpaceOpeningFeature> = openings
         .iter()
         .map(|opening| {
@@ -205,36 +196,60 @@ fn wall_chart_evaluation_with_openings(
             .with_feature_ref(opening.feature_ref)
         })
         .collect();
+    wall_chart_evaluation_with_opening_features(wall, wall_element_id, &opening_features)
+}
 
-    evaluate_chart_host_with_provenance(&chart, &opening_features)
+fn wall_chart_evaluation_with_opening_features(
+    wall: &Wall,
+    wall_element_id: ElementId,
+    openings: &[ChartSpaceOpeningFeature],
+) -> ChartHostEvaluation {
+    let length = wall.start.distance(wall.end);
+    let chart = HostChart::planar(
+        "wall_local",
+        PlanarHostChart::new(
+            Vec3::new(-length * 0.5, -wall.height * 0.5, 0.0),
+            Vec3::X,
+            Vec3::Y,
+            ChartDomain::new(0.0, length),
+            ChartDomain::new(0.0, wall.height),
+            wall.thickness,
+        ),
+    );
+
+    assert!(
+        openings
+            .iter()
+            .all(|opening| opening.host_ref == wall_element_id),
+        "wall opening features must reference the wall being evaluated"
+    );
+
+    evaluate_chart_host_with_provenance(&chart, openings)
         .expect("wall openings are clamped into the wall chart domain")
 }
 
-fn opening_rect(
+fn opening_feature_to_chart_space(
+    wall_element_id: ElementId,
     feature_ref: ElementId,
-    wall: &Wall,
-    opening: &Opening,
-    parent_wall: &ParentWall,
-) -> Option<OpeningRect> {
-    let wall_length = wall.start.distance(wall.end);
-    if wall_length <= f32::EPSILON || opening.width <= 0.0 || opening.height <= 0.0 {
+    opening_feature: &OpeningFeature,
+) -> Option<ChartSpaceOpeningFeature> {
+    if opening_feature.host_ref != wall_element_id
+        || opening_feature.operation != OpeningFeatureOperation::Cut
+        || opening_feature.chart_anchor != OpeningFeature::WALL_EXTERIOR_CHART_ANCHOR
+    {
         return None;
     }
 
-    let center_x = (parent_wall.position_along_wall.clamp(0.0, 1.0)) * wall_length;
-    let half_width = opening.width * 0.5;
-    let x_min = (center_x - half_width).clamp(0.0, wall_length);
-    let x_max = (center_x + half_width).clamp(0.0, wall_length);
-    let y_min = opening.sill_height.clamp(0.0, wall.height);
-    let y_max = (opening.sill_height + opening.height).clamp(0.0, wall.height);
-
-    (x_max - x_min > f32::EPSILON && y_max - y_min > f32::EPSILON).then_some(OpeningRect {
-        feature_ref,
-        x_min,
-        x_max,
-        y_min,
-        y_max,
-    })
+    Some(
+        ChartSpaceOpeningFeature::new(
+            wall_element_id,
+            "wall_local",
+            opening_feature.profile_loop_2d.clone(),
+        )
+        .with_feature_ref(feature_ref)
+        .with_depth(opening_feature.depth_policy)
+        .with_clearance(opening_feature.clearance_policy),
+    )
 }
 
 fn triangle_mesh_to_bevy_mesh(triangle_mesh: &TriangleMesh) -> Mesh {
@@ -302,6 +317,7 @@ fn compute_triangle_mesh_normals(triangle_mesh: &TriangleMesh) -> Vec<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::{Opening, OpeningKind};
     use bevy::mesh::VertexAttributeValues;
     use talos3d_core::plugins::modeling::geometry_health::check_triangle_mesh_health;
 
@@ -432,6 +448,67 @@ mod tests {
             ) && provenance.owner_ref == Some(ElementId(8))
                     && provenance.host_ref == Some(ElementId(7))
             })
+        );
+    }
+
+    #[test]
+    fn wall_chart_evaluation_accepts_authored_opening_feature() {
+        let wall = Wall {
+            start: Vec2::ZERO,
+            end: Vec2::new(4.0, 0.0),
+            height: 3.0,
+            thickness: 0.2,
+        };
+        let opening = Opening {
+            width: 1.2,
+            height: 1.5,
+            sill_height: 0.9,
+            kind: OpeningKind::Window,
+        };
+        let authored_feature =
+            OpeningFeature::rectangular_wall(ElementId(7), &wall, &opening, 0.5).unwrap();
+        let chart_feature =
+            opening_feature_to_chart_space(ElementId(7), ElementId(8), &authored_feature)
+                .expect("feature belongs to the wall");
+
+        let evaluation =
+            wall_chart_evaluation_with_opening_features(&wall, ElementId(7), &[chart_feature]);
+        let report = check_triangle_mesh_health(&evaluation.mesh);
+
+        assert!(report.is_clean(), "{report:#?}");
+        assert!(
+            evaluation.face_provenance.iter().any(|provenance| {
+                matches!(
+                provenance.role,
+                talos3d_core::plugins::modeling::host_chart::CaeGeneratedFaceRole::OpeningReveal {
+                    ..
+                }
+            ) && provenance.owner_ref == Some(ElementId(8))
+                    && provenance.host_ref == Some(ElementId(7))
+            })
+        );
+    }
+
+    #[test]
+    fn opening_feature_to_chart_space_rejects_other_hosts() {
+        let wall = Wall {
+            start: Vec2::ZERO,
+            end: Vec2::new(4.0, 0.0),
+            height: 3.0,
+            thickness: 0.2,
+        };
+        let opening = Opening {
+            width: 1.2,
+            height: 1.5,
+            sill_height: 0.9,
+            kind: OpeningKind::Window,
+        };
+        let authored_feature =
+            OpeningFeature::rectangular_wall(ElementId(7), &wall, &opening, 0.5).unwrap();
+
+        assert!(
+            opening_feature_to_chart_space(ElementId(99), ElementId(8), &authored_feature)
+                .is_none()
         );
     }
 }
