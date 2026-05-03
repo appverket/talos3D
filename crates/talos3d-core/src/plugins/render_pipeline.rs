@@ -360,7 +360,10 @@ fn execute_toggle_grid(world: &mut World, _: &Value) -> Result<CommandResult, St
 
 fn execute_toggle_outline(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     update_render_settings(world, "", |settings| {
-        settings.contour_overlay_enabled = !settings.contour_overlay_enabled;
+        settings.visible_edge_overlay_enabled = !settings.visible_edge_overlay_enabled;
+        if settings.visible_edge_overlay_enabled {
+            settings.contour_overlay_enabled = false;
+        }
     })
 }
 
@@ -1439,6 +1442,25 @@ mod tests {
         assert!(settings.visible_edge_overlay_enabled);
         assert!(!settings.wireframe_overlay_enabled);
         assert!(!settings.contour_overlay_enabled);
+    }
+
+    #[test]
+    fn outline_command_toggles_visible_edge_linework() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings {
+            contour_overlay_enabled: true,
+            ..RenderSettings::default()
+        })
+        .insert_resource(StatusBarData::default());
+
+        execute_toggle_outline(app.world_mut(), &Value::Null).expect("outline should toggle on");
+        let settings = app.world().resource::<RenderSettings>();
+        assert!(settings.visible_edge_overlay_enabled);
+        assert!(!settings.contour_overlay_enabled);
+
+        execute_toggle_outline(app.world_mut(), &Value::Null).expect("outline should toggle off");
+        let settings = app.world().resource::<RenderSettings>();
+        assert!(!settings.visible_edge_overlay_enabled);
     }
 
     #[test]
