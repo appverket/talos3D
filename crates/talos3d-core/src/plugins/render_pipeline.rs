@@ -38,7 +38,7 @@ const VISIBLE_EDGE_OVERLAY_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 1.0);
 const EDGE_QUANTIZATION_SCALE: f32 = 10_000.0;
 const DEFAULT_BACKGROUND_RGB: [f32; 3] = [0.17, 0.18, 0.20];
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
-const VISIBLE_EDGE_RAY_SAMPLE_T_VALUES: [f32; 3] = [0.2, 0.5, 0.8];
+const VISIBLE_EDGE_SEGMENT_STEPS: usize = 24;
 const EDGE_VISIBILITY_EPSILON: f32 = 0.01;
 const ORTHOGRAPHIC_VISIBILITY_RAY_LENGTH: f32 = 10_000.0;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
@@ -1115,8 +1115,8 @@ fn collect_visible_feature_segments(
     edges
         .into_values()
         .filter(|edge| edge.is_visible_candidate())
-        .filter(|edge| {
-            edge_is_visible(
+        .flat_map(|edge| {
+            edge_visible_subsegments(
                 edge.start_world,
                 edge.end_world,
                 entity,
@@ -1126,7 +1126,6 @@ fn collect_visible_feature_segments(
                 scene_triangles,
             )
         })
-        .map(|edge| (edge.start_world, edge.end_world))
         .collect()
 }
 
@@ -1153,7 +1152,7 @@ fn register_feature_edge(
     state.total_faces = state.total_faces.saturating_add(1);
 }
 
-fn edge_is_visible(
+fn edge_visible_subsegments(
     start: Vec3,
     end: Vec3,
     owner_entity: Entity,
@@ -1161,20 +1160,24 @@ fn edge_is_visible(
     camera_forward: Vec3,
     orthographic: bool,
     scene_triangles: &[SceneTriangle],
-) -> bool {
-    VISIBLE_EDGE_RAY_SAMPLE_T_VALUES
-        .into_iter()
-        .map(|t| start.lerp(end, t))
-        .any(|sample| {
-            point_is_visible(
-                sample,
-                owner_entity,
-                camera_position,
-                camera_forward,
-                orthographic,
-                scene_triangles,
-            )
-        })
+) -> Vec<(Vec3, Vec3)> {
+    let mut visible_segments = Vec::new();
+    for step in 0..VISIBLE_EDGE_SEGMENT_STEPS {
+        let t0 = step as f32 / VISIBLE_EDGE_SEGMENT_STEPS as f32;
+        let t1 = (step + 1) as f32 / VISIBLE_EDGE_SEGMENT_STEPS as f32;
+        let midpoint = start.lerp(end, (t0 + t1) * 0.5);
+        if point_is_visible(
+            midpoint,
+            owner_entity,
+            camera_position,
+            camera_forward,
+            orthographic,
+            scene_triangles,
+        ) {
+            visible_segments.push((start.lerp(end, t0), start.lerp(end, t1)));
+        }
+    }
+    visible_segments
 }
 
 fn point_is_visible(
@@ -1522,6 +1525,6 @@ mod tests {
             &scene_triangles,
         );
 
-        assert_eq!(segments.len(), 4);
+        assert_eq!(segments.len(), 4 * VISIBLE_EDGE_SEGMENT_STEPS);
     }
 }
