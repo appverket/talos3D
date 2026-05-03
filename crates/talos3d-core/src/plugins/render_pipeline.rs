@@ -637,7 +637,7 @@ fn draw_model_edge_overlays(
     settings: Res<RenderSettings>,
     registry: Res<CapabilityRegistry>,
     mesh_assets: Res<Assets<Mesh>>,
-    camera_query: Query<(&GlobalTransform, &Projection), With<Camera3d>>,
+    camera_query: Query<(&GlobalTransform, &Projection), With<OrbitCamera>>,
     mut gizmos: Gizmos,
 ) {
     if !settings.wireframe_overlay_enabled
@@ -786,7 +786,7 @@ fn draw_silhouette_edge_overlay(
     mesh_assets: Res<Assets<Mesh>>,
     camera_query: Query<
         (&Camera, &GlobalTransform, &Projection, Option<&OrbitCamera>),
-        With<Camera3d>,
+        With<OrbitCamera>,
     >,
     mesh_query: Query<(
         Entity,
