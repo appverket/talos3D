@@ -18583,7 +18583,7 @@ pub fn handle_select_recipe(
                     // Viable = supports the requested state (or all states if no filter).
                     target_state.is_none_or(|ts| d.supported_refinement_levels.contains(&ts))
                 })
-                .map(|d| {
+                .filter_map(|d| {
                     // Evaluate all applicable priors for this recipe family.  A prior
                     // is applicable when its scope matches either "all families for the
                     // class" (recipe_family: None) or exactly this family.
@@ -18599,13 +18599,16 @@ pub fn handle_select_recipe(
                         })
                         .map(|p| (p.prior_fn)(&prior_context).weight)
                         .fold(1.0_f32, |acc, w| acc * w);
-                    RecipeRankingInfo {
+                    if weight <= 0.0 {
+                        return None;
+                    }
+                    Some(RecipeRankingInfo {
                         id: d.id.0.clone(),
                         target_class: d.target_class.0.clone(),
                         label: d.label.clone(),
                         weight,
                         is_session_draft: false,
-                    }
+                    })
                 })
                 .collect()
         })
@@ -23253,6 +23256,69 @@ mod tests {
         assert_eq!(ranking.len(), 1);
         assert_eq!(ranking[0].id, installed.id);
         assert!(ranking[0].is_session_draft);
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn select_recipe_omits_prior_vetoed_families() {
+        use crate::capability_registry::{
+            CorpusProvenance, ElementClassId, GenerateOutput, GenerationPriorDescriptor,
+            LicenseTag, PassageRef, PriorEvaluation, PriorId, PriorScope, RecipeFamilyDescriptor,
+            RecipeFamilyId,
+        };
+
+        fn recipe(id: &str) -> RecipeFamilyDescriptor {
+            RecipeFamilyDescriptor {
+                id: RecipeFamilyId(id.into()),
+                target_class: ElementClassId("wall_assembly".into()),
+                label: id.into(),
+                description: "test recipe".into(),
+                parameters: Vec::new(),
+                supported_refinement_levels: vec![crate::plugins::refinement::RefinementState::Constructible],
+                obligation_specializations: std::collections::HashMap::new(),
+                promotion_critical_path_specializations: std::collections::HashMap::new(),
+                generate: std::sync::Arc::new(|_, _| Ok(GenerateOutput::default())),
+            }
+        }
+
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_recipe_family(recipe("compatible_wall"));
+        registry.register_recipe_family(recipe("incompatible_wall"));
+        registry.register_generation_prior(GenerationPriorDescriptor {
+            id: PriorId("test_veto_incompatible_wall".into()),
+            label: "Test Veto".into(),
+            description: "Veto one recipe to prove select_recipe removes it.".into(),
+            scope: PriorScope::RecipeSelection {
+                element_class: ElementClassId("wall_assembly".into()),
+                recipe_family: Some(RecipeFamilyId("incompatible_wall".into())),
+            },
+            source_provenance: CorpusProvenance {
+                source: "test".into(),
+                source_version: "test".into(),
+                jurisdiction: None,
+                ingested_at: 0,
+                license: LicenseTag::Cc0,
+                backlink: None::<PassageRef>,
+                supersedes: Vec::new(),
+            },
+            prior_fn: std::sync::Arc::new(|_| PriorEvaluation {
+                weight: 0.0,
+                suggestion: None,
+                rationale: "incompatible with active facet".into(),
+            }),
+        });
+        world.insert_resource(registry);
+
+        let ranking = handle_select_recipe(
+            &world,
+            "wall_assembly".into(),
+            serde_json::json!({ "target_state": "Constructible" }),
+        )
+        .expect("recipe selection should succeed");
+
+        assert_eq!(ranking.len(), 1);
+        assert_eq!(ranking[0].id, "compatible_wall");
     }
 
     #[cfg(feature = "model-api")]
