@@ -19835,11 +19835,13 @@ mod tests {
                     .and_then(|body| body.volume)),
             Some(960.0)
         );
-        assert_eq!(details.properties.len(), 2);
+        assert_eq!(details.properties.len(), 3);
         assert_eq!(details.properties[0].name, "center");
         assert_eq!(details.properties[0].kind, "vec3");
         assert_eq!(details.properties[0].value, json!([1.0, 2.0, 3.0]));
         assert!(details.properties[0].editable);
+        assert_eq!(details.properties[1].name, "half_extents");
+        assert_eq!(details.properties[2].name, "material");
     }
 
     #[cfg(feature = "model-api")]
