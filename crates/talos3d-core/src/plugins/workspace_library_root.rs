@@ -3,7 +3,9 @@
 //! Per `LIBRARY_PUBLICATION_BOUNDARY_AGREEMENT.md`, workspace
 //! libraries live under
 //!
-//!     <workspace-root>/.talos3d/libraries/
+//! ```text
+//! <workspace-root>/.talos3d/libraries/
+//! ```
 //!
 //! and the agreement is explicit that the application must not
 //! "silently invent a workspace root in an unrelated directory".
