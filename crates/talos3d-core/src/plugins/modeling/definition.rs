@@ -2914,8 +2914,8 @@ mod pp_100_workspace_library_tests {
         // `draft_status` key. Serde must default it to Active so the
         // file deserializes unchanged.
         let legacy = json!({
-            "id": "architecture.european-window-library",
-            "name": "European Window Library",
+            "id": "reference.compound-parts-library",
+            "name": "Reference Compound Parts Library",
             "scope": "Bundled",
             "tags": [],
             "definitions": {}

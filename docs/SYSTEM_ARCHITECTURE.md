@@ -81,8 +81,9 @@ These are replaceable and must not become the authored truth.
 The in-repo system currently demonstrates:
 
 - `talos3d-core` as the shared platform plus modeling workbench
-- `talos3d-architectural` as a reference domain extension
-- `talos3d-terrain` as another reference extension path
+- `talos3d-terrain` as an in-repo reference extension path
+- sibling extension repositories, such as `talos3d-architecture`, as optional
+  domain packs composed by downstream app workspaces
 
 This composition model is intentionally the same one future out-of-tree
 capability crates should use.

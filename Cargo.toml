@@ -5,7 +5,6 @@ members = [
     "crates/cadio-tools",
     "crates/talos3d-capability-api",
     "crates/talos3d-core",
-    "crates/talos3d-architectural",
     "crates/talos3d-terrain",
 ]
 exclude = ["app", "vendor"]
@@ -19,7 +18,7 @@ codegen-units = 1
 [profile.release.package."*"]
 opt-level = 3
 
-# The `talos3d` binary lives in `app/` and is its own workspace. It depends on
-# the private sibling `talos3d-architecture` repo via path deps, so it cannot
-# be built from a clone of this public repo alone. CI here only checks the
-# public library crates listed above; the binary is validated downstream.
+# The `talos3d` binary lives in `app/` and is its own workspace. It composes
+# the public platform with optional domain extensions from sibling repos, so it
+# is validated downstream. CI here checks only the self-contained public
+# platform crates listed above.

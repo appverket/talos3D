@@ -245,7 +245,8 @@ The main files are:
 - `/path/to/talos3d-core/Cargo.toml`
 - `/path/to/talos3d-core/crates/talos3d-core/Cargo.toml`
 - `/path/to/talos3d-core/crates/talos3d-terrain/Cargo.toml`
-- `/path/to/talos3d-core/crates/talos3d-architectural/Cargo.toml`
+- `/path/to/talos3d-architecture/crates/talos3d-architectural/Cargo.toml`
+  when validating the optional architecture extension repo
 
 Example shape:
 
