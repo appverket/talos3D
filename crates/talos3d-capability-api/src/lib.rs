@@ -94,6 +94,7 @@ mod tests {
                 param_type: ParamType::AxisRef,
                 default_value: json!("host.normal"),
                 override_policy: OverridePolicy::Locked,
+                geometry_affecting: true,
                 metadata: ParameterMetadata::default(),
             }]),
             validator_id: HostingValidatorId("example.validator".to_string()),
