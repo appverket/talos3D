@@ -23274,7 +23274,9 @@ mod tests {
                 label: id.into(),
                 description: "test recipe".into(),
                 parameters: Vec::new(),
-                supported_refinement_levels: vec![crate::plugins::refinement::RefinementState::Constructible],
+                supported_refinement_levels: vec![
+                    crate::plugins::refinement::RefinementState::Constructible,
+                ],
                 obligation_specializations: std::collections::HashMap::new(),
                 promotion_critical_path_specializations: std::collections::HashMap::new(),
                 generate: std::sync::Arc::new(|_, _| Ok(GenerateOutput::default())),

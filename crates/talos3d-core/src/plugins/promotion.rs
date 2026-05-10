@@ -228,10 +228,7 @@ pub enum ElementIdBlocker {
     },
     /// The target id is already occupied by an entity outside the
     /// replacement set.
-    TargetIdOccupiedOutsideReplacementSet {
-        target: ElementId,
-        slot_id: String,
-    },
+    TargetIdOccupiedOutsideReplacementSet { target: ElementId, slot_id: String },
     /// The realization has no stable Definition-local slot address (e.g.
     /// the slot id is empty or the slot is not declared in the plan).
     RealizationLacksStableSlotAddress { source: ElementId },
@@ -248,10 +245,17 @@ impl std::fmt::Display for PromotionEmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ElementIdPreservation(b) => {
-                write!(f, "element-id preservation conflict ({} blocker(s))", b.len())
+                write!(
+                    f,
+                    "element-id preservation conflict ({} blocker(s))",
+                    b.len()
+                )
             }
             Self::MissingCapabilityDescriptor(name) => {
-                write!(f, "validation: required capability descriptor missing: {name}")
+                write!(
+                    f,
+                    "validation: required capability descriptor missing: {name}"
+                )
             }
             Self::DuplicateSlotId(id) => {
                 write!(f, "validation: duplicate slot id `{id}`")
@@ -338,7 +342,10 @@ pub fn validate_element_id_preservation(
     let mut blockers = Vec::new();
     let mut by_slot: HashMap<&str, Vec<ElementId>> = HashMap::new();
 
-    for (source, slot) in &plan.element_id_preservation.source_element_to_slot_realization {
+    for (source, slot) in &plan
+        .element_id_preservation
+        .source_element_to_slot_realization
+    {
         // Stable-slot-address blocker: empty slot id or unknown to the plan
         // when the plan is compound; for leaf plans the slot must be empty.
         match &plan.output_shape {
@@ -912,8 +919,7 @@ pub struct ExternalContextRequirement {
     /// substrate. `None` means HostContract is declared but no
     /// specific kind is bound (placeholder / draft descriptor).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_contract_kind:
-        Option<crate::plugins::hosting_contracts::HostingContractKindId>,
+    pub host_contract_kind: Option<crate::plugins::hosting_contracts::HostingContractKindId>,
     /// Original `SemanticRelation` `ElementId` so downstream tooling
     /// can correlate the requirement back to the source relation.
     pub source_relation_id: ElementId,
@@ -989,8 +995,13 @@ pub enum OrphanReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MigrationWarning {
-    DuplicateRoleIndexed { role: String, count: usize },
-    CapabilityProjectionOutdated { detail: String },
+    DuplicateRoleIndexed {
+        role: String,
+        count: usize,
+    },
+    CapabilityProjectionOutdated {
+        detail: String,
+    },
     /// PP-A2DB-2 slice B: a preserved relation's descriptor is not
     /// present in the caller's `RelationClassificationRules`. Per the
     /// agreement this is a hard "do not silently classify" condition;
@@ -1083,9 +1094,11 @@ impl SemanticAssemblyPromotionSource {
             .map(|m| m.element_id)
             .collect();
         if !nested.is_empty() {
-            return Err(SemanticAssemblyAdapterError::UnsupportedNestedAssemblyMembers {
-                offending_members: nested,
-            });
+            return Err(
+                SemanticAssemblyAdapterError::UnsupportedNestedAssemblyMembers {
+                    offending_members: nested,
+                },
+            );
         }
         for member in &input.members {
             if member.kind == AssemblyMemberKind::Occurrence
@@ -1162,8 +1175,7 @@ impl SemanticAssemblyPromotionSource {
         }
 
         // === Capability projection =====================================
-        if input.capability.descriptor_id.is_none()
-            || input.capability.descriptor_version.is_none()
+        if input.capability.descriptor_id.is_none() || input.capability.descriptor_version.is_none()
         {
             warnings.push(MigrationWarning::CapabilityProjectionOutdated {
                 detail: format!(
@@ -1230,7 +1242,8 @@ impl SemanticAssemblyPromotionSource {
         // role: "realization" } reference on commit. Slice A records the
         // intended retargeting; slice B applies it.
         let mut retargeted_assemblies: Vec<RetargetedAssembly> = Vec::new();
-        let source_member_ids: Vec<ElementId> = input.members.iter().map(|m| m.element_id).collect();
+        let source_member_ids: Vec<ElementId> =
+            input.members.iter().map(|m| m.element_id).collect();
         if self.replace_source {
             retargeted_assemblies.push(RetargetedAssembly {
                 assembly_id: input.assembly_id,
@@ -1247,8 +1260,7 @@ impl SemanticAssemblyPromotionSource {
         // for retargeting. Each external `member_targets` entry maps to
         // the slot id chosen above (or to the new Occurrence's leaf id
         // for matching that didn't go through a slot).
-        let slot_lookup: HashMap<ElementId, String> =
-            member_slot_ids.iter().cloned().collect();
+        let slot_lookup: HashMap<ElementId, String> = member_slot_ids.iter().cloned().collect();
         for ext in &input.external_graph.memberships {
             if ext.assembly_id == input.assembly_id {
                 // Same as the self-retarget above; skip duplicate.
@@ -1305,16 +1317,10 @@ impl SemanticAssemblyPromotionSource {
         let mut preserved_relations: Vec<PreservedRelation> = Vec::new();
         let mut external_context_requirements: Vec<ExternalContextRequirement> = Vec::new();
         for relation in &input.internal_relations {
-            let subject = classify_relation_endpoint(
-                relation.source,
-                input.assembly_id,
-                &slot_lookup,
-            );
-            let object = classify_relation_endpoint(
-                relation.target,
-                input.assembly_id,
-                &slot_lookup,
-            );
+            let subject =
+                classify_relation_endpoint(relation.source, input.assembly_id, &slot_lookup);
+            let object =
+                classify_relation_endpoint(relation.target, input.assembly_id, &slot_lookup);
             match (subject.clone(), object.clone()) {
                 (Some(subject), Some(object)) => {
                     // PP-A2DB-2 slice C4f: rewrite `$entity_ref`
@@ -1382,17 +1388,16 @@ impl SemanticAssemblyPromotionSource {
                                 // requirements. Other classifications
                                 // ignore the lookup; carrying `None`
                                 // keeps the field defaulted.
-                                let host_contract_kind = if c
-                                    == ExternalRelationClassification::HostContract
-                                {
-                                    input
-                                        .relation_classification
-                                        .host_contract_kinds
-                                        .get(&relation.relation_type)
-                                        .cloned()
-                                } else {
-                                    None
-                                };
+                                let host_contract_kind =
+                                    if c == ExternalRelationClassification::HostContract {
+                                        input
+                                            .relation_classification
+                                            .host_contract_kinds
+                                            .get(&relation.relation_type)
+                                            .cloned()
+                                    } else {
+                                        None
+                                    };
                                 external_context_requirements.push(ExternalContextRequirement {
                                     relation_type: relation.relation_type.clone(),
                                     classification: c,
@@ -1523,13 +1528,11 @@ fn rewrite_template_parameters(
                             if let Some(slot_id) = slot_lookup.get(&target) {
                                 return serde_json::json!({ "$slot_ref": slot_id });
                             }
-                            warnings.push(
-                                MigrationWarning::ConcreteReferenceInTemplate {
-                                    relation_id,
-                                    parameter_path: path.to_string(),
-                                    target_id: target,
-                                },
-                            );
+                            warnings.push(MigrationWarning::ConcreteReferenceInTemplate {
+                                relation_id,
+                                parameter_path: path.to_string(),
+                                target_id: target,
+                            });
                             return value.clone();
                         }
                     }
@@ -1539,7 +1542,14 @@ fn rewrite_template_parameters(
                     let child_path = format!("{path}/{k}");
                     out.insert(
                         k.clone(),
-                        walk(v, &child_path, relation_id, assembly_id, slot_lookup, warnings),
+                        walk(
+                            v,
+                            &child_path,
+                            relation_id,
+                            assembly_id,
+                            slot_lookup,
+                            warnings,
+                        ),
                     );
                 }
                 serde_json::Value::Object(out)
@@ -1550,7 +1560,14 @@ fn rewrite_template_parameters(
                     .enumerate()
                     .map(|(i, v)| {
                         let child_path = format!("{path}/{i}");
-                        walk(v, &child_path, relation_id, assembly_id, slot_lookup, warnings)
+                        walk(
+                            v,
+                            &child_path,
+                            relation_id,
+                            assembly_id,
+                            slot_lookup,
+                            warnings,
+                        )
                     })
                     .collect();
                 serde_json::Value::Array(rewritten)
@@ -1605,9 +1622,7 @@ mod tests {
 
     #[test]
     fn compound_plan_exposes_declared_slot_ids() {
-        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group {
-            group_id: elem(7),
-        });
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group { group_id: elem(7) });
         plan.output_shape = PromotionOutputShape::Compound {
             child_slots: vec![child_slot("front"), child_slot("back")],
         };
@@ -1617,9 +1632,7 @@ mod tests {
 
     #[test]
     fn validate_plan_flags_duplicate_slot_ids_when_required() {
-        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group {
-            group_id: elem(1),
-        });
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group { group_id: elem(1) });
         plan.output_shape = PromotionOutputShape::Compound {
             child_slots: vec![child_slot("dup"), child_slot("dup")],
         };
@@ -1630,9 +1643,7 @@ mod tests {
 
     #[test]
     fn validate_plan_passes_when_unique_slot_check_is_off() {
-        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group {
-            group_id: elem(1),
-        });
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group { group_id: elem(1) });
         plan.output_shape = PromotionOutputShape::Compound {
             child_slots: vec![child_slot("dup"), child_slot("dup")],
         };
@@ -1670,24 +1681,21 @@ mod tests {
             element_ids: vec![elem(1)],
         });
         plan.element_id_preservation.mode = ElementIdPreservationMode::None;
-        plan.element_id_preservation.source_element_to_slot_realization =
-            vec![(elem(1), "anything".into())];
+        plan.element_id_preservation
+            .source_element_to_slot_realization = vec![(elem(1), "anything".into())];
         let blockers = validate_element_id_preservation(&plan, &HashSet::new());
         assert!(blockers.is_empty());
     }
 
     #[test]
     fn duplicate_source_to_same_realization_is_flagged() {
-        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group {
-            group_id: elem(99),
-        });
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group { group_id: elem(99) });
         plan.output_shape = PromotionOutputShape::Compound {
             child_slots: vec![child_slot("only")],
         };
-        plan.element_id_preservation.source_element_to_slot_realization = vec![
-            (elem(1), "only".into()),
-            (elem(2), "only".into()),
-        ];
+        plan.element_id_preservation
+            .source_element_to_slot_realization =
+            vec![(elem(1), "only".into()), (elem(2), "only".into())];
         let blockers = validate_element_id_preservation(&plan, &HashSet::new());
         assert_eq!(blockers.len(), 1);
         match &blockers[0] {
@@ -1706,14 +1714,12 @@ mod tests {
 
     #[test]
     fn target_id_occupied_outside_replacement_set_is_flagged() {
-        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group {
-            group_id: elem(1),
-        });
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group { group_id: elem(1) });
         plan.output_shape = PromotionOutputShape::Compound {
             child_slots: vec![child_slot("a")],
         };
-        plan.element_id_preservation.source_element_to_slot_realization =
-            vec![(elem(1), "a".into())];
+        plan.element_id_preservation
+            .source_element_to_slot_realization = vec![(elem(1), "a".into())];
         let mut existing = HashSet::new();
         existing.insert(elem(1));
         let blockers = validate_element_id_preservation(&plan, &existing);
@@ -1727,16 +1733,13 @@ mod tests {
 
     #[test]
     fn realization_without_stable_slot_address_is_flagged_for_compound() {
-        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group {
-            group_id: elem(99),
-        });
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group { group_id: elem(99) });
         plan.output_shape = PromotionOutputShape::Compound {
             child_slots: vec![child_slot("known")],
         };
-        plan.element_id_preservation.source_element_to_slot_realization = vec![
-            (elem(1), "unknown".into()),
-            (elem(2), "".into()),
-        ];
+        plan.element_id_preservation
+            .source_element_to_slot_realization =
+            vec![(elem(1), "unknown".into()), (elem(2), "".into())];
         let blockers = validate_element_id_preservation(&plan, &HashSet::new());
         assert_eq!(blockers.len(), 2);
         for b in &blockers {
@@ -1752,8 +1755,8 @@ mod tests {
         let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Selection {
             element_ids: vec![elem(1)],
         });
-        plan.element_id_preservation.source_element_to_slot_realization =
-            vec![(elem(1), "should-be-empty".into())];
+        plan.element_id_preservation
+            .source_element_to_slot_realization = vec![(elem(1), "should-be-empty".into())];
         let blockers = validate_element_id_preservation(&plan, &HashSet::new());
         assert_eq!(blockers.len(), 1);
         assert!(matches!(
@@ -1764,16 +1767,13 @@ mod tests {
 
     #[test]
     fn clean_compound_preservation_yields_no_blockers() {
-        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group {
-            group_id: elem(99),
-        });
+        let mut plan = PromotionPlan::new_leaf(PromotionSourceKind::Group { group_id: elem(99) });
         plan.output_shape = PromotionOutputShape::Compound {
             child_slots: vec![child_slot("a"), child_slot("b")],
         };
-        plan.element_id_preservation.source_element_to_slot_realization = vec![
-            (elem(1), "a".into()),
-            (elem(2), "b".into()),
-        ];
+        plan.element_id_preservation
+            .source_element_to_slot_realization =
+            vec![(elem(1), "a".into()), (elem(2), "b".into())];
         let blockers = validate_element_id_preservation(&plan, &HashSet::new());
         assert!(blockers.is_empty());
     }
@@ -1857,7 +1857,10 @@ mod tests {
                 element_ids: vec![elem(1), elem(2)],
             }
         );
-        assert_eq!(plan.source_replacement, SourceReplacementPolicy::NoReplacement);
+        assert_eq!(
+            plan.source_replacement,
+            SourceReplacementPolicy::NoReplacement
+        );
         assert!(plan
             .element_id_preservation
             .source_element_to_slot_realization
@@ -1900,8 +1903,8 @@ mod tests {
 
     // === DefaultPromotionDraftEmitter ======================================
 
-    fn leaf_body_builder()
-    -> impl FnMut(&PromotionPlan) -> Result<Definition, PromotionEmissionError> {
+    fn leaf_body_builder(
+    ) -> impl FnMut(&PromotionPlan) -> Result<Definition, PromotionEmissionError> {
         |plan| {
             // Carry the selection size into the name so tests can verify
             // the body builder actually saw the plan.
@@ -1910,9 +1913,9 @@ mod tests {
                 PromotionSourceKind::Group { .. } => 1,
                 PromotionSourceKind::SemanticAssembly { .. } => 1,
             };
-            Ok(crate::plugins::definition_authoring::blank_definition(format!(
-                "promoted-{count}"
-            )))
+            Ok(crate::plugins::definition_authoring::blank_definition(
+                format!("promoted-{count}"),
+            ))
         }
     }
 
@@ -2066,8 +2069,8 @@ mod tests {
             element_ids: vec![elem(1)],
         });
         plan.element_id_preservation.mode = ElementIdPreservationMode::None;
-        plan.element_id_preservation.source_element_to_slot_realization =
-            vec![(elem(1), String::new())];
+        plan.element_id_preservation
+            .source_element_to_slot_realization = vec![(elem(1), String::new())];
 
         let mut emitter =
             DefaultPromotionDraftEmitter::new(&mut drafts, &existing, leaf_body_builder());
@@ -2122,7 +2125,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            SemanticAssemblyAdapterError::EmptyAssembly { assembly_id: elem(100) }
+            SemanticAssemblyAdapterError::EmptyAssembly {
+                assembly_id: elem(100)
+            }
         );
     }
 
@@ -2197,7 +2202,12 @@ mod tests {
         // require_unique_slot_ids is enforced by validate_plan downstream.
         assert!(out.plan.validation.require_unique_slot_ids);
         // Provenance carries the AuthoringScript payload.
-        let payload = out.plan.provenance.authoring_script_payload.as_ref().unwrap();
+        let payload = out
+            .plan
+            .provenance
+            .authoring_script_payload
+            .as_ref()
+            .unwrap();
         assert_eq!(payload["kind"], "semantic_assembly");
         assert_eq!(payload["assembly_type"], "test_assembly");
     }
@@ -2279,10 +2289,13 @@ mod tests {
             member(2, "wall", AssemblyMemberKind::AuthoredEntity, None),
         ]);
         // External assembly references the first wall.
-        input.external_graph.memberships.push(ExternalAssemblyMembership {
-            assembly_id: elem(200),
-            member_targets: vec![elem(1)],
-        });
+        input
+            .external_graph
+            .memberships
+            .push(ExternalAssemblyMembership {
+                assembly_id: elem(200),
+                member_targets: vec![elem(1)],
+            });
         // External relation touches the second wall.
         input.external_graph.relations.push(ExternalRelation {
             relation_id: elem(300),
@@ -2302,7 +2315,10 @@ mod tests {
         assert_eq!(external.from_members, vec![elem(1)]);
         assert_eq!(external.to_slot_ids, vec!["wall_1".to_string()]);
         assert_eq!(out.migration_diff.retargeted_relations.len(), 1);
-        assert_eq!(out.migration_diff.retargeted_relations[0].relation_id, elem(300));
+        assert_eq!(
+            out.migration_diff.retargeted_relations[0].relation_id,
+            elem(300)
+        );
     }
 
     #[test]
@@ -2401,12 +2417,9 @@ mod tests {
             member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
             member(2, "leaf", AssemblyMemberKind::AuthoredEntity, None),
         ]);
-        input.internal_relations.push(internal_relation(
-            30,
-            elem(1),
-            elem(2),
-            "hinges_on",
-        ));
+        input
+            .internal_relations
+            .push(internal_relation(30, elem(1), elem(2), "hinges_on"));
         let out = adapter.build_plan_and_diff(input).unwrap();
 
         assert_eq!(out.migration_diff.candidate_relation_templates.len(), 1);
@@ -2425,9 +2438,12 @@ mod tests {
             replace_source: false,
             provenance: Default::default(),
         };
-        let mut input = assembly_input_for(vec![
-            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
-        ]);
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
         // The source assembly itself is the relation's source endpoint
         // (as if the assembly "contains" the frame).
         input.internal_relations.push(internal_relation(
@@ -2451,19 +2467,19 @@ mod tests {
             replace_source: false,
             provenance: Default::default(),
         };
-        let mut input = assembly_input_for(vec![
-            member(1, "frame", AssemblyMemberKind::AuthoredEntity, None),
-        ]);
+        let mut input = assembly_input_for(vec![member(
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
+        )]);
         // The relation has one endpoint inside the source (frame=elem(1))
         // and one endpoint that is neither the assembly itself nor a
         // source member (elem(99)). It cannot be lifted into a template
         // and lands in `preserved_relations`.
-        input.internal_relations.push(internal_relation(
-            31,
-            elem(1),
-            elem(99),
-            "anchored_to",
-        ));
+        input
+            .internal_relations
+            .push(internal_relation(31, elem(1), elem(99), "anchored_to"));
         let out = adapter.build_plan_and_diff(input).unwrap();
 
         assert!(out.migration_diff.candidate_relation_templates.is_empty());
@@ -2490,12 +2506,9 @@ mod tests {
         // Relation between wall #1 and wall #3 — the indexed slot id
         // (`wall_1` / `wall_3`) must be the template's endpoint
         // address, NOT the role.
-        input.internal_relations.push(internal_relation(
-            40,
-            elem(1),
-            elem(3),
-            "adjacent_to",
-        ));
+        input
+            .internal_relations
+            .push(internal_relation(40, elem(1), elem(3), "adjacent_to"));
         let out = adapter.build_plan_and_diff(input).unwrap();
 
         let template = &out.migration_diff.candidate_relation_templates[0];
@@ -2620,7 +2633,10 @@ mod tests {
             req.classification,
             ExternalRelationClassification::HostContract
         );
-        assert_eq!(req.endpoint_in_definition, RelationEndpoint::Slot("frame".into()));
+        assert_eq!(
+            req.endpoint_in_definition,
+            RelationEndpoint::Slot("frame".into())
+        );
         assert_eq!(req.descriptor_id.as_deref(), Some("hosted_on_wall"));
         assert_eq!(req.source_relation_id, elem(30));
 
@@ -2788,7 +2804,9 @@ mod tests {
         // descriptor_id is None because the lookup missed (the
         // requirement still records relation_type via its primary
         // field).
-        assert!(out.plan.external_context_requirements[0].descriptor_id.is_none());
+        assert!(out.plan.external_context_requirements[0]
+            .descriptor_id
+            .is_none());
     }
 
     #[test]
@@ -2863,12 +2881,13 @@ mod tests {
         assert!(out.plan.external_context_requirements.is_empty());
         // No UnknownRelationDescriptor warning (the rule isn't even
         // consulted) and no ExternalRelationDropped warning.
-        assert!(!out
-            .migration_diff
-            .warnings
-            .iter()
-            .any(|w| matches!(w, MigrationWarning::UnknownRelationDescriptor { .. })
-                || matches!(w, MigrationWarning::ExternalRelationDropped { .. })));
+        assert!(!out.migration_diff.warnings.iter().any(|w| matches!(
+            w,
+            MigrationWarning::UnknownRelationDescriptor { .. }
+        ) || matches!(
+            w,
+            MigrationWarning::ExternalRelationDropped { .. }
+        )));
     }
 
     #[test]
@@ -3070,7 +3089,10 @@ mod tests {
             provenance: Default::default(),
         };
         let mut input = assembly_input_for(vec![member(
-            1, "frame", AssemblyMemberKind::AuthoredEntity, None,
+            1,
+            "frame",
+            AssemblyMemberKind::AuthoredEntity,
+            None,
         )]);
         input.internal_relations.push(InternalRelationSnapshot {
             relation_id: elem(30),
@@ -3125,8 +3147,13 @@ mod tests {
             relation_type: "hosted_on_wall".into(),
             parameters: serde_json::Value::Null,
         });
-        let mut rules =
-            rules_with(&[("hosted_on_wall", ExternalRelationClassification::HostContract)], None);
+        let mut rules = rules_with(
+            &[(
+                "hosted_on_wall",
+                ExternalRelationClassification::HostContract,
+            )],
+            None,
+        );
         rules.host_contract_kinds.insert(
             "hosted_on_wall".into(),
             HostingContractKindId("architecture::wall_opening".into()),
@@ -3137,9 +3164,7 @@ mod tests {
         let req = &out.plan.external_context_requirements[0];
         assert_eq!(
             req.host_contract_kind,
-            Some(HostingContractKindId(
-                "architecture::wall_opening".into(),
-            ))
+            Some(HostingContractKindId("architecture::wall_opening".into(),))
         );
     }
 
@@ -3165,7 +3190,10 @@ mod tests {
             parameters: serde_json::Value::Null,
         });
         let mut rules = rules_with(
-            &[("needs_room", ExternalRelationClassification::RequiredContext)],
+            &[(
+                "needs_room",
+                ExternalRelationClassification::RequiredContext,
+            )],
             None,
         );
         // Even if a host_contract_kinds entry exists for this descriptor,
@@ -3235,9 +3263,7 @@ mod tests {
             classification: ExternalRelationClassification::HostContract,
             endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
             descriptor_id: Some("hosted_on_wall".into()),
-            host_contract_kind: Some(HostingContractKindId(
-                "architecture::wall_opening".into(),
-            )),
+            host_contract_kind: Some(HostingContractKindId("architecture::wall_opening".into())),
             source_relation_id: elem(30),
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -3254,9 +3280,7 @@ mod tests {
             classification: ExternalRelationClassification::HostContract,
             endpoint_in_definition: RelationEndpoint::Slot("frame".into()),
             descriptor_id: None,
-            host_contract_kind: Some(HostingContractKindId(
-                "architecture::wall_opening".into(),
-            )),
+            host_contract_kind: Some(HostingContractKindId("architecture::wall_opening".into())),
             source_relation_id: elem(30),
         };
         let advisory = ExternalContextRequirement {

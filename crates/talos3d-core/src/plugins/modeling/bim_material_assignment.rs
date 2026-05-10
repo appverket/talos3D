@@ -413,8 +413,7 @@ mod tests {
     fn layer_set_total_thickness_is_sum() {
         let set = BimMaterialLayerSet::new(vec![
             BimMaterialLayer::new(gypsum(), 0.0125),
-            BimMaterialLayer::new(mineral_wool(), 0.15)
-                .with_function(LayerFunction::Insulation),
+            BimMaterialLayer::new(mineral_wool(), 0.15).with_function(LayerFunction::Insulation),
             BimMaterialLayer::new(gypsum(), 0.0125),
         ]);
         assert!((set.total_thickness_m() - 0.175).abs() < 1e-9);
@@ -429,13 +428,12 @@ mod tests {
 
         let authored = BimMaterialLayerSet::new(vec![
             BimMaterialLayer::new(gypsum(), 0.0125).with_function(LayerFunction::Finish),
-            BimMaterialLayer::new(mineral_wool(), 0.15)
-                .with_function(LayerFunction::Insulation),
+            BimMaterialLayer::new(mineral_wool(), 0.15).with_function(LayerFunction::Insulation),
         ]);
         assert!(authored.is_fully_authored());
 
         let zero_thickness = BimMaterialLayerSet::new(vec![
-            BimMaterialLayer::new(gypsum(), 0.0).with_function(LayerFunction::Finish),
+            BimMaterialLayer::new(gypsum(), 0.0).with_function(LayerFunction::Finish)
         ]);
         assert!(!zero_thickness.is_fully_authored());
     }
@@ -444,7 +442,10 @@ mod tests {
     fn layer_set_total_thickness_param_round_trip() {
         let set = BimMaterialLayerSet::new(vec![BimMaterialLayer::new(concrete(), 0.2)])
             .with_total_thickness_param("wall_thickness_m");
-        assert_eq!(set.total_thickness_param.as_deref(), Some("wall_thickness_m"));
+        assert_eq!(
+            set.total_thickness_param.as_deref(),
+            Some("wall_thickness_m")
+        );
     }
 
     #[test]
@@ -464,9 +465,8 @@ mod tests {
 
     #[test]
     fn constituent_set_rejects_out_of_bounds_fraction() {
-        let bad = BimMaterialConstituentSet::new(vec![
-            BimMaterialConstituent::new(concrete(), 1.5),
-        ]);
+        let bad =
+            BimMaterialConstituentSet::new(vec![BimMaterialConstituent::new(concrete(), 1.5)]);
         assert!(!bad.is_well_formed(1e-6));
     }
 
@@ -481,12 +481,10 @@ mod tests {
         for assignment in [
             BimMaterialAssignment::single(concrete()),
             BimMaterialAssignment::layered(vec![
-                BimMaterialLayer::new(gypsum(), 0.0125)
-                    .with_function(LayerFunction::Finish),
+                BimMaterialLayer::new(gypsum(), 0.0125).with_function(LayerFunction::Finish),
                 BimMaterialLayer::new(mineral_wool(), 0.15)
                     .with_function(LayerFunction::Insulation),
-                BimMaterialLayer::new(gypsum(), 0.0125)
-                    .with_function(LayerFunction::Finish),
+                BimMaterialLayer::new(gypsum(), 0.0125).with_function(LayerFunction::Finish),
             ]),
             BimMaterialAssignment::constituents(vec![
                 BimMaterialConstituent::new(concrete(), 0.95),

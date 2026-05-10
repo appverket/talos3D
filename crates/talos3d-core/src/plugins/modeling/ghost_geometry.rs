@@ -240,7 +240,11 @@ pub struct ClearanceEnvelope {
 
 impl ClearanceEnvelope {
     /// Construct a minimal `Usable` envelope.
-    pub fn usable(owner: ElementId, owner_concept: impl Into<String>, geometry: ClearanceShape) -> Self {
+    pub fn usable(
+        owner: ElementId,
+        owner_concept: impl Into<String>,
+        geometry: ClearanceShape,
+    ) -> Self {
         Self {
             owner,
             owner_concept: owner_concept.into(),
@@ -568,7 +572,10 @@ pub fn check_support_corridor(
 pub fn collect_world_obstacles(world: &World) -> Vec<GhostObstacle> {
     let mut out = Vec::new();
     let mut seen: HashSet<ElementId> = HashSet::new();
-    let push = |id: ElementId, bounds: EntityBounds, out: &mut Vec<GhostObstacle>, seen: &mut HashSet<ElementId>| {
+    let push = |id: ElementId,
+                bounds: EntityBounds,
+                out: &mut Vec<GhostObstacle>,
+                seen: &mut HashSet<ElementId>| {
         if seen.insert(id) {
             out.push(GhostObstacle {
                 element_id: id,
@@ -686,11 +693,7 @@ mod tests {
     }
 
     fn unit_envelope(owner: ElementId, center: Vec3) -> ClearanceEnvelope {
-        ClearanceEnvelope::usable(
-            owner,
-            "test.concept",
-            box_shape(center, Vec3::splat(0.5)),
-        )
+        ClearanceEnvelope::usable(owner, "test.concept", box_shape(center, Vec3::splat(0.5)))
     }
 
     fn obstacle(id: u64, center: Vec3, half: Vec3) -> GhostObstacle {
@@ -972,12 +975,10 @@ mod tests {
         // 21 absent from obstacle index → MissingContributors finding.
         let obs = vec![obstacle(20, Vec3::ZERO, Vec3::splat(0.5))];
         let findings = check_support_corridor(&corr, &obs);
-        assert!(
-            findings
-                .iter()
-                .any(|f| f.reason == FindingReason::MissingContributors
-                    && f.offending_element == ElementId(21))
-        );
+        assert!(findings
+            .iter()
+            .any(|f| f.reason == FindingReason::MissingContributors
+                && f.offending_element == ElementId(21)));
     }
 
     #[test]

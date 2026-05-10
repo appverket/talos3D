@@ -571,9 +571,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     world.insert_resource(definitions);
     let mut definition_libraries = definition_libraries.unwrap_or_default();
-    for (library_id, migrated) in
-        definition_libraries.migrate_legacy_material_assignments()
-    {
+    for (library_id, migrated) in definition_libraries.migrate_legacy_material_assignments() {
         info!(
             "PP-099: migrated {} definition(s) in project library '{}' \
              from legacy domain_data material_assignment: {}",

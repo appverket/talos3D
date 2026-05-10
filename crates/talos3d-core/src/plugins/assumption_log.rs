@@ -41,10 +41,7 @@ pub enum AssumptionAnchor {
     /// A discipline-specific top-level intent — `kind` is a free
     /// string the capability crate chooses (e.g. `"building"`,
     /// `"storey"`, `"system"`, `"hull"`, `"powertrain"`).
-    Domain {
-        kind: String,
-        element_id: ElementId,
-    },
+    Domain { kind: String, element_id: ElementId },
     /// Anchored at a single element regardless of role. Useful when an
     /// assumption applies only to one entity.
     Element { element_id: ElementId },
@@ -234,10 +231,7 @@ impl AssumptionLog {
     /// independent of the source — it tells the user the assumption
     /// will not be revisited automatically.
     pub fn project_brief(&self) -> Vec<String> {
-        self.entries
-            .iter()
-            .map(|e| project_entry(e))
-            .collect()
+        self.entries.iter().map(|e| project_entry(e)).collect()
     }
 
     /// Projection grouped by `kind`, useful for findings panels that
@@ -265,8 +259,10 @@ impl AssumptionLog {
         self.entries
             .iter()
             .filter(|e| {
-                matches!(e.default_source, AssumptionDefaultSource::LLMHeuristic { .. })
-                    && !e.user_locked
+                matches!(
+                    e.default_source,
+                    AssumptionDefaultSource::LLMHeuristic { .. }
+                ) && !e.user_locked
             })
             .count()
     }
@@ -281,10 +277,7 @@ fn project_entry(entry: &AssumptionEntry) -> String {
         AssumptionDefaultSource::LLMHeuristic { .. } => "Assumed (heuristic)",
     };
     let body = if entry.plain_language_summary.is_empty() {
-        format!(
-            "{}: {} = {}",
-            lead, entry.kind, entry.chosen_value
-        )
+        format!("{}: {} = {}", lead, entry.kind, entry.chosen_value)
     } else {
         format!("{}: {}", lead, entry.plain_language_summary)
     };
@@ -410,13 +403,21 @@ mod tests {
     #[test]
     fn project_brief_by_kind_groups_in_record_order() {
         let mut log = AssumptionLog::new(AssumptionAnchor::project_default());
-        log.record(user_entry("truss_variant", Value::String("a".into()), "first"));
+        log.record(user_entry(
+            "truss_variant",
+            Value::String("a".into()),
+            "first",
+        ));
         log.record(user_entry(
             "foundation_choice",
             Value::String("slab".into()),
             "slab",
         ));
-        log.record(user_entry("truss_variant", Value::String("b".into()), "second"));
+        log.record(user_entry(
+            "truss_variant",
+            Value::String("b".into()),
+            "second",
+        ));
         let groups = log.project_brief_by_kind();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].0, "truss_variant");
@@ -464,7 +465,11 @@ mod tests {
     #[test]
     fn log_round_trips_through_json() {
         let mut log = AssumptionLog::new(AssumptionAnchor::domain("building", ElementId(1)));
-        log.record(user_entry("truss_variant", Value::String("storage".into()), "storage"));
+        log.record(user_entry(
+            "truss_variant",
+            Value::String("storage".into()),
+            "storage",
+        ));
         log.record(heuristic_entry(
             "ridge_height_mm",
             Value::Number(7800.into()),

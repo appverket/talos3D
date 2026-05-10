@@ -1290,15 +1290,16 @@ fn apply_patch_to_definition(
             match material_id {
                 Some(id) => {
                     // Ensure domain_data.architectural exists and is an object.
-                    let arch = root
-                        .entry("architectural")
-                        .or_insert_with(|| json!({}));
+                    let arch = root.entry("architectural").or_insert_with(|| json!({}));
                     if !arch.is_object() {
                         *arch = json!({});
                     }
                     arch.as_object_mut()
                         .expect("architectural is an object")
-                        .insert("material_assignment".to_string(), json!({ "material_id": id }));
+                        .insert(
+                            "material_assignment".to_string(),
+                            json!({ "material_id": id }),
+                        );
                 }
                 None => {
                     // Remove the key from architectural if it exists.

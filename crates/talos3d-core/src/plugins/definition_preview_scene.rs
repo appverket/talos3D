@@ -38,7 +38,7 @@
 //! carries `ElementId`.
 
 use bevy::{
-    camera::{RenderTarget, visibility::RenderLayers},
+    camera::{visibility::RenderLayers, RenderTarget},
     gizmos::config::{GizmoConfigGroup, GizmoConfigStore},
     prelude::*,
     render::render_resource::{
@@ -48,9 +48,7 @@ use bevy::{
 use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 
 use crate::plugins::{
-    definition_authoring::{
-        draft_effective_definition, DefinitionDraftRegistry,
-    },
+    definition_authoring::{draft_effective_definition, DefinitionDraftRegistry},
     definition_browser::{DefinitionEditorNode, DefinitionsWindowState},
     identity::ElementId,
     modeling::{
@@ -266,8 +264,8 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
             },
             Transform::from_rotation(Quat::from_euler(
                 EulerRot::YXZ,
-                std::f32::consts::FRAC_PI_4,         // 45° yaw
-                -std::f32::consts::FRAC_PI_4 * 0.8,  // 36° pitch down
+                std::f32::consts::FRAC_PI_4,        // 45° yaw
+                -std::f32::consts::FRAC_PI_4 * 0.8, // 36° pitch down
                 0.0,
             )),
             PREVIEW_RENDER_LAYER,
@@ -402,10 +400,7 @@ pub fn sync_preview_to_active_draft(world: &mut World) {
 /// sentinel `ElementId`.
 pub fn tag_preview_generated_parts(
     mut commands: Commands,
-    untagged: Query<
-        (Entity, &GeneratedOccurrencePart),
-        Without<PreviewOnly>,
-    >,
+    untagged: Query<(Entity, &GeneratedOccurrencePart), Without<PreviewOnly>>,
 ) {
     for (entity, part) in &untagged {
         if part.owner == PREVIEW_ELEMENT_ID_SENTINEL {
@@ -465,7 +460,12 @@ pub fn draw_preview_slot_highlight(
         // Selection takes priority over hover.
         if let Some(sel_id) = &selected_slot_id {
             if slot_path_matches(&part.slot_path, sel_id) {
-                draw_extrusion_wireframe_preview(&mut gizmos, extrusion, rot, PREVIEW_HIGHLIGHT_COLOR);
+                draw_extrusion_wireframe_preview(
+                    &mut gizmos,
+                    extrusion,
+                    rot,
+                    PREVIEW_HIGHLIGHT_COLOR,
+                );
                 continue;
             }
         }
@@ -474,7 +474,12 @@ pub fn draw_preview_slot_highlight(
         if let Some(hov_id) = &hovered_slot_id {
             if Some(hov_id.as_str()) != selected_slot_id.as_deref() {
                 if slot_path_matches(&part.slot_path, hov_id) {
-                    draw_extrusion_wireframe_preview(&mut gizmos, extrusion, rot, PREVIEW_HOVER_COLOR);
+                    draw_extrusion_wireframe_preview(
+                        &mut gizmos,
+                        extrusion,
+                        rot,
+                        PREVIEW_HOVER_COLOR,
+                    );
                 }
             }
         }
@@ -593,10 +598,7 @@ pub fn draw_definition_3d_preview(
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(26, 30, 34))
         .corner_radius(6.0)
-        .stroke(egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgb(64, 72, 78),
-        ))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(64, 72, 78)))
         .show(ui, |ui| {
             ui.set_min_size(egui::vec2(width, available_height));
             ui.set_max_size(egui::vec2(width, available_height));
@@ -615,11 +617,9 @@ pub fn draw_definition_3d_preview(
             }
 
             // Resolve the egui texture ID for the render-target image.
-            let texture_id = contexts
-                .image_id(&scene.render_target)
-                .unwrap_or_else(|| {
-                    contexts.add_image(EguiTextureHandle::Weak(scene.render_target.id()))
-                });
+            let texture_id = contexts.image_id(&scene.render_target).unwrap_or_else(|| {
+                contexts.add_image(EguiTextureHandle::Weak(scene.render_target.id()))
+            });
 
             // PP-DBUX4: add Sense::click() so egui reports primary clicks on
             // the preview image.  Sense::hover() is included by default in
@@ -716,8 +716,7 @@ fn selected_slot_id_from_node(node: &DefinitionEditorNode) -> Option<String> {
 /// A child path is one where the path starts with `slot_id + "."`, e.g.
 /// `"glazing.left_pane"` is a child of `"glazing"`.
 fn slot_path_matches(slot_path: &str, slot_id: &str) -> bool {
-    slot_path == slot_id
-        || slot_path.starts_with(&format!("{slot_id}."))
+    slot_path == slot_id || slot_path.starts_with(&format!("{slot_id}."))
 }
 
 /// Minimal slab AABB type used for the ray-AABB intersection.
@@ -734,9 +733,21 @@ struct Aabb3d {
 /// nearest hit.
 fn ray_aabb_intersection(origin: Vec3, direction: Vec3, aabb: Aabb3d) -> Option<f32> {
     let inv = Vec3::new(
-        if direction.x.abs() > f32::EPSILON { 1.0 / direction.x } else { f32::INFINITY },
-        if direction.y.abs() > f32::EPSILON { 1.0 / direction.y } else { f32::INFINITY },
-        if direction.z.abs() > f32::EPSILON { 1.0 / direction.z } else { f32::INFINITY },
+        if direction.x.abs() > f32::EPSILON {
+            1.0 / direction.x
+        } else {
+            f32::INFINITY
+        },
+        if direction.y.abs() > f32::EPSILON {
+            1.0 / direction.y
+        } else {
+            f32::INFINITY
+        },
+        if direction.z.abs() > f32::EPSILON {
+            1.0 / direction.z
+        } else {
+            f32::INFINITY
+        },
     );
 
     let t1 = (aabb.min - origin) * inv;
@@ -829,10 +840,7 @@ mod tests {
         // Ray along +Z from z = -5, aimed at origin.
         let hit = ray_aabb_intersection(Vec3::new(0.0, 0.0, -5.0), Vec3::Z, aabb);
         assert!(hit.is_some(), "centre ray must hit the box");
-        assert!(
-            (hit.unwrap() - 4.5).abs() < 1e-4,
-            "entry t should be ~4.5"
-        );
+        assert!((hit.unwrap() - 4.5).abs() < 1e-4, "entry t should be ~4.5");
 
         // Ray along +Z but offset in X so it misses.
         let aabb2 = Aabb3d {

@@ -449,7 +449,10 @@ mod tests {
 
     #[test]
     fn asset_kind_constant_matches() {
-        assert_eq!(CuratedManifest::asset_kind().as_str(), CURATED_MANIFEST_ASSET_KIND);
+        assert_eq!(
+            CuratedManifest::asset_kind().as_str(),
+            CURATED_MANIFEST_ASSET_KIND
+        );
     }
 
     #[test]
@@ -582,7 +585,9 @@ mod tests {
             "no_concept",
             serde_json::json!({}),
         ));
-        let report = manifests.walk_manifest(&id, &kinds).expect("manifest exists");
+        let report = manifests
+            .walk_manifest(&id, &kinds)
+            .expect("manifest exists");
         assert!(report.refs.is_empty());
         assert_eq!(report.missing_required.len(), 1);
         assert_eq!(report.missing_required[0].path, "/concept_ref");

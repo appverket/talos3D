@@ -14,9 +14,9 @@ use crate::{
         commands::{enqueue_create_boxed_entity, enqueue_create_definition},
         cursor::CursorWorldPos,
         definition_authoring::{
-            apply_patch_to_draft, blank_definition,
-            draft_effective_definition, preview_registry_for_draft, validate_draft,
-            DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry, DefinitionPatch,
+            apply_patch_to_draft, blank_definition, draft_effective_definition,
+            preview_registry_for_draft, validate_draft, DefinitionDraft, DefinitionDraftId,
+            DefinitionDraftRegistry, DefinitionPatch,
         },
         definition_preview_scene::{
             draw_definition_3d_preview, DefinitionPreviewScene, PendingPreviewClick,
@@ -452,8 +452,7 @@ pub fn execute_open_selected_occurrence_definition(
     world: &mut World,
     _: &Value,
 ) -> Result<CommandResult, String> {
-    let (definition_id, source_slot_path) =
-        selected_occurrence_definition_id_and_slot(world)?;
+    let (definition_id, source_slot_path) = selected_occurrence_definition_id_and_slot(world)?;
 
     let output = execute_open_definition_draft(
         world,
@@ -486,16 +485,20 @@ pub fn execute_open_selected_occurrence_definition(
             if let Some(active_draft_id) = &drafts.active_draft_id.clone() {
                 if let Some(draft) = drafts.get(active_draft_id) {
                     let eff = crate::plugins::definition_authoring::draft_effective_definition(
-                        definitions, libraries, draft,
+                        definitions,
+                        libraries,
+                        draft,
                     );
-                    eff.ok().and_then(|def| {
-                        def.compound.map(|compound| {
-                            compound
-                                .child_slots
-                                .iter()
-                                .any(|s| s.slot_id == top_level_slot)
+                    eff.ok()
+                        .and_then(|def| {
+                            def.compound.map(|compound| {
+                                compound
+                                    .child_slots
+                                    .iter()
+                                    .any(|s| s.slot_id == top_level_slot)
+                            })
                         })
-                    }).unwrap_or(false)
+                        .unwrap_or(false)
                 } else {
                     false
                 }
@@ -506,8 +509,7 @@ pub fn execute_open_selected_occurrence_definition(
 
         if slot_exists {
             if let Some(mut state) = world.get_resource_mut::<DefinitionsWindowState>() {
-                state.selected_node =
-                    DefinitionEditorNode::Slot(top_level_slot);
+                state.selected_node = DefinitionEditorNode::Slot(top_level_slot);
                 state.technical_view_buffer.clear();
                 state.technical_view_error = None;
             }
@@ -654,9 +656,9 @@ pub fn execute_promote_parameter_to_definition_default(
     world: &mut World,
     parameters: &Value,
 ) -> Result<CommandResult, String> {
-    let object = parameters
-        .as_object()
-        .ok_or_else(|| "promote_parameter_to_definition_default requires a JSON object".to_string())?;
+    let object = parameters.as_object().ok_or_else(|| {
+        "promote_parameter_to_definition_default requires a JSON object".to_string()
+    })?;
     let param_name = required_string(object, "parameter_name")?;
 
     // --- Resolve the selected occurrence ---
@@ -816,12 +818,20 @@ impl EditorCommand for PromoteParameterToDefinitionDefaultCommand {
 
     fn apply(&mut self, world: &mut World) {
         restore_definition_draft(world, &self.draft_id, Some(self.after_draft.clone()));
-        restore_occurrence_identity(world, self.occurrence_element_id, self.after_identity.clone());
+        restore_occurrence_identity(
+            world,
+            self.occurrence_element_id,
+            self.after_identity.clone(),
+        );
     }
 
     fn undo(&mut self, world: &mut World) {
         restore_definition_draft(world, &self.draft_id, self.before_draft.clone());
-        restore_occurrence_identity(world, self.occurrence_element_id, self.before_identity.clone());
+        restore_occurrence_identity(
+            world,
+            self.occurrence_element_id,
+            self.before_identity.clone(),
+        );
     }
 }
 
@@ -926,7 +936,11 @@ pub fn draw_definition_lens(
         })
         .unwrap_or(false);
 
-    let fill = if is_hovered { LENS_FILL_HOVER } else { LENS_FILL };
+    let fill = if is_hovered {
+        LENS_FILL_HOVER
+    } else {
+        LENS_FILL
+    };
 
     egui::TopBottomPanel::top("definition_lens")
         .exact_height(DEFINITION_LENS_HEIGHT)
@@ -1681,7 +1695,6 @@ fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry
     );
 }
 
-
 /// PP-DBUX3: unified Definition Editor window with real 3D occurrence preview.
 ///
 /// Four panes:
@@ -1722,8 +1735,7 @@ fn draw_definition_editor(
     };
     sync_inspector_state(state, &active_draft);
 
-    let editor_rect =
-        tool_window_rect(ctx, egui::pos2(568.0, 88.0), INSPECTOR_WINDOW_DEFAULT_SIZE);
+    let editor_rect = tool_window_rect(ctx, egui::pos2(568.0, 88.0), INSPECTOR_WINDOW_DEFAULT_SIZE);
     let mut open = state.inspector_visible;
     egui::Window::new("Definition Editor")
         .id(egui::Id::new("definition_inspector"))
@@ -1743,15 +1755,9 @@ fn draw_definition_editor(
                     .strong();
                 ui.label(heading_text);
                 let (pill_text, pill_color) = if active_draft.dirty {
-                    (
-                        "Draft",
-                        egui::Color32::from_rgb(220, 140, 50),
-                    )
+                    ("Draft", egui::Color32::from_rgb(220, 140, 50))
                 } else {
-                    (
-                        "Published",
-                        egui::Color32::from_rgb(80, 180, 110),
-                    )
+                    ("Published", egui::Color32::from_rgb(80, 180, 110))
                 };
                 ui.label(
                     egui::RichText::new(pill_text)
@@ -1986,15 +1992,10 @@ fn draw_property_tree(
             .default_open(true)
             .show(ui, |ui| {
                 for param in params {
-                    let selected = state.selected_node
-                        == DefinitionEditorNode::Parameter(param.name.clone());
+                    let selected =
+                        state.selected_node == DefinitionEditorNode::Parameter(param.name.clone());
                     let label = egui::RichText::new(&param.name);
-                    let unit_hint = param
-                        .metadata
-                        .unit
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_string();
+                    let unit_hint = param.metadata.unit.as_deref().unwrap_or("").to_string();
                     let secondary = egui::RichText::new(if unit_hint.is_empty() {
                         format!("{:?}", param.param_type)
                     } else {
@@ -2025,16 +2026,12 @@ fn draw_property_tree(
                         let slot_selected =
                             state.selected_node == DefinitionEditorNode::Slot(slot.slot_id.clone());
                         let child_name = child_def_name(&slot.definition_id);
-                        let slot_secondary = egui::RichText::new(format!(
-                            "Role: {} — {}",
-                            slot.role, child_name
-                        ))
-                        .small()
-                        .weak();
-                        let header_id = ui.make_persistent_id(format!(
-                            "def_editor.slot.{}",
-                            slot.slot_id
-                        ));
+                        let slot_secondary =
+                            egui::RichText::new(format!("Role: {} — {}", slot.role, child_name))
+                                .small()
+                                .weak();
+                        let header_id =
+                            ui.make_persistent_id(format!("def_editor.slot.{}", slot.slot_id));
                         egui::collapsing_header::CollapsingState::load_with_default_open(
                             ui.ctx(),
                             header_id,
@@ -2042,8 +2039,8 @@ fn draw_property_tree(
                         )
                         .show_header(ui, |ui| {
                             ui.horizontal(|ui| {
-                                let slot_response = ui
-                                    .selectable_label(slot_selected, &slot.slot_id);
+                                let slot_response =
+                                    ui.selectable_label(slot_selected, &slot.slot_id);
                                 if slot_response.clicked() {
                                     state.selected_node =
                                         DefinitionEditorNode::Slot(slot.slot_id.clone());
@@ -2052,9 +2049,8 @@ fn draw_property_tree(
                                 }
                                 // PP-DBUX4 C: track hover for preview pulse highlight.
                                 if slot_response.hovered() {
-                                    state.hovered_node = Some(
-                                        DefinitionEditorNode::Slot(slot.slot_id.clone()),
-                                    );
+                                    state.hovered_node =
+                                        Some(DefinitionEditorNode::Slot(slot.slot_id.clone()));
                                 }
                                 ui.label(slot_secondary);
                             });
@@ -2099,8 +2095,8 @@ fn draw_property_tree(
                 .default_open(false)
                 .show(ui, |ui| {
                     for anchor in &compound.anchors {
-                        let selected = state.selected_node
-                            == DefinitionEditorNode::Anchor(anchor.id.clone());
+                        let selected =
+                            state.selected_node == DefinitionEditorNode::Anchor(anchor.id.clone());
                         let secondary = egui::RichText::new(&anchor.kind).small().weak();
                         ui.horizontal(|ui| {
                             if ui.selectable_label(selected, &anchor.id).clicked() {
@@ -2123,10 +2119,9 @@ fn draw_property_tree(
                     for constraint in &compound.constraints {
                         let selected = state.selected_node
                             == DefinitionEditorNode::Constraint(constraint.id.clone());
-                        let secondary =
-                            egui::RichText::new(format!("{:?}", constraint.severity))
-                                .small()
-                                .weak();
+                        let secondary = egui::RichText::new(format!("{:?}", constraint.severity))
+                            .small()
+                            .weak();
                         ui.horizontal(|ui| {
                             if ui.selectable_label(selected, &constraint.id).clicked() {
                                 state.selected_node =
@@ -2189,13 +2184,27 @@ fn draw_context_editor(
     match selected_node {
         DefinitionEditorNode::Definition => {
             draw_context_definition_root(
-                ui, state, definitions, libraries, drafts, pending, active_draft_id, active_draft,
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                pending,
+                active_draft_id,
+                active_draft,
                 status,
             );
         }
         DefinitionEditorNode::Parameter(ref name) => {
             draw_context_parameter(
-                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, name,
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                active_draft,
+                name,
                 status,
             );
         }
@@ -2219,25 +2228,54 @@ fn draw_context_editor(
             ref parameter_name,
         } => {
             draw_context_slot_binding(
-                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, slot_id,
-                parameter_name, status,
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                active_draft,
+                slot_id,
+                parameter_name,
+                status,
             );
         }
         DefinitionEditorNode::Anchor(ref anchor_id) => {
             draw_context_anchor(
-                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, anchor_id,
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                active_draft,
+                anchor_id,
                 status,
             );
         }
         DefinitionEditorNode::Constraint(ref constraint_id) => {
             draw_context_constraint(
-                ui, state, definitions, libraries, drafts, active_draft_id, active_draft,
-                constraint_id, status,
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                active_draft,
+                constraint_id,
+                status,
             );
         }
         DefinitionEditorNode::DerivedParameter(ref name) => {
             draw_context_derived_parameter(
-                ui, state, definitions, libraries, drafts, active_draft_id, active_draft, name,
+                ui,
+                state,
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                active_draft,
+                name,
                 status,
             );
         }
@@ -2559,20 +2597,14 @@ fn draw_context_slot(
     };
 
     // Initialize buffers when first shown for this slot
-    if state.selected_slot_role_buffer.is_empty()
-        || state
-            .slot_editor_buffer
-            .is_empty()
-    {
+    if state.selected_slot_role_buffer.is_empty() || state.slot_editor_buffer.is_empty() {
         sync_selected_slot_buffers(state, slot);
     }
 
     // Resolve child definition name (never show raw id to the user)
     let preview_reg = preview_registry_for_draft(definitions, libraries, active_draft)
         .unwrap_or_else(|_| definitions.clone());
-    let child_def = preview_reg
-        .effective_definition(&slot.definition_id)
-        .ok();
+    let child_def = preview_reg.effective_definition(&slot.definition_id).ok();
     let child_def_name = child_def
         .as_ref()
         .map(|d| d.name.clone())
@@ -2615,9 +2647,12 @@ fn draw_context_slot(
         );
     });
     ui.label(
-        egui::RichText::new(format!("{} parameter binding(s)", slot.parameter_bindings.len()))
-            .small()
-            .weak(),
+        egui::RichText::new(format!(
+            "{} parameter binding(s)",
+            slot.parameter_bindings.len()
+        ))
+        .small()
+        .weak(),
     );
 
     // PP-DBUX6: Promote-to-Definition-Default for slot parameter bindings.
@@ -2661,11 +2696,15 @@ fn draw_context_slot(
                 // Already the default — no promote needed.
                 continue;
             }
-            let btn_label = format!("↑ Promote '{}' to {} default", binding.target_param, child_def_name);
+            let btn_label = format!(
+                "↑ Promote '{}' to {} default",
+                binding.target_param, child_def_name
+            );
             if let Some(child_draft_id) = &child_draft_id {
-                let btn = ui.button(&btn_label).on_hover_text(
-                    format!("Make {:.6?} the default for '{}' in '{}'", literal, binding.target_param, child_def_name),
-                );
+                let btn = ui.button(&btn_label).on_hover_text(format!(
+                    "Make {:.6?} the default for '{}' in '{}'",
+                    literal, binding.target_param, child_def_name
+                ));
                 if btn.clicked() {
                     let child_draft_id = child_draft_id.clone();
                     if let Err(error) = apply_patch_to_draft(
@@ -2860,9 +2899,8 @@ fn draw_context_slot_binding(
     );
     ui.add_space(4.0);
     if ui.button("Apply Binding").clicked() {
-        match serde_json::from_str::<crate::plugins::modeling::definition::ParameterBinding>(
-            buffer,
-        ) {
+        match serde_json::from_str::<crate::plugins::modeling::definition::ParameterBinding>(buffer)
+        {
             Ok(updated_binding) => {
                 if let Err(error) = apply_patch_to_draft(
                     definitions,
@@ -2904,9 +2942,7 @@ fn draw_context_anchor(
     status: &mut StatusBarData,
 ) {
     let compound = active_draft.working_copy.compound.as_ref();
-    let Some(anchor) = compound
-        .and_then(|c| c.anchors.iter().find(|a| a.id == anchor_id))
-    else {
+    let Some(anchor) = compound.and_then(|c| c.anchors.iter().find(|a| a.id == anchor_id)) else {
         ui.label(format!("Anchor '{anchor_id}' not found."));
         return;
     };
@@ -2980,8 +3016,8 @@ fn draw_context_constraint(
     status: &mut StatusBarData,
 ) {
     let compound = active_draft.working_copy.compound.as_ref();
-    let Some(constraint) = compound
-        .and_then(|c| c.constraints.iter().find(|c| c.id == constraint_id))
+    let Some(constraint) =
+        compound.and_then(|c| c.constraints.iter().find(|c| c.id == constraint_id))
     else {
         ui.label(format!("Constraint '{constraint_id}' not found."));
         return;
@@ -3012,7 +3048,9 @@ fn draw_context_constraint(
                         libraries,
                         drafts,
                         active_draft_id,
-                        DefinitionPatch::SetConstraint { constraint: updated },
+                        DefinitionPatch::SetConstraint {
+                            constraint: updated,
+                        },
                     ) {
                         status.set_feedback(error, 2.0);
                     } else {
@@ -3056,8 +3094,8 @@ fn draw_context_derived_parameter(
     status: &mut StatusBarData,
 ) {
     let compound = active_draft.working_copy.compound.as_ref();
-    let Some(derived) = compound
-        .and_then(|c| c.derived_parameters.iter().find(|d| d.name == derived_name))
+    let Some(derived) =
+        compound.and_then(|c| c.derived_parameters.iter().find(|d| d.name == derived_name))
     else {
         ui.label(format!("Derived parameter '{derived_name}' not found."));
         return;
@@ -3148,9 +3186,11 @@ fn draw_technical_view(
 
     ui.label(egui::RichText::new("Technical view").strong());
     ui.label(
-        egui::RichText::new("Edits are validated before applying.  Invalid JSON is rejected in place.")
-            .small()
-            .weak(),
+        egui::RichText::new(
+            "Edits are validated before applying.  Invalid JSON is rejected in place.",
+        )
+        .small()
+        .weak(),
     );
     ui.separator();
 
@@ -3167,7 +3207,10 @@ fn draw_technical_view(
         DefinitionEditorNode::Definition => format!("Definition: {}", def.name),
         DefinitionEditorNode::Parameter(n) => format!("Parameter: {n}"),
         DefinitionEditorNode::Slot(id) => format!("Slot: {id}"),
-        DefinitionEditorNode::SlotParameterBinding { slot_id, parameter_name } => {
+        DefinitionEditorNode::SlotParameterBinding {
+            slot_id,
+            parameter_name,
+        } => {
             format!("Binding: {slot_id} → {parameter_name}")
         }
         DefinitionEditorNode::Anchor(id) => format!("Anchor: {id}"),
@@ -3232,13 +3275,12 @@ fn technical_view_json_for_node(
             }
             pretty_json(&value)
         }
-        DefinitionEditorNode::Parameter(name) => {
-            def.interface
-                .parameters
-                .get(name)
-                .map(|p| pretty_json(p))
-                .unwrap_or_else(|| "{}".to_string())
-        }
+        DefinitionEditorNode::Parameter(name) => def
+            .interface
+            .parameters
+            .get(name)
+            .map(|p| pretty_json(p))
+            .unwrap_or_else(|| "{}".to_string()),
         DefinitionEditorNode::Slot(slot_id) => compound
             .and_then(|c| c.child_slots.iter().find(|s| s.slot_id == *slot_id))
             .map(|s| pretty_json(s))
@@ -3288,8 +3330,8 @@ fn apply_technical_view_edit(
         DefinitionEditorNode::Definition => {
             // Parse into a Value and apply patchable fields individually to
             // avoid overwriting child_slots (which were stripped in the buffer).
-            let value: serde_json::Map<String, Value> = serde_json::from_str(buffer)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let value: serde_json::Map<String, Value> =
+                serde_json::from_str(buffer).map_err(|e| format!("JSON parse error: {e}"))?;
             // Apply name if changed
             if let Some(name) = value.get("name").and_then(Value::as_str) {
                 if name != active_draft.working_copy.name {
@@ -3341,7 +3383,8 @@ fn apply_technical_view_edit(
                 )?;
             }
             // Validate after all patches
-            let refreshed = drafts.get(active_draft_id)
+            let refreshed = drafts
+                .get(active_draft_id)
                 .cloned()
                 .ok_or_else(|| "Draft not found after patch".to_string())?;
             validate_draft(definitions, libraries, &refreshed)
@@ -3349,36 +3392,36 @@ fn apply_technical_view_edit(
             return Ok(());
         }
         DefinitionEditorNode::Parameter(_) => {
-            let parameter: def_mod::ParameterDef = serde_json::from_str(buffer)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let parameter: def_mod::ParameterDef =
+                serde_json::from_str(buffer).map_err(|e| format!("JSON parse error: {e}"))?;
             DefinitionPatch::SetParameter { parameter }
         }
         DefinitionEditorNode::Slot(_) => {
-            let child_slot: def_mod::ChildSlotDef = serde_json::from_str(buffer)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let child_slot: def_mod::ChildSlotDef =
+                serde_json::from_str(buffer).map_err(|e| format!("JSON parse error: {e}"))?;
             DefinitionPatch::SetChildSlot { child_slot }
         }
         DefinitionEditorNode::SlotParameterBinding { slot_id, .. } => {
-            let binding: def_mod::ParameterBinding = serde_json::from_str(buffer)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let binding: def_mod::ParameterBinding =
+                serde_json::from_str(buffer).map_err(|e| format!("JSON parse error: {e}"))?;
             DefinitionPatch::SetChildSlotBinding {
                 slot_id: slot_id.clone(),
                 binding,
             }
         }
         DefinitionEditorNode::Anchor(_) => {
-            let anchor: def_mod::AnchorDef = serde_json::from_str(buffer)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let anchor: def_mod::AnchorDef =
+                serde_json::from_str(buffer).map_err(|e| format!("JSON parse error: {e}"))?;
             DefinitionPatch::SetAnchor { anchor }
         }
         DefinitionEditorNode::Constraint(_) => {
-            let constraint: def_mod::ConstraintDef = serde_json::from_str(buffer)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let constraint: def_mod::ConstraintDef =
+                serde_json::from_str(buffer).map_err(|e| format!("JSON parse error: {e}"))?;
             DefinitionPatch::SetConstraint { constraint }
         }
         DefinitionEditorNode::DerivedParameter(_) => {
-            let derived_parameter: def_mod::DerivedParameterDef = serde_json::from_str(buffer)
-                .map_err(|e| format!("JSON parse error: {e}"))?;
+            let derived_parameter: def_mod::DerivedParameterDef =
+                serde_json::from_str(buffer).map_err(|e| format!("JSON parse error: {e}"))?;
             DefinitionPatch::SetDerivedParameter { derived_parameter }
         }
     };
@@ -3431,13 +3474,7 @@ fn draw_assets_strip(
         ui.label(egui::RichText::new("None").small().weak());
     } else {
         for rep in &def.representations {
-            ui.label(
-                egui::RichText::new(format!(
-                    "{:?} / {:?}",
-                    rep.kind, rep.role
-                ))
-                .small(),
-            );
+            ui.label(egui::RichText::new(format!("{:?} / {:?}", rep.kind, rep.role)).small());
         }
     }
 
@@ -3485,13 +3522,9 @@ fn draw_assets_strip(
                     Ok(()) => {
                         // Keep domain_data_buffer in sync with the new value.
                         if let Some(draft) = drafts.get(active_draft_id) {
-                            state.domain_data_buffer =
-                                pretty_json(&draft.working_copy.domain_data);
+                            state.domain_data_buffer = pretty_json(&draft.working_copy.domain_data);
                         }
-                        status.set_feedback(
-                            format!("Material set to '{selected_id}'"),
-                            2.0,
-                        );
+                        status.set_feedback(format!("Material set to '{selected_id}'"), 2.0);
                     }
                     Err(error) => status.set_feedback(error, 2.0),
                 }
@@ -3514,8 +3547,7 @@ fn draw_assets_strip(
                 ) {
                     Ok(()) => {
                         if let Some(draft) = drafts.get(active_draft_id) {
-                            state.domain_data_buffer =
-                                pretty_json(&draft.working_copy.domain_data);
+                            state.domain_data_buffer = pretty_json(&draft.working_copy.domain_data);
                         }
                         status.set_feedback("Material assignment cleared".to_string(), 2.0);
                     }
@@ -4149,7 +4181,7 @@ mod tests {
         modeling::{
             definition::{
                 Definition, DefinitionId, DefinitionKind, DefinitionRegistry, Interface,
-                OverridePolicy, ParameterDef, ParameterMetadata, ParameterSchema, ParamType,
+                OverridePolicy, ParamType, ParameterDef, ParameterMetadata, ParameterSchema,
             },
             occurrence::OccurrenceIdentity,
         },
@@ -4202,29 +4234,25 @@ mod tests {
             .insert(definition.clone());
 
         let mut identity = OccurrenceIdentity::new(def_id.clone(), 1);
-        identity
-            .overrides
-            .set(param_name.to_string(), serde_json::json!(occurrence_override));
-        let entity = app.world_mut().spawn((
-            identity,
-            ElementId(1),
-            crate::plugins::selection::Selected,
-        )).id();
+        identity.overrides.set(
+            param_name.to_string(),
+            serde_json::json!(occurrence_override),
+        );
+        let entity = app
+            .world_mut()
+            .spawn((identity, ElementId(1), crate::plugins::selection::Selected))
+            .id();
 
         (app, entity, def_id)
     }
 
     #[test]
     fn promote_to_definition_default_changes_default_and_clears_override() {
-        let (mut app, _entity, def_id) =
-            build_test_app_with_occurrence("width", 0.6, 0.8);
+        let (mut app, _entity, def_id) = build_test_app_with_occurrence("width", 0.6, 0.8);
 
         // Run the executor.
         let params = serde_json::json!({ "parameter_name": "width" });
-        let result = execute_promote_parameter_to_definition_default(
-            app.world_mut(),
-            &params,
-        );
+        let result = execute_promote_parameter_to_definition_default(app.world_mut(), &params);
         assert!(result.is_ok(), "executor failed: {:?}", result);
 
         // Assert: a draft was created and the default was changed to 0.8.
@@ -4253,14 +4281,10 @@ mod tests {
 
     #[test]
     fn promote_no_op_when_already_default() {
-        let (mut app, _entity, def_id) =
-            build_test_app_with_occurrence("width", 0.6, 0.6);
+        let (mut app, _entity, def_id) = build_test_app_with_occurrence("width", 0.6, 0.6);
 
         let params = serde_json::json!({ "parameter_name": "width" });
-        let result = execute_promote_parameter_to_definition_default(
-            app.world_mut(),
-            &params,
-        );
+        let result = execute_promote_parameter_to_definition_default(app.world_mut(), &params);
         assert!(result.is_ok());
 
         // No draft should have been created.
@@ -4316,12 +4340,11 @@ mod tests {
 
         // Occurrence 1: has override 0.8 → selected.
         let mut identity1 = OccurrenceIdentity::new(def_id.clone(), 1);
-        identity1.overrides.set(param_name.to_string(), serde_json::json!(0.8_f64));
-        app.world_mut().spawn((
-            identity1,
-            ElementId(1),
-            crate::plugins::selection::Selected,
-        ));
+        identity1
+            .overrides
+            .set(param_name.to_string(), serde_json::json!(0.8_f64));
+        app.world_mut()
+            .spawn((identity1, ElementId(1), crate::plugins::selection::Selected));
 
         // Occurrences 2 & 3: no override — will inherit the new default.
         let identity2 = OccurrenceIdentity::new(def_id.clone(), 1);
@@ -4330,10 +4353,7 @@ mod tests {
         app.world_mut().spawn((identity3, ElementId(3)));
 
         let params = serde_json::json!({ "parameter_name": "width" });
-        let result = execute_promote_parameter_to_definition_default(
-            app.world_mut(),
-            &params,
-        );
+        let result = execute_promote_parameter_to_definition_default(app.world_mut(), &params);
         assert!(result.is_ok(), "executor failed: {:?}", result);
 
         // The draft default should now be 0.8.
@@ -4372,7 +4392,8 @@ mod tests {
             if eid.0 == 2 || eid.0 == 3 {
                 assert!(
                     !identity.overrides.contains("width"),
-                    "occurrence {} should have no override (inherits new default)", eid.0
+                    "occurrence {} should have no override (inherits new default)",
+                    eid.0
                 );
             }
         }
@@ -4380,8 +4401,7 @@ mod tests {
 
     #[test]
     fn promote_undo_restores_definition_default_and_occurrence_override() {
-        let (mut app, _entity, def_id) =
-            build_test_app_with_occurrence("width", 0.6, 0.8);
+        let (mut app, _entity, def_id) = build_test_app_with_occurrence("width", 0.6, 0.8);
 
         let params = serde_json::json!({ "parameter_name": "width" });
         execute_promote_parameter_to_definition_default(app.world_mut(), &params)

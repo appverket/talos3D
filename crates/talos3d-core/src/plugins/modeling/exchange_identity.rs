@@ -247,17 +247,14 @@ mod tests {
     #[test]
     fn assign_if_absent_succeeds_on_empty_slot() {
         let mut m = ExchangeIdentityMap::empty();
-        assert!(m
-            .assign_if_absent(ExchangeSystem::Ifc, ifc_guid())
-            .is_ok());
+        assert!(m.assign_if_absent(ExchangeSystem::Ifc, ifc_guid()).is_ok());
         assert_eq!(m.get(&ExchangeSystem::Ifc), Some(&ifc_guid()));
     }
 
     #[test]
     fn assign_if_absent_refuses_on_occupied_slot() {
         let mut m = ExchangeIdentityMap::empty();
-        m.assign_if_absent(ExchangeSystem::Ifc, ifc_guid())
-            .unwrap();
+        m.assign_if_absent(ExchangeSystem::Ifc, ifc_guid()).unwrap();
         let again = m.assign_if_absent(ExchangeSystem::Ifc, ExchangeId::new("different"));
         match again {
             Err(ExchangeAssignmentRefused::AlreadyAssigned { existing }) => {
@@ -272,10 +269,7 @@ mod tests {
     #[test]
     fn overwrite_replaces_existing_and_returns_prior() {
         let mut m = ExchangeIdentityMap::with(ExchangeSystem::Ifc, ifc_guid());
-        let prior = m.overwrite(
-            ExchangeSystem::Ifc,
-            ExchangeId::new("import-derived-guid"),
-        );
+        let prior = m.overwrite(ExchangeSystem::Ifc, ExchangeId::new("import-derived-guid"));
         assert_eq!(prior, Some(ifc_guid()));
         assert_eq!(
             m.get(&ExchangeSystem::Ifc),
@@ -286,8 +280,7 @@ mod tests {
     #[test]
     fn multiple_systems_coexist() {
         let mut m = ExchangeIdentityMap::empty();
-        m.assign_if_absent(ExchangeSystem::Ifc, ifc_guid())
-            .unwrap();
+        m.assign_if_absent(ExchangeSystem::Ifc, ifc_guid()).unwrap();
         m.assign_if_absent(ExchangeSystem::Revit, ExchangeId::new("123456"))
             .unwrap();
         m.assign_if_absent(
