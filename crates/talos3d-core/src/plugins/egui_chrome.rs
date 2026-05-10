@@ -639,10 +639,9 @@ fn draw_category_menu_contents(
         // their original tight layout.
         let needs_separator_now = match previous_kind {
             Some(MenuGroupRenderKind::Inline) => true,
-            Some(MenuGroupRenderKind::Submenu) => group_will_render_inline(
-                group.command_ids,
-                category_commands,
-            ),
+            Some(MenuGroupRenderKind::Submenu) => {
+                group_will_render_inline(group.command_ids, category_commands)
+            }
             None => false,
         };
         if needs_separator_now {
@@ -799,8 +798,7 @@ struct ChromeData<'w, 's> {
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
     selected_entities: Query<'w, 's, Entity, With<Selected>>,
-    selected_with_occurrence:
-        Query<'w, 's, (Entity, &'static OccurrenceIdentity), With<Selected>>,
+    selected_with_occurrence: Query<'w, 's, (Entity, &'static OccurrenceIdentity), With<Selected>>,
     all_occurrences: Query<'w, 's, &'static OccurrenceIdentity>,
     selected_material_assignments:
         Query<'w, 's, (&'static ElementId, Option<&'static MaterialAssignment>), With<Selected>>,

@@ -167,8 +167,7 @@ pub struct RelationTypeDescriptor {
     /// than silently picking a default. Domain crates should set
     /// this on relation descriptors that participate in promotion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub external_classification:
-        Option<crate::plugins::promotion::ExternalRelationClassification>,
+    pub external_classification: Option<crate::plugins::promotion::ExternalRelationClassification>,
     /// PP-A2DB-2 slice C2: when `external_classification` is
     /// `HostContract`, this names the `HostingContractKindId` the
     /// promoted Definition's instantiation must satisfy. Lets
@@ -180,8 +179,7 @@ pub struct RelationTypeDescriptor {
     /// draft descriptors). Validation downstream surfaces a
     /// diagnostic when a HostContract requirement has no kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_contract_kind:
-        Option<crate::plugins::hosting_contracts::HostingContractKindId>,
+    pub host_contract_kind: Option<crate::plugins::hosting_contracts::HostingContractKindId>,
 }
 
 /// One ordered member/layer within a reusable assembly pattern.

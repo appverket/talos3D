@@ -91,9 +91,7 @@ impl<T> QuantityValue<T> {
     pub fn from_evaluator(value: T, node: impl Into<String>) -> Self {
         Self {
             value,
-            provenance: QuantityProvenance::EvaluatorNode {
-                node: node.into(),
-            },
+            provenance: QuantityProvenance::EvaluatorNode { node: node.into() },
         }
     }
 
@@ -491,8 +489,7 @@ mod tests {
         let mut qs = QuantitySet::empty();
         qs.area_gross_m2 = Some(QuantityValue::from_parameter(10.0, "wall.gross_area"));
         qs.area_net_m2 = Some(QuantityValue::from_evaluator(8.5, "wall.net_area"));
-        qs.opening_area_deducted_m2 =
-            Some(QuantityValue::from_evaluator(1.5, "wall.opening_area"));
+        qs.opening_area_deducted_m2 = Some(QuantityValue::from_evaluator(1.5, "wall.opening_area"));
         let mut concrete_q = MaterialQuantity::new(concrete());
         concrete_q.volume_m3 = Some(QuantityValue::from_parameter(0.6, "wall.concrete_vol"));
         qs.upsert_material_quantity(concrete_q);

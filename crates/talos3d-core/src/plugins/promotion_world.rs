@@ -49,7 +49,10 @@ impl std::fmt::Display for AssemblyGatherError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AssemblyNotFound { assembly_id } => {
-                write!(f, "promotion gather: no entity with ElementId {assembly_id:?}")
+                write!(
+                    f,
+                    "promotion gather: no entity with ElementId {assembly_id:?}"
+                )
             }
             Self::NotASemanticAssembly { assembly_id } => write!(
                 f,
@@ -95,8 +98,7 @@ pub fn gather_semantic_assembly_input(
         members.iter().map(|m| m.element_id).collect();
 
     let external_graph = collect_external_graph(world, assembly_id, &source_member_ids);
-    let internal_relations =
-        collect_internal_relations(world, assembly_id, &source_member_ids);
+    let internal_relations = collect_internal_relations(world, assembly_id, &source_member_ids);
 
     Ok(SemanticAssemblyPromotionInput {
         assembly_id,
@@ -117,8 +119,7 @@ pub fn gather_semantic_assembly_input(
         // `gather_semantic_assembly_input_with_capability` (PP-A2DB-2
         // slice C4b) which seeds the rules from the live capability
         // registry.
-        relation_classification:
-            crate::plugins::promotion::RelationClassificationRules::default(),
+        relation_classification: crate::plugins::promotion::RelationClassificationRules::default(),
         source_parameters: assembly.parameters.clone(),
         source_label: assembly.label.clone(),
     })
@@ -159,12 +160,11 @@ pub fn gather_semantic_assembly_input_with_capability(
             }
         }
     }
-    input.relation_classification =
-        crate::plugins::promotion::RelationClassificationRules {
-            by_descriptor,
-            host_contract_kinds,
-            default_unknown: None,
-        };
+    input.relation_classification = crate::plugins::promotion::RelationClassificationRules {
+        by_descriptor,
+        host_contract_kinds,
+        default_unknown: None,
+    };
     Ok(input)
 }
 
@@ -196,9 +196,8 @@ fn collect_internal_relations(
     let Some(mut q) = world.try_query::<(&ElementId, &SemanticRelation)>() else {
         return out;
     };
-    let endpoint_in_source = |id: ElementId| -> bool {
-        id == source_assembly_id || source_member_ids.contains(&id)
-    };
+    let endpoint_in_source =
+        |id: ElementId| -> bool { id == source_assembly_id || source_member_ids.contains(&id) };
     for (relation_id, relation) in q.iter(world) {
         if endpoint_in_source(relation.source) || endpoint_in_source(relation.target) {
             out.push(crate::plugins::promotion::InternalRelationSnapshot {
@@ -375,7 +374,10 @@ pub enum AssemblyCommitError {
     /// The diff named an entity but it carries the wrong component
     /// (e.g. an assembly id resolves to a non-`SemanticAssembly` entity
     /// — the world drifted between Preview and Commit).
-    UnexpectedEntityShape { entity_id: ElementId, expected: &'static str },
+    UnexpectedEntityShape {
+        entity_id: ElementId,
+        expected: &'static str,
+    },
 }
 
 impl std::fmt::Display for AssemblyCommitError {
@@ -389,7 +391,10 @@ impl std::fmt::Display for AssemblyCommitError {
                 f,
                 "promotion commit: SemanticRelation {relation_id:?} not found in world"
             ),
-            Self::UnexpectedEntityShape { entity_id, expected } => write!(
+            Self::UnexpectedEntityShape {
+                entity_id,
+                expected,
+            } => write!(
                 f,
                 "promotion commit: entity {entity_id:?} is not a {expected}"
             ),
@@ -448,10 +453,11 @@ pub fn apply_assembly_migration_diff(
         .collect();
 
     for retargeted in &diff.retargeted_assemblies {
-        let entity = find_entity_with_element_id(world, retargeted.assembly_id)
-            .ok_or(AssemblyCommitError::AssemblyNotFound {
+        let entity = find_entity_with_element_id(world, retargeted.assembly_id).ok_or(
+            AssemblyCommitError::AssemblyNotFound {
                 assembly_id: retargeted.assembly_id,
-            })?;
+            },
+        )?;
 
         if !world.entity(entity).contains::<SemanticAssembly>() {
             return Err(AssemblyCommitError::UnexpectedEntityShape {
@@ -467,11 +473,12 @@ pub fn apply_assembly_migration_diff(
             // Surviving wrapper shape per the agreement: a single
             // realization entry pointing at the new Occurrence.
             let collapsed = retargeted.from_members.len();
-            assembly.members.retain(|m| !retargeted.from_members.contains(&m.target));
-            assembly.members.push(super_assembly_member_ref(
-                new_occurrence_id,
-                "realization",
-            ));
+            assembly
+                .members
+                .retain(|m| !retargeted.from_members.contains(&m.target));
+            assembly
+                .members
+                .push(super_assembly_member_ref(new_occurrence_id, "realization"));
             applied.source_members_collapsed += collapsed;
         } else {
             // External assemblies retain each member entry's role and
@@ -489,10 +496,11 @@ pub fn apply_assembly_migration_diff(
     }
 
     for relation_diff in &diff.retargeted_relations {
-        let entity = find_entity_with_element_id(world, relation_diff.relation_id)
-            .ok_or(AssemblyCommitError::RelationNotFound {
+        let entity = find_entity_with_element_id(world, relation_diff.relation_id).ok_or(
+            AssemblyCommitError::RelationNotFound {
                 relation_id: relation_diff.relation_id,
-            })?;
+            },
+        )?;
         if !world.entity(entity).contains::<SemanticRelation>() {
             return Err(AssemblyCommitError::UnexpectedEntityShape {
                 entity_id: relation_diff.relation_id,
@@ -575,8 +583,7 @@ pub fn spawn_promoted_occurrence(
         None => {
             // `ElementIdAllocator::next_id` is `&self` (atomic), so a
             // shared resource borrow suffices.
-            let allocator =
-                world.resource::<crate::plugins::identity::ElementIdAllocator>();
+            let allocator = world.resource::<crate::plugins::identity::ElementIdAllocator>();
             allocator.next_id()
         }
     };
@@ -644,10 +651,11 @@ pub fn write_assembly_promotion_metadata(
     source_assembly_id: ElementId,
     metadata: &AssemblyPromotionMetadata,
 ) -> Result<(), AssemblyCommitError> {
-    let entity = find_entity_with_element_id(world, source_assembly_id)
-        .ok_or(AssemblyCommitError::AssemblyNotFound {
+    let entity = find_entity_with_element_id(world, source_assembly_id).ok_or(
+        AssemblyCommitError::AssemblyNotFound {
             assembly_id: source_assembly_id,
-        })?;
+        },
+    )?;
     if !world.entity(entity).contains::<SemanticAssembly>() {
         return Err(AssemblyCommitError::UnexpectedEntityShape {
             entity_id: source_assembly_id,
@@ -698,8 +706,7 @@ pub struct AssemblyCommitConfig {
     pub source_assembly_id: ElementId,
     pub source_member_ids: Vec<ElementId>,
     pub promoted_definition_id: crate::plugins::modeling::definition::DefinitionId,
-    pub promoted_definition_version:
-        crate::plugins::modeling::definition::DefinitionVersion,
+    pub promoted_definition_version: crate::plugins::modeling::definition::DefinitionVersion,
     pub preserved_element_id: Option<ElementId>,
     pub source_member_snapshot_ref: Option<String>,
     pub source_relation_snapshot_ref: Option<String>,
@@ -748,8 +755,7 @@ pub fn commit_assembly_promotion(
     //    the new Occurrence). spawn_promoted_occurrence already
     //    despawned the preserved id's old entity, so it's safe to skip
     //    it here.
-    let despawned =
-        despawn_source_members(world, &config.source_member_ids, Some(new_occ));
+    let despawned = despawn_source_members(world, &config.source_member_ids, Some(new_occ));
 
     // 4. Write the agreement metadata block onto the surviving
     //    assembly. `apply_assembly_migration_diff` already collapsed
@@ -836,8 +842,11 @@ pub fn materialize_relation_templates(
     // before mutating the world. This keeps materialization atomic
     // from the caller's point of view: either every template spawns
     // or none do.
-    let mut resolved: Vec<(ElementId, ElementId, &crate::plugins::promotion::SemanticRelationTemplate)> =
-        Vec::with_capacity(compound.relation_templates.len());
+    let mut resolved: Vec<(
+        ElementId,
+        ElementId,
+        &crate::plugins::promotion::SemanticRelationTemplate,
+    )> = Vec::with_capacity(compound.relation_templates.len());
     for template in &compound.relation_templates {
         let source = resolve_template_endpoint(
             &template.subject,
@@ -1013,10 +1022,14 @@ pub fn materialize_self_root_templates_for_occurrences(world: &mut World) {
     // Snapshot the (occurrence_id, definition_id) pairs first so we
     // don't hold a query active while mutating the world inside the
     // auto-materializer.
-    let snapshots: Vec<(ElementId, crate::plugins::modeling::definition::DefinitionId)> = {
-        let Some(mut q) = world
-            .try_query::<(&ElementId, &crate::plugins::modeling::occurrence::OccurrenceIdentity)>()
-        else {
+    let snapshots: Vec<(
+        ElementId,
+        crate::plugins::modeling::definition::DefinitionId,
+    )> = {
+        let Some(mut q) = world.try_query::<(
+            &ElementId,
+            &crate::plugins::modeling::occurrence::OccurrenceIdentity,
+        )>() else {
             return;
         };
         q.iter(world)
@@ -1035,8 +1048,7 @@ pub fn materialize_self_root_templates_for_occurrences(world: &mut World) {
         crate::plugins::modeling::definition::DefinitionId,
         crate::plugins::modeling::definition::Definition,
     > = {
-        let registry = world
-            .resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        let registry = world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
         snapshots
             .iter()
             .filter_map(|(_, def_id)| {
@@ -1130,7 +1142,12 @@ mod tests {
     fn gather_returns_assembly_not_found_for_missing_id() {
         let mut world = World::new();
         let err = gather_semantic_assembly_input(&world, elem(1)).unwrap_err();
-        assert_eq!(err, AssemblyGatherError::AssemblyNotFound { assembly_id: elem(1) });
+        assert_eq!(
+            err,
+            AssemblyGatherError::AssemblyNotFound {
+                assembly_id: elem(1)
+            }
+        );
         let _ = &mut world; // silence unused_mut on World — reused in some impls
     }
 
@@ -1139,7 +1156,12 @@ mod tests {
         let mut world = World::new();
         spawn_authored_leaf(&mut world, elem(1));
         let err = gather_semantic_assembly_input(&world, elem(1)).unwrap_err();
-        assert_eq!(err, AssemblyGatherError::NotASemanticAssembly { assembly_id: elem(1) });
+        assert_eq!(
+            err,
+            AssemblyGatherError::NotASemanticAssembly {
+                assembly_id: elem(1)
+            }
+        );
     }
 
     #[test]
@@ -1246,10 +1268,7 @@ mod tests {
         );
         let input = gather_semantic_assembly_input(&world, elem(1)).unwrap();
         assert_eq!(input.external_graph.memberships.len(), 1);
-        assert_eq!(
-            input.external_graph.memberships[0].assembly_id,
-            elem(2)
-        );
+        assert_eq!(input.external_graph.memberships[0].assembly_id, elem(2));
         assert_eq!(
             input.external_graph.memberships[0].member_targets,
             vec![elem(10)]
@@ -1384,14 +1403,10 @@ mod tests {
             .any(|r| r.assembly_id == elem(1)));
         // Capability projection is missing descriptor metadata, so a
         // warning is recorded — gather does NOT fill descriptor info.
-        assert!(out
-            .migration_diff
-            .warnings
-            .iter()
-            .any(|w| matches!(
-                w,
-                crate::plugins::promotion::MigrationWarning::CapabilityProjectionOutdated { .. }
-            )));
+        assert!(out.migration_diff.warnings.iter().any(|w| matches!(
+            w,
+            crate::plugins::promotion::MigrationWarning::CapabilityProjectionOutdated { .. }
+        )));
     }
 
     // === apply_assembly_migration_diff =====================================
@@ -1401,13 +1416,11 @@ mod tests {
         source_members: &[ElementId],
     ) -> crate::plugins::promotion::SemanticGraphMigrationDiff {
         crate::plugins::promotion::SemanticGraphMigrationDiff {
-            retargeted_assemblies: vec![
-                crate::plugins::promotion::RetargetedAssembly {
-                    assembly_id: source_assembly_id,
-                    from_members: source_members.to_vec(),
-                    to_slot_ids: vec![String::new()], // marker: source self-retarget
-                },
-            ],
+            retargeted_assemblies: vec![crate::plugins::promotion::RetargetedAssembly {
+                assembly_id: source_assembly_id,
+                from_members: source_members.to_vec(),
+                to_slot_ids: vec![String::new()], // marker: source self-retarget
+            }],
             retargeted_relations: Vec::new(),
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
@@ -1432,8 +1445,7 @@ mod tests {
         let diff = diff_for_replace_source(elem(1), &[elem(10), elem(11)]);
         let new_occ = elem(500);
 
-        let applied =
-            apply_assembly_migration_diff(&mut world, &diff, new_occ).unwrap();
+        let applied = apply_assembly_migration_diff(&mut world, &diff, new_occ).unwrap();
         assert_eq!(applied.assemblies_retargeted, 1);
         assert_eq!(applied.source_members_collapsed, 2);
         assert_eq!(applied.external_member_retargets, 0);
@@ -1461,10 +1473,7 @@ mod tests {
             elem(2),
             "context",
             "C",
-            vec![
-                member(elem(10), "anchor"),
-                member(elem(99), "unrelated"),
-            ],
+            vec![member(elem(10), "anchor"), member(elem(99), "unrelated")],
             serde_json::Value::Null,
         );
         // Source assembly (so the diff's source-self-retarget can run
@@ -1498,8 +1507,7 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        let applied =
-            apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap();
+        let applied = apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap();
         assert_eq!(applied.assemblies_retargeted, 2);
         assert_eq!(applied.source_members_collapsed, 1);
         assert_eq!(applied.external_member_retargets, 1);
@@ -1563,13 +1571,11 @@ mod tests {
         ));
 
         let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
-            retargeted_assemblies: vec![
-                crate::plugins::promotion::RetargetedAssembly {
-                    assembly_id: elem(1),
-                    from_members: vec![elem(10)],
-                    to_slot_ids: vec![String::new()],
-                },
-            ],
+            retargeted_assemblies: vec![crate::plugins::promotion::RetargetedAssembly {
+                assembly_id: elem(1),
+                from_members: vec![elem(10)],
+                to_slot_ids: vec![String::new()],
+            }],
             retargeted_relations: vec![
                 crate::plugins::promotion::RetargetedRelation {
                     relation_id: elem(30),
@@ -1590,8 +1596,7 @@ mod tests {
             warnings: Vec::new(),
         };
 
-        let applied =
-            apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap();
+        let applied = apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap();
         assert_eq!(applied.relations_retargeted, 2);
 
         let mut q = world.query::<(&ElementId, &SemanticRelation)>();
@@ -1615,11 +1620,12 @@ mod tests {
         let mut world = World::new();
         // No assembly in the world; diff names one anyway.
         let diff = diff_for_replace_source(elem(99), &[elem(10)]);
-        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500))
-            .unwrap_err();
+        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap_err();
         assert_eq!(
             err,
-            AssemblyCommitError::AssemblyNotFound { assembly_id: elem(99) }
+            AssemblyCommitError::AssemblyNotFound {
+                assembly_id: elem(99)
+            }
         );
     }
 
@@ -1629,8 +1635,7 @@ mod tests {
         // ElementId(99) on a leaf entity (NO SemanticAssembly).
         spawn_authored_leaf(&mut world, elem(99));
         let diff = diff_for_replace_source(elem(99), &[elem(10)]);
-        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500))
-            .unwrap_err();
+        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap_err();
         assert_eq!(
             err,
             AssemblyCommitError::UnexpectedEntityShape {
@@ -1652,31 +1657,28 @@ mod tests {
             serde_json::Value::Null,
         );
         let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
-            retargeted_assemblies: vec![
-                crate::plugins::promotion::RetargetedAssembly {
-                    assembly_id: elem(1),
-                    from_members: Vec::new(),
-                    to_slot_ids: vec![String::new()],
-                },
-            ],
-            retargeted_relations: vec![
-                crate::plugins::promotion::RetargetedRelation {
-                    relation_id: elem(404),
-                    original_source: elem(10),
-                    original_target: elem(20),
-                    relation_type: "ghost".into(),
-                },
-            ],
+            retargeted_assemblies: vec![crate::plugins::promotion::RetargetedAssembly {
+                assembly_id: elem(1),
+                from_members: Vec::new(),
+                to_slot_ids: vec![String::new()],
+            }],
+            retargeted_relations: vec![crate::plugins::promotion::RetargetedRelation {
+                relation_id: elem(404),
+                original_source: elem(10),
+                original_target: elem(20),
+                relation_type: "ghost".into(),
+            }],
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
             preserved_relations: Vec::new(),
             warnings: Vec::new(),
         };
-        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500))
-            .unwrap_err();
+        let err = apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap_err();
         assert_eq!(
             err,
-            AssemblyCommitError::RelationNotFound { relation_id: elem(404) }
+            AssemblyCommitError::RelationNotFound {
+                relation_id: elem(404)
+            }
         );
     }
 
@@ -1709,18 +1711,15 @@ mod tests {
         };
         let out = adapter.build_plan_and_diff(input).unwrap();
 
-        let mut drafts =
-            crate::plugins::definition_authoring::DefinitionDraftRegistry::default();
+        let mut drafts = crate::plugins::definition_authoring::DefinitionDraftRegistry::default();
         let existing = std::collections::HashSet::<ElementId>::new();
         let mut emitter = crate::plugins::promotion::DefaultPromotionDraftEmitter::new(
             &mut drafts,
             &existing,
             |plan: &crate::plugins::promotion::PromotionPlan| {
-                let mut def =
-                    crate::plugins::definition_authoring::blank_definition("House");
-                if let crate::plugins::promotion::PromotionOutputShape::Compound {
-                    child_slots,
-                } = &plan.output_shape
+                let mut def = crate::plugins::definition_authoring::blank_definition("House");
+                if let crate::plugins::promotion::PromotionOutputShape::Compound { child_slots } =
+                    &plan.output_shape
                 {
                     def.compound = Some(crate::plugins::modeling::definition::CompoundDefinition {
                         child_slots: child_slots.clone(),
@@ -1770,12 +1769,8 @@ mod tests {
         world
             .resource_mut::<crate::plugins::identity::ElementIdAllocator>()
             .set_next(50);
-        let new_id = spawn_promoted_occurrence(
-            &mut world,
-            DefinitionId("lib.window".into()),
-            7u32,
-            None,
-        );
+        let new_id =
+            spawn_promoted_occurrence(&mut world, DefinitionId("lib.window".into()), 7u32, None);
         assert_eq!(new_id, ElementId(50));
         // New entity carries OccurrenceIdentity referencing the right
         // definition id and version.
@@ -1832,11 +1827,8 @@ mod tests {
         spawn_authored_leaf(&mut world, elem(12));
         // Imagine elem(11) became the new Occurrence; despawn should
         // leave it.
-        let despawned = despawn_source_members(
-            &mut world,
-            &[elem(10), elem(11), elem(12)],
-            Some(elem(11)),
-        );
+        let despawned =
+            despawn_source_members(&mut world, &[elem(10), elem(11), elem(12)], Some(elem(11)));
         assert_eq!(despawned, 2);
         assert_eq!(count_entities_with(&mut world, elem(10)), 0);
         assert_eq!(count_entities_with(&mut world, elem(11)), 1);
@@ -1874,15 +1866,18 @@ mod tests {
         };
         write_assembly_promotion_metadata(&mut world, elem(1), &metadata).unwrap();
         let mut q = world.query::<(&ElementId, &SemanticAssembly)>();
-        let (_, assembly) = q
-            .iter(&world)
-            .find(|(eid, _)| **eid == elem(1))
-            .unwrap();
+        let (_, assembly) = q.iter(&world).find(|(eid, _)| **eid == elem(1)).unwrap();
         let m = assembly.metadata.as_object().unwrap();
         assert_eq!(m["promoted_definition_id"], serde_json::json!("draft-foo"));
         assert_eq!(m["promoted_occurrence_id"], serde_json::json!(elem(500)));
-        assert_eq!(m["source_member_snapshot_ref"], serde_json::json!("snap-mem"));
-        assert_eq!(m["source_relation_snapshot_ref"], serde_json::json!("snap-rel"));
+        assert_eq!(
+            m["source_member_snapshot_ref"],
+            serde_json::json!("snap-mem")
+        );
+        assert_eq!(
+            m["source_relation_snapshot_ref"],
+            serde_json::json!("snap-rel")
+        );
         // Pre-existing metadata key is preserved.
         assert_eq!(m["preexisting"], serde_json::json!("kept"));
     }
@@ -1906,10 +1901,7 @@ mod tests {
         };
         write_assembly_promotion_metadata(&mut world, elem(1), &metadata).unwrap();
         let mut q = world.query::<(&ElementId, &SemanticAssembly)>();
-        let (_, assembly) = q
-            .iter(&world)
-            .find(|(eid, _)| **eid == elem(1))
-            .unwrap();
+        let (_, assembly) = q.iter(&world).find(|(eid, _)| **eid == elem(1)).unwrap();
         let m = assembly.metadata.as_object().unwrap();
         assert_eq!(m.len(), 2); // only the two non-Optional keys
         assert!(m.contains_key("promoted_definition_id"));
@@ -1930,13 +1922,11 @@ mod tests {
             serde_json::Value::Null,
         );
         let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
-            retargeted_assemblies: vec![
-                crate::plugins::promotion::RetargetedAssembly {
-                    assembly_id: elem(1),
-                    from_members: vec![elem(10), elem(11)],
-                    to_slot_ids: vec![String::new()],
-                },
-            ],
+            retargeted_assemblies: vec![crate::plugins::promotion::RetargetedAssembly {
+                assembly_id: elem(1),
+                from_members: vec![elem(10), elem(11)],
+                to_slot_ids: vec![String::new()],
+            }],
             retargeted_relations: Vec::new(),
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
@@ -1969,15 +1959,16 @@ mod tests {
         // 4. The preserved id now hosts an OccurrenceIdentity (the
         //    old leaf was despawned; new occ took its id).
         let mut q = world.query::<(&ElementId, &OccurrenceIdentity)>();
-        let (_, identity) =
-            q.iter(&world).find(|(eid, _)| **eid == elem(10)).unwrap();
+        let (_, identity) = q.iter(&world).find(|(eid, _)| **eid == elem(10)).unwrap();
         assert_eq!(identity.definition_id, DefinitionId("draft-house".into()));
         // 5. Surviving assembly's metadata block was written.
         let mut qa = world.query::<(&ElementId, &SemanticAssembly)>();
-        let (_, survivor) =
-            qa.iter(&world).find(|(eid, _)| **eid == elem(1)).unwrap();
+        let (_, survivor) = qa.iter(&world).find(|(eid, _)| **eid == elem(1)).unwrap();
         let m = survivor.metadata.as_object().unwrap();
-        assert_eq!(m["promoted_definition_id"], serde_json::json!("draft-house"));
+        assert_eq!(
+            m["promoted_definition_id"],
+            serde_json::json!("draft-house")
+        );
         assert_eq!(m["promoted_occurrence_id"], serde_json::json!(elem(10)));
         assert_eq!(m["source_member_snapshot_ref"], serde_json::json!("snap-1"));
         // 6. Surviving assembly points at the new Occurrence with role
@@ -2003,13 +1994,11 @@ mod tests {
             serde_json::Value::Null,
         );
         let diff = crate::plugins::promotion::SemanticGraphMigrationDiff {
-            retargeted_assemblies: vec![
-                crate::plugins::promotion::RetargetedAssembly {
-                    assembly_id: elem(1),
-                    from_members: vec![elem(10)],
-                    to_slot_ids: vec![String::new()],
-                },
-            ],
+            retargeted_assemblies: vec![crate::plugins::promotion::RetargetedAssembly {
+                assembly_id: elem(1),
+                from_members: vec![elem(10)],
+                to_slot_ids: vec![String::new()],
+            }],
             retargeted_relations: Vec::new(),
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
@@ -2221,8 +2210,7 @@ mod tests {
         realizations.insert("leaf".into(), elem(11));
         let occ = elem(500);
 
-        let count = materialize_relation_templates(&mut world, &def, occ, &realizations)
-            .unwrap();
+        let count = materialize_relation_templates(&mut world, &def, occ, &realizations).unwrap();
         assert_eq!(count, 2);
 
         let mut q = world.query::<&SemanticRelation>();
@@ -2254,11 +2242,13 @@ mod tests {
             RelationEndpoint::Slot("ghost".into()),
         )]);
         let realizations = std::collections::HashMap::new();
-        let err = materialize_relation_templates(&mut world, &def, elem(500), &realizations)
-            .unwrap_err();
+        let err =
+            materialize_relation_templates(&mut world, &def, elem(500), &realizations).unwrap_err();
         assert_eq!(
             err,
-            MaterializationError::UnknownSlot { slot_id: "ghost".into() }
+            MaterializationError::UnknownSlot {
+                slot_id: "ghost".into()
+            }
         );
         // No relation entities spawned.
         let mut q = world.query::<&SemanticRelation>();
@@ -2277,8 +2267,8 @@ mod tests {
         )]);
         let mut realizations = std::collections::HashMap::new();
         realizations.insert("frame".into(), elem(10));
-        let err = materialize_relation_templates(&mut world, &def, elem(500), &realizations)
-            .unwrap_err();
+        let err =
+            materialize_relation_templates(&mut world, &def, elem(500), &realizations).unwrap_err();
         assert_eq!(err, MaterializationError::AllocatorMissing);
     }
 
@@ -2378,10 +2368,7 @@ mod tests {
         ));
         // A descriptor without a classification — must NOT appear in
         // the seeded rules.
-        registry.register_relation_type(relation_descriptor_with_classification(
-            "ad_hoc",
-            None,
-        ));
+        registry.register_relation_type(relation_descriptor_with_classification("ad_hoc", None));
 
         let input =
             gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
@@ -2430,10 +2417,7 @@ mod tests {
 
         let mut registry = CapabilityRegistry::default();
         // Single descriptor without classification.
-        registry.register_relation_type(relation_descriptor_with_classification(
-            "lonely",
-            None,
-        ));
+        registry.register_relation_type(relation_descriptor_with_classification("lonely", None));
         let input =
             gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
         assert!(input.relation_classification.by_descriptor.is_empty());
@@ -2528,8 +2512,7 @@ mod tests {
     fn auto_materialize_returns_zero_when_definition_has_no_compound() {
         let mut world = world_with_allocator();
         let def = crate::plugins::definition_authoring::blank_definition("Empty");
-        let count =
-            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let count = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -2541,8 +2524,7 @@ mod tests {
                 self_root_template("contains_self", elem(30)),
                 self_root_template("self_marker", elem(31)),
             ]);
-        let count =
-            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let count = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!(count, 2);
 
         let mut q = world.query::<(&SemanticRelation, &MaterializedFromTemplate)>();
@@ -2562,12 +2544,10 @@ mod tests {
             .with_relation_templates(vec![self_root_template("self_marker", elem(30))]);
 
         // First call spawns one.
-        let first =
-            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let first = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!(first, 1);
         // Second call spawns nothing (already materialized).
-        let second =
-            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let second = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!(second, 0);
         // Still exactly one SemanticRelation in the world.
         let mut q = world.query::<&SemanticRelation>();
@@ -2583,8 +2563,7 @@ mod tests {
                 // Slot-referencing template — must be skipped silently.
                 slot_self_template("hosts", "frame", elem(31)),
             ]);
-        let count =
-            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let count = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!(count, 1, "only the SelfRoot template spawned");
         let mut q = world.query::<&SemanticRelation>();
         let relations: Vec<&SemanticRelation> = q.iter(&world).collect();
@@ -2602,8 +2581,7 @@ mod tests {
         // applies independently.
         let a = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         let b = auto_materialize_self_root_templates(&mut world, &def, elem(501)).unwrap();
-        let a_again =
-            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let a_again = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!((a, b, a_again), (1, 1, 0));
         let mut q = world.query::<(&SemanticRelation, &MaterializedFromTemplate)>();
         let mut for_500 = 0;
@@ -2623,8 +2601,7 @@ mod tests {
         let mut world = World::new();
         let def = crate::plugins::definition_authoring::blank_definition("NoAllocator")
             .with_relation_templates(vec![self_root_template("self_marker", elem(30))]);
-        let err = auto_materialize_self_root_templates(&mut world, &def, elem(500))
-            .unwrap_err();
+        let err = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap_err();
         assert_eq!(err, MaterializationError::AllocatorMissing);
     }
 
@@ -2639,8 +2616,7 @@ mod tests {
         let mut world = World::new();
         let def = crate::plugins::definition_authoring::blank_definition("SlotsOnly")
             .with_relation_templates(vec![slot_self_template("hosts", "frame", elem(30))]);
-        let count =
-            auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
+        let count = auto_materialize_self_root_templates(&mut world, &def, elem(500)).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -2650,8 +2626,7 @@ mod tests {
         defs: Vec<crate::plugins::modeling::definition::Definition>,
     ) -> World {
         let mut world = world_with_allocator();
-        let mut registry =
-            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        let mut registry = crate::plugins::modeling::definition::DefinitionRegistry::default();
         for def in defs {
             registry.insert(def);
         }
@@ -2671,15 +2646,10 @@ mod tests {
     fn materialize_system_spawns_relations_for_occurrence_with_self_root_templates() {
         let mut world = world_with_allocator();
         let def_id = DefinitionId("door.proto".to_string());
-        let mut def =
-            crate::plugins::definition_authoring::blank_definition("DoorProto");
+        let mut def = crate::plugins::definition_authoring::blank_definition("DoorProto");
         def.id = def_id.clone();
-        def = def.with_relation_templates(vec![self_root_template(
-            "self_marker",
-            elem(30),
-        )]);
-        let mut registry =
-            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        def = def.with_relation_templates(vec![self_root_template("self_marker", elem(30))]);
+        let mut registry = crate::plugins::modeling::definition::DefinitionRegistry::default();
         registry.insert(def);
         world.insert_resource(registry);
         spawn_occurrence(&mut world, elem(500), &def_id.0);
@@ -2697,15 +2667,10 @@ mod tests {
     fn materialize_system_is_idempotent_across_repeated_runs() {
         let mut world = world_with_allocator();
         let def_id = DefinitionId("door.proto".to_string());
-        let mut def =
-            crate::plugins::definition_authoring::blank_definition("DoorProto");
+        let mut def = crate::plugins::definition_authoring::blank_definition("DoorProto");
         def.id = def_id.clone();
-        def = def.with_relation_templates(vec![self_root_template(
-            "self_marker",
-            elem(30),
-        )]);
-        let mut registry =
-            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        def = def.with_relation_templates(vec![self_root_template("self_marker", elem(30))]);
+        let mut registry = crate::plugins::modeling::definition::DefinitionRegistry::default();
         registry.insert(def);
         world.insert_resource(registry);
         spawn_occurrence(&mut world, elem(500), &def_id.0);
@@ -2727,16 +2692,13 @@ mod tests {
         let mut world = world_with_allocator();
         let def_a = DefinitionId("def.a".to_string());
         let def_b = DefinitionId("def.b".to_string());
-        let mut a =
-            crate::plugins::definition_authoring::blank_definition("A");
+        let mut a = crate::plugins::definition_authoring::blank_definition("A");
         a.id = def_a.clone();
         a = a.with_relation_templates(vec![self_root_template("a_marker", elem(30))]);
-        let mut b =
-            crate::plugins::definition_authoring::blank_definition("B");
+        let mut b = crate::plugins::definition_authoring::blank_definition("B");
         b.id = def_b.clone();
         b = b.with_relation_templates(vec![self_root_template("b_marker", elem(31))]);
-        let mut registry =
-            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        let mut registry = crate::plugins::modeling::definition::DefinitionRegistry::default();
         registry.insert(a);
         registry.insert(b);
         world.insert_resource(registry);
@@ -2765,8 +2727,7 @@ mod tests {
     fn materialize_system_skips_occurrence_whose_definition_is_missing() {
         let mut world = world_with_allocator();
         // Empty registry — Occurrence's definition won't resolve.
-        let registry =
-            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        let registry = crate::plugins::modeling::definition::DefinitionRegistry::default();
         world.insert_resource(registry);
         spawn_occurrence(&mut world, elem(500), "ghost.def");
 
@@ -2780,14 +2741,10 @@ mod tests {
     fn materialize_system_does_nothing_when_definition_has_no_self_root_templates() {
         let mut world = world_with_allocator();
         let def_id = DefinitionId("slot.only".to_string());
-        let mut def =
-            crate::plugins::definition_authoring::blank_definition("SlotOnly");
+        let mut def = crate::plugins::definition_authoring::blank_definition("SlotOnly");
         def.id = def_id.clone();
-        def = def.with_relation_templates(vec![slot_self_template(
-            "hosts", "frame", elem(30),
-        )]);
-        let mut registry =
-            crate::plugins::modeling::definition::DefinitionRegistry::default();
+        def = def.with_relation_templates(vec![slot_self_template("hosts", "frame", elem(30))]);
+        let mut registry = crate::plugins::modeling::definition::DefinitionRegistry::default();
         registry.insert(def);
         world.insert_resource(registry);
         spawn_occurrence(&mut world, elem(500), &def_id.0);
@@ -2836,18 +2793,17 @@ mod tests {
             parameter_schema: serde_json::Value::Null,
             participates_in_dependency_graph: false,
             external_classification: Some(ExternalRelationClassification::HostContract),
-            host_contract_kind: Some(HostingContractKindId(
-                "architecture::wall_opening".into(),
-            )),
+            host_contract_kind: Some(HostingContractKindId("architecture::wall_opening".into())),
         });
 
         let input =
             gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
         assert_eq!(
-            input.relation_classification.host_contract_kinds.get("hosted_on_wall"),
-            Some(&HostingContractKindId(
-                "architecture::wall_opening".into(),
-            )),
+            input
+                .relation_classification
+                .host_contract_kinds
+                .get("hosted_on_wall"),
+            Some(&HostingContractKindId("architecture::wall_opening".into(),)),
         );
 
         let adapter = SemanticAssemblyPromotionSource {
@@ -2860,10 +2816,7 @@ mod tests {
         let req = &out.plan.external_context_requirements[0];
         assert_eq!(
             req.host_contract_kind,
-            Some(HostingContractKindId(
-                "architecture::wall_opening".into(),
-            )),
+            Some(HostingContractKindId("architecture::wall_opening".into(),)),
         );
     }
-
 }

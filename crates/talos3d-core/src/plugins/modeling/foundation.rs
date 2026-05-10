@@ -270,9 +270,7 @@ where
     // point with the second wall.
     let (a0, b0) = endpoints[0];
     let (a1, b1) = endpoints[1];
-    let (start, mut current) = if dist(b0, a1) <= tolerance
-        || dist(b0, b1) <= tolerance
-    {
+    let (start, mut current) = if dist(b0, a1) <= tolerance || dist(b0, b1) <= tolerance {
         (a0, b0)
     } else if dist(a0, a1) <= tolerance || dist(a0, b1) <= tolerance {
         (b0, a0)
@@ -314,8 +312,7 @@ fn dist(a: DVec2, b: DVec2) -> f64 {
 /// World-side lookup: find the entity whose `ElementId` matches `id`
 /// and read its `WallEndpoints`. Returns `None` if either is absent.
 fn lookup_wall_endpoints(world: &World, id: ElementId) -> Option<(DVec2, DVec2)> {
-    let mut q = world
-        .try_query::<(&ElementId, &WallEndpoints)>()?;
+    let mut q = world.try_query::<(&ElementId, &WallEndpoints)>()?;
     for (eid, ep) in q.iter(world) {
         if *eid == id {
             return Some((ep.start, ep.end));
@@ -547,16 +544,12 @@ pub fn evaluate_foundations_system(
                 let result = resolve_wall_loop(
                     walls,
                     DEFAULT_WALL_LOOP_TOLERANCE,
-                    |id| -> Option<(DVec2, DVec2)> {
-                        lookup_wall_endpoints(world, id)
-                    },
+                    |id| -> Option<(DVec2, DVec2)> { lookup_wall_endpoints(world, id) },
                 );
                 match result {
                     Ok(verts) => verts,
                     Err(e) => {
-                        bevy::log::warn!(
-                            "Foundation {entity:?}: wall-loop resolution failed: {e}",
-                        );
+                        bevy::log::warn!("Foundation {entity:?}: wall-loop resolution failed: {e}",);
                         continue;
                     }
                 }
@@ -1216,7 +1209,10 @@ mod tests {
         let samples: Vec<PerimeterSample> = subsample_perimeter(&footprint, 2.0)
             .unwrap()
             .into_iter()
-            .map(|xz| PerimeterSample { xz, terrain_y: -1.5 })
+            .map(|xz| PerimeterSample {
+                xz,
+                terrain_y: -1.5,
+            })
             .collect();
         let n = samples.len();
         let mesh = build_foundation_mesh_from_samples(&samples, 0.0, 0.3).unwrap();
@@ -1325,7 +1321,11 @@ mod tests {
         let boxed = FoundationFactory
             .from_create_request(&world, &request)
             .unwrap();
-        let snapshot = boxed.0.as_any().downcast_ref::<FoundationSnapshot>().unwrap();
+        let snapshot = boxed
+            .0
+            .as_any()
+            .downcast_ref::<FoundationSnapshot>()
+            .unwrap();
         // The allocator started at 0; the first call returns 0, then 1, ...
         // After this call the allocator should be advanced to 1.
         assert_eq!(snapshot.element_id.0, 0);
@@ -1467,7 +1467,9 @@ mod tests {
         ]
     }
 
-    fn lookup_for(walls: &[(u64, DVec2, DVec2)]) -> impl Fn(ElementId) -> Option<(DVec2, DVec2)> + '_ {
+    fn lookup_for(
+        walls: &[(u64, DVec2, DVec2)],
+    ) -> impl Fn(ElementId) -> Option<(DVec2, DVec2)> + '_ {
         move |id: ElementId| -> Option<(DVec2, DVec2)> {
             walls
                 .iter()
@@ -1481,8 +1483,7 @@ mod tests {
         let walls = unit_square_walls();
         let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
         let lookup = lookup_for(&walls);
-        let polyline =
-            resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
+        let polyline = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
         assert_eq!(polyline.len(), 4);
         // Polyline starts somewhere on the loop; rotate so we know
         // the first vertex.
@@ -1503,8 +1504,7 @@ mod tests {
         ];
         let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
         let lookup = lookup_for(&walls);
-        let polyline =
-            resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
+        let polyline = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
         assert_eq!(polyline.len(), 4);
     }
 
@@ -1526,7 +1526,9 @@ mod tests {
         let err = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, |_| None).unwrap_err();
         assert_eq!(
             err,
-            FoundationError::WallEndpointsMissing { wall: ElementId(99) }
+            FoundationError::WallEndpointsMissing {
+                wall: ElementId(99)
+            }
         );
     }
 
@@ -1571,8 +1573,7 @@ mod tests {
         ];
         let ids: Vec<ElementId> = walls.iter().map(|(id, _, _)| ElementId(*id)).collect();
         let lookup = lookup_for(&walls);
-        let polyline =
-            resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
+        let polyline = resolve_wall_loop(&ids, DEFAULT_WALL_LOOP_TOLERANCE, lookup).unwrap();
         assert_eq!(polyline.len(), 4);
     }
 
@@ -1653,11 +1654,9 @@ mod typereg_tests {
             .id();
 
         let edges = FoundationFactory.dependency_edges(&world, entity);
-        let expected = walls
-            .iter()
-            .fold(EntityDependencies::empty(), |acc, w| {
-                acc.with_edge(*w, "foundation_wall_loop")
-            });
+        let expected = walls.iter().fold(EntityDependencies::empty(), |acc, w| {
+            acc.with_edge(*w, "foundation_wall_loop")
+        });
         assert_eq!(edges, expected);
     }
 

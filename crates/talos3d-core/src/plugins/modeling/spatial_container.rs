@@ -144,11 +144,9 @@ pub enum SpatialMembershipError {
 impl std::fmt::Display for SpatialMembershipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnregisteredKind { kind } => write!(
-                f,
-                "container kind '{}' is not registered",
-                kind.as_str()
-            ),
+            Self::UnregisteredKind { kind } => {
+                write!(f, "container kind '{}' is not registered", kind.as_str())
+            }
             Self::WouldCreateCycle { element, container } => write!(
                 f,
                 "would create a cycle: assigning element {:?} to container {:?}",
@@ -267,7 +265,10 @@ pub fn validate_assignment(
     // not equal the container.
     let max_depth = graph.parent_of.len().saturating_add(1);
     if graph.is_ancestor_or_self(container, child, max_depth) {
-        return Err(SpatialMembershipError::WouldCreateCycle { element: child, container });
+        return Err(SpatialMembershipError::WouldCreateCycle {
+            element: child,
+            container,
+        });
     }
     // Invariant 3: single-parent. The child must not already have
     // a parent; reassignment requires removing the prior membership
@@ -357,8 +358,7 @@ mod tests {
 
     #[test]
     fn ancestors_terminates_on_root() {
-        let graph = SpatialContainmentGraph::new()
-            .with_edge(ElementId(10), ElementId(20));
+        let graph = SpatialContainmentGraph::new().with_edge(ElementId(10), ElementId(20));
         let ancestors = graph.ancestors(ElementId(20), 8);
         assert!(ancestors.is_empty());
     }
@@ -444,7 +444,10 @@ mod tests {
             .with_edge(ElementId(20), ElementId(30));
         let err = validate_assignment(&graph, &kinds, &storey_kind(), ElementId(30), ElementId(10))
             .unwrap_err();
-        assert!(matches!(err, SpatialMembershipError::WouldCreateCycle { .. }));
+        assert!(matches!(
+            err,
+            SpatialMembershipError::WouldCreateCycle { .. }
+        ));
     }
 
     #[test]
@@ -452,8 +455,7 @@ mod tests {
         let kinds = registry_with_storey_and_space();
         // 10 already in 20. Proposing 10 in 30 must be rejected;
         // single-parent invariant requires explicit removal first.
-        let graph = SpatialContainmentGraph::new()
-            .with_edge(ElementId(10), ElementId(20));
+        let graph = SpatialContainmentGraph::new().with_edge(ElementId(10), ElementId(20));
         let err = validate_assignment(&graph, &kinds, &storey_kind(), ElementId(10), ElementId(30))
             .unwrap_err();
         match err {
@@ -472,8 +474,7 @@ mod tests {
     fn validate_assignment_allows_orthogonal_branch() {
         let kinds = registry_with_storey_and_space();
         // 10 in 20; 11 not yet placed. 11 in 20 is fine.
-        let graph = SpatialContainmentGraph::new()
-            .with_edge(ElementId(10), ElementId(20));
+        let graph = SpatialContainmentGraph::new().with_edge(ElementId(10), ElementId(20));
         let r = validate_assignment(&graph, &kinds, &storey_kind(), ElementId(11), ElementId(20));
         assert!(r.is_ok());
     }

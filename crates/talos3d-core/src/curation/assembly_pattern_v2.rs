@@ -280,37 +280,30 @@ impl AssemblyPatternV2 {
 /// - `/envelopes/*/owner_concept_ref` → `vocabulary_concept.v1`
 /// - `/support_corridors/*/owner_concept_ref` → `vocabulary_concept.v1`
 pub fn assembly_pattern_v2_manifest_kind() -> ManifestKindDescriptor {
-    ManifestKindDescriptor::new(
-        ManifestKindId::new(ASSEMBLY_PATTERN_V2_KIND),
-        body_schema(),
-    )
-    .with_walker_hook(
-        RefField::new(
-            "/concept_ref",
-            AssetKindId::new("vocabulary_concept.v1"),
+    ManifestKindDescriptor::new(ManifestKindId::new(ASSEMBLY_PATTERN_V2_KIND), body_schema())
+        .with_walker_hook(
+            RefField::new("/concept_ref", AssetKindId::new("vocabulary_concept.v1")).required(),
         )
-        .required(),
-    )
-    .with_walker_hook(RefField::new(
-        "/variants/*/recipe_refs/*",
-        AssetKindId::new("recipe.v1"),
-    ))
-    .with_walker_hook(RefField::new(
-        "/variants/*/validator_refs/*",
-        AssetKindId::new("validation_pack.v1"),
-    ))
-    .with_walker_hook(RefField::new(
-        "/envelopes/*/owner_concept_ref",
-        AssetKindId::new("vocabulary_concept.v1"),
-    ))
-    .with_walker_hook(RefField::new(
-        "/support_corridors/*/owner_concept_ref",
-        AssetKindId::new("vocabulary_concept.v1"),
-    ))
-    .with_description(
-        "Generic assembly-pattern v2 contract — roles, slots, envelopes, \
+        .with_walker_hook(RefField::new(
+            "/variants/*/recipe_refs/*",
+            AssetKindId::new("recipe.v1"),
+        ))
+        .with_walker_hook(RefField::new(
+            "/variants/*/validator_refs/*",
+            AssetKindId::new("validation_pack.v1"),
+        ))
+        .with_walker_hook(RefField::new(
+            "/envelopes/*/owner_concept_ref",
+            AssetKindId::new("vocabulary_concept.v1"),
+        ))
+        .with_walker_hook(RefField::new(
+            "/support_corridors/*/owner_concept_ref",
+            AssetKindId::new("vocabulary_concept.v1"),
+        ))
+        .with_description(
+            "Generic assembly-pattern v2 contract — roles, slots, envelopes, \
          relations, variants, obligations. Per ADR-042 §9.",
-    )
+        )
 }
 
 /// JSON Schema sketch for the v2 body. Used today as documentation
@@ -515,7 +508,9 @@ pub fn validate_pattern_v2(pattern: &AssemblyPatternV2) -> Vec<AssemblyPatternV2
     let mut slot_ids: HashSet<&str> = HashSet::new();
     for slot in &pattern.slots {
         if !slot_ids.insert(slot.slot_id.as_str()) {
-            errors.push(AssemblyPatternV2Error::DuplicateSlotId(slot.slot_id.clone()));
+            errors.push(AssemblyPatternV2Error::DuplicateSlotId(
+                slot.slot_id.clone(),
+            ));
         }
     }
 
@@ -617,7 +612,9 @@ pub fn validate_pattern_v2(pattern: &AssemblyPatternV2) -> Vec<AssemblyPatternV2
 
 /// Validate a raw [`CuratedManifest::body`] as a v2 assembly pattern.
 /// Combines deserialization and the graph-shape pass.
-pub fn validate_pattern_v2_body(body: &Value) -> Result<AssemblyPatternV2, Vec<AssemblyPatternV2Error>> {
+pub fn validate_pattern_v2_body(
+    body: &Value,
+) -> Result<AssemblyPatternV2, Vec<AssemblyPatternV2Error>> {
     let pattern = AssemblyPatternV2::from_manifest_body(body)
         .map_err(|err| vec![AssemblyPatternV2Error::BodyDeserialization(err.to_string())])?;
     let errors = validate_pattern_v2(&pattern);
@@ -730,10 +727,7 @@ mod tests {
             .find(|h| h.path == "/concept_ref")
             .expect("concept_ref hook present");
         assert!(concept_hook.required, "concept_ref must be a required ref");
-        assert_eq!(
-            concept_hook.target_kind.as_str(),
-            "vocabulary_concept.v1"
-        );
+        assert_eq!(concept_hook.target_kind.as_str(), "vocabulary_concept.v1");
         let recipe_hook = d
             .walker_hooks
             .iter()
@@ -760,7 +754,8 @@ mod tests {
     #[test]
     fn duplicate_slot_id_is_reported() {
         let mut p = sample_pattern();
-        p.slots.push(slot("framing", "primary_structure", SlotMultiplicity::One));
+        p.slots
+            .push(slot("framing", "primary_structure", SlotMultiplicity::One));
         let errors = validate_pattern_v2(&p);
         assert!(matches!(
             errors.first(),
@@ -946,8 +941,9 @@ mod tests {
         let refs = manifests.enumerate_outbound_refs(&kinds);
         let recipe_kind = AssetKindId::new("recipe.v1");
         let recipe_refs = refs.get(&recipe_kind).expect("recipe refs walked");
-        assert!(recipe_refs.iter().any(|id| id.as_str()
-            == "recipe.v1/wall_light_frame_exterior"));
+        assert!(recipe_refs
+            .iter()
+            .any(|id| id.as_str() == "recipe.v1/wall_light_frame_exterior"));
 
         let concept_kind = AssetKindId::new("vocabulary_concept.v1");
         let concept_refs = refs.get(&concept_kind).expect("concept refs walked");

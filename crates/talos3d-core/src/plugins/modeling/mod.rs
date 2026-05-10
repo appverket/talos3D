@@ -27,8 +27,8 @@ pub mod property_sets;
 pub mod quantity_set;
 pub mod semantics;
 pub mod snapshots;
-pub mod spatial_container;
 pub mod solid_ops;
+pub mod spatial_container;
 pub mod tools;
 pub mod triangulate;
 pub mod void_declaration;
@@ -49,8 +49,7 @@ use crate::{
             execute_instantiate_definition, execute_open_definition_draft,
             execute_open_selected_occurrence_definition, execute_patch_definition_draft,
             execute_promote_parameter_to_definition_default, execute_publish_definition_draft,
-            execute_toggle_definitions_browser, DefinitionSelectionContext,
-            DefinitionsWindowState,
+            execute_toggle_definitions_browser, DefinitionSelectionContext, DefinitionsWindowState,
         },
         handles::arm_move_handles,
         identity::ElementId,

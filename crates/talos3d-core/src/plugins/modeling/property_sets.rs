@@ -29,9 +29,9 @@
 
 use std::collections::HashMap;
 
+use bevy::ecs::message::Message;
 #[cfg(test)]
 use bevy::ecs::message::Messages;
-use bevy::ecs::message::Message;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -90,7 +90,9 @@ pub enum PropertyValueType {
     Boolean,
     Text,
     /// Enum with a closed set of allowed string values.
-    Enum { allowed: Vec<String> },
+    Enum {
+        allowed: Vec<String>,
+    },
     /// Free JSON; schema-only check is "is JSON".
     Json,
 }
@@ -240,11 +242,7 @@ pub struct PropertySetSchemaRegistry {
 }
 
 impl PropertySetSchemaRegistry {
-    pub fn register(
-        &mut self,
-        definition_id: DefinitionId,
-        schemas: Vec<PropertySetSchema>,
-    ) {
+    pub fn register(&mut self, definition_id: DefinitionId, schemas: Vec<PropertySetSchema>) {
         self.by_definition.insert(definition_id, schemas);
     }
 
@@ -325,9 +323,11 @@ impl PropertySetMap {
     /// triple. Iteration order is not guaranteed; sort the
     /// collected output if a stable order is needed.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str, &PropertyValue)> {
-        self.sets
-            .iter()
-            .flat_map(|(set, props)| props.iter().map(move |(name, v)| (set.as_str(), name.as_str(), v)))
+        self.sets.iter().flat_map(|(set, props)| {
+            props
+                .iter()
+                .map(move |(name, v)| (set.as_str(), name.as_str(), v))
+        })
     }
 
     /// Number of property values across all sets.
@@ -726,9 +726,7 @@ mod tests {
     fn plugin_registers_resource_and_event() {
         let mut app = App::new();
         app.add_plugins(PropertySetsPlugin);
-        assert!(app
-            .world()
-            .contains_resource::<PropertySetSchemaRegistry>());
+        assert!(app.world().contains_resource::<PropertySetSchemaRegistry>());
         // Confirm the message channel was registered.
         assert!(app
             .world()

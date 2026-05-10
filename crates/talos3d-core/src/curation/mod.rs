@@ -37,9 +37,9 @@ pub mod synthesis;
 
 pub use assembly_pattern_v2::{
     assembly_pattern_v2_manifest_kind, validate_pattern_v2, validate_pattern_v2_body,
-    AssemblyPatternV2, AssemblyPatternV2Error, PatternEnvelope, PatternObligation,
-    PatternRelation, PatternSlot, PatternSlotOverride, PatternSupportCorridor, PatternVariant,
-    SlotMultiplicity, ASSEMBLY_PATTERN_V2_KIND, ASSEMBLY_PATTERN_V2_SCHEMA_VERSION,
+    AssemblyPatternV2, AssemblyPatternV2Error, PatternEnvelope, PatternObligation, PatternRelation,
+    PatternSlot, PatternSlotOverride, PatternSupportCorridor, PatternVariant, SlotMultiplicity,
+    ASSEMBLY_PATTERN_V2_KIND, ASSEMBLY_PATTERN_V2_SCHEMA_VERSION,
 };
 pub use authoring_script::{
     ArgExpr, AuthoringScript, AuthoringScriptStructuralError, McpToolId, MutationScope, OutputPath,

@@ -150,8 +150,7 @@ impl DiscoveryFindingsBudget {
     }
 
     pub fn remaining(&self) -> u32 {
-        self.max_per_sweep
-            .saturating_sub(self.emitted_this_sweep)
+        self.max_per_sweep.saturating_sub(self.emitted_this_sweep)
     }
 }
 
@@ -665,9 +664,7 @@ mod tests {
         validation_sweep_system(&mut world);
 
         assert!(
-            *called
-                .lock()
-                .expect("validator call flag mutex poisoned"),
+            *called.lock().expect("validator call flag mutex poisoned"),
             "Validator must run on any entity"
         );
     }
@@ -810,8 +807,7 @@ mod tests {
         validation_sweep_system(&mut world);
 
         let findings = world.resource::<Findings>();
-        let discoveries: Vec<&Finding> =
-            findings.by_role(ConstraintRole::Discovery).collect();
+        let discoveries: Vec<&Finding> = findings.by_role(ConstraintRole::Discovery).collect();
         assert_eq!(discoveries.len(), 2, "budget caps Discovery emissions");
 
         let budget = world.resource::<DiscoveryFindingsBudget>();
@@ -872,8 +868,7 @@ mod tests {
         validation_sweep_system(&mut world);
 
         let findings = world.resource::<Findings>();
-        let validations: Vec<&Finding> =
-            findings.by_role(ConstraintRole::Validation).collect();
+        let validations: Vec<&Finding> = findings.by_role(ConstraintRole::Validation).collect();
         assert_eq!(
             validations.len(),
             10,

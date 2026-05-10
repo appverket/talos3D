@@ -4,6 +4,8 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology},
 };
 
+#[cfg(test)]
+use talos3d_core::plugins::modeling::host_chart::ChartSpaceProfileLoop;
 use talos3d_core::plugins::modeling::mesh_generation::NeedsMesh;
 #[cfg(feature = "perf-stats")]
 use talos3d_core::plugins::perf_stats::{add_mesh_regen_count, PerfStats};
@@ -17,8 +19,6 @@ use talos3d_core::plugins::{
         primitives::TriangleMesh,
     },
 };
-#[cfg(test)]
-use talos3d_core::plugins::modeling::host_chart::ChartSpaceProfileLoop;
 
 use crate::components::{OpeningFeature, OpeningFeatureOperation, Wall};
 
