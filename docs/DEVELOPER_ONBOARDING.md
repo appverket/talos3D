@@ -39,20 +39,18 @@ demonstrates the public platform model.
 ## Workspace Shape
 
 ```text
-src/
-  main.rs                      -> app bootstrap
-
 crates/talos3d-core/
   core platform
   modeling workbench
   command/history substrate
   model API / MCP server
 
-crates/talos3d-architectural/
-  architectural reference capability pack
-
 crates/talos3d-terrain/
   terrain/site reference capability pack
+
+app/
+  optional downstream binary workspace that composes core with domain
+  extensions from sibling repos
 ```
 
 ## Core Mental Model
@@ -127,8 +125,8 @@ When terminology changes, update:
 
 - Core runtime or registries -> `talos3d-core`
 - Generic modeling entities or tools -> `talos3d-core/src/plugins/modeling`
-- Domain-specific rules and entities -> domain crate such as
-  `talos3d-architectural`
+- Domain-specific rules and entities -> domain extension repo such as
+  `talos3d-architecture`
 - Public docs -> `docs/`
 
 ## What Good Contributions Look Like

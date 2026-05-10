@@ -19842,6 +19842,7 @@ mod tests {
         assert!(details.properties[0].editable);
         assert_eq!(details.properties[1].name, "half_extents");
         assert_eq!(details.properties[2].name, "material");
+        assert_eq!(details.properties[2].kind, "text");
     }
 
     #[cfg(feature = "model-api")]
@@ -21722,51 +21723,6 @@ mod tests {
             .find(|parameter| parameter["name"] == json!("finish_color"))
             .expect("finish_color parameter should exist");
         assert_eq!(parameter["geometry_affecting"], json!(false));
-    }
-
-    #[cfg(feature = "model-api")]
-    #[test]
-    fn bundled_double_european_window_remains_single_slot_definition() {
-        let mut world = init_model_api_test_world();
-        {
-            let mut libraries = world
-                .resource_mut::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>(
-            );
-            crate::plugins::bundled_definition_libraries::apply_bundled_definition_libraries(
-                &mut libraries,
-            )
-            .expect("bundled libraries should load");
-        }
-
-        let explain = handle_explain_definition(
-            &world,
-            json!({
-                "library_id": "architecture.european-window-library",
-                "definition_id": "architecture.window.double-european"
-            }),
-        )
-        .expect("bundled double window should explain");
-        assert!(explain.compile.collection_slots.is_empty());
-        assert!(explain.resolved_collection_slots.is_empty());
-
-        let instantiated = handle_instantiate_definition(
-            &mut world,
-            json!({
-                "library_id": "architecture.european-window-library",
-                "definition_id": "architecture.window.double-european"
-            }),
-        )
-        .expect("bundled double window should instantiate");
-        let occurrence = handle_explain_occurrence(&world, instantiated.element_id)
-            .expect("bundled occurrence should explain");
-        let slot_paths = occurrence
-            .generated_parts
-            .iter()
-            .map(|part| part.slot_path.as_str())
-            .collect::<Vec<_>>();
-        assert!(slot_paths.iter().any(|slot| *slot == "left_window"));
-        assert!(slot_paths.iter().any(|slot| *slot == "right_window"));
-        assert!(!slot_paths.iter().any(|slot| slot.contains('[')));
     }
 
     #[cfg(feature = "model-api")]

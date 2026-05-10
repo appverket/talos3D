@@ -5148,17 +5148,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "talos3d-architectural"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "serde",
- "serde_json",
- "talos3d-capability-api",
- "talos3d-core",
-]
-
-[[package]]
 name = "talos3d-capability-api"
 version = "0.1.0"
 dependencies = [
