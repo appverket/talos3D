@@ -699,8 +699,6 @@ dependencies = [
 [[package]]
 name = "bevy_egui"
 version = "0.39.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d0a7e4806f3f242326d2c6157531c36d710f3bf320ebc0a1678e44635ed0eac"
 dependencies = [
  "arboard",
  "bevy_app",
@@ -1749,7 +1747,6 @@ dependencies = [
  "cadio-ir",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -1757,15 +1754,6 @@ name = "cadio-ir"
 version = "0.1.0"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "cadio-tools"
-version = "0.1.0"
-dependencies = [
- "cadio-ir",
- "dxf",
- "serde_json",
 ]
 
 [[package]]
@@ -2260,8 +2248,6 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "ecolor"
 version = "0.33.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71ddb8ac7643d1dba1bb02110e804406dd459a838efcb14011ced10556711a8e"
 dependencies = [
  "bytemuck",
  "emath",
@@ -2270,8 +2256,6 @@ dependencies = [
 [[package]]
 name = "egui"
 version = "0.33.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a9b567d356674e9a5121ed3fedfb0a7c31e059fe71f6972b691bcd0bfc284e3"
 dependencies = [
  "ahash",
  "bitflags 2.11.1",
@@ -2293,8 +2277,6 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 [[package]]
 name = "emath"
 version = "0.33.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "491bdf728bf25ddd9ad60d4cf1c48588fa82c013a2440b91aa7fc43e34a07c32"
 dependencies = [
  "bytemuck",
 ]
@@ -2351,8 +2333,6 @@ dependencies = [
 [[package]]
 name = "epaint"
 version = "0.33.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "009d0dd3c2163823a0abdb899451ecbc78798dec545ee91b43aff1fa790bab62"
 dependencies = [
  "ab_glyph",
  "ahash",
@@ -5148,6 +5128,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "talos3d"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde_json",
+ "talos3d-architectural",
+ "talos3d-architecture-core",
+ "talos3d-architecture-se",
+ "talos3d-core",
+ "talos3d-terrain",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "talos3d-architectural"
 version = "0.1.0"
 dependencies = [
@@ -5159,10 +5154,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "talos3d-architecture-core"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
+ "serde_json",
+ "talos3d-core",
+]
+
+[[package]]
+name = "talos3d-architecture-se"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
+ "serde_json",
+ "talos3d-architecture-core",
+ "talos3d-core",
+]
+
+[[package]]
 name = "talos3d-capability-api"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "talos3d-core",
 ]
 
@@ -5186,7 +5201,6 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tokio-util",
  "toml",
