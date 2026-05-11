@@ -23,8 +23,29 @@ impl Plugin for CursorPlugin {
         app.init_resource::<CursorWorldPos>()
             .init_resource::<DrawingPlane>()
             .init_resource::<ViewportUiInset>()
-            .add_systems(Update, (update_cursor_world_pos, draw_cursor_crosshair));
+            .configure_sets(
+                Update,
+                (
+                    CursorSystems::UpdateWorldPosition,
+                    CursorSystems::DrawCrosshair,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                Update,
+                update_cursor_world_pos.in_set(CursorSystems::UpdateWorldPosition),
+            )
+            .add_systems(
+                Update,
+                draw_cursor_crosshair.in_set(CursorSystems::DrawCrosshair),
+            );
     }
+}
+
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CursorSystems {
+    UpdateWorldPosition,
+    DrawCrosshair,
 }
 
 #[derive(Resource, Default)]
