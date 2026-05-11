@@ -5,7 +5,11 @@ use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::{
     authored_entity::{EntityBounds, HandleKind},
     capability_registry::{CapabilityRegistry, SnapPoint},
-    plugins::{cursor::CursorWorldPos, selection::Selected, transform::TransformState},
+    plugins::{
+        cursor::{CursorSystems, CursorWorldPos},
+        selection::Selected,
+        transform::TransformState,
+    },
 };
 
 const ELEMENT_SNAP_RADIUS_METRES: f32 = 0.35;
@@ -29,7 +33,14 @@ pub enum SnapSystems {
 impl Plugin for SnapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SnapResult>()
-            .configure_sets(Update, (SnapSystems::Resolve, SnapSystems::Draw).chain())
+            .configure_sets(
+                Update,
+                (
+                    SnapSystems::Resolve.after(CursorSystems::UpdateWorldPosition),
+                    SnapSystems::Draw,
+                )
+                    .chain(),
+            )
             .add_systems(Update, update_snap_result.in_set(SnapSystems::Resolve))
             .add_systems(Update, draw_snap_indicator.in_set(SnapSystems::Draw));
     }
