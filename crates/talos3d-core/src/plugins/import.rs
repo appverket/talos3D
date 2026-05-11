@@ -835,6 +835,12 @@ fn sync_imported_layer_visibility_to_registry(
     layer_state.entries.clear();
 }
 
+#[cfg(target_arch = "wasm32")]
+fn open_import_file_dialog(_importers: &[Arc<dyn FormatImporter>]) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn open_import_file_dialog(importers: &[Arc<dyn FormatImporter>]) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new();
     for importer in importers {

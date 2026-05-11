@@ -14,13 +14,15 @@ use serde_json::Value;
 use crate::capability_registry::{
     CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity, CapabilityRegistryAppExt,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plugins::document_state::DocumentState;
 use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
-    document_state::DocumentState,
     ui::StatusBarData,
 };
 
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_EXPORT_FILE_STEM: &str = "drawing";
 
 /// Capability id for the "2D drafting" extension that surfaces vector-paper
@@ -316,6 +318,15 @@ pub fn export_drawing_now(world: &mut World) -> Result<Option<PathBuf>, String> 
     export_drawing_now_with_format(world, None)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn export_drawing_now_with_format(
+    _world: &mut World,
+    _preferred_format: Option<ViewportExportFormat>,
+) -> Result<Option<PathBuf>, String> {
+    Err("Native drawing export dialogs are not available in the browser shell".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn export_drawing_now_with_format(
     world: &mut World,
     preferred_format: Option<ViewportExportFormat>,
@@ -671,6 +682,7 @@ fn write_pdf_object(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn default_export_file_stem(current_path: Option<&Path>) -> String {
     current_path
         .and_then(|path| path.file_stem())
@@ -678,6 +690,7 @@ fn default_export_file_stem(current_path: Option<&Path>) -> String {
         .unwrap_or_else(|| DEFAULT_EXPORT_FILE_STEM.to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn default_export_file_name(
     current_path: Option<&Path>,
     preferred_format: Option<ViewportExportFormat>,

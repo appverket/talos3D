@@ -2095,6 +2095,14 @@ fn material_meta_label(def: &MaterialDef) -> String {
 
 /// Open a native file picker and return a `TextureRef::Embedded` for the
 /// chosen image file, or `None` if the user cancelled or an error occurred.
+#[cfg(target_arch = "wasm32")]
+fn pick_texture_file() -> Option<TextureRef> {
+    None
+}
+
+/// Open a native file picker and return a `TextureRef::Embedded` for the
+/// chosen image file, or `None` if the user cancelled or an error occurred.
+#[cfg(not(target_arch = "wasm32"))]
 fn pick_texture_file() -> Option<TextureRef> {
     use base64::prelude::*;
 
