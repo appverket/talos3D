@@ -1,10 +1,15 @@
-use std::{env, sync::mpsc, sync::Mutex, thread, time::Duration};
+use std::{env, sync::mpsc, sync::Mutex};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{thread, time::Duration};
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+#[cfg(not(target_arch = "wasm32"))]
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
+#[cfg(not(target_arch = "wasm32"))]
+use serde_json::Value;
 
 use crate::plugins::authoring_guidance::AuthoringGuidance;
 use crate::plugins::document_properties::DocumentProperties;
@@ -14,7 +19,9 @@ pub const ASSISTANT_PANEL_MIN_WIDTH: f32 = 360.0;
 const ASSISTANT_PANEL_ID: &str = "assistant_chat_sidebar";
 const ASSISTANT_CHAT_COMPOSER_HEIGHT: f32 = 120.0;
 const ASSISTANT_CHAT_MIN_TRANSCRIPT_HEIGHT: f32 = 160.0;
+#[cfg(not(target_arch = "wasm32"))]
 const ASSISTANT_TOOL_STEPS: usize = 12;
+#[cfg(not(target_arch = "wasm32"))]
 const ASSISTANT_MAX_TOKENS: u32 = 1600;
 const ASSISTANT_PANEL_SURFACE: egui::Color32 = egui::Color32::from_rgb(26, 30, 36);
 const ASSISTANT_PANEL_BORDER: egui::Color32 = egui::Color32::from_rgb(66, 76, 90);
@@ -602,10 +609,12 @@ struct AssistantRuntimeConfig {
     /// Snapshot of `AuthoringGuidance::prompt_text` taken on the main thread.
     /// Threaded `run_assistant_turn` has no World access, so we capture the
     /// content up-front. Empty when no capability has contributed guidance.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     guidance_prompt: String,
 }
 
 #[derive(Debug)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum AssistantJobEvent {
     Message(AssistantChatMessage),
     Completed,
@@ -1464,6 +1473,16 @@ fn poll_assistant_jobs(
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn start_assistant_job(
+    _state: &mut AssistantChatState,
+    _pending_job: &PendingAssistantJob,
+    _authoring_guidance: &AuthoringGuidance,
+) -> Result<(), String> {
+    Err("Assistant HTTP requests are not available in the browser shell yet".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn start_assistant_job(
     state: &mut AssistantChatState,
     pending_job: &PendingAssistantJob,
@@ -1530,6 +1549,7 @@ fn validate_assistant_config(config: &AssistantRuntimeConfig) -> Result<(), Stri
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_assistant_turn(
     config: AssistantRuntimeConfig,
     conversation: Vec<AssistantChatMessage>,
@@ -1585,12 +1605,14 @@ fn run_assistant_turn(
 }
 
 #[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 struct AssistantToolDef {
     name: &'static str,
     description: &'static str,
     parameters: Value,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn assistant_tool_defs() -> [AssistantToolDef; 2] {
     [
         AssistantToolDef {
@@ -1618,6 +1640,7 @@ fn assistant_tool_defs() -> [AssistantToolDef; 2] {
     ]
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn assistant_system_prompt(mcp_url: &str, guidance_prompt: &str) -> String {
     let base = format!(
         "You are the Talos3D in-app assistant. Use Talos3D MCP tools for any model inspection, creation, deletion, transform, material, lighting, definition, layer, view, import, screenshot, or persistence action. Never claim an edit succeeded unless a tool result confirms it. Be concise and operational. If you do not know the exact MCP tool name or argument shape, call mcp_list_tools before editing. The configured MCP endpoint is {mcp_url}."
@@ -1633,10 +1656,12 @@ fn assistant_system_prompt(mcp_url: &str, guidance_prompt: &str) -> String {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn emit_assistant_message(sender: &mpsc::Sender<AssistantJobEvent>, message: AssistantChatMessage) {
     let _ = sender.send(AssistantJobEvent::Message(message));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_openai_turn(
     client: &Client,
     conversation: &[AssistantChatMessage],
@@ -1716,6 +1741,7 @@ fn run_openai_turn(
     Err("OpenAI assistant did not produce a final response within the tool step budget".to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_openai_chat_completions_turn(
     client: &Client,
     conversation: &[AssistantChatMessage],
@@ -1822,6 +1848,7 @@ fn run_openai_chat_completions_turn(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_anthropic_turn(
     client: &Client,
     conversation: &[AssistantChatMessage],
@@ -1916,6 +1943,7 @@ fn run_anthropic_turn(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run_gemini_turn(
     client: &Client,
     conversation: &[AssistantChatMessage],
@@ -2009,12 +2037,14 @@ fn run_gemini_turn(
 }
 
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 struct OpenAiFunctionCall {
     name: String,
     call_id: String,
     arguments: Value,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_openai_function_calls(response: &Value) -> Result<Vec<OpenAiFunctionCall>, String> {
     let Some(output) = response.get("output").and_then(Value::as_array) else {
         return Ok(Vec::new());
@@ -2048,6 +2078,7 @@ fn extract_openai_function_calls(response: &Value) -> Result<Vec<OpenAiFunctionC
     Ok(function_calls)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_openai_text(response: &Value) -> String {
     if let Some(text) = response.get("output_text").and_then(Value::as_str) {
         if !text.trim().is_empty() {
@@ -2086,6 +2117,7 @@ fn extract_openai_text(response: &Value) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_openai_input_messages(conversation: &[AssistantChatMessage]) -> Vec<Value> {
     conversation
         .iter()
@@ -2103,6 +2135,7 @@ fn build_openai_input_messages(conversation: &[AssistantChatMessage]) -> Vec<Val
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_openai_chat_messages(
     conversation: &[AssistantChatMessage],
     system_prompt: &str,
@@ -2129,6 +2162,7 @@ fn build_openai_chat_messages(
     messages
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_openai_tools() -> Vec<Value> {
     assistant_tool_defs()
         .into_iter()
@@ -2143,6 +2177,7 @@ fn build_openai_tools() -> Vec<Value> {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_openai_chat_tools() -> Vec<Value> {
     assistant_tool_defs()
         .into_iter()
@@ -2159,6 +2194,7 @@ fn build_openai_chat_tools() -> Vec<Value> {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_anthropic_messages(conversation: &[AssistantChatMessage]) -> Vec<Value> {
     conversation
         .iter()
@@ -2176,6 +2212,7 @@ fn build_anthropic_messages(conversation: &[AssistantChatMessage]) -> Vec<Value>
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_gemini_contents(conversation: &[AssistantChatMessage]) -> Vec<Value> {
     conversation
         .iter()
@@ -2193,6 +2230,7 @@ fn build_gemini_contents(conversation: &[AssistantChatMessage]) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_anthropic_tools() -> Vec<Value> {
     assistant_tool_defs()
         .into_iter()
@@ -2206,6 +2244,7 @@ fn build_anthropic_tools() -> Vec<Value> {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_gemini_function_declarations() -> Vec<Value> {
     assistant_tool_defs()
         .into_iter()
@@ -2219,6 +2258,7 @@ fn build_gemini_function_declarations() -> Vec<Value> {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn gemini_generate_content_endpoint(api_base: &str, model: &str) -> String {
     let base = api_base.trim_end_matches('/');
     if base.ends_with(":generateContent") {
@@ -2227,6 +2267,7 @@ fn gemini_generate_content_endpoint(api_base: &str, model: &str) -> String {
     format!("{base}/models/{model}:generateContent")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn execute_assistant_tool(
     bridge: &AssistantMcpBridge,
     tool_name: &str,
@@ -2250,12 +2291,14 @@ fn execute_assistant_tool(
 }
 
 #[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 struct AssistantMcpBridge {
     client: Client,
     base_url: String,
     guidance_prompt: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AssistantMcpBridge {
     fn new(client: Client, base_url: String, guidance_prompt: String) -> Self {
         Self {
@@ -2321,6 +2364,7 @@ impl AssistantMcpBridge {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn post_json_with_optional_bearer(
     client: &Client,
     endpoint: &str,
@@ -2337,6 +2381,7 @@ fn post_json_with_optional_bearer(
     decode_json_response(response)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn post_json_with_headers(
     client: &Client,
     endpoint: &str,
@@ -2353,6 +2398,7 @@ fn post_json_with_headers(
     decode_json_response(response)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn post_json_with_query_and_headers(
     client: &Client,
     endpoint: &str,
@@ -2370,6 +2416,7 @@ fn post_json_with_query_and_headers(
     decode_json_response(response)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn decode_json_response(response: reqwest::blocking::Response) -> Result<Value, String> {
     let status = response.status();
     let text = response
@@ -2382,6 +2429,7 @@ fn decode_json_response(response: reqwest::blocking::Response) -> Result<Value, 
         .map_err(|error| format!("Failed to parse JSON response: {error}; body: {text}"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn compact_json(value: &Value) -> String {
     let mut text = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
     if text.len() > 220 {

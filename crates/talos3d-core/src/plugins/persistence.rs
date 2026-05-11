@@ -196,6 +196,13 @@ pub fn load_project_from_path(world: &mut World, path: PathBuf) -> Result<PathBu
 }
 
 /// Open a Save As dialog, save to the chosen path.
+#[cfg(target_arch = "wasm32")]
+pub fn save_as_now(_world: &mut World) -> Result<Option<()>, String> {
+    Err("Native save dialogs are not available in the browser shell".to_string())
+}
+
+/// Open a Save As dialog, save to the chosen path.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_as_now(world: &mut World) -> Result<Option<()>, String> {
     let current_path = world.resource::<DocumentState>().current_path.clone();
     let mut dialog = rfd::FileDialog::new()
@@ -220,6 +227,13 @@ pub fn save_as_now(world: &mut World) -> Result<Option<()>, String> {
 }
 
 /// Open a file dialog and load the chosen project.
+#[cfg(target_arch = "wasm32")]
+pub fn open_project_dialog(_world: &mut World) -> Result<Option<()>, String> {
+    Err("Native open dialogs are not available in the browser shell".to_string())
+}
+
+/// Open a file dialog and load the chosen project.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn open_project_dialog(world: &mut World) -> Result<Option<()>, String> {
     let dialog = rfd::FileDialog::new().add_filter("Talos3D Project", &[FILE_EXTENSION]);
     match dialog.pick_file() {
