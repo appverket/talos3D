@@ -7,6 +7,8 @@ edition = "2021"
 default = []
 model-api = ["dep:rmcp", "dep:tokio", "dep:schemars", "dep:axum", "dep:tokio-util"]
 perf-stats = []
+webgpu = ["bevy/webgpu"]
+webgl2 = ["bevy/webgl2"]
 
 [dependencies]
 bevy = { version = "0.18", default-features = false, features = [
@@ -28,7 +30,6 @@ bevy = { version = "0.18", default-features = false, features = [
     "bevy_text",
     "bevy_ui",
     "tonemapping_luts",
-    "webgpu",
     "default_font",
     "png",
     "jpeg",
