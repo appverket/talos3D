@@ -1,13 +1,17 @@
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
-use bevy::{ecs::world::EntityRef, prelude::*};
+use bevy::{camera::Projection, ecs::world::EntityRef, prelude::*};
 use serde_json::{json, Map, Value};
 
 use crate::{
     capability_registry::CapabilityRegistry,
     plugins::{
-        commands::enqueue_create_boxed_entity, history::apply_pending_history_commands,
+        camera::OrbitCamera,
+        commands::enqueue_create_boxed_entity,
+        cursor::{cursor_window_position, CursorWorldPos, DrawingPlane},
+        history::apply_pending_history_commands,
         identity::ElementId,
+        tools::ActiveTool,
     },
 };
 
@@ -243,17 +247,134 @@ fn create_box(world: &mut World, args: Value) -> Result<Value, String> {
     create_entity(world, Value::Object(request))
 }
 
-fn browser_session_info() -> Value {
+fn browser_session_info(world: &mut World) -> Value {
+    let cursor_raw = world
+        .get_resource::<CursorWorldPos>()
+        .and_then(|cursor| cursor.raw);
+    let cursor_snapped = world
+        .get_resource::<CursorWorldPos>()
+        .and_then(|cursor| cursor.snapped);
+    let drawing_plane = world.get_resource::<DrawingPlane>().cloned();
+    let active_tool = world
+        .get_resource::<State<ActiveTool>>()
+        .map(|tool| format!("{:?}", tool.get()));
+    let pointer = browser_pointer_info(world);
+    let camera = browser_camera_info(world);
+
     json!({
         "executor_available": true,
         "runtime": "talos3d-browser",
         "url": browser_location_href(),
+        "active_tool": active_tool,
+        "pointer": pointer,
+        "camera": camera,
+        "cursor_world": {
+            "raw": cursor_raw.map(vec3_json),
+            "snapped": cursor_snapped.map(vec3_json),
+        },
+        "drawing_plane": drawing_plane.as_ref().map(|plane| json!({
+            "origin": vec3_json(plane.origin),
+            "normal": vec3_json(plane.normal),
+            "tangent": vec3_json(plane.tangent),
+            "bitangent": vec3_json(plane.bitangent),
+        })),
     })
+}
+
+fn browser_camera_info(world: &mut World) -> Value {
+    let mut camera_query =
+        world.query::<(&Camera, &GlobalTransform, &Projection, Option<&OrbitCamera>)>();
+    let Some((camera, transform, projection, orbit)) = camera_query
+        .iter(world)
+        .find(|(camera, _, _, orbit)| camera.is_active && orbit.is_some())
+        .or_else(|| camera_query.iter(world).next())
+    else {
+        return Value::Null;
+    };
+
+    json!({
+        "viewport": camera.logical_viewport_rect().map(|rect| json!({
+            "min": vec2_json(rect.min),
+            "max": vec2_json(rect.max),
+        })),
+        "projection": projection_json(projection),
+        "transform": {
+            "translation": vec3_json(transform.translation()),
+            "forward": vec3_json(Vec3::from(transform.forward())),
+            "up": vec3_json(Vec3::from(transform.up())),
+        },
+        "orbit": orbit.map(|orbit| json!({
+            "focus": vec3_json(orbit.focus),
+            "radius": orbit.radius,
+            "yaw": orbit.yaw,
+            "pitch": orbit.pitch,
+            "projection_mode": format!("{:?}", orbit.projection_mode),
+            "orthographic_scale": orbit.orthographic_scale,
+            "focal_length_mm": orbit.focal_length_mm,
+        })),
+    })
+}
+
+fn projection_json(projection: &Projection) -> Value {
+    match projection {
+        Projection::Perspective(perspective) => json!({
+            "type": "perspective",
+            "aspect_ratio": perspective.aspect_ratio,
+            "fov": perspective.fov,
+            "near": perspective.near,
+            "far": perspective.far,
+        }),
+        Projection::Orthographic(orthographic) => json!({
+            "type": "orthographic",
+            "scale": orthographic.scale,
+            "near": orthographic.near,
+            "far": orthographic.far,
+        }),
+        Projection::Custom(_) => json!({
+            "type": "custom",
+        }),
+    }
+}
+
+fn browser_pointer_info(world: &mut World) -> Value {
+    let window_cursor = {
+        let mut window_query = world.query_filtered::<&Window, With<bevy::window::PrimaryWindow>>();
+        let Some(window) = window_query.iter(world).next() else {
+            return Value::Null;
+        };
+        let Some(window_cursor) = cursor_window_position(window) else {
+            return Value::Null;
+        };
+        window_cursor
+    };
+
+    let mut camera_query = world.query::<(&Camera, Option<&OrbitCamera>)>();
+    let viewport_cursor = camera_query
+        .iter(world)
+        .find(|(camera, orbit)| camera.is_active && orbit.is_some())
+        .or_else(|| camera_query.iter(world).next())
+        .map(|(camera, _)| match camera.logical_viewport_rect() {
+            Some(rect) => window_cursor - rect.min,
+            None => window_cursor,
+        });
+
+    json!({
+        "window": vec2_json(window_cursor),
+        "viewport": viewport_cursor.map(vec2_json),
+    })
+}
+
+fn vec2_json(value: Vec2) -> Value {
+    json!([value.x, value.y])
+}
+
+fn vec3_json(value: Vec3) -> Value {
+    json!([value.x, value.y, value.z])
 }
 
 fn dispatch_tool(world: &mut World, tool_name: &str, args: Value) -> Result<Value, String> {
     match tool_name {
-        "browser_session_info" => Ok(browser_session_info()),
+        "browser_session_info" => Ok(browser_session_info(world)),
         "list_entity_types" => Ok(list_entity_types(world)),
         "list_entities" => Ok(list_entities(world)),
         "get_entity" => {
@@ -434,7 +555,7 @@ fn poll_browser_mcp_requests(world: &mut World) {
         let result = match &request.kind {
             wasm_bridge::BrowserMcpRequestKind::ListTools => Ok(json!({
                 "tools": tool_definitions(),
-                "session": browser_session_info(),
+                "session": browser_session_info(world),
             })),
             wasm_bridge::BrowserMcpRequestKind::CallTool {
                 tool_name,

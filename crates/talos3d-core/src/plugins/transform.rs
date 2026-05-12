@@ -16,8 +16,9 @@ use crate::{
     authored_entity::BoxedEntity,
     capability_registry::CapabilityRegistry,
     plugins::{
+        camera::OrbitCamera,
         commands::{ApplyEntityChangesCommand, CreateEntityCommand},
-        cursor::CursorWorldPos,
+        cursor::{cursor_viewport_position, CursorWorldPos},
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
         handles::arm_move_handles,
         identity::ElementId,
@@ -1210,16 +1211,12 @@ fn current_transform_cursor(world: &World) -> Option<Vec3> {
 fn current_viewport_cursor(world: &World) -> Option<Vec2> {
     let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
     let window = window_query.single(world).ok()?;
-    let cursor_position = window.cursor_position()?;
-    let mut camera_query = world.try_query::<&Camera>()?;
+    let mut camera_query = world.try_query_filtered::<&Camera, With<OrbitCamera>>()?;
     let camera = camera_query
         .iter(world)
         .find(|camera| camera.is_active)
         .or_else(|| camera_query.iter(world).next())?;
-    Some(match camera.logical_viewport_rect() {
-        Some(rect) => cursor_position - rect.min,
-        None => cursor_position,
-    })
+    cursor_viewport_position(window, camera)
 }
 
 fn restore_preview_transforms(world: &mut World) {
