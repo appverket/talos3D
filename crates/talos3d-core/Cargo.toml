@@ -53,6 +53,16 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 toml = "0.8"
 semver = "1"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+talos3d-catalog-client = { path = "../talos3d-catalog-client" }
+# tokio is already optional under model-api; for remote_catalog we need it on
+# native targets unconditionally. We keep the optional dep for model-api but
+# also declare it here so the remote_catalog plugin can use it without the
+# model-api feature flag.
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"
@@ -69,3 +79,5 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 tempfile = "3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }

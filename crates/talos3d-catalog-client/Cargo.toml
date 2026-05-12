@@ -1,0 +1,34 @@
+[package]
+name = "talos3d-catalog-client"
+version = "0.1.0"
+edition = "2021"
+description = "Async HTTP client for the talos-catalog knowledge backend service."
+
+# Wasm compatibility:
+# reqwest with rustls-tls is native-only. To compile for wasm32, switch to
+# reqwest's "default-features = false" and enable the "wasm" feature instead.
+# etcetera's choose_app_strategy is also native-only. Both gaps are tracked
+# under PP-KBD-5 (web client). Gate non-wasm code with #[cfg(not(target_arch = "wasm32"))]
+# in lib.rs if wasm compilation is required before PP-KBD-5.
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+hex = "0.4"
+sha2 = "0.10"
+tokio = { version = "1", features = ["sync", "macros", "time", "rt"] }
+etcetera = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tempfile = "3"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace"] }

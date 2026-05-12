@@ -50,6 +50,8 @@ pub mod promotion_world;
 pub mod property_edit;
 pub mod recipe_drafts;
 pub mod refinement;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod remote_catalog;
 pub mod render_pipeline;
 pub mod scene_ray;
 pub mod section_fill;
