@@ -2,6 +2,7 @@ pub mod assembly_pattern_drafts;
 pub mod assistant_chat;
 pub mod assumption_log;
 pub mod authoring_guidance;
+pub mod browser_mcp;
 pub mod bundled_definition_libraries;
 pub mod camera;
 pub mod clipping_planes;
