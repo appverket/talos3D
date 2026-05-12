@@ -4,6 +4,7 @@ members = [
     "crates/cadio-dwg",
     "crates/cadio-tools",
     "crates/talos3d-capability-api",
+    "crates/talos3d-catalog-client",
     "crates/talos3d-core",
     "crates/talos3d-terrain",
 ]
