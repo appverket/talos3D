@@ -5168,6 +5168,7 @@ dependencies = [
  "cadio-ir",
  "dxf",
  "image",
+ "js-sys",
  "reqwest",
  "rfd",
  "rmcp",
@@ -5179,6 +5180,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
