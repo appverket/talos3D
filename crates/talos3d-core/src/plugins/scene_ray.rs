@@ -7,6 +7,8 @@
 use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::capability_registry::{CapabilityRegistry, FaceHitCandidate, HitCandidate};
+use crate::plugins::camera::OrbitCamera;
+use crate::plugins::cursor::cursor_window_position;
 
 /// Build a camera ray from the current cursor position.
 ///
@@ -15,13 +17,13 @@ use crate::capability_registry::{CapabilityRegistry, FaceHitCandidate, HitCandid
 pub fn build_camera_ray(world: &mut World) -> Option<Ray3d> {
     let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
     let window = window_query.iter(world).next()?;
-    let cursor_pos = window.cursor_position()?;
+    let cursor_position = cursor_window_position(window)?;
 
-    let mut camera_query = world.query::<(&Camera, &GlobalTransform)>();
+    let mut camera_query = world.query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
     let (camera, cam_tf) = camera_query.iter(world).next()?;
     let viewport_cursor = match camera.logical_viewport_rect() {
-        Some(rect) => cursor_pos - rect.min,
-        None => cursor_pos,
+        Some(rect) => cursor_position - rect.min,
+        None => cursor_position,
     };
     camera.viewport_to_world(cam_tf, viewport_cursor).ok()
 }

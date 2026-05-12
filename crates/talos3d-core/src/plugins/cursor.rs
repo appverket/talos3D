@@ -1,8 +1,13 @@
-use bevy::window::PrimaryWindow;
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+
+use bevy::window::{PrimaryWindow, Window};
 use bevy::{ecs::system::SystemParam, picking::prelude::*, prelude::*};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{closure::Closure, JsCast};
 
 use super::document_properties::DocumentProperties;
-use crate::plugins::egui_chrome::EguiWantsInput;
+use crate::plugins::egui_chrome::{EguiChromeSystems, EguiWantsInput};
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::plugins::scene_ray;
@@ -33,12 +38,17 @@ impl Plugin for CursorPlugin {
             )
             .add_systems(
                 Update,
-                update_cursor_world_pos.in_set(CursorSystems::UpdateWorldPosition),
+                update_cursor_world_pos
+                    .in_set(CursorSystems::UpdateWorldPosition)
+                    .after(EguiChromeSystems),
             )
             .add_systems(
                 Update,
                 draw_cursor_crosshair.in_set(CursorSystems::DrawCrosshair),
             );
+
+        #[cfg(target_arch = "wasm32")]
+        app.add_systems(Startup, install_browser_canvas_cursor_mapping);
     }
 }
 
@@ -144,6 +154,117 @@ impl DrawingPlane {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static BROWSER_CANVAS_CURSOR_POSITION: RefCell<Option<Vec2>> = RefCell::new(None);
+}
+
+/// Return the cursor position in camera viewport logical pixels.
+///
+/// Native builds use Bevy's window cursor directly. Web builds prefer a browser
+/// canvas event mapping, because shells can differ in how DOM/client pixels are
+/// routed into winit after UI interaction. That environment-specific mapping is
+/// normalized here so tools and ray-casting code can remain generic.
+pub fn cursor_viewport_position(window: &Window, camera: &Camera) -> Option<Vec2> {
+    let cursor_position = platform_window_cursor_position(window)?;
+    Some(match camera.logical_viewport_rect() {
+        Some(rect) => cursor_position - rect.min,
+        None => cursor_position,
+    })
+}
+
+/// Return the cursor position in Bevy window logical pixels.
+pub fn cursor_window_position(window: &Window) -> Option<Vec2> {
+    platform_window_cursor_position(window)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn platform_window_cursor_position(window: &Window) -> Option<Vec2> {
+    window.cursor_position()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn platform_window_cursor_position(window: &Window) -> Option<Vec2> {
+    browser_canvas_cursor_position(window).or_else(|| window.cursor_position())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn install_browser_canvas_cursor_mapping() {
+    let Some(canvas) = browser_canvas() else {
+        return;
+    };
+
+    for event_name in ["pointermove", "pointerdown", "pointerup"] {
+        let canvas_for_event = canvas.clone();
+        let closure = Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |event| {
+            update_browser_canvas_cursor_position(&canvas_for_event, &event);
+        });
+        let _ =
+            canvas.add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref());
+        closure.forget();
+    }
+
+    let closure = Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |_| {
+        BROWSER_CANVAS_CURSOR_POSITION.with(|position| {
+            *position.borrow_mut() = None;
+        });
+    });
+    let _ =
+        canvas.add_event_listener_with_callback("pointerleave", closure.as_ref().unchecked_ref());
+    closure.forget();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn update_browser_canvas_cursor_position(
+    canvas: &web_sys::HtmlCanvasElement,
+    event: &web_sys::PointerEvent,
+) {
+    let rect = canvas.get_bounding_client_rect();
+    let width = rect.width() as f32;
+    let height = rect.height() as f32;
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+
+    let x = (event.client_x() as f64 - rect.left()) as f32;
+    let y = (event.client_y() as f64 - rect.top()) as f32;
+    let inside = x >= 0.0 && y >= 0.0 && x <= width && y <= height;
+    BROWSER_CANVAS_CURSOR_POSITION.with(|position| {
+        *position.borrow_mut() = inside.then_some(Vec2::new(x, y));
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_canvas_cursor_position(window: &Window) -> Option<Vec2> {
+    let cursor_position = BROWSER_CANVAS_CURSOR_POSITION.with(|position| *position.borrow())?;
+    let canvas_size =
+        browser_canvas_css_size().unwrap_or_else(|| Vec2::new(window.width(), window.height()));
+    if canvas_size.x <= 0.0 || canvas_size.y <= 0.0 {
+        return Some(cursor_position);
+    }
+    Some(Vec2::new(
+        cursor_position.x * window.width() / canvas_size.x,
+        cursor_position.y * window.height() / canvas_size.y,
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_canvas_css_size() -> Option<Vec2> {
+    let rect = browser_canvas()?.get_bounding_client_rect();
+    Some(Vec2::new(rect.width() as f32, rect.height() as f32))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_canvas() -> Option<web_sys::HtmlCanvasElement> {
+    web_sys::window()?
+        .document()?
+        .query_selector("#bevy")
+        .ok()
+        .flatten()?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .ok()
+}
+
 pub fn dimension_annotation_plane(
     drawing_plane: &DrawingPlane,
     orbit: Option<&OrbitCamera>,
@@ -243,7 +364,9 @@ fn update_cursor_world_pos(
         return;
     }
 
-    let Some((camera, camera_transform, orbit)) = camera_query.iter().next() else {
+    let Some((camera, camera_transform, orbit)) =
+        active_orbit_camera(camera_query.iter()).or_else(|| camera_query.iter().next())
+    else {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
     };
@@ -253,14 +376,9 @@ fn update_cursor_world_pos(
         return;
     };
 
-    let Some(cursor_position) = window.cursor_position() else {
+    let Some(viewport_cursor) = cursor_viewport_position(window, camera) else {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
-    };
-
-    let viewport_cursor = match camera.logical_viewport_rect() {
-        Some(rect) => cursor_position - rect.min,
-        None => cursor_position,
     };
 
     let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_cursor) else {
@@ -311,6 +429,14 @@ fn update_cursor_world_pos(
             .ok()
             .copied()
     });
+}
+
+fn active_orbit_camera<'a>(
+    cameras: impl Iterator<Item = (&'a Camera, &'a GlobalTransform, Option<&'a OrbitCamera>)>,
+) -> Option<(&'a Camera, &'a GlobalTransform, Option<&'a OrbitCamera>)> {
+    cameras
+        .into_iter()
+        .find(|(camera, _, orbit)| camera.is_active && orbit.is_some())
 }
 
 fn ray_cast_scene_surface(ray: Ray3d, ray_cast: &mut ToolCursorRayCast) -> Option<(Vec3, Entity)> {

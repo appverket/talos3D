@@ -7,8 +7,12 @@ use crate::{
     authored_entity::{PushPullAffordance, PushPullBlockReason},
     capability_registry::{CapabilityRegistry, FaceHitCandidate, FaceId, GeneratedFaceRef},
     plugins::{
+        camera::OrbitCamera,
         commands::CreateEntityCommand,
-        cursor::{CursorWorldPos, DrawingPlane},
+        cursor::{
+            cursor_viewport_position as mapped_cursor_viewport_position, CursorWorldPos,
+            DrawingPlane,
+        },
         egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
         input_ownership::{InputOwnership, InputPhase},
@@ -507,7 +511,9 @@ fn draw_face_outline(gizmos: &mut Gizmos, verts: &[Vec3], color: Color) {
 }
 
 fn active_camera_position(world: &World) -> Option<Vec3> {
-    let mut camera_query = world.try_query::<(&Camera, &GlobalTransform)>().unwrap();
+    let mut camera_query = world
+        .try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()
+        .unwrap();
     camera_query
         .iter(world)
         .find(|(camera, _)| camera.is_active)
@@ -715,7 +721,8 @@ fn build_push_pull_drag_plane(
 }
 
 fn active_camera(world: &World) -> Option<(Camera, GlobalTransform)> {
-    let mut camera_query = world.try_query::<(&Camera, &GlobalTransform)>()?;
+    let mut camera_query =
+        world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
     camera_query
         .iter(world)
         .find(|(camera, _)| camera.is_active)
@@ -726,11 +733,7 @@ fn active_camera(world: &World) -> Option<(Camera, GlobalTransform)> {
 fn viewport_cursor_position(world: &World, camera: &Camera) -> Option<Vec2> {
     let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
     let window = window_query.single(world).ok()?;
-    let cursor_position = window.cursor_position()?;
-    Some(match camera.logical_viewport_rect() {
-        Some(rect) => cursor_position - rect.min,
-        None => cursor_position,
-    })
+    mapped_cursor_viewport_position(window, camera)
 }
 
 fn projected_face_normal_screen(
@@ -1095,7 +1098,7 @@ fn handle_face_drawing_input(world: &mut World) {
 
 /// Compute close threshold scaled by camera distance.
 fn face_drawing_close_threshold(world: &mut World, target: Vec3) -> f32 {
-    let mut q = world.query::<(&Camera, &GlobalTransform)>();
+    let mut q = world.query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
     let Some((_cam, cam_tf)) = q.iter(world).next() else {
         return 0.3;
     };

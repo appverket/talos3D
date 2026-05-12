@@ -4,8 +4,9 @@ use crate::{
     authored_entity::{BoxedEntity, EntityBounds, HandleKind},
     capability_registry::CapabilityRegistry,
     plugins::{
+        camera::OrbitCamera,
         commands::ApplyEntityChangesCommand,
-        cursor::CursorWorldPos,
+        cursor::{cursor_window_position, CursorWorldPos},
         egui_chrome::EguiWantsInput,
         face_edit::FaceEditContext,
         input_ownership::{InputOwnership, InputPhase},
@@ -204,6 +205,7 @@ struct HandleViewportQuery<'w, 's> {
             &'static GlobalTransform,
             &'static Projection,
         ),
+        With<OrbitCamera>,
     >,
 }
 
@@ -248,7 +250,7 @@ impl HandleViewportQuery<'_, '_> {
 
     fn cursor_and_camera(&self) -> Option<(Vec2, &Camera, &GlobalTransform, &Projection)> {
         let window = self.window_query.single().ok()?;
-        let cursor_position = window.cursor_position()?;
+        let cursor_position = cursor_window_position(window)?;
         let (camera, camera_transform, projection) = self.camera_query.iter().next()?;
         Some((cursor_position, camera, camera_transform, projection))
     }
@@ -1037,11 +1039,9 @@ fn draw_loop(gizmos: &mut Gizmos, corners: [Vec3; 4], color: Color) {
 }
 
 fn current_cursor_screen(world: &mut World) -> Option<Vec2> {
-    world
-        .query_filtered::<&Window, With<PrimaryWindow>>()
-        .single(world)
-        .ok()?
-        .cursor_position()
+    let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
+    let window = window_query.single(world).ok()?;
+    cursor_window_position(window)
 }
 
 fn current_cursor_world(world: &World) -> Option<Vec3> {

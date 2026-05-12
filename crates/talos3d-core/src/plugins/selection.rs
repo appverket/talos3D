@@ -9,8 +9,9 @@ use crate::{
     authored_entity::EntityBounds,
     capability_registry::{CapabilityRegistry, HitCandidate},
     plugins::{
-        camera::orbit_modifier_pressed,
+        camera::{orbit_modifier_pressed, OrbitCamera},
         commands::DeleteEntitiesCommand,
+        cursor::cursor_window_position,
         definition_preview_scene::PreviewOnly,
         egui_chrome::EguiWantsInput,
         face_edit::FaceEditContext,
@@ -176,33 +177,37 @@ fn handle_selection_click(world: &mut World) {
         return;
     }
 
-    let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
     let cursor_position = {
+        let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
         let Ok(window) = window_query.single(world) else {
             return;
         };
 
-        let Some(cursor_position) = window.cursor_position() else {
+        let Some(cursor_position) = cursor_window_position(window) else {
             return;
         };
         cursor_position
     };
 
-    let hit_target = if just_pressed {
-        let mut camera_query = world.query::<(&Camera, &GlobalTransform)>();
+    let click_ray = if just_pressed {
+        let mut camera_query =
+            world.query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
         let Some((camera, camera_transform)) = camera_query.iter(world).next() else {
             return;
         };
-
         let viewport_cursor = match camera.logical_viewport_rect() {
             Some(rect) => cursor_position - rect.min,
             None => cursor_position,
         };
-
         let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_cursor) else {
             return;
         };
+        Some(ray)
+    } else {
+        None
+    };
 
+    let hit_target = if let Some(ray) = click_ray {
         let raw_hit_entity = selection_hit_entity(world, ray);
         resolve_selection_click_target(world, raw_hit_entity)
     } else {
@@ -755,7 +760,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
     let Ok(window) = cx.window_query.single() else {
         return;
     };
-    let Some(cursor_position) = window.cursor_position() else {
+    let Some(cursor_position) = cursor_window_position(window) else {
         return;
     };
 
@@ -1088,7 +1093,7 @@ fn draw_box_select_rect(
     let Ok(window) = window_query.single() else {
         return;
     };
-    let Some(cursor_position) = window.cursor_position() else {
+    let Some(cursor_position) = cursor_window_position(window) else {
         return;
     };
     let Some((camera, camera_transform)) = camera_query.iter().next() else {
