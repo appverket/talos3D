@@ -396,7 +396,7 @@ impl MaterialInfo {
                         })
                 }
                 Some(TextureRef::Embedded { data, .. }) => Some(data.clone()),
-                Some(TextureRef::AssetPath(p)) => Some(p.clone()),
+                Some(TextureRef::AssetPath { path: p }) => Some(p.clone()),
                 None => None,
             }
         }
@@ -413,7 +413,7 @@ impl MaterialInfo {
                         })
                 }
                 Some(TextureRef::Embedded { mime, .. }) => Some(mime.clone()),
-                Some(TextureRef::AssetPath(_)) => None,
+                Some(TextureRef::AssetPath { .. }) => None,
                 None => None,
             }
         }

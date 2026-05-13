@@ -55,12 +55,14 @@ mod inner {
     use uuid::Uuid;
 
     use talos3d_catalog_client::{
-        definition_publish_request, CatalogCache, ChangeEvent, ChangePoller, PublishScope,
-        RemoteCatalogClient, WorkspaceRemoteCache,
+        definition_publish_request, material_def_publish_request, CatalogCache, ChangeEvent,
+        ChangePoller, PublishScope, RemoteCatalogClient, WorkspaceRemoteCache,
     };
 
     use crate::plugins::materials::{MaterialDef, MaterialRegistry};
-    use crate::plugins::modeling::definition::{Definition, DefinitionId, DefinitionRegistry};
+    use crate::plugins::modeling::definition::{
+        Definition, DefinitionId, DefinitionLibraryRegistry, DefinitionRegistry,
+    };
 
     // ---- Messages -----------------------------------------------------------
 
@@ -92,6 +94,38 @@ mod inner {
     pub struct DefinitionRegistryReloaded {
         /// The [`DefinitionId`] of the inserted [`Definition`].
         pub id: DefinitionId,
+    }
+
+    /// Request the desktop to publish a [`MaterialDef`] to the remote catalog.
+    ///
+    /// Dispatch this message to trigger an async HTTP publish on the catalog
+    /// worker thread. The result is delivered as a [`PublishMaterialDefResult`]
+    /// message in a subsequent frame.
+    #[derive(Message, Debug, Clone)]
+    pub struct PublishMaterialDefRequested {
+        /// Local id used to look up the [`MaterialDef`] in [`MaterialRegistry`].
+        pub material_id: String,
+        /// `canonical_id` to publish under in the catalog.
+        pub canonical_id: String,
+        /// Distribution scope.
+        pub scope: PublishScope,
+        /// ISO country codes. Empty = universal.
+        pub jurisdiction: Vec<String>,
+        /// Required when `scope` is [`PublishScope::Org`].
+        pub owner_org_id: Option<Uuid>,
+        /// Operator or account id of the publisher.
+        pub published_by: Uuid,
+    }
+
+    /// Outcome of a [`PublishMaterialDefRequested`] request.
+    #[derive(Message, Debug, Clone)]
+    pub struct PublishMaterialDefResult {
+        /// Echoed back from the originating request.
+        pub material_id: String,
+        /// Echoed back from the originating request.
+        pub canonical_id: String,
+        /// Whether the publish succeeded or failed.
+        pub outcome: PublishDefinitionOutcome,
     }
 
     /// Request the desktop to publish a [`Definition`] to the remote catalog.
@@ -149,16 +183,26 @@ mod inner {
         pub body: Option<Value>,
     }
 
+    /// Identifies the local artifact a publish job is acting on. The catalog
+    /// worker thread is agnostic to artifact kind; this enum is reflected back
+    /// in [`PublishJobResult`] so the Bevy main thread can route the outcome
+    /// to the right strongly-typed result message.
+    #[derive(Debug, Clone)]
+    pub(super) enum PublishJobSource {
+        Definition(DefinitionId),
+        MaterialDef(String),
+    }
+
     /// A publish job sent from Bevy to the catalog worker thread.
     pub(super) struct PublishJob {
-        pub definition_id: DefinitionId,
+        pub source: PublishJobSource,
         pub canonical_id: String,
         pub request: talos3d_catalog_client::PublishArtifactRequest,
     }
 
     /// A publish result sent from the catalog worker thread back to Bevy.
     pub(super) struct PublishJobResult {
-        pub definition_id: DefinitionId,
+        pub source: PublishJobSource,
         pub canonical_id: String,
         pub outcome: PublishDefinitionOutcome,
     }
@@ -182,6 +226,48 @@ mod inner {
         /// Drain completed publish results from the worker thread.
         pub(super) publish_results_rx: Mutex<std::sync::mpsc::Receiver<PublishJobResult>>,
     }
+
+    /// Configuration for the optional bundled-content seeding pass.
+    ///
+    /// When `seed_bundled_on_start` is true (the default whenever the remote
+    /// catalog is enabled), the plugin walks `DefinitionLibraryRegistry` and
+    /// `MaterialRegistry` once at startup and emits `PublishDefinitionRequested`
+    /// / `PublishMaterialDefRequested` messages so the bundled artifacts seed
+    /// the catalog backend. Catalog deduplication by content hash makes
+    /// re-running idempotent.
+    ///
+    /// `published_by` defaults to `TALOS3D_PUBLISHED_BY` (parsed as a UUID) when
+    /// set, otherwise the nil UUID (a stable identifier for "bundled-content
+    /// seed").
+    #[derive(Resource, Debug, Clone)]
+    pub struct BundledContentSeedConfig {
+        pub seed_bundled_on_start: bool,
+        pub scope: PublishScope,
+        pub jurisdiction: Vec<String>,
+        pub owner_org_id: Option<Uuid>,
+        pub published_by: Uuid,
+    }
+
+    impl Default for BundledContentSeedConfig {
+        fn default() -> Self {
+            let published_by = std::env::var("TALOS3D_PUBLISHED_BY")
+                .ok()
+                .and_then(|s| Uuid::parse_str(&s).ok())
+                .unwrap_or(Uuid::nil());
+            Self {
+                seed_bundled_on_start: true,
+                scope: PublishScope::Shipped,
+                jurisdiction: Vec::new(),
+                owner_org_id: None,
+                published_by,
+            }
+        }
+    }
+
+    /// One-shot guard for `seed_bundled_content_system`. Inserted after the
+    /// first successful seed pass so it never fires again in this session.
+    #[derive(Resource, Default)]
+    pub struct BundledContentSeeded;
 
     // ---- Plugin -------------------------------------------------------------
 
@@ -216,6 +302,9 @@ mod inner {
                 .add_message::<DefinitionRegistryReloaded>()
                 .add_message::<PublishDefinitionRequested>()
                 .add_message::<PublishDefinitionResult>()
+                .add_message::<PublishMaterialDefRequested>()
+                .add_message::<PublishMaterialDefResult>()
+                .init_resource::<BundledContentSeedConfig>()
                 .add_systems(Startup, spawn_catalog_thread_system)
                 .add_systems(
                     PreUpdate,
@@ -224,9 +313,12 @@ mod inner {
                         apply_material_def_changes_system.after(drain_catalog_changes_system),
                         apply_definition_changes_system.after(drain_catalog_changes_system),
                         publish_definition_requests_system,
+                        publish_material_def_requests_system,
                         drain_publish_results_system,
+                        log_publish_outcomes_system.after(drain_publish_results_system),
                     ),
-                );
+                )
+                .add_systems(Update, seed_bundled_content_system);
 
             // Stash config for the Startup system.
             app.insert_resource(CatalogConfig {
@@ -386,7 +478,7 @@ mod inner {
 
                     tokio::spawn(async move {
                         while let Some(job) = publish_tokio_rx.recv().await {
-                            let definition_id = job.definition_id.clone();
+                            let source = job.source.clone();
                             let canonical_id = job.canonical_id.clone();
 
                             let outcome =
@@ -399,15 +491,16 @@ mod inner {
                                     Err(e) => {
                                         warn!(
                                             canonical_id = %canonical_id,
+                                            kind = %job.request.kind,
                                             error = %e,
-                                            "definition publish failed"
+                                            "artifact publish failed"
                                         );
                                         PublishDefinitionOutcome::Failed(e.to_string())
                                     }
                                 };
 
                             let result = PublishJobResult {
-                                definition_id,
+                                source,
                                 canonical_id,
                                 outcome,
                             };
@@ -528,6 +621,7 @@ mod inner {
     fn publish_definition_requests_system(
         mut reader: MessageReader<PublishDefinitionRequested>,
         registry: Res<DefinitionRegistry>,
+        libraries: Res<DefinitionLibraryRegistry>,
         state: Option<Res<RemoteCatalogState>>,
         mut writer: MessageWriter<PublishDefinitionResult>,
     ) {
@@ -537,12 +631,21 @@ mod inner {
             let definition_id = req.definition_id.clone();
             let canonical_id = req.canonical_id.clone();
 
-            // Look up the definition.
-            let Some(def) = registry.get(&definition_id) else {
+            // Look up the definition in the live registry first; fall back to
+            // bundled / workspace libraries so seed-publish paths can address
+            // definitions that have not (yet) been instantiated into
+            // DefinitionRegistry.
+            let def = registry.get(&definition_id).cloned().or_else(|| {
+                libraries
+                    .list()
+                    .into_iter()
+                    .find_map(|lib| lib.get(&definition_id).cloned())
+            });
+            let Some(def) = def else {
                 warn!(
                     id = %definition_id.as_str(),
                     canonical_id = %canonical_id,
-                    "PublishDefinitionRequested: definition not found in registry"
+                    "PublishDefinitionRequested: definition not found in registry or libraries"
                 );
                 writer.write(PublishDefinitionResult {
                     definition_id,
@@ -553,7 +656,7 @@ mod inner {
             };
 
             // Serialize to JSON.
-            let body = match serde_json::to_value(def) {
+            let body = match serde_json::to_value(&def) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
@@ -597,7 +700,7 @@ mod inner {
 
             // Forward to the worker thread.
             let job = PublishJob {
-                definition_id: definition_id.clone(),
+                source: PublishJobSource::Definition(definition_id.clone()),
                 canonical_id: canonical_id.clone(),
                 request: publish_req,
             };
@@ -618,22 +721,263 @@ mod inner {
         }
     }
 
+    /// Handles [`PublishMaterialDefRequested`] messages by serializing the
+    /// [`MaterialDef`] and sending a publish job to the catalog worker thread.
+    ///
+    /// Runs every frame in `PreUpdate`.
+    fn publish_material_def_requests_system(
+        mut reader: MessageReader<PublishMaterialDefRequested>,
+        registry: Res<MaterialRegistry>,
+        state: Option<Res<RemoteCatalogState>>,
+        mut writer: MessageWriter<PublishMaterialDefResult>,
+    ) {
+        let Some(state) = state else { return };
+
+        for req in reader.read() {
+            let material_id = req.material_id.clone();
+            let canonical_id = req.canonical_id.clone();
+
+            let Some(def) = registry.get(&material_id).cloned() else {
+                warn!(
+                    id = %material_id,
+                    canonical_id = %canonical_id,
+                    "PublishMaterialDefRequested: material not found in registry"
+                );
+                writer.write(PublishMaterialDefResult {
+                    material_id,
+                    canonical_id,
+                    outcome: PublishDefinitionOutcome::NotFound,
+                });
+                continue;
+            };
+
+            let body = match serde_json::to_value(&def) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        id = %material_id,
+                        error = %e,
+                        "PublishMaterialDefRequested: failed to serialize material"
+                    );
+                    writer.write(PublishMaterialDefResult {
+                        material_id,
+                        canonical_id,
+                        outcome: PublishDefinitionOutcome::Failed(e.to_string()),
+                    });
+                    continue;
+                }
+            };
+
+            let publish_req = match material_def_publish_request(
+                canonical_id.clone(),
+                body,
+                req.scope,
+                req.jurisdiction.clone(),
+                req.owner_org_id,
+                req.published_by,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        id = %material_id,
+                        error = %e,
+                        "PublishMaterialDefRequested: invalid publish parameters"
+                    );
+                    writer.write(PublishMaterialDefResult {
+                        material_id,
+                        canonical_id,
+                        outcome: PublishDefinitionOutcome::Failed(e.to_string()),
+                    });
+                    continue;
+                }
+            };
+
+            let job = PublishJob {
+                source: PublishJobSource::MaterialDef(material_id.clone()),
+                canonical_id: canonical_id.clone(),
+                request: publish_req,
+            };
+            if let Err(e) = state.publish_tx.lock().unwrap().send(job) {
+                warn!(
+                    id = %material_id,
+                    error = %e,
+                    "publish_tx channel closed; dropping material publish request"
+                );
+                writer.write(PublishMaterialDefResult {
+                    material_id,
+                    canonical_id,
+                    outcome: PublishDefinitionOutcome::Failed(
+                        "publish worker channel closed".to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+
     /// Drains completed publish results from the catalog worker thread and
-    /// emits [`PublishDefinitionResult`] messages.
+    /// emits [`PublishDefinitionResult`] / [`PublishMaterialDefResult`] messages
+    /// based on the artifact source recorded by the publish system.
     ///
     /// Runs every frame in `PreUpdate`.
     fn drain_publish_results_system(
         state: Option<Res<RemoteCatalogState>>,
-        mut writer: MessageWriter<PublishDefinitionResult>,
+        mut definition_writer: MessageWriter<PublishDefinitionResult>,
+        mut material_writer: MessageWriter<PublishMaterialDefResult>,
     ) {
         let Some(state) = state else { return };
         let rx = state.publish_results_rx.lock().unwrap();
         while let Ok(result) = rx.try_recv() {
-            writer.write(PublishDefinitionResult {
-                definition_id: result.definition_id,
-                canonical_id: result.canonical_id,
-                outcome: result.outcome,
+            match result.source {
+                PublishJobSource::Definition(definition_id) => {
+                    definition_writer.write(PublishDefinitionResult {
+                        definition_id,
+                        canonical_id: result.canonical_id,
+                        outcome: result.outcome,
+                    });
+                }
+                PublishJobSource::MaterialDef(material_id) => {
+                    material_writer.write(PublishMaterialDefResult {
+                        material_id,
+                        canonical_id: result.canonical_id,
+                        outcome: result.outcome,
+                    });
+                }
+            }
+        }
+    }
+
+    /// One-shot system that publishes every bundled `Definition` and
+    /// `MaterialDef` currently registered locally to the remote catalog.
+    ///
+    /// Runs every frame in `Update`; sets the [`BundledContentSeeded`] marker
+    /// resource the first time it fires so it never re-publishes in this
+    /// session. The remote catalog dedupes by content hash, so even without
+    /// this guard re-publishing the same bundled artifact would be a no-op on
+    /// the wire — the guard is mainly to keep logs tidy.
+    fn seed_bundled_content_system(
+        mut commands: Commands,
+        state: Option<Res<RemoteCatalogState>>,
+        config: Res<BundledContentSeedConfig>,
+        seeded: Option<Res<BundledContentSeeded>>,
+        libraries: Res<DefinitionLibraryRegistry>,
+        materials: Res<MaterialRegistry>,
+        mut def_writer: MessageWriter<PublishDefinitionRequested>,
+        mut mat_writer: MessageWriter<PublishMaterialDefRequested>,
+    ) {
+        if state.is_none() {
+            return;
+        }
+        if seeded.is_some() {
+            return;
+        }
+        if !config.seed_bundled_on_start {
+            commands.insert_resource(BundledContentSeeded);
+            return;
+        }
+
+        let mut definition_count = 0usize;
+        for library in libraries.list() {
+            for definition in library.definitions.values() {
+                let canonical_id = format!("{}::{}", library.id.0, definition.id.0);
+                def_writer.write(PublishDefinitionRequested {
+                    definition_id: definition.id.clone(),
+                    canonical_id,
+                    scope: config.scope,
+                    jurisdiction: config.jurisdiction.clone(),
+                    owner_org_id: config.owner_org_id,
+                    published_by: config.published_by,
+                });
+                definition_count += 1;
+            }
+        }
+
+        let mut material_count = 0usize;
+        for material in materials.all() {
+            let canonical_id = format!("bundled::{}", material.id);
+            mat_writer.write(PublishMaterialDefRequested {
+                material_id: material.id.clone(),
+                canonical_id,
+                scope: config.scope,
+                jurisdiction: config.jurisdiction.clone(),
+                owner_org_id: config.owner_org_id,
+                published_by: config.published_by,
             });
+            material_count += 1;
+        }
+
+        info!(
+            definitions = definition_count,
+            materials = material_count,
+            "seeding bundled definitions and materials to remote catalog"
+        );
+        commands.insert_resource(BundledContentSeeded);
+    }
+
+    /// Logs publish outcomes at info / warn level so the operator can see
+    /// success / failure from desktop logs without writing a custom subscriber.
+    fn log_publish_outcomes_system(
+        mut def_reader: MessageReader<PublishDefinitionResult>,
+        mut mat_reader: MessageReader<PublishMaterialDefResult>,
+    ) {
+        for result in def_reader.read() {
+            match &result.outcome {
+                PublishDefinitionOutcome::Published {
+                    artifact_id,
+                    revision,
+                    content_hash,
+                } => {
+                    info!(
+                        canonical_id = %result.canonical_id,
+                        artifact_id = %artifact_id,
+                        revision = revision,
+                        content_hash = %content_hash,
+                        "definition published to catalog"
+                    );
+                }
+                PublishDefinitionOutcome::NotFound => {
+                    warn!(
+                        canonical_id = %result.canonical_id,
+                        "definition publish: not found in registry"
+                    );
+                }
+                PublishDefinitionOutcome::Failed(error) => {
+                    warn!(
+                        canonical_id = %result.canonical_id,
+                        error = %error,
+                        "definition publish failed"
+                    );
+                }
+            }
+        }
+        for result in mat_reader.read() {
+            match &result.outcome {
+                PublishDefinitionOutcome::Published {
+                    artifact_id,
+                    revision,
+                    content_hash,
+                } => {
+                    info!(
+                        canonical_id = %result.canonical_id,
+                        artifact_id = %artifact_id,
+                        revision = revision,
+                        content_hash = %content_hash,
+                        "material_def published to catalog"
+                    );
+                }
+                PublishDefinitionOutcome::NotFound => {
+                    warn!(
+                        canonical_id = %result.canonical_id,
+                        "material_def publish: not found in registry"
+                    );
+                }
+                PublishDefinitionOutcome::Failed(error) => {
+                    warn!(
+                        canonical_id = %result.canonical_id,
+                        error = %error,
+                        "material_def publish failed"
+                    );
+                }
+            }
         }
     }
 
@@ -718,6 +1062,7 @@ mod inner {
             let mut app = App::new();
             app.add_plugins(MinimalPlugins)
                 .init_resource::<DefinitionRegistry>()
+                .init_resource::<DefinitionLibraryRegistry>()
                 .add_message::<PublishDefinitionRequested>()
                 .add_message::<PublishDefinitionResult>()
                 .add_systems(PreUpdate, publish_definition_requests_system);
@@ -996,7 +1341,10 @@ mod inner {
 // Re-export the non-wasm items at module level.
 #[cfg(not(target_arch = "wasm32"))]
 pub use inner::{
-    DefinitionRegistryReloaded, MaterialRegistryReloaded, PublishDefinitionOutcome,
-    PublishDefinitionRequested, PublishDefinitionResult, RemoteCatalogChange, RemoteCatalogPlugin,
-    RemoteCatalogState,
+    BundledContentSeedConfig, BundledContentSeeded, DefinitionRegistryReloaded,
+    MaterialRegistryReloaded, PublishDefinitionOutcome, PublishDefinitionRequested,
+    PublishDefinitionResult, PublishMaterialDefRequested, PublishMaterialDefResult,
+    RemoteCatalogChange, RemoteCatalogPlugin, RemoteCatalogState,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use talos3d_catalog_client::PublishScope;
