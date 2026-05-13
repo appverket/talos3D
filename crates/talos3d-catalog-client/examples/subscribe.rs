@@ -16,7 +16,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use talos3d_catalog_client::{ChangePoller, RemoteCatalogClient, WorkspaceRemoteCache};
+use talos3d_catalog_client::{CatalogCache, ChangePoller, RemoteCatalogClient, WorkspaceRemoteCache};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| uuid::Uuid::parse_str(&s).ok());
 
     let cache_root = tempfile::tempdir()?.keep();
-    let cache = Arc::new(WorkspaceRemoteCache::open(cache_root)?);
+    let cache: Arc<dyn CatalogCache> = Arc::new(WorkspaceRemoteCache::open(cache_root)?);
     let client = RemoteCatalogClient::new(base_url.clone(), account_id);
 
     eprintln!("subscribing to {base_url} (account={account_id:?})");

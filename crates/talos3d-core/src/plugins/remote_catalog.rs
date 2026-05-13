@@ -55,8 +55,8 @@ mod inner {
     use uuid::Uuid;
 
     use talos3d_catalog_client::{
-        definition_publish_request, ChangeEvent, ChangePoller, PublishScope, RemoteCatalogClient,
-        WorkspaceRemoteCache,
+        definition_publish_request, CatalogCache, ChangeEvent, ChangePoller, PublishScope,
+        RemoteCatalogClient, WorkspaceRemoteCache,
     };
 
     use crate::plugins::materials::{MaterialDef, MaterialRegistry};
@@ -265,7 +265,7 @@ mod inner {
             }
         };
 
-        let cache = match WorkspaceRemoteCache::open(cache_root.clone()) {
+        let cache: Arc<dyn CatalogCache> = match WorkspaceRemoteCache::open(cache_root.clone()) {
             Ok(c) => Arc::new(c),
             Err(e) => {
                 error!(error = %e, "failed to open catalog cache; remote catalog disabled");

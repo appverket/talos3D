@@ -4,27 +4,40 @@ version = "0.1.0"
 edition = "2021"
 description = "Async HTTP client for the talos-catalog knowledge backend service."
 
-# Wasm compatibility:
-# reqwest with rustls-tls is native-only. To compile for wasm32, switch to
-# reqwest's "default-features = false" and enable the "wasm" feature instead.
-# etcetera's choose_app_strategy is also native-only. Both gaps are tracked
-# under PP-KBD-5 (web client). Gate non-wasm code with #[cfg(not(target_arch = "wasm32"))]
-# in lib.rs if wasm compilation is required before PP-KBD-5.
+# Target support:
+# - Native: reqwest uses rustls-tls; WorkspaceRemoteCache + etcetera are
+#   compiled in. ChangePoller is driven by a tokio runtime owned by the
+#   caller (RemoteCatalogPlugin spawns a dedicated thread + current-thread
+#   runtime).
+# - wasm32-unknown-unknown: reqwest uses the browser's fetch API (no TLS
+#   features); WorkspaceRemoteCache + etcetera are compiled out (no
+#   filesystem). Callers use InMemoryCatalogCache and drive the poller via
+#   wasm_bindgen_futures::spawn_local.
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
 url = "2"
 hex = "0.4"
 sha2 = "0.10"
 tokio = { version = "1", features = ["sync", "macros", "time", "rt"] }
+
+# Native-only deps: rustls-tls (reqwest does TLS itself) + workspace cache.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 etcetera = "0.8"
+
+# Wasm: reqwest uses the browser fetch; no TLS layer, no streaming feature
+# (browser handles framing). getrandom needs the "js" feature so uuid::v4
+# works in the browser.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
