@@ -16,9 +16,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use talos3d_catalog_client::{
-    ChangePoller, RemoteCatalogClient, WorkspaceRemoteCache,
-};
+use talos3d_catalog_client::{ChangePoller, RemoteCatalogClient, WorkspaceRemoteCache};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
