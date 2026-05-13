@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
 use crate::{
-    cache::WorkspaceRemoteCache, client::RemoteCatalogClient, dto::ChangeEvent,
+    cache::CatalogCache, client::RemoteCatalogClient, dto::ChangeEvent,
     error::CatalogClientError,
 };
 
@@ -21,9 +21,13 @@ use crate::{
 ///
 /// Call [`ChangePoller::run`] to start the loop. It owns the loop lifecycle;
 /// drop or send `true` on the shutdown watch to stop it cleanly.
+///
+/// The cache is held as `Arc<dyn CatalogCache>` so the same poller compiles
+/// for native and wasm targets — pass a `WorkspaceRemoteCache` on the desktop
+/// or an `InMemoryCatalogCache` in the browser.
 pub struct ChangePoller {
     client: RemoteCatalogClient,
-    cache: Arc<WorkspaceRemoteCache>,
+    cache: Arc<dyn CatalogCache>,
     /// Artifact kinds to subscribe to (e.g. `["material_def.v1"]`).
     kinds: Vec<String>,
     /// How long to sleep when the feed is fully caught up.
@@ -34,7 +38,7 @@ impl ChangePoller {
     /// Create a new poller.
     pub fn new(
         client: RemoteCatalogClient,
-        cache: Arc<WorkspaceRemoteCache>,
+        cache: Arc<dyn CatalogCache>,
         kinds: Vec<String>,
         idle_interval: Duration,
     ) -> Self {
@@ -135,6 +139,16 @@ impl ChangePoller {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_transient_http(e: &reqwest::Error) -> bool {
     e.is_connect() || e.is_timeout() || e.is_request()
+}
+
+/// On wasm the browser `fetch` surface doesn't expose connect/timeout/request
+/// classifications — every network failure is a generic error. Treat any
+/// `reqwest::Error` as transient so the poller retries with backoff rather
+/// than terminating, which matches the native semantics close enough.
+#[cfg(target_arch = "wasm32")]
+fn is_transient_http(_e: &reqwest::Error) -> bool {
+    true
 }

@@ -20,8 +20,8 @@ use axum::{
 };
 use chrono::Utc;
 use talos3d_catalog_client::{
-    ArtifactResolution, ChangeEvent, ChangePoller, ChangesResponse, PublishArtifactRequest,
-    RemoteCatalogClient, WorkspaceRemoteCache,
+    ArtifactResolution, CatalogCache, ChangeEvent, ChangePoller, ChangesResponse,
+    PublishArtifactRequest, RemoteCatalogClient, WorkspaceRemoteCache,
 };
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -267,7 +267,8 @@ async fn change_poller_delivers_events_then_idles() {
     }
 
     let dir = TempDir::new().unwrap();
-    let cache = Arc::new(WorkspaceRemoteCache::open(dir.path().to_path_buf()).unwrap());
+    let cache: Arc<dyn CatalogCache> =
+        Arc::new(WorkspaceRemoteCache::open(dir.path().to_path_buf()).unwrap());
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -312,7 +313,8 @@ async fn change_poller_resumes_from_cursor() {
     }
 
     let dir = TempDir::new().unwrap();
-    let cache = Arc::new(WorkspaceRemoteCache::open(dir.path().to_path_buf()).unwrap());
+    let cache: Arc<dyn CatalogCache> =
+        Arc::new(WorkspaceRemoteCache::open(dir.path().to_path_buf()).unwrap());
 
     // Pre-seed cursor = 2; poller should only deliver event with cursor = 3.
     cache.write_cursor(2).unwrap();
