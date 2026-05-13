@@ -30,6 +30,7 @@ pub mod changes;
 pub mod client;
 pub mod dto;
 pub mod error;
+pub mod publish;
 
 pub use cache::{ResolutionPointer, WorkspaceRemoteCache};
 pub use changes::ChangePoller;
@@ -39,3 +40,6 @@ pub use dto::{
     PublishArtifactRequest,
 };
 pub use error::CatalogClientError;
+pub use publish::{
+    definition_publish_request, material_def_publish_request, PublishError, PublishScope,
+};
