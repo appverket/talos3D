@@ -157,20 +157,32 @@ pub struct DefinitionPreviewScene {
 pub struct DefinitionPreviewTarget {
     pub definition_id: Option<DefinitionId>,
     pub registry: DefinitionRegistry,
+    pub overrides: OverrideMap,
     pub registry_signature: u64,
 }
 
 impl DefinitionPreviewTarget {
     pub fn request(&mut self, definition_id: DefinitionId, registry: DefinitionRegistry) {
+        self.request_with_overrides(definition_id, registry, OverrideMap::default());
+    }
+
+    pub fn request_with_overrides(
+        &mut self,
+        definition_id: DefinitionId,
+        registry: DefinitionRegistry,
+        overrides: OverrideMap,
+    ) {
         let registry_signature = registry_signature(&registry);
         self.definition_id = Some(definition_id);
         self.registry = registry;
-        self.registry_signature = registry_signature;
+        self.overrides = overrides;
+        self.registry_signature = preview_target_signature(registry_signature, &self.overrides);
     }
 
     pub fn clear(&mut self) {
         self.definition_id = None;
         self.registry = DefinitionRegistry::default();
+        self.overrides = OverrideMap::default();
         self.registry_signature = 0;
     }
 }
@@ -338,11 +350,12 @@ fn configure_preview_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 /// Despawns all preview entities except the camera and directional light, then
 /// renders a fresh synthetic occurrence against the submitted preview registry.
 pub fn sync_preview_to_target(world: &mut World) {
-    let (target_definition_id, preview_registry, registry_signature) = {
+    let (target_definition_id, preview_registry, preview_overrides, registry_signature) = {
         let target = world.resource::<DefinitionPreviewTarget>();
         (
             target.definition_id.clone(),
             target.registry.clone(),
+            target.overrides.clone(),
             target.registry_signature,
         )
     };
@@ -388,7 +401,7 @@ pub fn sync_preview_to_target(world: &mut World) {
             .unwrap_or_default();
 
         let mut identity = OccurrenceIdentity::new(def_id.clone(), definition_version);
-        identity.overrides = OverrideMap::default();
+        identity.overrides = preview_overrides;
 
         match render_occurrence(
             world,
@@ -779,6 +792,15 @@ fn registry_signature(registry: &DefinitionRegistry) -> u64 {
         if let Ok(serialized) = serde_json::to_string(definition) {
             serialized.hash(&mut hasher);
         }
+    }
+    hasher.finish()
+}
+
+fn preview_target_signature(registry_signature: u64, overrides: &OverrideMap) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    registry_signature.hash(&mut hasher);
+    if let Ok(serialized) = serde_json::to_string(overrides) {
+        serialized.hash(&mut hasher);
     }
     hasher.finish()
 }

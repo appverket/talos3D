@@ -948,6 +948,67 @@ struct CompoundSpawnContext {
     local_translation_offset: Vec3,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CompoundSlotOccurrenceContext {
+    pub definition_id: DefinitionId,
+    pub overrides: OverrideMap,
+}
+
+/// Resolve the concrete child Definition occurrence represented by a compound
+/// slot path. The returned overrides are the parent-authored binding values
+/// for that child, so consumers can preview or inspect the same occurrence a
+/// compound instance would generate instead of falling back to child defaults.
+pub(crate) fn resolve_compound_slot_occurrence_context(
+    registry: &DefinitionRegistry,
+    root_definition_id: &DefinitionId,
+    slot_path: &str,
+) -> Result<CompoundSlotOccurrenceContext, String> {
+    let mut current_definition_id = root_definition_id.clone();
+    let root_overrides = OverrideMap::default();
+    let root_resolved = registry.resolve_params_checked(root_definition_id, &root_overrides)?;
+    let mut current_definition = registry.effective_definition(root_definition_id)?;
+    let mut current_values = evaluate_definition_state(&current_definition, &root_resolved)?.values;
+    let mut current_overrides = OverrideMap::default();
+
+    for segment in slot_path.split('.').filter(|segment| !segment.is_empty()) {
+        let slot_id = slot_path_segment_base(segment);
+        let compound = current_definition.compound.as_ref().ok_or_else(|| {
+            format!(
+                "Definition '{}' has no child slot '{}'",
+                current_definition.name, slot_id
+            )
+        })?;
+        let slot = compound
+            .child_slots
+            .iter()
+            .find(|slot| slot.slot_id == slot_id)
+            .ok_or_else(|| {
+                format!(
+                    "Definition '{}' has no child slot '{}'",
+                    current_definition.name, slot_id
+                )
+            })?;
+
+        let mut child_overrides = OverrideMap::default();
+        for binding in &slot.parameter_bindings {
+            let value = evaluate_expr(&binding.expr, &current_values)?;
+            child_overrides.set(binding.target_param.clone(), value);
+        }
+
+        let child_resolved =
+            registry.resolve_bound_params_checked(&slot.definition_id, &child_overrides)?;
+        current_definition_id = slot.definition_id.clone();
+        current_definition = registry.effective_definition(&slot.definition_id)?;
+        current_values = evaluate_definition_state(&current_definition, &child_resolved)?.values;
+        current_overrides = child_overrides;
+    }
+
+    Ok(CompoundSlotOccurrenceContext {
+        definition_id: current_definition_id,
+        overrides: current_overrides,
+    })
+}
+
 pub(crate) fn render_occurrence(
     world: &mut World,
     registry: &DefinitionRegistry,
@@ -1031,6 +1092,10 @@ pub(crate) fn render_occurrence(
     }
 
     Ok(())
+}
+
+fn slot_path_segment_base(segment: &str) -> &str {
+    segment.split('[').next().unwrap_or(segment)
 }
 
 fn ensure_occurrence_root_entity(
@@ -2110,6 +2175,29 @@ mod pp_098_occurrence_cache_tests {
             material_assignment: None,
             domain_data: Value::Null,
         }
+    }
+
+    #[test]
+    fn slot_occurrence_context_uses_parent_bindings_for_child_overrides() {
+        let mut child = rectangular_definition();
+        for parameter in &mut child.interface.parameters.0 {
+            if parameter.name == "width" {
+                parameter.override_policy = OverridePolicy::Locked;
+            }
+        }
+        let compound = compound_definition(child.id.clone());
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(child);
+        registry.insert(compound.clone());
+
+        let context = resolve_compound_slot_occurrence_context(&registry, &compound.id, "left")
+            .expect("slot context should resolve");
+
+        assert_eq!(context.definition_id.as_str(), "cached.window");
+        assert_eq!(context.overrides.get("width"), Some(&json!(2.0)));
+        registry
+            .validate_bound_overrides(&context.definition_id, &context.overrides)
+            .expect("bound slot overrides may drive locked parameters");
     }
 
     fn world_with_cache() -> World {

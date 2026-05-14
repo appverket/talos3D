@@ -32,7 +32,8 @@ use crate::{
                 DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap, SlotMultiplicity,
             },
             occurrence::{
-                HostedAnchor, HostedOccurrenceContext, OccurrenceIdentity, OccurrenceSnapshot,
+                resolve_compound_slot_occurrence_context, HostedAnchor, HostedOccurrenceContext,
+                OccurrenceIdentity, OccurrenceSnapshot,
             },
         },
         selection::Selected,
@@ -131,6 +132,7 @@ pub struct DefinitionsWindowState {
     pub source_manually_selected: bool,
     pub selected_definition_id: Option<String>,
     pub selected_preview_slot_path: Option<String>,
+    pub selected_occurrence_overrides: OverrideMap,
     pub instantiate_label: String,
     pub host_in_selection: bool,
     pub inspector_visible: bool,
@@ -1282,6 +1284,7 @@ pub fn draw_definitions_window(
                 state.selected_definition_id =
                     definition_entries.first().map(|entry| entry.id.clone());
                 state.selected_preview_slot_path = None;
+                state.selected_occurrence_overrides = OverrideMap::default();
             }
 
             let selected_definition_id =
@@ -1348,8 +1351,11 @@ pub fn draw_definitions_window(
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
                     if let Some(definition) = effective_definition.as_ref() {
-                        preview_target
-                            .request(definition.id.clone(), selected_preview_registry.clone());
+                        preview_target.request_with_overrides(
+                            definition.id.clone(),
+                            selected_preview_registry.clone(),
+                            state.selected_occurrence_overrides.clone(),
+                        );
                         draw_selected_definition_workspace(
                             ui,
                             contexts,
@@ -1502,6 +1508,7 @@ fn ensure_definition_browser_default_source(
             state.source_manually_selected = false;
             state.selected_definition_id = None;
             state.selected_preview_slot_path = None;
+            state.selected_occurrence_overrides = OverrideMap::default();
         }
     }
 
@@ -1519,6 +1526,7 @@ fn ensure_definition_browser_default_source(
         state.selected_library_id = Some(library.id.0.clone());
         state.selected_definition_id = None;
         state.selected_preview_slot_path = None;
+        state.selected_occurrence_overrides = OverrideMap::default();
     }
 }
 
@@ -1550,6 +1558,7 @@ fn draw_definition_browser_left_panel(
                 state.source_manually_selected = true;
                 state.selected_definition_id = None;
                 state.selected_preview_slot_path = None;
+                state.selected_occurrence_overrides = OverrideMap::default();
             }
             for library in library_entries {
                 let selected = state.selected_library_id.as_deref() == Some(library.id.0.as_str());
@@ -1564,6 +1573,7 @@ fn draw_definition_browser_left_panel(
                     state.source_manually_selected = true;
                     state.selected_definition_id = None;
                     state.selected_preview_slot_path = None;
+                    state.selected_occurrence_overrides = OverrideMap::default();
                 }
             }
         });
@@ -1744,6 +1754,7 @@ fn draw_selected_definition_workspace(
                 selected_library_id,
                 host_mode,
                 state.instantiate_label.trim(),
+                &state.selected_occurrence_overrides,
             );
         }
     });
@@ -1773,6 +1784,7 @@ fn draw_selected_definition_workspace(
                         &mut state.selected_definition_id,
                         &mut state.selected_preview_slot_path,
                         &mut state.instantiate_label,
+                        &mut state.selected_occurrence_overrides,
                         pending,
                         selected_library_id,
                     );
@@ -1824,6 +1836,7 @@ fn select_definition_in_browser(
 ) {
     state.selected_definition_id = Some(definition_id.to_string());
     state.selected_preview_slot_path = None;
+    state.selected_occurrence_overrides = OverrideMap::default();
     if state.instantiate_label.is_empty() {
         state.instantiate_label = definition_name.to_string();
     }
@@ -1884,6 +1897,7 @@ fn queue_instantiate_definition_from_browser(
     selected_library_id: Option<&str>,
     host_mode: &str,
     label: &str,
+    occurrence_overrides: &OverrideMap,
 ) {
     let mut parameters = json!({
         "definition_id": definition.id.to_string(),
@@ -1894,6 +1908,10 @@ fn queue_instantiate_definition_from_browser(
     }
     if !label.is_empty() {
         parameters["label"] = json!(label);
+    }
+    if !occurrence_overrides.0.is_empty() {
+        parameters["overrides"] =
+            serde_json::to_value(occurrence_overrides).unwrap_or_else(|_| json!({}));
     }
     if host_mode == "unhosted" {
         if let Some(position) = cursor_world_pos.snapped.or(cursor_world_pos.raw) {
@@ -2429,6 +2447,7 @@ fn draw_parents_panel(
                 if response.clicked() {
                     state.selected_definition_id = Some(link.definition_id.to_string());
                     state.selected_preview_slot_path = Some(link.path_to_current.clone());
+                    state.selected_occurrence_overrides = OverrideMap::default();
                     if state.instantiate_label.is_empty() {
                         state.instantiate_label = link.definition_name.clone();
                     }
@@ -2454,6 +2473,7 @@ fn draw_definition_composition_tree(
     selected_definition_id: &mut Option<String>,
     selected_preview_slot_path: &mut Option<String>,
     instantiate_label: &mut String,
+    selected_occurrence_overrides: &mut OverrideMap,
     pending: &mut PendingCommandInvocations,
     selected_library_id: Option<&str>,
 ) {
@@ -2466,11 +2486,13 @@ fn draw_definition_composition_tree(
         ui,
         registry,
         focus_definition_id,
+        focus_definition_id,
         None,
         None,
         selected_definition_id,
         selected_preview_slot_path,
         instantiate_label,
+        selected_occurrence_overrides,
         pending,
         selected_library_id,
         &mut Vec::new(),
@@ -2516,12 +2538,14 @@ fn composition_root_ids(
 fn draw_definition_composition_node(
     ui: &mut egui::Ui,
     registry: &DefinitionRegistry,
+    root_definition_id: &DefinitionId,
     definition_id: &DefinitionId,
     slot_label: Option<String>,
     slot_path: Option<String>,
     selected_definition_id: &mut Option<String>,
     selected_preview_slot_path: &mut Option<String>,
     instantiate_label: &mut String,
+    selected_occurrence_overrides: &mut OverrideMap,
     pending: &mut PendingCommandInvocations,
     selected_library_id: Option<&str>,
     branch: &mut Vec<DefinitionId>,
@@ -2573,9 +2597,13 @@ fn draw_definition_composition_node(
         }
         if response.double_clicked() {
             drill_into_definition_composition_node(
+                registry,
+                root_definition_id,
+                slot_path.as_deref(),
                 selected_definition_id,
                 selected_preview_slot_path,
                 instantiate_label,
+                selected_occurrence_overrides,
                 &definition,
             );
         }
@@ -2608,6 +2636,7 @@ fn draw_definition_composition_node(
                 draw_definition_composition_node(
                     ui,
                     registry,
+                    root_definition_id,
                     &slot.definition_id,
                     Some(slot_display_label(
                         &slot.slot_id,
@@ -2618,6 +2647,7 @@ fn draw_definition_composition_node(
                     selected_definition_id,
                     selected_preview_slot_path,
                     instantiate_label,
+                    selected_occurrence_overrides,
                     pending,
                     selected_library_id,
                     branch,
@@ -2632,9 +2662,13 @@ fn draw_definition_composition_node(
     }
     if response.header_response.double_clicked() {
         drill_into_definition_composition_node(
+            registry,
+            root_definition_id,
+            slot_path.as_deref(),
             selected_definition_id,
             selected_preview_slot_path,
             instantiate_label,
+            selected_occurrence_overrides,
             &definition,
         );
     }
@@ -2654,12 +2688,29 @@ fn draw_definition_composition_node(
 }
 
 fn drill_into_definition_composition_node(
+    registry: &DefinitionRegistry,
+    root_definition_id: &DefinitionId,
+    slot_path: Option<&str>,
     selected_definition_id: &mut Option<String>,
     selected_preview_slot_path: &mut Option<String>,
     instantiate_label: &mut String,
+    selected_occurrence_overrides: &mut OverrideMap,
     definition: &Definition,
 ) {
-    *selected_definition_id = Some(definition.id.to_string());
+    if let Some(slot_path) = slot_path {
+        if let Ok(context) =
+            resolve_compound_slot_occurrence_context(registry, root_definition_id, slot_path)
+        {
+            *selected_definition_id = Some(context.definition_id.to_string());
+            *selected_occurrence_overrides = context.overrides;
+        } else {
+            *selected_definition_id = Some(definition.id.to_string());
+            *selected_occurrence_overrides = OverrideMap::default();
+        }
+    } else {
+        *selected_definition_id = Some(definition.id.to_string());
+        *selected_occurrence_overrides = OverrideMap::default();
+    }
     *selected_preview_slot_path = None;
     if instantiate_label.is_empty() {
         *instantiate_label = definition.name.clone();
