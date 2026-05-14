@@ -55,6 +55,7 @@ semver = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 thiserror = "2"
 hex = "0.4"
+uuid = { version = "1", features = ["serde"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native-only persistence substrate deps. `etcetera` provides the OS
@@ -70,6 +71,7 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+uuid = { version = "1", features = ["js"] }
 web-sys = { version = "0.3", features = [
     "Document",
     "DomRect",
