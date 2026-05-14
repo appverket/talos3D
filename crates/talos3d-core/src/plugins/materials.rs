@@ -323,7 +323,12 @@ pub enum TextureRef {
     /// `mime` is e.g. `"image/png"`, `"image/jpeg"`.
     Embedded { data: String, mime: String },
     /// Path to a bundled app asset, resolved via Bevy's `AssetServer`.
-    AssetPath(String),
+    ///
+    /// Wrapped in a struct variant rather than a newtype tuple so that the
+    /// outer `#[serde(tag = "type")]` internally-tagged representation can
+    /// serialise it — internal tagging disallows newtype-of-non-struct
+    /// variants. The `path` field is the only payload.
+    AssetPath { path: String },
 }
 
 impl TextureRef {
@@ -339,7 +344,7 @@ impl TextureRef {
             TextureRef::TextureAsset { id } => registry
                 .and_then(|registry| registry.get(id))
                 .and_then(|asset| asset.payload.load(asset_server, images)),
-            TextureRef::AssetPath(path) => {
+            TextureRef::AssetPath { path } => {
                 TexturePayload::AssetPath(path.clone()).load(asset_server, images)
             }
             TextureRef::Embedded { data, mime } => TexturePayload::Embedded {
@@ -357,7 +362,7 @@ impl TextureRef {
                 .and_then(|registry| registry.get(id))
                 .map(|asset| asset.payload.label())
                 .unwrap_or(id.as_str()),
-            TextureRef::AssetPath(p) => p.split('/').last().unwrap_or(p),
+            TextureRef::AssetPath { path: p } => p.split('/').last().unwrap_or(p),
             TextureRef::Embedded { .. } => "<embedded>",
         }
     }
@@ -427,7 +432,9 @@ impl TextureCache {
         registry: Option<&TextureRegistry>,
     ) -> Option<Handle<Image>> {
         match texture {
-            TextureRef::AssetPath(path) => Some(self.load_asset_path(path, intent, asset_server)),
+            TextureRef::AssetPath { path } => {
+                Some(self.load_asset_path(path, intent, asset_server))
+            }
             TextureRef::TextureAsset { id } => {
                 let asset = registry.and_then(|registry| registry.get(id))?;
                 match &asset.payload {
@@ -901,7 +908,7 @@ pub fn material_texture_asset_ids(
     .flatten()
     .filter_map(|texture| match texture {
         TextureRef::TextureAsset { id } => Some(id.clone()),
-        TextureRef::Embedded { .. } | TextureRef::AssetPath(_) => None,
+        TextureRef::Embedded { .. } | TextureRef::AssetPath { .. } => None,
     })
     .collect()
 }
@@ -918,7 +925,7 @@ pub fn normalize_material_textures(material: &mut MaterialDef, registry: &mut Te
         };
         *slot = Some(match texture {
             TextureRef::TextureAsset { id } => TextureRef::TextureAsset { id },
-            TextureRef::AssetPath(path) => TextureRef::AssetPath(path),
+            TextureRef::AssetPath { path } => TextureRef::AssetPath { path },
             TextureRef::Embedded { data, mime } => TextureRef::TextureAsset {
                 id: registry.intern_embedded(data, mime, color_space, intent),
             },
@@ -1335,15 +1342,15 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         spec_ref: None,
         alpha_mode: MaterialAlphaMode::Opaque,
         alpha_cutoff: 0.5,
-        base_color_texture: Some(TextureRef::AssetPath(
-            "materials/maibec_red_cedar_light_h2bo/diffuse.png".to_string(),
-        )),
-        normal_map_texture: Some(TextureRef::AssetPath(
-            "materials/maibec_red_cedar_light_h2bo/normal_opengl.png".to_string(),
-        )),
-        metallic_roughness_texture: Some(TextureRef::AssetPath(
-            "materials/maibec_red_cedar_light_h2bo/roughness.png".to_string(),
-        )),
+        base_color_texture: Some(TextureRef::AssetPath {
+            path: "materials/maibec_red_cedar_light_h2bo/diffuse.png".to_string(),
+        }),
+        normal_map_texture: Some(TextureRef::AssetPath {
+            path: "materials/maibec_red_cedar_light_h2bo/normal_opengl.png".to_string(),
+        }),
+        metallic_roughness_texture: Some(TextureRef::AssetPath {
+            path: "materials/maibec_red_cedar_light_h2bo/roughness.png".to_string(),
+        }),
         emissive_texture: None,
         occlusion_texture: None,
         uv_scale: [1.0, 1.0],

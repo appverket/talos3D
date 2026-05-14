@@ -2054,7 +2054,7 @@ fn cached_texture_handle(
 fn texture_preview_key(texture: &TextureRef, _texture_registry: &TextureRegistry) -> String {
     match texture {
         TextureRef::TextureAsset { id } => format!("texture_asset:{}", id.as_str()),
-        TextureRef::AssetPath(path) => format!("asset:{path}"),
+        TextureRef::AssetPath { path } => format!("asset:{path}"),
         TextureRef::Embedded { data, mime } => {
             let mut hasher = DefaultHasher::new();
             data.hash(&mut hasher);
