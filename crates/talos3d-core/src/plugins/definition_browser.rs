@@ -28,7 +28,7 @@ use crate::{
         modeling::{
             assembly::{RelationSnapshot, SemanticRelation},
             definition::{
-                Definition, DefinitionId, DefinitionKind, DefinitionLibraryId,
+                Definition, DefinitionId, DefinitionKind, DefinitionLibrary, DefinitionLibraryId,
                 DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap, SlotMultiplicity,
             },
             occurrence::{
@@ -128,6 +128,7 @@ pub struct DefinitionsWindowState {
     pub visible: bool,
     pub search: String,
     pub selected_library_id: Option<String>,
+    pub source_manually_selected: bool,
     pub selected_definition_id: Option<String>,
     pub selected_preview_slot_path: Option<String>,
     pub instantiate_label: String,
@@ -1239,14 +1240,7 @@ pub fn draw_definitions_window(
         .show(ctx, |ui| {
             let mut library_entries = libraries.list();
             library_entries.sort_by(|left, right| left.name.cmp(&right.name));
-            if let Some(selected_library_id) = state.selected_library_id.as_deref() {
-                if !library_entries
-                    .iter()
-                    .any(|library| library.id.0 == selected_library_id)
-                {
-                    state.selected_library_id = None;
-                }
-            }
+            ensure_definition_browser_default_source(state, definitions, &library_entries);
 
             let selected_library_id = state.selected_library_id.clone();
             let mut definition_entries: Vec<DefinitionListEntry> =
@@ -1494,11 +1488,45 @@ fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry
     );
 }
 
+fn ensure_definition_browser_default_source(
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    library_entries: &[&DefinitionLibrary],
+) {
+    if let Some(selected_library_id) = state.selected_library_id.as_deref() {
+        if !library_entries
+            .iter()
+            .any(|library| library.id.0 == selected_library_id)
+        {
+            state.selected_library_id = None;
+            state.source_manually_selected = false;
+            state.selected_definition_id = None;
+            state.selected_preview_slot_path = None;
+        }
+    }
+
+    if state.source_manually_selected
+        || state.selected_library_id.is_some()
+        || !definitions.list().is_empty()
+    {
+        return;
+    }
+
+    if let Some(library) = library_entries
+        .iter()
+        .find(|library| !library.definitions.is_empty())
+    {
+        state.selected_library_id = Some(library.id.0.clone());
+        state.selected_definition_id = None;
+        state.selected_preview_slot_path = None;
+    }
+}
+
 fn draw_definition_browser_left_panel(
     ui: &mut egui::Ui,
     state: &mut DefinitionsWindowState,
     definitions: &DefinitionRegistry,
-    library_entries: &[&crate::plugins::modeling::definition::DefinitionLibrary],
+    library_entries: &[&DefinitionLibrary],
     definition_entries: &[DefinitionListEntry],
     drafts: &mut DefinitionDraftRegistry,
     pending: &mut PendingCommandInvocations,
@@ -1519,6 +1547,7 @@ fn draw_definition_browser_left_panel(
                 .clicked()
             {
                 state.selected_library_id = None;
+                state.source_manually_selected = true;
                 state.selected_definition_id = None;
                 state.selected_preview_slot_path = None;
             }
@@ -1532,6 +1561,7 @@ fn draw_definition_browser_left_panel(
                     .clicked()
                 {
                     state.selected_library_id = Some(library.id.0.clone());
+                    state.source_manually_selected = true;
                     state.selected_definition_id = None;
                     state.selected_preview_slot_path = None;
                 }
@@ -1561,7 +1591,12 @@ fn draw_definition_browser_left_panel(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if definition_entries.is_empty() {
-                ui.label("No definitions found.");
+                let message = if state.search.trim().is_empty() {
+                    "No definitions in this source."
+                } else {
+                    "No definitions match this search."
+                };
+                ui.label(egui::RichText::new(message).weak());
             }
             for entry in definition_entries {
                 let selected = state.selected_definition_id.as_deref() == Some(entry.id.as_str());
@@ -1770,7 +1805,7 @@ fn draw_empty_definition_workspace(ui: &mut egui::Ui) {
 fn selected_source_label(
     state: &DefinitionsWindowState,
     definitions: &DefinitionRegistry,
-    library_entries: &[&crate::plugins::modeling::definition::DefinitionLibrary],
+    library_entries: &[&DefinitionLibrary],
 ) -> String {
     match state.selected_library_id.as_deref() {
         Some(library_id) => library_entries
@@ -4855,8 +4890,8 @@ mod tests {
         modeling::{
             definition::{
                 ChildSlotDef, CompoundDefinition, Definition, DefinitionId, DefinitionKind,
-                DefinitionRegistry, Interface, OverridePolicy, ParamType, ParameterDef,
-                ParameterMetadata, ParameterSchema,
+                DefinitionLibraryScope, DefinitionRegistry, Interface, OverridePolicy, ParamType,
+                ParameterDef, ParameterMetadata, ParameterSchema,
             },
             occurrence::OccurrenceIdentity,
         },
@@ -5162,6 +5197,53 @@ mod tests {
 
         assert_eq!(parent_ids, vec!["left", "right"]);
         assert!(links.iter().all(|link| link.path_to_current == "sill"));
+    }
+
+    #[test]
+    fn default_source_selects_non_empty_library_when_document_is_empty() {
+        let definitions = DefinitionRegistry::default();
+        let mut libraries =
+            crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
+        let library_id =
+            libraries.create_library("Window Library", DefinitionLibraryScope::ExternalFile, None);
+        libraries
+            .get_mut(&library_id)
+            .unwrap()
+            .insert(test_definition("window", "Window", Vec::new()));
+
+        let mut library_entries = libraries.list();
+        library_entries.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut state = DefinitionsWindowState::default();
+
+        ensure_definition_browser_default_source(&mut state, &definitions, &library_entries);
+
+        assert_eq!(
+            state.selected_library_id.as_deref(),
+            Some(library_id.0.as_str())
+        );
+    }
+
+    #[test]
+    fn default_source_keeps_manual_empty_document_selection() {
+        let definitions = DefinitionRegistry::default();
+        let mut libraries =
+            crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
+        let library_id =
+            libraries.create_library("Window Library", DefinitionLibraryScope::ExternalFile, None);
+        libraries
+            .get_mut(&library_id)
+            .unwrap()
+            .insert(test_definition("window", "Window", Vec::new()));
+
+        let library_entries = libraries.list();
+        let mut state = DefinitionsWindowState {
+            source_manually_selected: true,
+            ..Default::default()
+        };
+
+        ensure_definition_browser_default_source(&mut state, &definitions, &library_entries);
+
+        assert!(state.selected_library_id.is_none());
     }
 
     #[test]
