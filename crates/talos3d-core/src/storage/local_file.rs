@@ -53,6 +53,13 @@ struct ManifestEntry {
     scope: String,
     jurisdiction: Vec<String>,
     content_hash: String,
+    #[serde(default)]
+    owner_account_id: Option<Uuid>,
+    #[serde(default)]
+    owner_project_id: Option<Uuid>,
+    #[serde(default)]
+    owner_workspace_id: Option<Uuid>,
+    #[serde(default)]
     owner_org_id: Option<Uuid>,
     published_at: String, // RFC 3339 to avoid the chrono::DateTime dance here.
 }
@@ -227,6 +234,9 @@ impl ArtifactStore for LocalFileArtifactStore {
             scope: req.scope.clone(),
             jurisdiction: req.jurisdiction.clone(),
             content_hash: content_hash.clone(),
+            owner_account_id: req.owner_account_id,
+            owner_project_id: req.owner_project_id,
+            owner_workspace_id: req.owner_workspace_id,
             owner_org_id: req.owner_org_id,
             published_at: published_at.clone(),
         };
@@ -315,6 +325,9 @@ impl ArtifactStore for LocalFileArtifactStore {
                     jurisdiction: entry.jurisdiction,
                     content_hash: entry.content_hash,
                     manifest_hash: None,
+                    owner_account_id: entry.owner_account_id,
+                    owner_project_id: entry.owner_project_id,
+                    owner_workspace_id: entry.owner_workspace_id,
                     owner_org_id: entry.owner_org_id,
                     published_at,
                 };
@@ -356,6 +369,9 @@ mod tests {
             scope: "shipped".to_owned(),
             trust: "published".to_owned(),
             jurisdiction: vec![],
+            owner_account_id: None,
+            owner_project_id: None,
+            owner_workspace_id: None,
             owner_org_id: None,
             dependencies: vec![],
             published_by: Uuid::new_v4(),
@@ -448,5 +464,49 @@ mod tests {
         assert_eq!(events.len(), 2, "expected 2 replay events, got {events:#?}");
         assert_eq!(events[0].kind, "definition.v1");
         assert_eq!(events[1].kind, "material_def.v1");
+    }
+
+    #[test]
+    fn run_subscription_replays_scope_owners() {
+        let dir = TempDir::new().unwrap();
+        let store = LocalFileArtifactStore::open(dir.path().to_path_buf()).unwrap();
+        let owner_account_id = Uuid::new_v4();
+
+        let mut req = make_req(
+            "definition.v1",
+            "private::frame",
+            json!({"id": "private::frame"}),
+        );
+        req.scope = "account_private".to_owned();
+        req.owner_account_id = Some(owner_account_id);
+        store.put(&req).unwrap();
+
+        let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ChangeEvent>::new()));
+        let collected_for_cb = collected.clone();
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_for_thread = shutdown.clone();
+
+        let store_handle = std::sync::Arc::new(store);
+        let store_for_thread = store_handle.clone();
+        let t = std::thread::spawn(move || {
+            let cb: StoreEventCallback = Box::new(move |ev| {
+                collected_for_cb.lock().unwrap().push(ev);
+            });
+            store_for_thread
+                .run_subscription(vec![], 0, cb, shutdown_for_thread)
+                .unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        t.join().unwrap();
+
+        let events = collected.lock().unwrap();
+        assert_eq!(events.len(), 1, "expected 1 replay event, got {events:#?}");
+        assert_eq!(events[0].scope, "account_private");
+        assert_eq!(events[0].owner_account_id, Some(owner_account_id));
+        assert_eq!(events[0].owner_project_id, None);
+        assert_eq!(events[0].owner_workspace_id, None);
+        assert_eq!(events[0].owner_org_id, None);
     }
 }

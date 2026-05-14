@@ -30,7 +30,7 @@ pub use artifact_store::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use local_file::LocalFileArtifactStore;
 pub use wire::{
-    definition_publish_request, material_def_publish_request, ArtifactResolution, ChangeEvent,
-    ChangesResponse, DependencyRefDto, ManifestResponse, PublishArtifactRequest, PublishError,
-    PublishScope,
+    artifact_publish_request, definition_publish_request, material_def_publish_request,
+    ArtifactResolution, ChangeEvent, ChangesResponse, DependencyRefDto, ManifestResponse,
+    PublishArtifactRequest, PublishError, PublishOwners, PublishScope,
 };
