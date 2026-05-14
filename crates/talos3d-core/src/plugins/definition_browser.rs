@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use bevy_egui::{egui, EguiContexts};
@@ -29,7 +29,7 @@ use crate::{
             assembly::{RelationSnapshot, SemanticRelation},
             definition::{
                 Definition, DefinitionId, DefinitionKind, DefinitionLibraryId,
-                DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap,
+                DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap, SlotMultiplicity,
             },
             occurrence::{
                 HostedAnchor, HostedOccurrenceContext, OccurrenceIdentity, OccurrenceSnapshot,
@@ -1282,8 +1282,17 @@ pub fn draw_definitions_window(
             }
 
             let selected_definition_id = state.selected_definition_id.as_deref().unwrap_or_default();
-            let selected_preview_registry =
-                preview_registry_for_selected_source(definitions, libraries, selected_library_id.as_deref());
+            let selected_preview_registry = preview_registry_for_selected_source(
+                definitions,
+                libraries,
+                selected_library_id.as_deref(),
+            );
+            let source_definition_ids = source_definition_ids(
+                &selected_preview_registry,
+                definitions,
+                libraries,
+                selected_library_id.as_deref(),
+            );
             let effective_definition = if selected_definition_id.is_empty() {
                 None
             } else {
@@ -1467,6 +1476,32 @@ pub fn draw_definitions_window(
                                             });
                                             ui.add_space(4.0);
                                         }
+                                    });
+                            });
+
+                            ui.add_space(8.0);
+                            ui.group(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(egui::RichText::new("Composition").strong());
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Definitions may appear in more than one branch.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                                ui.separator();
+                                egui::ScrollArea::vertical()
+                                    .id_salt("definitions.browser.composition_tree")
+                                    .max_height(260.0)
+                                    .show(ui, |ui| {
+                                        draw_definition_composition_tree(
+                                            ui,
+                                            &selected_preview_registry,
+                                            &source_definition_ids,
+                                            &mut state.selected_definition_id,
+                                            &mut state.instantiate_label,
+                                        );
                                     });
                             });
 
@@ -2172,6 +2207,231 @@ fn draw_property_tree(
                 });
         }
     }
+}
+
+fn source_definition_ids(
+    source_registry: &DefinitionRegistry,
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    selected_library_id: Option<&str>,
+) -> Vec<DefinitionId> {
+    let mut ids: Vec<DefinitionId> = match selected_library_id {
+        Some(library_id) => libraries
+            .get(&DefinitionLibraryId(library_id.to_string()))
+            .map(|library| library.definitions.keys().cloned().collect())
+            .unwrap_or_default(),
+        None => definitions
+            .list()
+            .into_iter()
+            .map(|definition| definition.id.clone())
+            .collect(),
+    };
+    ids.sort_by(|left, right| {
+        definition_sort_key(source_registry, left).cmp(&definition_sort_key(source_registry, right))
+    });
+    ids
+}
+
+fn draw_definition_composition_tree(
+    ui: &mut egui::Ui,
+    registry: &DefinitionRegistry,
+    source_definition_ids: &[DefinitionId],
+    selected_definition_id: &mut Option<String>,
+    instantiate_label: &mut String,
+) {
+    if source_definition_ids.is_empty() {
+        ui.label(egui::RichText::new("No definitions in this source.").weak());
+        return;
+    }
+
+    let roots = composition_root_ids(registry, source_definition_ids);
+    for root_id in roots {
+        draw_definition_composition_node(
+            ui,
+            registry,
+            &root_id,
+            None,
+            selected_definition_id,
+            instantiate_label,
+            &mut Vec::new(),
+            0,
+        );
+    }
+}
+
+fn composition_root_ids(
+    registry: &DefinitionRegistry,
+    source_definition_ids: &[DefinitionId],
+) -> Vec<DefinitionId> {
+    let source_set: HashSet<DefinitionId> = source_definition_ids.iter().cloned().collect();
+    let mut referenced = HashSet::new();
+
+    for definition_id in source_definition_ids {
+        let Ok(definition) = registry.effective_definition(definition_id) else {
+            continue;
+        };
+        if let Some(compound) = definition.compound {
+            for slot in compound.child_slots {
+                if source_set.contains(&slot.definition_id) {
+                    referenced.insert(slot.definition_id);
+                }
+            }
+        }
+    }
+
+    let mut roots: Vec<DefinitionId> = source_definition_ids
+        .iter()
+        .filter(|id| !referenced.contains(*id))
+        .cloned()
+        .collect();
+    if roots.is_empty() {
+        roots = source_definition_ids.to_vec();
+    }
+    roots.sort_by(|left, right| {
+        definition_sort_key(registry, left).cmp(&definition_sort_key(registry, right))
+    });
+    roots
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_definition_composition_node(
+    ui: &mut egui::Ui,
+    registry: &DefinitionRegistry,
+    definition_id: &DefinitionId,
+    slot_label: Option<String>,
+    selected_definition_id: &mut Option<String>,
+    instantiate_label: &mut String,
+    branch: &mut Vec<DefinitionId>,
+    depth: usize,
+) {
+    if branch.iter().any(|id| id == definition_id) {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} (cycle)",
+                definition_sort_key(registry, definition_id)
+            ))
+            .small()
+            .weak(),
+        );
+        return;
+    }
+
+    let Ok(definition) = registry.effective_definition(definition_id) else {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} (missing)",
+                slot_label.unwrap_or_else(|| definition_id.to_string())
+            ))
+            .small()
+            .weak(),
+        );
+        return;
+    };
+
+    let entry = DefinitionListEntry::from_definition(&definition);
+    let node_label = if let Some(slot_label) = slot_label {
+        format!("{slot_label}: {}", definition.name)
+    } else {
+        definition.name.clone()
+    };
+    let selected = selected_definition_id.as_deref() == Some(definition.id.as_str());
+    let child_slots = definition
+        .compound
+        .as_ref()
+        .map(|compound| compound.child_slots.clone())
+        .unwrap_or_default();
+
+    if child_slots.is_empty() {
+        let response = ui
+            .selectable_label(selected, node_label)
+            .on_hover_text(entry.meta_label());
+        if response.clicked() {
+            select_definition_composition_node(
+                selected_definition_id,
+                instantiate_label,
+                &definition,
+            );
+        }
+        return;
+    }
+
+    let branch_key = branch
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    let response = egui::CollapsingHeader::new(node_label)
+        .id_salt((
+            "definition_composition_node",
+            branch_key,
+            definition.id.as_str(),
+            depth,
+        ))
+        .default_open(depth == 0)
+        .show(ui, |ui| {
+            branch.push(definition.id.clone());
+            for slot in child_slots {
+                draw_definition_composition_node(
+                    ui,
+                    registry,
+                    &slot.definition_id,
+                    Some(slot_display_label(
+                        &slot.slot_id,
+                        &slot.role,
+                        &slot.multiplicity,
+                    )),
+                    selected_definition_id,
+                    instantiate_label,
+                    branch,
+                    depth + 1,
+                );
+            }
+            branch.pop();
+        });
+
+    if response.header_response.clicked() {
+        select_definition_composition_node(selected_definition_id, instantiate_label, &definition);
+    }
+    if selected {
+        let rect = response.header_response.rect;
+        ui.painter().rect_stroke(
+            rect.expand(1.0),
+            3.0,
+            egui::Stroke::new(1.0, ui.visuals().selection.stroke.color),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.header_response.on_hover_text(entry.meta_label());
+}
+
+fn select_definition_composition_node(
+    selected_definition_id: &mut Option<String>,
+    instantiate_label: &mut String,
+    definition: &Definition,
+) {
+    *selected_definition_id = Some(definition.id.to_string());
+    if instantiate_label.is_empty() {
+        *instantiate_label = definition.name.clone();
+    }
+}
+
+fn slot_display_label(slot_id: &str, role: &str, multiplicity: &SlotMultiplicity) -> String {
+    let mut label = if role.trim().is_empty() || role == slot_id {
+        slot_id.to_string()
+    } else {
+        format!("{slot_id} ({role})")
+    };
+    if multiplicity.is_collection() {
+        label.push_str(" [collection]");
+    }
+    label
+}
+
+fn definition_sort_key(registry: &DefinitionRegistry, definition_id: &DefinitionId) -> String {
+    registry
+        .effective_definition(definition_id)
+        .map(|definition| format!("{}\t{}", definition.name, definition.id))
+        .unwrap_or_else(|_| definition_id.to_string())
 }
 
 // ---------------------------------------------------------------------------

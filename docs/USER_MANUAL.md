@@ -90,6 +90,13 @@ The Definitions browser shows reusable authored families from two sources:
 - bundled libraries that ship with the app
 - project-local or imported libraries saved with the document
 
+The Composition panel shows the selected source as a recursive tree. Compound
+definitions expand into their child slots, so a parent such as a European Double
+Window can show sash, glazing, frame, sill, and other child definitions as
+nested items. The tree is a composition view, not an ownership view: a reusable
+part definition can appear in multiple branches when more than one parent uses
+it. Cycles are stopped at the branch where they are detected.
+
 Material textures can either reference bundled app assets or embed image data
 directly in the project. That keeps materials portable across native and
 browser deployments even before a backend-hosted catalog exists.
