@@ -1071,6 +1071,9 @@ mod inner {
                 jurisdiction: vec![],
                 content_hash: "abc123".to_owned(),
                 manifest_hash: None,
+                owner_account_id: None,
+                owner_project_id: None,
+                owner_workspace_id: None,
                 owner_org_id: None,
                 published_at: Utc::now(),
             }
