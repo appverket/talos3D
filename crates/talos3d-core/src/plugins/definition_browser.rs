@@ -127,6 +127,7 @@ pub struct DefinitionsWindowState {
     pub search: String,
     pub selected_library_id: Option<String>,
     pub selected_definition_id: Option<String>,
+    pub selected_preview_slot_path: Option<String>,
     pub instantiate_label: String,
     pub host_in_selection: bool,
     pub inspector_visible: bool,
@@ -1279,6 +1280,7 @@ pub fn draw_definitions_window(
             }) {
                 state.selected_definition_id =
                     definition_entries.first().map(|entry| entry.id.clone());
+                state.selected_preview_slot_path = None;
             }
 
             let selected_definition_id = state.selected_definition_id.as_deref().unwrap_or_default();
@@ -1359,6 +1361,123 @@ pub fn draw_definitions_window(
                     ui.label(egui::RichText::new(selection.summary()).small());
                     ui.separator();
 
+                    ui.group(|ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(egui::RichText::new("Selected Definition").strong());
+                        ui.separator();
+                        if let Some(definition) = effective_definition.as_ref() {
+                            preview_target.request(
+                                definition.id.clone(),
+                                selected_preview_registry.clone(),
+                            );
+                            let requires_opening_host =
+                                definition_requires_opening_host_definition(definition);
+                            draw_definition_3d_preview(
+                                ui,
+                                contexts,
+                                preview_scene,
+                                pending_click,
+                                DEFINITION_PREVIEW_HEIGHT,
+                            );
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(&definition.name).strong());
+                            ui.label(
+                                egui::RichText::new(definition.id.to_string())
+                                    .small()
+                                    .monospace(),
+                            );
+                            draw_part_of_list(
+                                ui,
+                                state,
+                                &selected_preview_registry,
+                                &source_definition_ids,
+                                &definition.id,
+                            );
+                            ui.label(format!(
+                                "{} parameters, {} child slots",
+                                definition.interface.parameters.0.len(),
+                                definition
+                                    .compound
+                                    .as_ref()
+                                    .map(|compound| compound.child_slots.len())
+                                    .unwrap_or(0)
+                            ));
+                            if requires_opening_host {
+                                ui.label(
+                                    egui::RichText::new("Requires a selected wall opening.")
+                                        .small(),
+                                );
+                            } else if selection.can_host_in_opening() {
+                                ui.checkbox(
+                                    &mut state.host_in_selection,
+                                    "Host in selected opening",
+                                );
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Label");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut state.instantiate_label)
+                                        .desired_width(220.0)
+                                        .hint_text(&definition.name),
+                                );
+                            });
+                            let can_host = selection.can_host_in_opening();
+                            let host_mode =
+                                if requires_opening_host || (state.host_in_selection && can_host) {
+                                    "opening"
+                                } else {
+                                    "unhosted"
+                                };
+                            let instantiate_enabled = !requires_opening_host || can_host;
+                            if !instantiate_enabled {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Select an opening in a wall to instantiate this definition.",
+                                    )
+                                    .small(),
+                                );
+                            }
+                            let button_text = if host_mode == "opening" {
+                                "Instantiate In Opening"
+                            } else {
+                                "Instantiate At Cursor"
+                            };
+                            if ui
+                                .add_enabled(instantiate_enabled, egui::Button::new(button_text))
+                                .clicked()
+                            {
+                                let mut parameters = json!({
+                                    "definition_id": definition.id.to_string(),
+                                    "host_mode": host_mode,
+                                });
+                                if let Some(library_id) = selected_library_id.as_deref() {
+                                    parameters["library_id"] = json!(library_id);
+                                }
+                                let label = state.instantiate_label.trim();
+                                if !label.is_empty() {
+                                    parameters["label"] = json!(label);
+                                }
+                                if host_mode == "unhosted" {
+                                    if let Some(position) =
+                                        cursor_world_pos.snapped.or(cursor_world_pos.raw)
+                                    {
+                                        parameters["offset"] =
+                                            json!([position.x, position.y, position.z]);
+                                    }
+                                }
+                                queue_command_invocation_resource(
+                                    pending,
+                                    "modeling.instantiate_definition".to_string(),
+                                    parameters,
+                                );
+                            }
+                        } else {
+                            preview_target.clear();
+                            ui.label("Select a definition from the list.");
+                        }
+                    });
+                    ui.separator();
+
                     ui.horizontal_top(|ui| {
                         ui.allocate_ui_with_layout(
                             egui::vec2(176.0, ui.available_height()),
@@ -1376,6 +1495,7 @@ pub fn draw_definitions_window(
                                         .clicked()
                                     {
                                         state.selected_library_id = None;
+                                        state.selected_preview_slot_path = None;
                                     }
                                     egui::ScrollArea::vertical()
                                         .id_salt("definitions.browser.sources")
@@ -1397,6 +1517,7 @@ pub fn draw_definitions_window(
                                                 {
                                                     state.selected_library_id =
                                                         Some(library.id.0.clone());
+                                                    state.selected_preview_slot_path = None;
                                                 }
                                             }
                                         });
@@ -1462,6 +1583,7 @@ pub fn draw_definitions_window(
                                                     {
                                                         state.selected_definition_id =
                                                             Some(entry.id.clone());
+                                                        state.selected_preview_slot_path = None;
                                                         if state.instantiate_label.is_empty() {
                                                             state.instantiate_label =
                                                                 entry.name.clone();
@@ -1483,139 +1605,28 @@ pub fn draw_definitions_window(
                             ui.group(|ui| {
                                 ui.set_width(ui.available_width());
                                 ui.label(egui::RichText::new("Composition").strong());
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Definitions may appear in more than one branch.",
-                                    )
-                                    .small()
-                                    .weak(),
-                                );
                                 ui.separator();
                                 egui::ScrollArea::vertical()
                                     .id_salt("definitions.browser.composition_tree")
                                     .max_height(260.0)
                                     .show(ui, |ui| {
-                                        draw_definition_composition_tree(
-                                            ui,
-                                            &selected_preview_registry,
-                                            &source_definition_ids,
-                                            &mut state.selected_definition_id,
-                                            &mut state.instantiate_label,
-                                        );
-                                    });
-                            });
-
-                            ui.add_space(8.0);
-                            ui.group(|ui| {
-                                ui.set_width(ui.available_width());
-                                ui.label(egui::RichText::new("Selected Definition").strong());
-                                ui.separator();
-                                if let Some(definition) = effective_definition {
-                                    preview_target.request(
-                                        definition.id.clone(),
-                                        selected_preview_registry.clone(),
-                                    );
-                                    let requires_opening_host =
-                                        definition_requires_opening_host_definition(&definition);
-                                    draw_definition_3d_preview(
-                                        ui,
-                                        contexts,
-                                        preview_scene,
-                                        pending_click,
-                                        DEFINITION_PREVIEW_HEIGHT,
-                                    );
-                                    ui.add_space(6.0);
-                                    ui.label(egui::RichText::new(&definition.name).strong());
-                                    ui.label(
-                                        egui::RichText::new(definition.id.to_string())
-                                            .small()
-                                            .monospace(),
-                                    );
-                                    ui.label(format!(
-                                        "{} parameters, {} child slots",
-                                        definition.interface.parameters.0.len(),
-                                        definition
-                                            .compound
-                                            .as_ref()
-                                            .map(|compound| compound.child_slots.len())
-                                            .unwrap_or(0)
-                                    ));
-                                    if requires_opening_host {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                "Requires a selected wall opening.",
-                                            )
-                                            .small(),
-                                        );
-                                    } else if selection.can_host_in_opening() {
-                                        ui.checkbox(
-                                            &mut state.host_in_selection,
-                                            "Host in selected opening",
-                                        );
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.label("Label");
-                                        ui.add(
-                                            egui::TextEdit::singleline(&mut state.instantiate_label)
-                                                .desired_width(220.0)
-                                                .hint_text(&definition.name),
-                                        );
-                                    });
-                                    let can_host = selection.can_host_in_opening();
-                                    let host_mode =
-                                        if requires_opening_host || (state.host_in_selection && can_host)
+                                        if let Some(focus_definition_id) =
+                                            state.selected_definition_id.as_deref()
                                         {
-                                            "opening"
+                                            draw_definition_composition_tree(
+                                                ui,
+                                                &selected_preview_registry,
+                                                &DefinitionId(focus_definition_id.to_string()),
+                                                &mut state.selected_definition_id,
+                                                &mut state.selected_preview_slot_path,
+                                                &mut state.instantiate_label,
+                                            );
                                         } else {
-                                            "unhosted"
-                                        };
-                                    let instantiate_enabled = !requires_opening_host || can_host;
-                                    if !instantiate_enabled {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                "Select an opening in a wall to instantiate this definition.",
-                                            )
-                                            .small(),
-                                        );
-                                    }
-                                    let button_text = if host_mode == "opening" {
-                                        "Instantiate In Opening"
-                                    } else {
-                                        "Instantiate At Cursor"
-                                    };
-                                    if ui
-                                        .add_enabled(instantiate_enabled, egui::Button::new(button_text))
-                                        .clicked()
-                                    {
-                                        let mut parameters = json!({
-                                            "definition_id": definition.id.to_string(),
-                                            "host_mode": host_mode,
-                                        });
-                                        if let Some(library_id) = selected_library_id.as_deref() {
-                                            parameters["library_id"] = json!(library_id);
+                                            ui.label(
+                                                egui::RichText::new("Select a definition.").weak(),
+                                            );
                                         }
-                                        let label = state.instantiate_label.trim();
-                                        if !label.is_empty() {
-                                            parameters["label"] = json!(label);
-                                        }
-                                        if host_mode == "unhosted" {
-                                            if let Some(position) =
-                                                cursor_world_pos.snapped.or(cursor_world_pos.raw)
-                                            {
-                                                parameters["offset"] =
-                                                    json!([position.x, position.y, position.z]);
-                                            }
-                                        }
-                                        queue_command_invocation_resource(
-                                            pending,
-                                            "modeling.instantiate_definition".to_string(),
-                                            parameters,
-                                        );
-                                    }
-                                } else {
-                                    preview_target.clear();
-                                    ui.label("Select a definition from the list.");
-                                }
+                                    });
                             });
                         });
                     });
@@ -1777,6 +1788,7 @@ fn draw_definition_editor(
     let Some(active_draft) = drafts.get(&active_draft_id).cloned() else {
         return;
     };
+    state.selected_preview_slot_path = None;
     if let Ok(preview_registry) = preview_registry_for_draft(definitions, libraries, &active_draft)
     {
         preview_target.request(active_draft.working_copy.id.clone(), preview_registry);
@@ -2232,31 +2244,62 @@ fn source_definition_ids(
     ids
 }
 
-fn draw_definition_composition_tree(
+fn draw_part_of_list(
     ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
     registry: &DefinitionRegistry,
     source_definition_ids: &[DefinitionId],
-    selected_definition_id: &mut Option<String>,
-    instantiate_label: &mut String,
+    current_definition_id: &DefinitionId,
 ) {
-    if source_definition_ids.is_empty() {
-        ui.label(egui::RichText::new("No definitions in this source.").weak());
+    let parent_links =
+        composition_parent_links(registry, source_definition_ids, current_definition_id);
+    if parent_links.is_empty() {
         return;
     }
 
-    let roots = composition_root_ids(registry, source_definition_ids);
-    for root_id in roots {
-        draw_definition_composition_node(
-            ui,
-            registry,
-            &root_id,
-            None,
-            selected_definition_id,
-            instantiate_label,
-            &mut Vec::new(),
-            0,
-        );
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Part of").small().strong());
+        for link in parent_links {
+            let response = ui
+                .small_button(&link.definition_name)
+                .on_hover_text(link.breadcrumb.clone());
+            if response.clicked() {
+                state.selected_definition_id = Some(link.definition_id.to_string());
+                state.selected_preview_slot_path = Some(link.path_to_current);
+                if state.instantiate_label.is_empty() {
+                    state.instantiate_label = link.definition_name;
+                }
+            }
+        }
+    });
+}
+
+fn draw_definition_composition_tree(
+    ui: &mut egui::Ui,
+    registry: &DefinitionRegistry,
+    focus_definition_id: &DefinitionId,
+    selected_definition_id: &mut Option<String>,
+    selected_preview_slot_path: &mut Option<String>,
+    instantiate_label: &mut String,
+) {
+    if registry.effective_definition(focus_definition_id).is_err() {
+        ui.label(egui::RichText::new("Selected definition is unavailable.").weak());
+        return;
     }
+
+    draw_definition_composition_node(
+        ui,
+        registry,
+        focus_definition_id,
+        None,
+        None,
+        selected_definition_id,
+        selected_preview_slot_path,
+        instantiate_label,
+        &mut Vec::new(),
+        0,
+    );
 }
 
 fn composition_root_ids(
@@ -2299,7 +2342,9 @@ fn draw_definition_composition_node(
     registry: &DefinitionRegistry,
     definition_id: &DefinitionId,
     slot_label: Option<String>,
+    slot_path: Option<String>,
     selected_definition_id: &mut Option<String>,
+    selected_preview_slot_path: &mut Option<String>,
     instantiate_label: &mut String,
     branch: &mut Vec<DefinitionId>,
     depth: usize,
@@ -2334,7 +2379,7 @@ fn draw_definition_composition_node(
     } else {
         definition.name.clone()
     };
-    let selected = selected_definition_id.as_deref() == Some(definition.id.as_str());
+    let selected = selected_preview_slot_path.as_deref() == slot_path.as_deref();
     let child_slots = definition
         .compound
         .as_ref()
@@ -2346,8 +2391,12 @@ fn draw_definition_composition_node(
             .selectable_label(selected, node_label)
             .on_hover_text(entry.meta_label());
         if response.clicked() {
-            select_definition_composition_node(
+            *selected_preview_slot_path = slot_path.clone();
+        }
+        if response.double_clicked() {
+            drill_into_definition_composition_node(
                 selected_definition_id,
+                selected_preview_slot_path,
                 instantiate_label,
                 &definition,
             );
@@ -2371,6 +2420,10 @@ fn draw_definition_composition_node(
         .show(ui, |ui| {
             branch.push(definition.id.clone());
             for slot in child_slots {
+                let child_slot_path = match slot_path.as_deref() {
+                    Some(parent) => format!("{}.{}", parent, slot.slot_id),
+                    None => slot.slot_id.clone(),
+                };
                 draw_definition_composition_node(
                     ui,
                     registry,
@@ -2380,7 +2433,9 @@ fn draw_definition_composition_node(
                         &slot.role,
                         &slot.multiplicity,
                     )),
+                    Some(child_slot_path),
                     selected_definition_id,
+                    selected_preview_slot_path,
                     instantiate_label,
                     branch,
                     depth + 1,
@@ -2390,7 +2445,15 @@ fn draw_definition_composition_node(
         });
 
     if response.header_response.clicked() {
-        select_definition_composition_node(selected_definition_id, instantiate_label, &definition);
+        *selected_preview_slot_path = slot_path.clone();
+    }
+    if response.header_response.double_clicked() {
+        drill_into_definition_composition_node(
+            selected_definition_id,
+            selected_preview_slot_path,
+            instantiate_label,
+            &definition,
+        );
     }
     if selected {
         let rect = response.header_response.rect;
@@ -2404,15 +2467,184 @@ fn draw_definition_composition_node(
     response.header_response.on_hover_text(entry.meta_label());
 }
 
-fn select_definition_composition_node(
+fn drill_into_definition_composition_node(
     selected_definition_id: &mut Option<String>,
+    selected_preview_slot_path: &mut Option<String>,
     instantiate_label: &mut String,
     definition: &Definition,
 ) {
     *selected_definition_id = Some(definition.id.to_string());
+    *selected_preview_slot_path = None;
     if instantiate_label.is_empty() {
         *instantiate_label = definition.name.clone();
     }
+}
+
+#[derive(Debug, Clone)]
+struct CompositionParentLink {
+    definition_id: DefinitionId,
+    definition_name: String,
+    path_to_current: String,
+    breadcrumb: String,
+}
+
+#[derive(Debug, Clone)]
+struct CompositionPathNode {
+    definition_id: DefinitionId,
+    definition_name: String,
+    slot_id_from_parent: Option<String>,
+}
+
+fn composition_parent_links(
+    registry: &DefinitionRegistry,
+    source_definition_ids: &[DefinitionId],
+    current_definition_id: &DefinitionId,
+) -> Vec<CompositionParentLink> {
+    let roots = composition_root_ids(registry, source_definition_ids);
+    let mut links = Vec::new();
+    for root_id in roots {
+        collect_composition_parent_links(
+            registry,
+            &root_id,
+            current_definition_id,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut links,
+        );
+    }
+    links.sort_by(|left, right| {
+        left.breadcrumb
+            .cmp(&right.breadcrumb)
+            .then_with(|| left.path_to_current.cmp(&right.path_to_current))
+    });
+    links
+}
+
+fn collect_composition_parent_links(
+    registry: &DefinitionRegistry,
+    definition_id: &DefinitionId,
+    current_definition_id: &DefinitionId,
+    branch: &mut Vec<DefinitionId>,
+    path: &mut Vec<CompositionPathNode>,
+    links: &mut Vec<CompositionParentLink>,
+) {
+    if branch.iter().any(|id| id == definition_id) {
+        return;
+    }
+    let Ok(definition) = registry.effective_definition(definition_id) else {
+        return;
+    };
+
+    branch.push(definition.id.clone());
+    path.push(CompositionPathNode {
+        definition_id: definition.id.clone(),
+        definition_name: definition.name.clone(),
+        slot_id_from_parent: None,
+    });
+
+    if &definition.id == current_definition_id && path.len() > 1 {
+        let target_index = path.len() - 1;
+        for ancestor_index in 0..target_index {
+            let path_to_current = path[ancestor_index + 1..=target_index]
+                .iter()
+                .filter_map(|node| node.slot_id_from_parent.clone())
+                .collect::<Vec<_>>()
+                .join(".");
+            let breadcrumb = path[ancestor_index..=target_index]
+                .iter()
+                .map(|node| node.definition_name.clone())
+                .collect::<Vec<_>>()
+                .join(" > ");
+            let ancestor = &path[ancestor_index];
+            links.push(CompositionParentLink {
+                definition_id: ancestor.definition_id.clone(),
+                definition_name: ancestor.definition_name.clone(),
+                path_to_current,
+                breadcrumb,
+            });
+        }
+    }
+
+    if let Some(compound) = definition.compound {
+        for slot in compound.child_slots {
+            collect_child_composition_parent_links(
+                registry,
+                &slot.definition_id,
+                current_definition_id,
+                Some(slot.slot_id),
+                branch,
+                path,
+                links,
+            );
+        }
+    }
+
+    path.pop();
+    branch.pop();
+}
+
+fn collect_child_composition_parent_links(
+    registry: &DefinitionRegistry,
+    definition_id: &DefinitionId,
+    current_definition_id: &DefinitionId,
+    slot_id_from_parent: Option<String>,
+    branch: &mut Vec<DefinitionId>,
+    path: &mut Vec<CompositionPathNode>,
+    links: &mut Vec<CompositionParentLink>,
+) {
+    if branch.iter().any(|id| id == definition_id) {
+        return;
+    }
+    let Ok(definition) = registry.effective_definition(definition_id) else {
+        return;
+    };
+
+    branch.push(definition.id.clone());
+    path.push(CompositionPathNode {
+        definition_id: definition.id.clone(),
+        definition_name: definition.name.clone(),
+        slot_id_from_parent,
+    });
+
+    if &definition.id == current_definition_id && path.len() > 1 {
+        let target_index = path.len() - 1;
+        for ancestor_index in 0..target_index {
+            let path_to_current = path[ancestor_index + 1..=target_index]
+                .iter()
+                .filter_map(|node| node.slot_id_from_parent.clone())
+                .collect::<Vec<_>>()
+                .join(".");
+            let breadcrumb = path[ancestor_index..=target_index]
+                .iter()
+                .map(|node| node.definition_name.clone())
+                .collect::<Vec<_>>()
+                .join(" > ");
+            let ancestor = &path[ancestor_index];
+            links.push(CompositionParentLink {
+                definition_id: ancestor.definition_id.clone(),
+                definition_name: ancestor.definition_name.clone(),
+                path_to_current,
+                breadcrumb,
+            });
+        }
+    }
+
+    if let Some(compound) = definition.compound {
+        for slot in compound.child_slots {
+            collect_child_composition_parent_links(
+                registry,
+                &slot.definition_id,
+                current_definition_id,
+                Some(slot.slot_id),
+                branch,
+                path,
+                links,
+            );
+        }
+    }
+
+    path.pop();
+    branch.pop();
 }
 
 fn slot_display_label(slot_id: &str, role: &str, multiplicity: &SlotMultiplicity) -> String {
@@ -4469,8 +4701,9 @@ mod tests {
         identity::ElementId,
         modeling::{
             definition::{
-                Definition, DefinitionId, DefinitionKind, DefinitionRegistry, Interface,
-                OverridePolicy, ParamType, ParameterDef, ParameterMetadata, ParameterSchema,
+                ChildSlotDef, CompoundDefinition, Definition, DefinitionId, DefinitionKind,
+                DefinitionRegistry, Interface, OverridePolicy, ParamType, ParameterDef,
+                ParameterMetadata, ParameterSchema,
             },
             occurrence::OccurrenceIdentity,
         },
@@ -4686,6 +4919,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn test_definition(id: &str, name: &str, child_slots: Vec<(&str, &str)>) -> Definition {
+        Definition {
+            id: DefinitionId(id.to_string()),
+            base_definition_id: None,
+            name: name.to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(Vec::new()),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: (!child_slots.is_empty()).then(|| CompoundDefinition {
+                child_slots: child_slots
+                    .into_iter()
+                    .map(|(slot_id, definition_id)| ChildSlotDef {
+                        slot_id: slot_id.to_string(),
+                        role: slot_id.to_string(),
+                        definition_id: DefinitionId(definition_id.to_string()),
+                        parameter_bindings: Vec::new(),
+                        transform_binding: Default::default(),
+                        suppression_expr: None,
+                        multiplicity: Default::default(),
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            material_assignment: None,
+            domain_data: Value::Null,
+        }
+    }
+
+    #[test]
+    fn composition_parent_links_include_all_ancestors_with_paths() {
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(test_definition("root", "Root", vec![("frame", "frame")]));
+        registry.insert(test_definition("frame", "Frame", vec![("sash", "sash")]));
+        registry.insert(test_definition("sash", "Sash", Vec::new()));
+
+        let links = composition_parent_links(
+            &registry,
+            &[
+                DefinitionId("root".to_string()),
+                DefinitionId("frame".to_string()),
+            ],
+            &DefinitionId("sash".to_string()),
+        );
+        let paths = links
+            .iter()
+            .map(|link| (link.definition_id.as_str(), link.path_to_current.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec![("frame", "sash"), ("root", "frame.sash")]);
+    }
+
+    #[test]
+    fn composition_parent_links_keep_shared_definition_in_multiple_branches() {
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(test_definition(
+            "left",
+            "Left Window",
+            vec![("sill", "sill")],
+        ));
+        registry.insert(test_definition(
+            "right",
+            "Right Window",
+            vec![("sill", "sill")],
+        ));
+        registry.insert(test_definition("sill", "Sill", Vec::new()));
+
+        let links = composition_parent_links(
+            &registry,
+            &[
+                DefinitionId("left".to_string()),
+                DefinitionId("right".to_string()),
+                DefinitionId("sill".to_string()),
+            ],
+            &DefinitionId("sill".to_string()),
+        );
+        let parent_ids = links
+            .iter()
+            .map(|link| link.definition_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(parent_ids, vec!["left", "right"]);
+        assert!(links.iter().all(|link| link.path_to_current == "sill"));
     }
 
     #[test]

@@ -46,6 +46,10 @@ use bevy::{
     },
 };
 use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use crate::plugins::{
     definition_browser::{DefinitionEditorNode, DefinitionsWindowState},
@@ -138,6 +142,9 @@ pub struct DefinitionPreviewScene {
     /// The current occurrence root entity, or `Entity::PLACEHOLDER` when no
     /// occurrence is materialised.
     pub occurrence_root: Entity,
+    /// Signature of the registry snapshot used for the current materialised
+    /// occurrence.
+    pub current_registry_signature: u64,
 }
 
 /// Requested definition + registry snapshot for the preview render target.
@@ -150,17 +157,21 @@ pub struct DefinitionPreviewScene {
 pub struct DefinitionPreviewTarget {
     pub definition_id: Option<DefinitionId>,
     pub registry: DefinitionRegistry,
+    pub registry_signature: u64,
 }
 
 impl DefinitionPreviewTarget {
     pub fn request(&mut self, definition_id: DefinitionId, registry: DefinitionRegistry) {
+        let registry_signature = registry_signature(&registry);
         self.definition_id = Some(definition_id);
         self.registry = registry;
+        self.registry_signature = registry_signature;
     }
 
     pub fn clear(&mut self) {
         self.definition_id = None;
         self.registry = DefinitionRegistry::default();
+        self.registry_signature = 0;
     }
 }
 
@@ -303,6 +314,7 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
         camera_entity,
         light_entity,
         occurrence_root: Entity::PLACEHOLDER,
+        current_registry_signature: 0,
     });
 }
 
@@ -326,15 +338,20 @@ fn configure_preview_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 /// Despawns all preview entities except the camera and directional light, then
 /// renders a fresh synthetic occurrence against the submitted preview registry.
 pub fn sync_preview_to_target(world: &mut World) {
-    let (target_definition_id, preview_registry) = {
+    let (target_definition_id, preview_registry, registry_signature) = {
         let target = world.resource::<DefinitionPreviewTarget>();
-        (target.definition_id.clone(), target.registry.clone())
+        (
+            target.definition_id.clone(),
+            target.registry.clone(),
+            target.registry_signature,
+        )
     };
 
     // ── Check if we need to re-spawn ──────────────────────────────────────────
     let needs_respawn = {
         let scene = world.resource::<DefinitionPreviewScene>();
         scene.current_definition_id != target_definition_id
+            || scene.current_registry_signature != registry_signature
     };
 
     if !needs_respawn {
@@ -398,6 +415,7 @@ pub fn sync_preview_to_target(world: &mut World) {
     let mut scene = world.resource_mut::<DefinitionPreviewScene>();
     scene.current_definition_id = target_definition_id;
     scene.occurrence_root = new_root;
+    scene.current_registry_signature = registry_signature;
 }
 
 /// After the eval system runs, tag every freshly-spawned
@@ -486,7 +504,10 @@ pub fn draw_preview_slot_highlight(
     >,
     mut gizmos: Gizmos<PreviewSelectionGizmos>,
 ) {
-    let selected_slot_id = selected_slot_id(&state.selected_node);
+    let selected_slot_id = state
+        .selected_preview_slot_path
+        .clone()
+        .or_else(|| selected_slot_id(&state.selected_node));
     let hovered_slot_id = state
         .hovered_node
         .as_ref()
@@ -592,18 +613,17 @@ pub fn resolve_preview_click(
     // Map the hit to a slot selection.
     if let Some((_, part)) = closest {
         // Use the top-level slot segment (everything up to the first '.').
-        let slot_id = part
-            .slot_path
-            .split('.')
-            .next()
-            .unwrap_or(&part.slot_path)
-            .to_string();
+        let slot_id =
+            slot_segment_base(part.slot_path.split('.').next().unwrap_or(&part.slot_path))
+                .to_string();
         state.selected_node = DefinitionEditorNode::Slot(slot_id);
+        state.selected_preview_slot_path = Some(normalize_slot_path(&part.slot_path));
         state.technical_view_buffer.clear();
         state.technical_view_error = None;
     } else {
         // Empty-space click — fall back to root selection.
         state.selected_node = DefinitionEditorNode::Definition;
+        state.selected_preview_slot_path = None;
         state.technical_view_buffer.clear();
         state.technical_view_error = None;
     }
@@ -749,12 +769,52 @@ fn selected_slot_id_from_node(node: &DefinitionEditorNode) -> Option<String> {
     }
 }
 
+fn registry_signature(registry: &DefinitionRegistry) -> u64 {
+    let mut entries = registry.list();
+    entries.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+    let mut hasher = DefaultHasher::new();
+    for definition in entries {
+        definition.id.hash(&mut hasher);
+        definition.definition_version.hash(&mut hasher);
+        if let Ok(serialized) = serde_json::to_string(definition) {
+            serialized.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 /// Return `true` if `slot_path` equals `slot_id` or is a child path of it.
 ///
 /// A child path is one where the path starts with `slot_id + "."`, e.g.
 /// `"glazing.left_pane"` is a child of `"glazing"`.
 fn slot_path_matches(slot_path: &str, slot_id: &str) -> bool {
-    slot_path == slot_id || slot_path.starts_with(&format!("{slot_id}."))
+    slot_path_pattern_matches(slot_path, slot_id, true)
+}
+
+fn slot_path_pattern_matches(slot_path: &str, pattern: &str, allow_descendants: bool) -> bool {
+    let actual_segments = slot_path.split('.').collect::<Vec<_>>();
+    let pattern_segments = pattern.split('.').collect::<Vec<_>>();
+    if pattern_segments.is_empty() || pattern_segments.len() > actual_segments.len() {
+        return false;
+    }
+    for (actual, expected) in actual_segments.iter().zip(pattern_segments.iter()) {
+        if slot_segment_base(actual) != *expected {
+            return false;
+        }
+    }
+    allow_descendants || actual_segments.len() == pattern_segments.len()
+}
+
+fn normalize_slot_path(slot_path: &str) -> String {
+    slot_path
+        .split('.')
+        .map(slot_segment_base)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn slot_segment_base(segment: &str) -> &str {
+    segment.split('[').next().unwrap_or(segment)
 }
 
 /// Minimal slab AABB type used for the ray-AABB intersection.
@@ -859,6 +919,14 @@ mod tests {
         assert!(
             slot_path_matches("left_glazing.inner_frame", "left_glazing"),
             "child slot path must match"
+        );
+        assert!(
+            slot_path_matches("muntins[0]", "muntins"),
+            "collection instance must match its slot id"
+        );
+        assert!(
+            slot_path_matches("muntins[0].bar", "muntins.bar"),
+            "nested collection child path must match by slot segment"
         );
         // Prefix that is not a dot-separated parent must not match.
         assert!(
