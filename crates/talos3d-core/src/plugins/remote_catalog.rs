@@ -78,13 +78,11 @@ mod inner {
     use crate::plugins::modeling::definition::{
         Definition, DefinitionId, DefinitionLibraryRegistry, DefinitionRegistry,
     };
-    use crate::storage::{
-        ActiveArtifactStore, ArtifactStore, LocalFileArtifactStore,
-    };
     use crate::storage::wire::{
         definition_publish_request, material_def_publish_request, ChangeEvent,
         PublishArtifactRequest, PublishError, PublishScope,
     };
+    use crate::storage::{ActiveArtifactStore, ArtifactStore, LocalFileArtifactStore};
 
     // ---- Messages -----------------------------------------------------------
 
@@ -481,7 +479,11 @@ mod inner {
         Ok((canonical_id, body))
     }
 
-    fn apply_definition(world: &mut World, _canonical_id: &str, body: &Value) -> Result<(), String> {
+    fn apply_definition(
+        world: &mut World,
+        _canonical_id: &str,
+        body: &Value,
+    ) -> Result<(), String> {
         let def: Definition = serde_json::from_value(body.clone()).map_err(|e| e.to_string())?;
         let id = def.id.clone();
         world.resource_mut::<DefinitionRegistry>().insert(def);
@@ -634,8 +636,8 @@ mod inner {
         thread::Builder::new()
             .name("talos3d-artifact-subscription-worker".into())
             .spawn(move || {
-                let on_event: crate::storage::artifact_store::StoreEventCallback = Box::new(
-                    move |event: ChangeEvent| {
+                let on_event: crate::storage::artifact_store::StoreEventCallback =
+                    Box::new(move |event: ChangeEvent| {
                         // For local-file stores, the blob is reachable via
                         // `get_blob`; for cloud stores we pre-fetch via
                         // the cache warm-up inside CloudArtifactStore. In
@@ -645,17 +647,15 @@ mod inner {
                         // auto-fetch set.
                         let body = if auto_fetch_kinds.iter().any(|k| k == &event.kind) {
                             match subscription_store_for_callback.get_blob(&event.content_hash) {
-                                Ok(bytes) => {
-                                    serde_json::from_slice::<Value>(&bytes)
-                                        .map_err(|e| {
-                                            warn!(
-                                                hash = %event.content_hash,
-                                                error = %e,
-                                                "blob is not valid JSON"
-                                            );
-                                        })
-                                        .ok()
-                                }
+                                Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+                                    .map_err(|e| {
+                                        warn!(
+                                            hash = %event.content_hash,
+                                            error = %e,
+                                            "blob is not valid JSON"
+                                        );
+                                    })
+                                    .ok(),
                                 Err(e) => {
                                     warn!(
                                         hash = %event.content_hash,
@@ -671,12 +671,14 @@ mod inner {
                         };
 
                         let _ = change_tx_for_thread.send(CatalogBridgeMessage { event, body });
-                    },
-                );
+                    });
 
-                if let Err(e) =
-                    subscription_store.run_subscription(subscription_kinds, since_cursor, on_event, subscription_shutdown)
-                {
+                if let Err(e) = subscription_store.run_subscription(
+                    subscription_kinds,
+                    since_cursor,
+                    on_event,
+                    subscription_shutdown,
+                ) {
                     error!(error = %e, "artifact subscription exited with error");
                 } else {
                     info!(store = %description, "artifact subscription exited cleanly");
@@ -707,7 +709,9 @@ mod inner {
     /// matching kind descriptor's `apply` callback.
     fn apply_artifact_changes_system(
         world: &mut World,
-        mut reader_state: Local<Option<SystemState<MessageReader<'static, 'static, RemoteCatalogChange>>>>,
+        mut reader_state: Local<
+            Option<SystemState<MessageReader<'static, 'static, RemoteCatalogChange>>>,
+        >,
     ) {
         let state = reader_state.get_or_insert_with(|| SystemState::new(world));
         let changes: Vec<RemoteCatalogChange> = {
@@ -755,7 +759,9 @@ mod inner {
     /// publish job to the worker thread for each.
     fn publish_artifact_requests_system(
         world: &mut World,
-        mut reader_state: Local<Option<SystemState<MessageReader<'static, 'static, PublishArtifactRequested>>>>,
+        mut reader_state: Local<
+            Option<SystemState<MessageReader<'static, 'static, PublishArtifactRequested>>>,
+        >,
     ) {
         if world.get_resource::<RemoteCatalogState>().is_none() {
             return;
@@ -964,9 +970,7 @@ mod inner {
         }
 
         // Second pass: emit publish messages.
-        if let Some(mut messages) =
-            world.get_resource_mut::<Messages<PublishArtifactRequested>>()
-        {
+        if let Some(mut messages) = world.get_resource_mut::<Messages<PublishArtifactRequested>>() {
             for req in requests {
                 messages.write(req);
             }
@@ -1025,9 +1029,7 @@ mod inner {
         use super::*;
         use chrono::Utc;
 
-        use crate::plugins::modeling::definition::{
-            DefinitionKind, Interface, ParameterSchema,
-        };
+        use crate::plugins::modeling::definition::{DefinitionKind, Interface, ParameterSchema};
 
         fn make_material_def() -> MaterialDef {
             MaterialDef {
@@ -1144,20 +1146,14 @@ mod inner {
 
             app.update();
 
-            assert!(app
-                .world()
-                .resource::<MaterialRegistry>()
-                .contains(&def_id));
+            assert!(app.world().resource::<MaterialRegistry>().contains(&def_id));
             assert_eq!(
                 app.world()
                     .resource::<Messages<MaterialRegistryReloaded>>()
                     .len(),
                 1
             );
-            assert_eq!(
-                app.world().resource::<Messages<ArtifactApplied>>().len(),
-                1
-            );
+            assert_eq!(app.world().resource::<Messages<ArtifactApplied>>().len(), 1);
         }
 
         #[test]
@@ -1207,10 +1203,7 @@ mod inner {
 
             app.update();
 
-            assert_eq!(
-                app.world().resource::<Messages<ArtifactApplied>>().len(),
-                0
-            );
+            assert_eq!(app.world().resource::<Messages<ArtifactApplied>>().len(), 0);
         }
 
         #[test]
@@ -1236,10 +1229,7 @@ mod inner {
                     .len(),
                 0
             );
-            assert_eq!(
-                app.world().resource::<Messages<ArtifactApplied>>().len(),
-                0
-            );
+            assert_eq!(app.world().resource::<Messages<ArtifactApplied>>().len(), 0);
         }
 
         // ---- publish tests --------------------------------------------------
@@ -1266,10 +1256,7 @@ mod inner {
             let results = app.world().resource::<Messages<PublishArtifactResult>>();
             assert_eq!(results.len(), 1);
             let result = results.iter_current_update_messages().next().unwrap();
-            assert!(matches!(
-                result.outcome,
-                PublishArtifactOutcome::Failed(_)
-            ));
+            assert!(matches!(result.outcome, PublishArtifactOutcome::Failed(_)));
         }
 
         #[test]
@@ -1302,6 +1289,8 @@ mod inner {
 
 // Re-export the non-wasm items at module level.
 #[cfg(not(target_arch = "wasm32"))]
+pub use crate::storage::wire::PublishScope;
+#[cfg(not(target_arch = "wasm32"))]
 pub use inner::{
     ArtifactApplied, ArtifactApplier, ArtifactSerializer, BundledContentSeedConfig,
     BundledContentSeeded, CatalogKindDescriptor, CatalogKindRegistry, DefinitionRegistryReloaded,
@@ -1309,5 +1298,3 @@ pub use inner::{
     PublishArtifactResult, PublishRequestBuilder, RemoteCatalogChange, RemoteCatalogPlugin,
     RemoteCatalogState, SeedLocalIds,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use crate::storage::wire::PublishScope;

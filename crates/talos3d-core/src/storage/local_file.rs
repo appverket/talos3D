@@ -68,7 +68,8 @@ impl LocalFileArtifactStore {
     /// subdirectories are created on first call.
     pub fn open(root: PathBuf) -> Result<Self, ArtifactStoreError> {
         fs::create_dir_all(&root).map_err(|e| ArtifactStoreError::Io(e.to_string()))?;
-        fs::create_dir_all(root.join("blobs")).map_err(|e| ArtifactStoreError::Io(e.to_string()))?;
+        fs::create_dir_all(root.join("blobs"))
+            .map_err(|e| ArtifactStoreError::Io(e.to_string()))?;
         fs::create_dir_all(root.join("manifest"))
             .map_err(|e| ArtifactStoreError::Io(e.to_string()))?;
         // Touch events.log so subscription replay has a file to open.
@@ -108,10 +109,10 @@ impl LocalFileArtifactStore {
 
     fn blob_path(&self, content_hash: &str) -> PathBuf {
         let prefix = &content_hash[..2.min(content_hash.len())];
-        self.root.join("blobs").join(prefix).join(format!(
-            "{}.bin",
-            content_hash
-        ))
+        self.root
+            .join("blobs")
+            .join(prefix)
+            .join(format!("{}.bin", content_hash))
     }
 
     fn manifest_path(&self, kind: &str, canonical_id: &str) -> PathBuf {
@@ -138,11 +139,7 @@ impl LocalFileArtifactStore {
         Ok(next)
     }
 
-    fn read_existing_manifest(
-        &self,
-        kind: &str,
-        canonical_id: &str,
-    ) -> Option<ManifestEntry> {
+    fn read_existing_manifest(&self, kind: &str, canonical_id: &str) -> Option<ManifestEntry> {
         let path = self.manifest_path(kind, canonical_id);
         let bytes = fs::read(&path).ok()?;
         serde_json::from_slice(&bytes).ok()
@@ -233,13 +230,16 @@ impl ArtifactStore for LocalFileArtifactStore {
             owner_org_id: req.owner_org_id,
             published_at: published_at.clone(),
         };
-        let entry_bytes =
-            serde_json::to_vec_pretty(&entry).map_err(|e| ArtifactStoreError::Other(e.to_string()))?;
-        atomic_write(&self.manifest_path(&req.kind, &req.canonical_id), &entry_bytes)?;
+        let entry_bytes = serde_json::to_vec_pretty(&entry)
+            .map_err(|e| ArtifactStoreError::Other(e.to_string()))?;
+        atomic_write(
+            &self.manifest_path(&req.kind, &req.canonical_id),
+            &entry_bytes,
+        )?;
 
         // Append to events log.
-        let log_line = serde_json::to_string(&entry)
-            .map_err(|e| ArtifactStoreError::Other(e.to_string()))?;
+        let log_line =
+            serde_json::to_string(&entry).map_err(|e| ArtifactStoreError::Other(e.to_string()))?;
         let mut log_file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -275,8 +275,8 @@ impl ArtifactStore for LocalFileArtifactStore {
         // Replay events.log once, then idle.
         let log_path = self.events_log_path();
         if log_path.exists() {
-            let file = fs::File::open(&log_path)
-                .map_err(|e| ArtifactStoreError::Io(e.to_string()))?;
+            let file =
+                fs::File::open(&log_path).map_err(|e| ArtifactStoreError::Io(e.to_string()))?;
             let reader = BufReader::new(file);
             for line in reader.lines() {
                 let line = match line {
