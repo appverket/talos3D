@@ -40,14 +40,16 @@ use crate::{
     },
 };
 
-const DEFINITIONS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(520.0, 540.0);
-const DEFINITIONS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(400.0, 320.0);
-const DEFINITIONS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(620.0, 680.0);
+const DEFINITIONS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(980.0, 680.0);
+const DEFINITIONS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(760.0, 520.0);
+const DEFINITIONS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(1240.0, 860.0);
 const INSPECTOR_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(620.0, 620.0);
 const INSPECTOR_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(460.0, 360.0);
 const INSPECTOR_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(760.0, 760.0);
 /// Height (in egui logical pixels) of the 3D occurrence preview panel.
-const DEFINITION_PREVIEW_HEIGHT: f32 = 220.0;
+const DEFINITION_PREVIEW_HEIGHT: f32 = 340.0;
+const DEFINITIONS_BROWSER_LEFT_WIDTH: f32 = 300.0;
+const DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT: f32 = 210.0;
 
 #[derive(Debug, Clone)]
 struct DefinitionListEntry {
@@ -1247,23 +1249,24 @@ pub fn draw_definitions_window(
             }
 
             let selected_library_id = state.selected_library_id.clone();
-            let mut definition_entries: Vec<DefinitionListEntry> = match selected_library_id.as_deref() {
-                Some(library_id) => libraries
-                    .get(&DefinitionLibraryId(library_id.to_string()))
-                    .map(|library| {
-                        library
-                            .definitions
-                            .values()
-                            .map(DefinitionListEntry::from_definition)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                None => definitions
-                    .list()
-                    .into_iter()
-                    .map(DefinitionListEntry::from_definition)
-                    .collect(),
-            };
+            let mut definition_entries: Vec<DefinitionListEntry> =
+                match selected_library_id.as_deref() {
+                    Some(library_id) => libraries
+                        .get(&DefinitionLibraryId(library_id.to_string()))
+                        .map(|library| {
+                            library
+                                .definitions
+                                .values()
+                                .map(DefinitionListEntry::from_definition)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    None => definitions
+                        .list()
+                        .into_iter()
+                        .map(DefinitionListEntry::from_definition)
+                        .collect(),
+                };
             definition_entries.sort_by(|left, right| left.name.cmp(&right.name));
             let search = state.search.trim().to_ascii_lowercase();
             if !search.is_empty() {
@@ -1273,17 +1276,22 @@ pub fn draw_definitions_window(
                 });
             }
 
-            if state.selected_definition_id.as_ref().is_none_or(|selected_id| {
-                !definition_entries
-                    .iter()
-                    .any(|entry| entry.id == *selected_id)
-            }) {
+            if state
+                .selected_definition_id
+                .as_ref()
+                .is_none_or(|selected_id| {
+                    !definition_entries
+                        .iter()
+                        .any(|entry| entry.id == *selected_id)
+                })
+            {
                 state.selected_definition_id =
                     definition_entries.first().map(|entry| entry.id.clone());
                 state.selected_preview_slot_path = None;
             }
 
-            let selected_definition_id = state.selected_definition_id.as_deref().unwrap_or_default();
+            let selected_definition_id =
+                state.selected_definition_id.as_deref().unwrap_or_default();
             let selected_preview_registry = preview_registry_for_selected_source(
                 definitions,
                 libraries,
@@ -1302,335 +1310,72 @@ pub fn draw_definitions_window(
                     .effective_definition(&DefinitionId(selected_definition_id.to_string()))
                     .ok()
             };
-            egui::ScrollArea::vertical()
-                .id_salt("definitions.browser.root")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("New Draft").clicked() {
-                            queue_command_invocation_resource(
-                                pending,
-                                "modeling.create_definition_draft".to_string(),
-                                json!({"name":"New Definition"}),
-                            );
-                        }
-                        let can_open = state.selected_definition_id.is_some();
-                        if ui.add_enabled(can_open, egui::Button::new("Edit As Draft")).clicked() {
-                            let mut parameters = json!({
-                                "definition_id": state.selected_definition_id.clone().unwrap_or_default(),
-                            });
-                            if let Some(library_id) = state.selected_library_id.as_deref() {
-                                parameters["library_id"] = json!(library_id);
-                            }
-                            queue_command_invocation_resource(
-                                pending,
-                                "modeling.open_definition_draft".to_string(),
-                                parameters,
-                            );
-                        }
-                        if ui.add_enabled(can_open, egui::Button::new("Derive Draft")).clicked() {
-                            let mut parameters = json!({
-                                "definition_id": state.selected_definition_id.clone().unwrap_or_default(),
-                            });
-                            if let Some(library_id) = state.selected_library_id.as_deref() {
-                                parameters["library_id"] = json!(library_id);
-                            }
-                            queue_command_invocation_resource(
-                                pending,
-                                "modeling.derive_definition_draft".to_string(),
-                                parameters,
-                            );
-                        }
-                        if ui
-                            .add_enabled(drafts.active_draft_id.is_some(), egui::Button::new("Open Inspector"))
-                            .clicked()
-                        {
-                            state.inspector_visible = true;
-                        }
-                    });
-                    ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("New").clicked() {
+                    queue_command_invocation_resource(
+                        pending,
+                        "modeling.create_definition_draft".to_string(),
+                        json!({"name":"New Definition"}),
+                    );
+                }
+                if ui
+                    .add_enabled(
+                        drafts.active_draft_id.is_some(),
+                        egui::Button::new("Open Editor"),
+                    )
+                    .clicked()
+                {
+                    state.inspector_visible = true;
+                }
+                ui.separator();
+                ui.label(egui::RichText::new(selection.summary()).small());
+            });
+            ui.separator();
 
-                    ui.horizontal(|ui| {
-                        ui.label("Search");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut state.search)
-                                .desired_width(220.0)
-                                .hint_text("Definition name or id"),
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(DEFINITIONS_BROWSER_LEFT_WIDTH, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        draw_definition_browser_left_panel(
+                            ui,
+                            state,
+                            definitions,
+                            &library_entries,
+                            &definition_entries,
+                            drafts,
+                            pending,
                         );
-                    });
-                    ui.label(egui::RichText::new(selection.summary()).small());
-                    ui.separator();
+                    },
+                );
 
-                    ui.group(|ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(egui::RichText::new("Selected Definition").strong());
-                        ui.separator();
-                        if let Some(definition) = effective_definition.as_ref() {
-                            preview_target.request(
-                                definition.id.clone(),
-                                selected_preview_registry.clone(),
-                            );
-                            let requires_opening_host =
-                                definition_requires_opening_host_definition(definition);
-                            draw_definition_3d_preview(
-                                ui,
-                                contexts,
-                                preview_scene,
-                                pending_click,
-                                DEFINITION_PREVIEW_HEIGHT,
-                            );
-                            ui.add_space(6.0);
-                            ui.label(egui::RichText::new(&definition.name).strong());
-                            ui.label(
-                                egui::RichText::new(definition.id.to_string())
-                                    .small()
-                                    .monospace(),
-                            );
-                            draw_part_of_list(
-                                ui,
-                                state,
-                                &selected_preview_registry,
-                                &source_definition_ids,
-                                &definition.id,
-                            );
-                            ui.label(format!(
-                                "{} parameters, {} child slots",
-                                definition.interface.parameters.0.len(),
-                                definition
-                                    .compound
-                                    .as_ref()
-                                    .map(|compound| compound.child_slots.len())
-                                    .unwrap_or(0)
-                            ));
-                            if requires_opening_host {
-                                ui.label(
-                                    egui::RichText::new("Requires a selected wall opening.")
-                                        .small(),
-                                );
-                            } else if selection.can_host_in_opening() {
-                                ui.checkbox(
-                                    &mut state.host_in_selection,
-                                    "Host in selected opening",
-                                );
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label("Label");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut state.instantiate_label)
-                                        .desired_width(220.0)
-                                        .hint_text(&definition.name),
-                                );
-                            });
-                            let can_host = selection.can_host_in_opening();
-                            let host_mode =
-                                if requires_opening_host || (state.host_in_selection && can_host) {
-                                    "opening"
-                                } else {
-                                    "unhosted"
-                                };
-                            let instantiate_enabled = !requires_opening_host || can_host;
-                            if !instantiate_enabled {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Select an opening in a wall to instantiate this definition.",
-                                    )
-                                    .small(),
-                                );
-                            }
-                            let button_text = if host_mode == "opening" {
-                                "Instantiate In Opening"
-                            } else {
-                                "Instantiate At Cursor"
-                            };
-                            if ui
-                                .add_enabled(instantiate_enabled, egui::Button::new(button_text))
-                                .clicked()
-                            {
-                                let mut parameters = json!({
-                                    "definition_id": definition.id.to_string(),
-                                    "host_mode": host_mode,
-                                });
-                                if let Some(library_id) = selected_library_id.as_deref() {
-                                    parameters["library_id"] = json!(library_id);
-                                }
-                                let label = state.instantiate_label.trim();
-                                if !label.is_empty() {
-                                    parameters["label"] = json!(label);
-                                }
-                                if host_mode == "unhosted" {
-                                    if let Some(position) =
-                                        cursor_world_pos.snapped.or(cursor_world_pos.raw)
-                                    {
-                                        parameters["offset"] =
-                                            json!([position.x, position.y, position.z]);
-                                    }
-                                }
-                                queue_command_invocation_resource(
-                                    pending,
-                                    "modeling.instantiate_definition".to_string(),
-                                    parameters,
-                                );
-                            }
-                        } else {
-                            preview_target.clear();
-                            ui.label("Select a definition from the list.");
-                        }
-                    });
-                    ui.separator();
+                ui.separator();
 
-                    ui.horizontal_top(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(176.0, ui.available_height()),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.group(|ui| {
-                                    ui.set_min_width(164.0);
-                                    ui.label(egui::RichText::new("Sources").strong());
-                                    ui.separator();
-                                    if ui
-                                        .selectable_label(
-                                            state.selected_library_id.is_none(),
-                                            format!("Document ({})", definitions.list().len()),
-                                        )
-                                        .clicked()
-                                    {
-                                        state.selected_library_id = None;
-                                        state.selected_preview_slot_path = None;
-                                    }
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("definitions.browser.sources")
-                                        .max_height(140.0)
-                                        .show(ui, |ui| {
-                                            for library in &library_entries {
-                                                let selected = state.selected_library_id.as_deref()
-                                                    == Some(library.id.0.as_str());
-                                                if ui
-                                                    .selectable_label(
-                                                        selected,
-                                                        format!(
-                                                            "{} ({})",
-                                                            library.name,
-                                                            library.definitions.len()
-                                                        ),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    state.selected_library_id =
-                                                        Some(library.id.0.clone());
-                                                    state.selected_preview_slot_path = None;
-                                                }
-                                            }
-                                        });
-                                });
-
-                                ui.add_space(8.0);
-                                ui.group(|ui| {
-                                    ui.set_min_width(164.0);
-                                    ui.label(egui::RichText::new("Drafts").strong());
-                                    ui.separator();
-                                    let mut draft_entries =
-                                        drafts.list().into_iter().cloned().collect::<Vec<_>>();
-                                    draft_entries.sort_by(|left, right| {
-                                        left.working_copy.name.cmp(&right.working_copy.name)
-                                    });
-                                    egui::ScrollArea::vertical()
-                                        .id_salt("definitions.browser.drafts")
-                                        .max_height(180.0)
-                                        .show(ui, |ui| {
-                                            for draft in draft_entries {
-                                                let selected =
-                                                    drafts.active_draft_id.as_ref()
-                                                        == Some(&draft.draft_id);
-                                                let label = if draft.dirty {
-                                                    format!("{} *", draft.working_copy.name)
-                                                } else {
-                                                    draft.working_copy.name.clone()
-                                                };
-                                                if ui.selectable_label(selected, label).clicked() {
-                                                    drafts.active_draft_id =
-                                                        Some(draft.draft_id.clone());
-                                                    state.inspector_visible = true;
-                                                }
-                                            }
-                                        });
-                                });
-                            },
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    if let Some(definition) = effective_definition.as_ref() {
+                        preview_target
+                            .request(definition.id.clone(), selected_preview_registry.clone());
+                        draw_selected_definition_workspace(
+                            ui,
+                            contexts,
+                            state,
+                            selection,
+                            pending,
+                            cursor_world_pos,
+                            preview_scene,
+                            pending_click,
+                            &selected_preview_registry,
+                            &source_definition_ids,
+                            selected_library_id.as_deref(),
+                            definition,
                         );
-
-                        ui.separator();
-
-                        ui.vertical(|ui| {
-                            ui.group(|ui| {
-                                ui.set_width(ui.available_width());
-                                ui.label(egui::RichText::new("Definitions").strong());
-                                ui.separator();
-                                egui::ScrollArea::vertical()
-                                    .id_salt("definitions.browser.list")
-                                    .max_height(220.0)
-                                    .show(ui, |ui| {
-                                        if definition_entries.is_empty() {
-                                            ui.label("No definitions match the current source and search.");
-                                        }
-                                        for entry in &definition_entries {
-                                            let selected = state.selected_definition_id.as_deref()
-                                                == Some(entry.id.as_str());
-                                            ui.horizontal(|ui| {
-                                                draw_definition_list_thumbnail(ui, entry);
-                                                ui.vertical(|ui| {
-                                                    if ui
-                                                        .selectable_label(selected, &entry.name)
-                                                        .clicked()
-                                                    {
-                                                        state.selected_definition_id =
-                                                            Some(entry.id.clone());
-                                                        state.selected_preview_slot_path = None;
-                                                        if state.instantiate_label.is_empty() {
-                                                            state.instantiate_label =
-                                                                entry.name.clone();
-                                                        }
-                                                    }
-                                                    ui.label(
-                                                        egui::RichText::new(entry.meta_label())
-                                                            .small()
-                                                            .weak(),
-                                                    );
-                                                });
-                                            });
-                                            ui.add_space(4.0);
-                                        }
-                                    });
-                            });
-
-                            ui.add_space(8.0);
-                            ui.group(|ui| {
-                                ui.set_width(ui.available_width());
-                                ui.label(egui::RichText::new("Composition").strong());
-                                ui.separator();
-                                egui::ScrollArea::vertical()
-                                    .id_salt("definitions.browser.composition_tree")
-                                    .max_height(260.0)
-                                    .show(ui, |ui| {
-                                        if let Some(focus_definition_id) =
-                                            state.selected_definition_id.as_deref()
-                                        {
-                                            draw_definition_composition_tree(
-                                                ui,
-                                                &selected_preview_registry,
-                                                &DefinitionId(focus_definition_id.to_string()),
-                                                &mut state.selected_definition_id,
-                                                &mut state.selected_preview_slot_path,
-                                                &mut state.instantiate_label,
-                                            );
-                                        } else {
-                                            ui.label(
-                                                egui::RichText::new("Select a definition.").weak(),
-                                            );
-                                        }
-                                    });
-                            });
-                        });
-                    });
+                    } else {
+                        preview_target.clear();
+                        draw_empty_definition_workspace(ui);
+                    }
                 });
+            });
         });
     state.visible = open;
     draw_definition_editor(
@@ -1746,6 +1491,384 @@ fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry
         badge_text,
         egui::TextStyle::Small.resolve(ui.style()),
         egui::Color32::WHITE,
+    );
+}
+
+fn draw_definition_browser_left_panel(
+    ui: &mut egui::Ui,
+    state: &mut DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    library_entries: &[&crate::plugins::modeling::definition::DefinitionLibrary],
+    definition_entries: &[DefinitionListEntry],
+    drafts: &mut DefinitionDraftRegistry,
+    pending: &mut PendingCommandInvocations,
+) {
+    ui.set_width(DEFINITIONS_BROWSER_LEFT_WIDTH);
+    ui.heading("Definitions");
+
+    let source_label = selected_source_label(state, definitions, library_entries);
+    egui::ComboBox::from_id_salt("definitions.browser.source_combo")
+        .width(ui.available_width())
+        .selected_text(source_label)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(
+                    state.selected_library_id.is_none(),
+                    format!("Document ({})", definitions.list().len()),
+                )
+                .clicked()
+            {
+                state.selected_library_id = None;
+                state.selected_definition_id = None;
+                state.selected_preview_slot_path = None;
+            }
+            for library in library_entries {
+                let selected = state.selected_library_id.as_deref() == Some(library.id.0.as_str());
+                if ui
+                    .selectable_label(
+                        selected,
+                        format!("{} ({})", library.name, library.definitions.len()),
+                    )
+                    .clicked()
+                {
+                    state.selected_library_id = Some(library.id.0.clone());
+                    state.selected_definition_id = None;
+                    state.selected_preview_slot_path = None;
+                }
+            }
+        });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Search");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.search)
+                .desired_width(ui.available_width())
+                .hint_text("Name or id"),
+        );
+    });
+    ui.separator();
+
+    let drafts_height = if !drafts.list().is_empty() {
+        118.0
+    } else {
+        36.0
+    };
+    let list_height = (ui.available_height() - drafts_height).max(180.0);
+    egui::ScrollArea::vertical()
+        .id_salt("definitions.browser.list")
+        .max_height(list_height)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if definition_entries.is_empty() {
+                ui.label("No definitions found.");
+            }
+            for entry in definition_entries {
+                let selected = state.selected_definition_id.as_deref() == Some(entry.id.as_str());
+                let response = ui
+                    .horizontal(|ui| {
+                        draw_definition_list_thumbnail(ui, entry);
+                        ui.vertical(|ui| {
+                            let title = ui.selectable_label(selected, &entry.name);
+                            if title.clicked() {
+                                select_definition_in_browser(state, &entry.id, &entry.name);
+                            }
+                            if title.double_clicked() {
+                                queue_open_definition_draft_from_browser(
+                                    pending,
+                                    &entry.id,
+                                    state.selected_library_id.as_deref(),
+                                );
+                            }
+                            ui.label(egui::RichText::new(entry.meta_label()).small().weak());
+                        });
+                    })
+                    .response;
+                response.context_menu(|ui| {
+                    draw_definition_action_menu(
+                        ui,
+                        pending,
+                        &entry.id,
+                        state.selected_library_id.as_deref(),
+                    );
+                });
+                ui.add_space(5.0);
+            }
+        });
+
+    ui.separator();
+    egui::CollapsingHeader::new("Drafts")
+        .id_salt("definitions.browser.drafts")
+        .default_open(drafts.active_draft_id.is_some())
+        .show(ui, |ui| {
+            let mut draft_entries = drafts.list().into_iter().cloned().collect::<Vec<_>>();
+            draft_entries
+                .sort_by(|left, right| left.working_copy.name.cmp(&right.working_copy.name));
+            if draft_entries.is_empty() {
+                ui.label(egui::RichText::new("No open drafts").weak());
+            }
+            for draft in draft_entries {
+                let selected = drafts.active_draft_id.as_ref() == Some(&draft.draft_id);
+                let label = if draft.dirty {
+                    format!("{} *", draft.working_copy.name)
+                } else {
+                    draft.working_copy.name.clone()
+                };
+                if ui.selectable_label(selected, label).clicked() {
+                    drafts.active_draft_id = Some(draft.draft_id.clone());
+                    state.inspector_visible = true;
+                }
+            }
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_selected_definition_workspace(
+    ui: &mut egui::Ui,
+    contexts: &mut EguiContexts,
+    state: &mut DefinitionsWindowState,
+    selection: &DefinitionSelectionContext,
+    pending: &mut PendingCommandInvocations,
+    cursor_world_pos: &CursorWorldPos,
+    preview_scene: &DefinitionPreviewScene,
+    pending_click: &mut PendingPreviewClick,
+    registry: &DefinitionRegistry,
+    source_definition_ids: &[DefinitionId],
+    selected_library_id: Option<&str>,
+    definition: &Definition,
+) {
+    let requires_opening_host = definition_requires_opening_host_definition(definition);
+    let can_host = selection.can_host_in_opening();
+    let host_mode = if requires_opening_host || (state.host_in_selection && can_host) {
+        "opening"
+    } else {
+        "unhosted"
+    };
+    let instantiate_enabled = !requires_opening_host || can_host;
+
+    ui.horizontal(|ui| {
+        let heading = ui.heading(&definition.name);
+        heading.context_menu(|ui| {
+            draw_definition_action_menu(ui, pending, definition.id.as_str(), selected_library_id);
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Edit").clicked() {
+                queue_open_definition_draft_from_browser(
+                    pending,
+                    definition.id.as_str(),
+                    selected_library_id,
+                );
+            }
+            if ui.button("Derive").clicked() {
+                queue_derive_definition_draft_from_browser(
+                    pending,
+                    definition.id.as_str(),
+                    selected_library_id,
+                );
+            }
+        });
+    });
+    ui.label(
+        egui::RichText::new(format!(
+            "{} · {} parameters · {} child slots",
+            definition.id,
+            definition.interface.parameters.0.len(),
+            definition
+                .compound
+                .as_ref()
+                .map(|compound| compound.child_slots.len())
+                .unwrap_or(0)
+        ))
+        .small()
+        .weak(),
+    );
+
+    ui.horizontal(|ui| {
+        ui.label("Label");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.instantiate_label)
+                .desired_width(220.0)
+                .hint_text(&definition.name),
+        );
+        if !requires_opening_host && can_host {
+            ui.checkbox(&mut state.host_in_selection, "Host in selected opening");
+        }
+        let button_text = if host_mode == "opening" {
+            "Instantiate In Opening"
+        } else {
+            "Instantiate At Cursor"
+        };
+        if ui
+            .add_enabled(instantiate_enabled, egui::Button::new(button_text))
+            .clicked()
+        {
+            queue_instantiate_definition_from_browser(
+                pending,
+                cursor_world_pos,
+                definition,
+                selected_library_id,
+                host_mode,
+                state.instantiate_label.trim(),
+            );
+        }
+    });
+
+    if requires_opening_host && !can_host {
+        ui.label(egui::RichText::new("Requires selected wall opening.").small());
+    }
+
+    let preview_height = (ui.available_height() - DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT - 18.0)
+        .clamp(240.0, DEFINITION_PREVIEW_HEIGHT);
+    draw_definition_3d_preview(ui, contexts, preview_scene, pending_click, preview_height);
+    ui.add_space(8.0);
+
+    ui.columns(2, |columns| {
+        columns[0].group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("Components").strong());
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("definitions.browser.components")
+                .max_height(DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT)
+                .show(ui, |ui| {
+                    draw_definition_composition_tree(
+                        ui,
+                        registry,
+                        &definition.id,
+                        &mut state.selected_definition_id,
+                        &mut state.selected_preview_slot_path,
+                        &mut state.instantiate_label,
+                        pending,
+                        selected_library_id,
+                    );
+                });
+        });
+
+        columns[1].group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new("Parents").strong());
+            ui.separator();
+            draw_parents_panel(
+                ui,
+                state,
+                pending,
+                registry,
+                source_definition_ids,
+                selected_library_id,
+                &definition.id,
+            );
+        });
+    });
+}
+
+fn draw_empty_definition_workspace(ui: &mut egui::Ui) {
+    ui.heading("Definitions");
+    ui.separator();
+    ui.label(egui::RichText::new("No definition selected").weak());
+}
+
+fn selected_source_label(
+    state: &DefinitionsWindowState,
+    definitions: &DefinitionRegistry,
+    library_entries: &[&crate::plugins::modeling::definition::DefinitionLibrary],
+) -> String {
+    match state.selected_library_id.as_deref() {
+        Some(library_id) => library_entries
+            .iter()
+            .find(|library| library.id.0 == library_id)
+            .map(|library| format!("{} ({})", library.name, library.definitions.len()))
+            .unwrap_or_else(|| "Missing source".to_string()),
+        None => format!("Document ({})", definitions.list().len()),
+    }
+}
+
+fn select_definition_in_browser(
+    state: &mut DefinitionsWindowState,
+    definition_id: &str,
+    definition_name: &str,
+) {
+    state.selected_definition_id = Some(definition_id.to_string());
+    state.selected_preview_slot_path = None;
+    if state.instantiate_label.is_empty() {
+        state.instantiate_label = definition_name.to_string();
+    }
+}
+
+fn draw_definition_action_menu(
+    ui: &mut egui::Ui,
+    pending: &mut PendingCommandInvocations,
+    definition_id: &str,
+    selected_library_id: Option<&str>,
+) {
+    if ui.button("Edit").clicked() {
+        queue_open_definition_draft_from_browser(pending, definition_id, selected_library_id);
+        ui.close();
+    }
+    if ui.button("Derive Draft").clicked() {
+        queue_derive_definition_draft_from_browser(pending, definition_id, selected_library_id);
+        ui.close();
+    }
+}
+
+fn queue_open_definition_draft_from_browser(
+    pending: &mut PendingCommandInvocations,
+    definition_id: &str,
+    selected_library_id: Option<&str>,
+) {
+    let mut parameters = json!({ "definition_id": definition_id });
+    if let Some(library_id) = selected_library_id {
+        parameters["library_id"] = json!(library_id);
+    }
+    queue_command_invocation_resource(
+        pending,
+        "modeling.open_definition_draft".to_string(),
+        parameters,
+    );
+}
+
+fn queue_derive_definition_draft_from_browser(
+    pending: &mut PendingCommandInvocations,
+    definition_id: &str,
+    selected_library_id: Option<&str>,
+) {
+    let mut parameters = json!({ "definition_id": definition_id });
+    if let Some(library_id) = selected_library_id {
+        parameters["library_id"] = json!(library_id);
+    }
+    queue_command_invocation_resource(
+        pending,
+        "modeling.derive_definition_draft".to_string(),
+        parameters,
+    );
+}
+
+fn queue_instantiate_definition_from_browser(
+    pending: &mut PendingCommandInvocations,
+    cursor_world_pos: &CursorWorldPos,
+    definition: &Definition,
+    selected_library_id: Option<&str>,
+    host_mode: &str,
+    label: &str,
+) {
+    let mut parameters = json!({
+        "definition_id": definition.id.to_string(),
+        "host_mode": host_mode,
+    });
+    if let Some(library_id) = selected_library_id {
+        parameters["library_id"] = json!(library_id);
+    }
+    if !label.is_empty() {
+        parameters["label"] = json!(label);
+    }
+    if host_mode == "unhosted" {
+        if let Some(position) = cursor_world_pos.snapped.or(cursor_world_pos.raw) {
+            parameters["offset"] = json!([position.x, position.y, position.z]);
+        }
+    }
+    queue_command_invocation_resource(
+        pending,
+        "modeling.instantiate_definition".to_string(),
+        parameters,
     );
 }
 
@@ -2244,35 +2367,49 @@ fn source_definition_ids(
     ids
 }
 
-fn draw_part_of_list(
+fn draw_parents_panel(
     ui: &mut egui::Ui,
     state: &mut DefinitionsWindowState,
+    pending: &mut PendingCommandInvocations,
     registry: &DefinitionRegistry,
     source_definition_ids: &[DefinitionId],
+    selected_library_id: Option<&str>,
     current_definition_id: &DefinitionId,
 ) {
     let parent_links =
         composition_parent_links(registry, source_definition_ids, current_definition_id);
     if parent_links.is_empty() {
+        ui.label(egui::RichText::new("None").weak());
         return;
     }
 
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new("Part of").small().strong());
-        for link in parent_links {
-            let response = ui
-                .small_button(&link.definition_name)
-                .on_hover_text(link.breadcrumb.clone());
-            if response.clicked() {
-                state.selected_definition_id = Some(link.definition_id.to_string());
-                state.selected_preview_slot_path = Some(link.path_to_current);
-                if state.instantiate_label.is_empty() {
-                    state.instantiate_label = link.definition_name;
+    egui::ScrollArea::vertical()
+        .id_salt("definitions.browser.parents")
+        .max_height(DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT)
+        .show(ui, |ui| {
+            for link in parent_links {
+                let response = ui
+                    .selectable_label(false, &link.definition_name)
+                    .on_hover_text(link.breadcrumb.clone());
+                if response.clicked() {
+                    state.selected_definition_id = Some(link.definition_id.to_string());
+                    state.selected_preview_slot_path = Some(link.path_to_current.clone());
+                    if state.instantiate_label.is_empty() {
+                        state.instantiate_label = link.definition_name.clone();
+                    }
                 }
+                response.context_menu(|ui| {
+                    draw_definition_action_menu(
+                        ui,
+                        pending,
+                        link.definition_id.as_str(),
+                        selected_library_id,
+                    );
+                });
+                ui.label(egui::RichText::new(link.breadcrumb).small().weak());
+                ui.add_space(4.0);
             }
-        }
-    });
+        });
 }
 
 fn draw_definition_composition_tree(
@@ -2282,6 +2419,8 @@ fn draw_definition_composition_tree(
     selected_definition_id: &mut Option<String>,
     selected_preview_slot_path: &mut Option<String>,
     instantiate_label: &mut String,
+    pending: &mut PendingCommandInvocations,
+    selected_library_id: Option<&str>,
 ) {
     if registry.effective_definition(focus_definition_id).is_err() {
         ui.label(egui::RichText::new("Selected definition is unavailable.").weak());
@@ -2297,6 +2436,8 @@ fn draw_definition_composition_tree(
         selected_definition_id,
         selected_preview_slot_path,
         instantiate_label,
+        pending,
+        selected_library_id,
         &mut Vec::new(),
         0,
     );
@@ -2346,6 +2487,8 @@ fn draw_definition_composition_node(
     selected_definition_id: &mut Option<String>,
     selected_preview_slot_path: &mut Option<String>,
     instantiate_label: &mut String,
+    pending: &mut PendingCommandInvocations,
+    selected_library_id: Option<&str>,
     branch: &mut Vec<DefinitionId>,
     depth: usize,
 ) {
@@ -2401,6 +2544,9 @@ fn draw_definition_composition_node(
                 &definition,
             );
         }
+        response.context_menu(|ui| {
+            draw_definition_action_menu(ui, pending, definition.id.as_str(), selected_library_id);
+        });
         return;
     }
 
@@ -2437,6 +2583,8 @@ fn draw_definition_composition_node(
                     selected_definition_id,
                     selected_preview_slot_path,
                     instantiate_label,
+                    pending,
+                    selected_library_id,
                     branch,
                     depth + 1,
                 );
@@ -2455,6 +2603,9 @@ fn draw_definition_composition_node(
             &definition,
         );
     }
+    response.header_response.context_menu(|ui| {
+        draw_definition_action_menu(ui, pending, definition.id.as_str(), selected_library_id);
+    });
     if selected {
         let rect = response.header_response.rect;
         ui.painter().rect_stroke(
@@ -2500,6 +2651,8 @@ fn composition_parent_links(
     source_definition_ids: &[DefinitionId],
     current_definition_id: &DefinitionId,
 ) -> Vec<CompositionParentLink> {
+    // A definition can be reused by multiple compounds; keep every acyclic path
+    // so the browser can show the same child under each valid parent branch.
     let roots = composition_root_ids(registry, source_definition_ids);
     let mut links = Vec::new();
     for root_id in roots {
