@@ -164,7 +164,7 @@ impl Plugin for ModelingPlugin {
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: Some("Ctrl/Cmd+Shift+D".to_string()),
-                    icon: None,
+                    icon: Some("icon.definitions".to_string()),
                     hint: Some("Browse document and library definitions".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
@@ -595,9 +595,7 @@ impl Plugin for ModelingPlugin {
                     // toolbar so the Definitions Browser and Materials Browser
                     // are reachable from a primary spatial surface, per
                     // DEFINITION_BROWSER_UX_AGREEMENT.md (Command Surfaces
-                    // rule). Both commands have `icon: None`; the toolbar
-                    // falls back to label text via
-                    // `toolbar_button_fallback_text`.
+                    // rule).
                     ToolbarSection {
                         label: "Library".to_string(),
                         command_ids: vec![

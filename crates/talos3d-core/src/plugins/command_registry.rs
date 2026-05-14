@@ -634,6 +634,8 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.view_outline", "view_outline"),
         ("icon.view_grid", "view_grid"),
         ("icon.view_paper", "view_paper"),
+        ("icon.definitions", "definitions"),
+        ("icon.materials", "materials"),
     ];
 
     let size = bevy::render::render_resource::Extent3d {

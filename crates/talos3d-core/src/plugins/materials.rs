@@ -1306,7 +1306,7 @@ impl Plugin for MaterialPlugin {
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: Some("Ctrl/Cmd+Shift+M".to_string()),
-                    icon: None,
+                    icon: Some("icon.materials".to_string()),
                     hint: Some("Browse and edit project materials".to_string()),
                     requires_selection: false,
                     show_in_menu: true,

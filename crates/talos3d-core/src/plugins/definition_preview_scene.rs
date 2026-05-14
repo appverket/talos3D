@@ -48,13 +48,12 @@ use bevy::{
 use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 
 use crate::plugins::{
-    definition_authoring::{draft_effective_definition, DefinitionDraftRegistry},
     definition_browser::{DefinitionEditorNode, DefinitionsWindowState},
     identity::ElementId,
     modeling::{
-        definition::{DefinitionId, DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap},
+        definition::{DefinitionId, DefinitionRegistry, OverrideMap},
         mesh_generation::EvaluationSet,
-        occurrence::{GeneratedOccurrencePart, NeedsEval, OccurrenceIdentity},
+        occurrence::{render_occurrence, GeneratedOccurrencePart, OccurrenceIdentity},
         primitive_trait::Primitive as _,
         primitives::ShapeRotation,
         profile::ProfileExtrusion,
@@ -141,6 +140,30 @@ pub struct DefinitionPreviewScene {
     pub occurrence_root: Entity,
 }
 
+/// Requested definition + registry snapshot for the preview render target.
+///
+/// The Definitions browser can preview document definitions, bundled-library
+/// definitions, and unsaved drafts. Those are not always present in the live
+/// document [`DefinitionRegistry`], so the egui layer submits the exact
+/// preview registry to render against.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DefinitionPreviewTarget {
+    pub definition_id: Option<DefinitionId>,
+    pub registry: DefinitionRegistry,
+}
+
+impl DefinitionPreviewTarget {
+    pub fn request(&mut self, definition_id: DefinitionId, registry: DefinitionRegistry) {
+        self.definition_id = Some(definition_id);
+        self.registry = registry;
+    }
+
+    pub fn clear(&mut self) {
+        self.definition_id = None;
+        self.registry = DefinitionRegistry::default();
+    }
+}
+
 /// PP-DBUX4: NDC-space coordinates of a click on the preview image, pending
 /// resolution by [`resolve_preview_click`].
 ///
@@ -172,9 +195,10 @@ impl Plugin for DefinitionPreviewPlugin {
         app
             // Register the custom gizmo group so Bevy allocates its pipeline.
             .init_gizmo_group::<PreviewSelectionGizmos>()
+            .init_resource::<DefinitionPreviewTarget>()
             .insert_resource(PendingPreviewClick::default())
             .add_systems(Startup, (setup_preview_scene, configure_preview_gizmos))
-            .add_systems(Update, sync_preview_to_active_draft)
+            .add_systems(Update, sync_preview_to_target)
             .add_systems(
                 Update,
                 tag_preview_generated_parts.after(EvaluationSet::Evaluate),
@@ -198,8 +222,8 @@ impl Plugin for DefinitionPreviewPlugin {
 /// Create the render-target image, preview camera, and directional light.
 ///
 /// Runs once at app startup.  The occurrence root is not created here — it is
-/// spawned / replaced by `sync_preview_to_active_draft` whenever the active
-/// draft changes.
+/// spawned / replaced by `sync_preview_to_target` whenever the requested
+/// preview definition changes.
 fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let size = Extent3d {
         width: PREVIEW_TEXTURE_SIZE,
@@ -296,27 +320,15 @@ fn configure_preview_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 // Sync system
 // ---------------------------------------------------------------------------
 
-/// Observe the active draft and re-materialise the preview occurrence when it
-/// changes.
+/// Observe the requested preview target and re-materialise the occurrence when
+/// it changes.
 ///
 /// Despawns all preview entities except the camera and directional light, then
-/// spawns a fresh occurrence root with `NeedsEval` so the standard eval
-/// pipeline produces `GeneratedOccurrencePart` entities.
-pub fn sync_preview_to_active_draft(world: &mut World) {
-    // ── Determine what definition the active draft represents ─────────────────
-    let target_definition_id: Option<DefinitionId> = {
-        let drafts = world.resource::<DefinitionDraftRegistry>();
-        let Some(active_draft_id) = drafts.active_draft_id.clone() else {
-            return;
-        };
-        let Some(active_draft) = drafts.get(&active_draft_id) else {
-            return;
-        };
-        let definitions = world.resource::<DefinitionRegistry>().clone();
-        let libraries = world.resource::<DefinitionLibraryRegistry>().clone();
-        draft_effective_definition(&definitions, &libraries, active_draft)
-            .ok()
-            .map(|def| def.id)
+/// renders a fresh synthetic occurrence against the submitted preview registry.
+pub fn sync_preview_to_target(world: &mut World) {
+    let (target_definition_id, preview_registry) = {
+        let target = world.resource::<DefinitionPreviewTarget>();
+        (target.definition_id.clone(), target.registry.clone())
     };
 
     // ── Check if we need to re-spawn ──────────────────────────────────────────
@@ -353,8 +365,7 @@ pub fn sync_preview_to_active_draft(world: &mut World) {
 
     // ── Spawn the new occurrence root (or leave blank if no definition) ───────
     let new_root = if let Some(def_id) = &target_definition_id {
-        let definition_version = world
-            .resource::<DefinitionRegistry>()
+        let definition_version = preview_registry
             .get(def_id)
             .map(|d| d.definition_version)
             .unwrap_or_default();
@@ -362,25 +373,23 @@ pub fn sync_preview_to_active_draft(world: &mut World) {
         let mut identity = OccurrenceIdentity::new(def_id.clone(), definition_version);
         identity.overrides = OverrideMap::default();
 
-        // Spawn at origin with a minimal set of components.  The eval system
-        // picks this up via `With<NeedsEval>` and populates geometry.
-        //
-        // IMPORTANT: GlobalTransform is required for the eval pipeline to
-        // propagate world-space translations to child slots.
-        let root = world
-            .spawn((
-                PREVIEW_ELEMENT_ID_SENTINEL,
-                identity,
-                Transform::default(),
-                GlobalTransform::default(),
-                Visibility::Visible,
-                PREVIEW_RENDER_LAYER,
-                PreviewOnly,
-                NeedsEval,
-                Name::new("__preview_occurrence__"),
-            ))
-            .id();
-        root
+        match render_occurrence(
+            world,
+            &preview_registry,
+            PREVIEW_ELEMENT_ID_SENTINEL,
+            &identity,
+            Transform::default(),
+            Some("__preview_occurrence__"),
+        ) {
+            Ok(()) => tag_preview_entities(world),
+            Err(error) => {
+                warn!(
+                    "Failed to render definition preview for '{}': {}",
+                    def_id, error
+                );
+                Entity::PLACEHOLDER
+            }
+        }
     } else {
         Entity::PLACEHOLDER
     };
@@ -409,6 +418,35 @@ pub fn tag_preview_generated_parts(
                 .insert((PreviewOnly, PREVIEW_RENDER_LAYER));
         }
     }
+}
+
+fn tag_preview_entities(world: &mut World) -> Entity {
+    let root =
+        crate::plugins::commands::find_entity_by_element_id(world, PREVIEW_ELEMENT_ID_SENTINEL)
+            .unwrap_or(Entity::PLACEHOLDER);
+    if root != Entity::PLACEHOLDER {
+        if let Ok(mut entity) = world.get_entity_mut(root) {
+            entity.insert((PreviewOnly, PREVIEW_RENDER_LAYER, Visibility::Visible));
+        }
+    }
+
+    let generated_parts: Vec<Entity> = {
+        let mut query =
+            world.query_filtered::<(Entity, &GeneratedOccurrencePart), Without<PreviewOnly>>();
+        query
+            .iter(world)
+            .filter_map(|(entity, part)| {
+                (part.owner == PREVIEW_ELEMENT_ID_SENTINEL).then_some(entity)
+            })
+            .collect()
+    };
+    for entity in generated_parts {
+        if let Ok(mut entity) = world.get_entity_mut(entity) {
+            entity.insert((PreviewOnly, PREVIEW_RENDER_LAYER));
+        }
+    }
+
+    root
 }
 
 // ---------------------------------------------------------------------------

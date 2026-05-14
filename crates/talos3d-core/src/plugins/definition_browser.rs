@@ -19,7 +19,8 @@ use crate::{
             DefinitionDraftRegistry, DefinitionPatch,
         },
         definition_preview_scene::{
-            draw_definition_3d_preview, DefinitionPreviewScene, PendingPreviewClick,
+            draw_definition_3d_preview, DefinitionPreviewScene, DefinitionPreviewTarget,
+            PendingPreviewClick,
         },
         history::{apply_pending_history_commands, EditorCommand, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
@@ -1214,6 +1215,7 @@ pub fn draw_definitions_window(
     cursor_world_pos: &CursorWorldPos,
     status: &mut StatusBarData,
     preview_scene: &DefinitionPreviewScene,
+    preview_target: &mut DefinitionPreviewTarget,
     pending_click: &mut PendingPreviewClick,
     material_registry: &MaterialRegistry,
 ) {
@@ -1280,14 +1282,14 @@ pub fn draw_definitions_window(
             }
 
             let selected_definition_id = state.selected_definition_id.as_deref().unwrap_or_default();
-            let effective_definition = match selected_library_id.as_deref() {
-                Some(library_id) if !selected_definition_id.is_empty() => {
-                    library_effective_definition(libraries, library_id, selected_definition_id).ok()
-                }
-                None if !selected_definition_id.is_empty() => definitions
+            let selected_preview_registry =
+                preview_registry_for_selected_source(definitions, libraries, selected_library_id.as_deref());
+            let effective_definition = if selected_definition_id.is_empty() {
+                None
+            } else {
+                selected_preview_registry
                     .effective_definition(&DefinitionId(selected_definition_id.to_string()))
-                    .ok(),
-                _ => None,
+                    .ok()
             };
             egui::ScrollArea::vertical()
                 .id_salt("definitions.browser.root")
@@ -1474,6 +1476,10 @@ pub fn draw_definitions_window(
                                 ui.label(egui::RichText::new("Selected Definition").strong());
                                 ui.separator();
                                 if let Some(definition) = effective_definition {
+                                    preview_target.request(
+                                        definition.id.clone(),
+                                        selected_preview_registry.clone(),
+                                    );
                                     let requires_opening_host =
                                         definition_requires_opening_host_definition(&definition);
                                     draw_definition_3d_preview(
@@ -1572,6 +1578,7 @@ pub fn draw_definitions_window(
                                         );
                                     }
                                 } else {
+                                    preview_target.clear();
                                     ui.label("Select a definition from the list.");
                                 }
                             });
@@ -1584,6 +1591,7 @@ pub fn draw_definitions_window(
         ctx,
         contexts,
         preview_scene,
+        preview_target,
         pending_click,
         state,
         definitions,
@@ -1714,6 +1722,7 @@ fn draw_definition_editor(
     ctx: &egui::Context,
     contexts: &mut EguiContexts,
     preview_scene: &DefinitionPreviewScene,
+    preview_target: &mut DefinitionPreviewTarget,
     pending_click: &mut PendingPreviewClick,
     state: &mut DefinitionsWindowState,
     definitions: &DefinitionRegistry,
@@ -1733,6 +1742,10 @@ fn draw_definition_editor(
     let Some(active_draft) = drafts.get(&active_draft_id).cloned() else {
         return;
     };
+    if let Ok(preview_registry) = preview_registry_for_draft(definitions, libraries, &active_draft)
+    {
+        preview_target.request(active_draft.working_copy.id.clone(), preview_registry);
+    }
     sync_inspector_state(state, &active_draft);
 
     let editor_rect = tool_window_rect(ctx, egui::pos2(568.0, 88.0), INSPECTOR_WINDOW_DEFAULT_SIZE);
@@ -3974,6 +3987,22 @@ pub fn library_effective_definition(
         registry.insert(definition.clone());
     }
     registry.effective_definition(&DefinitionId(definition_id.to_string()))
+}
+
+fn preview_registry_for_selected_source(
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    selected_library_id: Option<&str>,
+) -> DefinitionRegistry {
+    let mut registry = definitions.clone();
+    if let Some(library_id) = selected_library_id {
+        if let Some(library) = libraries.get(&DefinitionLibraryId(library_id.to_string())) {
+            for definition in library.definitions.values() {
+                registry.insert(definition.clone());
+            }
+        }
+    }
+    registry
 }
 
 pub fn definition_requires_opening_host_definition(definition: &Definition) -> bool {
