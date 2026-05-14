@@ -52,14 +52,18 @@ blake3 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 toml = "0.8"
 semver = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+thiserror = "2"
+hex = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-talos3d-catalog-client = { path = "../talos3d-catalog-client" }
-# tokio is already optional under model-api; for remote_catalog we need it on
-# native targets unconditionally. We keep the optional dep for model-api but
-# also declare it here so the remote_catalog plugin can use it without the
-# model-api feature flag.
-tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+# Native-only persistence substrate deps. `etcetera` provides the OS
+# cache-dir discovery for LocalFileArtifactStore. `tokio` is needed by
+# the substrate plugin's worker thread bookkeeping (the cloud-side
+# CloudArtifactStore lives in appverket-infra/services/products/talos3d/
+# talos3d-catalog-client and owns its own runtime there).
+etcetera = "0.8"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 
