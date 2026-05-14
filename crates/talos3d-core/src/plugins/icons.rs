@@ -669,6 +669,26 @@ fn draw_opening(c: &mut Canvas) {
     c.line(3.0, 21.0, 21.0, 21.0);
 }
 
+fn draw_definitions(c: &mut Canvas) {
+    c.rounded_rect(4.0, 4.0, 11.0, 14.0, 1.5);
+    c.rounded_rect(9.0, 7.0, 11.0, 14.0, 1.5);
+    c.line(7.0, 8.0, 12.0, 8.0);
+    c.line(7.0, 11.0, 12.0, 11.0);
+    c.line(12.0, 12.0, 17.0, 12.0);
+    c.line(12.0, 15.0, 17.0, 15.0);
+    c.line(12.0, 18.0, 15.0, 18.0);
+}
+
+fn draw_materials(c: &mut Canvas) {
+    c.rounded_rect(4.0, 4.0, 16.0, 16.0, 2.0);
+    c.line(4.0, 12.0, 20.0, 12.0);
+    c.line(12.0, 4.0, 12.0, 20.0);
+    c.line(7.0, 8.0, 9.0, 8.0);
+    c.line(15.0, 8.0, 17.0, 8.0);
+    c.line(7.0, 16.0, 9.0, 16.0);
+    c.line(15.0, 16.0, 17.0, 16.0);
+}
+
 pub fn render_icon(name: &str) -> Vec<u8> {
     let mut c = Canvas::new();
     match name {
@@ -719,6 +739,8 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "view_paper" => draw_view_paper(&mut c),
         "wall" => draw_wall(&mut c),
         "opening" => draw_opening(&mut c),
+        "definitions" => draw_definitions(&mut c),
+        "materials" => draw_materials(&mut c),
         _ => draw_plus(&mut c),
     }
     c.into_rgba()

@@ -948,7 +948,7 @@ struct CompoundSpawnContext {
     local_translation_offset: Vec3,
 }
 
-fn render_occurrence(
+pub(crate) fn render_occurrence(
     world: &mut World,
     registry: &DefinitionRegistry,
     element_id: ElementId,

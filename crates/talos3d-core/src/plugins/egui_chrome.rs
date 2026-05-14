@@ -31,7 +31,9 @@ use crate::plugins::{
         draw_definition_lens, draw_definitions_window, sync_definition_selection_context,
         DefinitionSelectionContext, DefinitionsWindowState,
     },
-    definition_preview_scene::{DefinitionPreviewScene, PendingPreviewClick},
+    definition_preview_scene::{
+        DefinitionPreviewScene, DefinitionPreviewTarget, PendingPreviewClick,
+    },
     document_properties::DocumentProperties,
     drawing_export::ViewportExportState,
     identity::{ElementId, ElementIdAllocator},
@@ -794,6 +796,7 @@ struct ChromeData<'w, 's> {
     definition_draft_registry:
         ResMut<'w, crate::plugins::definition_authoring::DefinitionDraftRegistry>,
     definition_preview_scene: Res<'w, DefinitionPreviewScene>,
+    definition_preview_target: ResMut<'w, DefinitionPreviewTarget>,
     pending_preview_click: ResMut<'w, PendingPreviewClick>,
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
@@ -1035,6 +1038,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &data.cursor_world_pos,
         &mut data.status_bar_data,
         &data.definition_preview_scene,
+        &mut data.definition_preview_target,
         &mut data.pending_preview_click,
         &data.material_registry,
     );
