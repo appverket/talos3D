@@ -52,14 +52,17 @@ blake3 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 toml = "0.8"
 semver = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 talos3d-catalog-client = { path = "../talos3d-catalog-client" }
-# tokio is already optional under model-api; for remote_catalog we need it on
-# native targets unconditionally. We keep the optional dep for model-api but
-# also declare it here so the remote_catalog plugin can use it without the
-# model-api feature flag.
-tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+# tokio is already optional under model-api; for the artifact substrate we
+# need it on native targets unconditionally. We keep the optional dep for
+# model-api but also declare it here so the substrate plugin can use it
+# without the model-api feature flag. `rt-multi-thread` is needed by
+# CloudArtifactStore so the publish + subscription worker threads can each
+# block_on the shared runtime concurrently.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 

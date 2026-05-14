@@ -63,10 +63,8 @@
 mod inner {
     use std::{
         collections::HashMap,
-        path::PathBuf,
         sync::{Arc, Mutex},
         thread,
-        time::Duration,
     };
 
     use bevy::ecs::system::SystemState;
@@ -75,15 +73,19 @@ mod inner {
     use url::Url;
     use uuid::Uuid;
 
+    use std::sync::atomic::AtomicBool;
+
     use talos3d_catalog_client::{
-        definition_publish_request, material_def_publish_request, CatalogCache, ChangeEvent,
-        ChangePoller, PublishArtifactRequest, PublishError, PublishScope, RemoteCatalogClient,
-        WorkspaceRemoteCache,
+        definition_publish_request, material_def_publish_request, ChangeEvent,
+        PublishArtifactRequest, PublishError, PublishScope,
     };
 
     use crate::plugins::materials::{MaterialDef, MaterialRegistry};
     use crate::plugins::modeling::definition::{
         Definition, DefinitionId, DefinitionLibraryRegistry, DefinitionRegistry,
+    };
+    use crate::storage::{
+        ActiveArtifactStore, ArtifactStore, CloudArtifactStore, LocalFileArtifactStore,
     };
 
     // ---- Messages -----------------------------------------------------------
@@ -286,16 +288,17 @@ mod inner {
 
     // ---- Internal bridge types ----------------------------------------------
 
-    /// Internal message bridging the async poller thread to the Bevy main
+    /// Internal message bridging the subscription thread to the Bevy main
     /// thread.
     pub(super) struct CatalogBridgeMessage {
         pub event: ChangeEvent,
         pub body: Option<Value>,
     }
 
-    /// A publish job sent from Bevy to the catalog worker thread. The `kind`
-    /// + `local_id` round-trip through the worker unchanged so the result
-    /// can be routed back as a strongly-typed [`PublishArtifactResult`].
+    /// A publish job sent from Bevy to the publish-worker thread. The
+    /// `kind` + `local_id` round-trip through the worker unchanged so the
+    /// result can be routed back as a strongly-typed
+    /// [`PublishArtifactResult`].
     pub(super) struct PublishJob {
         pub kind: &'static str,
         pub local_id: String,
@@ -303,7 +306,7 @@ mod inner {
         pub request: PublishArtifactRequest,
     }
 
-    /// A publish result sent from the catalog worker thread back to Bevy.
+    /// A publish result sent from the publish-worker thread back to Bevy.
     pub(super) struct PublishJobResult {
         pub kind: &'static str,
         pub local_id: String,
@@ -313,55 +316,44 @@ mod inner {
 
     // ---- Resource -----------------------------------------------------------
 
-    /// Bevy resource that holds the live connection between the poller thread
-    /// and the Bevy main thread. Inserted only when `TALOS3D_CATALOG_URL` is
-    /// set.
+    /// Bevy resource that holds the channels into the substrate's two
+    /// worker threads (publish + subscription). Inserted by
+    /// [`spawn_store_workers_system`] in `PostStartup` whenever the
+    /// substrate is active.
+    ///
+    /// The name `RemoteCatalogState` is preserved for diff readability;
+    /// internally the resource is now store-agnostic.
     #[derive(Resource)]
     pub struct RemoteCatalogState {
-        pub base_url: Url,
-        pub account_id: Option<Uuid>,
-        pub cache_root: PathBuf,
+        pub description: String,
         pub(super) rx: Mutex<std::sync::mpsc::Receiver<CatalogBridgeMessage>>,
-        pub shutdown_tx: tokio::sync::watch::Sender<bool>,
+        pub shutdown: Arc<AtomicBool>,
         pub(super) publish_tx: Mutex<std::sync::mpsc::Sender<PublishJob>>,
         pub(super) publish_results_rx: Mutex<std::sync::mpsc::Receiver<PublishJobResult>>,
     }
 
     // ---- Plugin -------------------------------------------------------------
 
-    /// Bevy plugin that subscribes to the talos-catalog change feed, applies
-    /// incoming artifacts via registered kind descriptors, publishes local
-    /// artifacts on request, and runs a one-shot bundled-content seeding
-    /// pass.
+    /// Bevy plugin that wires the artifact substrate (kind registry,
+    /// generic publish/apply pipeline, seeding) onto an
+    /// [`ActiveArtifactStore`].
+    ///
+    /// Store selection at `Startup`:
+    ///
+    /// - If a plugin earlier in the chain has already inserted
+    ///   [`ActiveArtifactStore`], the substrate uses that.
+    /// - Otherwise, if `TALOS3D_CATALOG_URL` is set, the substrate
+    ///   constructs a [`CloudArtifactStore`].
+    /// - Otherwise, the substrate constructs a
+    ///   [`LocalFileArtifactStore`] under the OS cache root.
     pub struct RemoteCatalogPlugin;
 
     impl Plugin for RemoteCatalogPlugin {
         fn build(&self, app: &mut App) {
             // The kind registry is always available so other plugins can
-            // register their kinds regardless of whether the catalog poller
-            // is enabled in this run.
+            // register their kinds regardless of which store is active.
             app.init_resource::<CatalogKindRegistry>();
             register_builtin_kinds(app);
-
-            let catalog_url = match std::env::var("TALOS3D_CATALOG_URL") {
-                Ok(v) => v,
-                Err(_) => {
-                    info!("remote catalog disabled (TALOS3D_CATALOG_URL unset)");
-                    return;
-                }
-            };
-
-            let base_url = match Url::parse(&catalog_url) {
-                Ok(u) => u,
-                Err(e) => {
-                    error!(url = %catalog_url, error = %e, "TALOS3D_CATALOG_URL is not a valid URL");
-                    return;
-                }
-            };
-
-            let account_id = std::env::var("TALOS3D_ACCOUNT_ID")
-                .ok()
-                .and_then(|s| s.parse::<Uuid>().ok());
 
             app.add_message::<RemoteCatalogChange>()
                 .add_message::<ArtifactApplied>()
@@ -370,10 +362,13 @@ mod inner {
                 .add_message::<PublishArtifactRequested>()
                 .add_message::<PublishArtifactResult>()
                 .init_resource::<BundledContentSeedConfig>()
-                // Poller is spawned in PostStartup so any plugin that
-                // registers a kind in Startup is reflected in the
-                // poller's auto-fetch-kinds subscription.
-                .add_systems(PostStartup, spawn_catalog_thread_system)
+                // Pick the default store at Startup so it's available
+                // for the worker-spawn system at PostStartup. Other
+                // plugins may override by inserting ActiveArtifactStore
+                // earlier (e.g. in their own Startup running before this
+                // system).
+                .add_systems(Startup, pick_default_store_system)
+                .add_systems(PostStartup, spawn_store_workers_system)
                 .add_systems(
                     PreUpdate,
                     (
@@ -385,20 +380,54 @@ mod inner {
                     ),
                 )
                 .add_systems(Update, seed_bundled_content_system);
-
-            app.insert_resource(CatalogConfig {
-                base_url,
-                account_id,
-            });
         }
     }
 
-    // ---- Startup config (consumed by spawn_catalog_thread_system) -----------
+    /// Startup system: installs a default [`ActiveArtifactStore`] if no
+    /// other plugin has done so already. Reads `TALOS3D_CATALOG_URL` to
+    /// pick between cloud and local storage.
+    fn pick_default_store_system(mut commands: Commands, existing: Option<Res<ActiveArtifactStore>>) {
+        if existing.is_some() {
+            return;
+        }
 
-    #[derive(Resource)]
-    struct CatalogConfig {
-        base_url: Url,
-        account_id: Option<Uuid>,
+        match std::env::var("TALOS3D_CATALOG_URL") {
+            Ok(url) => match Url::parse(&url) {
+                Ok(parsed) => {
+                    let account_id = std::env::var("TALOS3D_ACCOUNT_ID")
+                        .ok()
+                        .and_then(|s| s.parse::<Uuid>().ok());
+                    match CloudArtifactStore::open(parsed, account_id) {
+                        Ok(store) => {
+                            info!(
+                                description = store.description(),
+                                "artifact substrate: using cloud store"
+                            );
+                            commands
+                                .insert_resource(ActiveArtifactStore::new(Arc::new(store)));
+                        }
+                        Err(e) => {
+                            error!(error = %e, "failed to open cloud store; substrate disabled");
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(url = %url, error = %e, "TALOS3D_CATALOG_URL is not a valid URL");
+                }
+            },
+            Err(_) => match LocalFileArtifactStore::open_default() {
+                Ok(store) => {
+                    info!(
+                        description = store.description(),
+                        "artifact substrate: using local-file store (default)"
+                    );
+                    commands.insert_resource(ActiveArtifactStore::new(Arc::new(store)));
+                }
+                Err(e) => {
+                    error!(error = %e, "failed to open local-file store; substrate disabled");
+                }
+            },
+        }
     }
 
     // ---- Built-in kinds (definition.v1 + material_def.v1) -------------------
@@ -520,101 +549,113 @@ mod inner {
 
     // ---- Wire-layer systems -------------------------------------------------
 
-    /// Spawns the poller OS thread and inserts [`RemoteCatalogState`].
-    fn spawn_catalog_thread_system(
+    /// Spawns the substrate's worker threads:
+    ///
+    /// - A **publish worker** that consumes [`PublishJob`]s from the
+    ///   Bevy main thread and forwards each to `store.put(...)`.
+    /// - A **subscription worker** that calls
+    ///   `store.run_subscription(...)` and bridges incoming events back
+    ///   to the Bevy main thread as [`CatalogBridgeMessage`]s.
+    ///
+    /// Inserts the [`RemoteCatalogState`] resource holding the channels.
+    fn spawn_store_workers_system(
         mut commands: Commands,
-        config: Option<Res<CatalogConfig>>,
+        store_res: Option<Res<ActiveArtifactStore>>,
         registry: Res<CatalogKindRegistry>,
     ) {
-        let Some(config) = config else { return };
+        let Some(store_res) = store_res else {
+            // No store available — substrate is inert. Apply / publish
+            // systems early-return when RemoteCatalogState is absent.
+            return;
+        };
+        let store: Arc<dyn ArtifactStore> = store_res.0.clone();
+        let description = store.description().to_owned();
 
-        let base_url = config.base_url.clone();
-        let account_id = config.account_id;
         // Snapshot the auto-fetch kinds at spawn time. Kinds registered
-        // after PostStartup will not influence the poller's subscription
+        // after PostStartup will not influence the subscription
         // (acceptable for the static-by-plugin-build model we use today).
-        let auto_fetch_kinds: Vec<String> = registry.auto_fetch_kinds();
+        let subscription_kinds: Vec<String> = registry.auto_fetch_kinds();
+        let auto_fetch_kinds: Vec<String> = subscription_kinds.clone();
 
-        commands.remove_resource::<CatalogConfig>();
-
-        let cache_root = match WorkspaceRemoteCache::discover_default_cache_root() {
-            Ok(root) => root,
-            Err(e) => {
-                error!(error = %e, "failed to discover catalog cache root; remote catalog disabled");
-                return;
-            }
-        };
-
-        let cache: Arc<dyn CatalogCache> = match WorkspaceRemoteCache::open(cache_root.clone()) {
-            Ok(c) => Arc::new(c),
-            Err(e) => {
-                error!(error = %e, "failed to open catalog cache; remote catalog disabled");
-                return;
-            }
-        };
-
-        let (std_tx, std_rx) = std::sync::mpsc::channel::<CatalogBridgeMessage>();
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-        let (publish_jobs_std_tx, publish_jobs_std_rx) = std::sync::mpsc::channel::<PublishJob>();
-        let (publish_results_std_tx, publish_results_std_rx) =
+        let (change_tx, change_rx) = std::sync::mpsc::channel::<CatalogBridgeMessage>();
+        let (publish_tx, publish_rx) = std::sync::mpsc::channel::<PublishJob>();
+        let (publish_results_tx, publish_results_rx) =
             std::sync::mpsc::channel::<PublishJobResult>();
+        let shutdown = Arc::new(AtomicBool::new(false));
 
-        let state = RemoteCatalogState {
-            base_url: base_url.clone(),
-            account_id,
-            cache_root: cache_root.clone(),
-            rx: Mutex::new(std_rx),
-            shutdown_tx,
-            publish_tx: Mutex::new(publish_jobs_std_tx),
-            publish_results_rx: Mutex::new(publish_results_std_rx),
-        };
-        commands.insert_resource(state);
+        commands.insert_resource(RemoteCatalogState {
+            description: description.clone(),
+            rx: Mutex::new(change_rx),
+            shutdown: shutdown.clone(),
+            publish_tx: Mutex::new(publish_tx),
+            publish_results_rx: Mutex::new(publish_results_rx),
+        });
 
-        let spawn_result = thread::Builder::new()
-            .name("talos3d-catalog-poller".into())
+        // --- Publish-worker thread ---
+        let publish_store = store.clone();
+        let publish_results_tx_for_thread = publish_results_tx.clone();
+        thread::Builder::new()
+            .name("talos3d-artifact-publish-worker".into())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build tokio rt for catalog poller");
+                while let Ok(job) = publish_rx.recv() {
+                    let kind = job.kind;
+                    let local_id = job.local_id.clone();
+                    let canonical_id = job.canonical_id.clone();
 
-                rt.block_on(async move {
-                    let client = RemoteCatalogClient::new(base_url.clone(), account_id);
+                    let outcome = match publish_store.put(&job.request) {
+                        Ok(resolution) => PublishArtifactOutcome::Published {
+                            artifact_id: resolution.artifact_id,
+                            revision: resolution.revision,
+                            content_hash: resolution.content_hash,
+                        },
+                        Err(e) => {
+                            warn!(
+                                kind = kind,
+                                canonical_id = %canonical_id,
+                                error = %e,
+                                "artifact publish failed"
+                            );
+                            PublishArtifactOutcome::Failed(e.to_string())
+                        }
+                    };
 
-                    let auto_fetch: Vec<String> = auto_fetch_kinds.clone();
+                    if publish_results_tx_for_thread
+                        .send(PublishJobResult {
+                            kind,
+                            local_id,
+                            canonical_id,
+                            outcome,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn publish worker thread");
 
-                    // Bridge: tokio mpsc -> std mpsc (change events).
-                    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::channel::<ChangeEvent>(256);
-                    let client_for_blob = client.clone();
-                    let cache_for_blob = cache.clone();
-                    let std_tx_bridge = std_tx.clone();
-
-                    tokio::spawn(async move {
-                        while let Some(event) = tokio_rx.recv().await {
-                            let body = if auto_fetch.iter().any(|k| k == &event.kind) {
-                                let hash = event.content_hash.clone();
-                                let bytes = match cache_for_blob.read_blob(&hash) {
-                                    Some(b) => Some(b),
-                                    None => match client_for_blob.get_blob(&hash).await {
-                                        Ok(b) => {
-                                            let _ = cache_for_blob.write_blob(&hash, &b);
-                                            Some(b)
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                hash = %hash,
-                                                canonical_id = %event.canonical_id,
-                                                error = %e,
-                                                "failed to fetch blob for catalog event"
-                                            );
-                                            None
-                                        }
-                                    },
-                                };
-
-                                bytes.and_then(|b| {
-                                    serde_json::from_slice::<Value>(&b)
+        // --- Subscription-worker thread ---
+        let subscription_store = store.clone();
+        let subscription_store_for_callback = subscription_store.clone();
+        let subscription_shutdown = shutdown.clone();
+        let since_cursor = subscription_store.read_cursor();
+        let change_tx_for_thread = change_tx.clone();
+        thread::Builder::new()
+            .name("talos3d-artifact-subscription-worker".into())
+            .spawn(move || {
+                let on_event: crate::storage::artifact_store::StoreEventCallback = Box::new(
+                    move |event: ChangeEvent| {
+                        // For local-file stores, the blob is reachable via
+                        // `get_blob`; for cloud stores we pre-fetch via
+                        // the cache warm-up inside CloudArtifactStore. In
+                        // either case we attempt a synchronous read
+                        // through the store now to deliver the body
+                        // alongside the event when the kind is in the
+                        // auto-fetch set.
+                        let body = if auto_fetch_kinds.iter().any(|k| k == &event.kind) {
+                            match subscription_store_for_callback.get_blob(&event.content_hash) {
+                                Ok(bytes) => {
+                                    serde_json::from_slice::<Value>(&bytes)
                                         .map_err(|e| {
                                             warn!(
                                                 hash = %event.content_hash,
@@ -623,89 +664,34 @@ mod inner {
                                             );
                                         })
                                         .ok()
-                                })
-                            } else {
-                                None
-                            };
-
-                            let msg = CatalogBridgeMessage { event, body };
-                            if std_tx_bridge.send(msg).is_err() {
-                                break;
-                            }
-                        }
-                    });
-
-                    // Publish-job consumer.
-                    let client_for_publish = client.clone();
-                    let (publish_tokio_tx, mut publish_tokio_rx) =
-                        tokio::sync::mpsc::channel::<PublishJob>(64);
-
-                    let publish_tokio_tx_bridge = publish_tokio_tx.clone();
-                    std::thread::Builder::new()
-                        .name("talos3d-catalog-publish-bridge".into())
-                        .spawn(move || {
-                            while let Ok(job) = publish_jobs_std_rx.recv() {
-                                if publish_tokio_tx_bridge.blocking_send(job).is_err() {
-                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        hash = %event.content_hash,
+                                        canonical_id = %event.canonical_id,
+                                        error = %e,
+                                        "failed to fetch blob for catalog event"
+                                    );
+                                    None
                                 }
                             }
-                        })
-                        .expect("spawn publish bridge thread");
+                        } else {
+                            None
+                        };
 
-                    tokio::spawn(async move {
-                        while let Some(job) = publish_tokio_rx.recv().await {
-                            let kind = job.kind;
-                            let local_id = job.local_id.clone();
-                            let canonical_id = job.canonical_id.clone();
+                        let _ = change_tx_for_thread.send(CatalogBridgeMessage { event, body });
+                    },
+                );
 
-                            let outcome =
-                                match client_for_publish.publish_artifact(&job.request).await {
-                                    Ok(resolution) => PublishArtifactOutcome::Published {
-                                        artifact_id: resolution.artifact_id,
-                                        revision: resolution.revision,
-                                        content_hash: resolution.content_hash,
-                                    },
-                                    Err(e) => {
-                                        warn!(
-                                            kind = kind,
-                                            canonical_id = %canonical_id,
-                                            error = %e,
-                                            "artifact publish failed"
-                                        );
-                                        PublishArtifactOutcome::Failed(e.to_string())
-                                    }
-                                };
-
-                            let result = PublishJobResult {
-                                kind,
-                                local_id,
-                                canonical_id,
-                                outcome,
-                            };
-                            if publish_results_std_tx.send(result).is_err() {
-                                break;
-                            }
-                        }
-                    });
-
-                    let poller = ChangePoller::new(
-                        client,
-                        cache,
-                        auto_fetch_kinds,
-                        Duration::from_secs(5),
-                    );
-
-                    if let Err(e) = poller.run(tokio_tx, shutdown_rx).await {
-                        error!(error = %e, "catalog poller exited with error");
-                    } else {
-                        info!("catalog poller exited cleanly");
-                    }
-                });
-            });
-
-        if let Err(e) = spawn_result {
-            error!(error = %e, "failed to spawn catalog poller thread");
-        }
+                if let Err(e) =
+                    subscription_store.run_subscription(subscription_kinds, since_cursor, on_event, subscription_shutdown)
+                {
+                    error!(error = %e, "artifact subscription exited with error");
+                } else {
+                    info!(store = %description, "artifact subscription exited cleanly");
+                }
+            })
+            .expect("spawn subscription worker thread");
     }
 
     /// Drains the std::sync::mpsc receiver into a [`RemoteCatalogChange`]
@@ -1135,14 +1121,11 @@ mod inner {
             let (_res_tx, res_rx) = std::sync::mpsc::channel::<PublishJobResult>();
             let (change_tx, change_rx) = std::sync::mpsc::channel::<CatalogBridgeMessage>();
             drop(change_tx);
-            let (shutdown_tx, _) = tokio::sync::watch::channel(false);
 
             app.insert_resource(RemoteCatalogState {
-                base_url: "http://127.0.0.1:18010".parse().unwrap(),
-                account_id: None,
-                cache_root: std::path::PathBuf::from("/tmp"),
+                description: "test://fake".to_owned(),
                 rx: Mutex::new(change_rx),
-                shutdown_tx,
+                shutdown: Arc::new(AtomicBool::new(false)),
                 publish_tx: Mutex::new(pub_tx),
                 publish_results_rx: Mutex::new(res_rx),
             });
