@@ -1,9 +1,11 @@
-//! Wire types for the talos-catalog HTTP API.
+//! Wire types and publish-request helpers for the talos-catalog HTTP API.
 //!
-//! These types mirror the server-side DTOs in the `talos-catalog` crate
-//! (appverket-infra repo). They are intentionally duplicated rather than
-//! shared via a common crate — the two repos have different dependency graphs
-//! and the wire shape (JSON over HTTP) is the stability contract.
+//! These types form the substrate's stability contract. They live in
+//! `talos3d-core` (not in the catalog-client crate) because they're part
+//! of the [`super::ArtifactStore`] abstraction — any store implementation
+//! that ferries artifacts between processes uses them. The HTTP client in
+//! `appverket-infra/services/products/talos3d/talos3d-catalog-client`
+//! depends on this module rather than redefining its own.
 //!
 //! Field names use snake_case. Enum string values use lower_snake_case
 //! to match the catalog Postgres column values.
@@ -46,7 +48,7 @@ pub struct ArtifactResolution {
     /// UUID of the artifact row this revision supersedes.
     pub supersedes: Option<Uuid>,
     /// Blob URL. For dev backend: relative `/v1/blobs/{hash}`.
-    /// For prod (PP-KBD-3): signed R2 URL.
+    /// For prod: signed R2 URL.
     pub blob_url: Option<String>,
 }
 
@@ -70,8 +72,7 @@ pub struct PublishArtifactRequest {
     pub owner_org_id: Option<Uuid>,
     #[serde(default)]
     pub dependencies: Vec<DependencyRefDto>,
-    /// Operator or account id. Trusted by the caller in PP-KBD-1; PP-KBD-6
-    /// layers in Stytch session middleware.
+    /// Operator or account id.
     pub published_by: Uuid,
 }
 
@@ -93,8 +94,6 @@ pub struct ManifestResponse {
 /// A single entry in the change feed (both long-poll and SSE).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangeEvent {
-    /// Monotonically increasing cursor. Clients use this as `since` on
-    /// reconnect.
     pub cursor: i64,
     /// `"publish"` | `"supersede"` | `"rollback"`
     pub op: String,
@@ -119,4 +118,102 @@ pub struct ChangesResponse {
     pub changes: Vec<ChangeEvent>,
     /// Use as `since` on the next poll call.
     pub next_cursor: i64,
+}
+
+// ---- Publish helpers --------------------------------------------------------
+
+/// Error returned by publish helpers when preconditions are violated.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PublishError {
+    #[error("Org-scoped publish requires owner_org_id to be Some")]
+    OrgScopeRequiresOwner,
+}
+
+/// Distribution scope for a published artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishScope {
+    /// Visible only within the owning organisation. `owner_org_id` is
+    /// mandatory.
+    Org,
+    /// Shipped with the product; visible to every account.
+    Shipped,
+}
+
+impl PublishScope {
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            PublishScope::Org => "org",
+            PublishScope::Shipped => "shipped",
+        }
+    }
+}
+
+/// Build a [`PublishArtifactRequest`] for a `material_def.v1` artifact.
+pub fn material_def_publish_request(
+    canonical_id: String,
+    body: serde_json::Value,
+    scope: PublishScope,
+    jurisdiction: Vec<String>,
+    owner_org_id: Option<Uuid>,
+    published_by: Uuid,
+) -> Result<PublishArtifactRequest, PublishError> {
+    build_request(
+        "material_def.v1",
+        canonical_id,
+        body,
+        scope,
+        jurisdiction,
+        owner_org_id,
+        published_by,
+    )
+}
+
+/// Build a [`PublishArtifactRequest`] for a `definition.v1` artifact.
+pub fn definition_publish_request(
+    canonical_id: String,
+    body: serde_json::Value,
+    scope: PublishScope,
+    jurisdiction: Vec<String>,
+    owner_org_id: Option<Uuid>,
+    published_by: Uuid,
+) -> Result<PublishArtifactRequest, PublishError> {
+    build_request(
+        "definition.v1",
+        canonical_id,
+        body,
+        scope,
+        jurisdiction,
+        owner_org_id,
+        published_by,
+    )
+}
+
+fn build_request(
+    kind: &'static str,
+    canonical_id: String,
+    body: serde_json::Value,
+    scope: PublishScope,
+    jurisdiction: Vec<String>,
+    owner_org_id: Option<Uuid>,
+    published_by: Uuid,
+) -> Result<PublishArtifactRequest, PublishError> {
+    if scope == PublishScope::Org && owner_org_id.is_none() {
+        return Err(PublishError::OrgScopeRequiresOwner);
+    }
+    let effective_owner = match scope {
+        PublishScope::Org => owner_org_id,
+        PublishScope::Shipped => None,
+    };
+    Ok(PublishArtifactRequest {
+        kind: kind.to_owned(),
+        canonical_id,
+        body,
+        body_schema_rev: 1,
+        scope: scope.as_wire_str().to_owned(),
+        trust: "published".to_owned(),
+        jurisdiction,
+        owner_org_id: effective_owner,
+        dependencies: Vec::new(),
+        published_by,
+    })
 }

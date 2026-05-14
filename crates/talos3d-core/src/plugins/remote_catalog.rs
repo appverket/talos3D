@@ -70,22 +70,20 @@ mod inner {
     use bevy::ecs::system::SystemState;
     use bevy::prelude::*;
     use serde_json::Value;
-    use url::Url;
     use uuid::Uuid;
 
     use std::sync::atomic::AtomicBool;
-
-    use talos3d_catalog_client::{
-        definition_publish_request, material_def_publish_request, ChangeEvent,
-        PublishArtifactRequest, PublishError, PublishScope,
-    };
 
     use crate::plugins::materials::{MaterialDef, MaterialRegistry};
     use crate::plugins::modeling::definition::{
         Definition, DefinitionId, DefinitionLibraryRegistry, DefinitionRegistry,
     };
     use crate::storage::{
-        ActiveArtifactStore, ArtifactStore, CloudArtifactStore, LocalFileArtifactStore,
+        ActiveArtifactStore, ArtifactStore, LocalFileArtifactStore,
+    };
+    use crate::storage::wire::{
+        definition_publish_request, material_def_publish_request, ChangeEvent,
+        PublishArtifactRequest, PublishError, PublishScope,
     };
 
     // ---- Messages -----------------------------------------------------------
@@ -362,13 +360,15 @@ mod inner {
                 .add_message::<PublishArtifactRequested>()
                 .add_message::<PublishArtifactResult>()
                 .init_resource::<BundledContentSeedConfig>()
-                // Pick the default store at Startup so it's available
-                // for the worker-spawn system at PostStartup. Other
-                // plugins may override by inserting ActiveArtifactStore
-                // earlier (e.g. in their own Startup running before this
-                // system).
-                .add_systems(Startup, pick_default_store_system)
-                .add_systems(PostStartup, spawn_store_workers_system)
+                // Default-store fallback runs in PostStartup so the
+                // Commands buffer from any Startup plugin (e.g.
+                // CloudCatalogPlugin) has flushed and an existing
+                // ActiveArtifactStore is observable. The
+                // `.chain()` enforces fallback-before-worker-spawn.
+                .add_systems(
+                    PostStartup,
+                    (pick_default_store_system, spawn_store_workers_system).chain(),
+                )
                 .add_systems(
                     PreUpdate,
                     (
@@ -383,50 +383,34 @@ mod inner {
         }
     }
 
-    /// Startup system: installs a default [`ActiveArtifactStore`] if no
-    /// other plugin has done so already. Reads `TALOS3D_CATALOG_URL` to
-    /// pick between cloud and local storage.
-    fn pick_default_store_system(mut commands: Commands, existing: Option<Res<ActiveArtifactStore>>) {
+    /// Startup system: installs the default
+    /// [`LocalFileArtifactStore`] if no other plugin has installed an
+    /// [`ActiveArtifactStore`] yet.
+    ///
+    /// Cloud-side stores (e.g. the `CloudArtifactStore` provided by
+    /// `talos3d-catalog-client`'s Bevy plugin in
+    /// `appverket-infra/services/products/talos3d/talos3d-catalog-client`)
+    /// run their own Startup system *before* this one — when
+    /// `TALOS3D_CATALOG_URL` is set their plugin inserts the cloud store
+    /// first and this default no-ops.
+    fn pick_default_store_system(
+        mut commands: Commands,
+        existing: Option<Res<ActiveArtifactStore>>,
+    ) {
         if existing.is_some() {
             return;
         }
-
-        match std::env::var("TALOS3D_CATALOG_URL") {
-            Ok(url) => match Url::parse(&url) {
-                Ok(parsed) => {
-                    let account_id = std::env::var("TALOS3D_ACCOUNT_ID")
-                        .ok()
-                        .and_then(|s| s.parse::<Uuid>().ok());
-                    match CloudArtifactStore::open(parsed, account_id) {
-                        Ok(store) => {
-                            info!(
-                                description = store.description(),
-                                "artifact substrate: using cloud store"
-                            );
-                            commands
-                                .insert_resource(ActiveArtifactStore::new(Arc::new(store)));
-                        }
-                        Err(e) => {
-                            error!(error = %e, "failed to open cloud store; substrate disabled");
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(url = %url, error = %e, "TALOS3D_CATALOG_URL is not a valid URL");
-                }
-            },
-            Err(_) => match LocalFileArtifactStore::open_default() {
-                Ok(store) => {
-                    info!(
-                        description = store.description(),
-                        "artifact substrate: using local-file store (default)"
-                    );
-                    commands.insert_resource(ActiveArtifactStore::new(Arc::new(store)));
-                }
-                Err(e) => {
-                    error!(error = %e, "failed to open local-file store; substrate disabled");
-                }
-            },
+        match LocalFileArtifactStore::open_default() {
+            Ok(store) => {
+                info!(
+                    description = store.description(),
+                    "artifact substrate: using local-file store (default)"
+                );
+                commands.insert_resource(ActiveArtifactStore::new(Arc::new(store)));
+            }
+            Err(e) => {
+                error!(error = %e, "failed to open local-file store; substrate disabled");
+            }
         }
     }
 
@@ -459,27 +443,34 @@ mod inner {
     fn serialize_definition(world: &World, local_id: &str) -> Result<(String, Value), String> {
         let did = DefinitionId(local_id.to_owned());
 
-        // Live registry first, then any of the loaded libraries so library
-        // contents are addressable for seeding without first being
-        // instantiated into the runtime registry.
-        let (def, library_id) = if let Some(def) = world.resource::<DefinitionRegistry>().get(&did)
-        {
-            (def.clone(), None)
-        } else {
-            let libraries = world.resource::<DefinitionLibraryRegistry>();
-            let found = libraries
-                .list()
-                .into_iter()
-                .find_map(|lib| lib.get(&did).map(|d| (d.clone(), Some(lib.id.0.clone()))));
-            match found {
-                Some(pair) => pair,
+        // Libraries are the source of truth for bundled content — their
+        // namespaced canonical_id is what the catalog already knows the
+        // artifact by. Only fall back to the live DefinitionRegistry
+        // when the id is genuinely local (a user-authored definition not
+        // promoted to a library).
+        //
+        // Looking up live-first would race with apply-from-catalog:
+        // after a hot-reload the same id sits in both the live registry
+        // and the library, and we'd round-trip the bundled artifact
+        // under a `local::` namespace, which the catalog rejects with
+        // 409 "content_hash already exists under a different
+        // canonical_id".
+        let libraries = world.resource::<DefinitionLibraryRegistry>();
+        let from_library = libraries
+            .list()
+            .into_iter()
+            .find_map(|lib| lib.get(&did).map(|d| (d.clone(), Some(lib.id.0.clone()))));
+        let (def, library_id) = match from_library {
+            Some(pair) => pair,
+            None => match world.resource::<DefinitionRegistry>().get(&did) {
+                Some(def) => (def.clone(), None),
                 None => {
                     return Err(format!(
                         "definition '{}' not found in registry or libraries",
                         local_id
                     ))
                 }
-            }
+            },
         };
 
         let canonical_id = match library_id {
@@ -1319,4 +1310,4 @@ pub use inner::{
     RemoteCatalogState, SeedLocalIds,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use talos3d_catalog_client::PublishScope;
+pub use crate::storage::wire::PublishScope;

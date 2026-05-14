@@ -87,19 +87,22 @@ impl LocalFileArtifactStore {
         })
     }
 
-    /// Open at the canonical OS cache root (same conventions as
-    /// `WorkspaceRemoteCache::discover_default_cache_root`, but a
-    /// sibling `local-store` directory).
+    /// Open at the canonical OS cache root.
+    ///
+    /// On macOS: `~/Library/Caches/com.appverket.talos3d/libraries/local-store/`.
+    /// On Linux: `~/.cache/talos3d/libraries/local-store/`.
+    ///
+    /// (Sibling of the cloud-side `libraries/remote/` directory used by
+    /// the catalog-client's `WorkspaceRemoteCache`.)
     pub fn open_default() -> Result<Self, ArtifactStoreError> {
-        let cache_root =
-            talos3d_catalog_client::WorkspaceRemoteCache::discover_default_cache_root()
-                .map_err(|e| ArtifactStoreError::Io(e.to_string()))?;
-        // The catalog-client picks `libraries/remote`; we sit alongside as
-        // `libraries/local-store`.
-        let local_root = cache_root
-            .parent()
-            .unwrap_or(&cache_root)
-            .join("local-store");
+        use etcetera::AppStrategy;
+        let strategy = etcetera::choose_app_strategy(etcetera::AppStrategyArgs {
+            top_level_domain: "com".to_owned(),
+            author: "appverket".to_owned(),
+            app_name: "talos3d".to_owned(),
+        })
+        .map_err(|e| ArtifactStoreError::Io(format!("cache dir: {e}")))?;
+        let local_root = strategy.cache_dir().join("libraries").join("local-store");
         Self::open(local_root)
     }
 
