@@ -19,15 +19,18 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod artifact_store;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod cloud;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod local_file;
+pub mod wire;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use artifact_store::{
     ActiveArtifactStore, ArtifactStore, ArtifactStoreError, PutResolution, StoreChangeEvent,
+    StoreEventCallback,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use cloud::CloudArtifactStore;
-#[cfg(not(target_arch = "wasm32"))]
 pub use local_file::LocalFileArtifactStore;
+pub use wire::{
+    definition_publish_request, material_def_publish_request, ArtifactResolution, ChangeEvent,
+    ChangesResponse, DependencyRefDto, ManifestResponse, PublishArtifactRequest, PublishError,
+    PublishScope,
+};

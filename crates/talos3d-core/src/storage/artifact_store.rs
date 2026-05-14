@@ -1,18 +1,18 @@
 //! [`ArtifactStore`] trait — the persistence substrate's public surface.
 //!
 //! Wire types ([`PublishArtifactRequest`], [`ArtifactResolution`],
-//! [`ChangeEvent`]) are reused from `talos3d-catalog-client` so the trait
-//! does not duplicate them. The catalog-client crate will eventually
-//! move into `appverket-infra/clients/`; at that point talos3d-core
-//! depends on it only for these wire types (the HTTP client itself is
-//! no longer reachable from core, only through the trait).
+//! [`ChangeEvent`]) live in [`super::wire`] and are owned by core. The
+//! cloud-side HTTP client in
+//! `appverket-infra/services/products/talos3d/talos3d-catalog-client/`
+//! depends on this module rather than redefining them, so the wire is
+//! a single canonical contract.
 
 use std::sync::{atomic::AtomicBool, Arc};
 
 use bevy::prelude::*;
 use uuid::Uuid;
 
-pub use talos3d_catalog_client::{ArtifactResolution, ChangeEvent, PublishArtifactRequest};
+pub use super::wire::{ArtifactResolution, ChangeEvent, PublishArtifactRequest};
 
 /// Minimal put-result surface the substrate cares about. Cloud stores
 /// project this from [`ArtifactResolution`]; local stores synthesise it.
