@@ -39,7 +39,7 @@ contributors use.
 ## Workspace Worktrees
 
 When this repository is used inside the Talos3D multi-repo workspace, agent
-worktrees should live at `/Users/torstenek/dev/talos3D/.worktrees/talos3d-core`
+worktrees should live at `/Users/torstenek/dev/appverket/talos3D/.worktrees/talos3d-core`
 unless the workspace ledger says otherwise. Some sibling crates resolve
 `talos3d-core` through relative paths, so worktrees under
 `talos3d-core/.worktrees/` do not compile reliably in that workspace layout.
