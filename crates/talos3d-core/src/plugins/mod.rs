@@ -26,6 +26,7 @@ pub mod guide_line;
 pub mod handles;
 pub mod history;
 pub mod hosting_contracts;
+pub mod procedural_session_mcp;
 pub mod icons;
 pub mod identity;
 pub mod import;

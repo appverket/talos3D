@@ -107,6 +107,19 @@ impl Plugin for ModelApiPlugin {
         let (sender, receiver) = mpsc::channel();
         app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
         app.insert_resource(runtime_info.clone());
+        // Ensure the Semantic Procedural Session substrate (ADR-051) is
+        // installed so `procedural_session.*` tools have resources to
+        // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds
+        // `ProceduralSessionPlugin` only if not already present.
+        app.add_plugins(crate::plugins::procedural_session_mcp::ProceduralSessionMcpPlugin);
+        // Register the Model API tools a session may commit, so `eval`
+        // accepts them and commit can route them to real geometry.
+        {
+            let mut session_tools = app
+                .world_mut()
+                .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
+            register_model_api_session_tools(&mut session_tools);
+        }
         app.add_systems(Update, poll_model_api_requests.before(HistorySet::Queue));
         app.add_systems(Startup, annotate_window_title_with_model_api_instance);
         spawn_model_api_server(sender, runtime_info, http_listener);
@@ -2180,6 +2193,35 @@ enum ModelApiRequest {
     },
     // --- Authoring guidance (Slice A of COMPONENT_STRUCTURE) ---
     GetAuthoringGuidance(oneshot::Sender<AuthoringGuidance>),
+    // --- Semantic Procedural Session (ADR-051, PP-SPS-3) ---
+    ProceduralSessionCreate {
+        request: crate::plugins::procedural_session_mcp::SessionCreateRequest,
+        response: oneshot::Sender<crate::plugins::procedural_session_mcp::SessionCreateResponse>,
+    },
+    ProceduralSessionEval {
+        request: crate::plugins::procedural_session_mcp::SessionEvalRequest,
+        response: oneshot::Sender<
+            Result<crate::curation::EvalReport, crate::curation::SessionError>,
+        >,
+    },
+    ProceduralSessionSnapshot {
+        request: crate::plugins::procedural_session_mcp::SessionSnapshotRequest,
+        response: oneshot::Sender<
+            Result<crate::curation::SessionSnapshot, crate::curation::SessionError>,
+        >,
+    },
+    ProceduralSessionCommit {
+        request: crate::plugins::procedural_session_mcp::SessionCommitRequest,
+        response: oneshot::Sender<
+            Result<crate::curation::CommitReport, crate::curation::SessionError>,
+        >,
+    },
+    ProceduralSessionExport {
+        request: crate::plugins::procedural_session_mcp::SessionExportRequest,
+        response: oneshot::Sender<
+            Result<crate::curation::ExportHandle, crate::curation::SessionError>,
+        >,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -3208,6 +3250,31 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
                 .cloned()
                 .unwrap_or_default();
             let _ = response.send(guidance);
+        }
+        ModelApiRequest::ProceduralSessionCreate { request, response } => {
+            let r = crate::plugins::procedural_session_mcp::world_create(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ProceduralSessionEval { request, response } => {
+            let r = crate::plugins::procedural_session_mcp::world_eval(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ProceduralSessionSnapshot { request, response } => {
+            let r = crate::plugins::procedural_session_mcp::world_snapshot(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ProceduralSessionCommit { request, response } => {
+            let mut executor = ModelApiStepExecutor;
+            let r = crate::plugins::procedural_session_mcp::world_commit_with_executor(
+                world,
+                request,
+                Some(&mut executor),
+            );
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ProceduralSessionExport { request, response } => {
+            let r = crate::plugins::procedural_session_mcp::world_export(world, request);
+            let _ = response.send(r);
         }
     }
 }
@@ -6014,6 +6081,77 @@ impl ModelApiServer {
         receiver
             .await
             .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    // --- Semantic Procedural Session (ADR-051, PP-SPS-3) ---
+
+    async fn request_procedural_session_create(
+        &self,
+        request: crate::plugins::procedural_session_mcp::SessionCreateRequest,
+    ) -> Result<crate::plugins::procedural_session_mcp::SessionCreateResponse, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ProceduralSessionCreate { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_procedural_session_eval(
+        &self,
+        request: crate::plugins::procedural_session_mcp::SessionEvalRequest,
+    ) -> Result<crate::curation::EvalReport, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ProceduralSessionEval { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn request_procedural_session_snapshot(
+        &self,
+        request: crate::plugins::procedural_session_mcp::SessionSnapshotRequest,
+    ) -> Result<crate::curation::SessionSnapshot, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ProceduralSessionSnapshot { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn request_procedural_session_commit(
+        &self,
+        request: crate::plugins::procedural_session_mcp::SessionCommitRequest,
+    ) -> Result<crate::curation::CommitReport, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ProceduralSessionCommit { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn request_procedural_session_export(
+        &self,
+        request: crate::plugins::procedural_session_mcp::SessionExportRequest,
+    ) -> Result<crate::curation::ExportHandle, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ProceduralSessionExport { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+            .map_err(|e| format!("{e}"))
     }
 }
 
@@ -10233,6 +10371,85 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(guidance)
+    }
+
+    // --- Semantic Procedural Session (ADR-051, PP-SPS-3) ---
+
+    #[tool(
+        name = "procedural_session.create",
+        description = "Open a new Semantic Procedural Session against a declared refinement target, stage transition, MutationScope, and allowed-tool set. Returns the new session_id and an initial snapshot including any session-scoped guidance overlay. See ADR-051."
+    )]
+    async fn procedural_session_create_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::procedural_session_mcp::SessionCreateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let response = self
+            .request_procedural_session_create(params)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(response)
+    }
+
+    #[tool(
+        name = "procedural_session.eval",
+        description = "Append/preview a single step against an open session. Modes: bind_only (type-check + append), dry_run (project expected commands/obligations/findings; do not append), dry_run_and_bind. Type-checks against the registered capability/command descriptors and enforces MutationScope."
+    )]
+    async fn procedural_session_eval_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::procedural_session_mcp::SessionEvalRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self
+            .request_procedural_session_eval(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(report)
+    }
+
+    #[tool(
+        name = "procedural_session.snapshot",
+        description = "Return full session state: declared spec, accumulated AuthoringScript, live bindings, outstanding obligations, accrued findings, and a recent audit excerpt."
+    )]
+    async fn procedural_session_snapshot_tool(
+        &self,
+        Parameters(params): Parameters<
+            crate::plugins::procedural_session_mcp::SessionSnapshotRequest,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        let snap = self
+            .request_procedural_session_snapshot(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(snap)
+    }
+
+    #[tool(
+        name = "procedural_session.commit",
+        description = "Commit the accumulated AuthoringScript through the existing command queue (ADR-002 / ADR-011). Policies: require_clean, accept_with_waivers, accept_partial. Returns enqueued command ids, post-commit findings, remaining obligations, carry-over (accept_partial), and optional in-line export handle."
+    )]
+    async fn procedural_session_commit_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::procedural_session_mcp::SessionCommitRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self
+            .request_procedural_session_commit(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(report)
+    }
+
+    #[tool(
+        name = "procedural_session.export",
+        description = "Freeze the session's accumulated AuthoringScript as a durable curated artifact. v1 target: authoring_script (kind `recipe.authoring_script.v1`). Session remains re-exportable until close."
+    )]
+    async fn procedural_session_export_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::procedural_session_mcp::SessionExportRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let handle = self
+            .request_procedural_session_export(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(handle)
     }
 }
 
@@ -17216,6 +17433,94 @@ fn flush_model_api_write_pipeline(world: &mut World) {
     apply_pending_history_commands(world);
 }
 
+/// `SessionStepExecutor` that routes committed Semantic Procedural Session
+/// steps to the existing Model API world handlers, so a session commit
+/// produces real geometry / authored entities (ADR-051, PP-SPS-3/4).
+///
+/// Supported step tools in v1: `create_box`, `create_entity`,
+/// `set_property`. Each returns a JSON object containing the affected
+/// `element_id` so later steps can bind to it.
+#[cfg(feature = "model-api")]
+pub struct ModelApiStepExecutor;
+
+#[cfg(feature = "model-api")]
+impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiStepExecutor {
+    fn execute(
+        &mut self,
+        world: &mut World,
+        tool: &crate::curation::McpToolId,
+        args: &serde_json::Map<String, Value>,
+    ) -> Result<Value, crate::curation::ToolDispatchError> {
+        use crate::curation::ToolDispatchError;
+        let to_err = |code: &str, e: String| ToolDispatchError::new(code, e);
+        match tool.as_str() {
+            "create_box" => {
+                let request: CreateBoxRequest =
+                    serde_json::from_value(Value::Object(args.clone()))
+                        .map_err(|e| to_err("invalid_args", e.to_string()))?;
+                let id = handle_create_box(world, request)
+                    .map_err(|e| to_err("create_box_failed", e))?;
+                Ok(serde_json::json!({ "element_id": id }))
+            }
+            "create_entity" => {
+                let id = handle_create_entity(world, Value::Object(args.clone()))
+                    .map_err(|e| to_err("create_entity_failed", e))?;
+                Ok(serde_json::json!({ "element_id": id }))
+            }
+            "set_property" => {
+                let element_id = args
+                    .get("element_id")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| to_err("invalid_args", "missing element_id".into()))?;
+                let property_name = args
+                    .get("property_name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| to_err("invalid_args", "missing property_name".into()))?;
+                let value = args.get("value").cloned().unwrap_or(Value::Null);
+                let result = handle_set_property(world, element_id, property_name, value)
+                    .map_err(|e| to_err("set_property_failed", e))?;
+                Ok(result)
+            }
+            other => Err(to_err(
+                "unsupported_tool",
+                format!("ModelApiStepExecutor does not support tool '{other}'"),
+            )),
+        }
+    }
+}
+
+/// Register `SessionToolDescriptor`s for the Model API tools a procedural
+/// session may commit. Called from `ModelApiPlugin::build` so `eval`
+/// accepts these tools and dry-run projections have a sensible stub shape.
+#[cfg(feature = "model-api")]
+pub fn register_model_api_session_tools(
+    registry: &mut crate::curation::procedural_session::SessionToolRegistry,
+) {
+    use crate::curation::procedural_session::SessionToolDescriptor;
+    use crate::curation::McpToolId;
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("create_box"),
+        mutates: true,
+        default_stub: Some(serde_json::json!({ "element_id": 0 })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("create_entity"),
+        mutates: true,
+        default_stub: Some(serde_json::json!({ "element_id": 0 })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("set_property"),
+        mutates: true,
+        default_stub: Some(serde_json::json!({ "ok": true })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+}
+
 #[cfg(feature = "model-api")]
 pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, String> {
     let object = json
@@ -20636,7 +20941,17 @@ mod tests {
             .into_typed()
             .expect("get_entity_details result should deserialize");
         assert_eq!(box_details.entity_type, "box");
-        assert_eq!(box_details.properties.len(), 2);
+        // center, half_extents, and the material property added to all
+        // primitive snapshots (see PP-021).
+        assert_eq!(box_details.properties.len(), 3);
+        let prop_names: Vec<&str> = box_details
+            .properties
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(prop_names.contains(&"center"));
+        assert!(prop_names.contains(&"half_extents"));
+        assert!(prop_names.contains(&"material"));
 
         let summary: ModelSummary = server
             .model_summary_tool()
@@ -20722,6 +21037,243 @@ mod tests {
         assert_eq!(modeling_toolbar.order, 4);
 
         let _ = fs::remove_file(obj_path);
+
+        drop(server);
+        worker_handle.await.expect("worker should stop cleanly");
+    }
+
+    #[cfg(feature = "model-api")]
+    /// End-to-end demonstration (ADR-051): build a parametric post-and-beam
+    /// pavilion entirely through the `procedural_session.*` MCP tools, with
+    /// commit producing real geometry via `ModelApiStepExecutor`.
+    ///
+    /// This drives the exact `ModelApiServer` tool entry points an external
+    /// MCP client hits, against a real world, and asserts the committed
+    /// structure exists.
+    #[cfg(feature = "model-api")]
+    #[tokio::test]
+    async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
+        use crate::curation::procedural_session::{
+            ProceduralSessionConfig, ProceduralSessionRegistry, SessionToolRegistry,
+        };
+        use crate::curation::{ArgExpr, McpToolId, StepId};
+        use crate::plugins::procedural_session_mcp::{
+            SessionCommitRequest, SessionCreateRequest, SessionEvalRequest, SessionExportRequest,
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        let worker_handle = tokio::task::spawn_blocking(move || {
+            let mut world = init_model_api_test_world();
+            // Install the Semantic Procedural Session substrate + the
+            // Model API session-tool descriptors (as ModelApiPlugin does).
+            world.insert_resource(ProceduralSessionRegistry::default());
+            world.insert_resource(ProceduralSessionConfig::default());
+            let mut session_tools = SessionToolRegistry::default();
+            register_model_api_session_tools(&mut session_tools);
+            world.insert_resource(session_tools);
+
+            while let Ok(request) = receiver.recv() {
+                handle_model_api_request(&mut world, request);
+            }
+        });
+
+        let server = ModelApiServer::new(sender);
+
+        // The five session tools are registered on the MCP surface.
+        let tool_names: std::collections::BTreeSet<_> = server
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        for expected in [
+            "procedural_session.create",
+            "procedural_session.eval",
+            "procedural_session.snapshot",
+            "procedural_session.commit",
+            "procedural_session.export",
+        ] {
+            assert!(
+                tool_names.contains(expected),
+                "missing MCP tool {expected}"
+            );
+        }
+
+        // 1. Open a session for net-new top-level authoring: ProjectRoot
+        //    scope, (none) -> Conceptual, only `create_box` allowed.
+        let mut spec = crate::curation::procedural_session::SessionSpec::for_new_structure(
+            [McpToolId::new("create_box")].into_iter().collect(),
+        );
+        spec.seed = Some(1);
+        let create_req = SessionCreateRequest { spec };
+        let create_result: crate::plugins::procedural_session_mcp::SessionCreateResponse = server
+            .procedural_session_create_tool(Parameters(create_req))
+            .await
+            .expect("session create should succeed")
+            .into_typed()
+            .expect("create response should deserialize");
+        let session_id = create_result.session_id.clone();
+
+        // 2. Procedurally generate the structure: a 3 (X) x 2 (Z) post-and-
+        //    beam frame. This loop is the "agent's" procedural generation;
+        //    each step is appended to the in-flight AuthoringScript.
+        let nx = 3usize; // column lines along X
+        let nz = 2usize; // column lines along Z
+        let bay_x = 3.0f32;
+        let bay_z = 4.0f32;
+        let col_h = 3.0f32;
+        let col_w = 0.3f32;
+        let beam_h = 0.4f32;
+
+        let box_step = |id: String, center: [f32; 3], size: [f32; 3]| SessionEvalRequest {
+            session_id: session_id.clone(),
+            step: crate::curation::procedural_session::EvalStep {
+                id: StepId::new(id),
+                tool: McpToolId::new("create_box"),
+                args: [
+                    (
+                        "center".to_string(),
+                        ArgExpr::Literal {
+                            value: json!(center),
+                        },
+                    ),
+                    (
+                        "size".to_string(),
+                        ArgExpr::Literal { value: json!(size) },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                bindings: Default::default(),
+                essential: true,
+                precondition: None,
+            },
+            mode: crate::curation::procedural_session::EvalMode::BindOnly,
+        };
+
+        let mut expected_boxes = 0usize;
+
+        // Columns.
+        for ix in 0..nx {
+            for iz in 0..nz {
+                let x = ix as f32 * bay_x;
+                let z = iz as f32 * bay_z;
+                let req = box_step(
+                    format!("col_{ix}_{iz}"),
+                    [x, col_h / 2.0, z],
+                    [col_w, col_h, col_w],
+                );
+                server
+                    .procedural_session_eval_tool(Parameters(req))
+                    .await
+                    .expect("eval column step should succeed");
+                expected_boxes += 1;
+            }
+        }
+        // Longitudinal beams (along X) at the top, one per Z line per bay.
+        for iz in 0..nz {
+            for ix in 0..(nx - 1) {
+                let x = (ix as f32 + 0.5) * bay_x;
+                let z = iz as f32 * bay_z;
+                let req = box_step(
+                    format!("beam_x_{ix}_{iz}"),
+                    [x, col_h + beam_h / 2.0, z],
+                    [bay_x, beam_h, col_w],
+                );
+                server
+                    .procedural_session_eval_tool(Parameters(req))
+                    .await
+                    .expect("eval longitudinal beam step should succeed");
+                expected_boxes += 1;
+            }
+        }
+        // Transverse beams (along Z) at the top, one per X line per bay.
+        for ix in 0..nx {
+            for iz in 0..(nz - 1) {
+                let x = ix as f32 * bay_x;
+                let z = (iz as f32 + 0.5) * bay_z;
+                let req = box_step(
+                    format!("beam_z_{ix}_{iz}"),
+                    [x, col_h + beam_h / 2.0, z],
+                    [col_w, beam_h, bay_z],
+                );
+                server
+                    .procedural_session_eval_tool(Parameters(req))
+                    .await
+                    .expect("eval transverse beam step should succeed");
+                expected_boxes += 1;
+            }
+        }
+        // 3*2 columns + (nx-1)*nz + nx*(nz-1) beams = 6 + 4 + 3 = 13.
+        assert_eq!(expected_boxes, 13);
+
+        // 3. Snapshot: the accumulated AuthoringScript holds all steps,
+        //    nothing has touched the model yet.
+        let snap: crate::curation::SessionSnapshot = server
+            .procedural_session_snapshot_tool(Parameters(
+                crate::plugins::procedural_session_mcp::SessionSnapshotRequest {
+                    session_id: session_id.clone(),
+                },
+            ))
+            .await
+            .expect("snapshot should succeed")
+            .into_typed()
+            .expect("snapshot should deserialize");
+        assert_eq!(snap.script.steps.len(), expected_boxes);
+
+        // Pre-commit: the model is still empty.
+        let pre: ModelSummary = server
+            .model_summary_tool()
+            .await
+            .expect("model_summary should succeed")
+            .into_typed()
+            .expect("summary should deserialize");
+        assert_eq!(pre.entity_counts.get("box").copied().unwrap_or(0), 0);
+
+        // 4. Commit: replay the script through the command queue. The
+        //    ModelApiStepExecutor turns each step into a real create_box.
+        let commit: crate::curation::CommitReport = server
+            .procedural_session_commit_tool(Parameters(SessionCommitRequest {
+                session_id: session_id.clone(),
+                options: crate::curation::CommitOptions::default(), // require_clean
+            }))
+            .await
+            .expect("commit should succeed")
+            .into_typed()
+            .expect("commit report should deserialize");
+        assert_eq!(commit.steps_run.len(), expected_boxes);
+        assert_eq!(commit.tagged_calls.len(), expected_boxes);
+        assert!(commit.remaining_obligations.is_empty());
+
+        // 5. The model now contains the committed structure.
+        let post: ModelSummary = server
+            .model_summary_tool()
+            .await
+            .expect("model_summary should succeed")
+            .into_typed()
+            .expect("summary should deserialize");
+        assert_eq!(
+            post.entity_counts.get("box").copied().unwrap_or(0),
+            expected_boxes,
+            "committed pavilion should have created {expected_boxes} boxes"
+        );
+
+        // 6. Export the procedure as a reusable AuthoringScript artifact.
+        let handle: crate::curation::ExportHandle = server
+            .procedural_session_export_tool(Parameters(SessionExportRequest {
+                session_id: session_id.clone(),
+                target: crate::curation::ExportTarget::AuthoringScript,
+                metadata: crate::curation::ExportMetadata {
+                    name: "post_and_beam_pavilion_3x2".to_string(),
+                    description: "Parametric post-and-beam pavilion, 3x2 bays".to_string(),
+                    additional_postconditions: vec![],
+                },
+            }))
+            .await
+            .expect("export should succeed")
+            .into_typed()
+            .expect("export handle should deserialize");
+        assert_eq!(handle.kind.as_str(), "recipe.authoring_script.v1");
 
         drop(server);
         worker_handle.await.expect("worker should stop cleanly");
@@ -22613,32 +23165,51 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    /// A current-version project whose primitive entity record omits the
+    /// newer `element_id` / `rotation` fields (a legacy-shaped record)
+    /// still loads: `upgrade_legacy_entity_record` backfills them. Built
+    /// via the real serializer so it stays correct across format-version
+    /// bumps (v1 hand-rolled files are intentionally rejected — see
+    /// `persistence::tests::project_version_one_is_rejected_after_opening_feature_format_bump`).
     #[cfg(feature = "model-api")]
     #[test]
-    fn legacy_primitive_project_loads_successfully() {
+    fn legacy_primitive_record_upgrades_and_loads() {
+        // Produce a valid current-version project containing a sphere.
+        let mut source_world = init_model_api_test_world();
+        handle_create_entity(
+            &mut source_world,
+            json!({ "type": "sphere", "centre": [0.0, 0.0, 0.0], "radius": 1.25 }),
+        )
+        .expect("sphere should be created");
         let path = temp_json_path("talos3d-legacy-primitive").with_extension("talos3d");
-        let project = json!({
-            "version": 1,
-            "next_element_id": 7,
-            "entities": [
-                {
-                    "type": "sphere",
-                    "data": {
-                        "centre": [0.0, 0.0, 0.0],
-                        "radius": 1.25
-                    }
-                }
-            ]
-        });
+        handle_save_project(&mut source_world, path.to_str().unwrap_or_default())
+            .expect("project should save");
+
+        // Strip the newer per-record fields to simulate a legacy record
+        // inside an otherwise current-version file.
+        let mut project: Value = serde_json::from_slice(
+            &fs::read(&path).expect("saved project should read"),
+        )
+        .expect("saved project should parse");
+        for entity in project["entities"]
+            .as_array_mut()
+            .expect("entities array")
+        {
+            if entity["type"] == json!("sphere") {
+                let data = entity["data"].as_object_mut().expect("entity data object");
+                data.remove("element_id");
+                data.remove("rotation");
+            }
+        }
         fs::write(
             &path,
-            serde_json::to_vec_pretty(&project).expect("legacy project should serialize"),
+            serde_json::to_vec_pretty(&project).expect("project should serialize"),
         )
-        .expect("legacy project should write");
+        .expect("project should write");
 
         let mut world = init_model_api_test_world();
         handle_load_project(&mut world, path.to_str().unwrap_or_default())
-            .expect("legacy project should load");
+            .expect("legacy-shaped record should upgrade and load");
 
         let entities = list_entities(&world);
         assert!(entities.iter().any(|entity| entity.entity_type == "sphere"));
@@ -22660,26 +23231,32 @@ mod tests {
         )
         .expect("box should be created");
 
+        // Build a valid current-version project file, then inject an
+        // unparseable entity (a scene_light missing its element_id). The
+        // load fails during entity parsing — which happens *before*
+        // `clear_scene` — so the existing box must survive. Built via the
+        // real serializer so the version gate is passed and the test
+        // exercises the intended mid-load failure path.
         let path = temp_json_path("talos3d-invalid-load").with_extension("talos3d");
-        let invalid_project = json!({
-            "version": 1,
-            "next_element_id": 2,
-            "entities": [
-                {
-                    "type": "scene_light",
-                    "data": {}
-                }
-            ]
-        });
+        let mut empty_world = init_model_api_test_world();
+        handle_save_project(&mut empty_world, path.to_str().unwrap_or_default())
+            .expect("baseline project should save");
+        let mut project: Value =
+            serde_json::from_slice(&fs::read(&path).expect("baseline project should read"))
+                .expect("baseline project should parse");
+        project["entities"] = json!([{ "type": "scene_light", "data": {} }]);
         fs::write(
             &path,
-            serde_json::to_vec_pretty(&invalid_project).expect("invalid project should serialize"),
+            serde_json::to_vec_pretty(&project).expect("invalid project should serialize"),
         )
         .expect("invalid project should write");
 
         let error = handle_load_project(&mut world, path.to_str().unwrap_or_default())
             .expect_err("invalid project should fail to load");
-        assert!(error.contains("Missing element_id"));
+        assert!(
+            error.contains("Missing element_id"),
+            "expected an entity-parse error, got: {error}"
+        );
         assert!(get_entity_snapshot(&world, ElementId(box_id)).is_some());
 
         let _ = fs::remove_file(path);
