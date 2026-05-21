@@ -458,6 +458,13 @@ impl Predicate {
         }
     }
 
+    /// Parameter names this predicate reads.
+    pub fn dependencies(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        self.collect_deps(&mut out);
+        out
+    }
+
     fn collect_deps(&self, out: &mut BTreeSet<String>) {
         match self {
             Predicate::Bool { .. } => {}
