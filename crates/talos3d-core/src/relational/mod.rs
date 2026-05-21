@@ -13,6 +13,7 @@ pub mod component;
 pub mod graph;
 pub mod incremental;
 pub mod parallel;
+pub mod service;
 pub mod transform;
 
 pub use component::{
