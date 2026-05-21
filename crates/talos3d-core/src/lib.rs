@@ -5,4 +5,5 @@ pub mod capability_registry;
 pub mod curation;
 pub mod importers;
 pub mod plugins;
+pub mod relational;
 pub mod storage;
