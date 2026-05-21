@@ -1186,6 +1186,18 @@ fn spawn_compound_slot_instance(
     let resolved = registry.resolve_bound_params_checked(&slot.definition_id, &child_overrides)?;
     let state = evaluate_definition_state(&child_definition, &resolved)?;
     let cache_key = mesh_cache_key_for_definition(&child_definition, &state.values);
+
+    // Evaluate the slot's local rotation (if any). Expressed in the parent's
+    // local frame, so we pre-multiply the parent rotation.
+    let local_rotation =
+        evaluate_rotation_euler_deg(slot, parent_values)?.unwrap_or(Quat::IDENTITY);
+    let composed_rotation = context.parent_rotation * local_rotation;
+
+    // The local translation offset must be rotated by the *parent* rotation
+    // (not the composed one) so collection layouts remain correct when the
+    // parent is itself rotated. The slot's own translation is in parent-local
+    // space, so it is also rotated by parent_rotation before being added to
+    // the parent world translation.
     let local_translation =
         evaluate_translation(slot, parent_values)? + context.local_translation_offset;
     let world_translation =
@@ -1196,7 +1208,7 @@ fn spawn_compound_slot_instance(
     {
         let mut entity = world.spawn((
             extrusion,
-            ShapeRotation(context.parent_rotation),
+            ShapeRotation(composed_rotation),
             NeedsMesh,
             Visibility::Visible,
             GeneratedOccurrencePart {
@@ -1219,7 +1231,7 @@ fn spawn_compound_slot_instance(
                 CompoundSpawnContext {
                     owner: context.owner,
                     parent_translation: world_translation,
-                    parent_rotation: context.parent_rotation,
+                    parent_rotation: composed_rotation,
                     slot_path: format!("{}.{}", context.slot_path, child_slot.slot_id),
                     local_translation_offset: Vec3::ZERO,
                 },
@@ -1504,6 +1516,31 @@ fn evaluate_translation(
     ))
 }
 
+/// Evaluate a slot's `rotation_euler_deg` binding into a `Quat`.
+///
+/// Returns `Ok(None)` when no rotation is specified (identity); the caller
+/// is responsible for treating `None` as `Quat::IDENTITY`. Expressions are
+/// evaluated in degrees and converted to radians before constructing the
+/// intrinsic XYZ Euler quaternion.
+fn evaluate_rotation_euler_deg(
+    slot: &ChildSlotDef,
+    values: &HashMap<String, Value>,
+) -> Result<Option<Quat>, String> {
+    let Some(rotation) = &slot.transform_binding.rotation_euler_deg else {
+        return Ok(None);
+    };
+    if rotation.len() != 3 {
+        return Err(format!(
+            "Child slot '{}' rotation_euler_deg must contain exactly 3 expressions",
+            slot.slot_id
+        ));
+    }
+    let rx = evaluate_expr_f32(&rotation[0], values)?.to_radians();
+    let ry = evaluate_expr_f32(&rotation[1], values)?.to_radians();
+    let rz = evaluate_expr_f32(&rotation[2], values)?.to_radians();
+    Ok(Some(Quat::from_euler(EulerRot::XYZ, rx, ry, rz)))
+}
+
 fn evaluate_expr(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<Value, String> {
     match expr {
         ExprNode::Literal { value } => Ok(value.clone()),
@@ -1554,6 +1591,15 @@ fn evaluate_expr(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<Val
                 evaluate_expr(when_false, values)
             }
         }
+        ExprNode::Sin { value } => Ok(Value::from(
+            evaluate_expr_f64(value, values)?.to_radians().sin(),
+        )),
+        ExprNode::Cos { value } => Ok(Value::from(
+            evaluate_expr_f64(value, values)?.to_radians().cos(),
+        )),
+        ExprNode::Tan { value } => Ok(Value::from(
+            evaluate_expr_f64(value, values)?.to_radians().tan(),
+        )),
     }
 }
 
@@ -2884,5 +2930,272 @@ mod pp_098_occurrence_cache_tests {
         }
         assert!(distinct_mesh_ids.len() <= GEOMETRY_WIDTHS.len() + 1);
         assert!(app.world().resource::<RepresentationCache>().len() <= GEOMETRY_WIDTHS.len() + 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trig expression + rotation_euler_deg tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod trig_and_rotation_tests {
+    use super::*;
+    use crate::plugins::modeling::definition::{
+        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterBinding,
+        ParameterDef, ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator,
+        TransformBinding,
+    };
+    use serde_json::json;
+
+    fn empty_values() -> HashMap<String, Value> {
+        HashMap::new()
+    }
+
+    // -----------------------------------------------------------------------
+    // Unit tests for Sin / Cos / Tan
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sin_30_degrees_is_approx_half() {
+        let expr = ExprNode::Sin {
+            value: Box::new(ExprNode::Literal { value: json!(30.0) }),
+        };
+        let result = evaluate_expr(&expr, &empty_values())
+            .expect("sin(30) should evaluate")
+            .as_f64()
+            .expect("numeric");
+        assert!((result - 0.5).abs() < 1e-6, "sin(30°) ≈ 0.5, got {result}");
+    }
+
+    #[test]
+    fn cos_60_degrees_is_approx_half() {
+        let expr = ExprNode::Cos {
+            value: Box::new(ExprNode::Literal { value: json!(60.0) }),
+        };
+        let result = evaluate_expr(&expr, &empty_values())
+            .expect("cos(60) should evaluate")
+            .as_f64()
+            .expect("numeric");
+        assert!((result - 0.5).abs() < 1e-6, "cos(60°) ≈ 0.5, got {result}");
+    }
+
+    #[test]
+    fn tan_45_degrees_is_approx_one() {
+        let expr = ExprNode::Tan {
+            value: Box::new(ExprNode::Literal { value: json!(45.0) }),
+        };
+        let result = evaluate_expr(&expr, &empty_values())
+            .expect("tan(45) should evaluate")
+            .as_f64()
+            .expect("numeric");
+        assert!((result - 1.0).abs() < 1e-6, "tan(45°) ≈ 1.0, got {result}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Compound slot child rotation test
+    // -----------------------------------------------------------------------
+
+    /// Build a leaf rectangular-extrusion definition.
+    fn leaf_definition(id: &str) -> Definition {
+        Definition {
+            id: DefinitionId(id.to_string()),
+            base_definition_id: None,
+            name: id.to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![
+                    ParameterDef {
+                        name: "width".to_string(),
+                        param_type: ParamType::Numeric,
+                        default_value: json!(1.0),
+                        override_policy: OverridePolicy::Overridable,
+                        geometry_affecting: true,
+                        metadata: ParameterMetadata::default(),
+                    },
+                    ParameterDef {
+                        name: "depth".to_string(),
+                        param_type: ParamType::Numeric,
+                        default_value: json!(0.2),
+                        override_policy: OverridePolicy::Overridable,
+                        geometry_affecting: true,
+                        metadata: ParameterMetadata::default(),
+                    },
+                    ParameterDef {
+                        name: "height".to_string(),
+                        param_type: ParamType::Numeric,
+                        default_value: json!(3.0),
+                        override_policy: OverridePolicy::Overridable,
+                        geometry_affecting: true,
+                        metadata: ParameterMetadata::default(),
+                    },
+                ]),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: vec![EvaluatorDecl::RectangularExtrusion(
+                RectangularExtrusionEvaluator {
+                    width_param: "width".to_string(),
+                    depth_param: "depth".to_string(),
+                    height_param: "height".to_string(),
+                },
+            )],
+            representations: Vec::new(),
+            compound: None,
+            material_assignment: None,
+            domain_data: Value::Null,
+        }
+    }
+
+    /// Build a compound definition whose single child slot has
+    /// `rotation_euler_deg = [0, 0, 90]` (90° about Z in the parent's local frame).
+    fn compound_with_z_rotation(child_id: DefinitionId) -> Definition {
+        Definition {
+            id: DefinitionId("rot.compound".to_string()),
+            base_definition_id: None,
+            name: "Rotation Compound".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![]),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: Some(CompoundDefinition {
+                child_slots: vec![ChildSlotDef {
+                    slot_id: "member".to_string(),
+                    role: "chord".to_string(),
+                    definition_id: child_id,
+                    parameter_bindings: Vec::new(),
+                    transform_binding: TransformBinding {
+                        translation: None,
+                        rotation_euler_deg: Some(vec![
+                            ExprNode::Literal { value: json!(0.0) },
+                            ExprNode::Literal { value: json!(0.0) },
+                            ExprNode::Literal { value: json!(90.0) },
+                        ]),
+                    },
+                    suppression_expr: None,
+                    multiplicity: SlotMultiplicity::Single,
+                }],
+                ..Default::default()
+            }),
+            material_assignment: None,
+            domain_data: Value::Null,
+        }
+    }
+
+    #[test]
+    fn child_slot_rotation_euler_deg_produces_90_deg_z_rotation() {
+        let leaf = leaf_definition("rot.leaf");
+        let compound = compound_with_z_rotation(leaf.id.clone());
+
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(leaf);
+        registry.insert(compound.clone());
+
+        let identity = OccurrenceIdentity::new(compound.id.clone(), compound.definition_version);
+
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(RepresentationCache::default());
+        world.insert_resource(PrimitiveMaterial(Handle::default()));
+
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(9000),
+            &identity,
+            Transform::IDENTITY,
+            Some("rot-compound"),
+        )
+        .expect("render_occurrence with rotation should succeed");
+
+        // Find the generated child part and check its ShapeRotation component.
+        let mut query = world.query::<(&GeneratedOccurrencePart, &ShapeRotation)>();
+        let (part, shape_rotation) = query
+            .iter(&world)
+            .find(|(part, _)| part.slot_path == "member")
+            .expect("child part 'member' should be spawned");
+
+        assert_eq!(part.slot_path, "member");
+
+        let expected = Quat::from_rotation_z(90f32.to_radians());
+        let actual = shape_rotation.0;
+        // Quaternions q and -q represent the same rotation; check via dot product ≈ ±1.
+        let dot = actual.dot(expected).abs();
+        assert!(
+            dot > 0.9999,
+            "child rotation should be ≈ 90° about Z, dot={dot:.6}"
+        );
+    }
+
+    #[test]
+    fn child_slot_without_rotation_is_unaffected() {
+        // Verify existing behavior: no rotation_euler_deg → identity rotation (parent's).
+        let leaf = leaf_definition("norot.leaf");
+        let compound = Definition {
+            id: DefinitionId("norot.compound".to_string()),
+            base_definition_id: None,
+            name: "No-Rotation Compound".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![]),
+                void_declaration: None,
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: Some(CompoundDefinition {
+                child_slots: vec![ChildSlotDef {
+                    slot_id: "member".to_string(),
+                    role: "chord".to_string(),
+                    definition_id: leaf.id.clone(),
+                    parameter_bindings: Vec::new(),
+                    transform_binding: TransformBinding::default(),
+                    suppression_expr: None,
+                    multiplicity: SlotMultiplicity::Single,
+                }],
+                ..Default::default()
+            }),
+            material_assignment: None,
+            domain_data: Value::Null,
+        };
+
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(leaf);
+        registry.insert(compound.clone());
+
+        let identity = OccurrenceIdentity::new(compound.id.clone(), compound.definition_version);
+
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(RepresentationCache::default());
+        world.insert_resource(PrimitiveMaterial(Handle::default()));
+
+        render_occurrence(
+            &mut world,
+            &registry,
+            ElementId(9001),
+            &identity,
+            Transform::IDENTITY,
+            Some("norot-compound"),
+        )
+        .expect("render_occurrence without rotation should succeed");
+
+        let mut query = world.query::<(&GeneratedOccurrencePart, &ShapeRotation)>();
+        let (_, shape_rotation) = query
+            .iter(&world)
+            .find(|(part, _)| part.slot_path == "member")
+            .expect("child part 'member' should be spawned");
+
+        let dot = shape_rotation.0.dot(Quat::IDENTITY).abs();
+        assert!(
+            dot > 0.9999,
+            "without rotation_euler_deg the child should inherit parent identity rotation, dot={dot:.6}"
+        );
     }
 }

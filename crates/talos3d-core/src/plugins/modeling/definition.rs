@@ -502,6 +502,18 @@ pub enum ExprNode {
         when_true: Box<ExprNode>,
         when_false: Box<ExprNode>,
     },
+    /// Sine of an angle in degrees; returns a dimensionless number.
+    Sin {
+        value: Box<ExprNode>,
+    },
+    /// Cosine of an angle in degrees; returns a dimensionless number.
+    Cos {
+        value: Box<ExprNode>,
+    },
+    /// Tangent of an angle in degrees; returns a dimensionless number.
+    Tan {
+        value: Box<ExprNode>,
+    },
 }
 
 /// Machine-readable anchor name exposed by a definition.
@@ -553,6 +565,12 @@ pub struct ParameterBinding {
 pub struct TransformBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<Vec<ExprNode>>,
+    /// Intrinsic XYZ Euler rotation in degrees applied to the child part in
+    /// the parent's local frame. Must contain exactly 3 expressions when
+    /// present; corresponds to `Quat::from_euler(EulerRot::XYZ, rx, ry, rz)`
+    /// after converting each value to radians.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_euler_deg: Option<Vec<ExprNode>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,6 +1088,14 @@ impl Definition {
                     if translation.len() != 3 {
                         return Err(format!(
                             "Definition '{}' child slot '{}' translation must contain exactly 3 expressions",
+                            self.name, slot.slot_id
+                        ));
+                    }
+                }
+                if let Some(rotation) = &slot.transform_binding.rotation_euler_deg {
+                    if rotation.len() != 3 {
+                        return Err(format!(
+                            "Definition '{}' child slot '{}' rotation_euler_deg must contain exactly 3 expressions",
                             self.name, slot.slot_id
                         ));
                     }
