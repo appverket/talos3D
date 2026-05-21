@@ -29,7 +29,8 @@ use crate::{
             assembly::{RelationSnapshot, SemanticRelation},
             definition::{
                 Definition, DefinitionId, DefinitionKind, DefinitionLibrary, DefinitionLibraryId,
-                DefinitionLibraryRegistry, DefinitionRegistry, OverrideMap, SlotMultiplicity,
+                DefinitionLibraryRegistry, DefinitionRegistry, DefinitionVisibility, OverrideMap,
+                SlotMultiplicity,
             },
             occurrence::{
                 resolve_compound_slot_occurrence_context, HostedAnchor, HostedOccurrenceContext,
@@ -61,6 +62,7 @@ struct DefinitionListEntry {
     representation_count: usize,
     child_slot_count: usize,
     derived_parameter_count: usize,
+    visibility: DefinitionVisibility,
 }
 
 impl DefinitionListEntry {
@@ -76,6 +78,7 @@ impl DefinitionListEntry {
             derived_parameter_count: compound
                 .map(|value| value.derived_parameters.len())
                 .unwrap_or(0),
+            visibility: definition.visibility,
         }
     }
 
@@ -181,6 +184,13 @@ pub struct DefinitionsWindowState {
     /// so the ribbon always displays an up-to-date count without requiring World
     /// access inside the egui pass.
     pub lens_occurrence_count: usize,
+    /// When `true`, the browser list includes `InternalPart` definitions
+    /// alongside public ones.  Defaults to `false` so the default view only
+    /// shows user-facing families.
+    ///
+    /// Per ADR-025 amendment 2026-05-21: internal parts remain fully reachable
+    /// via this toggle — they are just not shown in the default listing.
+    pub show_internal_definitions: bool,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -1264,6 +1274,13 @@ pub fn draw_definitions_window(
                         .collect(),
                 };
             definition_entries.sort_by(|left, right| left.name.cmp(&right.name));
+            // Visibility filter: exclude InternalPart definitions from the
+            // default listing.  The toggle allows them to be shown when needed
+            // (e.g. debugging, parent navigation, migration).
+            if !state.show_internal_definitions {
+                definition_entries
+                    .retain(|entry| !matches!(entry.visibility, DefinitionVisibility::InternalPart));
+            }
             let search = state.search.trim().to_ascii_lowercase();
             if !search.is_empty() {
                 definition_entries.retain(|entry| {
@@ -1323,6 +1340,23 @@ pub fn draw_definitions_window(
                     .clicked()
                 {
                     state.inspector_visible = true;
+                }
+                ui.separator();
+                // Toggle for internal/implementation parts (ADR-025 amendment).
+                let show_internal_label = if state.show_internal_definitions {
+                    "Hide Internal"
+                } else {
+                    "Show Internal"
+                };
+                if ui
+                    .selectable_label(state.show_internal_definitions, show_internal_label)
+                    .on_hover_text(
+                        "Toggle visibility of InternalPart definitions \
+                         (implementation parts such as truss members and window parts).",
+                    )
+                    .clicked()
+                {
+                    state.show_internal_definitions = !state.show_internal_definitions;
                 }
                 ui.separator();
                 ui.label(egui::RichText::new(selection.summary()).small());
@@ -4988,6 +5022,7 @@ mod tests {
             representations: Vec::new(),
             compound: None,
             material_assignment: None,
+            visibility: DefinitionVisibility::PublicRoot,
             domain_data: serde_json::Value::Null,
         };
         app.world_mut()
@@ -5093,6 +5128,7 @@ mod tests {
             representations: Vec::new(),
             compound: None,
             material_assignment: None,
+            visibility: DefinitionVisibility::PublicRoot,
             domain_data: serde_json::Value::Null,
         };
         app.world_mut()
@@ -5190,6 +5226,7 @@ mod tests {
                 ..Default::default()
             }),
             material_assignment: None,
+            visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,
         }
     }

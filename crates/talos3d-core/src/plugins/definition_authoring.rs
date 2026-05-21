@@ -14,9 +14,10 @@ use crate::plugins::{
     modeling::definition::{
         AnchorDef, AxisRef, ChildSlotDef, CompoundDefinition, ConstraintDef, Definition,
         DefinitionId, DefinitionKind, DefinitionLibraryId, DefinitionLibraryRegistry,
-        DefinitionRegistry, DerivedParameterDef, EvaluatorDecl, ExprNode, Interface,
-        OverridePolicy, ParameterBinding, ParameterDef, ParameterMetadata, ParameterSchema,
-        RepresentationDecl, SlotCount, SlotLayout, SlotMultiplicity, TransformBinding,
+        DefinitionRegistry, DefinitionVisibility, DerivedParameterDef, EvaluatorDecl, ExprNode,
+        Interface, OverridePolicy, ParameterBinding, ParameterDef, ParameterMetadata,
+        ParameterSchema, RepresentationDecl, SlotCount, SlotLayout, SlotMultiplicity,
+        TransformBinding,
     },
 };
 
@@ -262,6 +263,7 @@ pub fn blank_definition(name: impl Into<String>) -> Definition {
         representations: Vec::new(),
         compound: None,
         material_assignment: None,
+        visibility: DefinitionVisibility::PublicRoot,
         domain_data: Value::Null,
     }
 }
@@ -328,6 +330,7 @@ pub fn derive_definition_from_base(
         representations: Vec::new(),
         compound: None,
         material_assignment: None,
+        visibility: DefinitionVisibility::PublicVariant,
         domain_data: Value::Null,
     }
 }

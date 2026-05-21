@@ -1005,6 +1005,20 @@ pub struct DefinitionEntry {
     pub effective_full: serde_json::Value,
 }
 
+/// Optional parameters for the `definition.list` MCP tool.
+///
+/// All fields default to `false` / `None` so the tool can be called with no
+/// arguments (matching the previous no-argument signature).
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DefinitionListParams {
+    /// When `true`, `InternalPart` definitions (implementation parts such as
+    /// truss members and window parts) are included in the result. Defaults
+    /// to `false` so the default listing only shows user-facing public families.
+    #[serde(default)]
+    pub include_internal: bool,
+}
+
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1833,7 +1847,11 @@ enum ModelApiRequest {
         response: oneshot::Sender<ApiResult<Vec<AssemblyMemberEntry>>>,
     },
     // --- Definition / Occurrence ---
-    ListDefinitions(oneshot::Sender<Vec<DefinitionEntry>>),
+    ListDefinitions {
+        /// When `true`, `InternalPart` definitions are included in the result.
+        include_internal: bool,
+        response: oneshot::Sender<Vec<DefinitionEntry>>,
+    },
     GetDefinition {
         definition_id: String,
         response: oneshot::Sender<ApiResult<DefinitionEntry>>,
@@ -2755,8 +2773,8 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         } => {
             let _ = response.send(handle_list_assembly_members(world, element_id));
         }
-        ModelApiRequest::ListDefinitions(response) => {
-            let _ = response.send(handle_list_definitions(world));
+        ModelApiRequest::ListDefinitions { include_internal, response } => {
+            let _ = response.send(handle_list_definitions_filtered(world, include_internal));
         }
         ModelApiRequest::GetDefinition {
             definition_id,
@@ -5565,10 +5583,18 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    #[allow(dead_code)]
     async fn request_list_definitions(&self) -> Result<Vec<DefinitionEntry>, String> {
+        self.request_list_definitions_opt(false).await
+    }
+
+    async fn request_list_definitions_opt(
+        &self,
+        include_internal: bool,
+    ) -> Result<Vec<DefinitionEntry>, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::ListDefinitions(response))
+            .send(ModelApiRequest::ListDefinitions { include_internal, response })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -9856,11 +9882,17 @@ impl ModelApiServer {
 
     #[tool(
         name = "definition.list",
-        description = "List all reusable definitions in the document."
+        description = "List reusable definitions in the document. By default only public \
+                       families (PublicRoot + PublicVariant) are returned. Pass \
+                       include_internal=true to also include internal implementation parts \
+                       such as truss members and window parts."
     )]
-    async fn definition_list_tool(&self) -> Result<CallToolResult, McpError> {
+    async fn definition_list_tool(
+        &self,
+        Parameters(params): Parameters<DefinitionListParams>,
+    ) -> Result<CallToolResult, McpError> {
         let definitions = self
-            .request_list_definitions()
+            .request_list_definitions_opt(params.include_internal)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(definitions)
@@ -14665,6 +14697,7 @@ fn build_definition_from_object(
         representations: parse_representations(object)?,
         compound: parse_optional_compound(object)?,
         material_assignment: None,
+        visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
         domain_data: object.get("domain_data").cloned().unwrap_or(Value::Null),
     })
 }
@@ -14724,12 +14757,26 @@ fn resolve_definition_analysis_target(
 }
 
 #[cfg(feature = "model-api")]
+/// List definitions in the registry.
+///
+/// When `include_internal` is `false` (the default for MCP exposure and the
+/// browser), `InternalPart` definitions are excluded so agents and users see
+/// only user-facing families.  Pass `true` to retrieve the full set for
+/// debugging, parent navigation, or migration work.
 pub fn handle_list_definitions(world: &World) -> Vec<DefinitionEntry> {
-    use crate::plugins::modeling::definition::DefinitionRegistry;
+    handle_list_definitions_filtered(world, false)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_list_definitions_filtered(world: &World, include_internal: bool) -> Vec<DefinitionEntry> {
+    use crate::plugins::modeling::definition::{DefinitionRegistry, DefinitionVisibility};
     let registry = world.resource::<DefinitionRegistry>();
     registry
         .list()
         .into_iter()
+        .filter(|definition| {
+            include_internal || definition.visibility != DefinitionVisibility::InternalPart
+        })
         .filter_map(|definition| {
             registry
                 .effective_definition(&definition.id)

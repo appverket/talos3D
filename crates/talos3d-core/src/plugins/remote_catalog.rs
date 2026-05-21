@@ -1029,7 +1029,9 @@ mod inner {
         use super::*;
         use chrono::Utc;
 
-        use crate::plugins::modeling::definition::{DefinitionKind, Interface, ParameterSchema};
+        use crate::plugins::modeling::definition::{
+            DefinitionKind, DefinitionVisibility, Interface, ParameterSchema,
+        };
 
         fn make_material_def() -> MaterialDef {
             MaterialDef {
@@ -1055,6 +1057,7 @@ mod inner {
                 representations: Vec::new(),
                 compound: None,
                 material_assignment: None,
+                visibility: DefinitionVisibility::PublicRoot,
                 domain_data: Value::Null,
             }
         }

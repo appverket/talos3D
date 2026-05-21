@@ -72,11 +72,17 @@ pub struct ExplainParametricResponse {
 
 // --- world handlers --------------------------------------------------------
 
+/// Return only public parametric types for MCP discovery.
+///
+/// Types with `public: false` are internal evaluator inputs that back a
+/// `Definition` — they must not appear in `parametric.list_types` responses
+/// because the same component is already discoverable through
+/// `definition.list`.
 pub fn world_list_types(world: &mut World) -> Vec<ParametricTypeInfo> {
     let Some(reg) = world.get_resource::<ParametricRegistry>() else {
         return Vec::new();
     };
-    reg.list()
+    reg.list_public()
         .into_iter()
         .map(|(id, label)| ParametricTypeInfo { id, label })
         .collect()
@@ -207,6 +213,7 @@ mod tests {
             defaults,
             derivations: d,
             transform: TransformBindings::default().bind(TransformAxis::X, "width"),
+            public: true,
         }
     }
 
