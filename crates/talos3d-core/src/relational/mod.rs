@@ -12,6 +12,7 @@
 pub mod component;
 pub mod graph;
 pub mod incremental;
+pub mod lock_solver;
 pub mod param_expr;
 pub mod parallel;
 pub mod service;
