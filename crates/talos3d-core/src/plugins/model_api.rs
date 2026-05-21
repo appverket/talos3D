@@ -112,6 +112,10 @@ impl Plugin for ModelApiPlugin {
         // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds
         // `ProceduralSessionPlugin` only if not already present.
         app.add_plugins(crate::plugins::procedural_session_mcp::ProceduralSessionMcpPlugin);
+        // Ensure the parametric component substrate (ParametricRegistry +
+        // ParametricStore) exists so the `parametric.*` tools have resources
+        // to operate on. Idempotent — domain plugins populate the registry.
+        app.add_plugins(crate::plugins::parametric_mcp::ParametricMcpPlugin);
         // Register the Model API tools a session may commit, so `eval`
         // accepts them and commit can route them to real geometry.
         {
@@ -2222,6 +2226,31 @@ enum ModelApiRequest {
             Result<crate::curation::ExportHandle, crate::curation::SessionError>,
         >,
     },
+    // --- Parametric components (RELATIONAL_PARAMETRIC_SUBSTRATE, PP-RPS-7 UX) ---
+    ParametricListTypes {
+        response: oneshot::Sender<Vec<crate::plugins::parametric_mcp::ParametricTypeInfo>>,
+    },
+    ParametricCreate {
+        request: crate::plugins::parametric_mcp::CreateParametricRequest,
+        response: oneshot::Sender<Result<crate::relational::registry::ParametricSnapshot, String>>,
+    },
+    ParametricInspect {
+        request: crate::plugins::parametric_mcp::InspectParametricRequest,
+        response: oneshot::Sender<Result<crate::relational::registry::ParametricSnapshot, String>>,
+    },
+    ParametricSetDriver {
+        request: crate::plugins::parametric_mcp::SetParametricDriverRequest,
+        response: oneshot::Sender<Result<crate::relational::service::PropagationReport, String>>,
+    },
+    ParametricTransform {
+        request: crate::plugins::parametric_mcp::ParametricTransformRequest,
+        response: oneshot::Sender<Result<crate::relational::transform::TransformOutcome, String>>,
+    },
+    ParametricExplain {
+        request: crate::plugins::parametric_mcp::ExplainParametricRequest,
+        response:
+            oneshot::Sender<Result<crate::plugins::parametric_mcp::ExplainParametricResponse, String>>,
+    },
 }
 
 #[cfg(feature = "model-api")]
@@ -3274,6 +3303,30 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::ProceduralSessionExport { request, response } => {
             let r = crate::plugins::procedural_session_mcp::world_export(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ParametricListTypes { response } => {
+            let r = crate::plugins::parametric_mcp::world_list_types(world);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ParametricCreate { request, response } => {
+            let r = crate::plugins::parametric_mcp::world_create(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ParametricInspect { request, response } => {
+            let r = crate::plugins::parametric_mcp::world_inspect(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ParametricSetDriver { request, response } => {
+            let r = crate::plugins::parametric_mcp::world_set_driver(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ParametricTransform { request, response } => {
+            let r = crate::plugins::parametric_mcp::world_transform(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ParametricExplain { request, response } => {
+            let r = crate::plugins::parametric_mcp::world_explain(world, request);
             let _ = response.send(r);
         }
     }
@@ -6152,6 +6205,85 @@ impl ModelApiServer {
             .await
             .map_err(|_| "model API response channel closed".to_string())?
             .map_err(|e| format!("{e}"))
+    }
+
+    // --- Parametric components (RELATIONAL_PARAMETRIC_SUBSTRATE, PP-RPS-7 UX) ---
+
+    async fn request_parametric_list_types(
+        &self,
+    ) -> Result<Vec<crate::plugins::parametric_mcp::ParametricTypeInfo>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ParametricListTypes { response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_parametric_create(
+        &self,
+        request: crate::plugins::parametric_mcp::CreateParametricRequest,
+    ) -> Result<crate::relational::registry::ParametricSnapshot, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ParametricCreate { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_parametric_inspect(
+        &self,
+        request: crate::plugins::parametric_mcp::InspectParametricRequest,
+    ) -> Result<crate::relational::registry::ParametricSnapshot, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ParametricInspect { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_parametric_set_driver(
+        &self,
+        request: crate::plugins::parametric_mcp::SetParametricDriverRequest,
+    ) -> Result<crate::relational::service::PropagationReport, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ParametricSetDriver { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_parametric_transform(
+        &self,
+        request: crate::plugins::parametric_mcp::ParametricTransformRequest,
+    ) -> Result<crate::relational::transform::TransformOutcome, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ParametricTransform { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_parametric_explain(
+        &self,
+        request: crate::plugins::parametric_mcp::ExplainParametricRequest,
+    ) -> Result<crate::plugins::parametric_mcp::ExplainParametricResponse, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ParametricExplain { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
     }
 }
 
@@ -10450,6 +10582,95 @@ impl ModelApiServer {
             .await
             .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(handle)
+    }
+
+    // --- Parametric components (RELATIONAL_PARAMETRIC_SUBSTRATE, PP-RPS-7 UX) ---
+
+    #[tool(
+        name = "parametric.list_types",
+        description = "List the registered parametric component types (e.g. trusses, windows). Each entry has an `id` (use it with parametric.create) and a human `label`. Parametric types are driver-driven systems whose derived geometry recomputes when you edit a driver — see RELATIONAL_PARAMETRIC_SUBSTRATE."
+    )]
+    async fn parametric_list_types_tool(&self) -> Result<CallToolResult, McpError> {
+        let types = self
+            .request_parametric_list_types()
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(types)
+    }
+
+    #[tool(
+        name = "parametric.create",
+        description = "Instantiate a parametric component of the given `type_id` (from parametric.list_types). Returns a snapshot with the new `instance_id`, the editable/read-only drivers and their values, and the derived values computed from them."
+    )]
+    async fn parametric_create_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::parametric_mcp::CreateParametricRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let snap = self
+            .request_parametric_create(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(snap)
+    }
+
+    #[tool(
+        name = "parametric.inspect",
+        description = "Return the current snapshot of a parametric instance: its type label, all driver values (with editability), and all derived values. Use this to see what can be edited and what those edits will affect."
+    )]
+    async fn parametric_inspect_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::parametric_mcp::InspectParametricRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let snap = self
+            .request_parametric_inspect(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(snap)
+    }
+
+    #[tool(
+        name = "parametric.set_driver",
+        description = "Edit one editable driver of a parametric instance by name and value, then re-derive. Returns a propagation report listing which derived values changed. Read-only drivers are refused. This is the primary way to resize/reshape a parametric system semantically."
+    )]
+    async fn parametric_set_driver_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::parametric_mcp::SetParametricDriverRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self
+            .request_parametric_set_driver(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(report)
+    }
+
+    #[tool(
+        name = "parametric.transform",
+        description = "Apply a transform gesture (e.g. SetExtent along an axis) to a parametric instance. If the axis is bound to a driver the gesture becomes a smart driver-edit (resizing re-derives dependents); otherwise it is refused rather than silently breaking the parametric relationships. Returns the transform outcome."
+    )]
+    async fn parametric_transform_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::parametric_mcp::ParametricTransformRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let outcome = self
+            .request_parametric_transform(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(outcome)
+    }
+
+    #[tool(
+        name = "parametric.explain",
+        description = "Explain a derived parameter of a parametric instance: returns the dependency trace through the graph and the controlling drivers that ultimately determine its value. Use this to understand why a value is what it is and which driver to edit to change it."
+    )]
+    async fn parametric_explain_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::parametric_mcp::ExplainParametricRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let response = self
+            .request_parametric_explain(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(response)
     }
 }
 
