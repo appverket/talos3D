@@ -542,6 +542,9 @@ fn collect_expression_dependencies_into(expr: &ExprNode, dependencies: &mut Hash
             collect_expression_dependencies_into(when_true, dependencies);
             collect_expression_dependencies_into(when_false, dependencies);
         }
+        ExprNode::Sin { value } | ExprNode::Cos { value } | ExprNode::Tan { value } => {
+            collect_expression_dependencies_into(value, dependencies);
+        }
     }
 }
 
@@ -934,6 +937,15 @@ fn evaluate_authoring_expr(
                 evaluate_authoring_expr(when_false, values)
             }
         }
+        ExprNode::Sin { value } => Ok(Value::from(
+            evaluate_authoring_expr_f64(value, values)?.to_radians().sin(),
+        )),
+        ExprNode::Cos { value } => Ok(Value::from(
+            evaluate_authoring_expr_f64(value, values)?.to_radians().cos(),
+        )),
+        ExprNode::Tan { value } => Ok(Value::from(
+            evaluate_authoring_expr_f64(value, values)?.to_radians().tan(),
+        )),
     }
 }
 
