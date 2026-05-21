@@ -102,6 +102,14 @@ pub enum MutationScope {
     /// identified by the named parameter. The value of the parameter
     /// must be an element id.
     RefinementSubtree { root_element_param: String },
+    /// New top-level authored entities in the active document/project.
+    /// Used by scripts and procedural sessions that author a fresh
+    /// structure from scratch rather than refining an existing entity.
+    /// Permits creating and mutating top-level document content; it does
+    /// **not** grant `DefinitionRegistry` / org-library writes (use
+    /// `OrgLibraryDefinitions` for that) and is distinct from refining an
+    /// existing subtree (`RefinementSubtree`).
+    ProjectRoot,
     /// Writes to the `DefinitionRegistry` at org-library scope only.
     /// Used by scripts that author shared `Definition`s.
     OrgLibraryDefinitions,

@@ -26,6 +26,7 @@ pub mod nomination;
 pub mod pack;
 pub mod plugin;
 pub mod policy;
+pub mod procedural_session;
 pub mod provenance;
 pub mod publication;
 pub mod recipes;
@@ -46,6 +47,16 @@ pub use authoring_script::{
     Postcondition, Predicate, Step, StepId, AUTHORING_SCRIPT_SCHEMA_VERSION,
 };
 pub use plugin::CurationPlugin;
+pub use procedural_session::{
+    commit as commit_session, eval as eval_session, export as export_session, AuditEntry,
+    AuditEvent, CarriedOverObligation, CommitOptions, CommitPolicy, CommitPolicyDe, CommitReport,
+    DryRunDispatcher, DryRunProjection, EvalMode, EvalReport, EvalStep, ExportHandle,
+    ExportMetadata, ExportTarget, ExportedAuthoringScript, FindingSeverity, InlineExportRequest,
+    ProceduralSession, ProceduralSessionConfig, ProceduralSessionPlugin,
+    ProceduralSessionRegistry, SessionError, SessionFinding, SessionId, SessionObligation,
+    SessionSnapshot, SessionSpec, SessionToolDescriptor, SessionToolRegistry, StageTransition,
+    TaggedCommit, Waiver,
+};
 pub use publication::{evidence_resolution_report, PublicationFinding, PublicationFindingSeverity};
 pub use recipes::{
     mirror_recipe_descriptors_to_artifacts, recipe_artifact_from_descriptor, NativeFnId,
