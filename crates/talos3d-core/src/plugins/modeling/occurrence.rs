@@ -1835,7 +1835,8 @@ fn remove_entity_mesh_assets(world: &mut World, entity: Entity) {
 mod pp_098_dirty_taxonomy_tests {
     use super::*;
     use crate::plugins::modeling::definition::{
-        DefinitionKind, Interface, OverridePolicy, ParameterDef, ParameterMetadata, ParameterSchema,
+        DefinitionKind, DefinitionVisibility, Interface, OverridePolicy, ParameterDef,
+        ParameterMetadata, ParameterSchema,
     };
     use serde_json::json;
 
@@ -1870,6 +1871,7 @@ mod pp_098_dirty_taxonomy_tests {
             representations: Vec::new(),
             compound: None,
             material_assignment: None,
+            visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,
         };
         let mut registry = DefinitionRegistry::default();
@@ -2098,8 +2100,9 @@ mod pp_098_occurrence_cache_tests {
     use serde_json::json;
 
     use crate::plugins::modeling::definition::{
-        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterBinding,
-        ParameterDef, ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator,
+        CompoundDefinition, DefinitionKind, DefinitionVisibility, Interface, OverridePolicy,
+        ParameterBinding, ParameterDef, ParameterMetadata, ParameterSchema,
+        RectangularExtrusionEvaluator,
     };
     use crate::plugins::modeling::mesh_generation::{spawn_primitive_meshes, PlaneMaterial};
 
@@ -2127,6 +2130,7 @@ mod pp_098_occurrence_cache_tests {
 
     fn rectangular_definition() -> Definition {
         Definition {
+            visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
             id: DefinitionId("cached.window".to_string()),
             base_definition_id: None,
             name: "Cached Window".to_string(),
@@ -2175,6 +2179,7 @@ mod pp_098_occurrence_cache_tests {
 
     fn compound_definition(child_definition_id: DefinitionId) -> Definition {
         Definition {
+            visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
             id: DefinitionId("cached.compound".to_string()),
             base_definition_id: None,
             name: "Cached Compound".to_string(),
@@ -2998,6 +3003,7 @@ mod trig_and_rotation_tests {
     /// Build a leaf rectangular-extrusion definition.
     fn leaf_definition(id: &str) -> Definition {
         Definition {
+            visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
             id: DefinitionId(id.to_string()),
             base_definition_id: None,
             name: id.to_string(),
@@ -3051,6 +3057,7 @@ mod trig_and_rotation_tests {
     /// `rotation_euler_deg = [0, 0, 90]` (90° about Z in the parent's local frame).
     fn compound_with_z_rotation(child_id: DefinitionId) -> Definition {
         Definition {
+            visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
             id: DefinitionId("rot.compound".to_string()),
             base_definition_id: None,
             name: "Rotation Compound".to_string(),
@@ -3137,6 +3144,7 @@ mod trig_and_rotation_tests {
         // Verify existing behavior: no rotation_euler_deg → identity rotation (parent's).
         let leaf = leaf_definition("norot.leaf");
         let compound = Definition {
+            visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
             id: DefinitionId("norot.compound".to_string()),
             base_definition_id: None,
             name: "No-Rotation Compound".to_string(),

@@ -768,9 +768,9 @@ mod tests {
             definition::{
                 AxisRef, BindingSide, ChildSlotDef, CompoundDefinition, Definition, DefinitionId,
                 DefinitionKind, DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
-                ExprNode, Interface, OverridePolicy, ParamType, ParameterDef, ParameterMetadata,
-                ParameterRef, ParameterSchema, SlotCount, SlotLayout, SlotMultiplicity,
-                TransformBinding,
+                DefinitionVisibility, ExprNode, Interface, OverridePolicy, ParamType, ParameterDef,
+                ParameterMetadata, ParameterRef, ParameterSchema, SlotCount, SlotLayout,
+                SlotMultiplicity, TransformBinding,
             },
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
         },
@@ -874,6 +874,7 @@ mod tests {
             interface: Interface::default(),
             evaluators: Vec::new(),
             representations: Vec::new(),
+            visibility: DefinitionVisibility::PublicRoot,
             compound: Some(CompoundDefinition {
                 child_slots: vec![
                     ChildSlotDef {
@@ -1214,6 +1215,7 @@ mod tests {
             representations: Vec::new(),
             compound: None,
             material_assignment: None,
+            visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,
         };
 

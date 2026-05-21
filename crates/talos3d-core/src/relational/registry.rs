@@ -23,6 +23,14 @@ use super::param_expr::{Quantity, ScalarExpr, Unit};
 use super::service::{ParametricComponent, PropagationReport};
 use super::transform::{TransformAxis, TransformBindings, TransformGesture, TransformOutcome, map_transform};
 
+fn default_true_bool() -> bool {
+    true
+}
+
+fn is_true_bool(v: &bool) -> bool {
+    *v
+}
+
 /// A registered parametric component *type*: drivers/derived classification,
 /// per-driver units, default driver values, declared `ScalarExpr` derivations,
 /// and transform-to-driver bindings. Generic container; domain crates build
@@ -37,6 +45,14 @@ pub struct ParametricTypeDef {
     pub defaults: BTreeMap<String, f64>,
     pub derivations: BTreeMap<String, ScalarExpr>,
     pub transform: TransformBindings,
+    /// When `false` this type is an internal evaluator input delegated to by a
+    /// `Definition`; it is excluded from `parametric.list_types` MCP discovery
+    /// and from `ParametricRegistry::list_public()`.
+    ///
+    /// Defaults to `true` (backward-compatible; all pre-existing entries remain
+    /// publicly discoverable until explicitly set to `false`).
+    #[serde(default = "default_true_bool", skip_serializing_if = "is_true_bool")]
+    pub public: bool,
 }
 
 impl ParametricTypeDef {
@@ -114,9 +130,24 @@ impl ParametricRegistry {
     pub fn get(&self, id: &str) -> Option<&ParametricTypeDef> {
         self.types.get(id)
     }
+    /// Return all registered types (including internal ones).
+    /// Prefer [`list_public`] for MCP and UI discovery surfaces.
     pub fn list(&self) -> Vec<(String, String)> {
         self.types
             .values()
+            .map(|t| (t.id.clone(), t.label.clone()))
+            .collect()
+    }
+    /// Return only types whose `public` flag is `true`.
+    ///
+    /// This is the correct source for `parametric.list_types` MCP discovery
+    /// and any UI that shows user-facing component families. Internal evaluator
+    /// inputs (types with `public: false`) are excluded so they do not appear
+    /// alongside the `Definition`-based components they back.
+    pub fn list_public(&self) -> Vec<(String, String)> {
+        self.types
+            .values()
+            .filter(|t| t.public)
             .map(|t| (t.id.clone(), t.label.clone()))
             .collect()
     }
@@ -315,6 +346,7 @@ mod tests {
             defaults,
             derivations: d,
             transform: TransformBindings::default().bind(TransformAxis::X, "span"),
+            public: true,
         }
     }
 

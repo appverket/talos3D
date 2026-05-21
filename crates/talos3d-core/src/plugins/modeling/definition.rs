@@ -254,6 +254,15 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+/// `skip_serializing_if` helper for `Definition::visibility`.
+/// Omits the field from JSON when it holds the default `PublicRoot` or
+/// `PublicVariant` so that only `InternalPart` entries appear on the wire.
+/// Actually, we only skip the write when it is the default `PublicRoot`
+/// (to keep round-trips compact while still preserving `PublicVariant`).
+fn definition_visibility_is_public(v: &DefinitionVisibility) -> bool {
+    *v == DefinitionVisibility::PublicRoot
+}
+
 impl ParameterDef {
     pub fn validate_value(&self, value: &Value, context: &str) -> Result<(), String> {
         validate_param_type(&self.param_type, value, context)?;
@@ -833,6 +842,54 @@ impl Interface {
 // Definition
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// DefinitionVisibility
+// ---------------------------------------------------------------------------
+
+/// Controls whether a `Definition` is advertised as a top-level public family
+/// in the browser and MCP discovery, or is an internal composition part.
+///
+/// Per ADR-025 amendment 2026-05-21 and the Parametric Component Unification
+/// Agreement: the Definition browser and `definition.list` MCP tool default to
+/// showing only `PublicRoot` and `PublicVariant`; `InternalPart` definitions
+/// are reachable through parent navigation, composition, and the optional
+/// `include_internal` path — but are not advertised as user-pickable families.
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefinitionVisibility {
+    /// Top-level reusable family; shown in the browser and discovery by default.
+    PublicRoot,
+    /// A shallow specialisation of a `PublicRoot` (e.g. a colour variant).
+    /// Shown alongside its root in default discovery.
+    PublicVariant,
+    /// An internal implementation part (e.g. a shared truss member, window
+    /// frame). Excluded from default browser/MCP listing; always reachable
+    /// through composition, parent links, and the `include_internal` path.
+    InternalPart,
+}
+
+impl Default for DefinitionVisibility {
+    fn default() -> Self {
+        Self::PublicRoot
+    }
+}
+
+impl DefinitionVisibility {
+    /// Returns `true` for `PublicRoot` and `PublicVariant` — the set shown in
+    /// the default browser listing and default MCP discovery.
+    #[inline]
+    pub fn is_public(self) -> bool {
+        matches!(self, Self::PublicRoot | Self::PublicVariant)
+    }
+
+    /// Returns `true` only for `InternalPart`.
+    #[inline]
+    pub fn is_internal(self) -> bool {
+        matches!(self, Self::InternalPart)
+    }
+}
+
 /// A fully described, versioned template for a reusable modeled element.
 ///
 /// `Definition`s are immutable once published; the `definition_version` is
@@ -869,6 +926,12 @@ pub struct Definition {
     /// until follow-up slices migrate them and remove the helper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material_assignment: Option<MaterialAssignment>,
+    /// Visibility governs default browser and MCP discovery exposure.
+    ///
+    /// Defaults to `PublicRoot` so every existing persisted `Definition`
+    /// round-trips as a public family — backward compatible.
+    #[serde(default, skip_serializing_if = "definition_visibility_is_public")]
+    pub visibility: DefinitionVisibility,
     /// Domain-specific extension payload owned by higher-level products.
     ///
     /// Core treats this as opaque JSON and round-trips it unchanged.
@@ -897,6 +960,21 @@ pub enum MaterialProvenance {
 }
 
 impl Definition {
+    /// Returns `true` when this definition is `PublicRoot` — the primary
+    /// user-facing top-level family.  Convenience wrapper for
+    /// `visibility == DefinitionVisibility::PublicRoot`.
+    #[inline]
+    pub fn is_public_root(&self) -> bool {
+        self.visibility == DefinitionVisibility::PublicRoot
+    }
+
+    /// Returns `true` when this definition is an `InternalPart`, i.e. it
+    /// should be excluded from default browser and MCP discovery listings.
+    #[inline]
+    pub fn is_internal(&self) -> bool {
+        self.visibility == DefinitionVisibility::InternalPart
+    }
+
     /// Compute the deterministic digest PP-098 uses for future mesh cache keys.
     ///
     /// Only parameters marked `geometry_affecting` contribute to the hash.
@@ -1651,6 +1729,8 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
         representations,
         compound,
         material_assignment,
+        // Visibility comes from the child (the specialised definition).
+        visibility,
         domain_data,
     } = child;
 
@@ -1675,6 +1755,7 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
         },
         compound: merge_compound_definition(base.compound, compound),
         material_assignment: material_assignment.or(base.material_assignment),
+        visibility,
         domain_data: merge_json_values(base.domain_data, domain_data),
     }
 }
@@ -2365,6 +2446,7 @@ mod pp_098_geometry_param_hash_tests {
 
     fn definition_with_params(params: Vec<ParameterDef>) -> Definition {
         Definition {
+            visibility: DefinitionVisibility::PublicRoot,
             id: DefinitionId("hash.test".to_string()),
             base_definition_id: None,
             name: "Hash Test".to_string(),
@@ -2477,6 +2559,7 @@ mod pp_099_material_assignment_relocation_tests {
 
     fn blank_definition_with_id(id: &str) -> Definition {
         Definition {
+            visibility: DefinitionVisibility::PublicRoot,
             id: DefinitionId(id.to_string()),
             base_definition_id: None,
             name: format!("Test {id}"),
