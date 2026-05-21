@@ -43,6 +43,7 @@ pub mod model_api;
 pub mod modeling;
 pub mod named_views;
 pub mod palette;
+pub mod parametric_mcp;
 #[cfg(feature = "perf-stats")]
 pub mod perf_stats;
 pub mod persistence;
