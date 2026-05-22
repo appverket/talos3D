@@ -68,8 +68,13 @@ use crate::plugins::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Size (in pixels) of the render-target image used for the 3D preview.
-const PREVIEW_TEXTURE_SIZE: u32 = 512;
+/// Initial size (in pixels) of the render-target image used for the 3D preview.
+const PREVIEW_TEXTURE_INITIAL_SIZE: u32 = 512;
+
+/// Upper bound for either render-target dimension. The preview pane can become
+/// very wide; capping the texture avoids allocating unnecessarily large GPU
+/// images while preserving the pane aspect ratio.
+const PREVIEW_TEXTURE_MAX_SIZE: u32 = 1536;
 
 /// The render layer used exclusively for preview-scene entities.
 ///
@@ -149,6 +154,12 @@ pub struct DefinitionPreviewScene {
     /// out. The camera is re-framed from current preview bounds so selection
     /// and parameter changes update the view without manual refresh.
     pub camera_distance_scale: f32,
+    /// Current render-target size in pixels. Kept in sync with the displayed
+    /// egui image aspect so the preview is never stretched by UI layout.
+    pub current_texture_size: UVec2,
+    /// Requested render-target size in pixels, written by the egui preview
+    /// draw pass and applied by `resize_preview_render_target`.
+    pub requested_texture_size: UVec2,
 }
 
 /// Requested definition + registry snapshot for the preview render target.
@@ -227,7 +238,9 @@ impl Plugin for DefinitionPreviewPlugin {
             .add_systems(Startup, (setup_preview_scene, configure_preview_gizmos))
             .add_systems(
                 Update,
-                sync_preview_to_target.after(crate::plugins::egui_chrome::EguiChromeSystems),
+                (resize_preview_render_target, sync_preview_to_target)
+                    .chain()
+                    .after(crate::plugins::egui_chrome::EguiChromeSystems),
             )
             .add_systems(
                 Update,
@@ -260,9 +273,10 @@ impl Plugin for DefinitionPreviewPlugin {
 /// spawned / replaced by `sync_preview_to_target` whenever the requested
 /// preview definition changes.
 fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let initial_texture_size = UVec2::splat(PREVIEW_TEXTURE_INITIAL_SIZE);
     let size = Extent3d {
-        width: PREVIEW_TEXTURE_SIZE,
-        height: PREVIEW_TEXTURE_SIZE,
+        width: initial_texture_size.x,
+        height: initial_texture_size.y,
         depth_or_array_layers: 1,
     };
 
@@ -340,7 +354,36 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
         occurrence_root: Entity::PLACEHOLDER,
         current_registry_signature: 0,
         camera_distance_scale: 1.0,
+        current_texture_size: initial_texture_size,
+        requested_texture_size: initial_texture_size,
     });
+}
+
+fn resize_preview_render_target(
+    mut scene: ResMut<DefinitionPreviewScene>,
+    mut images: ResMut<Assets<Image>>,
+    mut projection_query: Query<&mut Projection>,
+) {
+    let requested = scene.requested_texture_size.max(UVec2::ONE);
+    if scene.current_texture_size == requested {
+        return;
+    }
+
+    if let Some(image) = images.get_mut(&scene.render_target) {
+        image.resize(Extent3d {
+            width: requested.x,
+            height: requested.y,
+            depth_or_array_layers: 1,
+        });
+        scene.current_texture_size = requested;
+    }
+
+    let aspect = requested.x as f32 / requested.y.max(1) as f32;
+    if let Ok(mut projection) = projection_query.get_mut(scene.camera_entity) {
+        if let Projection::Perspective(perspective) = projection.as_mut() {
+            perspective.aspect_ratio = aspect.max(0.01);
+        }
+    }
 }
 
 /// Point the [`PreviewSelectionGizmos`] config at [`PREVIEW_RENDER_LAYER`].
@@ -613,14 +656,14 @@ pub fn resolve_preview_click(
     // Convert NDC to a viewport position so we can call `viewport_to_world`.
     //
     // `viewport_to_world` expects a position in **logical viewport pixels**
-    // (origin top-left).  The viewport for the preview camera is the full
-    // 512×512 render target.
+    // (origin top-left).  The preview camera renders to the full preview
+    // texture, whose aspect follows the displayed egui image.
     //
     // NDC → pixel: pixel = (ndc * 0.5 + 0.5) * size, then flip Y.
-    let half = PREVIEW_TEXTURE_SIZE as f32 * 0.5;
+    let texture_size = scene.current_texture_size.as_vec2();
     let viewport_pos = Vec2::new(
-        (ndc.x * 0.5 + 0.5) * PREVIEW_TEXTURE_SIZE as f32,
-        (1.0 - (ndc.y * 0.5 + 0.5)) * PREVIEW_TEXTURE_SIZE as f32,
+        (ndc.x * 0.5 + 0.5) * texture_size.x,
+        (1.0 - (ndc.y * 0.5 + 0.5)) * texture_size.y,
     );
 
     let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_pos) else {
@@ -662,7 +705,6 @@ pub fn resolve_preview_click(
         state.technical_view_buffer.clear();
         state.technical_view_error = None;
     }
-    let _ = half; // suppress unused-variable warning (used in comment above)
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +755,9 @@ pub fn draw_definition_3d_preview(
                 }
             });
             let image_height = (height - 24.0).max(180.0);
+            let image_size = egui::vec2(width, image_height);
+            scene.requested_texture_size =
+                preview_texture_size_for_display(image_size.x, image_size.y);
 
             if scene.current_definition_id.is_none() {
                 // Blank placeholder — same wording as the old `draw_empty_definition_preview`.
@@ -737,10 +782,7 @@ pub fn draw_definition_3d_preview(
             // egui::Image interactions; we do NOT add Sense::drag() per the
             // PP-DBUX4 constraints.
             let response = ui
-                .add(egui::Image::new((
-                    texture_id,
-                    egui::vec2(width, image_height),
-                )))
+                .add(egui::Image::new((texture_id, image_size)))
                 .interact(egui::Sense::click());
 
             if response.clicked_by(egui::PointerButton::Primary) {
@@ -792,6 +834,23 @@ fn frame_preview_camera(world: &mut World, camera_entity: Entity, distance_scale
     if let Ok(mut camera) = world.get_entity_mut(camera_entity) {
         camera.insert(Transform::from_translation(eye).looking_at(center, Vec3::Y));
     }
+}
+
+fn preview_texture_size_for_display(width: f32, height: f32) -> UVec2 {
+    let display_width = width.max(1.0);
+    let display_height = height.max(1.0);
+    let display_max = display_width.max(display_height);
+    let target_max = display_max
+        .clamp(
+            PREVIEW_TEXTURE_INITIAL_SIZE as f32,
+            PREVIEW_TEXTURE_MAX_SIZE as f32,
+        )
+        .max(1.0);
+    let scale = target_max / display_max;
+    UVec2::new(
+        (display_width * scale).round().max(1.0) as u32,
+        (display_height * scale).round().max(1.0) as u32,
+    )
 }
 
 fn preview_geometry_bounds(world: &mut World) -> Option<Aabb3d> {
@@ -991,6 +1050,30 @@ mod tests {
         assert!(
             PREVIEW_ELEMENT_ID_SENTINEL.0 > 1_000_000,
             "sentinel must be far above normal element id range"
+        );
+    }
+
+    #[test]
+    fn preview_texture_size_preserves_display_aspect() {
+        let size = preview_texture_size_for_display(1200.0, 360.0);
+        let aspect = size.x as f32 / size.y as f32;
+        assert!(
+            (aspect - (1200.0 / 360.0)).abs() < 0.01,
+            "texture aspect must match preview pane aspect"
+        );
+        assert!(
+            size.x <= PREVIEW_TEXTURE_MAX_SIZE && size.y <= PREVIEW_TEXTURE_MAX_SIZE,
+            "preview texture must respect the maximum allocation"
+        );
+    }
+
+    #[test]
+    fn preview_texture_size_keeps_small_panes_crisp() {
+        let size = preview_texture_size_for_display(220.0, 180.0);
+        assert_eq!(size.x, PREVIEW_TEXTURE_INITIAL_SIZE);
+        assert_eq!(
+            size.y,
+            (PREVIEW_TEXTURE_INITIAL_SIZE as f32 * 180.0 / 220.0).round() as u32
         );
     }
 
