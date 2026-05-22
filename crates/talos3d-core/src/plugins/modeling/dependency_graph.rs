@@ -707,9 +707,22 @@ fn sync_relation_dependency_edges_system(world: &mut World) {
 
     let mut desired_by_source: HashMap<ElementId, Vec<DependencyOut>> = HashMap::new();
     {
-        let mut query = world.query::<&SemanticRelation>();
-        for relation in query.iter(world) {
+        let mut query = world.query::<EntityRef>();
+        for entity_ref in query.iter(world) {
+            if let Some(branch) = entity_ref.get::<crate::plugins::refinement::RefinementBranch>() {
+                if branch.status == crate::plugins::refinement::RefinementBranchStatus::Parked {
+                    continue;
+                }
+            }
+            let Some(relation) = entity_ref.get::<SemanticRelation>() else {
+                continue;
+            };
             if !participating_relation_types.contains(&relation.relation_type) {
+                continue;
+            }
+            if crate::plugins::refinement::is_parked_refinement_entity(world, relation.source)
+                || crate::plugins::refinement::is_parked_refinement_entity(world, relation.target)
+            {
                 continue;
             }
             desired_by_source
@@ -824,12 +837,17 @@ pub fn build_graph_snapshot(world: &mut World) -> DependencyGraph {
         let mut query = world.query::<(&ElementId, &EntityDependencies)>();
         query
             .iter(world)
+            .filter(|(id, _)| !crate::plugins::refinement::is_parked_refinement_entity(world, **id))
             .map(|(id, deps)| (*id, deps.edges.clone()))
             .collect()
     };
     let mut graph = DependencyGraph::new();
     for (id, edges) in rows {
-        graph.set_dependencies(id, edges);
+        let active_edges: Vec<DependencyOut> = edges
+            .into_iter()
+            .filter(|edge| !crate::plugins::refinement::is_parked_refinement_entity(world, edge.on))
+            .collect();
+        graph.set_dependencies(id, active_edges);
     }
     graph
 }
@@ -1025,6 +1043,44 @@ mod tests {
         let json = dependency_graph_json(&mut world);
         assert_eq!(json["has_cycle"], serde_json::json!(true));
         assert!(json["topological_order"].is_null());
+    }
+
+    #[test]
+    fn dependency_graph_json_excludes_parked_refinement_branch_entities() {
+        use crate::plugins::refinement::{
+            RefinementBranch, RefinementBranchStatus, RefinementState,
+        };
+
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "parametric"),
+        ));
+        world.spawn((ElementId(2), EntityDependencies::empty()));
+        world.spawn((
+            ElementId(20),
+            SemanticRelation {
+                source: ElementId(2),
+                target: ElementId(1),
+                relation_type: "refinement_of".to_string(),
+                parameters: serde_json::Value::Null,
+            },
+            RefinementBranch {
+                root_element_id: 1,
+                parent_element_id: 1,
+                child_element_id: 2,
+                target_state: RefinementState::Constructible,
+                recipe_id: None,
+                status: RefinementBranchStatus::Parked,
+            },
+        ));
+
+        let json = dependency_graph_json(&mut world);
+
+        assert_eq!(json["node_count"], serde_json::json!(1));
+        assert_eq!(json["edge_count"], serde_json::json!(0));
+        let nodes = json["nodes"].as_array().unwrap();
+        assert_eq!(nodes[0]["element_id"], serde_json::json!(1));
     }
 
     #[test]
