@@ -831,8 +831,7 @@ impl<'a> ToolDispatcher for DryRunDispatcher<'a> {
                 return Err(ToolDispatchError::new("mutation_out_of_scope", reason));
             }
         }
-        self.captured
-            .push((call.tool.clone(), call.args.clone()));
+        self.captured.push((call.tool.clone(), call.args.clone()));
         let stub = descriptor
             .and_then(|d| d.default_stub.clone())
             .unwrap_or(Value::Null);
@@ -867,9 +866,7 @@ fn precheck_step(
     registry: &SessionToolRegistry,
     step: &EvalStep,
 ) -> Result<(), SessionError> {
-    if !session.spec.allowed_tools.is_empty()
-        && !session.spec.allowed_tools.contains(&step.tool)
-    {
+    if !session.spec.allowed_tools.is_empty() && !session.spec.allowed_tools.contains(&step.tool) {
         return Err(SessionError::DisallowedTool {
             tool: step.tool.clone(),
         });
@@ -1001,7 +998,9 @@ pub fn eval(
                 }
             }
             // Memory cap on accumulated bindings.
-            let projected = serde_json::to_vec(&session.bindings).unwrap_or_default().len()
+            let projected = serde_json::to_vec(&session.bindings)
+                .unwrap_or_default()
+                .len()
                 + serde_json::to_vec(&captured).unwrap_or_default().len();
             if projected > config.max_binding_bytes {
                 // Roll back the append.
@@ -1098,7 +1097,9 @@ fn project_single_step(
                 projected_findings,
             })
         }
-        Err(InvocationError::Dispatch { step: sid, error }) if error.code == "mutation_out_of_scope" => {
+        Err(InvocationError::Dispatch { step: sid, error })
+            if error.code == "mutation_out_of_scope" =>
+        {
             Err(SessionError::MutationOutOfScope {
                 step: sid,
                 reason: error.message,
@@ -1188,7 +1189,11 @@ impl<'a, D: ToolDispatcher> ToolDispatcher for CommitTaggingDispatcher<'a, D> {
         let mutates = descriptor.map(|d| d.mutates).unwrap_or(false);
         if mutates {
             if let MutationScope::None = call.mutation_scope {
-                let step = self.step_order.front().cloned().unwrap_or_else(|| StepId::new("?"));
+                let step = self
+                    .step_order
+                    .front()
+                    .cloned()
+                    .unwrap_or_else(|| StepId::new("?"));
                 let reason = format!(
                     "tool '{}' is a mutator but session mutation_scope is `None`",
                     call.tool.0
@@ -1198,7 +1203,10 @@ impl<'a, D: ToolDispatcher> ToolDispatcher for CommitTaggingDispatcher<'a, D> {
             }
         }
 
-        let step_id = self.step_order.pop_front().unwrap_or_else(|| StepId::new("?"));
+        let step_id = self
+            .step_order
+            .pop_front()
+            .unwrap_or_else(|| StepId::new("?"));
         let response = self.inner.dispatch(call)?;
         let command_id = self.next_command_id;
         self.next_command_id += 1;
@@ -1312,8 +1320,11 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
             }
         }
         CommitPolicy::AcceptWithWaivers => {
-            let waiver_ids: BTreeSet<&str> =
-                options.waivers.iter().map(|w| w.finding_id.as_str()).collect();
+            let waiver_ids: BTreeSet<&str> = options
+                .waivers
+                .iter()
+                .map(|w| w.finding_id.as_str())
+                .collect();
             let missing: Vec<String> = remaining_findings
                 .iter()
                 .filter(|f| !waiver_ids.contains(f.id.as_str()))
@@ -1335,12 +1346,8 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
     // Replay the script through a tagging dispatcher that also enforces
     // MutationScope::None against mutating tools.
     let step_order: Vec<StepId> = session.script.steps.iter().map(|s| s.id.clone()).collect();
-    let mut tagger = CommitTaggingDispatcher::new(
-        dispatcher,
-        session.id.clone(),
-        registry,
-        step_order.clone(),
-    );
+    let mut tagger =
+        CommitTaggingDispatcher::new(dispatcher, session.id.clone(), registry, step_order.clone());
 
     let report_result = replay(&session.script, Map::new(), &mut tagger, oracle);
     let tagged = std::mem::take(&mut tagger.tagged);
@@ -1578,14 +1585,14 @@ mod tests {
         let mut s = fresh_session(allowed(&["architecture.opening.place_hosted"]));
         let snap = s.snapshot();
         assert_eq!(snap.script.steps.len(), 0);
-        assert!(snap.audit_excerpt.iter().any(|e| matches!(
-            e.event,
-            AuditEvent::Created
-        )));
-        assert!(snap.audit_excerpt.iter().any(|e| matches!(
-            e.event,
-            AuditEvent::Snapshotted
-        )));
+        assert!(snap
+            .audit_excerpt
+            .iter()
+            .any(|e| matches!(e.event, AuditEvent::Created)));
+        assert!(snap
+            .audit_excerpt
+            .iter()
+            .any(|e| matches!(e.event, AuditEvent::Snapshotted)));
     }
 
     #[test]
@@ -1749,11 +1756,7 @@ mod tests {
     impl ToolDispatcher for CountingDispatcher {
         fn dispatch(&mut self, call: &ToolCall<'_>) -> Result<Value, ToolDispatchError> {
             self.calls.push((call.tool.clone(), call.args.clone()));
-            let v = self
-                .responses
-                .get(self.idx)
-                .cloned()
-                .unwrap_or(Value::Null);
+            let v = self.responses.get(self.idx).cloned().unwrap_or(Value::Null);
             self.idx += 1;
             Ok(v)
         }

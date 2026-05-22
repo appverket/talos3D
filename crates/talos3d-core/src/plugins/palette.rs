@@ -69,12 +69,12 @@ impl PaletteCommandEntry {
 }
 
 fn toggle_palette(world: &mut World) {
-    let primary_modifier_pressed =
-        primary_modifier_pressed(world.resource::<ButtonInput<KeyCode>>());
+    // Cmd/Ctrl+K is dispatched through the unified keymap (core.show_command_palette).
+    // `/` remains a palette-local quick toggle.
     let open_shortcut = {
         let keys = world.resource::<ButtonInput<KeyCode>>();
-        (primary_modifier_pressed && keys.just_pressed(KeyCode::KeyK))
-            || (!primary_modifier_pressed && keys.just_pressed(KeyCode::Slash))
+        let primary_modifier_pressed = primary_modifier_pressed(keys);
+        !primary_modifier_pressed && keys.just_pressed(KeyCode::Slash)
     };
     if !open_shortcut {
         return;

@@ -304,7 +304,7 @@ fn sync_handle_display_mode(
     // In face edit mode, G is reserved for push/pull — don't switch handle mode
     let face_editing = face_edit_context.is_active();
 
-    if keys.just_pressed(KeyCode::KeyG) && !face_editing {
+    if keys.just_pressed(KeyCode::KeyM) && !face_editing {
         handle_context.display_mode = HandleDisplayMode::Move;
     } else if keys.just_pressed(KeyCode::KeyS) {
         handle_context.display_mode = HandleDisplayMode::Scale;

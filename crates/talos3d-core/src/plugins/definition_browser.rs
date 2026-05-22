@@ -48,8 +48,6 @@ const DEFINITIONS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(1240.0, 860.0);
 const INSPECTOR_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(620.0, 620.0);
 const INSPECTOR_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(460.0, 360.0);
 const INSPECTOR_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(760.0, 760.0);
-/// Height (in egui logical pixels) of the 3D occurrence preview panel.
-const DEFINITION_PREVIEW_HEIGHT: f32 = 340.0;
 const DEFINITIONS_BROWSER_LEFT_WIDTH: f32 = 300.0;
 const DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT: f32 = 210.0;
 
@@ -1230,7 +1228,7 @@ pub fn draw_definitions_window(
     pending: &mut PendingCommandInvocations,
     cursor_world_pos: &CursorWorldPos,
     status: &mut StatusBarData,
-    preview_scene: &DefinitionPreviewScene,
+    preview_scene: &mut DefinitionPreviewScene,
     preview_target: &mut DefinitionPreviewTarget,
     pending_click: &mut PendingPreviewClick,
     material_registry: &MaterialRegistry,
@@ -1278,8 +1276,9 @@ pub fn draw_definitions_window(
             // default listing.  The toggle allows them to be shown when needed
             // (e.g. debugging, parent navigation, migration).
             if !state.show_internal_definitions {
-                definition_entries
-                    .retain(|entry| !matches!(entry.visibility, DefinitionVisibility::InternalPart));
+                definition_entries.retain(|entry| {
+                    !matches!(entry.visibility, DefinitionVisibility::InternalPart)
+                });
             }
             let search = state.search.trim().to_ascii_lowercase();
             if !search.is_empty() {
@@ -1686,6 +1685,7 @@ fn draw_definition_browser_left_panel(
             if draft_entries.is_empty() {
                 ui.label(egui::RichText::new("No open drafts").weak());
             }
+            let mut draft_to_remove = None;
             for draft in draft_entries {
                 let selected = drafts.active_draft_id.as_ref() == Some(&draft.draft_id);
                 let label = if draft.dirty {
@@ -1693,9 +1693,25 @@ fn draw_definition_browser_left_panel(
                 } else {
                     draft.working_copy.name.clone()
                 };
-                if ui.selectable_label(selected, label).clicked() {
-                    drafts.active_draft_id = Some(draft.draft_id.clone());
-                    state.inspector_visible = true;
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(selected, label).clicked() {
+                        drafts.active_draft_id = Some(draft.draft_id.clone());
+                        state.inspector_visible = true;
+                    }
+                    if ui.small_button("Discard").clicked() {
+                        draft_to_remove = Some(draft.draft_id.clone());
+                    }
+                });
+            }
+            if let Some(draft_id) = draft_to_remove {
+                let was_selected = drafts.active_draft_id.as_ref() == Some(&draft_id);
+                drafts.remove(&draft_id);
+                if was_selected {
+                    state.selected_draft_id = None;
+                    state.inspector_visible = drafts.active_draft_id.is_some();
+                    state.selected_node = DefinitionEditorNode::Definition;
+                    state.technical_view_buffer.clear();
+                    state.technical_view_error = None;
                 }
             }
         });
@@ -1709,7 +1725,7 @@ fn draw_selected_definition_workspace(
     selection: &DefinitionSelectionContext,
     pending: &mut PendingCommandInvocations,
     cursor_world_pos: &CursorWorldPos,
-    preview_scene: &DefinitionPreviewScene,
+    preview_scene: &mut DefinitionPreviewScene,
     pending_click: &mut PendingPreviewClick,
     registry: &DefinitionRegistry,
     source_definition_ids: &[DefinitionId],
@@ -1797,8 +1813,8 @@ fn draw_selected_definition_workspace(
         ui.label(egui::RichText::new("Requires selected wall opening.").small());
     }
 
-    let preview_height = (ui.available_height() - DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT - 18.0)
-        .clamp(240.0, DEFINITION_PREVIEW_HEIGHT);
+    let preview_height =
+        (ui.available_height() - DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT - 18.0).max(240.0);
     draw_definition_3d_preview(ui, contexts, preview_scene, pending_click, preview_height);
     ui.add_space(8.0);
 
@@ -1871,9 +1887,7 @@ fn select_definition_in_browser(
     state.selected_definition_id = Some(definition_id.to_string());
     state.selected_preview_slot_path = None;
     state.selected_occurrence_overrides = OverrideMap::default();
-    if state.instantiate_label.is_empty() {
-        state.instantiate_label = definition_name.to_string();
-    }
+    state.instantiate_label = definition_name.to_string();
 }
 
 fn draw_definition_action_menu(
@@ -1977,7 +1991,7 @@ fn queue_instantiate_definition_from_browser(
 fn draw_definition_editor(
     ctx: &egui::Context,
     contexts: &mut EguiContexts,
-    preview_scene: &DefinitionPreviewScene,
+    preview_scene: &mut DefinitionPreviewScene,
     preview_target: &mut DefinitionPreviewTarget,
     pending_click: &mut PendingPreviewClick,
     state: &mut DefinitionsWindowState,
@@ -2111,7 +2125,7 @@ fn draw_definition_editor(
                             contexts,
                             preview_scene,
                             pending_click,
-                            DEFINITION_PREVIEW_HEIGHT,
+                            (ui.available_height() * 0.42).max(220.0),
                         );
                         ui.separator();
                         // Property tree
@@ -2482,9 +2496,7 @@ fn draw_parents_panel(
                     state.selected_definition_id = Some(link.definition_id.to_string());
                     state.selected_preview_slot_path = Some(link.path_to_current.clone());
                     state.selected_occurrence_overrides = OverrideMap::default();
-                    if state.instantiate_label.is_empty() {
-                        state.instantiate_label = link.definition_name.clone();
-                    }
+                    state.instantiate_label = link.definition_name.clone();
                 }
                 response.context_menu(|ui| {
                     draw_definition_action_menu(
@@ -2746,9 +2758,7 @@ fn drill_into_definition_composition_node(
         *selected_occurrence_overrides = OverrideMap::default();
     }
     *selected_preview_slot_path = None;
-    if instantiate_label.is_empty() {
-        *instantiate_label = definition.name.clone();
-    }
+    *instantiate_label = definition.name.clone();
 }
 
 #[derive(Debug, Clone)]
@@ -4575,7 +4585,7 @@ fn sync_inspector_state(state: &mut DefinitionsWindowState, draft: &DefinitionDr
     state.domain_data_buffer = pretty_json(&draft.working_copy.domain_data);
     state.evaluators_buffer = pretty_json(&draft.working_copy.evaluators);
     state.representations_buffer = pretty_json(&draft.working_copy.representations);
-    state.selected_node = DefinitionEditorNode::Definition;
+    state.selected_node = default_editor_node_for_draft(draft);
     state.technical_view_buffer.clear();
     state.technical_view_error = None;
     state.slot_editor_buffer.clear();
@@ -4586,6 +4596,21 @@ fn sync_inspector_state(state: &mut DefinitionsWindowState, draft: &DefinitionDr
     state.derived_editor_buffer.clear();
     state.constraint_editor_buffer.clear();
     state.anchor_editor_buffer.clear();
+}
+
+fn default_editor_node_for_draft(draft: &DefinitionDraft) -> DefinitionEditorNode {
+    draft
+        .working_copy
+        .interface
+        .parameters
+        .0
+        .iter()
+        .find(|parameter| {
+            parameter.metadata.mutability
+                != crate::plugins::modeling::definition::ParameterMutability::Derived
+        })
+        .map(|parameter| DefinitionEditorNode::Parameter(parameter.name.clone()))
+        .unwrap_or(DefinitionEditorNode::Definition)
 }
 
 fn sync_selected_slot_buffers(

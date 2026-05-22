@@ -39,10 +39,16 @@ pub struct Quantity {
 
 impl Quantity {
     pub fn mm(v: f64) -> Self {
-        Quantity { value: v, unit: Unit::Mm }
+        Quantity {
+            value: v,
+            unit: Unit::Mm,
+        }
     }
     pub fn deg(v: f64) -> Self {
-        Quantity { value: v, unit: Unit::Deg }
+        Quantity {
+            value: v,
+            unit: Unit::Deg,
+        }
     }
     pub fn num(v: f64) -> Self {
         Quantity {
@@ -189,21 +195,54 @@ pub enum CmpOp {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ScalarExpr {
-    Lit { q: Quantity },
-    Param { name: String },
-    Add { lhs: Box<ScalarExpr>, rhs: Box<ScalarExpr> },
-    Sub { lhs: Box<ScalarExpr>, rhs: Box<ScalarExpr> },
-    Mul { lhs: Box<ScalarExpr>, rhs: Box<ScalarExpr> },
-    Div { lhs: Box<ScalarExpr>, rhs: Box<ScalarExpr> },
-    Neg { expr: Box<ScalarExpr> },
+    Lit {
+        q: Quantity,
+    },
+    Param {
+        name: String,
+    },
+    Add {
+        lhs: Box<ScalarExpr>,
+        rhs: Box<ScalarExpr>,
+    },
+    Sub {
+        lhs: Box<ScalarExpr>,
+        rhs: Box<ScalarExpr>,
+    },
+    Mul {
+        lhs: Box<ScalarExpr>,
+        rhs: Box<ScalarExpr>,
+    },
+    Div {
+        lhs: Box<ScalarExpr>,
+        rhs: Box<ScalarExpr>,
+    },
+    Neg {
+        expr: Box<ScalarExpr>,
+    },
     /// Trig on an angle (deg) -> dimensionless.
-    Sin { expr: Box<ScalarExpr> },
-    Cos { expr: Box<ScalarExpr> },
-    Tan { expr: Box<ScalarExpr> },
+    Sin {
+        expr: Box<ScalarExpr>,
+    },
+    Cos {
+        expr: Box<ScalarExpr>,
+    },
+    Tan {
+        expr: Box<ScalarExpr>,
+    },
     /// atan2(y, x) -> degrees. Operands must share a unit.
-    Atan2 { y: Box<ScalarExpr>, x: Box<ScalarExpr> },
-    Min { lhs: Box<ScalarExpr>, rhs: Box<ScalarExpr> },
-    Max { lhs: Box<ScalarExpr>, rhs: Box<ScalarExpr> },
+    Atan2 {
+        y: Box<ScalarExpr>,
+        x: Box<ScalarExpr>,
+    },
+    Min {
+        lhs: Box<ScalarExpr>,
+        rhs: Box<ScalarExpr>,
+    },
+    Max {
+        lhs: Box<ScalarExpr>,
+        rhs: Box<ScalarExpr>,
+    },
     Clamp {
         expr: Box<ScalarExpr>,
         lo: Box<ScalarExpr>,
@@ -222,15 +261,23 @@ pub enum ScalarExpr {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "pred", rename_all = "snake_case")]
 pub enum Predicate {
-    Bool { value: bool },
+    Bool {
+        value: bool,
+    },
     Cmp {
         op: CmpOp,
         lhs: Box<ScalarExpr>,
         rhs: Box<ScalarExpr>,
     },
-    And { children: Vec<Predicate> },
-    Or { children: Vec<Predicate> },
-    Not { child: Box<Predicate> },
+    And {
+        children: Vec<Predicate>,
+    },
+    Or {
+        children: Vec<Predicate>,
+    },
+    Not {
+        child: Box<Predicate>,
+    },
 }
 
 pub type Env = BTreeMap<String, Quantity>;
@@ -538,11 +585,18 @@ mod tests {
         let q = apex.eval(&e).unwrap();
         assert_eq!(q.unit, Unit::Mm);
         // 90 + 3750*tan(30) = 90 + 3750*0.57735 = 2255.0...
-        assert!((q.value - 2255.0).abs() < 1.0, "apex ~2255mm, got {}", q.value);
+        assert!(
+            (q.value - 2255.0).abs() < 1.0,
+            "apex ~2255mm, got {}",
+            q.value
+        );
         // dependencies are span, pitch, heel
         assert_eq!(
             apex.dependencies(),
-            ["heel", "pitch", "span"].iter().map(|s| s.to_string()).collect()
+            ["heel", "pitch", "span"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         );
         assert_eq!(apex.dependency_nodes(1).len(), 3);
     }
@@ -582,12 +636,21 @@ mod tests {
             lhs: b(ScalarExpr::param("width")),
             rhs: b(ScalarExpr::param("min_width")),
         };
-        let pass = env(&[("width", Quantity::mm(1200.0)), ("min_width", Quantity::mm(600.0))]);
-        let fail = env(&[("width", Quantity::mm(400.0)), ("min_width", Quantity::mm(600.0))]);
+        let pass = env(&[
+            ("width", Quantity::mm(1200.0)),
+            ("min_width", Quantity::mm(600.0)),
+        ]);
+        let fail = env(&[
+            ("width", Quantity::mm(400.0)),
+            ("min_width", Quantity::mm(600.0)),
+        ]);
         assert!(guard.eval(&pass).unwrap());
         assert!(!guard.eval(&fail).unwrap());
         // mismatched units rejected
-        let bad = env(&[("width", Quantity::mm(1200.0)), ("min_width", Quantity::deg(600.0))]);
+        let bad = env(&[
+            ("width", Quantity::mm(1200.0)),
+            ("min_width", Quantity::deg(600.0)),
+        ]);
         assert!(guard.eval(&bad).is_err());
     }
 
@@ -603,8 +666,18 @@ mod tests {
             then: b(ScalarExpr::param("width")),
             els: b(ScalarExpr::lit(Quantity::mm(1000.0))),
         };
-        assert_eq!(e.eval(&env(&[("width", Quantity::mm(1500.0))])).unwrap().value, 1500.0);
-        assert_eq!(e.eval(&env(&[("width", Quantity::mm(800.0))])).unwrap().value, 1000.0);
+        assert_eq!(
+            e.eval(&env(&[("width", Quantity::mm(1500.0))]))
+                .unwrap()
+                .value,
+            1500.0
+        );
+        assert_eq!(
+            e.eval(&env(&[("width", Quantity::mm(800.0))]))
+                .unwrap()
+                .value,
+            1000.0
+        );
     }
 
     #[test]

@@ -239,6 +239,21 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
 ];
 
+/// Every command id referenced by the menu bar. Used by startup validation to
+/// guarantee menu items only ever drive registered commands.
+pub fn all_menu_command_ids() -> Vec<&'static str> {
+    [
+        FILE_MENU_GROUPS,
+        EDIT_MENU_GROUPS,
+        CREATE_MENU_GROUPS,
+        VIEW_MENU_GROUPS,
+    ]
+    .iter()
+    .flat_map(|groups| groups.iter())
+    .flat_map(|group| group.command_ids.iter().copied())
+    .collect()
+}
+
 pub struct EguiChromePlugin;
 
 /// System set for the egui chrome draw pass.  Other systems that depend on
@@ -260,6 +275,7 @@ impl Plugin for EguiChromePlugin {
             auto_create_primary_context: false,
             ..default()
         })
+        .add_plugins(crate::plugins::outliner::OutlinerPlugin)
         .init_resource::<MenuBarState>()
         .init_resource::<EguiWantsInput>()
         .init_resource::<ToolbarDragState>()
@@ -773,6 +789,8 @@ struct ChromeData<'w, 's> {
     authoring_guidance: Res<'w, crate::plugins::authoring_guidance::AuthoringGuidance>,
     definitions_window_state: ResMut<'w, DefinitionsWindowState>,
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
+    outliner_window_state: ResMut<'w, crate::plugins::outliner::OutlinerWindowState>,
+    outliner_tree: Res<'w, crate::plugins::outliner::OutlinerTree>,
     lighting_window_state: ResMut<'w, LightingWindowState>,
     lighting_settings: ResMut<'w, SceneLightingSettings>,
     light_object_visibility: ResMut<'w, SceneLightObjectVisibility>,
@@ -795,7 +813,7 @@ struct ChromeData<'w, 's> {
     definition_library_registry: Res<'w, DefinitionLibraryRegistry>,
     definition_draft_registry:
         ResMut<'w, crate::plugins::definition_authoring::DefinitionDraftRegistry>,
-    definition_preview_scene: Res<'w, DefinitionPreviewScene>,
+    definition_preview_scene: ResMut<'w, DefinitionPreviewScene>,
     definition_preview_target: ResMut<'w, DefinitionPreviewTarget>,
     pending_preview_click: ResMut<'w, PendingPreviewClick>,
     active_tool: Res<'w, State<ActiveTool>>,
@@ -1037,11 +1055,27 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.pending_command_invocations,
         &data.cursor_world_pos,
         &mut data.status_bar_data,
-        &data.definition_preview_scene,
+        data.definition_preview_scene.as_mut(),
         &mut data.definition_preview_target,
         &mut data.pending_preview_click,
         &data.material_registry,
     );
+    {
+        let selected_now: std::collections::HashSet<Entity> =
+            data.selected_entities.iter().collect();
+        if let Some(action) = crate::plugins::outliner::draw_outliner_window(
+            &ctx,
+            &mut data.outliner_window_state,
+            &data.outliner_tree,
+            &selected_now,
+        ) {
+            crate::plugins::outliner::apply_outliner_selection(
+                &mut data.commands,
+                &selected_now,
+                action,
+            );
+        }
+    }
     let selected_material_assignments: Vec<(u64, Option<MaterialAssignment>)> = data
         .selected_material_assignments
         .iter()
@@ -1177,6 +1211,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.viewport_context_menu,
         selection_count,
         &mut data.pending_command_invocations,
+        &data.command_registry,
     );
 
     let wants_ptr = ctx.wants_pointer_input();
@@ -2804,6 +2839,7 @@ fn draw_viewport_context_menu(
     menu: &mut ViewportContextMenu,
     selection_count: usize,
     pending: &mut PendingCommandInvocations,
+    registry: &CommandRegistry,
 ) {
     if !menu.open {
         return;
@@ -2818,9 +2854,13 @@ fn draw_viewport_context_menu(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(160.0);
 
+                // Labels carry no shortcut text of their own: the chord is read
+                // from the command descriptor so the menu can never disagree
+                // with what the keyboard actually does.
                 macro_rules! item {
                     ($label:expr, $id:expr) => {{
-                        if ui.button($label).clicked() {
+                        let full = append_command_shortcut(registry, $label, $id);
+                        if ui.button(full).clicked() {
                             queue_command_invocation_resource(
                                 pending,
                                 $id.to_string(),
@@ -2830,10 +2870,8 @@ fn draw_viewport_context_menu(
                         }
                     }};
                     (enabled: $enabled:expr, $label:expr, $id:expr) => {{
-                        if ui
-                            .add_enabled($enabled, egui::Button::new($label))
-                            .clicked()
-                        {
+                        let full = append_command_shortcut(registry, $label, $id);
+                        if ui.add_enabled($enabled, egui::Button::new(full)).clicked() {
                             queue_command_invocation_resource(
                                 pending,
                                 $id.to_string(),
@@ -2845,46 +2883,31 @@ fn draw_viewport_context_menu(
                 }
 
                 if has_selection {
-                    item!("Move    G", "modeling.move");
-                    item!("Rotate    R", "modeling.rotate");
-                    item!("Scale    S", "modeling.scale");
+                    item!("Move", "modeling.move");
+                    item!("Rotate", "modeling.rotate");
+                    item!("Scale", "modeling.scale");
                     ui.separator();
                     item!(
                         "Open Definition",
                         "modeling.open_selected_occurrence_definition"
                     );
-                    item!(
-                        "Materials\u{2026}    Cmd+\u{21e7}M",
-                        "materials.toggle_browser"
-                    );
-                    item!(
-                        "Definitions\u{2026}    Cmd+\u{21e7}D",
-                        "modeling.toggle_definitions_browser"
-                    );
+                    item!("Materials\u{2026}", "materials.toggle_browser");
+                    item!("Definitions\u{2026}", "modeling.toggle_definitions_browser");
                     ui.separator();
-                    item!(
-                        "Zoom to Selection    \u{21e7}Home",
-                        "core.zoom_to_selection"
-                    );
+                    item!("Zoom to Selection", "core.zoom_to_selection");
                     ui.separator();
-                    item!("Group    Cmd+G", "modeling.group");
-                    item!("Ungroup    Cmd+\u{21e7}G", "modeling.ungroup");
+                    item!("Group", "modeling.group");
+                    item!("Ungroup", "modeling.ungroup");
                     ui.separator();
-                    item!("Deselect    Esc / Cmd+D", "core.deselect");
-                    item!("Delete    Delete", "core.delete");
+                    item!("Deselect", "core.deselect");
+                    item!("Delete", "core.delete");
                 } else {
-                    item!("Select All    Cmd+A", "core.select_all");
+                    item!("Select All", "core.select_all");
                     ui.separator();
-                    item!(
-                        "Materials\u{2026}    Cmd+\u{21e7}M",
-                        "materials.toggle_browser"
-                    );
-                    item!(
-                        "Definitions\u{2026}    Cmd+\u{21e7}D",
-                        "modeling.toggle_definitions_browser"
-                    );
+                    item!("Materials\u{2026}", "materials.toggle_browser");
+                    item!("Definitions\u{2026}", "modeling.toggle_definitions_browser");
                     ui.separator();
-                    item!("Zoom to Extents    Home", "core.zoom_to_extents");
+                    item!("Zoom to Extents", "core.zoom_to_extents");
                 }
             });
         });
@@ -3745,6 +3768,15 @@ fn toolbar_button_fallback_text(descriptor: &CommandDescriptor) -> String {
         .next()
         .map(|character| character.to_ascii_uppercase().to_string())
         .unwrap_or_else(|| "?".to_string())
+}
+
+/// Append a command's registered shortcut to a menu label so the displayed
+/// chord is always sourced from the command descriptor.
+fn append_command_shortcut(registry: &CommandRegistry, label: &str, id: &str) -> String {
+    match registry.get(id).and_then(|d| d.default_shortcut.as_deref()) {
+        Some(shortcut) => format!("{label}    {shortcut}"),
+        None => label.to_string(),
+    }
 }
 
 fn command_tooltip_text(descriptor: &CommandDescriptor) -> String {

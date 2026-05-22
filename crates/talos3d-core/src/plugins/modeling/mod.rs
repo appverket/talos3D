@@ -464,7 +464,7 @@ impl Plugin for ModelingPlugin {
                     description: "Arm move handles for the current selection".to_string(),
                     category: CommandCategory::Edit,
                     parameters: Some(serde_json::json!({"type":"object"})),
-                    default_shortcut: Some("G".to_string()),
+                    default_shortcut: Some("M".to_string()),
                     icon: Some("icon.move".to_string()),
                     hint: Some("Drag a corner or control point to move".to_string()),
                     requires_selection: true,

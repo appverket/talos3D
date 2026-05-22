@@ -941,13 +941,19 @@ fn evaluate_authoring_expr(
             }
         }
         ExprNode::Sin { value } => Ok(Value::from(
-            evaluate_authoring_expr_f64(value, values)?.to_radians().sin(),
+            evaluate_authoring_expr_f64(value, values)?
+                .to_radians()
+                .sin(),
         )),
         ExprNode::Cos { value } => Ok(Value::from(
-            evaluate_authoring_expr_f64(value, values)?.to_radians().cos(),
+            evaluate_authoring_expr_f64(value, values)?
+                .to_radians()
+                .cos(),
         )),
         ExprNode::Tan { value } => Ok(Value::from(
-            evaluate_authoring_expr_f64(value, values)?.to_radians().tan(),
+            evaluate_authoring_expr_f64(value, values)?
+                .to_radians()
+                .tan(),
         )),
     }
 }

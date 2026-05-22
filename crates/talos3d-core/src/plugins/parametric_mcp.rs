@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::relational::graph::NodeId;
-use crate::relational::registry::{
-    ParametricRegistry, ParametricSnapshot, ParametricStore,
-};
+use crate::relational::registry::{ParametricRegistry, ParametricSnapshot, ParametricStore};
 use crate::relational::transform::{TransformAxis, TransformGesture, TransformOutcome};
 
 // --- request / response DTOs -----------------------------------------------
@@ -88,7 +86,10 @@ pub fn world_list_types(world: &mut World) -> Vec<ParametricTypeInfo> {
         .collect()
 }
 
-pub fn world_create(world: &mut World, req: CreateParametricRequest) -> Result<ParametricSnapshot, String> {
+pub fn world_create(
+    world: &mut World,
+    req: CreateParametricRequest,
+) -> Result<ParametricSnapshot, String> {
     if world
         .get_resource::<ParametricRegistry>()
         .map(|r| r.get(&req.type_id).is_none())
@@ -103,7 +104,10 @@ pub fn world_create(world: &mut World, req: CreateParametricRequest) -> Result<P
     world_inspect(world, InspectParametricRequest { instance_id: id })
 }
 
-pub fn world_inspect(world: &mut World, req: InspectParametricRequest) -> Result<ParametricSnapshot, String> {
+pub fn world_inspect(
+    world: &mut World,
+    req: InspectParametricRequest,
+) -> Result<ParametricSnapshot, String> {
     let reg = world
         .get_resource::<ParametricRegistry>()
         .cloned()
@@ -186,8 +190,8 @@ mod tests {
     use crate::relational::param_expr::{Quantity, ScalarExpr, Unit};
     use crate::relational::registry::ParametricTypeDef;
     use crate::relational::transform::{TransformAxis, TransformBindings, TransformGesture};
-    use std::collections::BTreeMap;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     fn box_type() -> ParametricTypeDef {
         let params = ComponentParams::default()
@@ -234,13 +238,23 @@ mod tests {
         assert_eq!(types.len(), 1);
         assert_eq!(types[0].id, "test.box");
         // create
-        let snap = world_create(w, CreateParametricRequest { type_id: "test.box".into() }).unwrap();
+        let snap = world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "test.box".into(),
+            },
+        )
+        .unwrap();
         let id = snap.instance_id;
         assert_eq!(snap.derived["half"], json!(500.0));
         // edit via set_driver
         let report = world_set_driver(
             w,
-            SetParametricDriverRequest { instance_id: id, name: "width".into(), value: json!(1600.0) },
+            SetParametricDriverRequest {
+                instance_id: id,
+                name: "width".into(),
+                value: json!(1600.0),
+            },
         )
         .unwrap();
         assert!(report.changed_derived.contains_key("half"));
@@ -258,12 +272,30 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(out, TransformOutcome::DriverEdit { .. }));
-        assert_eq!(world_inspect(w, InspectParametricRequest { instance_id: id }).unwrap().derived["half"], json!(1000.0));
+        assert_eq!(
+            world_inspect(w, InspectParametricRequest { instance_id: id })
+                .unwrap()
+                .derived["half"],
+            json!(1000.0)
+        );
         // explain
-        let ex = world_explain(w, ExplainParametricRequest { instance_id: id, param: "half".into() }).unwrap();
+        let ex = world_explain(
+            w,
+            ExplainParametricRequest {
+                instance_id: id,
+                param: "half".into(),
+            },
+        )
+        .unwrap();
         assert!(ex.controlling_drivers.contains(&"width".to_string()));
         // unknown type / instance errors
-        assert!(world_create(w, CreateParametricRequest { type_id: "nope".into() }).is_err());
+        assert!(world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "nope".into()
+            }
+        )
+        .is_err());
         assert!(world_inspect(w, InspectParametricRequest { instance_id: 999 }).is_err());
     }
 }

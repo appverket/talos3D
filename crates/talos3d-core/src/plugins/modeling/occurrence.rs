@@ -389,6 +389,12 @@ pub struct OccurrenceSnapshot {
     pub rotation: Quat,
     /// Non-uniform scale applied on top of the evaluated geometry.
     pub scale: Vec3,
+    /// Cached world-space bounds of generated occurrence parts.
+    ///
+    /// This is capture-time UI/interaction metadata, not persisted model state.
+    /// It lets selection handles and transform previews use the same bounds that
+    /// occurrence selection outlines already draw from.
+    pub generated_bounds: Option<EntityBounds>,
 }
 
 impl OccurrenceSnapshot {
@@ -405,6 +411,7 @@ impl OccurrenceSnapshot {
             offset: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
+            generated_bounds: None,
         }
     }
 }
@@ -427,12 +434,18 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn center(&self) -> Vec3 {
-        self.offset
+        self.generated_bounds
+            .map(|bounds| bounds.center())
+            .unwrap_or(self.offset)
     }
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
         let mut next = self.clone();
         next.offset += delta;
+        if let Some(bounds) = next.generated_bounds.as_mut() {
+            bounds.min += delta;
+            bounds.max += delta;
+        }
         BoxedEntity(Box::new(next))
     }
 
@@ -467,7 +480,7 @@ impl AuthoredEntity for OccurrenceSnapshot {
     }
 
     fn bounds(&self) -> Option<EntityBounds> {
-        None
+        self.generated_bounds
     }
 
     fn to_json(&self) -> Value {
@@ -544,10 +557,14 @@ impl AuthoredEntity for OccurrenceSnapshot {
         })
     }
 
-    fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {}
+    fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
+        if let Some(bounds) = self.generated_bounds {
+            draw_occurrence_bounds(gizmos, bounds, color);
+        }
+    }
 
     fn preview_line_count(&self) -> usize {
-        0
+        self.generated_bounds.map(|_| 12).unwrap_or(0)
     }
 
     fn box_clone(&self) -> BoxedEntity {
@@ -645,7 +662,7 @@ impl AuthoredEntityFactory for OccurrenceFactory {
     fn capture_snapshot(
         &self,
         entity_ref: &bevy::ecs::world::EntityRef,
-        _world: &World,
+        world: &World,
     ) -> Option<BoxedEntity> {
         let element_id = *entity_ref.get::<ElementId>()?;
         let identity = entity_ref.get::<OccurrenceIdentity>()?.clone();
@@ -665,6 +682,7 @@ impl AuthoredEntityFactory for OccurrenceFactory {
                 offset: transform.translation,
                 rotation: transform.rotation,
                 scale: transform.scale,
+                generated_bounds: occurrence_generated_bounds(world, element_id),
             }
             .into(),
         )
@@ -714,6 +732,7 @@ impl AuthoredEntityFactory for OccurrenceFactory {
             offset,
             rotation,
             scale,
+            generated_bounds: None,
         }
         .into())
     }
@@ -795,13 +814,13 @@ fn occurrence_generated_bounds(world: &World, owner: ElementId) -> Option<Entity
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
-    let mut query = world
-        .try_query::<(
-            &GeneratedOccurrencePart,
-            &ProfileExtrusion,
-            Option<&ShapeRotation>,
-        )>()
-        .unwrap();
+    let Some(mut query) = world.try_query::<(
+        &GeneratedOccurrencePart,
+        &ProfileExtrusion,
+        Option<&ShapeRotation>,
+    )>() else {
+        return None;
+    };
     for (generated, extrusion, rotation) in query.iter(world) {
         if generated.owner != owner {
             continue;

@@ -139,7 +139,11 @@ pub fn solve_lock(req: &LockRequest<'_>) -> LockOutcome {
     // so we decide by structure, then invert exactly from two points.
     if is_affine_in(req.expr, req.free_driver) {
         let (s0, s1) = req.spec.bounds.unwrap_or((0.0, 1.0));
-        let (s0, s1) = if (s1 - s0).abs() < 1e-12 { (0.0, 1.0) } else { (s0, s1) };
+        let (s0, s1) = if (s1 - s0).abs() < 1e-12 {
+            (0.0, 1.0)
+        } else {
+            (s0, s1)
+        };
         let (g0, g1) = match (eval_at(req, s0), eval_at(req, s1)) {
             (Ok(a), Ok(b)) => (a, b),
             (Err(e), _) | (_, Err(e)) => {
@@ -246,9 +250,7 @@ fn is_affine_in(expr: &ScalarExpr, free: &str) -> bool {
             !contains(expr, free) && !contains(lo, free) && !contains(hi, free)
         }
         ScalarExpr::If { cond, then, els } => {
-            !cond.dependencies().contains(free)
-                && !contains(then, free)
-                && !contains(els, free)
+            !cond.dependencies().contains(free) && !contains(then, free) && !contains(els, free)
         }
     }
 }
@@ -280,14 +282,22 @@ mod tests {
     // apex = heel + (span/2) * tan(pitch)
     fn apex_expr() -> E {
         E::Add {
-            lhs: b(E::Param { name: "heel".into() }),
+            lhs: b(E::Param {
+                name: "heel".into(),
+            }),
             rhs: b(E::Mul {
                 lhs: b(E::Div {
-                    lhs: b(E::Param { name: "span".into() }),
-                    rhs: b(E::Lit { q: Quantity::num(2.0) }),
+                    lhs: b(E::Param {
+                        name: "span".into(),
+                    }),
+                    rhs: b(E::Lit {
+                        q: Quantity::num(2.0),
+                    }),
                 }),
                 rhs: b(E::Tan {
-                    expr: b(E::Param { name: "pitch".into() }),
+                    expr: b(E::Param {
+                        name: "pitch".into(),
+                    }),
                 }),
             }),
         }
@@ -312,10 +322,16 @@ mod tests {
             extra_free: 0,
         };
         match solve_lock(&req) {
-            LockOutcome::Solved { free_value, method, .. } => {
+            LockOutcome::Solved {
+                free_value, method, ..
+            } => {
                 assert_eq!(method, SolveMethod::SymbolicAffine);
                 // heel 90 + span/2 * tan30 = 2255 -> span ~ 7500
-                assert!((free_value.value - 7500.0).abs() < 1.0, "span ~7500, got {}", free_value.value);
+                assert!(
+                    (free_value.value - 7500.0).abs() < 1.0,
+                    "span ~7500, got {}",
+                    free_value.value
+                );
                 assert_eq!(free_value.unit, Unit::Mm);
             }
             other => panic!("expected solved, got {other:?}"),
@@ -341,11 +357,19 @@ mod tests {
             extra_free: 0,
         };
         match solve_lock(&req) {
-            LockOutcome::Solved { free_value, method, iterations } => {
+            LockOutcome::Solved {
+                free_value,
+                method,
+                iterations,
+            } => {
                 assert_eq!(method, SolveMethod::NumericBisection);
                 assert!(iterations > 0);
                 // pitch that gives apex 2255 with span 7500, heel 90 is ~30deg
-                assert!((free_value.value - 30.0).abs() < 0.2, "pitch ~30, got {}", free_value.value);
+                assert!(
+                    (free_value.value - 30.0).abs() < 0.2,
+                    "pitch ~30, got {}",
+                    free_value.value
+                );
             }
             other => panic!("expected solved, got {other:?}"),
         }

@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::component::{ComponentParams, DriverEditError, DriverPolicy, OccurrenceDrivers, ParamRole};
+use super::component::{
+    ComponentParams, DriverEditError, DriverPolicy, OccurrenceDrivers, ParamRole,
+};
 use super::graph::{DependencyGraph, NodeId};
 
 /// Recompute closure: derived-value map from the current drivers.
@@ -89,7 +91,8 @@ impl ParametricComponent {
     ) -> Result<PropagationReport, DriverEditError> {
         self.drivers.set_driver(&self.params, name, value)?;
         // mark the param dirty; the graph yields the affected (derived) nodes.
-        self.graph.mark_dirty(NodeId::param(self.component, name.to_string()));
+        self.graph
+            .mark_dirty(NodeId::param(self.component, name.to_string()));
         let recomputed = self
             .graph
             .take_dirty_topological()

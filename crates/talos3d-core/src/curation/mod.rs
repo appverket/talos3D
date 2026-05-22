@@ -52,10 +52,9 @@ pub use procedural_session::{
     AuditEvent, CarriedOverObligation, CommitOptions, CommitPolicy, CommitPolicyDe, CommitReport,
     DryRunDispatcher, DryRunProjection, EvalMode, EvalReport, EvalStep, ExportHandle,
     ExportMetadata, ExportTarget, ExportedAuthoringScript, FindingSeverity, InlineExportRequest,
-    ProceduralSession, ProceduralSessionConfig, ProceduralSessionPlugin,
-    ProceduralSessionRegistry, SessionError, SessionFinding, SessionId, SessionObligation,
-    SessionSnapshot, SessionSpec, SessionToolDescriptor, SessionToolRegistry, StageTransition,
-    TaggedCommit, Waiver,
+    ProceduralSession, ProceduralSessionConfig, ProceduralSessionPlugin, ProceduralSessionRegistry,
+    SessionError, SessionFinding, SessionId, SessionObligation, SessionSnapshot, SessionSpec,
+    SessionToolDescriptor, SessionToolRegistry, StageTransition, TaggedCommit, Waiver,
 };
 pub use publication::{evidence_resolution_report, PublicationFinding, PublicationFindingSeverity};
 pub use recipes::{

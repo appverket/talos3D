@@ -308,10 +308,7 @@ impl DependencyGraph {
         if order.len() != dirty.len() {
             // Should be impossible (edges are cycle-checked at insertion), but
             // surface a finding rather than silently dropping nodes.
-            let remaining: Vec<NodeId> = dirty
-                .into_iter()
-                .filter(|n| !order.contains(n))
-                .collect();
+            let remaining: Vec<NodeId> = dirty.into_iter().filter(|n| !order.contains(n)).collect();
             return Err(CycleError { path: remaining });
         }
         Ok(order)
@@ -386,7 +383,8 @@ mod tests {
         // span -> apex -> ridge_height ; pitch -> apex
         g.add_dependency(p(1, "apex"), p(1, "span")).unwrap();
         g.add_dependency(p(1, "apex"), p(1, "pitch")).unwrap();
-        g.add_dependency(p(1, "ridge_height"), p(1, "apex")).unwrap();
+        g.add_dependency(p(1, "ridge_height"), p(1, "apex"))
+            .unwrap();
         g.mark_dirty(p(1, "span"));
         let d: BTreeSet<NodeId> = g.dirty_nodes().into_iter().collect();
         // span + its transitive dependents apex, ridge_height — NOT pitch.
@@ -400,7 +398,8 @@ mod tests {
     fn topological_propagation_orders_inputs_first() {
         let mut g = DependencyGraph::new();
         g.add_dependency(p(1, "apex"), p(1, "span")).unwrap();
-        g.add_dependency(p(1, "ridge_height"), p(1, "apex")).unwrap();
+        g.add_dependency(p(1, "ridge_height"), p(1, "apex"))
+            .unwrap();
         g.mark_dirty(p(1, "span"));
         let order = g.propagate(|_| {}).unwrap();
         let pos = |n: &NodeId| order.iter().position(|x| x == n).unwrap();
@@ -424,7 +423,7 @@ mod tests {
         let mut g = DependencyGraph::new();
         g.add_dependency(p(1, "b"), p(1, "a")).unwrap(); // b depends on a
         g.add_dependency(p(1, "c"), p(1, "b")).unwrap(); // c depends on b
-        // a depends on c would close a -> c -> b -> a
+                                                         // a depends on c would close a -> c -> b -> a
         let err = g.add_dependency(p(1, "a"), p(1, "c")).unwrap_err();
         assert!(err.path.first() == Some(&p(1, "c")));
         assert!(err.path.last() == Some(&p(1, "a")));
@@ -473,7 +472,8 @@ mod tests {
         let build = || {
             let mut g = DependencyGraph::new();
             for i in 0..8u64 {
-                g.add_dependency(p(1, &format!("d{i}")), p(1, "root")).unwrap();
+                g.add_dependency(p(1, &format!("d{i}")), p(1, "root"))
+                    .unwrap();
             }
             g.mark_dirty(p(1, "root"));
             g.propagate(|_| {}).unwrap()

@@ -20,7 +20,6 @@ use crate::{
         commands::{ApplyEntityChangesCommand, CreateEntityCommand},
         cursor::{cursor_viewport_position, CursorWorldPos},
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
-        handles::arm_move_handles,
         identity::ElementId,
         inference::InferenceEngine,
         input_ownership::{InputOwnership, InputPhase, ModalKind},
@@ -64,18 +63,6 @@ impl Plugin for TransformPlugin {
             .add_systems(
                 Update,
                 (
-                    begin_move
-                        .in_set(TransformShortcuts)
-                        .in_set(InputPhase::ToolInput)
-                        .run_if(in_state(ActiveTool::Select)),
-                    begin_rotate
-                        .in_set(TransformShortcuts)
-                        .in_set(InputPhase::ToolInput)
-                        .run_if(in_state(ActiveTool::Select)),
-                    begin_scale
-                        .in_set(TransformShortcuts)
-                        .in_set(InputPhase::ToolInput)
-                        .run_if(in_state(ActiveTool::Select)),
                     activate_pending_transform
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
@@ -216,87 +203,6 @@ pub struct TransformStartOptions {
     pub initial_cursor: Option<Vec3>,
     pub pivot_override: Option<Vec3>,
     pub confirm_on_release: bool,
-}
-
-fn begin_move(world: &mut World) {
-    begin_move_shortcut(world, KeyCode::KeyG);
-}
-
-fn begin_move_shortcut(world: &mut World, key: KeyCode) {
-    if !world.resource::<InputOwnership>().is_idle() {
-        return;
-    }
-
-    if world.resource::<FaceEditContext>().is_active() {
-        return;
-    }
-
-    let keys = world.resource::<ButtonInput<KeyCode>>();
-    let key_pressed = keys.just_pressed(key);
-    let has_modifier = keys.pressed(KeyCode::SuperLeft)
-        || keys.pressed(KeyCode::SuperRight)
-        || keys.pressed(KeyCode::ControlLeft)
-        || keys.pressed(KeyCode::ControlRight)
-        || keys.pressed(KeyCode::AltLeft)
-        || keys.pressed(KeyCode::AltRight);
-    if !key_pressed || has_modifier {
-        return;
-    }
-
-    if world.resource::<TransformState>().is_idle() {
-        let _ = arm_move_handles(world);
-    }
-}
-
-fn begin_rotate(world: &mut World) {
-    begin_transform_shortcut(world, KeyCode::KeyR, TransformMode::Rotating);
-}
-
-fn begin_scale(world: &mut World) {
-    begin_transform_shortcut(world, KeyCode::KeyS, TransformMode::Scaling);
-}
-
-fn begin_transform_shortcut(world: &mut World, key: KeyCode, mode: TransformMode) {
-    if !world.resource::<InputOwnership>().is_idle() {
-        return;
-    }
-
-    // In face edit mode, G is reserved for push/pull — never start a generic move.
-    // This pairs with the `.before(TransformShortcuts)` ordering on push/pull.
-    if key == KeyCode::KeyG && world.resource::<FaceEditContext>().is_active() {
-        return;
-    }
-
-    let keys = world.resource::<ButtonInput<KeyCode>>();
-    let key_pressed = keys.just_pressed(key);
-    let has_modifier = keys.pressed(KeyCode::SuperLeft)
-        || keys.pressed(KeyCode::SuperRight)
-        || keys.pressed(KeyCode::ControlLeft)
-        || keys.pressed(KeyCode::ControlRight)
-        || keys.pressed(KeyCode::AltLeft)
-        || keys.pressed(KeyCode::AltRight);
-    if !key_pressed || has_modifier {
-        return;
-    }
-
-    // Allow switching pending mode even if already pending
-    let state = world.resource::<TransformState>();
-    if state.is_pending() {
-        world.resource_mut::<TransformState>().pending_mode = Some(mode);
-        return;
-    }
-    if !state.is_idle() {
-        return;
-    }
-
-    match start_transform_mode(world, mode) {
-        Ok(()) => {}
-        Err(_) => {
-            // Cursor not over viewport — enter pending state so transform
-            // activates as soon as the cursor enters the viewport.
-            world.resource_mut::<TransformState>().pending_mode = Some(mode);
-        }
-    }
 }
 
 pub fn start_transform_mode(world: &mut World, mode: TransformMode) -> Result<(), String> {
@@ -867,7 +773,10 @@ fn draw_transform_preview(world: &World, mut gizmos: Gizmos) {
     let live_transform_preview = mode != TransformMode::Idle;
 
     for snapshot in preview.after {
-        if live_transform_preview && snapshot.preview_transform().is_some() {
+        if live_transform_preview
+            && snapshot.preview_transform().is_some()
+            && snapshot.type_name() != "occurrence"
+        {
             continue;
         }
         snapshot.draw_preview(&mut gizmos, TRANSFORM_PREVIEW_COLOR);

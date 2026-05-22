@@ -156,11 +156,7 @@ pub struct MemoResult<T> {
     pub reused: usize,
 }
 
-pub fn evaluate_memoized<T, K, KF, F>(
-    nodes: &[NodeId],
-    key_of: KF,
-    eval: F,
-) -> MemoResult<T>
+pub fn evaluate_memoized<T, K, KF, F>(nodes: &[NodeId], key_of: KF, eval: F) -> MemoResult<T>
 where
     T: Clone,
     K: Ord + Clone,
@@ -197,10 +193,14 @@ mod tests {
     fn diamond() -> (DependencyGraph, BTreeSet<NodeId>) {
         // a -> b, a -> c, b -> d, c -> d  (b and c independent => same level)
         let mut g = DependencyGraph::new();
-        g.add_dependency(NodeId::param(1, "b"), NodeId::param(1, "a")).unwrap();
-        g.add_dependency(NodeId::param(1, "c"), NodeId::param(1, "a")).unwrap();
-        g.add_dependency(NodeId::param(1, "d"), NodeId::param(1, "b")).unwrap();
-        g.add_dependency(NodeId::param(1, "d"), NodeId::param(1, "c")).unwrap();
+        g.add_dependency(NodeId::param(1, "b"), NodeId::param(1, "a"))
+            .unwrap();
+        g.add_dependency(NodeId::param(1, "c"), NodeId::param(1, "a"))
+            .unwrap();
+        g.add_dependency(NodeId::param(1, "d"), NodeId::param(1, "b"))
+            .unwrap();
+        g.add_dependency(NodeId::param(1, "d"), NodeId::param(1, "c"))
+            .unwrap();
         let nodes: BTreeSet<NodeId> = ["a", "b", "c", "d"]
             .iter()
             .map(|s| NodeId::param(1, *s))
@@ -213,7 +213,10 @@ mod tests {
         let (g, nodes) = diamond();
         let levels = topological_levels(&g, &nodes).unwrap();
         assert_eq!(levels[0], vec![NodeId::param(1, "a")]);
-        assert_eq!(levels[1], vec![NodeId::param(1, "b"), NodeId::param(1, "c")]);
+        assert_eq!(
+            levels[1],
+            vec![NodeId::param(1, "b"), NodeId::param(1, "c")]
+        );
         assert_eq!(levels[2], vec![NodeId::param(1, "d")]);
     }
 

@@ -164,7 +164,10 @@ pub struct CommandQueueDispatcher<'w, 'e> {
 
 impl<'w, 'e> ToolDispatcher for CommandQueueDispatcher<'w, 'e> {
     fn dispatch(&mut self, call: &ToolCall<'_>) -> Result<Value, ToolDispatchError> {
-        let step_id = self.step_order.pop_front().unwrap_or_else(|| StepId::new("?"));
+        let step_id = self
+            .step_order
+            .pop_front()
+            .unwrap_or_else(|| StepId::new("?"));
 
         if let Some(executor) = self.executor.as_mut() {
             // Real mutation path: the executor turns the step into the
@@ -269,12 +272,8 @@ pub fn world_commit_with_executor<'e>(
             .clone()
     };
 
-    let step_order: std::collections::VecDeque<StepId> = session
-        .script
-        .steps
-        .iter()
-        .map(|s| s.id.clone())
-        .collect();
+    let step_order: std::collections::VecDeque<StepId> =
+        session.script.steps.iter().map(|s| s.id.clone()).collect();
     let oracle = AlwaysPassOracle;
     let result = {
         let mut dispatcher = CommandQueueDispatcher {
@@ -325,10 +324,7 @@ pub struct ProceduralSessionMcpPlugin;
 
 impl Plugin for ProceduralSessionMcpPlugin {
     fn build(&self, app: &mut App) {
-        if !app
-            .world()
-            .contains_resource::<ProceduralSessionRegistry>()
-        {
+        if !app.world().contains_resource::<ProceduralSessionRegistry>() {
             app.add_plugins(ProceduralSessionPlugin);
         }
     }
@@ -347,8 +343,8 @@ mod tests {
 
     use super::*;
     use crate::curation::procedural_session::{
-        FindingSeverity, ProceduralSessionRegistry, SessionFinding,
-        SessionToolDescriptor, SessionToolRegistry, StageTransition,
+        FindingSeverity, ProceduralSessionRegistry, SessionFinding, SessionToolDescriptor,
+        SessionToolRegistry, StageTransition,
     };
     use crate::curation::{McpToolId, MutationScope, StepId};
 
