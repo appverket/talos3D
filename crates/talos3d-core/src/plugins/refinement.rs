@@ -16,7 +16,7 @@
 //! function wired into `run_validation`. A richer scheduling engine with Bevy
 //! change detection and caching will land in PP74.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -438,6 +438,31 @@ pub struct PromoteRefinementRequest {
 pub struct DemoteRefinementRequest {
     pub entity_element_id: u64,
     pub target_state: RefinementState,
+}
+
+/// Explicit target scope for a refinement promotion preview or commit.
+///
+/// The subtree is rooted at a stable coarse handle and contains the root plus
+/// active descendants reachable through `refined_into` relations. Parked branch
+/// exclusion lands in PP-PREF-2; until then every reachable child is active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementSubtree {
+    pub root_element_id: u64,
+    pub active_element_ids: Vec<u64>,
+}
+
+impl RefinementSubtree {
+    pub fn singleton(root_element_id: u64) -> Self {
+        Self {
+            root_element_id,
+            active_element_ids: vec![root_element_id],
+        }
+    }
+
+    pub fn contains(&self, element_id: u64) -> bool {
+        self.active_element_ids.contains(&element_id)
+    }
 }
 
 /// Apply a promotion to the world, queuing history commands for undo/redo.
@@ -1076,6 +1101,42 @@ pub fn query_refinement_of(world: &World, child_eid: ElementId) -> Option<Elemen
     })
 }
 
+/// Resolve the active refinement subtree rooted at `root_eid`.
+///
+/// The result is deterministic: ids are de-duplicated and sorted, while the root
+/// is always present. This is the generic scope that promotion previews expose
+/// for user or agent editing before commit.
+pub fn resolve_refinement_subtree(
+    world: &World,
+    root_eid: ElementId,
+) -> Result<RefinementSubtree, String> {
+    let root_exists = {
+        let mut q = world.try_query::<(&ElementId,)>().unwrap();
+        q.iter(world).any(|(id,)| *id == root_eid)
+    };
+    if !root_exists {
+        return Err(format!("Entity {} not found", root_eid.0));
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    visited.insert(root_eid.0);
+    queue.push_back(root_eid);
+
+    while let Some(parent) = queue.pop_front() {
+        for child in query_refined_into(world, parent) {
+            if visited.insert(child.0) {
+                queue.push_back(child);
+            }
+        }
+    }
+
+    Ok(RefinementSubtree {
+        root_element_id: root_eid.0,
+        active_element_ids: visited.into_iter().collect(),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -1276,5 +1337,46 @@ mod tests {
         let findings =
             validate_declared_state_obligations(1, RefinementState::Schematic, &obligations);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn refinement_subtree_resolves_root_and_active_descendants_deterministically() {
+        let mut world = World::new();
+        world.spawn((ElementId(1),));
+        world.spawn((ElementId(2),));
+        world.spawn((ElementId(3),));
+        world.spawn((
+            ElementId(20),
+            SemanticRelation {
+                source: ElementId(1),
+                target: ElementId(2),
+                relation_type: "unrelated".to_string(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+        world.spawn((
+            ElementId(21),
+            SemanticRelation {
+                source: ElementId(1),
+                target: ElementId(3),
+                relation_type: "refined_into".to_string(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+        world.spawn((
+            ElementId(22),
+            SemanticRelation {
+                source: ElementId(3),
+                target: ElementId(2),
+                relation_type: "refined_into".to_string(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        let subtree = resolve_refinement_subtree(&world, ElementId(1)).unwrap();
+
+        assert_eq!(subtree.root_element_id, 1);
+        assert_eq!(subtree.active_element_ids, vec![1, 2, 3]);
+        assert!(subtree.contains(2));
     }
 }
