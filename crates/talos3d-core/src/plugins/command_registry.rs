@@ -23,8 +23,13 @@ impl Plugin for CommandRegistryPlugin {
             .add_systems(Startup, setup_core_icons)
             .add_systems(
                 Update,
-                (detect_command_shortcuts, execute_pending_commands).chain(),
+                (
+                    crate::plugins::keymap::dispatch_command_shortcuts,
+                    execute_pending_commands,
+                )
+                    .chain(),
             );
+        crate::plugins::keymap::register(app);
         register_core_commands(app);
     }
 }
@@ -82,11 +87,11 @@ fn default_version() -> u32 {
 /// programmatic callers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandResult {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created: Vec<u64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modified: Vec<u64>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleted: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<Value>,
@@ -110,6 +115,10 @@ struct RegisteredCommand {
 pub struct CommandRegistry {
     commands: Vec<RegisteredCommand>,
     index_by_id: HashMap<String, usize>,
+    /// Command IDs that were registered more than once. The first registration
+    /// wins; later ones are rejected and recorded here so startup validation can
+    /// fail fast. Command IDs are required to be globally unique.
+    duplicate_ids: Vec<String>,
 }
 
 impl CommandRegistry {
@@ -124,7 +133,18 @@ impl CommandRegistry {
             .map(|command| &command.descriptor)
     }
 
+    /// IDs that were registered more than once (uniqueness violations).
+    pub fn duplicate_ids(&self) -> &[String] {
+        &self.duplicate_ids
+    }
+
     fn register(&mut self, descriptor: CommandDescriptor, handler: CommandHandler) {
+        if self.index_by_id.contains_key(&descriptor.id) {
+            // Reject the duplicate (first registration is canonical) and record
+            // it; validate_registry turns this into a hard failure.
+            self.duplicate_ids.push(descriptor.id.clone());
+            return;
+        }
         let index = self.commands.len();
         self.index_by_id.insert(descriptor.id.clone(), index);
         self.commands.push(RegisteredCommand {
@@ -657,43 +677,21 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
     }
 }
 
-fn detect_command_shortcuts(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut pending: ResMut<PendingCommandInvocations>,
-    egui_wants_input: Res<crate::plugins::egui_chrome::EguiWantsInput>,
-) {
-    if egui_wants_input.keyboard {
-        return;
-    }
-
-    let primary_modifier = if cfg!(target_os = "macos") {
-        keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
-    } else {
-        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
-    };
-
-    if primary_modifier && keys.just_pressed(KeyCode::KeyA) {
-        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-        if !shift {
-            queue_command_invocation_resource(&mut pending, "core.select_all", Value::Null);
-        }
-    }
-
-    if primary_modifier && keys.just_pressed(KeyCode::KeyD) {
-        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-        if !shift {
-            queue_command_invocation_resource(&mut pending, "core.deselect", Value::Null);
-        }
-    }
-
-    if primary_modifier && keys.just_pressed(KeyCode::KeyG) {
-        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-        if shift {
-            queue_command_invocation_resource(&mut pending, "modeling.ungroup", Value::Null);
-        } else {
-            queue_command_invocation_resource(&mut pending, "modeling.group", Value::Null);
-        }
-    }
+/// Canonical command executor: the single point where a command id is resolved
+/// to its handler and run against the world. Every surface — UI menus/toolbars/
+/// shortcuts (via [`execute_pending_commands`]) and the MCP API (`invoke_command`)
+/// — routes through this function, guaranteeing that the same command produces
+/// the same result regardless of how it was triggered.
+pub fn execute_command(
+    world: &mut World,
+    id: &str,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let handler = world
+        .resource::<CommandRegistry>()
+        .handler_for(id)
+        .ok_or_else(|| format!("Unknown command: {id}"))?;
+    handler(world, parameters)
 }
 
 fn execute_pending_commands(world: &mut World) {
@@ -704,14 +702,7 @@ fn execute_pending_commands(world: &mut World) {
     );
 
     for invocation in invocations {
-        let handler = {
-            let registry = world.resource::<CommandRegistry>();
-            registry.handler_for(&invocation.id)
-        };
-        let result = handler
-            .ok_or_else(|| format!("Unknown command: {}", invocation.id))
-            .and_then(|handler| handler(world, &invocation.parameters));
-        if let Err(error) = result {
+        if let Err(error) = execute_command(world, &invocation.id, &invocation.parameters) {
             if let Some(mut status_bar_data) =
                 world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
             {
@@ -1011,6 +1002,107 @@ mod tests {
         queue_command_invocation(app.world_mut(), "core.clear_pivot", serde_json::json!({}));
         app.update();
         assert_eq!(app.world().resource::<PivotPoint>().position, None);
+    }
+
+    fn minimal_descriptor(id: &str) -> CommandDescriptor {
+        CommandDescriptor {
+            id: id.to_string(),
+            label: id.to_string(),
+            description: String::new(),
+            category: CommandCategory::Edit,
+            parameters: None,
+            version: 1,
+            default_shortcut: None,
+            icon: None,
+            hint: None,
+            requires_selection: false,
+            show_in_menu: false,
+            activates_tool: None,
+            capability_id: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_command_ids_are_rejected_and_recorded() {
+        let mut registry = CommandRegistry::default();
+        registry.register(minimal_descriptor("dup"), execute_noop);
+        registry.register(minimal_descriptor("dup"), execute_noop);
+
+        // First registration is canonical; the duplicate is dropped but recorded.
+        assert_eq!(registry.commands().count(), 1);
+        assert!(registry.get("dup").is_some());
+        assert_eq!(registry.duplicate_ids(), &["dup".to_string()]);
+    }
+
+    #[test]
+    fn ui_and_api_paths_execute_the_same_handler() {
+        // The MCP `invoke_command` path calls `execute_command` directly; the UI
+        // queues an invocation that `execute_pending_commands` runs through the
+        // same `execute_command`. Both must produce identical world state.
+        use crate::plugins::transform::PivotPoint;
+
+        fn run(via_api: bool) -> Option<Vec3> {
+            let mut app = App::new();
+            app.add_plugins(CommandRegistryPlugin)
+                .init_resource::<Assets<Image>>()
+                .init_resource::<ButtonInput<KeyCode>>()
+                .insert_resource(crate::plugins::egui_chrome::EguiWantsInput::default())
+                .insert_resource(PivotPoint::default())
+                .insert_resource(StatusBarData::default());
+            app.world_mut().spawn(Selected);
+            let params = serde_json::json!({"x": 4.0, "y": 5.0, "z": 6.0});
+            if via_api {
+                execute_command(app.world_mut(), "core.set_pivot", &params).unwrap();
+            } else {
+                queue_command_invocation(app.world_mut(), "core.set_pivot", params);
+                app.update();
+            }
+            app.world().resource::<PivotPoint>().position
+        }
+
+        let api = run(true);
+        let ui = run(false);
+        assert_eq!(api, Some(Vec3::new(4.0, 5.0, 6.0)));
+        assert_eq!(api, ui);
+    }
+
+    #[test]
+    fn reference_validation_passes_for_registered_commands() {
+        use crate::plugins::toolbar::{
+            ToolbarDescriptor, ToolbarDock, ToolbarRegistry, ToolbarSection,
+        };
+        let mut app = App::new();
+        app.add_plugins(CommandRegistryPlugin);
+        let registry = app.world().resource::<CommandRegistry>();
+
+        // A toolbar/menu that only references commands CommandRegistryPlugin
+        // registers must validate clean; an unknown id must be flagged.
+        let mut toolbars = ToolbarRegistry::default();
+        toolbars.register(ToolbarDescriptor {
+            id: "t".to_string(),
+            label: "t".to_string(),
+            default_dock: ToolbarDock::Top,
+            default_visible: true,
+            sections: vec![ToolbarSection {
+                label: "s".to_string(),
+                command_ids: vec![
+                    "core.undo".to_string(),
+                    "core.redo".to_string(),
+                    "core.delete".to_string(),
+                ],
+            }],
+        });
+        assert!(crate::plugins::keymap::reference_problems(
+            registry,
+            &toolbars,
+            &["core.select_all"]
+        )
+        .is_empty());
+        assert_eq!(
+            crate::plugins::keymap::reference_problems(registry, &toolbars, &["does.not_exist"])
+                .len(),
+            1
+        );
     }
 
     #[test]

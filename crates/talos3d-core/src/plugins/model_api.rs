@@ -16,6 +16,10 @@ use crate::curation::MaterialSpecBody;
 #[cfg(feature = "model-api")]
 use crate::plugins::authoring_guidance::AuthoringGuidance;
 #[cfg(feature = "model-api")]
+use crate::plugins::command_registry::{
+    CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
+};
+#[cfg(feature = "model-api")]
 use crate::plugins::hosting_contracts::{
     HostAffectedRegion, HostingCheckId, HostingCheckStatus, HostingContractKindId,
     HostingValidationCheck, HostingValidationRequest, HostingValidationResult,
@@ -95,6 +99,17 @@ use tokio::time::{sleep, Duration};
 pub struct ModelApiPlugin;
 
 #[cfg(feature = "model-api")]
+const CMD_MODEL_API_CREATE_ENTITY: &str = "modeling.create_entity_direct";
+#[cfg(feature = "model-api")]
+const CMD_MODEL_API_CREATE_BOX: &str = "modeling.create_box_direct";
+#[cfg(feature = "model-api")]
+const CMD_MODEL_API_DELETE_ENTITIES: &str = "core.delete_entities";
+#[cfg(feature = "model-api")]
+const CMD_MODEL_API_TRANSFORM_ENTITIES: &str = "modeling.transform_entities";
+#[cfg(feature = "model-api")]
+const CMD_MODEL_API_SET_ENTITY_PROPERTY: &str = "core.set_entity_property";
+
+#[cfg(feature = "model-api")]
 impl Plugin for ModelApiPlugin {
     fn build(&self, app: &mut App) {
         let (runtime_info, http_listener) = match resolve_model_api_runtime() {
@@ -116,18 +131,140 @@ impl Plugin for ModelApiPlugin {
         // ParametricStore) exists so the `parametric.*` tools have resources
         // to operate on. Idempotent — domain plugins populate the registry.
         app.add_plugins(crate::plugins::parametric_mcp::ParametricMcpPlugin);
+        // Live UX automation enters through Bevy's input messages, not model
+        // mutation APIs, so agents can verify the same viewport paths users
+        // exercise with pointer and keyboard input.
+        app.add_plugins(crate::plugins::ux_harness::UxHarnessPlugin);
+        // Register agent-grade direct mutation primitives as hidden commands.
+        // The public low-level MCP mutation tools call these commands and
+        // return CommandResult; normal UI surfaces stay on interactive commands.
+        register_model_api_primitive_commands(app);
         // Register the Model API tools a session may commit, so `eval`
         // accepts them and commit can route them to real geometry.
         {
-            let mut session_tools = app
-                .world_mut()
-                .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
+            let mut session_tools =
+                app.world_mut()
+                    .resource_mut::<crate::curation::procedural_session::SessionToolRegistry>();
             register_model_api_session_tools(&mut session_tools);
         }
         app.add_systems(Update, poll_model_api_requests.before(HistorySet::Queue));
         app.add_systems(Startup, annotate_window_title_with_model_api_instance);
         spawn_model_api_server(sender, runtime_info, http_listener);
     }
+}
+
+#[cfg(feature = "model-api")]
+fn register_model_api_primitive_commands(app: &mut App) {
+    fn hidden_command(
+        id: &str,
+        label: &str,
+        description: &str,
+        category: CommandCategory,
+        parameters: Value,
+    ) -> CommandDescriptor {
+        CommandDescriptor {
+            id: id.to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
+            category,
+            parameters: Some(parameters),
+            default_shortcut: None,
+            icon: None,
+            hint: None,
+            requires_selection: false,
+            show_in_menu: false,
+            version: 1,
+            activates_tool: None,
+            capability_id: Some("model-api".to_string()),
+        }
+    }
+
+    app.register_command(
+        hidden_command(
+            CMD_MODEL_API_CREATE_ENTITY,
+            "Create Entity Direct",
+            "Create an authored entity from a typed JSON payload.",
+            CommandCategory::Create,
+            json!({
+                "type": "object",
+                "required": ["type"],
+                "additionalProperties": true
+            }),
+        ),
+        execute_model_api_create_entity_command,
+    )
+    .register_command(
+        hidden_command(
+            CMD_MODEL_API_CREATE_BOX,
+            "Create Box Direct",
+            "Create a box from explicit dimensions and transform values.",
+            CommandCategory::Create,
+            json!({
+                "type": "object",
+                "properties": {
+                    "center": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                    "centre": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                    "half_extents": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                    "size": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                    "rotation": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}
+                }
+            }),
+        ),
+        execute_model_api_create_box_command,
+    )
+    .register_command(
+        hidden_command(
+            CMD_MODEL_API_DELETE_ENTITIES,
+            "Delete Entities Direct",
+            "Delete explicit authored entities by element id.",
+            CommandCategory::Edit,
+            json!({
+                "type": "object",
+                "required": ["element_ids"],
+                "properties": {
+                    "element_ids": {"type": "array", "items": {"type": "integer"}}
+                }
+            }),
+        ),
+        execute_model_api_delete_entities_command,
+    )
+    .register_command(
+        hidden_command(
+            CMD_MODEL_API_TRANSFORM_ENTITIES,
+            "Transform Entities Direct",
+            "Apply an explicit move, rotate, or scale operation to authored entities.",
+            CommandCategory::Edit,
+            json!({
+                "type": "object",
+                "required": ["element_ids", "operation", "axis", "value"],
+                "properties": {
+                    "element_ids": {"type": "array", "items": {"type": "integer"}},
+                    "operation": {"type": "string"},
+                    "axis": {"type": ["string", "null"]},
+                    "value": {}
+                }
+            }),
+        ),
+        execute_model_api_transform_entities_command,
+    )
+    .register_command(
+        hidden_command(
+            CMD_MODEL_API_SET_ENTITY_PROPERTY,
+            "Set Entity Property Direct",
+            "Set one JSON-authored property on an explicit entity.",
+            CommandCategory::Edit,
+            json!({
+                "type": "object",
+                "required": ["element_id", "property_name", "value"],
+                "properties": {
+                    "element_id": {"type": "integer"},
+                    "property_name": {"type": "string"},
+                    "value": {}
+                }
+            }),
+        ),
+        execute_model_api_set_entity_property_command,
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -1494,33 +1631,16 @@ enum ModelApiRequest {
         response: oneshot::Sender<Option<EntityDetails>>,
     },
     ModelSummary(oneshot::Sender<ModelSummary>),
+    OutlineTree(oneshot::Sender<Value>),
     ListImporters(oneshot::Sender<Vec<ImporterDescriptor>>),
     CreateEntity {
         json: Value,
-        response: oneshot::Sender<ApiResult<u64>>,
-    },
-    CreateBox {
-        request: CreateBoxRequest,
         response: oneshot::Sender<ApiResult<u64>>,
     },
     ImportFile {
         path: String,
         format_hint: Option<String>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
-    },
-    DeleteEntities {
-        element_ids: Vec<u64>,
-        response: oneshot::Sender<ApiResult<usize>>,
-    },
-    Transform {
-        request: TransformToolRequest,
-        response: oneshot::Sender<ApiResult<Vec<Value>>>,
-    },
-    SetProperty {
-        element_id: u64,
-        property_name: String,
-        value: Value,
-        response: oneshot::Sender<ApiResult<Value>>,
     },
     ListHandles {
         element_id: u64,
@@ -1764,6 +1884,26 @@ enum ModelApiRequest {
     SetSelection {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
+    },
+    // --- Live UX harness ---
+    UxObserve {
+        response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxHarnessSnapshot>>,
+    },
+    UxMovePointer {
+        request: crate::plugins::ux_harness::UxPointerMoveRequest,
+        response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxInputResult>>,
+    },
+    UxClick {
+        request: crate::plugins::ux_harness::UxClickRequest,
+        response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxInputResult>>,
+    },
+    UxDrag {
+        request: crate::plugins::ux_harness::UxDragRequest,
+        response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxInputResult>>,
+    },
+    UxPressKey {
+        request: crate::plugins::ux_harness::UxPressKeyRequest,
+        response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxInputResult>>,
     },
     AlignPreview {
         request: AlignRequest,
@@ -2222,9 +2362,8 @@ enum ModelApiRequest {
     },
     ProceduralSessionEval {
         request: crate::plugins::procedural_session_mcp::SessionEvalRequest,
-        response: oneshot::Sender<
-            Result<crate::curation::EvalReport, crate::curation::SessionError>,
-        >,
+        response:
+            oneshot::Sender<Result<crate::curation::EvalReport, crate::curation::SessionError>>,
     },
     ProceduralSessionSnapshot {
         request: crate::plugins::procedural_session_mcp::SessionSnapshotRequest,
@@ -2234,15 +2373,13 @@ enum ModelApiRequest {
     },
     ProceduralSessionCommit {
         request: crate::plugins::procedural_session_mcp::SessionCommitRequest,
-        response: oneshot::Sender<
-            Result<crate::curation::CommitReport, crate::curation::SessionError>,
-        >,
+        response:
+            oneshot::Sender<Result<crate::curation::CommitReport, crate::curation::SessionError>>,
     },
     ProceduralSessionExport {
         request: crate::plugins::procedural_session_mcp::SessionExportRequest,
-        response: oneshot::Sender<
-            Result<crate::curation::ExportHandle, crate::curation::SessionError>,
-        >,
+        response:
+            oneshot::Sender<Result<crate::curation::ExportHandle, crate::curation::SessionError>>,
     },
     // --- Parametric components (RELATIONAL_PARAMETRIC_SUBSTRATE, PP-RPS-7 UX) ---
     ParametricListTypes {
@@ -2266,8 +2403,9 @@ enum ModelApiRequest {
     },
     ParametricExplain {
         request: crate::plugins::parametric_mcp::ExplainParametricRequest,
-        response:
-            oneshot::Sender<Result<crate::plugins::parametric_mcp::ExplainParametricResponse, String>>,
+        response: oneshot::Sender<
+            Result<crate::plugins::parametric_mcp::ExplainParametricResponse, String>,
+        >,
     },
 }
 
@@ -2318,6 +2456,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::ModelSummary(response) => {
             let _ = response.send(model_summary(world));
         }
+        ModelApiRequest::OutlineTree(response) => {
+            let _ = response.send(crate::plugins::outliner::outline_tree_json(world));
+        }
         ModelApiRequest::ListImporters(response) => {
             let importers = world.resource::<ImportRegistry>().list_importers();
             let _ = response.send(importers);
@@ -2325,37 +2466,12 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         ModelApiRequest::CreateEntity { json, response } => {
             let _ = response.send(handle_create_entity(world, json));
         }
-        ModelApiRequest::CreateBox { request, response } => {
-            let _ = response.send(handle_create_box(world, request));
-        }
         ModelApiRequest::ImportFile {
             path,
             format_hint,
             response,
         } => {
             let _ = response.send(handle_import_file(world, &path, format_hint.as_deref()));
-        }
-        ModelApiRequest::DeleteEntities {
-            element_ids,
-            response,
-        } => {
-            let _ = response.send(handle_delete_entities(world, element_ids));
-        }
-        ModelApiRequest::Transform { request, response } => {
-            let _ = response.send(handle_transform(world, request));
-        }
-        ModelApiRequest::SetProperty {
-            element_id,
-            property_name,
-            value,
-            response,
-        } => {
-            let _ = response.send(handle_set_property(
-                world,
-                element_id,
-                &property_name,
-                value,
-            ));
         }
         ModelApiRequest::ListHandles {
             element_id,
@@ -2678,6 +2794,26 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         } => {
             let _ = response.send(handle_set_selection(world, element_ids));
         }
+        // --- Live UX harness ---
+        ModelApiRequest::UxObserve { response } => {
+            let _ = response.send(crate::plugins::ux_harness::observe_ux(world));
+        }
+        ModelApiRequest::UxMovePointer { request, response } => {
+            let _ = response.send(crate::plugins::ux_harness::enqueue_pointer_move(
+                world, request,
+            ));
+        }
+        ModelApiRequest::UxClick { request, response } => {
+            let _ = response.send(crate::plugins::ux_harness::enqueue_click(world, request));
+        }
+        ModelApiRequest::UxDrag { request, response } => {
+            let _ = response.send(crate::plugins::ux_harness::enqueue_drag(world, request));
+        }
+        ModelApiRequest::UxPressKey { request, response } => {
+            let _ = response.send(crate::plugins::ux_harness::enqueue_press_key(
+                world, request,
+            ));
+        }
         ModelApiRequest::AlignPreview { request, response } => {
             let _ = response.send(handle_align_preview(world, request));
         }
@@ -2773,7 +2909,10 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         } => {
             let _ = response.send(handle_list_assembly_members(world, element_id));
         }
-        ModelApiRequest::ListDefinitions { include_internal, response } => {
+        ModelApiRequest::ListDefinitions {
+            include_internal,
+            response,
+        } => {
             let _ = response.send(handle_list_definitions_filtered(world, include_internal));
         }
         ModelApiRequest::GetDefinition {
@@ -3705,6 +3844,16 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())
     }
 
+    async fn request_outline_tree(&self) -> Result<Value, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::OutlineTree(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
     async fn request_list_importers(&self) -> Result<Vec<ImporterDescriptor>, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -3725,16 +3874,6 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
-    async fn request_create_box(&self, request: CreateBoxRequest) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateBox { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
-    }
-
     async fn request_import_file(
         &self,
         path: String,
@@ -3745,49 +3884,6 @@ impl ModelApiServer {
             .send(ModelApiRequest::ImportFile {
                 path,
                 format_hint,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
-    }
-
-    async fn request_delete_entities(&self, element_ids: Vec<u64>) -> ApiResult<usize> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DeleteEntities {
-                element_ids,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
-    }
-
-    async fn request_transform(&self, request: TransformToolRequest) -> ApiResult<Vec<Value>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::Transform { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
-    }
-
-    async fn request_set_property(
-        &self,
-        element_id: u64,
-        property_name: String,
-        value: Value,
-    ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetProperty {
-                element_id,
-                property_name,
-                value,
                 response,
             })
             .map_err(|_| "model API request channel closed".to_string())?;
@@ -4798,6 +4894,68 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_ux_observe(&self) -> ApiResult<crate::plugins::ux_harness::UxHarnessSnapshot> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UxObserve { response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_ux_move_pointer(
+        &self,
+        request: crate::plugins::ux_harness::UxPointerMoveRequest,
+    ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UxMovePointer { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_ux_click(
+        &self,
+        request: crate::plugins::ux_harness::UxClickRequest,
+    ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UxClick { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_ux_drag(
+        &self,
+        request: crate::plugins::ux_harness::UxDragRequest,
+    ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UxDrag { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_ux_press_key(
+        &self,
+        request: crate::plugins::ux_harness::UxPressKeyRequest,
+    ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UxPressKey { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_align_preview(
         &self,
         request: AlignRequest,
@@ -5594,7 +5752,10 @@ impl ModelApiServer {
     ) -> Result<Vec<DefinitionEntry>, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::ListDefinitions { include_internal, response })
+            .send(ModelApiRequest::ListDefinitions {
+                include_internal,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
@@ -7766,6 +7927,18 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "outline_tree",
+        description = "Get the model's aggregation structure as a nested tree (the same structure shown in the Outliner panel). Returns `{\"roots\":[{element_id,label,kind,children}]}` where `kind` is one of group/occurrence/part/leaf; groups nest their members and compound occurrences nest their generated parts."
+    )]
+    async fn outline_tree_tool(&self) -> Result<CallToolResult, McpError> {
+        let outline = self
+            .request_outline_tree()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(outline)
+    }
+
+    #[tool(
         name = "list_importers",
         description = "List all registered file importers."
     )]
@@ -7779,32 +7952,34 @@ impl ModelApiServer {
 
     #[tool(
         name = "create_entity",
-        description = "Create an authored entity from a typed JSON object."
+        description = "Create an authored entity from a typed JSON object through the command pipeline. Returns CommandResult."
     )]
     async fn create_entity_tool(
         &self,
         Parameters(json): Parameters<Value>,
     ) -> Result<CallToolResult, McpError> {
-        let element_id = self
-            .request_create_entity(json)
+        let result = self
+            .request_invoke_command(CMD_MODEL_API_CREATE_ENTITY.to_string(), json)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(element_id)
+        json_tool_result(result)
     }
 
     #[tool(
         name = "create_box",
-        description = "Create a box primitive directly. Accepts `center` (or `centre`) plus either `size` or `half_extents`, with optional quaternion `rotation`."
+        description = "Create a box primitive through the command pipeline. Accepts `center` (or `centre`) plus either `size` or `half_extents`, with optional quaternion `rotation`. Returns CommandResult."
     )]
     async fn create_box_tool(
         &self,
         Parameters(params): Parameters<CreateBoxRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let element_id = self
-            .request_create_box(params)
+        let parameters = serde_json::to_value(params)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let result = self
+            .request_invoke_command(CMD_MODEL_API_CREATE_BOX.to_string(), parameters)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(element_id)
+        json_tool_result(result)
     }
 
     #[tool(
@@ -7824,62 +7999,70 @@ impl ModelApiServer {
 
     #[tool(
         name = "delete_entities",
-        description = "Delete one or more entities by element ID."
+        description = "Delete one or more entities by element ID through the command pipeline. Returns CommandResult."
     )]
     async fn delete_entities_tool(
         &self,
         Parameters(params): Parameters<DeleteEntitiesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let deleted_count = self
-            .request_delete_entities(params.element_ids)
+        let parameters = serde_json::to_value(params)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let result = self
+            .request_invoke_command(CMD_MODEL_API_DELETE_ENTITIES.to_string(), parameters)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(deleted_count)
+        json_tool_result(result)
     }
 
     #[tool(
         name = "transform",
-        description = "Move, rotate, or scale entities through the command pipeline."
+        description = "Move, rotate, or scale entities through the command pipeline. Returns CommandResult."
     )]
     async fn transform_tool(
         &self,
         Parameters(params): Parameters<TransformToolRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshots = self
-            .request_transform(params)
+        let parameters = serde_json::to_value(params)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let result = self
+            .request_invoke_command(CMD_MODEL_API_TRANSFORM_ENTITIES.to_string(), parameters)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(snapshots)
+        json_tool_result(result)
     }
 
     #[tool(
         name = "set_property",
-        description = "Set a single authored property on an entity."
+        description = "Set a single authored property on an entity through the command pipeline. Returns CommandResult."
     )]
     async fn set_property_tool(
         &self,
         Parameters(params): Parameters<SetPropertyRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self
-            .request_set_property(params.element_id, params.property_name, params.value)
+        let parameters = serde_json::to_value(params)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let result = self
+            .request_invoke_command(CMD_MODEL_API_SET_ENTITY_PROPERTY.to_string(), parameters)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(snapshot)
+        json_tool_result(result)
     }
 
     #[tool(
         name = "set_entity_property",
-        description = "Set a single authored property on an entity and return the updated snapshot."
+        description = "Set a single authored property on an entity through the command pipeline. Returns CommandResult."
     )]
     async fn set_entity_property_tool(
         &self,
         Parameters(params): Parameters<SetPropertyRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self
-            .request_set_property(params.element_id, params.property_name, params.value)
+        let parameters = serde_json::to_value(params)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let result = self
+            .request_invoke_command(CMD_MODEL_API_SET_ENTITY_PROPERTY.to_string(), parameters)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(snapshot)
+        json_tool_result(result)
     }
 
     #[tool(
@@ -9087,6 +9270,78 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(selection)
+    }
+
+    #[tool(
+        name = "ux_observe",
+        description = "Observe the live UX state: pending injected input steps, selected element IDs, primary window/cursor coordinates, and projected screen bounds for user-facing model entities."
+    )]
+    async fn ux_observe_tool(&self) -> Result<CallToolResult, McpError> {
+        let snapshot = self
+            .request_ux_observe()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(snapshot)
+    }
+
+    #[tool(
+        name = "ux_move_pointer",
+        description = "Queue a pointer move through the live Bevy input path using primary-window logical pixel coordinates."
+    )]
+    async fn ux_move_pointer_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::ux_harness::UxPointerMoveRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_ux_move_pointer(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "ux_click",
+        description = "Queue a pointer move, mouse press, and mouse release through the live Bevy input path. Coordinates are primary-window logical pixels."
+    )]
+    async fn ux_click_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::ux_harness::UxClickRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_ux_click(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "ux_drag",
+        description = "Queue a live pointer drag through the Bevy input path. Use primary-window logical pixel coordinates, optional button left/right/middle, and optional step count."
+    )]
+    async fn ux_drag_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::ux_harness::UxDragRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_ux_drag(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "ux_press_key",
+        description = "Queue a key press and release through the live Bevy input path. Supports letters, KeyG-style names, Escape, Delete, Backspace, Enter, ShiftLeft, and ShiftRight."
+    )]
+    async fn ux_press_key_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::ux_harness::UxPressKeyRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_ux_press_key(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
     }
 
     #[tool(
@@ -10545,7 +10800,9 @@ impl ModelApiServer {
     )]
     async fn procedural_session_create_tool(
         &self,
-        Parameters(params): Parameters<crate::plugins::procedural_session_mcp::SessionCreateRequest>,
+        Parameters(params): Parameters<
+            crate::plugins::procedural_session_mcp::SessionCreateRequest,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let response = self
             .request_procedural_session_create(params)
@@ -10592,7 +10849,9 @@ impl ModelApiServer {
     )]
     async fn procedural_session_commit_tool(
         &self,
-        Parameters(params): Parameters<crate::plugins::procedural_session_mcp::SessionCommitRequest>,
+        Parameters(params): Parameters<
+            crate::plugins::procedural_session_mcp::SessionCommitRequest,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let report = self
             .request_procedural_session_commit(params)
@@ -10607,7 +10866,9 @@ impl ModelApiServer {
     )]
     async fn procedural_session_export_tool(
         &self,
-        Parameters(params): Parameters<crate::plugins::procedural_session_mcp::SessionExportRequest>,
+        Parameters(params): Parameters<
+            crate::plugins::procedural_session_mcp::SessionExportRequest,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let handle = self
             .request_procedural_session_export(params)
@@ -13545,13 +13806,12 @@ fn handle_invoke_command(
     command_id: &str,
     parameters: Value,
 ) -> Result<Value, String> {
-    use crate::plugins::command_registry::{CommandRegistry, CommandResult};
+    use crate::plugins::command_registry::{execute_command, CommandResult};
 
-    let handler = world
-        .resource::<CommandRegistry>()
-        .handler_for(command_id)
-        .ok_or_else(|| format!("Unknown command: {command_id}"))?;
-    let result: CommandResult = handler(world, &parameters)?;
+    // Route through the same canonical executor the UI uses, so an MCP
+    // `invoke_command` is equivalent to triggering the command from a menu,
+    // toolbar or shortcut.
+    let result: CommandResult = execute_command(world, command_id, &parameters)?;
     flush_model_api_write_pipeline(world);
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
@@ -14768,7 +15028,10 @@ pub fn handle_list_definitions(world: &World) -> Vec<DefinitionEntry> {
 }
 
 #[cfg(feature = "model-api")]
-pub fn handle_list_definitions_filtered(world: &World, include_internal: bool) -> Vec<DefinitionEntry> {
+pub fn handle_list_definitions_filtered(
+    world: &World,
+    include_internal: bool,
+) -> Vec<DefinitionEntry> {
     use crate::plugins::modeling::definition::{DefinitionRegistry, DefinitionVisibility};
     let registry = world.resource::<DefinitionRegistry>();
     registry
@@ -15950,6 +16213,25 @@ fn opening_id_from_occurrence(world: &World, occurrence_id: ElementId) -> Option
 }
 
 #[cfg(feature = "model-api")]
+fn hosted_occurrence_placement_center(world: &World, occurrence_id: ElementId) -> Option<Vec3> {
+    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+
+    let mut query = world.try_query::<EntityRef>()?;
+    let entity_ref = query
+        .iter(world)
+        .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(occurrence_id))?;
+    entity_ref
+        .get::<Transform>()
+        .map(|transform| transform.translation)
+        .or_else(|| {
+            entity_ref
+                .get::<OccurrenceIdentity>()
+                .and_then(|identity| identity.hosting.as_ref())
+                .and_then(|hosting| hosting.anchor_position("opening.center"))
+        })
+}
+
+#[cfg(feature = "model-api")]
 fn wall_opening_validation_result(
     contract_kind: HostingContractKindId,
     host_element_id: ElementId,
@@ -17088,8 +17370,11 @@ pub fn handle_occurrence_validate_host_fit(
             validation_request.hosted_element_id,
             capture_entity_snapshot(world, validation_request.host_element_id),
             opening_id.and_then(|id| capture_entity_snapshot(world, id)),
-            capture_entity_snapshot(world, validation_request.hosted_element_id)
-                .map(|snapshot| snapshot.center()),
+            hosted_occurrence_placement_center(world, validation_request.hosted_element_id)
+                .or_else(|| {
+                    capture_entity_snapshot(world, validation_request.hosted_element_id)
+                        .map(|snapshot| snapshot.center())
+                }),
         ));
     }
 
@@ -17723,9 +18008,8 @@ impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiSte
         let to_err = |code: &str, e: String| ToolDispatchError::new(code, e);
         match tool.as_str() {
             "create_box" => {
-                let request: CreateBoxRequest =
-                    serde_json::from_value(Value::Object(args.clone()))
-                        .map_err(|e| to_err("invalid_args", e.to_string()))?;
+                let request: CreateBoxRequest = serde_json::from_value(Value::Object(args.clone()))
+                    .map_err(|e| to_err("invalid_args", e.to_string()))?;
                 let id = handle_create_box(world, request)
                     .map_err(|e| to_err("create_box_failed", e))?;
                 Ok(serde_json::json!({ "element_id": id }))
@@ -17787,6 +18071,86 @@ pub fn register_model_api_session_tools(
         creates_obligations: Vec::new(),
         satisfies_obligation_ids: Vec::new(),
     });
+}
+
+#[cfg(feature = "model-api")]
+fn execute_model_api_create_entity_command(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let element_id = handle_create_entity(world, parameters.clone())?;
+    Ok(CommandResult {
+        created: vec![element_id],
+        output: Some(json!({ "element_id": element_id })),
+        ..CommandResult::default()
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn execute_model_api_create_box_command(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let request: CreateBoxRequest =
+        serde_json::from_value(parameters.clone()).map_err(|e| e.to_string())?;
+    let element_id = handle_create_box(world, request)?;
+    Ok(CommandResult {
+        created: vec![element_id],
+        output: Some(json!({ "element_id": element_id })),
+        ..CommandResult::default()
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn execute_model_api_delete_entities_command(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let request: DeleteEntitiesRequest =
+        serde_json::from_value(parameters.clone()).map_err(|e| e.to_string())?;
+    let requested_ids = request.element_ids.clone();
+    let deleted_count = handle_delete_entities(world, request.element_ids)?;
+    Ok(CommandResult {
+        deleted: requested_ids,
+        output: Some(json!({ "deleted_count": deleted_count })),
+        ..CommandResult::default()
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn execute_model_api_transform_entities_command(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let request: TransformToolRequest =
+        serde_json::from_value(parameters.clone()).map_err(|e| e.to_string())?;
+    let modified = request.element_ids.clone();
+    let snapshots = handle_transform(world, request)?;
+    Ok(CommandResult {
+        modified,
+        output: Some(Value::Array(snapshots)),
+        ..CommandResult::default()
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn execute_model_api_set_entity_property_command(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let request: SetPropertyRequest =
+        serde_json::from_value(parameters.clone()).map_err(|e| e.to_string())?;
+    let updated = handle_set_property(
+        world,
+        request.element_id,
+        &request.property_name,
+        request.value,
+    )?;
+    Ok(CommandResult {
+        modified: vec![request.element_id],
+        output: Some(updated),
+        ..CommandResult::default()
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -20209,6 +20573,8 @@ mod tests {
     #[cfg(feature = "model-api")]
     use crate::importers::obj::ObjImporter;
     #[cfg(feature = "model-api")]
+    use crate::plugins::command_registry::{execute_command, CommandRegistry};
+    #[cfg(feature = "model-api")]
     use crate::plugins::modeling::snapshots::TriangleMeshFactory;
     #[cfg(feature = "model-api")]
     use crate::plugins::modeling::{
@@ -20531,6 +20897,50 @@ mod tests {
             Projection::Perspective(PerspectiveProjection::default()),
         ));
         world
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn direct_model_api_primitives_are_hidden_commands_with_command_result() {
+        let mut app = App::new();
+        register_model_api_primitive_commands(&mut app);
+        let command_registry = app
+            .world_mut()
+            .remove_resource::<CommandRegistry>()
+            .expect("primitive command registration should initialize registry");
+
+        let mut world = init_model_api_test_world();
+        world.insert_resource(command_registry);
+
+        let descriptor = world
+            .resource::<CommandRegistry>()
+            .get(CMD_MODEL_API_CREATE_BOX)
+            .expect("direct create_box command should be registered");
+        assert!(!descriptor.show_in_menu);
+        assert!(descriptor.default_shortcut.is_none());
+
+        let command_result = execute_command(
+            &mut world,
+            CMD_MODEL_API_CREATE_BOX,
+            &json!({
+                "center": [4.0, 5.0, 6.0],
+                "size": [2.0, 2.0, 2.0]
+            }),
+        )
+        .expect("hidden command should execute the same direct primitive");
+        assert_eq!(command_result.created.len(), 1);
+        let command_element_id = command_result.created[0];
+        assert_eq!(
+            command_result
+                .output
+                .as_ref()
+                .and_then(|output| output.get("element_id"))
+                .and_then(Value::as_u64),
+            Some(command_element_id)
+        );
+        let details = get_entity_details(&world, ElementId(command_element_id))
+            .expect("created box details should exist");
+        assert_eq!(details.entity_type, "box");
     }
 
     #[cfg(feature = "model-api")]
@@ -21146,6 +21556,13 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let worker_handle = tokio::task::spawn_blocking(move || {
             let mut world = init_model_api_test_world();
+            let mut command_app = App::new();
+            register_model_api_primitive_commands(&mut command_app);
+            let command_registry = command_app
+                .world_mut()
+                .remove_resource::<CommandRegistry>()
+                .expect("primitive command registration should initialize registry");
+            world.insert_resource(command_registry);
             world.spawn((
                 ElementId(10),
                 BoxPrimitive {
@@ -21264,7 +21681,7 @@ mod tests {
             json!("FromTool")
         );
 
-        let updated_snapshot: Value = server
+        let property_result: CommandResult = server
             .set_entity_property_tool(Parameters(SetPropertyRequest {
                 element_id: 10,
                 property_name: "half_extents".to_string(),
@@ -21274,6 +21691,10 @@ mod tests {
             .expect("set_entity_property tool should succeed")
             .into_typed()
             .expect("set_entity_property result should deserialize");
+        assert_eq!(property_result.modified, vec![10]);
+        let updated_snapshot = property_result
+            .output
+            .expect("set_entity_property should include updated snapshot output");
         assert_eq!(updated_snapshot["half_extents"], json!([2.0, 2.0, 2.0]));
 
         let toolbars: Vec<ToolbarDetails> = server
@@ -21361,10 +21782,7 @@ mod tests {
             "procedural_session.commit",
             "procedural_session.export",
         ] {
-            assert!(
-                tool_names.contains(expected),
-                "missing MCP tool {expected}"
-            );
+            assert!(tool_names.contains(expected), "missing MCP tool {expected}");
         }
 
         // 1. Open a session for net-new top-level authoring: ProjectRoot
@@ -21405,10 +21823,7 @@ mod tests {
                             value: json!(center),
                         },
                     ),
-                    (
-                        "size".to_string(),
-                        ArgExpr::Literal { value: json!(size) },
-                    ),
+                    ("size".to_string(), ArgExpr::Literal { value: json!(size) }),
                 ]
                 .into_iter()
                 .collect(),
@@ -23455,14 +23870,10 @@ mod tests {
 
         // Strip the newer per-record fields to simulate a legacy record
         // inside an otherwise current-version file.
-        let mut project: Value = serde_json::from_slice(
-            &fs::read(&path).expect("saved project should read"),
-        )
-        .expect("saved project should parse");
-        for entity in project["entities"]
-            .as_array_mut()
-            .expect("entities array")
-        {
+        let mut project: Value =
+            serde_json::from_slice(&fs::read(&path).expect("saved project should read"))
+                .expect("saved project should parse");
+        for entity in project["entities"].as_array_mut().expect("entities array") {
             if entity["type"] == json!("sphere") {
                 let data = entity["data"].as_object_mut().expect("entity data object");
                 data.remove("element_id");

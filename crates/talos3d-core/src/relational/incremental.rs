@@ -53,16 +53,18 @@ fn add_expr_edges(component: u64, expr: &ArgExpr, step_node: &NodeId, g: &mut De
             let _ = g.add_dependency(step_node.clone(), NodeId::param(component, name.clone()));
         }
         ArgExpr::StepOutput { step_id, .. } => {
-            let _ = g.add_dependency(
-                step_node.clone(),
-                NodeId::step(component, step_id.as_str()),
-            );
+            let _ = g.add_dependency(step_node.clone(), NodeId::step(component, step_id.as_str()));
         }
         ArgExpr::Literal { .. } | ArgExpr::ClaimRef { .. } => {}
     }
 }
 
-fn add_predicate_edges(component: u64, pred: &Predicate, step_node: &NodeId, g: &mut DependencyGraph) {
+fn add_predicate_edges(
+    component: u64,
+    pred: &Predicate,
+    step_node: &NodeId,
+    g: &mut DependencyGraph,
+) {
     match pred {
         Predicate::Equals { lhs, rhs } => {
             add_expr_edges(component, lhs, step_node, g);
@@ -101,7 +103,10 @@ fn resolve(
         ArgExpr::Param { name } => params.get(name).cloned(),
         ArgExpr::StepOutput { step_id, path } => {
             let out = outputs.get(step_id)?;
-            let key = path.as_str().trim_start_matches("$.").trim_start_matches('$');
+            let key = path
+                .as_str()
+                .trim_start_matches("$.")
+                .trim_start_matches('$');
             if key.is_empty() {
                 Some(Value::Object(out.clone()))
             } else {
@@ -217,7 +222,9 @@ pub fn incremental_eval(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curation::authoring_script::{AuthoringScript, McpToolId, MutationScope, OutputPath, Step};
+    use crate::curation::authoring_script::{
+        AuthoringScript, McpToolId, MutationScope, OutputPath, Step,
+    };
 
     // Build a small parametric "truss-ish" script:
     //   half = span / 2                 (depends on param `span`)
@@ -239,7 +246,12 @@ mod tests {
         s.steps.push(step(
             "half",
             "half",
-            vec![("span", ArgExpr::Param { name: "span".into() })],
+            vec![(
+                "span",
+                ArgExpr::Param {
+                    name: "span".into(),
+                },
+            )],
         ));
         s.steps.push(step(
             "apex",
@@ -252,7 +264,12 @@ mod tests {
                         path: OutputPath::new("v"),
                     },
                 ),
-                ("tan_pitch", ArgExpr::Param { name: "tan_pitch".into() }),
+                (
+                    "tan_pitch",
+                    ArgExpr::Param {
+                        name: "tan_pitch".into(),
+                    },
+                ),
             ],
         ));
         s.steps.push(step(
@@ -270,10 +287,13 @@ mod tests {
     }
 
     // A deterministic evaluator implementing the toy math, counting calls.
-    fn make_eval(calls: &mut Vec<String>) -> impl FnMut(&str, &Map<String, Value>) -> Map<String, Value> + '_ {
+    fn make_eval(
+        calls: &mut Vec<String>,
+    ) -> impl FnMut(&str, &Map<String, Value>) -> Map<String, Value> + '_ {
         move |tool: &str, args: &Map<String, Value>| {
             calls.push(tool.to_string());
-            let num = |m: &Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let num =
+                |m: &Map<String, Value>, k: &str| m.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
             let mut out = Map::new();
             let v = match tool {
                 "half" => num(args, "span") / 2.0,
@@ -302,7 +322,9 @@ mod tests {
         assert!(deps.contains(&NodeId::step(1, "half")));
         assert!(deps.contains(&NodeId::param(1, "tan_pitch")));
         // make depends on apex
-        assert!(g.dependencies_of(&NodeId::step(1, "make")).contains(&NodeId::step(1, "apex")));
+        assert!(g
+            .dependencies_of(&NodeId::step(1, "make"))
+            .contains(&NodeId::step(1, "apex")));
     }
 
     #[test]
@@ -334,8 +356,17 @@ mod tests {
         drop(ei);
 
         // recomputed only apex and make (not half)
-        let rc: BTreeSet<String> = inc.recomputed.iter().map(|s| s.as_str().to_string()).collect();
-        assert_eq!(rc, ["apex".to_string(), "make".to_string()].into_iter().collect());
+        let rc: BTreeSet<String> = inc
+            .recomputed
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect();
+        assert_eq!(
+            rc,
+            ["apex".to_string(), "make".to_string()]
+                .into_iter()
+                .collect()
+        );
 
         // and the result equals a fresh full replay with the new params
         let mut cf = Vec::new();

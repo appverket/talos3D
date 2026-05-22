@@ -13,7 +13,6 @@ impl Plugin for HistoryPlugin {
         app.configure_sets(Update, (HistorySet::Queue, HistorySet::Apply).chain())
             .init_resource::<History>()
             .init_resource::<PendingCommandQueue>()
-            .add_systems(Update, queue_history_shortcuts.in_set(HistorySet::Queue))
             .add_systems(
                 Update,
                 apply_pending_history_commands.in_set(HistorySet::Apply),
@@ -160,28 +159,6 @@ impl PendingCommandQueue {
 enum HistoryAction {
     Undo,
     Redo,
-}
-
-fn queue_history_shortcuts(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut pending_command_queue: ResMut<PendingCommandQueue>,
-) {
-    let primary_modifier_pressed = if cfg!(target_os = "macos") {
-        keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
-    } else {
-        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
-    };
-
-    if !primary_modifier_pressed || !keys.just_pressed(KeyCode::KeyZ) {
-        return;
-    }
-
-    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    if shift_pressed {
-        pending_command_queue.queue_redo();
-    } else {
-        pending_command_queue.queue_undo();
-    }
 }
 
 pub(crate) fn apply_pending_history_commands(world: &mut World) {

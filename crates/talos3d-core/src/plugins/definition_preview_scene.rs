@@ -145,6 +145,10 @@ pub struct DefinitionPreviewScene {
     /// Signature of the registry snapshot used for the current materialised
     /// occurrence.
     pub current_registry_signature: u64,
+    /// Camera distance multiplier. Lower values zoom in; higher values zoom
+    /// out. The camera is re-framed from current preview bounds so selection
+    /// and parameter changes update the view without manual refresh.
+    pub camera_distance_scale: f32,
 }
 
 /// Requested definition + registry snapshot for the preview render target.
@@ -221,20 +225,28 @@ impl Plugin for DefinitionPreviewPlugin {
             .init_resource::<DefinitionPreviewTarget>()
             .insert_resource(PendingPreviewClick::default())
             .add_systems(Startup, (setup_preview_scene, configure_preview_gizmos))
-            .add_systems(Update, sync_preview_to_target)
             .add_systems(
                 Update,
-                tag_preview_generated_parts.after(EvaluationSet::Evaluate),
+                sync_preview_to_target.after(crate::plugins::egui_chrome::EguiChromeSystems),
+            )
+            .add_systems(
+                Update,
+                tag_preview_generated_parts
+                    .after(EvaluationSet::Evaluate)
+                    .after(sync_preview_to_target),
             )
             // PP-DBUX4: reset the frame-local hover target before egui draws
             // the property tree so that rows from a previous frame never
             // produce sticky highlights.
             .add_systems(Update, reset_hovered_node)
             // PP-DBUX4: draw per-slot wireframe highlights in the preview.
-            .add_systems(Update, draw_preview_slot_highlight)
+            .add_systems(
+                Update,
+                draw_preview_slot_highlight.after(sync_preview_to_target),
+            )
             // PP-DBUX4: consume a pending preview-image click and map it to a
             // property-tree selection.
-            .add_systems(Update, resolve_preview_click);
+            .add_systems(Update, resolve_preview_click.after(sync_preview_to_target));
     }
 }
 
@@ -327,6 +339,7 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
         light_entity,
         occurrence_root: Entity::PLACEHOLDER,
         current_registry_signature: 0,
+        camera_distance_scale: 1.0,
     });
 }
 
@@ -368,6 +381,11 @@ pub fn sync_preview_to_target(world: &mut World) {
     };
 
     if !needs_respawn {
+        let (camera_entity, camera_distance_scale) = {
+            let scene = world.resource::<DefinitionPreviewScene>();
+            (scene.camera_entity, scene.camera_distance_scale)
+        };
+        frame_preview_camera(world, camera_entity, camera_distance_scale);
         return;
     }
 
@@ -429,6 +447,10 @@ pub fn sync_preview_to_target(world: &mut World) {
     scene.current_definition_id = target_definition_id;
     scene.occurrence_root = new_root;
     scene.current_registry_signature = registry_signature;
+    let camera_entity = scene.camera_entity;
+    let camera_distance_scale = scene.camera_distance_scale;
+    drop(scene);
+    frame_preview_camera(world, camera_entity, camera_distance_scale);
 }
 
 /// After the eval system runs, tag every freshly-spawned
@@ -660,24 +682,42 @@ pub fn resolve_preview_click(
 pub fn draw_definition_3d_preview(
     ui: &mut egui::Ui,
     contexts: &mut EguiContexts,
-    scene: &DefinitionPreviewScene,
+    scene: &mut DefinitionPreviewScene,
     pending_click: &mut PendingPreviewClick,
     available_height: f32,
 ) {
-    let width = ui.available_width().clamp(220.0, 360.0);
+    let width = ui.available_width().max(220.0);
+    let height = available_height.max(220.0);
 
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(26, 30, 34))
         .corner_radius(6.0)
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(64, 72, 78)))
         .show(ui, |ui| {
-            ui.set_min_size(egui::vec2(width, available_height));
-            ui.set_max_size(egui::vec2(width, available_height));
+            ui.set_min_size(egui::vec2(width, height));
+            ui.set_max_size(egui::vec2(width, height));
+
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button("Fit")
+                    .on_hover_text("Reset preview zoom")
+                    .clicked()
+                {
+                    scene.camera_distance_scale = 1.0;
+                }
+                if ui.small_button("-").on_hover_text("Zoom out").clicked() {
+                    scene.camera_distance_scale = (scene.camera_distance_scale * 1.2).min(5.0);
+                }
+                if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+                    scene.camera_distance_scale = (scene.camera_distance_scale / 1.2).max(0.25);
+                }
+            });
+            let image_height = (height - 24.0).max(180.0);
 
             if scene.current_definition_id.is_none() {
                 // Blank placeholder — same wording as the old `draw_empty_definition_preview`.
                 ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                    ui.add_space(available_height * 0.35);
+                    ui.add_space(image_height * 0.35);
                     ui.label(
                         egui::RichText::new("Add an evaluator to preview geometry")
                             .small()
@@ -699,7 +739,7 @@ pub fn draw_definition_3d_preview(
             let response = ui
                 .add(egui::Image::new((
                     texture_id,
-                    egui::vec2(width, available_height),
+                    egui::vec2(width, image_height),
                 )))
                 .interact(egui::Sense::click());
 
@@ -737,6 +777,39 @@ pub fn draw_definition_3d_preview(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn frame_preview_camera(world: &mut World, camera_entity: Entity, distance_scale: f32) {
+    let Some(bounds) = preview_geometry_bounds(world) else {
+        return;
+    };
+    let center = (bounds.min + bounds.max) * 0.5;
+    let extents = bounds.max - bounds.min;
+    let radius = (extents.length() * 0.5).max(0.75);
+    let distance = (radius * 3.0 * distance_scale.clamp(0.25, 5.0)).max(1.5);
+    let view_dir = Vec3::new(0.85, 0.55, 1.0).normalize();
+    let eye = center + view_dir * distance;
+
+    if let Ok(mut camera) = world.get_entity_mut(camera_entity) {
+        camera.insert(Transform::from_translation(eye).looking_at(center, Vec3::Y));
+    }
+}
+
+fn preview_geometry_bounds(world: &mut World) -> Option<Aabb3d> {
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+    let mut query =
+        world.query_filtered::<(&ProfileExtrusion, Option<&ShapeRotation>), With<PreviewOnly>>();
+    for (extrusion, rotation) in query.iter(world) {
+        let Some(bounds) = extrusion.bounds(rotation.copied().unwrap_or_default().0) else {
+            continue;
+        };
+        min = min.min(bounds.min);
+        max = max.max(bounds.max);
+        any = true;
+    }
+    any.then_some(Aabb3d { min, max })
+}
 
 /// Arc tessellation resolution for wireframe drawing — matches the value used
 /// in `profile.rs` (`ARC_SEGMENTS_PER_CIRCLE = 32`).

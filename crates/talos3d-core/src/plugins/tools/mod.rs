@@ -1,7 +1,11 @@
 use bevy::prelude::*;
+use serde_json::Value;
 
 use crate::plugins::{
-    input_ownership::{InputOwnership, InputPhase},
+    command_registry::{
+        activate_tool_command, CommandCategory, CommandDescriptor, CommandRegistryAppExt,
+        CommandResult,
+    },
     ui::StatusBarData,
 };
 
@@ -9,8 +13,47 @@ pub struct ToolPlugin;
 
 impl Plugin for ToolPlugin {
     fn build(&self, app: &mut App) {
+        // Wall/Opening previously had keyboard-only activation with no command.
+        // Register them so their shortcuts flow through the unified keymap and
+        // are covered by conflict detection like every other tool.
+        app.register_command(
+            CommandDescriptor {
+                id: "architectural.place_wall".to_string(),
+                label: "Wall".to_string(),
+                description: "Activate wall placement".to_string(),
+                category: CommandCategory::Create,
+                parameters: None,
+                default_shortcut: None,
+                icon: None,
+                hint: Some("Click to place start point".to_string()),
+                requires_selection: false,
+                show_in_menu: false,
+                version: 1,
+                activates_tool: Some("PlaceWall".to_string()),
+                capability_id: None,
+            },
+            execute_place_wall,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "architectural.place_opening".to_string(),
+                label: "Place Opening".to_string(),
+                description: "Activate opening placement".to_string(),
+                category: CommandCategory::Create,
+                parameters: None,
+                default_shortcut: Some("O".to_string()),
+                icon: Some("icon.architectural.opening".to_string()),
+                hint: Some("Hover a wall and click to place an opening".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: Some("PlaceOpening".to_string()),
+                capability_id: Some("architectural".to_string()),
+            },
+            execute_place_opening,
+        );
+
         app.init_state::<ActiveTool>()
-            .add_systems(Update, activate_tools.in_set(InputPhase::ToolInput))
             .add_systems(OnEnter(ActiveTool::Select), enter_select_tool)
             .add_systems(
                 OnEnter(ActiveTool::PlaceDimensionLine),
@@ -60,44 +103,12 @@ pub enum ActiveTool {
 #[derive(Component)]
 pub struct Preview;
 
-fn activate_tools(
-    keys: Res<ButtonInput<KeyCode>>,
-    active_tool: Res<State<ActiveTool>>,
-    ownership: Res<InputOwnership>,
-    mut next_active_tool: ResMut<NextState<ActiveTool>>,
-) {
-    if !ownership.is_idle() {
-        return;
-    }
+fn execute_place_wall(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    activate_tool_command(world, ActiveTool::PlaceWall)
+}
 
-    let primary_modifier_pressed = if cfg!(target_os = "macos") {
-        keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
-    } else {
-        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
-    };
-    if primary_modifier_pressed {
-        return;
-    }
-
-    let active_tool = active_tool.get();
-
-    if keys.just_pressed(KeyCode::KeyD) && *active_tool != ActiveTool::PlaceDimensionLine {
-        next_active_tool.set(ActiveTool::PlaceDimensionLine);
-    } else if keys.just_pressed(KeyCode::KeyG) && *active_tool != ActiveTool::PlaceGuideLine {
-        next_active_tool.set(ActiveTool::PlaceGuideLine);
-    } else if keys.just_pressed(KeyCode::KeyW) && *active_tool != ActiveTool::PlaceWall {
-        next_active_tool.set(ActiveTool::PlaceWall);
-    } else if keys.just_pressed(KeyCode::KeyO) && *active_tool != ActiveTool::PlaceOpening {
-        next_active_tool.set(ActiveTool::PlaceOpening);
-    } else if keys.just_pressed(KeyCode::KeyB) && *active_tool != ActiveTool::PlaceBox {
-        next_active_tool.set(ActiveTool::PlaceBox);
-    } else if keys.just_pressed(KeyCode::KeyC) && *active_tool != ActiveTool::PlaceCylinder {
-        next_active_tool.set(ActiveTool::PlaceCylinder);
-    } else if keys.just_pressed(KeyCode::KeyP) && *active_tool != ActiveTool::PlacePlane {
-        next_active_tool.set(ActiveTool::PlacePlane);
-    } else if keys.just_pressed(KeyCode::KeyL) && *active_tool != ActiveTool::PlacePolyline {
-        next_active_tool.set(ActiveTool::PlacePolyline);
-    }
+fn execute_place_opening(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    activate_tool_command(world, ActiveTool::PlaceOpening)
 }
 
 fn enter_select_tool(mut status_bar_data: ResMut<StatusBarData>) {

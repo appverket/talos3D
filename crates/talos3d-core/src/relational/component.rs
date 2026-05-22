@@ -44,7 +44,9 @@ pub enum DriverPolicy {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum ParamRole {
-    Driver { policy: DriverPolicy },
+    Driver {
+        policy: DriverPolicy,
+    },
     /// Derived from a declared expression (the expression itself is a
     /// `relational::ScalarExpr` referenced by parameter name; PP-RPS-2).
     Derived,
@@ -60,8 +62,7 @@ pub struct ComponentParams {
 
 impl ComponentParams {
     pub fn driver(mut self, name: impl Into<String>, policy: DriverPolicy) -> Self {
-        self.roles
-            .insert(name.into(), ParamRole::Driver { policy });
+        self.roles.insert(name.into(), ParamRole::Driver { policy });
         self
     }
     pub fn derived(mut self, name: impl Into<String>) -> Self {
@@ -223,7 +224,9 @@ mod tests {
     fn readonly_driver_refused() {
         let p = window_params();
         let mut d = OccurrenceDrivers::default();
-        let err = d.set_driver(&p, "frame_thickness", json!(50.0)).unwrap_err();
+        let err = d
+            .set_driver(&p, "frame_thickness", json!(50.0))
+            .unwrap_err();
         assert!(matches!(err, DriverEditError::ReadOnly(_)));
     }
 

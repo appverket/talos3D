@@ -4,9 +4,10 @@ use bevy::{
     prelude::*,
     window::PrimaryWindow,
 };
+use bevy_egui::{egui, EguiContexts};
 
 use crate::{
-    authored_entity::EntityBounds,
+    authored_entity::{EntityBounds, EntityScope},
     capability_registry::{CapabilityRegistry, HitCandidate},
     plugins::{
         camera::{orbit_modifier_pressed, OrbitCamera},
@@ -27,7 +28,7 @@ use crate::{
                 GroupEditMuted, GroupMembers,
             },
             occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
-            primitive_trait::Primitive,
+            primitive_trait::{ray_aabb_intersection, Primitive},
             primitives::ShapeRotation,
             profile::ProfileExtrusion,
             profile_feature::{FaceProfileFeature, FeatureOperand},
@@ -66,6 +67,18 @@ type BoxSelectEntityQueryItem = (
     Has<SceneLightNode>,
     Has<GroupEditMuted>,
     Has<OpeningContext>,
+);
+type BoxSelectGeneratedOccurrenceQueryItem = (
+    &'static GeneratedOccurrencePart,
+    &'static GlobalTransform,
+    Option<&'static Visibility>,
+    Option<&'static bevy::camera::primitives::Aabb>,
+);
+type BoxSelectOccurrenceOwnerQueryItem = (
+    Entity,
+    &'static ElementId,
+    Option<&'static LayerAssignment>,
+    Has<GroupEditMuted>,
 );
 type GroupMembershipQueryItem = (Entity, &'static ElementId, &'static GroupMembers);
 
@@ -672,17 +685,12 @@ fn find_entity_by_element_id_ref(world: &World, element_id: ElementId) -> Option
 fn choose_selection_hit(
     custom_hit: Option<HitCandidate>,
     mesh_hit: Option<HitCandidate>,
+    bounds_hit: Option<HitCandidate>,
 ) -> Option<HitCandidate> {
-    match (custom_hit, mesh_hit) {
-        (Some(custom_hit), Some(mesh_hit)) => Some(if custom_hit.distance <= mesh_hit.distance {
-            custom_hit
-        } else {
-            mesh_hit
-        }),
-        (Some(custom_hit), None) => Some(custom_hit),
-        (None, Some(mesh_hit)) => Some(mesh_hit),
-        (None, None) => None,
-    }
+    [custom_hit, mesh_hit, bounds_hit]
+        .into_iter()
+        .flatten()
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
 }
 
 fn selection_hit_entity(world: &mut World, ray: Ray3d) -> Option<Entity> {
@@ -719,7 +727,39 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d) -> Option<Entity> {
         });
     system_state.apply(world);
 
-    choose_selection_hit(custom_hit, mesh_hit).map(|hit| hit.entity)
+    let bounds_hit = snapshot_bounds_hit(world, ray);
+    choose_selection_hit(custom_hit, mesh_hit, bounds_hit).map(|hit| hit.entity)
+}
+
+fn snapshot_bounds_hit(world: &mut World, ray: Ray3d) -> Option<HitCandidate> {
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut query = world
+        .try_query::<EntityRef>()
+        .expect("EntityRef query should be available");
+
+    query
+        .iter(world)
+        .filter_map(|entity_ref| {
+            let entity = entity_ref.id();
+            if entity_ref.contains::<PreviewOnly>()
+                || entity_ref.contains::<OpeningContext>()
+                || entity_ref.contains::<FaceProfileFeature>()
+                || entity_ref.contains::<OccurrenceIdentity>()
+                || !entity_is_visible(world, entity)
+            {
+                return None;
+            }
+
+            let snapshot = registry.capture_user_facing_snapshot(&entity_ref, world)?;
+            if snapshot.scope() != EntityScope::AuthoredModel {
+                return None;
+            }
+
+            let bounds = snapshot.bounds()?;
+            let distance = ray_aabb_intersection(ray, bounds.min, bounds.max)?;
+            Some(HitCandidate { entity, distance })
+        })
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
 }
 
 // --- Box Select ---
@@ -740,6 +780,9 @@ struct BoxSelectContext<'w, 's> {
     layer_registry: Res<'w, LayerRegistry>,
     light_object_visibility: Res<'w, SceneLightObjectVisibility>,
     entity_query: Query<'w, 's, BoxSelectEntityQueryItem>,
+    generated_occurrence_query: Query<'w, 's, BoxSelectGeneratedOccurrenceQueryItem>,
+    occurrence_owner_query:
+        Query<'w, 's, BoxSelectOccurrenceOwnerQueryItem, With<OccurrenceIdentity>>,
     edit_context: Res<'w, GroupEditContext>,
     group_query: Query<'w, 's, GroupMembershipQueryItem>,
 }
@@ -870,6 +913,49 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 }
             }
 
+            for (generated, global_transform, visibility, aabb) in &cx.generated_occurrence_query {
+                if visibility.copied() == Some(Visibility::Hidden) {
+                    continue;
+                }
+                let Some(aabb) = aabb else {
+                    continue;
+                };
+                let Some((owner_entity, owner_element_id, layer_assignment, owner_muted)) =
+                    find_box_select_occurrence_owner(&cx.occurrence_owner_query, generated.owner)
+                else {
+                    continue;
+                };
+                if owner_muted {
+                    continue;
+                }
+                let layer_name = layer_assignment
+                    .map(|a| a.layer.as_str())
+                    .unwrap_or(DEFAULT_LAYER_NAME);
+                if !cx.layer_registry.is_visible(layer_name)
+                    || cx.layer_registry.is_locked(layer_name)
+                {
+                    continue;
+                }
+
+                let bounds = aabb_to_world_bounds(aabb, global_transform);
+                if entity_screen_bounds_match(
+                    &bounds,
+                    camera,
+                    camera_transform,
+                    rect_min,
+                    rect_max,
+                    is_window_select,
+                ) {
+                    let target = redirect_to_group_query(
+                        owner_entity,
+                        owner_element_id,
+                        &cx.edit_context,
+                        &cx.group_query,
+                    );
+                    cx.commands.entity(target).insert(Selected);
+                }
+            }
+
             cx.box_state.drag_start = None;
             cx.box_state.is_dragging = false;
             cx.box_state.just_completed = true;
@@ -878,6 +964,18 @@ fn handle_box_select(mut cx: BoxSelectContext) {
             cx.box_state.is_dragging = false;
         }
     }
+}
+
+fn find_box_select_occurrence_owner<'a>(
+    owner_query: &'a Query<BoxSelectOccurrenceOwnerQueryItem, With<OccurrenceIdentity>>,
+    owner: ElementId,
+) -> Option<(Entity, ElementId, Option<&'a LayerAssignment>, bool)> {
+    owner_query
+        .iter()
+        .find(|(_, element_id, _, _)| **element_id == owner)
+        .map(|(entity, element_id, layer_assignment, is_muted)| {
+            (entity, *element_id, layer_assignment, is_muted)
+        })
 }
 
 fn aabb_to_world_bounds(
@@ -1081,8 +1179,7 @@ fn find_top_level_group_for(world: &World, element_id: ElementId) -> Option<Elem
 fn draw_box_select_rect(
     box_state: Res<BoxSelectState>,
     window_query: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    mut gizmos: Gizmos,
+    mut contexts: EguiContexts,
 ) {
     if !box_state.is_dragging {
         return;
@@ -1096,7 +1193,7 @@ fn draw_box_select_rect(
     let Some(cursor_position) = cursor_window_position(window) else {
         return;
     };
-    let Some((camera, camera_transform)) = camera_query.iter().next() else {
+    let Ok(ctx_ref) = contexts.ctx_mut() else {
         return;
     };
 
@@ -1107,40 +1204,34 @@ fn draw_box_select_rect(
     } else {
         BOX_SELECT_CROSSING_BORDER
     };
-    let _fill_color = if is_window {
+    let fill_color = if is_window {
         BOX_SELECT_WINDOW_COLOR
     } else {
         BOX_SELECT_CROSSING_COLOR
     };
 
-    // Draw rectangle border as 4 lines in world space on the near plane
-    let corners_2d = [
-        Vec2::new(start.x, start.y),
-        Vec2::new(end.x, start.y),
-        Vec2::new(end.x, end.y),
-        Vec2::new(start.x, end.y),
-    ];
+    let rect = egui::Rect::from_two_pos(egui::pos2(start.x, start.y), egui::pos2(end.x, end.y));
+    let painter = ctx_ref.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("box_select_rect"),
+    ));
+    painter.rect_filled(rect, 0.0, egui_color(fill_color));
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.5, egui_color(border_color)),
+        egui::StrokeKind::Outside,
+    );
+}
 
-    let near_distance = 0.5;
-    let world_corners: Vec<Vec3> = corners_2d
-        .iter()
-        .filter_map(|screen_pos| {
-            let viewport_pos = match camera.logical_viewport_rect() {
-                Some(rect) => *screen_pos - rect.min,
-                None => *screen_pos,
-            };
-            camera
-                .viewport_to_world(camera_transform, viewport_pos)
-                .ok()
-                .map(|ray| ray.origin + ray.direction * near_distance)
-        })
-        .collect();
-
-    if world_corners.len() == 4 {
-        for i in 0..4 {
-            gizmos.line(world_corners[i], world_corners[(i + 1) % 4], border_color);
-        }
-    }
+fn egui_color(color: Color) -> egui::Color32 {
+    let srgba = color.to_srgba();
+    egui::Color32::from_rgba_premultiplied(
+        (srgba.red * 255.0).round() as u8,
+        (srgba.green * 255.0).round() as u8,
+        (srgba.blue * 255.0).round() as u8,
+        (srgba.alpha * 255.0).round() as u8,
+    )
 }
 
 // --- Group edit muting ---

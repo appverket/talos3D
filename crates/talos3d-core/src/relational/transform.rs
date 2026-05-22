@@ -173,7 +173,7 @@ mod tests {
     fn window_smart_resize_keeps_frame_and_centres_mullion() {
         let frame = 58.0; // constant
         let mullion = 68.0; // constant
-        // before: width 1200
+                            // before: width 1200
         let (sash0, centre0) = derive_window(1200.0, frame, mullion);
         // resize X -> 1500 becomes a width driver edit; re-derive
         let (_p, b) = window();
@@ -197,8 +197,12 @@ mod tests {
         // frame & mullion thickness are read-only drivers => never edited by the
         // resize: a direct attempt is refused by the component model.
         let mut occ = OccurrenceDrivers::default();
-        assert!(occ.set_driver(&window().0, "frame_thickness", json!(80.0)).is_err());
-        assert!(occ.set_driver(&window().0, "mullion_width", json!(90.0)).is_err());
+        assert!(occ
+            .set_driver(&window().0, "frame_thickness", json!(80.0))
+            .is_err());
+        assert!(occ
+            .set_driver(&window().0, "mullion_width", json!(90.0))
+            .is_err());
     }
 
     #[test]
@@ -227,12 +231,28 @@ mod tests {
     fn scale_and_translate_gestures() {
         let b = TransformBindings::default().bind(TransformAxis::X, "span");
         assert_eq!(
-            map_transform(&b, TransformAxis::X, TransformGesture::Scale { factor: 1.5 }, 6000.0),
-            TransformOutcome::DriverEdit { driver: "span".into(), new_value: 9000.0 }
+            map_transform(
+                &b,
+                TransformAxis::X,
+                TransformGesture::Scale { factor: 1.5 },
+                6000.0
+            ),
+            TransformOutcome::DriverEdit {
+                driver: "span".into(),
+                new_value: 9000.0
+            }
         );
         assert_eq!(
-            map_transform(&b, TransformAxis::X, TransformGesture::Translate { delta: 600.0 }, 6000.0),
-            TransformOutcome::DriverEdit { driver: "span".into(), new_value: 6600.0 }
+            map_transform(
+                &b,
+                TransformAxis::X,
+                TransformGesture::Translate { delta: 600.0 },
+                6000.0
+            ),
+            TransformOutcome::DriverEdit {
+                driver: "span".into(),
+                new_value: 6600.0
+            }
         );
     }
 }

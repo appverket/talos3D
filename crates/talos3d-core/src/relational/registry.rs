@@ -21,7 +21,9 @@ use super::component::{ComponentParams, DriverEditError};
 use super::graph::NodeId;
 use super::param_expr::{Quantity, ScalarExpr, Unit};
 use super::service::{ParametricComponent, PropagationReport};
-use super::transform::{TransformAxis, TransformBindings, TransformGesture, TransformOutcome, map_transform};
+use super::transform::{
+    map_transform, TransformAxis, TransformBindings, TransformGesture, TransformOutcome,
+};
 
 fn default_true_bool() -> bool {
     true
@@ -72,7 +74,13 @@ impl ParametricTypeDef {
                 .and_then(|v| v.as_f64())
                 .or_else(|| self.defaults.get(name).copied());
             if let Some(v) = v {
-                env.insert(name.clone(), Quantity { value: v, unit: *unit });
+                env.insert(
+                    name.clone(),
+                    Quantity {
+                        value: v,
+                        unit: *unit,
+                    },
+                );
             }
         }
         env
@@ -103,7 +111,10 @@ impl ParametricTypeDef {
     }
 
     /// Effective driver values = defaults overlaid with overrides.
-    pub fn effective_drivers(&self, overrides: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    pub fn effective_drivers(
+        &self,
+        overrides: &BTreeMap<String, Value>,
+    ) -> BTreeMap<String, Value> {
         let mut out: BTreeMap<String, Value> = self
             .defaults
             .iter()
@@ -268,7 +279,11 @@ impl ParametricStore {
         let current = def
             .transform
             .driver_for(axis)
-            .and_then(|d| def.effective_drivers(&inst.overrides).get(d).and_then(|v| v.as_f64()))
+            .and_then(|d| {
+                def.effective_drivers(&inst.overrides)
+                    .get(d)
+                    .and_then(|v| v.as_f64())
+            })
             .unwrap_or(0.0);
         let outcome = map_transform(&def.transform, axis, gesture, current);
         // if it resolved to a driver edit, apply it
@@ -279,7 +294,12 @@ impl ParametricStore {
     }
 
     /// INSPECT: "why is this param the way it is" — its controlling inputs.
-    pub fn explain(&self, registry: &ParametricRegistry, id: u64, param: &str) -> Option<Vec<NodeId>> {
+    pub fn explain(
+        &self,
+        registry: &ParametricRegistry,
+        id: u64,
+        param: &str,
+    ) -> Option<Vec<NodeId>> {
         let inst = self.instances.get(&id)?;
         let def = registry.get(&inst.type_id)?;
         let comp = ParametricComponent::new(id, def.params.clone(), &def.edges());
@@ -334,7 +354,9 @@ mod tests {
                 lhs: Box::new(ScalarExpr::param("heel")),
                 rhs: Box::new(ScalarExpr::Mul {
                     lhs: Box::new(ScalarExpr::param("half")),
-                    rhs: Box::new(ScalarExpr::Tan { expr: Box::new(ScalarExpr::param("pitch")) }),
+                    rhs: Box::new(ScalarExpr::Tan {
+                        expr: Box::new(ScalarExpr::param("pitch")),
+                    }),
                 }),
             },
         );
@@ -383,13 +405,26 @@ mod tests {
         let (reg, mut store) = setup();
         let id = store.instantiate("test.truss");
         let out = store
-            .transform(&reg, id, TransformAxis::X, TransformGesture::SetExtent { value: 9000.0 })
+            .transform(
+                &reg,
+                id,
+                TransformAxis::X,
+                TransformGesture::SetExtent { value: 9000.0 },
+            )
             .unwrap();
         assert!(matches!(out, TransformOutcome::DriverEdit { .. }));
-        assert_eq!(store.snapshot(&reg, id).unwrap().drivers["span"], json!(9000.0));
+        assert_eq!(
+            store.snapshot(&reg, id).unwrap().drivers["span"],
+            json!(9000.0)
+        );
         // unmapped axis refuses
         let z = store
-            .transform(&reg, id, TransformAxis::Z, TransformGesture::Scale { factor: 2.0 })
+            .transform(
+                &reg,
+                id,
+                TransformAxis::Z,
+                TransformGesture::Scale { factor: 2.0 },
+            )
             .unwrap();
         assert!(matches!(z, TransformOutcome::Refused { .. }));
     }
