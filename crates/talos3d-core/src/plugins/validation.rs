@@ -249,6 +249,9 @@ pub fn validation_sweep_system(world: &mut World) {
         .filter_map(|entity| {
             // Skip entities without an ElementId component.
             let eid = world.get::<ElementId>(entity)?;
+            if crate::plugins::refinement::is_parked_refinement_entity(world, *eid) {
+                return None;
+            }
             let class = world
                 .get::<ElementClassAssignment>(entity)
                 .map(|c| c.element_class.clone());

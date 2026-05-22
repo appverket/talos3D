@@ -1465,6 +1465,11 @@ pub fn list_entities(world: &World) -> Vec<EntityEntry> {
 
     let mut q = world.try_query::<EntityRef>().unwrap();
     for entity_ref in q.iter(world) {
+        if let Some(element_id) = entity_ref.get::<ElementId>() {
+            if crate::plugins::refinement::is_parked_refinement_entity(world, *element_id) {
+                continue;
+            }
+        }
         let Some(snapshot) = registry.capture_user_facing_snapshot(&entity_ref, world) else {
             continue;
         };
@@ -1521,6 +1526,9 @@ fn capture_entity_snapshot(
     let entity_ref = q
         .iter(world)
         .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(element_id))?;
+    if crate::plugins::refinement::is_parked_refinement_entity(world, element_id) {
+        return None;
+    }
     world
         .resource::<CapabilityRegistry>()
         .capture_snapshot(&entity_ref, world)
@@ -2251,6 +2259,15 @@ enum ModelApiRequest {
         target_state: String,
         response: oneshot::Sender<ApiResult<DemoteRefinementResult>>,
     },
+    InspectRefinementBranches {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Vec<RefinementBranchApiInfo>>>,
+    },
+    DiscardRefinementBranch {
+        parent_element_id: u64,
+        child_element_id: u64,
+        response: oneshot::Sender<ApiResult<DiscardRefinementBranchResult>>,
+    },
     RunValidation {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Vec<ValidationFindingInfo>>>,
@@ -2684,9 +2701,8 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         // --- Dependency Graph (read-only) ---
         ModelApiRequest::DependencyGraph(response) => {
-            let _ = response.send(
-                crate::plugins::modeling::dependency_graph::dependency_graph_json(world),
-            );
+            let _ = response
+                .send(crate::plugins::modeling::dependency_graph::dependency_graph_json(world));
         }
         ModelApiRequest::EntityDependencies {
             element_id,
@@ -3283,6 +3299,23 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_demote_refinement(world, element_id, target_state));
+        }
+        ModelApiRequest::InspectRefinementBranches {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_inspect_refinement_branches(world, element_id));
+        }
+        ModelApiRequest::DiscardRefinementBranch {
+            parent_element_id,
+            child_element_id,
+            response,
+        } => {
+            let _ = response.send(handle_discard_refinement_branch(
+                world,
+                parent_element_id,
+                child_element_id,
+            ));
         }
         ModelApiRequest::RunValidation {
             element_id,
@@ -5429,6 +5462,40 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_inspect_refinement_branches(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<Vec<RefinementBranchApiInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::InspectRefinementBranches {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_discard_refinement_branch(
+        &self,
+        parent_element_id: u64,
+        child_element_id: u64,
+    ) -> ApiResult<DiscardRefinementBranchResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DiscardRefinementBranch {
+                parent_element_id,
+                child_element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_run_validation(
         &self,
         element_id: u64,
@@ -7514,6 +7581,25 @@ pub struct DemoteRefinementResult {
     pub new_state: String,
 }
 
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementBranchApiInfo {
+    pub root_element_id: u64,
+    pub parent_element_id: u64,
+    pub child_element_id: u64,
+    pub target_state: String,
+    pub recipe_id: Option<String>,
+    pub status: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiscardRefinementBranchResult {
+    pub parent_element_id: u64,
+    pub child_element_id: u64,
+    pub discarded_element_ids: Vec<u64>,
+}
+
 // --- Refinement request types (PP70) ---
 
 #[cfg(feature = "model-api")]
@@ -7547,6 +7633,21 @@ struct PromoteRefinementRequest {
 struct DemoteRefinementRequest {
     element_id: u64,
     target_state: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InspectRefinementBranchesRequest {
+    element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiscardRefinementBranchRequest {
+    parent_element_id: u64,
+    child_element_id: u64,
 }
 
 #[cfg(feature = "model-api")]
@@ -9941,7 +10042,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "demote_refinement",
-        description = "Demote an entity to a lower refinement state. Removes any refined_into relation links. The demotion is undoable."
+        description = "Demote an entity to a lower refinement state. Generated refinement branches are parked, not deleted, so authored overrides can be reactivated later. The demotion is undoable."
     )]
     async fn demote_refinement_tool(
         &self,
@@ -9949,6 +10050,36 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_demote_refinement(params.element_id, params.target_state)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "inspect_refinement_branches",
+        description = "List active and parked refinement branches for an entity. Parked branches are dormant but inspectable and can be reactivated by promoting to the same target state."
+    )]
+    async fn inspect_refinement_branches_tool(
+        &self,
+        Parameters(params): Parameters<InspectRefinementBranchesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_inspect_refinement_branches(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "discard_refinement_branch",
+        description = "Permanently discard a parked refinement branch by parent_element_id and child_element_id. Active branches must be demoted/parked before they can be discarded."
+    )]
+    async fn discard_refinement_branch_tool(
+        &self,
+        Parameters(params): Parameters<DiscardRefinementBranchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_discard_refinement_branch(params.parent_element_id, params.child_element_id)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
@@ -10083,8 +10214,7 @@ impl ModelApiServer {
         name = "preview_promotion",
         description = "Preview the obligation set and validation findings that would result from \
             promoting an entity to a target state, without permanently mutating the world. \
-            Implementation: promotes, captures result, then demotes to restore previous state. \
-            True read-only simulation is a follow-on (PP75+)."
+            Returns a read-only promotion plan and leaves the active graph unchanged."
     )]
     async fn preview_promotion_tool(
         &self,
@@ -12502,6 +12632,13 @@ pub fn handle_quantity_set(
 
     let entity = find_entity_by_element_id(world, ElementId(request.element_id))
         .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
+    {
+        return Err(format!(
+            "Entity {} is in a parked refinement branch",
+            request.element_id
+        ));
+    }
     if world.get::<QuantitySet>(entity).is_none() {
         world.entity_mut(entity).insert(QuantitySet::empty());
     }
@@ -12532,6 +12669,10 @@ pub fn handle_quantity_get(
 
     let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
         .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
+    {
+        return Ok(Value::Null);
+    }
     let Some(set) = world.entity(entity).get::<QuantitySet>() else {
         return Ok(Value::Null);
     };
@@ -12571,6 +12712,10 @@ pub fn handle_quantity_list_provenance(
 
     let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
         .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
+    {
+        return Ok(Value::Array(Vec::new()));
+    }
     let Some(set) = world.entity(entity).get::<QuantitySet>() else {
         return Ok(Value::Array(Vec::new()));
     };
@@ -12625,6 +12770,17 @@ pub fn handle_quantity_check_invariants(
 
     let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
         .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
+    {
+        return Ok(serde_json::json!({
+            "has_quantity_set": false,
+            "ok": true,
+            "net_le_gross_violations": [],
+            "area_deduction_consistent": true,
+            "all_grounded": true,
+            "parked_refinement_branch": true,
+        }));
+    }
     let Some(set) = world.entity(entity).get::<QuantitySet>() else {
         return Ok(serde_json::json!({
             "has_quantity_set": false,
@@ -19533,6 +19689,51 @@ fn handle_demote_refinement(
 }
 
 #[cfg(feature = "model-api")]
+fn handle_inspect_refinement_branches(
+    world: &World,
+    element_id: u64,
+) -> ApiResult<Vec<RefinementBranchApiInfo>> {
+    use crate::plugins::refinement::list_refinement_branches;
+
+    let eid = ElementId(element_id);
+    ensure_refinable_entity_exists(world, eid)?;
+    Ok(list_refinement_branches(world, eid)
+        .into_iter()
+        .map(|branch| RefinementBranchApiInfo {
+            root_element_id: branch.root_element_id,
+            parent_element_id: branch.parent_element_id,
+            child_element_id: branch.child_element_id,
+            target_state: branch.target_state.as_str().to_string(),
+            recipe_id: branch.recipe_id.map(|recipe_id| recipe_id.0),
+            status: branch.status.as_str().to_string(),
+        })
+        .collect())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_discard_refinement_branch(
+    world: &mut World,
+    parent_element_id: u64,
+    child_element_id: u64,
+) -> ApiResult<DiscardRefinementBranchResult> {
+    use crate::plugins::refinement::discard_refinement_branch;
+
+    ensure_refinable_entity_exists(world, ElementId(parent_element_id))?;
+    ensure_refinable_entity_exists(world, ElementId(child_element_id))?;
+    let discarded_element_ids = discard_refinement_branch(
+        world,
+        ElementId(parent_element_id),
+        ElementId(child_element_id),
+    )?;
+    flush_model_api_write_pipeline(world);
+    Ok(DiscardRefinementBranchResult {
+        parent_element_id,
+        child_element_id,
+        discarded_element_ids,
+    })
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_run_validation(
     world: &World,
     element_id: u64,
@@ -19543,6 +19744,9 @@ pub fn handle_run_validation(
 
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
+    if crate::plugins::refinement::is_parked_refinement_entity(world, eid) {
+        return Ok(Vec::new());
+    }
 
     let (state, obligations) = {
         let mut q = world.try_query::<(EntityRef,)>().unwrap();
@@ -19925,6 +20129,12 @@ fn handle_list_constraints(world: &World, _scope: Option<String>) -> Vec<Constra
 #[cfg(feature = "model-api")]
 fn handle_run_validation_v2(world: &World, element_id: Option<u64>) -> Vec<ValidationFindingInfo> {
     use crate::plugins::validation::Findings;
+
+    if let Some(eid) = element_id {
+        if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(eid)) {
+            return Vec::new();
+        }
+    }
 
     let Some(findings) = world.get_resource::<Findings>() else {
         return Vec::new();
