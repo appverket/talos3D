@@ -5,6 +5,8 @@
 //! is the ADR-048 substrate that lets a planar wall and a cylindrical turret
 //! share one opening representation.
 
+use std::collections::BTreeSet;
+
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +118,17 @@ impl HostChart {
         }
     }
 
+    pub fn default_through_stack(&self) -> HostThroughStack {
+        HostThroughStack::single_interval(
+            self.chart_id.clone(),
+            ThroughInterval::constant(
+                "host",
+                self.thickness(),
+                ThroughIntervalRoleToken::new("core:host"),
+            ),
+        )
+    }
+
     pub fn wraps_u(&self) -> bool {
         match &self.kind {
             HostChartKind::Cylindrical(chart) => {
@@ -178,6 +191,269 @@ impl HostChart {
     fn offset_point_at(&self, point: Vec2, side: f32) -> Vec3 {
         self.point_at(point) + self.normal_at(point) * (self.thickness() * 0.5 * side)
     }
+}
+
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostThroughStack {
+    pub reference_chart_id: String,
+    #[serde(default)]
+    pub through_axis_policy: HostThroughAxisPolicy,
+    pub intervals: Vec<ThroughInterval>,
+}
+
+impl HostThroughStack {
+    pub fn new(reference_chart_id: impl Into<String>, intervals: Vec<ThroughInterval>) -> Self {
+        Self {
+            reference_chart_id: reference_chart_id.into(),
+            through_axis_policy: HostThroughAxisPolicy::default(),
+            intervals,
+        }
+    }
+
+    pub fn single_interval(
+        reference_chart_id: impl Into<String>,
+        interval: ThroughInterval,
+    ) -> Self {
+        Self::new(reference_chart_id, vec![interval])
+    }
+
+    pub fn with_axis_policy(mut self, through_axis_policy: HostThroughAxisPolicy) -> Self {
+        self.through_axis_policy = through_axis_policy;
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), HostThroughStackValidationError> {
+        if self.reference_chart_id.trim().is_empty() {
+            return Err(HostThroughStackValidationError::EmptyReferenceChartId);
+        }
+
+        match self.through_axis_policy {
+            HostThroughAxisPolicy::ChartNormal => {}
+            HostThroughAxisPolicy::ExplicitVector { axis } => {
+                if !axis.x.is_finite()
+                    || !axis.y.is_finite()
+                    || !axis.z.is_finite()
+                    || axis.length_squared() <= f32::EPSILON
+                {
+                    return Err(HostThroughStackValidationError::InvalidExplicitAxis);
+                }
+            }
+        }
+
+        if self.intervals.is_empty() {
+            return Err(HostThroughStackValidationError::EmptyIntervals);
+        }
+
+        let mut seen_ids = BTreeSet::new();
+        for interval in &self.intervals {
+            if interval.id.0.trim().is_empty() {
+                return Err(HostThroughStackValidationError::EmptyIntervalId);
+            }
+            if !seen_ids.insert(interval.id.0.clone()) {
+                return Err(HostThroughStackValidationError::DuplicateIntervalId {
+                    id: interval.id.clone(),
+                });
+            }
+            match &interval.extent_field {
+                ThroughExtentField::Constant { value } => {
+                    if !value.is_finite() || *value <= 0.0 {
+                        return Err(HostThroughStackValidationError::InvalidIntervalExtent {
+                            id: interval.id.clone(),
+                        });
+                    }
+                }
+                ThroughExtentField::Parameter { name } => {
+                    if name.trim().is_empty() {
+                        return Err(HostThroughStackValidationError::InvalidIntervalExtent {
+                            id: interval.id.clone(),
+                        });
+                    }
+                }
+            }
+            if interval.role_token.0.trim().is_empty() {
+                return Err(HostThroughStackValidationError::EmptyRoleToken {
+                    id: interval.id.clone(),
+                });
+            }
+            if interval
+                .capability_tokens
+                .iter()
+                .any(|token| token.0.trim().is_empty())
+            {
+                return Err(HostThroughStackValidationError::EmptyCapabilityToken {
+                    id: interval.id.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn total_constant_extent(&self) -> Option<f32> {
+        self.intervals.iter().try_fold(0.0, |total, interval| {
+            Some(total + interval.constant_extent()?)
+        })
+    }
+
+    pub fn resolved_constant_intervals(
+        &self,
+    ) -> Result<Vec<ResolvedThroughInterval>, HostThroughStackValidationError> {
+        self.validate()?;
+
+        let mut start = 0.0;
+        let mut resolved = Vec::with_capacity(self.intervals.len());
+        for interval in &self.intervals {
+            let extent = interval.constant_extent().ok_or_else(|| {
+                HostThroughStackValidationError::UnresolvedIntervalExtent {
+                    id: interval.id.clone(),
+                }
+            })?;
+            let end = start + extent;
+            resolved.push(ResolvedThroughInterval {
+                id: interval.id.clone(),
+                extent,
+                cumulative_range: ThroughRange { start, end },
+                role_token: interval.role_token.clone(),
+                capability_tokens: interval.capability_tokens.clone(),
+            });
+            start = end;
+        }
+
+        Ok(resolved)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HostThroughAxisPolicy {
+    ChartNormal,
+    ExplicitVector { axis: Vec3 },
+}
+
+impl Default for HostThroughAxisPolicy {
+    fn default() -> Self {
+        Self::ChartNormal
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ThroughIntervalId(pub String);
+
+impl ThroughIntervalId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThroughIntervalRoleToken(pub String);
+
+impl ThroughIntervalRoleToken {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThroughIntervalCapabilityToken(pub String);
+
+impl ThroughIntervalCapabilityToken {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThroughInterval {
+    pub id: ThroughIntervalId,
+    pub extent_field: ThroughExtentField,
+    pub role_token: ThroughIntervalRoleToken,
+    #[serde(default)]
+    pub capability_tokens: Vec<ThroughIntervalCapabilityToken>,
+}
+
+impl ThroughInterval {
+    pub fn new(
+        id: impl Into<String>,
+        extent_field: ThroughExtentField,
+        role_token: ThroughIntervalRoleToken,
+    ) -> Self {
+        Self {
+            id: ThroughIntervalId::new(id),
+            extent_field,
+            role_token,
+            capability_tokens: Vec::new(),
+        }
+    }
+
+    pub fn constant(
+        id: impl Into<String>,
+        extent: f32,
+        role_token: ThroughIntervalRoleToken,
+    ) -> Self {
+        Self::new(id, ThroughExtentField::constant(extent), role_token)
+    }
+
+    pub fn with_capability_token(mut self, token: ThroughIntervalCapabilityToken) -> Self {
+        self.capability_tokens.push(token);
+        self
+    }
+
+    pub fn constant_extent(&self) -> Option<f32> {
+        self.extent_field.constant_extent()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ThroughExtentField {
+    Constant { value: f32 },
+    Parameter { name: String },
+}
+
+impl ThroughExtentField {
+    pub fn constant(value: f32) -> Self {
+        Self::Constant { value }
+    }
+
+    pub fn parameter(name: impl Into<String>) -> Self {
+        Self::Parameter { name: name.into() }
+    }
+
+    pub fn constant_extent(&self) -> Option<f32> {
+        match self {
+            Self::Constant { value } => Some(*value),
+            Self::Parameter { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ThroughRange {
+    pub start: f32,
+    pub end: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedThroughInterval {
+    pub id: ThroughIntervalId,
+    pub extent: f32,
+    pub cumulative_range: ThroughRange,
+    pub role_token: ThroughIntervalRoleToken,
+    pub capability_tokens: Vec<ThroughIntervalCapabilityToken>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostThroughStackValidationError {
+    EmptyReferenceChartId,
+    EmptyIntervals,
+    EmptyIntervalId,
+    DuplicateIntervalId { id: ThroughIntervalId },
+    InvalidIntervalExtent { id: ThroughIntervalId },
+    UnresolvedIntervalExtent { id: ThroughIntervalId },
+    EmptyRoleToken { id: ThroughIntervalId },
+    EmptyCapabilityToken { id: ThroughIntervalId },
+    InvalidExplicitAxis,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1015,6 +1291,158 @@ mod tests {
         let round_trip: HostChart = serde_json::from_str(&json).unwrap();
 
         assert_eq!(round_trip, chart);
+    }
+
+    #[test]
+    fn host_through_stack_round_trips_through_json() {
+        let stack = HostThroughStack::new(
+            "wall_face",
+            vec![
+                ThroughInterval::constant(
+                    "interval_a",
+                    0.016,
+                    ThroughIntervalRoleToken::new("role:a"),
+                )
+                .with_capability_token(ThroughIntervalCapabilityToken::new("capability:a")),
+                ThroughInterval::new(
+                    "interval_b",
+                    ThroughExtentField::parameter("interval_b_extent"),
+                    ThroughIntervalRoleToken::new("role:b"),
+                ),
+            ],
+        )
+        .with_axis_policy(HostThroughAxisPolicy::ChartNormal);
+
+        let json = serde_json::to_string(&stack).unwrap();
+        let round_trip: HostThroughStack = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(round_trip, stack);
+    }
+
+    #[test]
+    fn host_through_stack_derives_cumulative_ranges_from_constant_extents() {
+        let stack = HostThroughStack::new(
+            "wall_face",
+            vec![
+                ThroughInterval::constant(
+                    "interval_a",
+                    0.016,
+                    ThroughIntervalRoleToken::new("role:a"),
+                ),
+                ThroughInterval::constant(
+                    "interval_b",
+                    0.168,
+                    ThroughIntervalRoleToken::new("role:b"),
+                ),
+                ThroughInterval::constant(
+                    "interval_c",
+                    0.016,
+                    ThroughIntervalRoleToken::new("role:c"),
+                ),
+            ],
+        );
+
+        let resolved = stack.resolved_constant_intervals().unwrap();
+
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(
+            resolved[0].cumulative_range,
+            ThroughRange {
+                start: 0.0,
+                end: 0.016
+            }
+        );
+        assert_eq!(
+            resolved[1].cumulative_range,
+            ThroughRange {
+                start: 0.016,
+                end: 0.184
+            }
+        );
+        assert_eq!(
+            resolved[2].cumulative_range,
+            ThroughRange {
+                start: 0.184,
+                end: 0.2
+            }
+        );
+        assert!((stack.total_constant_extent().unwrap() - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn host_chart_default_through_stack_matches_host_thickness() {
+        let chart = HostChart::planar(
+            "wall_face",
+            PlanarHostChart::new(
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                ChartDomain::new(0.0, 4.0),
+                ChartDomain::new(0.0, 3.0),
+                0.2,
+            ),
+        );
+
+        let resolved = chart
+            .default_through_stack()
+            .resolved_constant_intervals()
+            .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].cumulative_range,
+            ThroughRange {
+                start: 0.0,
+                end: 0.2
+            }
+        );
+        assert_eq!(
+            resolved[0].role_token,
+            ThroughIntervalRoleToken::new("core:host")
+        );
+    }
+
+    #[test]
+    fn host_through_stack_rejects_duplicate_ids_and_bad_extents() {
+        let duplicate_ids = HostThroughStack::new(
+            "wall_face",
+            vec![
+                ThroughInterval::constant("interval", 0.1, ThroughIntervalRoleToken::new("role:a")),
+                ThroughInterval::constant("interval", 0.1, ThroughIntervalRoleToken::new("role:b")),
+            ],
+        );
+        assert_eq!(
+            duplicate_ids.validate(),
+            Err(HostThroughStackValidationError::DuplicateIntervalId {
+                id: ThroughIntervalId::new("interval")
+            })
+        );
+
+        let bad_extent = HostThroughStack::single_interval(
+            "wall_face",
+            ThroughInterval::constant("interval", 0.0, ThroughIntervalRoleToken::new("role:a")),
+        );
+        assert_eq!(
+            bad_extent.validate(),
+            Err(HostThroughStackValidationError::InvalidIntervalExtent {
+                id: ThroughIntervalId::new("interval")
+            })
+        );
+
+        let unresolved = HostThroughStack::single_interval(
+            "wall_face",
+            ThroughInterval::new(
+                "interval",
+                ThroughExtentField::parameter("interval_extent"),
+                ThroughIntervalRoleToken::new("role:a"),
+            ),
+        );
+        assert_eq!(
+            unresolved.resolved_constant_intervals(),
+            Err(HostThroughStackValidationError::UnresolvedIntervalExtent {
+                id: ThroughIntervalId::new("interval")
+            })
+        );
     }
 
     #[test]
