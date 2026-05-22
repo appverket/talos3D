@@ -47,9 +47,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::authored_entity::BoxedEntity;
 use crate::capability_registry::CapabilityRegistry;
+use crate::plugins::entity_labels::collect_entity_labels;
 use crate::plugins::identity::ElementId;
 use crate::plugins::modeling::assembly::SemanticRelation;
 
@@ -150,6 +152,15 @@ fn is_relation_dependency_edge(edge: &DependencyOut) -> bool {
 // Read-side adjacency view
 // ---------------------------------------------------------------------------
 
+/// A single resolved dependency edge in the read-side view: `dependent`
+/// depends on `dependency` in the given `role`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyEdge {
+    pub dependent: ElementId,
+    pub dependency: ElementId,
+    pub role: DependencyRole,
+}
+
 /// Read-only adjacency view of the current dependency graph, built
 /// by the caller from `EntityDependencies` components in the world.
 ///
@@ -219,6 +230,44 @@ impl DependencyGraph {
             nodes.insert(*k);
         }
         nodes.len()
+    }
+
+    /// All distinct entities that appear as a dependent or a dependency,
+    /// sorted by id for deterministic output.
+    pub fn nodes(&self) -> Vec<ElementId> {
+        let mut set: HashSet<ElementId> = HashSet::new();
+        for k in self.out_edges.keys() {
+            set.insert(*k);
+        }
+        for k in self.in_edges.keys() {
+            set.insert(*k);
+        }
+        let mut nodes: Vec<ElementId> = set.into_iter().collect();
+        nodes.sort_by_key(|e| e.0);
+        nodes
+    }
+
+    /// All resolved edges (`dependent → dependency`, with role), sorted for
+    /// deterministic output.
+    pub fn edges(&self) -> Vec<DependencyEdge> {
+        let mut edges: Vec<DependencyEdge> = Vec::new();
+        for (dependent, deps) in &self.out_edges {
+            for dep in deps {
+                edges.push(DependencyEdge {
+                    dependent: *dependent,
+                    dependency: dep.on,
+                    role: dep.role.clone(),
+                });
+            }
+        }
+        edges.sort_by(|a, b| {
+            a.dependent
+                .0
+                .cmp(&b.dependent.0)
+                .then(a.dependency.0.cmp(&b.dependency.0))
+                .then_with(|| a.role.as_str().cmp(b.role.as_str()))
+        });
+        edges
     }
 
     /// Direct dependencies of `entity`.
@@ -759,6 +808,141 @@ impl Plugin for DependencyGraphPlugin {
 }
 
 // ---------------------------------------------------------------------------
+// Read-only snapshots for the Dependency panel and model-api
+// ---------------------------------------------------------------------------
+
+/// Build a fresh [`DependencyGraph`] directly from the world's
+/// `EntityDependencies` components.
+///
+/// Equivalent to what [`rebuild_dependency_graph_system`] caches into
+/// [`DependencyGraphResource`], but self-contained: callers that read the graph
+/// outside the evaluation schedule (the Dependency panel each frame, the
+/// model-api request handler) get an always-current view without depending on
+/// system ordering relative to the cache rebuild.
+pub fn build_graph_snapshot(world: &mut World) -> DependencyGraph {
+    let rows: Vec<(ElementId, Vec<DependencyOut>)> = {
+        let mut query = world.query::<(&ElementId, &EntityDependencies)>();
+        query
+            .iter(world)
+            .map(|(id, deps)| (*id, deps.edges.clone()))
+            .collect()
+    };
+    let mut graph = DependencyGraph::new();
+    for (id, edges) in rows {
+        graph.set_dependencies(id, edges);
+    }
+    graph
+}
+
+/// Serialize the whole entity dependency graph — the single source of truth
+/// shared by the Dependency panel and the model-api `dependency_graph` tool.
+///
+/// Returns `{nodes, edges, topological_order, has_cycle, node_count,
+/// edge_count}`, where `topological_order` is `null` when the graph contains a
+/// cycle (`has_cycle: true`).
+pub fn dependency_graph_json(world: &mut World) -> Value {
+    let labels = collect_entity_labels(world);
+    let graph = build_graph_snapshot(world);
+    let label_of = |id: ElementId| labels.get(&id.0).cloned();
+
+    let nodes: Vec<Value> = graph
+        .nodes()
+        .into_iter()
+        .map(|id| {
+            json!({
+                "element_id": id.0,
+                "label": label_of(id),
+                "depends_on_count": graph.parents_of(id).len(),
+                "dependent_count": graph.children_of(id).len(),
+            })
+        })
+        .collect();
+
+    let edges_view = graph.edges();
+    let edges: Vec<Value> = edges_view
+        .iter()
+        .map(|edge| {
+            json!({
+                "dependent": edge.dependent.0,
+                "dependency": edge.dependency.0,
+                "role": edge.role.as_str(),
+            })
+        })
+        .collect();
+
+    let (topological_order, has_cycle) = match graph.topological_order() {
+        Ok(order) => (
+            Some(order.into_iter().map(|id| id.0).collect::<Vec<u64>>()),
+            false,
+        ),
+        Err(_) => (None, true),
+    };
+
+    json!({
+        "nodes": nodes,
+        "edges": edges,
+        "topological_order": topological_order,
+        "has_cycle": has_cycle,
+        "node_count": graph.node_count(),
+        "edge_count": edges_view.len(),
+    })
+}
+
+/// Serialize one entity's dependency neighbourhood for the model-api
+/// `entity_dependencies` tool: what it depends on (with edge roles), what
+/// directly depends on it, and the full transitive set that a change to it
+/// would propagate to.
+pub fn entity_dependencies_json(world: &mut World, element_id: u64) -> Value {
+    let labels = collect_entity_labels(world);
+    let graph = build_graph_snapshot(world);
+    let id = ElementId(element_id);
+    let label_of = |i: ElementId| labels.get(&i.0).cloned();
+
+    let depends_on: Vec<Value> = graph
+        .parents_of(id)
+        .iter()
+        .map(|edge| {
+            json!({
+                "element_id": edge.on.0,
+                "label": label_of(edge.on),
+                "role": edge.role.as_str(),
+            })
+        })
+        .collect();
+
+    let dependents: Vec<Value> = graph
+        .children_of(id)
+        .iter()
+        .map(|child| {
+            json!({
+                "element_id": child.0,
+                "label": label_of(*child),
+            })
+        })
+        .collect();
+
+    let bound = graph.node_count().saturating_add(1);
+    let propagates_to: Vec<Value> = graph
+        .bounded_descendant_walk(id, bound)
+        .into_iter()
+        .map(|node| {
+            json!({
+                "element_id": node.0,
+                "label": label_of(node),
+            })
+        })
+        .collect();
+
+    json!({
+        "element_id": element_id,
+        "label": label_of(id),
+        "depends_on": depends_on,
+        "dependents": dependents,
+        "propagates_to": propagates_to,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -768,6 +952,114 @@ mod tests {
 
     fn eid(n: u64) -> ElementId {
         ElementId(n)
+    }
+
+    // ── Read-only snapshots / JSON serializers ─────────────────
+
+    #[test]
+    fn graph_nodes_and_edges_are_sorted_and_complete() {
+        let g = DependencyGraph::new()
+            .with_edge(eid(3), eid(1), "parametric")
+            .with_edge(eid(2), eid(1), "relation:hosted_on");
+        assert_eq!(g.nodes(), vec![eid(1), eid(2), eid(3)]);
+        let edges = g.edges();
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].dependent, eid(2));
+        assert_eq!(edges[0].dependency, eid(1));
+        assert_eq!(edges[0].role.as_str(), "relation:hosted_on");
+        assert_eq!(edges[1].dependent, eid(3));
+    }
+
+    #[test]
+    fn build_graph_snapshot_reads_entity_dependencies() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "parametric"),
+        ));
+        world.spawn((ElementId(2), EntityDependencies::empty()));
+        let graph = build_graph_snapshot(&mut world);
+        assert_eq!(graph.parents_of(ElementId(1)).len(), 1);
+        assert_eq!(graph.children_of(ElementId(2)), &[ElementId(1)]);
+    }
+
+    #[test]
+    fn dependency_graph_json_reports_nodes_edges_and_acyclic_order() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "parametric"),
+        ));
+        world.spawn((ElementId(2), EntityDependencies::empty()));
+
+        let json = dependency_graph_json(&mut world);
+        assert_eq!(json["node_count"], serde_json::json!(2));
+        assert_eq!(json["edge_count"], serde_json::json!(1));
+        assert_eq!(json["has_cycle"], serde_json::json!(false));
+        let edges = json["edges"].as_array().expect("edges array");
+        assert_eq!(edges[0]["dependent"], serde_json::json!(1));
+        assert_eq!(edges[0]["dependency"], serde_json::json!(2));
+        assert_eq!(edges[0]["role"], serde_json::json!("parametric"));
+        // Dependency (2) must come before its dependent (1) in topo order.
+        let order: Vec<u64> = json["topological_order"]
+            .as_array()
+            .expect("order array")
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        let pos = |e: u64| order.iter().position(|x| *x == e).unwrap();
+        assert!(pos(2) < pos(1));
+    }
+
+    #[test]
+    fn dependency_graph_json_flags_cycle_with_null_order() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "p"),
+        ));
+        world.spawn((
+            ElementId(2),
+            EntityDependencies::empty().with_edge(ElementId(1), "p"),
+        ));
+        let json = dependency_graph_json(&mut world);
+        assert_eq!(json["has_cycle"], serde_json::json!(true));
+        assert!(json["topological_order"].is_null());
+    }
+
+    #[test]
+    fn entity_dependencies_json_reports_neighbourhood_and_propagation() {
+        let mut world = World::new();
+        // chain: 1 → 2 → 3 (1 depends on 2, 2 depends on 3).
+        world.spawn((
+            ElementId(1),
+            EntityDependencies::empty().with_edge(ElementId(2), "p"),
+        ));
+        world.spawn((
+            ElementId(2),
+            EntityDependencies::empty().with_edge(ElementId(3), "host"),
+        ));
+        world.spawn((ElementId(3), EntityDependencies::empty()));
+
+        let json = entity_dependencies_json(&mut world, 2);
+        assert_eq!(json["element_id"], serde_json::json!(2));
+        // 2 depends on 3, with the recorded role.
+        let depends_on = json["depends_on"].as_array().unwrap();
+        assert_eq!(depends_on.len(), 1);
+        assert_eq!(depends_on[0]["element_id"], serde_json::json!(3));
+        assert_eq!(depends_on[0]["role"], serde_json::json!("host"));
+        // 1 directly depends on 2.
+        let dependents = json["dependents"].as_array().unwrap();
+        assert_eq!(dependents.len(), 1);
+        assert_eq!(dependents[0]["element_id"], serde_json::json!(1));
+        // Changing 3's neighbourhood: editing 2 propagates to 1 only.
+        let propagates: Vec<u64> = json["propagates_to"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["element_id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(propagates, vec![1]);
     }
 
     // ── EntityDependencies ─────────────────────────────────────

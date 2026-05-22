@@ -141,6 +141,33 @@ struct SelectionPressCapture {
 #[derive(Component)]
 pub struct Selected;
 
+/// Apply a list-panel row click to the ECS selection set, mirroring viewport
+/// selection semantics: exclusive by default, toggle when `additive` (the row
+/// was clicked with Cmd/Ctrl or Shift held). Shared by every panel that drives
+/// selection from a clickable list (Outliner, Layers, Dependency graph) so they
+/// behave identically.
+pub fn apply_click_selection(
+    commands: &mut Commands,
+    current: &std::collections::HashSet<Entity>,
+    target: Entity,
+    additive: bool,
+) {
+    if additive {
+        if current.contains(&target) {
+            commands.entity(target).remove::<Selected>();
+        } else {
+            commands.entity(target).insert(Selected);
+        }
+    } else {
+        for entity in current {
+            if *entity != target {
+                commands.entity(*entity).remove::<Selected>();
+            }
+        }
+        commands.entity(target).insert(Selected);
+    }
+}
+
 /// Filter that matches authored scene entities eligible for selection.
 ///
 /// `Without<PreviewOnly>` ensures that synthetic preview-scene entities
@@ -221,7 +248,7 @@ fn handle_selection_click(world: &mut World) {
     };
 
     let hit_target = if let Some(ray) = click_ray {
-        let raw_hit_entity = selection_hit_entity(world, ray);
+        let raw_hit_entity = selection_hit_entity(world, ray, cursor_position);
         resolve_selection_click_target(world, raw_hit_entity)
     } else {
         SelectionClickTarget::default()
@@ -693,7 +720,7 @@ fn choose_selection_hit(
         .min_by(|left, right| left.distance.total_cmp(&right.distance))
 }
 
-fn selection_hit_entity(world: &mut World, ray: Ray3d) -> Option<Entity> {
+fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) -> Option<Entity> {
     let registry = world.resource::<CapabilityRegistry>();
     let custom_hit = registry
         .factories()
@@ -727,8 +754,72 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d) -> Option<Entity> {
         });
     system_state.apply(world);
 
+    let screen_hit = screen_bounds_hit(world, cursor_position);
     let bounds_hit = snapshot_bounds_hit(world, ray);
-    choose_selection_hit(custom_hit, mesh_hit, bounds_hit).map(|hit| hit.entity)
+    choose_selection_hit(custom_hit, mesh_hit, None)
+        .or(screen_hit)
+        .or(bounds_hit)
+        .map(|hit| hit.entity)
+}
+
+fn screen_bounds_hit(world: &mut World, cursor_position: Vec2) -> Option<HitCandidate> {
+    let (camera, camera_transform) = {
+        let mut camera_query =
+            world.query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
+        camera_query
+            .iter(world)
+            .next()
+            .map(|(camera, transform)| (camera.clone(), *transform))?
+    };
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut query = world
+        .try_query::<EntityRef>()
+        .expect("EntityRef query should be available");
+
+    query
+        .iter(world)
+        .filter_map(|entity_ref| {
+            let entity = entity_ref.id();
+            if entity_ref.contains::<PreviewOnly>()
+                || entity_ref.contains::<OpeningContext>()
+                || entity_ref.contains::<FaceProfileFeature>()
+                || !entity_is_visible(world, entity)
+            {
+                return None;
+            }
+
+            let snapshot = registry.capture_user_facing_snapshot(&entity_ref, world)?;
+            if snapshot.scope() != EntityScope::AuthoredModel {
+                return None;
+            }
+            let bounds = snapshot.bounds()?;
+            let mut screen_min = Vec2::splat(f32::MAX);
+            let mut screen_max = Vec2::splat(f32::MIN);
+            let mut any_projected = false;
+            for corner in bounds.corners() {
+                let Ok(screen_pos) = camera.world_to_viewport(&camera_transform, corner) else {
+                    continue;
+                };
+                screen_min = screen_min.min(screen_pos);
+                screen_max = screen_max.max(screen_pos);
+                any_projected = true;
+            }
+            if !any_projected
+                || cursor_position.x < screen_min.x
+                || cursor_position.x > screen_max.x
+                || cursor_position.y < screen_min.y
+                || cursor_position.y > screen_max.y
+            {
+                return None;
+            }
+            let size = screen_max - screen_min;
+            let area = (size.x.max(1.0)) * (size.y.max(1.0));
+            Some(HitCandidate {
+                entity,
+                distance: area,
+            })
+        })
+        .min_by(|left, right| left.distance.total_cmp(&right.distance))
 }
 
 fn snapshot_bounds_hit(world: &mut World, ray: Ray3d) -> Option<HitCandidate> {
