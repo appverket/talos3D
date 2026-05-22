@@ -30,11 +30,12 @@ use crate::{
             definition::{
                 Definition, DefinitionId, DefinitionKind, DefinitionLibrary, DefinitionLibraryId,
                 DefinitionLibraryRegistry, DefinitionRegistry, DefinitionVisibility, OverrideMap,
-                SlotMultiplicity,
+                ResolvedParam, SlotMultiplicity, ValueProvenance,
             },
             occurrence::{
-                resolve_compound_slot_occurrence_context, HostedAnchor, HostedOccurrenceContext,
-                OccurrenceIdentity, OccurrenceSnapshot,
+                resolve_compound_slot_occurrence_context,
+                resolve_compound_slot_occurrence_context_with_root_overrides, HostedAnchor,
+                HostedOccurrenceContext, OccurrenceIdentity, OccurrenceSnapshot,
             },
         },
         selection::Selected,
@@ -404,6 +405,7 @@ pub fn execute_create_definition_draft(
     if let Some(mut state) = world.get_resource_mut::<DefinitionsWindowState>() {
         state.visible = true;
         state.inspector_visible = true;
+        state.selected_occurrence_overrides = OverrideMap::default();
     }
     if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
         status.set_feedback(format!("Created draft '{}'", definition.name), 2.0);
@@ -467,20 +469,24 @@ pub fn execute_open_selected_occurrence_definition(
     world: &mut World,
     _: &Value,
 ) -> Result<CommandResult, String> {
-    let (definition_id, source_slot_path) = selected_occurrence_definition_id_and_slot(world)?;
+    let selected_context = selected_occurrence_definition_context(world)?;
 
     let output = execute_open_definition_draft(
         world,
         &json!({
-            "definition_id": definition_id.to_string(),
+            "definition_id": selected_context.definition_id.to_string(),
         }),
     )?;
+
+    if let Some(mut state) = world.get_resource_mut::<DefinitionsWindowState>() {
+        state.selected_occurrence_overrides = selected_context.overrides.clone();
+    }
 
     // PP-DBUX4 D: when the editor was opened by clicking a generated part in
     // the main viewport, auto-select the matching slot in the property tree.
     // This is best-effort: if the slot path leaf does not exist in the opened
     // definition's child slots, fall back to the definition root.
-    if let Some(slot_path) = source_slot_path {
+    if let Some(slot_path) = selected_context.source_slot_path {
         // The `slot_path` may be nested (e.g. "glazing.left_pane"). The
         // controlling definition is the child definition at the top-level
         // slot, so its own slot list may not contain the nested segment.
@@ -525,6 +531,7 @@ pub fn execute_open_selected_occurrence_definition(
         if slot_exists {
             if let Some(mut state) = world.get_resource_mut::<DefinitionsWindowState>() {
                 state.selected_node = DefinitionEditorNode::Slot(top_level_slot);
+                state.selected_preview_slot_path = Some(slot_path);
                 state.technical_view_buffer.clear();
                 state.technical_view_error = None;
             }
@@ -533,7 +540,10 @@ pub fn execute_open_selected_occurrence_definition(
 
     if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
         status.set_feedback(
-            format!("Opened occurrence definition '{}'", definition_id),
+            format!(
+                "Opened occurrence definition '{}'",
+                selected_context.definition_id
+            ),
             2.0,
         );
     }
@@ -1107,16 +1117,24 @@ pub fn analyze_selection_snapshots(snapshots: &[BoxedEntity]) -> DefinitionSelec
     context
 }
 
-/// Return the controlling definition id for the single currently-selected
-/// entity, plus the slot path that led to it (populated when the selection is
-/// a [`GeneratedOccurrencePart`]).
+#[derive(Debug, Clone)]
+struct SelectedOccurrenceDefinitionContext {
+    definition_id: DefinitionId,
+    source_slot_path: Option<String>,
+    overrides: OverrideMap,
+}
+
+/// Return the controlling definition context for the single currently-selected
+/// entity. The context includes the occurrence or slot-bound overrides that
+/// produced the visible geometry, so the Definition editor can show effective
+/// parameter values instead of only definition defaults.
 ///
 /// The slot path is used by PP-DBUX4 to auto-select the matching slot in the
 /// Definition Editor property tree when the editor is opened from the main
 /// viewport.
-fn selected_occurrence_definition_id_and_slot(
+fn selected_occurrence_definition_context(
     world: &mut World,
-) -> Result<(DefinitionId, Option<String>), String> {
+) -> Result<SelectedOccurrenceDefinitionContext, String> {
     let mut selected_query = world.query_filtered::<Entity, With<Selected>>();
     let selected_entities: Vec<Entity> = selected_query.iter(world).collect();
     if selected_entities.len() != 1 {
@@ -1125,13 +1143,21 @@ fn selected_occurrence_definition_id_and_slot(
 
     let selected = selected_entities[0];
     if let Some(identity) = world.get::<OccurrenceIdentity>(selected) {
-        return Ok((identity.definition_id.clone(), None));
+        return Ok(SelectedOccurrenceDefinitionContext {
+            definition_id: identity.definition_id.clone(),
+            source_slot_path: None,
+            overrides: identity.overrides.clone(),
+        });
     }
 
     if let Some(relation) = world.get::<SemanticRelation>(selected) {
         if relation.relation_type == "hosted_on" {
-            if let Some(definition_id) = occurrence_definition_for_element(world, relation.source) {
-                return Ok((definition_id, None));
+            if let Some(identity) = occurrence_identity_for_element(world, relation.source) {
+                return Ok(SelectedOccurrenceDefinitionContext {
+                    definition_id: identity.definition_id,
+                    source_slot_path: None,
+                    overrides: identity.overrides,
+                });
             }
         }
     }
@@ -1151,32 +1177,55 @@ fn selected_occurrence_definition_id_and_slot(
         // PP-DBUX4: also capture the slot path so the editor can auto-select
         // the matching slot row when it opens.
         let slot_path = generated.slot_path.clone();
-        return Ok((generated.definition_id.clone(), Some(slot_path)));
+        let owner = generated.owner;
+        let definition_id = generated.definition_id.clone();
+        let overrides = occurrence_identity_for_element(world, owner)
+            .and_then(|identity| {
+                let registry = world.resource::<DefinitionRegistry>();
+                resolve_compound_slot_occurrence_context_with_root_overrides(
+                    registry,
+                    &identity.definition_id,
+                    &identity.overrides,
+                    &slot_path,
+                )
+                .ok()
+                .map(|context| context.overrides)
+            })
+            .unwrap_or_default();
+        return Ok(SelectedOccurrenceDefinitionContext {
+            definition_id,
+            source_slot_path: Some(slot_path),
+            overrides,
+        });
     }
 
     if let Some(opening_id) = world.get::<ElementId>(selected).copied() {
-        if let Some(definition_id) = occurrence_definition_for_hosted_opening(world, opening_id) {
-            return Ok((definition_id, None));
+        if let Some(identity) = occurrence_identity_for_hosted_opening(world, opening_id) {
+            return Ok(SelectedOccurrenceDefinitionContext {
+                definition_id: identity.definition_id,
+                source_slot_path: None,
+                overrides: identity.overrides,
+            });
         }
     }
 
     Err("Selected entity is not an occurrence".to_string())
 }
 
-fn occurrence_definition_for_element(
+fn occurrence_identity_for_element(
     world: &mut World,
     occurrence_id: ElementId,
-) -> Option<DefinitionId> {
+) -> Option<OccurrenceIdentity> {
     let mut owner_query = world.query::<(&ElementId, &OccurrenceIdentity)>();
     owner_query.iter(world).find_map(|(element_id, identity)| {
-        (*element_id == occurrence_id).then_some(identity.definition_id.clone())
+        (*element_id == occurrence_id).then_some(identity.clone())
     })
 }
 
-fn occurrence_definition_for_hosted_opening(
+fn occurrence_identity_for_hosted_opening(
     world: &mut World,
     opening_id: ElementId,
-) -> Option<DefinitionId> {
+) -> Option<OccurrenceIdentity> {
     let hosted_sources = {
         let mut relation_query = world.query::<&SemanticRelation>();
         relation_query
@@ -1197,7 +1246,7 @@ fn occurrence_definition_for_hosted_opening(
 
     hosted_sources
         .into_iter()
-        .find_map(|source| occurrence_definition_for_element(world, source))
+        .find_map(|source| occurrence_identity_for_element(world, source))
 }
 
 fn wall_axis_from_value(value: &Value) -> Option<Vec3> {
@@ -2012,10 +2061,13 @@ fn draw_definition_editor(
     let Some(active_draft) = drafts.get(&active_draft_id).cloned() else {
         return;
     };
-    state.selected_preview_slot_path = None;
     if let Ok(preview_registry) = preview_registry_for_draft(definitions, libraries, &active_draft)
     {
-        preview_target.request(active_draft.working_copy.id.clone(), preview_registry);
+        preview_target.request_with_overrides(
+            active_draft.working_copy.id.clone(),
+            preview_registry,
+            state.selected_occurrence_overrides.clone(),
+        );
     }
     sync_inspector_state(state, &active_draft);
 
@@ -3070,6 +3122,70 @@ fn draw_context_editor(
     }
 }
 
+fn draw_effective_parameter_table(
+    ui: &mut egui::Ui,
+    title: &str,
+    definition: &Definition,
+    resolved: &HashMap<String, ResolvedParam>,
+    bound_values: &OverrideMap,
+    bound_source_label: &str,
+) {
+    egui::CollapsingHeader::new(title)
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new((title, definition.id.as_str(), "effective_parameters"))
+                .num_columns(4)
+                .striped(true)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Parameter").strong());
+                    ui.label(egui::RichText::new("Value").strong());
+                    ui.label(egui::RichText::new("Source").strong());
+                    ui.label(egui::RichText::new("Editability").strong());
+                    ui.end_row();
+
+                    for parameter in &definition.interface.parameters.0 {
+                        let Some(resolved_param) = resolved.get(&parameter.name) else {
+                            continue;
+                        };
+                        let is_bound = bound_values.contains(&parameter.name);
+                        let source = if is_bound {
+                            bound_source_label.to_string()
+                        } else {
+                            match &resolved_param.provenance {
+                                ValueProvenance::DefinitionDefault => "definition default",
+                                ValueProvenance::OccurrenceOverride => {
+                                    "occurrence / host contract"
+                                }
+                            }
+                            .to_string()
+                        };
+                        let editability = if is_bound
+                            || matches!(
+                                &resolved_param.provenance,
+                                ValueProvenance::OccurrenceOverride
+                            )
+                        {
+                            "read-only here"
+                        } else {
+                            match parameter.override_policy {
+                                crate::plugins::modeling::definition::OverridePolicy::Locked => {
+                                    "locked"
+                                }
+                                _ => "edit default below",
+                            }
+                        };
+
+                        ui.label(&parameter.name);
+                        ui.label(compact_json(&resolved_param.value));
+                        ui.label(egui::RichText::new(source).weak());
+                        ui.label(egui::RichText::new(editability).small().weak());
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
 // -- Context: Definition root --
 
 #[allow(clippy::too_many_arguments)]
@@ -3136,6 +3252,25 @@ fn draw_context_definition_root(
             egui::Color32::from_rgb(110, 180, 130),
             "Definition validates successfully.",
         );
+    }
+
+    if let Ok(preview_reg) = preview_registry_for_draft(definitions, libraries, active_draft) {
+        match preview_reg.resolve_params_checked(&def.id, &state.selected_occurrence_overrides) {
+            Ok(resolved) => draw_effective_parameter_table(
+                ui,
+                "Effective parameters",
+                def,
+                &resolved,
+                &state.selected_occurrence_overrides,
+                "occurrence / host contract",
+            ),
+            Err(error) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 140, 60),
+                    format!("Effective parameters unavailable: {error}"),
+                );
+            }
+        }
     }
 
     ui.add_space(8.0);
@@ -3299,6 +3434,52 @@ fn draw_context_parameter(
     });
     ui.separator();
 
+    if let Ok(preview_reg) = preview_registry_for_draft(definitions, libraries, active_draft) {
+        if let Ok(resolved) =
+            preview_reg.resolve_params_checked(&effective.id, &state.selected_occurrence_overrides)
+        {
+            if let Some(resolved_param) = resolved.get(parameter_name) {
+                let is_bound = state.selected_occurrence_overrides.contains(parameter_name);
+                let source = if is_bound {
+                    "occurrence / host contract"
+                } else {
+                    match &resolved_param.provenance {
+                        ValueProvenance::DefinitionDefault => "definition default",
+                        ValueProvenance::OccurrenceOverride => "occurrence / host contract",
+                    }
+                };
+                let editability = if is_bound
+                    || matches!(
+                        &resolved_param.provenance,
+                        ValueProvenance::OccurrenceOverride
+                    ) {
+                    "read-only here"
+                } else if parameter.override_policy
+                    == crate::plugins::modeling::definition::OverridePolicy::Locked
+                {
+                    "locked"
+                } else {
+                    "edit default below"
+                };
+                egui::Grid::new(("parameter_effective_value", parameter_name))
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Effective");
+                        ui.label(compact_json(&resolved_param.value));
+                        ui.end_row();
+                        ui.label("Source");
+                        ui.label(egui::RichText::new(source).weak());
+                        ui.end_row();
+                        ui.label("Editability");
+                        ui.label(egui::RichText::new(editability).weak());
+                        ui.end_row();
+                    });
+                ui.separator();
+            }
+        }
+    }
+
     ui.horizontal(|ui| {
         ui.label("Default");
         if let Some(buffer) = state.parameter_default_buffers.get_mut(&default_key) {
@@ -3400,6 +3581,44 @@ fn draw_context_slot(
 
     ui.label(egui::RichText::new(slot_id).heading());
     ui.separator();
+
+    match resolve_compound_slot_occurrence_context_with_root_overrides(
+        &preview_reg,
+        &active_draft.working_copy.id,
+        &state.selected_occurrence_overrides,
+        slot_id,
+    ) {
+        Ok(context) => {
+            if let Ok(component_definition) = preview_reg.effective_definition(&context.definition_id)
+            {
+                match preview_reg
+                    .resolve_bound_params_checked(&context.definition_id, &context.overrides)
+                {
+                    Ok(resolved) => draw_effective_parameter_table(
+                        ui,
+                        "Component parameters",
+                        &component_definition,
+                        &resolved,
+                        &context.overrides,
+                        "parent slot binding",
+                    ),
+                    Err(error) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 140, 60),
+                            format!("Component parameters unavailable: {error}"),
+                        );
+                    }
+                };
+            }
+        }
+        Err(error) => {
+            ui.colored_label(
+                egui::Color32::from_rgb(220, 140, 60),
+                format!("Component parameters unavailable: {error}"),
+            );
+        }
+    }
+    ui.add_space(8.0);
 
     ui.horizontal(|ui| {
         ui.label("Role");
