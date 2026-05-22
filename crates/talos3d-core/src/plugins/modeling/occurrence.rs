@@ -982,12 +982,25 @@ pub(crate) fn resolve_compound_slot_occurrence_context(
     root_definition_id: &DefinitionId,
     slot_path: &str,
 ) -> Result<CompoundSlotOccurrenceContext, String> {
+    resolve_compound_slot_occurrence_context_with_root_overrides(
+        registry,
+        root_definition_id,
+        &OverrideMap::default(),
+        slot_path,
+    )
+}
+
+pub(crate) fn resolve_compound_slot_occurrence_context_with_root_overrides(
+    registry: &DefinitionRegistry,
+    root_definition_id: &DefinitionId,
+    root_overrides: &OverrideMap,
+    slot_path: &str,
+) -> Result<CompoundSlotOccurrenceContext, String> {
     let mut current_definition_id = root_definition_id.clone();
-    let root_overrides = OverrideMap::default();
-    let root_resolved = registry.resolve_params_checked(root_definition_id, &root_overrides)?;
+    let root_resolved = registry.resolve_params_checked(root_definition_id, root_overrides)?;
     let mut current_definition = registry.effective_definition(root_definition_id)?;
     let mut current_values = evaluate_definition_state(&current_definition, &root_resolved)?.values;
-    let mut current_overrides = OverrideMap::default();
+    let mut current_overrides = root_overrides.clone();
 
     for segment in slot_path.split('.').filter(|segment| !segment.is_empty()) {
         let slot_id = slot_path_segment_base(segment);
@@ -2268,6 +2281,29 @@ mod pp_098_occurrence_cache_tests {
         registry
             .validate_bound_overrides(&context.definition_id, &context.overrides)
             .expect("bound slot overrides may drive locked parameters");
+    }
+
+    #[test]
+    fn slot_occurrence_context_can_use_root_occurrence_overrides() {
+        let child = rectangular_definition();
+        let compound = compound_definition(child.id.clone());
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(child);
+        registry.insert(compound.clone());
+
+        let mut root_overrides = OverrideMap::default();
+        root_overrides.set("left_width", json!(3.5));
+
+        let context = resolve_compound_slot_occurrence_context_with_root_overrides(
+            &registry,
+            &compound.id,
+            &root_overrides,
+            "left",
+        )
+        .expect("slot context should resolve using root overrides");
+
+        assert_eq!(context.definition_id.as_str(), "cached.window");
+        assert_eq!(context.overrides.get("width"), Some(&json!(3.5)));
     }
 
     fn world_with_cache() -> World {
