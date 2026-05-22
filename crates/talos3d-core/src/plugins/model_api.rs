@@ -7438,6 +7438,64 @@ pub struct PreviewPromotionResult {
     pub obligation_set: Vec<ObligationInfo>,
     /// Validator findings that would be produced after promotion.
     pub findings: Vec<ValidationFindingInfo>,
+    pub plan: RefinementPromotionPlanInfo,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementPromotionPlanInfo {
+    pub plan_id: String,
+    pub target: RefinementPromotionTargetInfo,
+    pub affected_scope: RefinementPromotionScopeInfo,
+    pub current_state: String,
+    pub target_state: String,
+    pub recipe_id: Option<String>,
+    pub default_commit_policy: String,
+    pub supported_commit_policies: Vec<String>,
+    pub changed_entities: Vec<PromotionPlanEntityChangeInfo>,
+    pub generated_entities: Vec<PromotionPlanEntityChangeInfo>,
+    pub parked_entities: Vec<PromotionPlanEntityChangeInfo>,
+    pub removed_entities: Vec<PromotionPlanEntityChangeInfo>,
+    pub obligations: Vec<ObligationInfo>,
+    pub validators: Vec<PromotionPlanValidatorInfo>,
+    pub missing_inputs: Vec<String>,
+    pub findings: Vec<ValidationFindingInfo>,
+    pub derived_graph_additions: Vec<String>,
+    pub can_commit: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementPromotionTargetInfo {
+    pub kind: String,
+    pub root_element_id: u64,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementPromotionScopeInfo {
+    pub root_element_id: u64,
+    pub default_selected_element_ids: Vec<u64>,
+    pub editable: bool,
+    pub project_wide: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromotionPlanEntityChangeInfo {
+    pub element_id: Option<u64>,
+    pub action: String,
+    pub reason: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromotionPlanValidatorInfo {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+    pub default_severity: String,
+    pub required_state: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -19939,11 +19997,6 @@ fn handle_explain_finding_v2(world: &World, finding_id: String) -> ApiResult<ser
     }))
 }
 
-/// Transactional simulation of a promotion: promote → sweep → capture → demote.
-///
-/// This is NOT a true read-only preview — it mutates the world and restores.
-/// A fully read-only sandbox simulation is a follow-on (post-PP74).
-/// Mark: this is a transactional simulation; true read-only preview is a follow-on.
 #[cfg(feature = "model-api")]
 fn handle_preview_promotion(
     world: &mut World,
@@ -19952,12 +20005,37 @@ fn handle_preview_promotion(
     recipe_id: Option<String>,
     overrides: serde_json::Value,
 ) -> ApiResult<PreviewPromotionResult> {
-    use crate::plugins::refinement::{
-        apply_demote_refinement, ClaimPath, DemoteRefinementRequest, RefinementState,
-        RefinementStateComponent,
+    let plan = build_refinement_promotion_plan(
+        world,
+        element_id,
+        target_state_str.clone(),
+        recipe_id,
+        overrides,
+    )?;
+
+    Ok(PreviewPromotionResult {
+        element_id,
+        would_transition_to: target_state_str,
+        obligation_set: plan.obligations.clone(),
+        findings: plan.findings.clone(),
+        plan,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn build_refinement_promotion_plan(
+    world: &World,
+    element_id: u64,
+    target_state_str: String,
+    recipe_id: Option<String>,
+    overrides: serde_json::Value,
+) -> ApiResult<RefinementPromotionPlanInfo> {
+    use crate::capability_registry::{
+        effective_obligations, CapabilityRegistry, ElementClassAssignment,
     };
     use crate::plugins::refinement::{
-        apply_promote_refinement, PromoteRefinementRequest, RecipeId,
+        resolve_refinement_subtree, validate_declared_state_obligations, Obligation, ObligationSet,
+        ObligationStatus, RefinementState, RefinementStateComponent,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -19965,104 +20043,278 @@ fn handle_preview_promotion(
 
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
+    let entity = find_entity_by_element_id_readonly(world, eid)
+        .ok_or_else(|| format!("Entity not found: {element_id}"))?;
 
-    let previous_state = {
-        let mut q = world.try_query::<(EntityRef,)>().unwrap();
-        q.iter(world)
-            .find_map(|(entity_ref,)| {
-                if entity_ref.get::<ElementId>().copied() != Some(eid) {
-                    return None;
-                }
-                Some(
-                    entity_ref
-                        .get::<RefinementStateComponent>()
-                        .map(|c| c.state)
-                        .unwrap_or_default(),
-                )
-            })
-            .unwrap_or_default()
-    };
-
-    // 1. Promote.
-    let overrides_map: std::collections::HashMap<ClaimPath, serde_json::Value> = overrides
-        .as_object()
-        .map(|obj| {
-            obj.iter()
-                .map(|(k, v)| (ClaimPath(k.clone()), v.clone()))
-                .collect()
-        })
+    let current_state = world
+        .get::<RefinementStateComponent>(entity)
+        .map(|component| component.state)
         .unwrap_or_default();
+    if target_state <= current_state {
+        return Err(format!(
+            "Cannot promote from {} to {} — target must be higher",
+            current_state.as_str(),
+            target_state.as_str()
+        ));
+    }
 
-    apply_promote_refinement(
-        world,
-        PromoteRefinementRequest {
-            entity_element_id: element_id,
-            target_state,
-            recipe_id: recipe_id.map(RecipeId),
-            overrides: overrides_map,
-        },
-    )?;
+    let subtree = resolve_refinement_subtree(world, eid)?;
+    let assignment = world.get::<ElementClassAssignment>(entity).cloned();
+    let registry = world.get_resource::<CapabilityRegistry>();
+    let requested_recipe_id = recipe_id.clone();
+    let effective_recipe_id = requested_recipe_id.clone().or_else(|| {
+        assignment
+            .as_ref()
+            .and_then(|assignment| assignment.active_recipe.as_ref())
+            .map(|id| id.0.clone())
+    });
+    let recipe_descriptor = registry.and_then(|registry| {
+        effective_recipe_id.as_ref().and_then(|id| {
+            registry
+                .recipe_family_descriptor(&crate::capability_registry::RecipeFamilyId(id.clone()))
+        })
+    });
+    let class_descriptor = registry.and_then(|registry| {
+        assignment
+            .as_ref()
+            .and_then(|assignment| registry.element_class_descriptor(&assignment.element_class))
+    });
 
-    // 2. Run validation sweep to populate findings after promotion.
-    crate::plugins::validation::validation_sweep_system(world);
-
-    // 3. Capture obligation set and findings.
-    let obligation_set = {
-        use crate::plugins::refinement::ObligationSet;
-        let mut q = world.try_query::<(EntityRef,)>().unwrap();
-        q.iter(world)
-            .find_map(|(entity_ref,)| {
-                if entity_ref.get::<ElementId>().copied() != Some(eid) {
-                    return None;
-                }
-                entity_ref.get::<ObligationSet>().cloned()
+    let mut missing_inputs = Vec::new();
+    if let Some(recipe_id) = requested_recipe_id.as_deref() {
+        if world
+            .get_resource::<crate::plugins::recipe_drafts::RecipeDraftRegistry>()
+            .and_then(|registry| registry.get(recipe_id))
+            .is_some()
+        {
+            missing_inputs.push(format!(
+                "recipe draft '{recipe_id}' is consultable but not executable"
+            ));
+        } else if recipe_descriptor.is_none() {
+            missing_inputs.push(format!("unknown recipe family '{recipe_id}'"));
+        }
+    }
+    if let (Some(assignment), Some(recipe)) = (&assignment, recipe_descriptor) {
+        if assignment.element_class != recipe.target_class {
+            missing_inputs.push(format!(
+                "recipe '{}' targets '{}' but entity is assigned to '{}'",
+                recipe.id.0, recipe.target_class.0, assignment.element_class.0
+            ));
+        }
+    }
+    if let Some(recipe) = recipe_descriptor {
+        if !recipe.supported_refinement_levels.contains(&target_state) {
+            missing_inputs.push(format!(
+                "recipe '{}' does not support target state {}",
+                recipe.id.0,
+                target_state.as_str()
+            ));
+        }
+        let override_keys = overrides
+            .as_object()
+            .map(|object| {
+                object
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for parameter in &recipe.parameters {
+            if parameter.default.is_none() && !override_keys.contains(&parameter.name) {
+                missing_inputs.push(format!(
+                    "missing required recipe parameter '{}'",
+                    parameter.name
+                ));
+            }
+        }
+    }
+
+    let obligation_templates = class_descriptor
+        .map(|class| effective_obligations(class, recipe_descriptor, target_state))
+        .unwrap_or_default();
+    let obligation_set = ObligationSet {
+        entries: obligation_templates
+            .into_iter()
+            .map(|template| Obligation {
+                id: template.id,
+                role: template.role,
+                required_by_state: template.required_by_state,
+                status: ObligationStatus::Unresolved,
+            })
+            .collect(),
     };
-
-    let findings = handle_run_validation_v2(world, Some(element_id));
-
-    let obligation_infos: Vec<ObligationInfo> = obligation_set
+    let obligations: Vec<ObligationInfo> = obligation_set
         .entries
         .iter()
-        .map(|ob| ObligationInfo {
-            id: ob.id.0.clone(),
-            role: ob.role.0.clone(),
-            required_by_state: ob.required_by_state.as_str().to_string(),
-            status: match &ob.status {
-                crate::plugins::refinement::ObligationStatus::Unresolved => {
-                    "Unresolved".to_string()
-                }
-                crate::plugins::refinement::ObligationStatus::SatisfiedBy(id) => {
-                    format!("SatisfiedBy:{id}")
-                }
-                crate::plugins::refinement::ObligationStatus::Deferred(reason) => {
-                    format!("Deferred:{reason}")
-                }
-                crate::plugins::refinement::ObligationStatus::Waived(rationale) => {
-                    format!("Waived:{rationale}")
-                }
-            },
-        })
+        .map(obligation_to_info)
         .collect();
+    let findings: Vec<ValidationFindingInfo> =
+        validate_declared_state_obligations(element_id, target_state, &obligation_set)
+            .into_iter()
+            .map(refinement_finding_to_info)
+            .collect();
 
-    // 4. Demote back to previous state.
-    apply_demote_refinement(
-        world,
-        DemoteRefinementRequest {
-            entity_element_id: element_id,
-            target_state: previous_state,
+    let validators = promotion_plan_validators(world, entity, target_state);
+    let changed_entities = subtree
+        .active_element_ids
+        .iter()
+        .map(|id| PromotionPlanEntityChangeInfo {
+            element_id: Some(*id),
+            action: "set_refinement_state".to_string(),
+            reason: format!(
+                "default selected for promotion to {}",
+                target_state.as_str()
+            ),
+        })
+        .collect::<Vec<_>>();
+    let generated_entities = recipe_descriptor
+        .map(|recipe| {
+            vec![PromotionPlanEntityChangeInfo {
+                element_id: None,
+                action: "invoke_recipe".to_string(),
+                reason: format!("recipe '{}' may create children during commit", recipe.id.0),
+            }]
+        })
+        .unwrap_or_default();
+    let mut derived_graph_additions = changed_entities
+        .iter()
+        .filter_map(|change| change.element_id)
+        .map(|id| format!("refinement_state:{id}:{}", target_state.as_str()))
+        .collect::<Vec<_>>();
+    derived_graph_additions.extend(
+        obligations
+            .iter()
+            .map(|obligation| format!("obligation:{element_id}:{}", obligation.id)),
+    );
+    derived_graph_additions.extend(
+        validators
+            .iter()
+            .map(|validator| format!("validator:{}", validator.id)),
+    );
+    if let Some(recipe_id) = effective_recipe_id.as_ref() {
+        derived_graph_additions.push(format!("recipe_generate:{recipe_id}"));
+    }
+    derived_graph_additions.sort();
+    derived_graph_additions.dedup();
+
+    Ok(RefinementPromotionPlanInfo {
+        plan_id: format!(
+            "promotion:{element_id}:{}:{}:{}",
+            current_state.as_str(),
+            target_state.as_str(),
+            effective_recipe_id.as_deref().unwrap_or("-")
+        ),
+        target: RefinementPromotionTargetInfo {
+            kind: "refinement_subtree".to_string(),
+            root_element_id: element_id,
         },
-    )?;
-
-    flush_model_api_write_pipeline(world);
-
-    Ok(PreviewPromotionResult {
-        element_id,
-        would_transition_to: target_state_str,
-        obligation_set: obligation_infos,
+        affected_scope: RefinementPromotionScopeInfo {
+            root_element_id: subtree.root_element_id,
+            default_selected_element_ids: subtree.active_element_ids,
+            editable: true,
+            project_wide: false,
+        },
+        current_state: current_state.as_str().to_string(),
+        target_state: target_state.as_str().to_string(),
+        recipe_id: effective_recipe_id,
+        default_commit_policy: "require_clean".to_string(),
+        supported_commit_policies: vec![
+            "require_clean".to_string(),
+            "accept_with_waivers".to_string(),
+            "accept_partial".to_string(),
+        ],
+        changed_entities,
+        generated_entities,
+        parked_entities: Vec::new(),
+        removed_entities: Vec::new(),
+        obligations,
+        validators,
+        missing_inputs: missing_inputs.clone(),
         findings,
+        derived_graph_additions,
+        can_commit: missing_inputs.is_empty(),
     })
+}
+
+#[cfg(feature = "model-api")]
+fn obligation_to_info(obligation: &crate::plugins::refinement::Obligation) -> ObligationInfo {
+    ObligationInfo {
+        id: obligation.id.0.clone(),
+        role: obligation.role.0.clone(),
+        required_by_state: obligation.required_by_state.as_str().to_string(),
+        status: match &obligation.status {
+            crate::plugins::refinement::ObligationStatus::Unresolved => "Unresolved".to_string(),
+            crate::plugins::refinement::ObligationStatus::SatisfiedBy(id) => {
+                format!("SatisfiedBy:{id}")
+            }
+            crate::plugins::refinement::ObligationStatus::Deferred(reason) => {
+                format!("Deferred:{reason}")
+            }
+            crate::plugins::refinement::ObligationStatus::Waived(rationale) => {
+                format!("Waived:{rationale}")
+            }
+        },
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn refinement_finding_to_info(
+    finding: crate::plugins::refinement::ValidationFinding,
+) -> ValidationFindingInfo {
+    ValidationFindingInfo {
+        finding_id: finding.finding_id,
+        entity_element_id: finding.entity_element_id,
+        validator: finding.validator,
+        severity: finding.severity.as_str().to_string(),
+        message: finding.message,
+        rationale: finding.rationale,
+        obligation_id: finding.obligation_id.map(|id| id.0),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn promotion_plan_validators(
+    world: &World,
+    entity: Entity,
+    target_state: crate::plugins::refinement::RefinementState,
+) -> Vec<PromotionPlanValidatorInfo> {
+    use crate::capability_registry::{CapabilityRegistry, ElementClassAssignment};
+
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return Vec::new();
+    };
+    let entity_class = world
+        .get::<ElementClassAssignment>(entity)
+        .map(|assignment| assignment.element_class.clone());
+    registry
+        .constraint_descriptors()
+        .iter()
+        .filter(|descriptor| {
+            if !descriptor.applicability.element_classes.is_empty() {
+                let matches_class = entity_class
+                    .as_ref()
+                    .map(|class| descriptor.applicability.element_classes.contains(class))
+                    .unwrap_or(false);
+                if !matches_class {
+                    return false;
+                }
+            }
+            descriptor
+                .applicability
+                .required_state
+                .is_none_or(|required| target_state >= required)
+        })
+        .map(|descriptor| PromotionPlanValidatorInfo {
+            id: descriptor.id.0.clone(),
+            label: descriptor.label.clone(),
+            role: descriptor.role.as_str().to_string(),
+            default_severity: descriptor.default_severity.as_str().to_string(),
+            required_state: descriptor
+                .applicability
+                .required_state
+                .map(|state| state.as_str().to_string()),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -24800,6 +25052,88 @@ mod tests {
         .expect_err("draft recipe ids must not execute");
 
         assert!(error.contains("consultable but not executable yet"));
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
+    fn preview_promotion_returns_read_only_refinement_plan() {
+        use crate::capability_registry::{
+            ElementClassAssignment, ElementClassDescriptor, ElementClassId, ObligationTemplate,
+        };
+        use crate::plugins::modeling::assembly::SemanticRelation;
+        use crate::plugins::refinement::{
+            ObligationId, ObligationSet, RefinementState, RefinementStateComponent, SemanticRole,
+        };
+
+        let mut world = init_model_api_test_world();
+        let mut class_min_obligations = std::collections::HashMap::new();
+        class_min_obligations.insert(
+            RefinementState::Schematic,
+            vec![ObligationTemplate {
+                id: ObligationId("primary_structure".to_string()),
+                role: SemanticRole("primary_structure".to_string()),
+                required_by_state: RefinementState::Schematic,
+            }],
+        );
+        world
+            .resource_mut::<CapabilityRegistry>()
+            .register_element_class(ElementClassDescriptor {
+                id: ElementClassId("generic_building_part".to_string()),
+                label: "Generic Building Part".to_string(),
+                description: "Test class".to_string(),
+                semantic_roles: Vec::new(),
+                class_min_obligations,
+                class_min_promotion_critical_paths: std::collections::HashMap::new(),
+                parameter_schema: serde_json::json!({"type": "object"}),
+            });
+
+        let root = world
+            .spawn((
+                ElementId(100),
+                ElementClassAssignment {
+                    element_class: ElementClassId("generic_building_part".to_string()),
+                    active_recipe: None,
+                },
+            ))
+            .id();
+        world.spawn((ElementId(101),));
+        world.spawn((
+            ElementId(200),
+            SemanticRelation {
+                source: ElementId(100),
+                target: ElementId(101),
+                relation_type: "refined_into".to_string(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        let result = handle_preview_promotion(
+            &mut world,
+            100,
+            "Schematic".to_string(),
+            None,
+            serde_json::json!({}),
+        )
+        .expect("promotion preview should produce a plan");
+
+        assert!(world.get::<RefinementStateComponent>(root).is_none());
+        assert!(world.get::<ObligationSet>(root).is_none());
+        assert_eq!(
+            result.plan.affected_scope.default_selected_element_ids,
+            vec![100, 101]
+        );
+        assert!(result.plan.affected_scope.editable);
+        assert!(!result.plan.affected_scope.project_wide);
+        assert_eq!(result.plan.default_commit_policy, "require_clean");
+        assert!(result
+            .plan
+            .supported_commit_policies
+            .contains(&"accept_with_waivers".to_string()));
+        assert_eq!(result.plan.changed_entities.len(), 2);
+        assert_eq!(result.obligation_set.len(), 1);
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(result.findings[0].severity, "warning");
+        assert!(result.plan.can_commit);
     }
 
     #[cfg(feature = "model-api")]
