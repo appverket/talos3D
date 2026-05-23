@@ -765,6 +765,7 @@ mod tests {
             BUILTIN_MATERIAL_BLUE_TINT_GLAZING_80, BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO,
         },
         modeling::{
+            assembly::{AssemblyFactory, SemanticAssembly},
             definition::{
                 AxisRef, BindingSide, ChildSlotDef, CompoundDefinition, Definition, DefinitionId,
                 DefinitionKind, DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
@@ -775,6 +776,7 @@ mod tests {
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
         },
         property_edit::PropertyEditState,
+        refinement::{RefinementState, RefinementStateComponent},
         tools::ActiveTool,
         transform::TransformState,
     };
@@ -1288,6 +1290,75 @@ mod tests {
         );
         assert_eq!(restored.2.as_str(), "Saved reusable window");
         assert_eq!(restored.3.translation, Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn semantic_assembly_refinement_state_round_trips_through_project() {
+        let mut source = World::new();
+        let mut source_factories = CapabilityRegistry::default();
+        source_factories.register_factory(AssemblyFactory);
+        source.insert_resource(source_factories);
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        source.insert_resource(DefinitionRegistry::default());
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+
+        source.spawn((
+            ElementId(77),
+            SemanticAssembly {
+                assembly_type: "house".to_string(),
+                label: "Fabrication ready house".to_string(),
+                members: Vec::new(),
+                parameters: serde_json::json!({ "gross_floor_area_m2": 90.0 }),
+                metadata: serde_json::json!({ "scenario": "refinement-stage-persistence" }),
+            },
+            RefinementStateComponent {
+                state: RefinementState::FabricationReady,
+            },
+        ));
+
+        let project = build_project_file(&mut source).expect("project should serialize");
+        let assembly_record = project
+            .entities
+            .iter()
+            .find(|record| record.type_name == "semantic_assembly")
+            .expect("semantic assembly should persist");
+        assert_eq!(
+            assembly_record.data["Assembly"]["refinement_state"].as_str(),
+            Some("FabricationReady")
+        );
+
+        let mut target = World::new();
+        let mut target_factories = CapabilityRegistry::default();
+        target_factories.register_factory(AssemblyFactory);
+        target.insert_resource(target_factories);
+        target.insert_resource(bevy::prelude::Assets::<bevy::prelude::Mesh>::default());
+        target.insert_resource(MaterialRegistry::default());
+        target.insert_resource(DefinitionRegistry::default());
+        target.insert_resource(DefinitionLibraryRegistry::default());
+        target.insert_resource(NamedViewRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(OpaquePersistedEntities::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        let mut query = target.query::<(&ElementId, &RefinementStateComponent)>();
+        let restored = query
+            .iter(&target)
+            .find(|(element_id, _)| **element_id == ElementId(77))
+            .expect("assembly refinement state should reload");
+        assert_eq!(restored.1.state, RefinementState::FabricationReady);
     }
 
     #[test]

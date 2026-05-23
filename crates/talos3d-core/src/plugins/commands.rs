@@ -376,6 +376,9 @@ fn queue_delete_entities_commands(world: &mut World) {
                         let after = AssemblySnapshot {
                             element_id: *eid,
                             assembly: pruned,
+                            refinement_state: entity_ref
+                                .get::<crate::plugins::refinement::RefinementStateComponent>()
+                                .map(|component| component.state),
                         };
                         repair_before.push(before);
                         repair_after.push(BoxedEntity::from(after));
