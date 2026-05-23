@@ -63,6 +63,38 @@ impl GroundingTag {
             Self::Unresolved => "Unresolved",
         }
     }
+
+    /// The canonical ADR-052 wire string for this tag.
+    ///
+    /// This is the on-the-wire/annotation form the model API's semantic
+    /// annotations use (e.g. `SemanticSourceRef.grounding` and
+    /// `UnresolvedDecisionRecord.grounding`) — distinct from
+    /// [`as_str`](Self::as_str), which is the Rust-variant label. The closed set
+    /// is exactly `source-backed | policy-backed | user-specified | unresolved(CorpusGap)`.
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::SourceBacked => "source-backed",
+            Self::PolicyBacked => "policy-backed",
+            Self::UserSpecified => "user-specified",
+            Self::Unresolved => "unresolved(CorpusGap)",
+        }
+    }
+
+    /// Parse a grounding wire string back into a tag.
+    ///
+    /// Accepts exactly the four canonical [`wire_str`](Self::wire_str) forms
+    /// (whitespace-trimmed). Any other value — empty, free-text, or a malformed
+    /// tag — yields `None`, which the gate treats as ungrounded (a likely
+    /// hallucination).
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s.trim() {
+            "source-backed" => Some(Self::SourceBacked),
+            "policy-backed" => Some(Self::PolicyBacked),
+            "user-specified" => Some(Self::UserSpecified),
+            "unresolved(CorpusGap)" => Some(Self::Unresolved),
+            _ => None,
+        }
+    }
 }
 
 /// Project an existing [`Grounding`] value onto the closed [`GroundingTag`] set
@@ -209,6 +241,15 @@ pub enum GroundingGateFinding {
         /// The slash-delimited claim path (e.g. `"riser_max_mm"`).
         claim_path: String,
     },
+    /// A claim carries a grounding *string* that is not one of the closed
+    /// wire-format tags — e.g. empty, or free-text like `"seems reasonable"`.
+    /// This is the hallucination case the gate exists to catch.
+    UngroundedClaim {
+        /// The slash-delimited claim path.
+        claim_path: String,
+        /// The raw, unrecognised grounding string that was supplied.
+        raw: String,
+    },
 }
 
 impl GroundingGateFinding {
@@ -217,6 +258,7 @@ impl GroundingGateFinding {
     pub fn code(&self) -> &'static str {
         match self {
             Self::UntaggedClaim { .. } => "grounding_gate.untagged_claim",
+            Self::UngroundedClaim { .. } => "grounding_gate.ungrounded_claim",
         }
     }
 
@@ -228,6 +270,14 @@ impl GroundingGateFinding {
                     "claim '{}' has no grounding tag — it must carry SourceBacked, \
                      PolicyBacked, UserSpecified, or Unresolved(CorpusGap)",
                     claim_path
+                )
+            }
+            Self::UngroundedClaim { claim_path, raw } => {
+                format!(
+                    "claim '{}' has an unrecognised grounding string '{}' — it must be \
+                     one of: source-backed, policy-backed, user-specified, \
+                     unresolved(CorpusGap)",
+                    claim_path, raw
                 )
             }
         }
@@ -301,6 +351,64 @@ pub fn run_grounding_gate<'a>(
             });
         }
         // All four tag values pass by definition; no further per-tag rules yet.
+    }
+
+    let passed = violations.is_empty();
+    GroundingGateReport { passed, violations }
+}
+
+/// A model annotation presented to the gate: a claim path plus the raw grounding
+/// *wire string* the model API recorded for it (e.g. from
+/// `SemanticSourceRef.grounding` or `UnresolvedDecisionRecord.grounding`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WireClaimEntry<'a> {
+    /// The claim path being validated.
+    pub claim_path: &'a str,
+    /// The raw grounding string recorded on the annotation.
+    pub grounding: &'a str,
+}
+
+impl<'a> WireClaimEntry<'a> {
+    /// Construct a wire-claim entry.
+    pub fn new(claim_path: &'a str, grounding: &'a str) -> Self {
+        Self {
+            claim_path,
+            grounding,
+        }
+    }
+}
+
+/// Run the zero-hallucination gate over model annotations whose groundings are
+/// wire strings (ADR-052 §3).
+///
+/// Each grounding is parsed via [`GroundingTag::from_wire`]:
+/// * a recognised tag passes — including `unresolved(CorpusGap)`, which is a
+///   *declared* gap, not a hallucination;
+/// * an empty/whitespace grounding fails as
+///   [`GroundingGateFinding::UntaggedClaim`];
+/// * any other unrecognised string (free-text, malformed) fails as
+///   [`GroundingGateFinding::UngroundedClaim`] — the hallucination case.
+///
+/// This is the bridge that lets the gate validate real generated artifacts,
+/// whose annotations carry grounding as strings rather than typed [`GroundingTag`]s.
+pub fn run_grounding_gate_over_wire<'a>(
+    claims: impl IntoIterator<Item = WireClaimEntry<'a>>,
+) -> GroundingGateReport {
+    let mut violations: Vec<GroundingGateFinding> = Vec::new();
+
+    for entry in claims {
+        if GroundingTag::from_wire(entry.grounding).is_none() {
+            if entry.grounding.trim().is_empty() {
+                violations.push(GroundingGateFinding::UntaggedClaim {
+                    claim_path: entry.claim_path.to_owned(),
+                });
+            } else {
+                violations.push(GroundingGateFinding::UngroundedClaim {
+                    claim_path: entry.claim_path.to_owned(),
+                    raw: entry.grounding.to_owned(),
+                });
+            }
+        }
     }
 
     let passed = violations.is_empty();
@@ -638,5 +746,77 @@ mod tests {
         assert_eq!(info.grounding_tag, "Unresolved");
         assert!(info.should_ask_user);
         assert_eq!(info.evidence_refs, vec!["BBR_5:532"]);
+    }
+
+    // --- wire_str / from_wire round-trip ---
+
+    #[test]
+    fn wire_str_round_trips_for_all_tags() {
+        for tag in [
+            GroundingTag::SourceBacked,
+            GroundingTag::PolicyBacked,
+            GroundingTag::UserSpecified,
+            GroundingTag::Unresolved,
+        ] {
+            assert_eq!(GroundingTag::from_wire(tag.wire_str()), Some(tag));
+        }
+    }
+
+    #[test]
+    fn wire_str_matches_adr_052_canonical_strings() {
+        assert_eq!(GroundingTag::SourceBacked.wire_str(), "source-backed");
+        assert_eq!(GroundingTag::PolicyBacked.wire_str(), "policy-backed");
+        assert_eq!(GroundingTag::UserSpecified.wire_str(), "user-specified");
+        assert_eq!(GroundingTag::Unresolved.wire_str(), "unresolved(CorpusGap)");
+    }
+
+    #[test]
+    fn from_wire_trims_and_rejects_unknown_and_empty() {
+        assert_eq!(
+            GroundingTag::from_wire("  user-specified  "),
+            Some(GroundingTag::UserSpecified)
+        );
+        assert_eq!(GroundingTag::from_wire("seems reasonable"), None);
+        assert_eq!(GroundingTag::from_wire(""), None);
+        assert_eq!(GroundingTag::from_wire("SourceBacked"), None); // Rust label is not the wire form
+    }
+
+    // --- run_grounding_gate_over_wire ---
+
+    #[test]
+    fn wire_gate_accepts_real_model_grounding_strings() {
+        // Exactly the strings the model API records today (see the model_api
+        // `create_box_semantic_annotation_*` test): a user-specified source ref
+        // and an unresolved(CorpusGap) decision.
+        let entries = [
+            WireClaimEntry::new("massing", "user-specified"),
+            WireClaimEntry::new("orientation", "unresolved(CorpusGap)"),
+            WireClaimEntry::new("stud_spacing_mm", "policy-backed"),
+            WireClaimEntry::new("beam_profile", "source-backed"),
+        ];
+        let report = run_grounding_gate_over_wire(entries);
+        assert!(report.passed, "canonical wire strings should pass the gate");
+        assert!(report.violations.is_empty());
+    }
+
+    #[test]
+    fn wire_gate_flags_untagged_and_ungrounded() {
+        let entries = [
+            WireClaimEntry::new("ok", "source-backed"),
+            WireClaimEntry::new("blank", "   "),
+            WireClaimEntry::new("guessed", "seems reasonable"),
+        ];
+        let report = run_grounding_gate_over_wire(entries);
+        assert!(!report.passed);
+        assert_eq!(report.violations.len(), 2);
+        assert!(report.violations.iter().any(|v| matches!(
+            v,
+            GroundingGateFinding::UntaggedClaim { claim_path } if claim_path == "blank"
+        )));
+        assert!(report.violations.iter().any(|v| matches!(
+            v,
+            GroundingGateFinding::UngroundedClaim { claim_path, raw }
+                if claim_path == "guessed" && raw == "seems reasonable"
+        )));
     }
 }
