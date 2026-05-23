@@ -230,6 +230,41 @@ impl Default for AuthoringProvenance {
 }
 
 // ---------------------------------------------------------------------------
+// SemanticIntent
+// ---------------------------------------------------------------------------
+
+/// Generic non-geometric intent attached to an authored entity.
+///
+/// Domain crates define the vocabulary and parameter schema via
+/// `ElementClassDescriptor`; this component stores the instance-level values
+/// and unresolved choices without committing the entity to a constructible
+/// recipe or domain-specific component.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SemanticIntent {
+    pub parameters: serde_json::Value,
+    pub unresolved_decisions: Vec<UnresolvedDecisionRecord>,
+    pub source_refs: Vec<SemanticSourceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct UnresolvedDecisionRecord {
+    pub id: String,
+    pub question: String,
+    pub reason: String,
+    pub grounding: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SemanticSourceRef {
+    pub reference: String,
+    pub claim: String,
+    pub grounding: String,
+}
+
+// ---------------------------------------------------------------------------
 // ClaimGrounding
 // ---------------------------------------------------------------------------
 
