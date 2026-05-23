@@ -276,6 +276,8 @@ impl Plugin for EguiChromePlugin {
             ..default()
         })
         .add_plugins(crate::plugins::outliner::OutlinerPlugin)
+        .add_plugins(crate::plugins::dependency_panel::DependencyPanelPlugin)
+        .add_plugins(crate::plugins::layers_panel::LayersPanelPlugin)
         .init_resource::<MenuBarState>()
         .init_resource::<EguiWantsInput>()
         .init_resource::<ToolbarDragState>()
@@ -791,6 +793,10 @@ struct ChromeData<'w, 's> {
     definition_selection_context: Res<'w, DefinitionSelectionContext>,
     outliner_window_state: ResMut<'w, crate::plugins::outliner::OutlinerWindowState>,
     outliner_tree: Res<'w, crate::plugins::outliner::OutlinerTree>,
+    dependency_panel_state: ResMut<'w, crate::plugins::dependency_panel::DependencyPanelState>,
+    dependency_panel_data: Res<'w, crate::plugins::dependency_panel::DependencyPanelData>,
+    layers_panel_state: ResMut<'w, crate::plugins::layers_panel::LayersPanelState>,
+    layers_panel_data: Res<'w, crate::plugins::layers_panel::LayersPanelData>,
     lighting_window_state: ResMut<'w, LightingWindowState>,
     lighting_settings: ResMut<'w, SceneLightingSettings>,
     light_object_visibility: ResMut<'w, SceneLightObjectVisibility>,
@@ -1076,6 +1082,43 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             );
         }
     }
+    {
+        let selected_now: std::collections::HashSet<Entity> =
+            data.selected_entities.iter().collect();
+        if let Some(action) = crate::plugins::dependency_panel::draw_dependency_window(
+            &ctx,
+            &mut data.dependency_panel_state,
+            &data.dependency_panel_data,
+            &selected_now,
+        ) {
+            crate::plugins::dependency_panel::apply_dependency_selection(
+                &mut data.commands,
+                &selected_now,
+                action,
+            );
+        }
+    }
+    {
+        let selected_now: std::collections::HashSet<Entity> =
+            data.selected_entities.iter().collect();
+        let actions = crate::plugins::layers_panel::draw_layers_window(
+            &ctx,
+            &mut data.layers_panel_state,
+            &data.layers_panel_data,
+            &selected_now,
+        );
+        if !actions.is_empty() {
+            crate::plugins::layers_panel::apply_layers_actions(
+                &actions,
+                &mut data.layer_registry,
+                &mut data.layer_state,
+                &data.layers_panel_data.members_by_layer,
+                &selected_now,
+                &mut data.commands,
+                &mut data.status_bar_data,
+            );
+        }
+    }
     let selected_material_assignments: Vec<(u64, Option<MaterialAssignment>)> = data
         .selected_material_assignments
         .iter()
@@ -1109,7 +1152,6 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.capability_activation,
     );
     draw_import_review_window(&ctx, &mut data);
-    draw_imported_layers_window(&ctx, &mut data);
     draw_import_progress_window(&ctx, &data);
 
     // Compute the insertion target before rendering indicators, using a split
@@ -1645,58 +1687,6 @@ fn draw_import_review_window(ctx: &egui::Context, data: &mut ChromeData) {
             Err(error) => data.status_bar_data.set_feedback(error, 2.0),
         }
     }
-}
-
-fn draw_imported_layers_window(ctx: &egui::Context, data: &mut ChromeData) {
-    // Only show the layer panel if there are layers beyond Default
-    if data.layer_registry.layers.len() <= 1 {
-        return;
-    }
-
-    egui::Window::new("Layers")
-        .default_width(280.0)
-        .resizable(true)
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 360.0))
-        .show(ctx, |ui| {
-            let sorted = data
-                .layer_registry
-                .sorted_layers()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            for layer_def in &sorted {
-                let is_active = data.layer_state.active_layer == layer_def.name;
-
-                ui.horizontal(|ui| {
-                    let mut visible = layer_def.visible;
-                    if ui.checkbox(&mut visible, "").changed() {
-                        if let Some(def) = data.layer_registry.layers.get_mut(&layer_def.name) {
-                            def.visible = visible;
-                        }
-                    }
-
-                    let label_text = if is_active {
-                        format!("▸ {}", layer_def.name)
-                    } else {
-                        format!("  {}", layer_def.name)
-                    };
-
-                    if ui.selectable_label(is_active, label_text).clicked() {
-                        data.layer_state.active_layer = layer_def.name.clone();
-                        if let Some(def) = data.layer_registry.layers.get_mut(&layer_def.name) {
-                            def.visible = true;
-                            def.locked = false;
-                        }
-                    }
-                });
-            }
-
-            ui.separator();
-            if ui.button("+ Add Layer").clicked() {
-                let name = data.layer_registry.generate_unique_name();
-                data.layer_registry.create_layer(name);
-            }
-        });
 }
 
 fn draw_import_progress_window(ctx: &egui::Context, data: &ChromeData) {

@@ -546,6 +546,22 @@ fn queue_import_group(
         }
     }
 
+    // Reveal the Layers panel so the freshly imported layers are visible to
+    // review (mirrors the auto-show the old import-staging window had), but only
+    // when the import introduced layers beyond Default.
+    if world
+        .resource::<crate::plugins::layers::LayerRegistry>()
+        .layers
+        .len()
+        > 1
+    {
+        if let Some(mut state) =
+            world.get_resource_mut::<crate::plugins::layers_panel::LayersPanelState>()
+        {
+            state.visible = true;
+        }
+    }
+
     let mut create_events = world.resource_mut::<Messages<CreateEntityCommand>>();
     for snapshot in snapshots {
         create_events.write(CreateEntityCommand { snapshot });
