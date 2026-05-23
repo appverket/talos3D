@@ -13,6 +13,7 @@ use crate::{
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
+        refinement::{RefinementState, RefinementStateComponent},
     },
 };
 
@@ -78,6 +79,8 @@ pub struct SemanticRelation {
 pub struct AssemblySnapshot {
     pub element_id: ElementId,
     pub assembly: SemanticAssembly,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement_state: Option<RefinementState>,
 }
 
 impl From<AssemblySnapshot> for BoxedEntity {
@@ -177,8 +180,18 @@ impl AuthoredEntity for AssemblySnapshot {
             if let Some(mut assembly) = world.get_mut::<SemanticAssembly>(entity) {
                 *assembly = self.assembly.clone();
             }
+            if let Some(refinement_state) = self.refinement_state {
+                world.entity_mut(entity).insert(RefinementStateComponent {
+                    state: refinement_state,
+                });
+            }
         } else {
-            world.spawn((self.element_id, self.assembly.clone()));
+            let mut entity = world.spawn((self.element_id, self.assembly.clone()));
+            if let Some(refinement_state) = self.refinement_state {
+                entity.insert(RefinementStateComponent {
+                    state: refinement_state,
+                });
+            }
         }
     }
 
@@ -353,10 +366,14 @@ impl AuthoredEntityFactory for AssemblyFactory {
     fn capture_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
         let element_id = *entity_ref.get::<ElementId>()?;
         let assembly = entity_ref.get::<SemanticAssembly>()?;
+        let refinement_state = entity_ref
+            .get::<RefinementStateComponent>()
+            .map(|component| component.state);
         Some(
             AssemblySnapshot {
                 element_id,
                 assembly: assembly.clone(),
+                refinement_state,
             }
             .into(),
         )
@@ -444,6 +461,7 @@ impl AuthoredEntityFactory for AssemblyFactory {
                 parameters,
                 metadata,
             },
+            refinement_state: None,
         }
         .into())
     }
