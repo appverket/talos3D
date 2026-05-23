@@ -61,6 +61,7 @@ pub mod refinement;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod remote_catalog;
 pub mod render_pipeline;
+pub mod scenario_scoring;
 pub mod scene_ray;
 pub mod section_fill;
 pub mod selection;
