@@ -1754,6 +1754,21 @@ enum ModelApiRequest {
         name: String,
         response: oneshot::Sender<ApiResult<Vec<LayerInfo>>>,
     },
+    RenameLayer {
+        old_name: String,
+        new_name: String,
+        response: oneshot::Sender<ApiResult<Vec<LayerInfo>>>,
+    },
+    DeleteLayer {
+        name: String,
+        response: oneshot::Sender<ApiResult<Vec<LayerInfo>>>,
+    },
+    // --- Dependency Graph (read-only) ---
+    DependencyGraph(oneshot::Sender<Value>),
+    EntityDependencies {
+        element_id: u64,
+        response: oneshot::Sender<Value>,
+    },
     // --- Materials ---
     ListMaterials(oneshot::Sender<Vec<MaterialInfo>>),
     GetMaterial {
@@ -2656,6 +2671,32 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
         }
         ModelApiRequest::CreateLayer { name, response } => {
             let _ = response.send(handle_create_layer(world, &name));
+        }
+        ModelApiRequest::RenameLayer {
+            old_name,
+            new_name,
+            response,
+        } => {
+            let _ = response.send(handle_rename_layer(world, &old_name, &new_name));
+        }
+        ModelApiRequest::DeleteLayer { name, response } => {
+            let _ = response.send(handle_delete_layer(world, &name));
+        }
+        // --- Dependency Graph (read-only) ---
+        ModelApiRequest::DependencyGraph(response) => {
+            let _ = response.send(
+                crate::plugins::modeling::dependency_graph::dependency_graph_json(world),
+            );
+        }
+        ModelApiRequest::EntityDependencies {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(
+                crate::plugins::modeling::dependency_graph::entity_dependencies_json(
+                    world, element_id,
+                ),
+            );
         }
         // --- Materials ---
         ModelApiRequest::ListMaterials(response) => {
@@ -4304,6 +4345,57 @@ impl ModelApiServer {
         receiver
             .await
             .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_rename_layer(
+        &self,
+        old_name: String,
+        new_name: String,
+    ) -> ApiResult<Vec<LayerInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::RenameLayer {
+                old_name,
+                new_name,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_delete_layer(&self, name: String) -> ApiResult<Vec<LayerInfo>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DeleteLayer { name, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_dependency_graph(&self) -> Result<Value, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DependencyGraph(response))
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
+    }
+
+    async fn request_entity_dependencies(&self, element_id: u64) -> Result<Value, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::EntityDependencies {
+                element_id,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())
     }
 
     // --- Named Views ---
@@ -6762,6 +6854,28 @@ struct CreateLayerRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct RenameLayerRequest {
+    old_name: String,
+    new_name: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeleteLayerRequest {
+    name: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EntityDependenciesRequest {
+    element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct GetMaterialRequest {
     id: String,
 }
@@ -8507,6 +8621,65 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(layers)
+    }
+
+    #[tool(
+        name = "rename_layer",
+        description = "Rename a layer and move every object on it onto the new name. The Default layer cannot be renamed. Returns the updated layer list."
+    )]
+    async fn rename_layer_tool(
+        &self,
+        Parameters(params): Parameters<RenameLayerRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let layers = self
+            .request_rename_layer(params.old_name, params.new_name)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(layers)
+    }
+
+    #[tool(
+        name = "delete_layer",
+        description = "Delete a layer, moving any objects on it back to the Default layer. The Default layer cannot be deleted. Returns the updated layer list."
+    )]
+    async fn delete_layer_tool(
+        &self,
+        Parameters(params): Parameters<DeleteLayerRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let layers = self
+            .request_delete_layer(params.name)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(layers)
+    }
+
+    // --- Dependency Graph (read-only) ---
+
+    #[tool(
+        name = "dependency_graph",
+        description = "Get the model's change-propagation dependency graph (ADR-007). Returns `{nodes:[{element_id,label,depends_on_count,dependent_count}], edges:[{dependent,dependency,role}], topological_order, has_cycle, node_count, edge_count}`. An edge `dependent → dependency` means the dependent must be re-evaluated when the dependency changes; `topological_order` is null when `has_cycle` is true."
+    )]
+    async fn dependency_graph_tool(&self) -> Result<CallToolResult, McpError> {
+        let graph = self
+            .request_dependency_graph()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(graph)
+    }
+
+    #[tool(
+        name = "entity_dependencies",
+        description = "Inspect one entity's place in the dependency graph: `{element_id, label, depends_on:[{element_id,label,role}], dependents:[{element_id,label}], propagates_to:[{element_id,label}]}`. `depends_on` is what it directly consumes, `dependents` is what directly consumes it, and `propagates_to` is the full transitive set that a change to it would dirty."
+    )]
+    async fn entity_dependencies_tool(
+        &self,
+        Parameters(params): Parameters<EntityDependenciesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let deps = self
+            .request_entity_dependencies(params.element_id)
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(deps)
     }
 
     // --- Named Views ---
@@ -11110,6 +11283,72 @@ fn handle_create_layer(world: &mut World, name: &str) -> Result<Vec<LayerInfo>, 
         }
         registry.create_layer(name.to_string());
     }
+    Ok(handle_list_layers(world))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_rename_layer(
+    world: &mut World,
+    old_name: &str,
+    new_name: &str,
+) -> Result<Vec<LayerInfo>, String> {
+    world
+        .resource_mut::<LayerRegistry>()
+        .rename_layer(old_name, new_name.to_string())?;
+
+    // Re-home every object that referenced the old layer name.
+    let to_update: Vec<Entity> = {
+        let mut query = world.query::<(Entity, &LayerAssignment)>();
+        query
+            .iter(world)
+            .filter(|(_, assignment)| assignment.layer == old_name)
+            .map(|(entity, _)| entity)
+            .collect()
+    };
+    for entity in to_update {
+        world
+            .entity_mut(entity)
+            .insert(LayerAssignment::new(new_name));
+    }
+
+    {
+        let mut state = world.resource_mut::<LayerState>();
+        if state.active_layer == old_name {
+            state.active_layer = new_name.to_string();
+        }
+    }
+
+    Ok(handle_list_layers(world))
+}
+
+#[cfg(feature = "model-api")]
+fn handle_delete_layer(world: &mut World, name: &str) -> Result<Vec<LayerInfo>, String> {
+    // Move any objects on this layer back to Default before removing it, so no
+    // assignment dangles to a non-existent layer.
+    let to_update: Vec<Entity> = {
+        let mut query = world.query::<(Entity, &LayerAssignment)>();
+        query
+            .iter(world)
+            .filter(|(_, assignment)| assignment.layer == name)
+            .map(|(entity, _)| entity)
+            .collect()
+    };
+
+    world.resource_mut::<LayerRegistry>().delete_layer(name)?;
+
+    for entity in to_update {
+        world
+            .entity_mut(entity)
+            .insert(LayerAssignment::default_layer());
+    }
+
+    {
+        let mut state = world.resource_mut::<LayerState>();
+        if state.active_layer == name {
+            state.active_layer = crate::plugins::layers::DEFAULT_LAYER_NAME.to_string();
+        }
+    }
+
     Ok(handle_list_layers(world))
 }
 
