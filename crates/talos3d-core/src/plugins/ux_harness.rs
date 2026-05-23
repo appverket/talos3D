@@ -5,7 +5,7 @@ use bevy::{
     input::{
         keyboard::{Key, KeyCode, KeyboardInput},
         mouse::{MouseButton, MouseButtonInput, MouseMotion},
-        ButtonState, InputSystems,
+        ButtonState,
     },
     prelude::*,
     window::{CursorMoved, PrimaryWindow},
@@ -19,7 +19,10 @@ use crate::{
     authored_entity::EntityScope,
     capability_registry::CapabilityRegistry,
     plugins::{
-        camera::OrbitCamera, cursor::cursor_window_position, identity::ElementId, tools::ActiveTool,
+        camera::OrbitCamera, cursor::cursor_window_position, egui_chrome::EguiWantsInput,
+        identity::ElementId,
+        input_ownership::{InputOwnership, InputPhase},
+        tools::ActiveTool,
     },
 };
 
@@ -28,7 +31,12 @@ pub struct UxHarnessPlugin;
 impl Plugin for UxHarnessPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UxHarnessState>()
-            .add_systems(PreUpdate, process_ux_harness_step.before(InputSystems));
+            .add_systems(
+                Update,
+                process_ux_harness_step
+                    .after(InputPhase::SyncOwnership)
+                    .before(InputPhase::ToolInput),
+            );
     }
 }
 
@@ -108,6 +116,9 @@ pub struct UxHarnessSnapshot {
     pub pending_steps: usize,
     pub completed_sequence: u64,
     pub last_error: Option<String>,
+    pub input_ownership: String,
+    pub egui_pointer: bool,
+    pub egui_keyboard: bool,
     pub window: Option<UxWindowSnapshot>,
     pub cursor: Option<UxCursorSnapshot>,
     pub active_tool: Option<String>,
@@ -251,6 +262,18 @@ pub fn observe_ux(world: &mut World) -> Result<UxHarnessSnapshot, String> {
         pending_steps,
         completed_sequence,
         last_error,
+        input_ownership: world
+            .get_resource::<InputOwnership>()
+            .map(|ownership| format!("{ownership:?}"))
+            .unwrap_or_else(|| "Unavailable".to_string()),
+        egui_pointer: world
+            .get_resource::<EguiWantsInput>()
+            .map(|wants| wants.pointer)
+            .unwrap_or(false),
+        egui_keyboard: world
+            .get_resource::<EguiWantsInput>()
+            .map(|wants| wants.keyboard)
+            .unwrap_or(false),
         window,
         cursor,
         active_tool: active_tool(world),
@@ -312,6 +335,11 @@ fn apply_step(world: &mut World, action: &UxStepAction) -> Result<(), String> {
                     state: *state,
                     window,
                 });
+            let mut buttons = world.resource_mut::<ButtonInput<MouseButton>>();
+            match state {
+                ButtonState::Pressed => buttons.press(*button),
+                ButtonState::Released => buttons.release(*button),
+            }
             Ok(())
         }
         UxStepAction::Key {
@@ -333,6 +361,11 @@ fn apply_step(world: &mut World, action: &UxStepAction) -> Result<(), String> {
                     repeat: false,
                     window,
                 });
+            let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+            match state {
+                ButtonState::Pressed => keys.press(*key_code),
+                ButtonState::Released => keys.release(*key_code),
+            }
             Ok(())
         }
     }
