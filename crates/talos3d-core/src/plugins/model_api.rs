@@ -326,7 +326,20 @@ pub struct EntityDetails {
     pub label: String,
     pub snapshot: serde_json::Value,
     pub geometry_semantics: Option<GeometrySemantics>,
+    pub semantic: Option<EntitySemanticDetails>,
     pub properties: Vec<EntityPropertyDetails>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntitySemanticDetails {
+    pub element_class: Option<String>,
+    pub semantic_roles: Vec<String>,
+    pub refinement_state: Option<String>,
+    pub parameters: serde_json::Value,
+    pub unresolved_decisions: Vec<crate::plugins::refinement::UnresolvedDecisionRecord>,
+    pub source_refs: Vec<crate::plugins::refinement::SemanticSourceRef>,
+    pub authoring_rationale: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -996,6 +1009,26 @@ pub struct CreateBoxRequest {
     /// Optional quaternion as `[x, y, z, w]`.
     #[serde(default)]
     pub rotation: Option<[f32; 4]>,
+    /// Optional semantic annotation attached after geometric creation.
+    #[serde(default)]
+    pub semantic: Option<SemanticEntityAnnotationRequest>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SemanticEntityAnnotationRequest {
+    #[serde(default)]
+    pub element_class: Option<String>,
+    #[serde(default)]
+    pub refinement_state: Option<String>,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    #[serde(default)]
+    pub unresolved_decisions: Vec<crate::plugins::refinement::UnresolvedDecisionRecord>,
+    #[serde(default)]
+    pub source_refs: Vec<crate::plugins::refinement::SemanticSourceRef>,
+    #[serde(default)]
+    pub rationale: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -1541,6 +1574,7 @@ fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> Entity
         label: snapshot.label(),
         snapshot: snapshot.to_json(),
         geometry_semantics: geometry_semantics_for_snapshot(world, snapshot),
+        semantic: semantic_details_for_entity(world, snapshot.element_id()),
         properties: snapshot
             .property_fields()
             .into_iter()
@@ -1556,6 +1590,65 @@ fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> Entity
             })
             .collect(),
     }
+}
+
+fn semantic_details_for_entity(
+    world: &World,
+    element_id: ElementId,
+) -> Option<EntitySemanticDetails> {
+    use crate::capability_registry::ElementClassAssignment;
+    use crate::plugins::refinement::{
+        AuthoringProvenance, RefinementStateComponent, SemanticIntent,
+    };
+
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    let entity_ref = q
+        .iter(world)
+        .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(element_id))?;
+
+    let assignment = entity_ref.get::<ElementClassAssignment>();
+    let refinement_state = entity_ref.get::<RefinementStateComponent>();
+    let semantic_intent = entity_ref.get::<SemanticIntent>();
+    let provenance = entity_ref.get::<AuthoringProvenance>();
+
+    if assignment.is_none()
+        && refinement_state.is_none()
+        && semantic_intent.is_none()
+        && provenance.is_none()
+    {
+        return None;
+    }
+
+    let semantic_roles = assignment
+        .and_then(|assignment| {
+            world
+                .get_resource::<CapabilityRegistry>()
+                .and_then(|registry| registry.element_class_descriptor(&assignment.element_class))
+        })
+        .map(|descriptor| {
+            descriptor
+                .semantic_roles
+                .iter()
+                .map(|role| role.0.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(EntitySemanticDetails {
+        element_class: assignment.map(|assignment| assignment.element_class.0.clone()),
+        semantic_roles,
+        refinement_state: refinement_state.map(|state| state.state.as_str().to_string()),
+        parameters: semantic_intent
+            .map(|intent| intent.parameters.clone())
+            .unwrap_or(serde_json::Value::Null),
+        unresolved_decisions: semantic_intent
+            .map(|intent| intent.unresolved_decisions.clone())
+            .unwrap_or_default(),
+        source_refs: semantic_intent
+            .map(|intent| intent.source_refs.clone())
+            .unwrap_or_default(),
+        authoring_rationale: provenance.and_then(|provenance| provenance.rationale.clone()),
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -13042,6 +13135,15 @@ fn create_box_request_json(request: &CreateBoxRequest) -> Result<Value, String> 
             .expect("box request should serialize as an object")
             .insert("rotation".to_string(), json!(rotation));
     }
+    if let Some(semantic) = &request.semantic {
+        request_json
+            .as_object_mut()
+            .expect("box request should serialize as an object")
+            .insert(
+                "semantic".to_string(),
+                serde_json::to_value(semantic).map_err(|error| error.to_string())?,
+            );
+    }
     Ok(request_json)
 }
 
@@ -18608,9 +18710,15 @@ fn execute_model_api_set_entity_property_command(
 
 #[cfg(feature = "model-api")]
 pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, String> {
-    let object = json
-        .as_object()
+    let mut request_json = json;
+    let object = request_json
+        .as_object_mut()
         .ok_or_else(|| "create_entity expects a JSON object".to_string())?;
+    let semantic_annotation = object
+        .remove("semantic")
+        .map(serde_json::from_value::<SemanticEntityAnnotationRequest>)
+        .transpose()
+        .map_err(|error| format!("Invalid semantic annotation: {error}"))?;
     let entity_type = required_string(object, "type")?.to_ascii_lowercase();
     let registry = world.resource::<CapabilityRegistry>();
     let factory = registry.factory_for(&entity_type).ok_or_else(|| {
@@ -18620,7 +18728,7 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
             valid_types.join(", ")
         )
     })?;
-    let snapshot = factory.from_create_request(world, &json)?;
+    let snapshot = factory.from_create_request(world, &request_json)?;
     let element_id = snapshot.element_id();
     send_event(
         world,
@@ -18628,10 +18736,91 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
     );
 
     flush_model_api_write_pipeline(world);
+    if let Some(annotation) = semantic_annotation {
+        apply_semantic_annotation(world, element_id, annotation)?;
+    }
 
     get_entity_snapshot(world, element_id)
         .map(|_| element_id.0)
         .ok_or_else(|| format!("Failed to create entity of type '{entity_type}'"))
+}
+
+#[cfg(feature = "model-api")]
+fn apply_semantic_annotation(
+    world: &mut World,
+    element_id: ElementId,
+    annotation: SemanticEntityAnnotationRequest,
+) -> Result<(), String> {
+    use crate::capability_registry::{ElementClassAssignment, ElementClassId};
+    use crate::plugins::refinement::{
+        AuthoringMode, AuthoringProvenance, RefinementState, RefinementStateComponent,
+        SemanticIntent,
+    };
+
+    let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
+    let entity = q
+        .iter(world)
+        .find_map(|(entity, id)| (*id == element_id).then_some(entity))
+        .ok_or_else(|| format!("Entity {} not found after creation", element_id.0))?;
+
+    let element_class = annotation
+        .element_class
+        .as_deref()
+        .map(|id| ElementClassId(id.to_string()));
+    let refinement_state = annotation
+        .refinement_state
+        .as_deref()
+        .map(|state| {
+            RefinementState::from_str(state).ok_or_else(|| {
+                format!(
+                    "Invalid refinement_state '{state}'. Valid states: Conceptual, Schematic, Constructible, Detailed, FabricationReady"
+                )
+            })
+        })
+        .transpose()?;
+
+    if let Some(element_class) = &element_class {
+        let registry = world
+            .get_resource::<CapabilityRegistry>()
+            .ok_or_else(|| "CapabilityRegistry is not available".to_string())?;
+        if registry.element_class_descriptor(element_class).is_none() {
+            return Err(format!(
+                "Unknown element_class '{}'; register the domain vocabulary before creating semantically typed entities",
+                element_class.0
+            ));
+        }
+    }
+
+    let mut entity_mut = world.entity_mut(entity);
+    if let Some(element_class) = element_class {
+        entity_mut.insert(ElementClassAssignment {
+            element_class,
+            active_recipe: None,
+        });
+    }
+    if annotation.refinement_state.is_some() || annotation.element_class.is_some() {
+        entity_mut.insert(RefinementStateComponent {
+            state: refinement_state.unwrap_or(RefinementState::Conceptual),
+        });
+    }
+    if !annotation.parameters.is_null()
+        || !annotation.unresolved_decisions.is_empty()
+        || !annotation.source_refs.is_empty()
+    {
+        entity_mut.insert(SemanticIntent {
+            parameters: annotation.parameters,
+            unresolved_decisions: annotation.unresolved_decisions,
+            source_refs: annotation.source_refs,
+        });
+    }
+    if annotation.rationale.is_some() {
+        entity_mut.insert(AuthoringProvenance {
+            mode: AuthoringMode::Freeform,
+            rationale: annotation.rationale,
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "model-api")]
@@ -21602,6 +21791,100 @@ mod tests {
 
     #[cfg(feature = "model-api")]
     #[test]
+    fn create_box_semantic_annotation_is_inspectable_and_survives_transform() {
+        use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+        use crate::plugins::refinement::{
+            SemanticRole, SemanticSourceRef, UnresolvedDecisionRecord,
+        };
+
+        let mut world = init_model_api_test_world();
+        world
+            .resource_mut::<CapabilityRegistry>()
+            .register_element_class(ElementClassDescriptor {
+                id: ElementClassId("conceptual_building_block".to_string()),
+                label: "Conceptual Building Block".to_string(),
+                description: "Test conceptual massing class".to_string(),
+                semantic_roles: vec![SemanticRole("conceptual_massing".to_string())],
+                class_min_obligations: std::collections::HashMap::new(),
+                class_min_promotion_critical_paths: std::collections::HashMap::new(),
+                parameter_schema: json!({"type": "object"}),
+            });
+
+        let element_id = handle_create_box(
+            &mut world,
+            CreateBoxRequest {
+                center: Some([0.0, 1.5, 0.0]),
+                half_extents: None,
+                size: Some([8.0, 3.0, 10.0]),
+                rotation: None,
+                semantic: Some(SemanticEntityAnnotationRequest {
+                    element_class: Some("conceptual_building_block".to_string()),
+                    refinement_state: None,
+                    parameters: json!({
+                        "label": "Main villa",
+                        "height_mm": 3000,
+                        "footprint_polygon_xz": [[-4, -5], [4, -5], [4, 5], [-4, 5]]
+                    }),
+                    unresolved_decisions: vec![UnresolvedDecisionRecord {
+                        id: "orientation".to_string(),
+                        question: "Which way should the main glazing face?".to_string(),
+                        reason: "No site view or sun-path input has been provided.".to_string(),
+                        grounding: "unresolved(CorpusGap)".to_string(),
+                    }],
+                    source_refs: vec![SemanticSourceRef {
+                        reference: "user-prompt".to_string(),
+                        claim: "Primary villa massing requested by the user.".to_string(),
+                        grounding: "user-specified".to_string(),
+                    }],
+                    rationale: Some("Initial co-creative conceptual massing block".to_string()),
+                }),
+            },
+        )
+        .expect("semantic conceptual block should be creatable");
+
+        let details = get_entity_details(&world, ElementId(element_id))
+            .expect("created conceptual block should be inspectable");
+        let semantic = details
+            .semantic
+            .expect("semantic details should be exposed");
+        assert_eq!(
+            semantic.element_class.as_deref(),
+            Some("conceptual_building_block")
+        );
+        assert_eq!(semantic.refinement_state.as_deref(), Some("Conceptual"));
+        assert_eq!(semantic.semantic_roles, vec!["conceptual_massing"]);
+        assert_eq!(semantic.parameters["label"], json!("Main villa"));
+        assert_eq!(semantic.unresolved_decisions.len(), 1);
+        assert_eq!(
+            semantic.unresolved_decisions[0].grounding,
+            "unresolved(CorpusGap)"
+        );
+
+        handle_transform(
+            &mut world,
+            TransformToolRequest {
+                element_ids: vec![element_id],
+                operation: "move".to_string(),
+                axis: None,
+                value: json!([12.0, 0.0, 0.0]),
+            },
+        )
+        .expect("conceptual block should use the existing transform path");
+
+        let moved = get_entity_details(&world, ElementId(element_id))
+            .expect("moved conceptual block should remain inspectable");
+        assert_eq!(moved.snapshot["centre"], json!([12.0, 1.5, 0.0]));
+        assert_eq!(
+            moved
+                .semantic
+                .as_ref()
+                .and_then(|semantic| semantic.element_class.as_deref()),
+            Some("conceptual_building_block")
+        );
+    }
+
+    #[cfg(feature = "model-api")]
+    #[test]
     fn direct_model_api_primitives_are_hidden_commands_with_command_result() {
         let mut app = App::new();
         register_model_api_primitive_commands(&mut app);
@@ -21781,6 +22064,7 @@ mod tests {
                 half_extents: None,
                 size: Some([4.0, 2.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .expect("create_box should create a primitive");
@@ -25567,6 +25851,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .expect("box should be created");
@@ -25945,6 +26230,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -25981,6 +26267,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26040,6 +26327,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26088,6 +26376,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26132,6 +26421,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26160,6 +26450,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26195,6 +26486,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26222,6 +26514,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26359,6 +26652,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26369,6 +26663,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26410,6 +26705,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26420,6 +26716,7 @@ mod tests {
                 half_extents: None,
                 size: Some([1.0, 1.0, 1.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26447,6 +26744,7 @@ mod tests {
                 half_extents: None,
                 size: Some([10.0, 0.5, 10.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26457,6 +26755,7 @@ mod tests {
                 half_extents: None,
                 size: Some([3.0, 3.0, 3.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26478,6 +26777,7 @@ mod tests {
                 half_extents: None,
                 size: Some([10.0, 0.5, 10.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
@@ -26488,6 +26788,7 @@ mod tests {
                 half_extents: None,
                 size: Some([3.0, 3.0, 3.0]),
                 rotation: None,
+                semantic: None,
             },
         )
         .unwrap();
