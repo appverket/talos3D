@@ -24,6 +24,7 @@ pub mod egui_chrome;
 pub mod entity_labels;
 pub mod face_edit;
 pub mod grid;
+pub mod grounding_gate;
 pub mod guide_line;
 pub mod handles;
 pub mod history;
