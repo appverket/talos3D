@@ -100,6 +100,14 @@ pub struct RecipeId(pub String);
 ///
 /// Variants are ordered from least to most detailed; `PartialOrd` / `Ord`
 /// implementations let the validator compare states numerically.
+///
+/// The level is a *claim about how resolved the model is*, and it is
+/// **monotonic in resolved structure**: a higher level must contain strictly
+/// more resolved content than a lower level of the same design. It follows
+/// that two artifacts which are structurally identical cannot legitimately sit
+/// at different levels — see [`REFINEMENT_LEVEL_SEMANTICS`] for the full,
+/// domain-neutral contract and the rule for "identical X, one per refinement
+/// level" requests.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
 )]
@@ -142,6 +150,78 @@ impl RefinementState {
         }
     }
 }
+
+/// Domain-neutral, agent-facing definition of what the refinement levels mean.
+///
+/// This is platform knowledge: it holds for any domain (architecture, naval,
+/// mechanical, …), independent of walls, hulls, or parts. Domain packs compose
+/// it into their own `get_authoring_guidance` `prompt_text` ahead of any
+/// domain-specific worked examples, so every authoring agent — internal
+/// assistant or external MCP client — reads the same contract before it edits.
+pub const REFINEMENT_LEVEL_SEMANTICS: &str = r#"# Refinement levels — what they mean (read this first)
+
+A `RefinementState` is a **claim about how resolved a model is**, not a free
+label you may attach at will. The levels are ordered
+
+`Conceptual < Schematic < Constructible < Detailed < FabricationReady`
+
+and the ordering is **monotonic in resolved structure**: each higher level
+must contain *strictly more resolved content* than a lower level of the same
+design. A "promotion" that adds no resolved structure is not a promotion — it
+is only relabelling, and is invalid.
+
+Generic meaning of each level (domain packs specialise the *content*, not the
+*intent*):
+
+- **Conceptual** — intent only. Coarse aggregate/massing elements; major
+  parameters captured as data; major decisions may remain explicitly open.
+  Little or nothing detailed to validate yet.
+- **Schematic** — intent + coordination. The same coarse roots persist;
+  coordination data is tightened and key top-level decisions are resolved.
+  Explicit repeated members are still optional.
+- **Constructible** — buildable. The coarse root persists as an identity
+  anchor and is linked (`refined_into` / `refinement_of`) to an explicit
+  realisation: reusable definitions, their occurrences, derived variants,
+  justified singletons, and the structural/connective relations that make it
+  actually buildable. Outstanding obligations are resolved.
+- **Detailed** — full assembly detail, added where downstream use justifies
+  it. Same structural rules apply.
+- **FabricationReady** — resolved to fabrication/manufacturing specificity
+  (connections, catalog/BOM-level definiteness).
+
+## The identical-vs-level contradiction
+
+Because a level is *defined by resolved content*, two models that are
+structurally identical **cannot** legitimately sit at different refinement
+levels. That is a contradiction, and it must be caught — never silently
+resolved by making the models identical and varying only a label.
+
+When a request implies identical artifacts at different levels — e.g.
+"N identical houses, one per refinement level", "the same part modelled at
+each level of detail" — interpret it as a **controlled comparison**:
+
+- "identical" denotes identical *design intent / brief / controlled inputs*
+  (size, program, site, placement) — the things held constant.
+- the **refinement level is the independent variable that must actually be
+  applied**, so resolved detail visibly increases with level.
+
+Correct response (a decision rule, not a fixed action):
+
+1. Recognise the contradiction-under-literal-reading as a trigger.
+2. Resolve it by purpose: the comparison is only meaningful if the levels
+   differ, so build the *same design realised at increasing levels of
+   resolution*.
+3. State that interpretation in one line so the user can redirect, then
+   proceed.
+4. Ask only if the intent is genuinely indeterminate (e.g. the request is
+   equally consistent with "just demonstrate the label").
+
+Trip-wire: if your plan would produce equal structure across levels, or a
+promotion adds no structure, stop — you have misread the task. Two wrong
+answers to avoid: (a) identical output across levels (makes the refinement
+axis vacuous); (b) a higher-level label on lower-level content (an
+unsubstantiated claim).
+"#;
 
 // ---------------------------------------------------------------------------
 // RefinementStateComponent
@@ -1553,6 +1633,30 @@ mod tests {
     #[test]
     fn refinement_state_default_is_conceptual() {
         assert_eq!(RefinementState::default(), RefinementState::Conceptual);
+    }
+
+    #[test]
+    fn refinement_level_semantics_states_invariant_and_contradiction() {
+        let s = REFINEMENT_LEVEL_SEMANTICS;
+        // Every level is described.
+        for level in [
+            "Conceptual",
+            "Schematic",
+            "Constructible",
+            "Detailed",
+            "FabricationReady",
+        ] {
+            assert!(s.contains(level), "semantics must describe {level}");
+        }
+        // The two load-bearing rules are present.
+        assert!(
+            s.contains("monotonic"),
+            "semantics must state the monotonic-resolution invariant"
+        );
+        assert!(
+            s.to_lowercase().contains("identical"),
+            "semantics must address the identical-vs-level contradiction"
+        );
     }
 
     #[test]
