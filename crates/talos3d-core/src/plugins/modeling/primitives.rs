@@ -1,4 +1,8 @@
-use bevy::prelude::*;
+use bevy::{
+    asset::RenderAssetUsages,
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -297,11 +301,7 @@ impl Primitive for BoxPrimitive {
 
 impl MeshGenerator for BoxPrimitive {
     fn to_bevy_mesh(&self, _rotation: Quat) -> Mesh {
-        Mesh::from(Cuboid::new(
-            self.half_extents.x * 2.0,
-            self.half_extents.y * 2.0,
-            self.half_extents.z * 2.0,
-        ))
+        box_mesh_with_physical_uvs(self.half_extents * 2.0)
     }
 }
 
@@ -952,13 +952,122 @@ impl MeshGenerator for PlanePrimitive {
 
     fn to_bevy_mesh(&self, _rotation: Quat) -> Mesh {
         let size = (self.corner_b - self.corner_a).abs();
-        Mesh::from(Rectangle::new(size.x.max(0.001), size.y.max(0.001)))
+        plane_mesh_with_physical_uvs(size.x.max(0.001), size.y.max(0.001))
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+fn box_mesh_with_physical_uvs(size: Vec3) -> Mesh {
+    let hx = (size.x * 0.5).max(0.0005);
+    let hy = (size.y * 0.5).max(0.0005);
+    let hz = (size.z * 0.5).max(0.0005);
+    let sx = hx * 2.0;
+    let sy = hy * 2.0;
+    let sz = hz * 2.0;
+
+    let mut positions = Vec::with_capacity(24);
+    let mut normals = Vec::with_capacity(24);
+    let mut uvs = Vec::with_capacity(24);
+    let mut indices = Vec::with_capacity(36);
+
+    let mut push_face = |corners: [[f32; 3]; 4], normal: [f32; 3], width: f32, height: f32| {
+        let base = positions.len() as u32;
+        positions.extend(corners);
+        normals.extend([normal; 4]);
+        uvs.extend([[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]]);
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    push_face(
+        [[hx, -hy, -hz], [hx, -hy, hz], [hx, hy, hz], [hx, hy, -hz]],
+        [1.0, 0.0, 0.0],
+        sz,
+        sy,
+    );
+    push_face(
+        [
+            [-hx, -hy, hz],
+            [-hx, -hy, -hz],
+            [-hx, hy, -hz],
+            [-hx, hy, hz],
+        ],
+        [-1.0, 0.0, 0.0],
+        sz,
+        sy,
+    );
+    push_face(
+        [[-hx, hy, -hz], [hx, hy, -hz], [hx, hy, hz], [-hx, hy, hz]],
+        [0.0, 1.0, 0.0],
+        sx,
+        sz,
+    );
+    push_face(
+        [
+            [-hx, -hy, hz],
+            [hx, -hy, hz],
+            [hx, -hy, -hz],
+            [-hx, -hy, -hz],
+        ],
+        [0.0, -1.0, 0.0],
+        sx,
+        sz,
+    );
+    push_face(
+        [[-hx, -hy, hz], [-hx, hy, hz], [hx, hy, hz], [hx, -hy, hz]],
+        [0.0, 0.0, 1.0],
+        sx,
+        sy,
+    );
+    push_face(
+        [
+            [hx, -hy, -hz],
+            [hx, hy, -hz],
+            [-hx, hy, -hz],
+            [-hx, -hy, -hz],
+        ],
+        [0.0, 0.0, -1.0],
+        sx,
+        sy,
+    );
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn plane_mesh_with_physical_uvs(width: f32, height: f32) -> Mesh {
+    let hx = width * 0.5;
+    let hy = height * 0.5;
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![
+            [-hx, -hy, 0.0],
+            [hx, -hy, 0.0],
+            [hx, hy, 0.0],
+            [-hx, hy, 0.0],
+        ],
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; 4]);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![[0.0, 0.0], [width, 0.0], [width, height], [0.0, height]],
+    );
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+    mesh
+}
 
 fn box_primitive_corners(primitive: &BoxPrimitive, rotation: Quat) -> [Vec3; 8] {
     let h = primitive.half_extents;
@@ -1038,5 +1147,48 @@ fn draw_sphere_circle(
 
     if let (Some(first), Some(last)) = (first, previous) {
         gizmos.line(last, first, color);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uv_values(mesh: &Mesh) -> Vec<[f32; 2]> {
+        match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+            Some(bevy::mesh::VertexAttributeValues::Float32x2(values)) => values.clone(),
+            other => panic!("expected Float32x2 UVs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn box_mesh_uvs_follow_physical_face_dimensions() {
+        let primitive = BoxPrimitive {
+            centre: Vec3::ZERO,
+            half_extents: Vec3::new(1.0, 1.5, 2.0),
+        };
+
+        let mesh = primitive.to_bevy_mesh(Quat::IDENTITY);
+        let uvs = uv_values(&mesh);
+
+        assert_eq!(uvs.len(), 24);
+        assert_eq!(uvs[0], [0.0, 0.0]);
+        assert_eq!(uvs[1], [4.0, 0.0]);
+        assert_eq!(uvs[2], [4.0, 3.0]);
+        assert_eq!(uvs[3], [0.0, 3.0]);
+    }
+
+    #[test]
+    fn plane_mesh_uvs_follow_physical_size() {
+        let primitive = PlanePrimitive {
+            corner_a: Vec2::new(-1.0, -2.0),
+            corner_b: Vec2::new(3.0, 1.0),
+            elevation: 0.0,
+        };
+
+        let mesh = primitive.to_bevy_mesh(Quat::IDENTITY);
+        let uvs = uv_values(&mesh);
+
+        assert_eq!(uvs, vec![[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]]);
     }
 }

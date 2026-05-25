@@ -22,8 +22,8 @@ use crate::plugins::{
     command_registry::{queue_command_invocation_resource, PendingCommandInvocations},
     materials::{
         material_assignment_from_value, material_assignment_to_value, normalize_material_textures,
-        MaterialAlphaMode, MaterialAssignment, MaterialDef, MaterialRegistry, TextureRef,
-        TextureRegistry,
+        MaterialAlphaMode, MaterialAssignment, MaterialDef, MaterialRegistry, TextureProjection,
+        TextureRef, TextureRegistry,
     },
     ui::{tool_window_max_size, tool_window_rect},
 };
@@ -85,7 +85,10 @@ pub struct MaterialsWindowState {
     pub fog_enabled: bool,
     pub depth_bias: f32,
     pub uv_scale: [f32; 2],
+    pub uv_offset: [f32; 2],
     pub uv_rotation_deg: f32,
+    pub uv_flip: [bool; 2],
+    pub texture_projection_idx: usize,
     pub anisotropy_rotation_deg: f32,
     pub base_color_tex: Option<TextureRef>,
     pub normal_map_tex: Option<TextureRef>,
@@ -284,7 +287,10 @@ impl MaterialsWindowState {
         self.fog_enabled = def.fog_enabled;
         self.depth_bias = def.depth_bias;
         self.uv_scale = def.uv_scale;
+        self.uv_offset = def.uv_offset;
         self.uv_rotation_deg = def.uv_rotation.to_degrees();
+        self.uv_flip = def.uv_flip;
+        self.texture_projection_idx = texture_projection_to_idx(def.texture_projection);
         self.anisotropy_rotation_deg = def.anisotropy_rotation.to_degrees();
         self.base_color_tex = def.base_color_texture.clone();
         self.normal_map_tex = def.normal_map_texture.clone();
@@ -326,7 +332,10 @@ impl MaterialsWindowState {
         def.fog_enabled = self.fog_enabled;
         def.depth_bias = self.depth_bias;
         def.uv_scale = self.uv_scale;
+        def.uv_offset = self.uv_offset;
         def.uv_rotation = self.uv_rotation_deg.to_radians();
+        def.uv_flip = self.uv_flip;
+        def.texture_projection = idx_to_texture_projection(self.texture_projection_idx);
         def.anisotropy_rotation = self.anisotropy_rotation_deg.to_radians();
         def.base_color_texture = self.base_color_tex.clone();
         def.normal_map_texture = self.normal_map_tex.clone();
@@ -946,6 +955,21 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                     }
                     ui.end_row();
 
+                    ui.label("Projection");
+                    egui::ComboBox::from_id_salt("material_texture_projection")
+                        .selected_text(texture_projection_name(state.texture_projection_idx))
+                        .show_ui(ui, |ui| {
+                            for (idx, name) in TEXTURE_PROJECTION_NAMES.iter().enumerate() {
+                                if ui
+                                    .selectable_value(&mut state.texture_projection_idx, idx, *name)
+                                    .changed()
+                                {
+                                    state.dirty = true;
+                                }
+                            }
+                        });
+                    ui.end_row();
+
                     // UV scale
                     ui.label("UV Tiling (X, Y)");
                     ui.horizontal(|ui| {
@@ -974,18 +998,62 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                     });
                     ui.end_row();
 
+                    ui.label("UV Offset (U, V)");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut state.uv_offset[0])
+                                    .speed(0.02)
+                                    .prefix("U:"),
+                            )
+                            .changed()
+                        {
+                            state.dirty = true;
+                        }
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut state.uv_offset[1])
+                                    .speed(0.02)
+                                    .prefix("V:"),
+                            )
+                            .changed()
+                        {
+                            state.dirty = true;
+                        }
+                    });
+                    ui.end_row();
+
                     // UV rotation
                     ui.label("UV Rotation (°)");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut state.uv_rotation_deg)
-                                .speed(1.0)
-                                .suffix("°"),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut state.uv_rotation_deg)
+                                    .speed(1.0)
+                                    .suffix("°"),
+                            )
+                            .changed()
+                        {
+                            state.dirty = true;
+                        }
+                        for degrees in [0.0, 90.0, 180.0, 270.0] {
+                            if ui.small_button(format!("{degrees:.0}°")).clicked() {
+                                state.uv_rotation_deg = degrees;
+                                state.dirty = true;
+                            }
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("UV Flip");
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut state.uv_flip[0], "U").changed() {
+                            state.dirty = true;
+                        }
+                        if ui.checkbox(&mut state.uv_flip[1], "V").changed() {
+                            state.dirty = true;
+                        }
+                    });
                     ui.end_row();
 
                     ui.label("Depth Bias");
@@ -2098,6 +2166,32 @@ fn idx_to_alpha_mode(idx: usize) -> MaterialAlphaMode {
         3 => MaterialAlphaMode::Premultiplied,
         4 => MaterialAlphaMode::Add,
         _ => MaterialAlphaMode::Opaque,
+    }
+}
+
+// ─── Texture projection helpers ──────────────────────────────────────────────
+
+const TEXTURE_PROJECTION_NAMES: &[&str] = &["UV", "Planar", "Box", "Triplanar"];
+
+fn texture_projection_name(idx: usize) -> &'static str {
+    TEXTURE_PROJECTION_NAMES.get(idx).copied().unwrap_or("UV")
+}
+
+fn texture_projection_to_idx(projection: TextureProjection) -> usize {
+    match projection {
+        TextureProjection::Uv => 0,
+        TextureProjection::Planar => 1,
+        TextureProjection::Box => 2,
+        TextureProjection::Triplanar => 3,
+    }
+}
+
+fn idx_to_texture_projection(idx: usize) -> TextureProjection {
+    match idx {
+        1 => TextureProjection::Planar,
+        2 => TextureProjection::Box,
+        3 => TextureProjection::Triplanar,
+        _ => TextureProjection::Uv,
     }
 }
 

@@ -69,6 +69,16 @@ initial MVP: specular tint, transmission, thickness, IOR, attenuation,
 clearcoat, anisotropy, unlit/fog flags, and depth bias are all readable and
 writeable through the material tools.
 
+Texture mapping is also agent-addressable. Use `get_texture_mapping`,
+`update_texture_mapping`, and `reset_texture_mapping` against exactly one target:
+either `material_id` for the shared material default or `element_id` for an
+assignment-scoped override. Mapping payloads cover projection, `uv_scale`,
+`uv_offset`, `uv_rotation_deg`, `flip_u`, `flip_v`, and `blend_sharpness`.
+Element-target inspection includes UV diagnostics so agents can distinguish a
+bad mapping transform from missing or degenerate mesh UVs. Non-UV projections
+are accepted as authored intent but reported as not yet rendered by the current
+Bevy `StandardMaterial` path.
+
 Viewport renderer state is also available over MCP through
 `get_render_settings` and `set_render_settings`. Those tools expose
 tonemapping, exposure, SSAO, bloom, SSR, background color, grid visibility,

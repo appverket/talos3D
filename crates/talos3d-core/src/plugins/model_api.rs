@@ -1420,6 +1420,258 @@ fn handle_set_material_assignment(
 }
 
 #[cfg(feature = "model-api")]
+fn handle_get_texture_mapping(
+    world: &World,
+    request: GetTextureMappingRequest,
+) -> Result<TextureMappingInfo, String> {
+    match texture_mapping_target(request.material_id, request.element_id)? {
+        TextureMappingTarget::Material(material_id) => {
+            material_texture_mapping_info(world, &material_id)
+        }
+        TextureMappingTarget::Element(element_id) => {
+            element_texture_mapping_info(world, element_id)
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn handle_update_texture_mapping(
+    world: &mut World,
+    request: UpdateTextureMappingRequest,
+) -> Result<TextureMappingInfo, String> {
+    let mapping = request.mapping.to_mapping()?;
+    crate::plugins::materials::validate_texture_mapping(mapping)?;
+    match texture_mapping_target(request.material_id, request.element_id)? {
+        TextureMappingTarget::Material(material_id) => {
+            let mut registry = world.resource_mut::<MaterialRegistry>();
+            let def = registry
+                .get_mut(&material_id)
+                .ok_or_else(|| format!("Material '{material_id}' not found"))?;
+            def.set_texture_mapping(mapping);
+            material_texture_mapping_info(world, &material_id)
+        }
+        TextureMappingTarget::Element(element_id) => {
+            let entity = find_entity_by_element_id(world, ElementId(element_id))
+                .ok_or_else(|| format!("Entity {element_id} not found"))?;
+            let mut assignment = world
+                .entity(entity)
+                .get::<MaterialAssignment>()
+                .cloned()
+                .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
+            assignment.set_texture_mapping_override(mapping)?;
+            crate::plugins::materials::validate_material_assignment(world, &assignment)?;
+            world.entity_mut(entity).insert(assignment);
+            element_texture_mapping_info(world, element_id)
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn handle_reset_texture_mapping(
+    world: &mut World,
+    request: ResetTextureMappingRequest,
+) -> Result<TextureMappingInfo, String> {
+    match texture_mapping_target(request.material_id, request.element_id)? {
+        TextureMappingTarget::Material(material_id) => {
+            let mut registry = world.resource_mut::<MaterialRegistry>();
+            let def = registry
+                .get_mut(&material_id)
+                .ok_or_else(|| format!("Material '{material_id}' not found"))?;
+            def.set_texture_mapping(crate::plugins::materials::TextureMapping::default());
+            material_texture_mapping_info(world, &material_id)
+        }
+        TextureMappingTarget::Element(element_id) => {
+            let entity = find_entity_by_element_id(world, ElementId(element_id))
+                .ok_or_else(|| format!("Entity {element_id} not found"))?;
+            let mut assignment = world
+                .entity(entity)
+                .get::<MaterialAssignment>()
+                .cloned()
+                .ok_or_else(|| format!("Entity {element_id} has no material assignment"))?;
+            assignment.clear_texture_mapping_override();
+            world.entity_mut(entity).insert(assignment);
+            element_texture_mapping_info(world, element_id)
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+enum TextureMappingTarget {
+    Material(String),
+    Element(u64),
+}
+
+#[cfg(feature = "model-api")]
+fn texture_mapping_target(
+    material_id: Option<String>,
+    element_id: Option<u64>,
+) -> Result<TextureMappingTarget, String> {
+    match (
+        material_id
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty()),
+        element_id,
+    ) {
+        (Some(material_id), None) => Ok(TextureMappingTarget::Material(material_id)),
+        (None, Some(element_id)) => Ok(TextureMappingTarget::Element(element_id)),
+        (Some(_), Some(_)) => Err(
+            "texture mapping requests must target either material_id or element_id, not both"
+                .to_string(),
+        ),
+        (None, None) => {
+            Err("texture mapping requests require material_id or element_id".to_string())
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn material_texture_mapping_info(
+    world: &World,
+    material_id: &str,
+) -> Result<TextureMappingInfo, String> {
+    let def = world
+        .resource::<MaterialRegistry>()
+        .get(material_id)
+        .ok_or_else(|| format!("Material '{material_id}' not found"))?;
+    let mapping = def.texture_mapping();
+    Ok(TextureMappingInfo {
+        target: "material".to_string(),
+        material_id: Some(material_id.to_string()),
+        element_id: None,
+        source: "material_default".to_string(),
+        mapping: TextureMappingDto::from_mapping(mapping),
+        renderer_supported: mapping.renderer_supported(),
+        renderer_note: mapping.renderer_support_note().map(str::to_string),
+        assignment: None,
+        uv_diagnostics: None,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn element_texture_mapping_info(
+    world: &World,
+    element_id: u64,
+) -> Result<TextureMappingInfo, String> {
+    let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let assignment = world.entity(entity).get::<MaterialAssignment>().cloned();
+    let spec_registry = world.get_resource::<crate::curation::MaterialSpecRegistry>();
+    let material_id = assignment
+        .as_ref()
+        .and_then(|assignment| assignment.render_material_id(spec_registry));
+    let (source, mapping) = if let Some(mapping) = assignment
+        .as_ref()
+        .and_then(MaterialAssignment::texture_mapping_override)
+    {
+        ("assignment_override".to_string(), mapping)
+    } else if let Some(material_id) = material_id.as_ref() {
+        let def = world
+            .resource::<MaterialRegistry>()
+            .get(material_id)
+            .ok_or_else(|| format!("Material '{material_id}' not found"))?;
+        ("material_default".to_string(), def.texture_mapping())
+    } else {
+        (
+            "renderer_default".to_string(),
+            crate::plugins::materials::TextureMapping::default(),
+        )
+    };
+    Ok(TextureMappingInfo {
+        target: "element".to_string(),
+        material_id,
+        element_id: Some(element_id),
+        source,
+        mapping: TextureMappingDto::from_mapping(mapping),
+        renderer_supported: mapping.renderer_supported(),
+        renderer_note: mapping.renderer_support_note().map(str::to_string),
+        assignment,
+        uv_diagnostics: Some(texture_uv_diagnostics(world, entity)),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn texture_uv_diagnostics(world: &World, entity: Entity) -> UvDiagnosticsInfo {
+    let Some(mesh_handle) = world.entity(entity).get::<Mesh3d>() else {
+        return UvDiagnosticsInfo {
+            inspected: true,
+            has_mesh: false,
+            has_uv0: false,
+            uv_count: 0,
+            vertex_count: 0,
+            degenerate: true,
+            messages: vec!["entity has no Mesh3d component".to_string()],
+        };
+    };
+    let Some(meshes) = world.get_resource::<Assets<Mesh>>() else {
+        return UvDiagnosticsInfo {
+            inspected: true,
+            has_mesh: true,
+            has_uv0: false,
+            uv_count: 0,
+            vertex_count: 0,
+            degenerate: true,
+            messages: vec!["Assets<Mesh> resource is unavailable".to_string()],
+        };
+    };
+    let Some(mesh) = meshes.get(&mesh_handle.0) else {
+        return UvDiagnosticsInfo {
+            inspected: true,
+            has_mesh: true,
+            has_uv0: false,
+            uv_count: 0,
+            vertex_count: 0,
+            degenerate: true,
+            messages: vec!["mesh asset is not loaded".to_string()],
+        };
+    };
+    let vertex_count = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(bevy::mesh::VertexAttributeValues::Float32x3(values)) => values.len(),
+        _ => 0,
+    };
+    let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+        Some(bevy::mesh::VertexAttributeValues::Float32x2(values)) => values,
+        _ => {
+            return UvDiagnosticsInfo {
+                inspected: true,
+                has_mesh: true,
+                has_uv0: false,
+                uv_count: 0,
+                vertex_count,
+                degenerate: true,
+                messages: vec!["mesh has no ATTRIBUTE_UV_0 Float32x2 data".to_string()],
+            };
+        }
+    };
+    let degenerate = uvs
+        .first()
+        .map(|first| uvs.iter().all(|uv| uv == first))
+        .unwrap_or(true);
+    let mut messages = Vec::new();
+    if uvs.len() != vertex_count {
+        messages.push(format!(
+            "uv count {} does not match vertex count {}",
+            uvs.len(),
+            vertex_count
+        ));
+    }
+    if degenerate {
+        messages.push("all UV coordinates are identical".to_string());
+    }
+    if messages.is_empty() {
+        messages.push("mesh has non-degenerate ATTRIBUTE_UV_0 data".to_string());
+    }
+    UvDiagnosticsInfo {
+        inspected: true,
+        has_mesh: true,
+        has_uv0: true,
+        uv_count: uvs.len(),
+        vertex_count,
+        degenerate,
+        messages,
+    }
+}
+
+#[cfg(feature = "model-api")]
 fn parse_bim_material_ref(
     value: &str,
 ) -> Result<crate::plugins::modeling::bim_material_assignment::BimMaterialRef, String> {
@@ -2762,7 +3014,12 @@ fn apply_request_to_def(req: CreateMaterialRequest, def: &mut MaterialDef) {
     def.fog_enabled = req.fog_enabled;
     def.depth_bias = req.depth_bias;
     def.uv_scale = req.uv_scale;
+    def.uv_offset = req.uv_offset;
     def.uv_rotation = req.uv_rotation_deg.to_radians();
+    def.uv_flip = req.uv_flip;
+    def.texture_projection = parse_texture_projection(&req.texture_projection)
+        .unwrap_or(crate::plugins::materials::TextureProjection::Uv);
+    def.texture_blend_sharpness = req.texture_blend_sharpness;
     def.base_color_texture = to_texture_ref(req.base_color_texture, req.base_color_texture_mime);
     def.normal_map_texture = to_texture_ref(req.normal_map_texture, req.normal_map_texture_mime);
     def.metallic_roughness_texture = to_texture_ref(

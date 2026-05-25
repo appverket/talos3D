@@ -479,6 +479,7 @@ fn load_material_texture(
 
 // ─── TextureMapping ──────────────────────────────────────────────────────────
 
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TextureProjection {
@@ -497,18 +498,25 @@ fn default_mapping_blend_sharpness() -> f32 {
     4.0
 }
 
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TextureMapping {
     #[serde(default)]
     pub projection: TextureProjection,
     #[serde(default = "default_mapping_scale")]
+    #[cfg_attr(feature = "model-api", schemars(with = "[f32; 3]"))]
     pub scale: Vec3,
     #[serde(default)]
+    #[cfg_attr(feature = "model-api", schemars(with = "[f32; 3]"))]
     pub offset: Vec3,
     #[serde(default)]
     pub rotation: f32,
     #[serde(default = "default_mapping_blend_sharpness")]
     pub blend_sharpness: f32,
+    #[serde(default)]
+    pub flip_u: bool,
+    #[serde(default)]
+    pub flip_v: bool,
 }
 
 impl Default for TextureMapping {
@@ -519,6 +527,29 @@ impl Default for TextureMapping {
             offset: Vec3::ZERO,
             rotation: 0.0,
             blend_sharpness: default_mapping_blend_sharpness(),
+            flip_u: false,
+            flip_v: false,
+        }
+    }
+}
+
+impl TextureMapping {
+    pub fn renderer_supported(&self) -> bool {
+        self.projection == TextureProjection::Uv
+    }
+
+    pub fn renderer_support_note(&self) -> Option<&'static str> {
+        match self.projection {
+            TextureProjection::Uv => None,
+            TextureProjection::Triplanar => Some(
+                "triplanar projection is authored but not yet rendered by the Bevy StandardMaterial path",
+            ),
+            TextureProjection::Planar => Some(
+                "planar projection is authored but not yet rendered by the Bevy StandardMaterial path",
+            ),
+            TextureProjection::Box => Some(
+                "box projection is authored but not yet rendered by the Bevy StandardMaterial path",
+            ),
         }
     }
 }
@@ -612,8 +643,18 @@ pub struct MaterialDef {
     // --- UV tiling / transform ---
     /// Multiply UV coords by this scale (creates tiling).  `[1,1]` = no tiling.
     pub uv_scale: [f32; 2],
+    /// Additive UV offset after scaling/rotation.
+    #[serde(default)]
+    pub uv_offset: [f32; 2],
     /// Additional UV rotation in radians.
     pub uv_rotation: f32,
+    /// Flip sampled texture coordinates around the U/V axes.
+    #[serde(default)]
+    pub uv_flip: [bool; 2],
+    #[serde(default)]
+    pub texture_projection: TextureProjection,
+    #[serde(default = "default_mapping_blend_sharpness")]
+    pub texture_blend_sharpness: f32,
     /// Anisotropy direction in radians relative to the mesh tangent.
     pub anisotropy_rotation: f32,
 
@@ -657,7 +698,11 @@ impl Default for MaterialDef {
             emissive_texture: None,
             occlusion_texture: None,
             uv_scale: [1.0, 1.0],
+            uv_offset: [0.0, 0.0],
             uv_rotation: 0.0,
+            uv_flip: [false, false],
+            texture_projection: TextureProjection::Uv,
+            texture_blend_sharpness: default_mapping_blend_sharpness(),
             anisotropy_rotation: 0.0,
             double_sided: false,
             unlit: false,
@@ -681,17 +726,29 @@ impl MaterialDef {
 
     pub fn texture_mapping(&self) -> TextureMapping {
         TextureMapping {
-            projection: TextureProjection::Uv,
+            projection: self.texture_projection,
             scale: Vec3::new(self.uv_scale[0], self.uv_scale[1], 1.0),
-            offset: Vec3::ZERO,
+            offset: Vec3::new(self.uv_offset[0], self.uv_offset[1], 0.0),
             rotation: self.uv_rotation,
-            blend_sharpness: default_mapping_blend_sharpness(),
+            blend_sharpness: self.texture_blend_sharpness,
+            flip_u: self.uv_flip[0],
+            flip_v: self.uv_flip[1],
         }
     }
 
     pub fn set_texture_mapping(&mut self, mapping: TextureMapping) {
+        self.texture_projection = mapping.projection;
         self.uv_scale = [mapping.scale.x, mapping.scale.y];
+        self.uv_offset = [mapping.offset.x, mapping.offset.y];
         self.uv_rotation = mapping.rotation;
+        self.uv_flip = [mapping.flip_u, mapping.flip_v];
+        self.texture_blend_sharpness = mapping.blend_sharpness;
+    }
+
+    pub fn with_texture_mapping(&self, mapping: TextureMapping) -> Self {
+        let mut next = self.clone();
+        next.set_texture_mapping(mapping);
+        next
     }
 
     /// Build a Bevy `StandardMaterial` from this definition.
@@ -711,12 +768,29 @@ impl MaterialDef {
         let [er, eg, eb] = self.emissive;
         let [ar, ag, ab] = self.attenuation_color;
 
-        let uv_transform = if self.uv_scale != [1.0f32, 1.0f32] || self.uv_rotation != 0.0 {
-            Affine2::from_scale_angle_translation(
-                Vec2::from(self.uv_scale),
-                self.uv_rotation,
-                Vec2::ZERO,
-            )
+        let uv_transform = if self.texture_projection == TextureProjection::Uv
+            && (self.uv_scale != [1.0f32, 1.0f32]
+                || self.uv_offset != [0.0f32, 0.0f32]
+                || self.uv_rotation != 0.0
+                || self.uv_flip != [false, false])
+        {
+            let scale = Vec2::new(
+                if self.uv_flip[0] {
+                    -self.uv_scale[0]
+                } else {
+                    self.uv_scale[0]
+                },
+                if self.uv_flip[1] {
+                    -self.uv_scale[1]
+                } else {
+                    self.uv_scale[1]
+                },
+            );
+            let translation = Vec2::new(
+                self.uv_offset[0] + if self.uv_flip[0] { 1.0 } else { 0.0 },
+                self.uv_offset[1] + if self.uv_flip[1] { 1.0 } else { 0.0 },
+            );
+            Affine2::from_scale_angle_translation(scale, self.uv_rotation, translation)
         } else {
             Affine2::IDENTITY
         };
@@ -974,6 +1048,8 @@ pub struct MaterialBinding {
     pub spec: Option<AssetId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<AssetId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping: Option<TextureMapping>,
 }
 
 impl MaterialBinding {
@@ -981,6 +1057,7 @@ impl MaterialBinding {
         Self {
             spec: None,
             render: Some(material_def_asset_id(material_id.as_ref())),
+            mapping: None,
         }
     }
 
@@ -1002,6 +1079,10 @@ impl MaterialBinding {
             .as_ref()
             .and_then(material_id_from_asset_id)
             .map(str::to_string)
+    }
+
+    pub fn texture_mapping_override(&self) -> Option<TextureMapping> {
+        self.mapping
     }
 
     pub fn contains_explicit_render_material_id(&self, material_id: &str) -> bool {
@@ -1068,6 +1149,52 @@ impl MaterialAssignment {
                 .layers
                 .iter()
                 .find_map(|layer| layer.binding.render_material_id(specs)),
+        }
+    }
+
+    pub fn texture_mapping_override(&self) -> Option<TextureMapping> {
+        match self {
+            Self::Single(binding) => binding.texture_mapping_override(),
+            Self::LayerSet(layer_set) => layer_set
+                .layers
+                .iter()
+                .find_map(|layer| layer.binding.texture_mapping_override()),
+        }
+    }
+
+    pub fn set_texture_mapping_override(&mut self, mapping: TextureMapping) -> Result<(), String> {
+        match self {
+            Self::Single(binding) => {
+                binding.mapping = Some(mapping);
+                Ok(())
+            }
+            Self::LayerSet(layer_set) => {
+                let Some(layer) = layer_set
+                    .layers
+                    .iter_mut()
+                    .find(|layer| !layer.binding.is_empty())
+                else {
+                    return Err(
+                        "layer-set assignment has no material binding to carry a mapping override"
+                            .to_string(),
+                    );
+                };
+                layer.binding.mapping = Some(mapping);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn clear_texture_mapping_override(&mut self) {
+        match self {
+            Self::Single(binding) => {
+                binding.mapping = None;
+            }
+            Self::LayerSet(layer_set) => {
+                for layer in &mut layer_set.layers {
+                    layer.binding.mapping = None;
+                }
+            }
         }
     }
 
@@ -1192,10 +1319,26 @@ pub fn material_assignment_display_id(assignment: Option<&MaterialAssignment>) -
 
 // ─── Bevy material handles cache ─────────────────────────────────────────────
 
-/// Maps `material_id → Handle<StandardMaterial>`.
+/// Maps `material_id + effective texture mapping → Handle<StandardMaterial>`.
 /// Populated lazily when materials are applied to entities.
 #[derive(Resource, Default)]
 pub struct MaterialHandleCache(pub BTreeMap<String, Handle<StandardMaterial>>);
+
+fn material_handle_cache_key(material_id: &str, mapping: Option<TextureMapping>) -> String {
+    let Some(mapping) = mapping else {
+        return material_id.to_string();
+    };
+    format!(
+        "{material_id}|mapping={}",
+        serde_json::to_string(&mapping).unwrap_or_else(|_| "invalid".to_string())
+    )
+}
+
+fn material_id_from_handle_cache_key(key: &str) -> &str {
+    key.split_once("|mapping=")
+        .map(|(material_id, _)| material_id)
+        .unwrap_or(key)
+}
 
 // ─── Plugin ───────────────────────────────────────────────────────────────────
 
@@ -1345,7 +1488,11 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         emissive_texture: None,
         occlusion_texture: None,
         uv_scale: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
         uv_rotation: 0.0,
+        uv_flip: [false, false],
+        texture_projection: TextureProjection::Uv,
+        texture_blend_sharpness: default_mapping_blend_sharpness(),
         anisotropy_rotation: 0.0,
         double_sided: false,
         unlit: false,
@@ -1381,7 +1528,11 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         emissive_texture: None,
         occlusion_texture: None,
         uv_scale: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
         uv_rotation: 0.0,
+        uv_flip: [false, false],
+        texture_projection: TextureProjection::Uv,
+        texture_blend_sharpness: default_mapping_blend_sharpness(),
         anisotropy_rotation: 0.0,
         double_sided: true,
         unlit: false,
@@ -1417,7 +1568,11 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         emissive_texture: None,
         occlusion_texture: None,
         uv_scale: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
         uv_rotation: 0.0,
+        uv_flip: [false, false],
+        texture_projection: TextureProjection::Uv,
+        texture_blend_sharpness: default_mapping_blend_sharpness(),
         anisotropy_rotation: 0.0,
         double_sided: false,
         unlit: false,
@@ -1453,7 +1608,11 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         emissive_texture: None,
         occlusion_texture: None,
         uv_scale: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
         uv_rotation: 0.0,
+        uv_flip: [false, false],
+        texture_projection: TextureProjection::Uv,
+        texture_blend_sharpness: default_mapping_blend_sharpness(),
         anisotropy_rotation: 0.0,
         double_sided: false,
         unlit: false,
@@ -1489,7 +1648,11 @@ pub fn ensure_builtin_materials(registry: &mut MaterialRegistry) {
         emissive_texture: None,
         occlusion_texture: None,
         uv_scale: [1.0, 1.0],
+        uv_offset: [0.0, 0.0],
         uv_rotation: 0.0,
+        uv_flip: [false, false],
+        texture_projection: TextureProjection::Uv,
+        texture_blend_sharpness: default_mapping_blend_sharpness(),
         anisotropy_rotation: 0.0,
         double_sided: false,
         unlit: false,
@@ -1594,6 +1757,34 @@ pub fn validate_material_assignment(
             }
         }
     }
+    if let Some(mapping) = assignment.texture_mapping_override() {
+        validate_texture_mapping(mapping)?;
+    }
+    Ok(())
+}
+
+pub fn validate_texture_mapping(mapping: TextureMapping) -> Result<(), String> {
+    if !mapping.scale.x.is_finite()
+        || !mapping.scale.y.is_finite()
+        || !mapping.scale.z.is_finite()
+        || mapping.scale.x == 0.0
+        || mapping.scale.y == 0.0
+    {
+        return Err("texture mapping scale values must be finite and non-zero".to_string());
+    }
+    if !mapping.offset.x.is_finite()
+        || !mapping.offset.y.is_finite()
+        || !mapping.offset.z.is_finite()
+        || !mapping.rotation.is_finite()
+        || !mapping.blend_sharpness.is_finite()
+    {
+        return Err(
+            "texture mapping offset, rotation, and blend_sharpness must be finite".to_string(),
+        );
+    }
+    if mapping.blend_sharpness <= 0.0 {
+        return Err("texture mapping blend_sharpness must be greater than zero".to_string());
+    }
     Ok(())
 }
 
@@ -1636,7 +1827,7 @@ fn rebuild_changed_material_handles(
     let ids_to_remove: Vec<String> = cache
         .0
         .keys()
-        .filter(|id| !registry.contains(id))
+        .filter(|key| !registry.contains(material_id_from_handle_cache_key(key)))
         .cloned()
         .collect();
     for id in ids_to_remove {
@@ -1646,8 +1837,18 @@ fn rebuild_changed_material_handles(
     }
     // Invalidate (remove) existing handles so they are rebuilt fresh.
     // The apply system will recreate them when entities need them.
-    for id in registry.all().map(|m| m.id.clone()).collect::<Vec<_>>() {
-        if let Some(handle) = cache.0.remove(&id) {
+    let ids = registry.all().map(|m| m.id.clone()).collect::<Vec<_>>();
+    let keys_to_remove = cache
+        .0
+        .keys()
+        .filter(|key| {
+            ids.iter()
+                .any(|id| id == material_id_from_handle_cache_key(key))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in keys_to_remove {
+        if let Some(handle) = cache.0.remove(&key) {
             std_materials.remove(handle.id());
         }
     }
@@ -1693,11 +1894,16 @@ fn apply_material_assignments(
             .render_material_id(spec_registry.as_deref())
             .and_then(|material_id| {
                 let def = registry.get(&material_id)?;
+                let mapping_override = assignment.texture_mapping_override();
+                let cache_key = material_handle_cache_key(&material_id, mapping_override);
                 let handle = cache
                     .0
-                    .entry(material_id.clone())
+                    .entry(cache_key)
                     .or_insert_with(|| {
-                        std_materials.add(def.to_standard_material(
+                        let effective_def = mapping_override
+                            .map(|mapping| def.with_texture_mapping(mapping))
+                            .unwrap_or_else(|| def.clone());
+                        std_materials.add(effective_def.to_standard_material(
                             &asset_server,
                             &mut images,
                             Some(&texture_registry),
@@ -1795,18 +2001,24 @@ mod tests {
             offset: Vec3::new(1.0, 0.0, -2.0),
             rotation: 0.5,
             blend_sharpness: 8.0,
+            flip_u: true,
+            flip_v: false,
         });
 
         assert_eq!(material.uv_scale, [0.25, 0.065]);
+        assert_eq!(material.uv_offset, [1.0, 0.0]);
         assert_eq!(material.uv_rotation, 0.5);
+        assert_eq!(material.uv_flip, [true, false]);
         assert_eq!(
             material.texture_mapping(),
             TextureMapping {
-                projection: TextureProjection::Uv,
+                projection: TextureProjection::Planar,
                 scale: Vec3::new(0.25, 0.065, 1.0),
-                offset: Vec3::ZERO,
+                offset: Vec3::new(1.0, 0.0, 0.0),
                 rotation: 0.5,
-                blend_sharpness: 4.0,
+                blend_sharpness: 8.0,
+                flip_u: true,
+                flip_v: false,
             }
         );
     }
@@ -1819,6 +2031,8 @@ mod tests {
             offset: Vec3::new(1.0, 0.0, -2.0),
             rotation: 0.5,
             blend_sharpness: 8.0,
+            flip_u: true,
+            flip_v: true,
         };
         let parsed: TextureMapping =
             serde_json::from_value(serde_json::to_value(mapping).unwrap()).unwrap();
@@ -1906,6 +2120,7 @@ mod tests {
         let hinted = MaterialAssignment::Single(MaterialBinding {
             spec: Some(spec_id),
             render: None,
+            mapping: None,
         });
         assert_eq!(
             hinted.render_material_id(Some(&specs)).as_deref(),
@@ -1915,6 +2130,7 @@ mod tests {
         let explicit = MaterialAssignment::Single(MaterialBinding {
             spec: None,
             render: Some(material_def_asset_id("paint_white")),
+            mapping: None,
         });
         assert_eq!(
             explicit.render_material_id(Some(&specs)).as_deref(),
@@ -1927,6 +2143,7 @@ mod tests {
         let assignment = MaterialAssignment::Single(MaterialBinding {
             spec: Some(crate::curation::MaterialSpec::asset_id_for("gypsum_board")),
             render: Some(material_def_asset_id("paint_white")),
+            mapping: None,
         });
 
         let stripped = assignment
@@ -1947,6 +2164,7 @@ mod tests {
         let single = MaterialAssignment::Single(MaterialBinding {
             spec: Some(crate::curation::MaterialSpec::asset_id_for("c24")),
             render: Some(material_def_asset_id("oak_finish")),
+            mapping: None,
         });
         let single_value = material_assignment_to_value(&single);
         assert_eq!(material_assignment_from_value(&single_value), Some(single));
@@ -1959,6 +2177,7 @@ mod tests {
                     binding: MaterialBinding {
                         spec: Some(crate::curation::MaterialSpec::asset_id_for("c24")),
                         render: Some(material_def_asset_id("oak_finish")),
+                        mapping: None,
                     },
                 },
                 MaterialLayer {
@@ -1967,6 +2186,7 @@ mod tests {
                     binding: MaterialBinding {
                         spec: None,
                         render: Some(material_def_asset_id("paint_white")),
+                        mapping: None,
                     },
                 },
             ],
