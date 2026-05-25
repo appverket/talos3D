@@ -480,6 +480,26 @@ pub(super) enum ModelApiRequest {
         path: String,
         response: oneshot::Sender<ApiResult<String>>,
     },
+    ListWorkspaceDefinitionLibraries {
+        request: Value,
+        response: oneshot::Sender<ApiResult<Vec<DefinitionLibraryEntry>>>,
+    },
+    CreateWorkspaceDefinitionLibrary {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionLibraryEntry>>,
+    },
+    ImportWorkspaceDefinitionDraft {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionLibraryEntry>>,
+    },
+    UpdateWorkspaceDefinitionDraft {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionLibraryEntry>>,
+    },
+    DeleteWorkspaceDefinitionDraft {
+        request: Value,
+        response: oneshot::Sender<ApiResult<DefinitionLibraryEntry>>,
+    },
     InstantiateDefinition {
         request: Value,
         response: oneshot::Sender<ApiResult<InstantiateDefinitionResult>>,
@@ -1467,6 +1487,21 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(handle_export_definition_library(world, &library_id, &path));
+        }
+        ModelApiRequest::ListWorkspaceDefinitionLibraries { request, response } => {
+            let _ = response.send(handle_list_workspace_definition_libraries(world, request));
+        }
+        ModelApiRequest::CreateWorkspaceDefinitionLibrary { request, response } => {
+            let _ = response.send(handle_create_workspace_definition_library(world, request));
+        }
+        ModelApiRequest::ImportWorkspaceDefinitionDraft { request, response } => {
+            let _ = response.send(handle_import_workspace_definition_draft(world, request));
+        }
+        ModelApiRequest::UpdateWorkspaceDefinitionDraft { request, response } => {
+            let _ = response.send(handle_update_workspace_definition_draft(world, request));
+        }
+        ModelApiRequest::DeleteWorkspaceDefinitionDraft { request, response } => {
+            let _ = response.send(handle_delete_workspace_definition_draft(world, request));
         }
         ModelApiRequest::InstantiateDefinition { request, response } => {
             let _ = response.send(handle_instantiate_definition(world, request));

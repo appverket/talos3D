@@ -5712,6 +5712,243 @@ pub fn handle_export_definition_library(
 }
 
 #[cfg(feature = "model-api")]
+pub fn handle_list_workspace_definition_libraries(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<Vec<DefinitionLibraryEntry>> {
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition.library.workspace.list expects a JSON object".to_string())?;
+    let library_files = workspace_library_files_from_request(object)?;
+    let mut entries = Vec::new();
+    for path in library_files {
+        let library = read_workspace_definition_library_file(&path)?;
+        entries.push(definition_library_to_entry(&library));
+        world
+            .resource_mut::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+            .insert(library);
+    }
+    entries.sort_by(|left, right| left.source_path.cmp(&right.source_path));
+    Ok(entries)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_create_workspace_definition_library(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionLibraryEntry> {
+    use crate::plugins::modeling::definition::{
+        DefinitionDraftStatus, DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
+    };
+
+    let object = request
+        .as_object()
+        .ok_or_else(|| "definition.library.workspace.create expects a JSON object".to_string())?;
+    let workspace_root = required_string(object, "workspace_root")?;
+    let name = required_string(object, "name")?;
+    let library_root = crate::plugins::workspace_library_root::ensure_workspace_library_root(
+        workspace_root.as_ref(),
+    )
+    .map_err(|error| error.to_string())?;
+    let library_id = DefinitionLibraryId::new();
+    let source_path = library_root
+        .join(format!("{}.json", library_id.0))
+        .to_string_lossy()
+        .into_owned();
+    let library = DefinitionLibrary {
+        id: library_id,
+        name: name.to_string(),
+        scope: DefinitionLibraryScope::WorkspaceLibrary,
+        source_path: Some(source_path),
+        tags: Vec::new(),
+        definitions: HashMap::new(),
+        draft_status: DefinitionDraftStatus::default(),
+    };
+    write_workspace_definition_library_file(&library)?;
+    world
+        .resource_mut::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+        .insert(library.clone());
+    Ok(definition_library_to_entry(&library))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_import_workspace_definition_draft(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionLibraryEntry> {
+    upsert_workspace_definition_draft(world, request, "definition.library.workspace.import_draft")
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_update_workspace_definition_draft(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionLibraryEntry> {
+    upsert_workspace_definition_draft(world, request, "definition.library.workspace.update_draft")
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_delete_workspace_definition_draft(
+    world: &mut World,
+    request: Value,
+) -> ApiResult<DefinitionLibraryEntry> {
+    use crate::plugins::modeling::definition::{DefinitionId, DefinitionLibraryId};
+
+    let object = request.as_object().ok_or_else(|| {
+        "definition.library.workspace.delete_draft expects a JSON object".to_string()
+    })?;
+    let library_id = DefinitionLibraryId(required_string(object, "library_id")?.to_string());
+    let definition_id = DefinitionId(required_string(object, "definition_id")?.to_string());
+    let mut library = workspace_library_from_registry(world, &library_id)?;
+    if library.definitions.remove(&definition_id).is_none() {
+        return Err(format!(
+            "Definition '{}' not found in workspace library '{}'",
+            definition_id, library_id
+        ));
+    }
+    write_workspace_definition_library_file(&library)?;
+    world
+        .resource_mut::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+        .insert(library.clone());
+    Ok(definition_library_to_entry(&library))
+}
+
+#[cfg(feature = "model-api")]
+fn upsert_workspace_definition_draft(
+    world: &mut World,
+    request: Value,
+    tool_name: &str,
+) -> ApiResult<DefinitionLibraryEntry> {
+    use crate::plugins::{
+        definition_authoring::{validate_draft, DefinitionDraftId},
+        modeling::definition::DefinitionLibraryId,
+    };
+
+    let object = request
+        .as_object()
+        .ok_or_else(|| format!("{tool_name} expects a JSON object"))?;
+    let library_id = DefinitionLibraryId(required_string(object, "library_id")?.to_string());
+    let draft_id = DefinitionDraftId(required_string(object, "draft_id")?.to_string());
+    let draft = world
+        .resource::<crate::plugins::definition_authoring::DefinitionDraftRegistry>()
+        .get(&draft_id)
+        .cloned()
+        .ok_or_else(|| format!("Definition draft '{}' not found", draft_id))?;
+    {
+        let definitions =
+            world.resource::<crate::plugins::modeling::definition::DefinitionRegistry>();
+        let libraries =
+            world.resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>();
+        validate_draft(definitions, libraries, &draft)?;
+    }
+
+    let mut library = workspace_library_from_registry(world, &library_id)?;
+    library.insert(draft.working_copy);
+    write_workspace_definition_library_file(&library)?;
+    world
+        .resource_mut::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
+        .insert(library.clone());
+    Ok(definition_library_to_entry(&library))
+}
+
+#[cfg(feature = "model-api")]
+fn workspace_library_files_from_request(
+    object: &serde_json::Map<String, Value>,
+) -> ApiResult<Vec<std::path::PathBuf>> {
+    if let Some(workspace_root) = object.get("workspace_root").and_then(Value::as_str) {
+        let library_root = crate::plugins::workspace_library_root::workspace_library_root_for(
+            workspace_root.as_ref(),
+        );
+        return crate::plugins::workspace_library_root::list_workspace_library_files(&library_root)
+            .map_err(|error| error.to_string());
+    }
+
+    let start_dir = object
+        .get("start_dir")
+        .and_then(Value::as_str)
+        .unwrap_or(".");
+    crate::plugins::workspace_library_root::discover_workspace_library_files(start_dir.as_ref())
+        .map(|files| files.unwrap_or_default())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn read_workspace_definition_library_file(
+    path: &std::path::Path,
+) -> ApiResult<crate::plugins::modeling::definition::DefinitionLibrary> {
+    use crate::plugins::modeling::definition::{DefinitionLibraryFile, DefinitionLibraryScope};
+
+    let contents = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut file: DefinitionLibraryFile =
+        serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    if file.version != DefinitionLibraryFile::VERSION {
+        return Err(format!(
+            "Unsupported definition library version {} (expected {})",
+            file.version,
+            DefinitionLibraryFile::VERSION
+        ));
+    }
+    file.library.scope = DefinitionLibraryScope::WorkspaceLibrary;
+    file.library.source_path = Some(path.to_string_lossy().into_owned());
+    Ok(file.library)
+}
+
+#[cfg(feature = "model-api")]
+fn write_workspace_definition_library_file(
+    library: &crate::plugins::modeling::definition::DefinitionLibrary,
+) -> ApiResult<()> {
+    use crate::plugins::modeling::definition::{DefinitionLibraryFile, DefinitionLibraryScope};
+
+    if library.scope != DefinitionLibraryScope::WorkspaceLibrary {
+        return Err(format!(
+            "Definition library '{}' is not a workspace library",
+            library.id
+        ));
+    }
+    let source_path = library
+        .source_path
+        .as_ref()
+        .ok_or_else(|| format!("Workspace library '{}' has no source_path", library.id))?;
+    let path = std::path::Path::new(source_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let file = DefinitionLibraryFile {
+        version: DefinitionLibraryFile::VERSION,
+        library: library.clone(),
+    };
+    let json = serde_json::to_string_pretty(&file).map_err(|error| error.to_string())?;
+    std::fs::write(path, json).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn workspace_library_from_registry(
+    world: &World,
+    library_id: &crate::plugins::modeling::definition::DefinitionLibraryId,
+) -> ApiResult<crate::plugins::modeling::definition::DefinitionLibrary> {
+    use crate::plugins::modeling::definition::{DefinitionLibraryRegistry, DefinitionLibraryScope};
+
+    let library = world
+        .resource::<DefinitionLibraryRegistry>()
+        .get(library_id)
+        .cloned()
+        .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
+    if library.scope != DefinitionLibraryScope::WorkspaceLibrary {
+        return Err(format!(
+            "Definition library '{}' is not a workspace library",
+            library_id
+        ));
+    }
+    if library.source_path.is_none() {
+        return Err(format!(
+            "Workspace library '{}' has no source_path",
+            library_id
+        ));
+    }
+    Ok(library)
+}
+
+#[cfg(feature = "model-api")]
 fn ensure_definition_available_for_request(
     world: &mut World,
     object: &serde_json::Map<String, Value>,

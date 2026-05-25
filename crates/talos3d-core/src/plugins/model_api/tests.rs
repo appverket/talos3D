@@ -3094,6 +3094,84 @@ fn register_hosted_on_relation(world: &mut World) {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn workspace_definition_library_tools_persist_draft_crud_to_files() {
+    let mut world = init_model_api_test_world();
+    let temp = tempfile::tempdir().expect("temp workspace should be created");
+    fs::create_dir(temp.path().join(".talos3d")).expect("workspace marker should be created");
+    let workspace_root = temp.path().to_string_lossy().to_string();
+
+    let created = handle_create_workspace_definition_library(
+        &mut world,
+        json!({
+            "workspace_root": workspace_root,
+            "name": "Workspace Drafts"
+        }),
+    )
+    .expect("workspace library should be created");
+    assert_eq!(created.scope, "WorkspaceLibrary");
+    let source_path = created
+        .source_path
+        .clone()
+        .expect("workspace library should have a source path");
+    assert!(std::path::Path::new(&source_path).is_file());
+
+    let listed = handle_list_workspace_definition_libraries(
+        &mut world,
+        json!({ "start_dir": temp.path().join("nested").to_string_lossy() }),
+    )
+    .expect("workspace libraries should list from a nested start dir");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].library_id, created.library_id);
+
+    let draft = handle_create_definition_draft(&mut world, make_rect_extrusion_request())
+        .expect("draft should be created");
+    let imported = handle_import_workspace_definition_draft(
+        &mut world,
+        json!({
+            "library_id": created.library_id,
+            "draft_id": draft.draft_id
+        }),
+    )
+    .expect("draft should import into workspace library");
+    assert_eq!(imported.definition_count, 1);
+
+    let patched = handle_patch_definition_draft(
+        &mut world,
+        json!({
+            "draft_id": draft.draft_id,
+            "patch": { "op": "set_name", "name": "WorkspaceWall" }
+        }),
+    )
+    .expect("draft should patch before update");
+    let updated = handle_update_workspace_definition_draft(
+        &mut world,
+        json!({
+            "library_id": created.library_id,
+            "draft_id": patched.draft_id
+        }),
+    )
+    .expect("workspace draft should update");
+    assert_eq!(updated.definition_count, 1);
+
+    let library_json = std::fs::read_to_string(&source_path).expect("library file should read");
+    assert!(library_json.contains("WorkspaceWall"));
+
+    let deleted = handle_delete_workspace_definition_draft(
+        &mut world,
+        json!({
+            "library_id": created.library_id,
+            "definition_id": patched.definition_id
+        }),
+    )
+    .expect("workspace draft should delete");
+    assert_eq!(deleted.definition_count, 0);
+
+    let library_json = std::fs::read_to_string(&source_path).expect("library file should read");
+    assert!(!library_json.contains("WorkspaceWall"));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn hosted_definition_instantiation_derives_anchors_and_relation() {
     use crate::plugins::history::PendingCommandQueue;
     use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink};
