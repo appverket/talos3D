@@ -1212,6 +1212,115 @@ mod tests {
     }
 
     #[test]
+    fn legacy_param_types_round_trip_through_project_file_after_hosting_extension() {
+        let definition_id = DefinitionId("test.legacy.params".to_string());
+        let definition = Definition {
+            id: definition_id.clone(),
+            base_definition_id: None,
+            name: "Legacy Parameter Definition".to_string(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![
+                    ParameterDef {
+                        name: "width".to_string(),
+                        param_type: ParamType::Numeric,
+                        default_value: serde_json::json!(1.2),
+                        override_policy: OverridePolicy::Overridable,
+                        geometry_affecting: true,
+                        metadata: ParameterMetadata::default(),
+                    },
+                    ParameterDef {
+                        name: "operable".to_string(),
+                        param_type: ParamType::Boolean,
+                        default_value: serde_json::json!(true),
+                        override_policy: OverridePolicy::Overridable,
+                        geometry_affecting: false,
+                        metadata: ParameterMetadata::default(),
+                    },
+                    ParameterDef {
+                        name: "finish".to_string(),
+                        param_type: ParamType::StringVal,
+                        default_value: serde_json::json!("painted"),
+                        override_policy: OverridePolicy::Overridable,
+                        geometry_affecting: false,
+                        metadata: ParameterMetadata::default(),
+                    },
+                    ParameterDef {
+                        name: "handing".to_string(),
+                        param_type: ParamType::Enum(vec!["left".into(), "right".into()]),
+                        default_value: serde_json::json!("left"),
+                        override_policy: OverridePolicy::Overridable,
+                        geometry_affecting: true,
+                        metadata: ParameterMetadata::default(),
+                    },
+                ]),
+                ..Default::default()
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            visibility: DefinitionVisibility::PublicRoot,
+            compound: None,
+            material_assignment: None,
+            domain_data: Value::Null,
+        };
+
+        let mut source = World::new();
+        source.insert_resource(CapabilityRegistry::default());
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        let mut definitions = DefinitionRegistry::default();
+        definitions.insert(definition);
+        source.insert_resource(definitions);
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+
+        let project = build_project_file(&mut source).expect("project should serialize");
+        let json = serde_json::to_string(&project).expect("project should serialize to JSON");
+        assert!(json.contains("\"param_type\":\"Numeric\""));
+        assert!(json.contains("\"param_type\":\"Boolean\""));
+        assert!(json.contains("\"param_type\":\"StringVal\""));
+        assert!(json.contains("\"Enum\""));
+        let project: ProjectFile =
+            serde_json::from_str(&json).expect("legacy param-type project should deserialize");
+
+        let mut target = World::new();
+        target.insert_resource(CapabilityRegistry::default());
+        target.insert_resource(MaterialRegistry::default());
+        target.insert_resource(DefinitionRegistry::default());
+        target.insert_resource(DefinitionLibraryRegistry::default());
+        target.insert_resource(NamedViewRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(OpaquePersistedEntities::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        let restored = target
+            .resource::<DefinitionRegistry>()
+            .get(&definition_id)
+            .expect("definition survives project load");
+        let params = &restored.interface.parameters.0;
+        assert_eq!(params.len(), 4);
+        assert_eq!(params[0].param_type, ParamType::Numeric);
+        assert_eq!(params[1].param_type, ParamType::Boolean);
+        assert_eq!(params[2].param_type, ParamType::StringVal);
+        assert_eq!(
+            params[3].param_type,
+            ParamType::Enum(vec!["left".into(), "right".into()])
+        );
+    }
+
+    #[test]
     fn project_version_one_is_rejected_after_opening_feature_format_bump() {
         let mut world = World::new();
         world.insert_resource(CapabilityRegistry::default());
