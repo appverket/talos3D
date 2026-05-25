@@ -372,6 +372,14 @@ pub struct InstanceInfo {
     pub registry_path: String,
     pub started_at_unix_ms: u128,
     pub requested_port: Option<u16>,
+    /// Length unit of the world/scene coordinate system. Geometry primitives
+    /// (`create_box` center/size, occurrence offsets, frame/bbox values) are in
+    /// this unit (metres). Architectural recipe/parametric drivers named `*_mm`
+    /// are millimetres and converted internally. Stated here so agents never
+    /// have to calibrate by trial.
+    pub world_length_unit: String,
+    /// One-line units rule for authoring (geometry in metres; `*_mm` drivers in mm).
+    pub units_note: String,
 }
 
 #[cfg(feature = "model-api")]
@@ -387,6 +395,8 @@ impl From<&ModelApiRuntimeInfo> for InstanceInfo {
             registry_path: value.registry_path.clone(),
             started_at_unix_ms: value.started_at_unix_ms,
             requested_port: value.requested_port,
+            world_length_unit: "m".to_string(),
+            units_note: "World/scene geometry is in METRES (create_box, occurrence offsets, frame bboxes). Recipe/parametric drivers named *_mm are MILLIMETRES, converted internally.".to_string(),
         }
     }
 }
@@ -2389,6 +2399,10 @@ enum ModelApiRequest {
         context: serde_json::Value,
         response: oneshot::Sender<ApiResult<Vec<RecipeRankingInfo>>>,
     },
+    InstantiateRecipe {
+        request: Box<InstantiateRecipeRequest>,
+        response: oneshot::Sender<ApiResult<InstantiateRecipeResult>>,
+    },
     // --- Constraint engine (PP74) ---
     ListConstraints {
         scope: Option<String>,
@@ -2512,7 +2526,9 @@ enum ModelApiRequest {
     },
     ParametricCreate {
         request: crate::plugins::parametric_mcp::CreateParametricRequest,
-        response: oneshot::Sender<Result<crate::relational::registry::ParametricSnapshot, String>>,
+        response: oneshot::Sender<
+            Result<crate::plugins::parametric_mcp::CreateParametricResponse, String>,
+        >,
     },
     ParametricInspect {
         request: crate::plugins::parametric_mcp::InspectParametricRequest,
@@ -2520,7 +2536,7 @@ enum ModelApiRequest {
     },
     ParametricSetDriver {
         request: crate::plugins::parametric_mcp::SetParametricDriverRequest,
-        response: oneshot::Sender<Result<crate::relational::service::PropagationReport, String>>,
+        response: oneshot::Sender<Result<crate::plugins::parametric_mcp::SetDriverResponse, String>>,
     },
     ParametricTransform {
         request: crate::plugins::parametric_mcp::ParametricTransformRequest,
@@ -3449,6 +3465,9 @@ fn handle_model_api_request(world: &mut World, request: ModelApiRequest) {
             response,
         } => {
             let _ = response.send(handle_select_recipe(world, element_class, context));
+        }
+        ModelApiRequest::InstantiateRecipe { request, response } => {
+            let _ = response.send(handle_instantiate_recipe(world, *request));
         }
         // --- PP74 ---
         ModelApiRequest::ListConstraints { scope, response } => {
@@ -5686,6 +5705,22 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_instantiate_recipe(
+        &self,
+        request: InstantiateRecipeRequest,
+    ) -> ApiResult<InstantiateRecipeResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::InstantiateRecipe {
+                request: Box::new(request),
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     // --- PP74 requests ---
 
     async fn request_list_constraints(&self, scope: Option<String>) -> Vec<ConstraintInfo> {
@@ -6663,7 +6698,7 @@ impl ModelApiServer {
     async fn request_parametric_create(
         &self,
         request: crate::plugins::parametric_mcp::CreateParametricRequest,
-    ) -> Result<crate::relational::registry::ParametricSnapshot, String> {
+    ) -> Result<crate::plugins::parametric_mcp::CreateParametricResponse, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::ParametricCreate { request, response })
@@ -6689,7 +6724,7 @@ impl ModelApiServer {
     async fn request_parametric_set_driver(
         &self,
         request: crate::plugins::parametric_mcp::SetParametricDriverRequest,
-    ) -> Result<crate::relational::service::PropagationReport, String> {
+    ) -> Result<crate::plugins::parametric_mcp::SetDriverResponse, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
             .send(ModelApiRequest::ParametricSetDriver { request, response })
@@ -7355,6 +7390,36 @@ pub struct ElementClassInfo {
     pub label: String,
     pub description: String,
     pub semantic_roles: Vec<String>,
+    /// Per-refinement-state obligation ladder: what must be resolved before an
+    /// entity of this class can legitimately claim each level. Ordered from
+    /// `Conceptual` upward; only states that carry obligations or
+    /// promotion-critical claim paths are included. An MCP-only agent reads this
+    /// to know the per-level requirements without source access.
+    #[serde(default)]
+    pub obligations_by_state: Vec<ClassStateObligationsInfo>,
+}
+
+/// The obligations and promotion-critical claim paths an element class requires
+/// at one refinement state.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClassStateObligationsInfo {
+    /// Refinement state label (`Conceptual` … `FabricationReady`).
+    pub refinement_state: String,
+    /// Class-minimum obligations that must be resolved by this state.
+    pub obligations: Vec<ClassObligationTemplateInfo>,
+    /// Claim paths that are promotion-critical at this state (must be grounded
+    /// before promotion).
+    pub promotion_critical_paths: Vec<String>,
+}
+
+/// A single class-minimum obligation template (no live status).
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClassObligationTemplateInfo {
+    pub id: String,
+    pub role: String,
+    pub required_by_state: String,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -7388,6 +7453,10 @@ pub struct RecipeRankingInfo {
     pub weight: f32,
     #[serde(default)]
     pub is_session_draft: bool,
+    /// One-line hint for how to instantiate this recipe. Always points to
+    /// `instantiate_recipe { family_id, target_class, parameters }` so agents
+    /// never need to hand-roll the two-step create+promote pattern.
+    pub how_to_instantiate: String,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -7761,6 +7830,60 @@ struct ListRecipeFamiliesRequest {
     /// Include session-installed recipe drafts in the response.
     #[serde(default)]
     include_session_drafts: bool,
+}
+
+/// Request for the `instantiate_recipe` convenience tool.
+///
+/// Creates a semantic element of `target_class` and immediately runs
+/// the named recipe's `generate` function to populate geometry.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstantiateRecipeRequest {
+    /// Recipe family id (from `select_recipe` / `list_recipe_families`).
+    family_id: String,
+    /// Element class of the root semantic entity to create (e.g. `"wall_assembly"`).
+    target_class: String,
+    /// Recipe parameters (e.g. `{"length_mm": 4000, "height_mm": 2700}`).
+    /// Driver keys and units are recipe-specific; consult `list_recipe_families`
+    /// for the parameter schema.
+    #[serde(default)]
+    parameters: serde_json::Value,
+    /// Optional placement. `translate` is in **metres** (world coordinates).
+    #[serde(default)]
+    placement: Option<InstantiateRecipePlacement>,
+    /// Target refinement state (default `"Constructible"`).
+    target_state: Option<String>,
+}
+
+/// Placement override for `instantiate_recipe`.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstantiateRecipePlacement {
+    /// World-space translation in metres.
+    #[serde(default)]
+    translate: [f64; 3],
+    /// Euler angles in degrees (XYZ order). LIMITATION: not yet applied — recipe
+    /// results are built axis-aligned (the wall runs along X). Orienting a
+    /// recipe's many generated sub-elements is a tracked follow-up. For a part
+    /// that must be rotated now, use `create_box` (it honours a rotation
+    /// quaternion) or the parametric path.
+    #[serde(default)]
+    rotate_euler_deg: [f64; 3],
+}
+
+/// Response from `instantiate_recipe`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InstantiateRecipeResult {
+    /// Element id of the root semantic entity that was created.
+    pub root_element_id: u64,
+    /// All element ids created by the recipe `generate` function (may be empty if
+    /// the recipe generates no sub-elements, but `root_element_id` is always present).
+    pub created_element_ids: Vec<u64>,
+    /// The refinement state the root entity now occupies.
+    pub state: String,
 }
 
 #[cfg(feature = "model-api")]
@@ -10115,7 +10238,12 @@ impl ModelApiServer {
 
     #[tool(
         name = "promote_refinement",
-        description = "Promote an entity to a higher refinement state. Recipe instantiation is a no-op in PP70 (no recipes registered yet). The promotion is undoable."
+        description = "Promote an entity to a higher refinement state. When `recipe_id` is \
+            supplied, the named recipe's `generate` function runs synchronously, creating \
+            sub-element geometry (occurrences, relations, etc.) and satisfying obligations. \
+            Available recipes are discovered via `select_recipe` or `list_recipe_families`; \
+            prefer `instantiate_recipe` to create a new element AND run its recipe in one call. \
+            The promotion is undoable."
     )]
     async fn promote_refinement_tool(
         &self,
@@ -10254,6 +10382,30 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(ranking)
+    }
+
+    #[tool(
+        name = "instantiate_recipe",
+        description = "Create a semantic element and immediately run a curated recipe to generate \
+            its sub-element geometry in a single call. This is the preferred one-call alternative \
+            to the two-step pattern of `create_entity` + `promote_refinement { recipe_id }`. \
+            \n\nRequired: `family_id` (recipe family id from `select_recipe`), `target_class` \
+            (element class, e.g. `\"wall_assembly\"`), `parameters` (recipe-specific driver map, \
+            e.g. `{\"length_mm\": 4000, \"height_mm\": 2700, \"thickness_mm\": 140}`). \
+            \nOptional: `placement` (`{ translate: [x,y,z] }` in **metres**), \
+            `target_state` (default `\"Constructible\"`). \
+            \n\nReturns `{ root_element_id, created_element_ids, state }`. After this call, \
+            use `frame_entities([root_element_id])` to verify geometry was placed."
+    )]
+    async fn instantiate_recipe_tool(
+        &self,
+        Parameters(params): Parameters<InstantiateRecipeRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_instantiate_recipe(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
     }
 
     // --- PP74: Constraint layer tools ---
@@ -11335,7 +11487,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "parametric.list_types",
-        description = "List the registered parametric component types (e.g. trusses, windows). Each entry has an `id` (use it with parametric.create) and a human `label`. Parametric types are driver-driven systems whose derived geometry recomputes when you edit a driver — see RELATIONAL_PARAMETRIC_SUBSTRATE."
+        description = "List the registered parametric component types (e.g. trusses, windows). Each entry has an `id` (use it with parametric.create) and a human `label`. Parametric types are a DERIVATION substrate: they compute driver-driven values (lengths, counts, member geometry) but do NOT by themselves place renderable geometry in the model. They are not a substitute for a geometry-emitting recipe — see RELATIONAL_PARAMETRIC_SUBSTRATE and the ADR-042 anti-bluff gate in get_authoring_guidance."
     )]
     async fn parametric_list_types_tool(&self) -> Result<CallToolResult, McpError> {
         let types = self
@@ -11347,17 +11499,24 @@ impl ModelApiServer {
 
     #[tool(
         name = "parametric.create",
-        description = "Instantiate a parametric component of the given `type_id` (from parametric.list_types). Returns a snapshot with the new `instance_id`, the editable/read-only drivers and their values, and the derived values computed from them."
+        description = "Instantiate a parametric component of the given `type_id` (from \
+        parametric.list_types). Returns a `CreateParametricResponse` containing: `snapshot` \
+        (instance_id, drivers, derived values) and `element_ids` (scene entity IDs for spawned \
+        geometry, empty when the type has no declarative representation). Types that carry a \
+        `representation` will emit real renderable geometry — one ProfileExtrusion per member — \
+        accessible by element_id. Types without a representation are derivation-only; use \
+        request_corpus_expansion to add a representation as DATA rather than hand-rolling \
+        primitives."
     )]
     async fn parametric_create_tool(
         &self,
         Parameters(params): Parameters<crate::plugins::parametric_mcp::CreateParametricRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let snap = self
+        let resp = self
             .request_parametric_create(params)
             .await
             .map_err(|e| McpError::invalid_params(e, None))?;
-        json_tool_result(snap)
+        json_tool_result(resp)
     }
 
     #[tool(
@@ -15036,8 +15195,11 @@ fn parse_parameter_schema(
                 .map(parse_param_type_value)
                 .transpose()?
                 .unwrap_or(crate::plugins::modeling::definition::ParamType::Numeric);
+            // Accept `default_value` (canonical) or `default` (alias).
+            // `default_value` takes precedence if both are present.
             let default_value = object
                 .get("default_value")
+                .or_else(|| object.get("default"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             let override_policy = parse_override_policy(object.get("override_policy"))?;
@@ -15267,23 +15429,50 @@ fn parse_evaluators(
             .collect();
     }
 
+    // Bind the default extrusion evaluator to the caller's ACTUAL parameter
+    // names so a leaf can never silently render zero-size geometry from a
+    // name mismatch. Resolution per axis: explicit `<axis>_param` override →
+    // a param named exactly `<axis>` → a param whose name contains `<axis>`
+    // (e.g. `width_mm`) → the param in that positional slot → the literal axis.
+    let param_names: Vec<String> = object
+        .get("parameters")
+        .and_then(|value| value.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    p.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let resolve = |axis: &str, idx: usize| -> String {
+        if let Some(explicit) = object
+            .get(&format!("{axis}_param"))
+            .and_then(|value| value.as_str())
+        {
+            return explicit.to_string();
+        }
+        if param_names.iter().any(|n| n == axis) {
+            return axis.to_string();
+        }
+        if let Some(n) = param_names
+            .iter()
+            .find(|n| n.to_ascii_lowercase().contains(axis))
+        {
+            return n.clone();
+        }
+        if let Some(n) = param_names.get(idx) {
+            return n.clone();
+        }
+        axis.to_string()
+    };
     Ok(vec![EvaluatorDecl::RectangularExtrusion(
         RectangularExtrusionEvaluator {
-            width_param: object
-                .get("width_param")
-                .and_then(|value| value.as_str())
-                .unwrap_or("width")
-                .to_string(),
-            depth_param: object
-                .get("depth_param")
-                .and_then(|value| value.as_str())
-                .unwrap_or("depth")
-                .to_string(),
-            height_param: object
-                .get("height_param")
-                .and_then(|value| value.as_str())
-                .unwrap_or("height")
-                .to_string(),
+            width_param: resolve("width", 0),
+            height_param: resolve("height", 1),
+            depth_param: resolve("depth", 2),
         },
     )])
 }
@@ -19830,6 +20019,109 @@ pub fn handle_promote_refinement(
     })
 }
 
+/// `instantiate_recipe`: one-call path from a discovered recipe family to placed
+/// geometry. Creates a coarse semantic root of `target_class` (the identity
+/// anchor) carrying the recipe parameters, then runs the recipe's `generate`
+/// function via the same promote path, returning the root plus every element the
+/// recipe created. Thin wrapper — no generation logic is duplicated here.
+#[cfg(feature = "model-api")]
+fn handle_instantiate_recipe(
+    world: &mut World,
+    request: InstantiateRecipeRequest,
+) -> ApiResult<InstantiateRecipeResult> {
+    let target_state = request
+        .target_state
+        .clone()
+        .unwrap_or_else(|| "Constructible".to_string());
+    let placement = request.placement.clone().unwrap_or(InstantiateRecipePlacement {
+        translate: [0.0, 0.0, 0.0],
+        rotate_euler_deg: [0.0, 0.0, 0.0],
+    });
+
+    let collect_ids = |world: &mut World| -> std::collections::HashSet<u64> {
+        let mut q = world.try_query::<(&ElementId,)>().unwrap();
+        q.iter(world).map(|(id,)| id.0).collect()
+    };
+    let before = collect_ids(world);
+
+    // 1. Create the coarse identity-anchor root carrying the element class +
+    //    recipe parameters, at the requested placement (metres). The recipe
+    //    generates the real sub-element geometry on promotion.
+    // Size the coarse identity-anchor box so the recipe generates geometry at
+    // the intended scale (recipes derive sub-element geometry from the root's
+    // extent). Use length_mm/height_mm/thickness_mm when present (mm→m), else a
+    // footprint_polygon's bounding box, else a 1 m fallback cube.
+    let mm = |key: &str| request.parameters.get(key).and_then(|v| v.as_f64());
+    let half_extents: [f64; 3] = if let (Some(l), Some(h)) = (mm("length_mm"), mm("height_mm")) {
+        let t = mm("thickness_mm").unwrap_or(200.0);
+        [l / 2000.0, h / 2000.0, t / 2000.0]
+    } else if let Some(poly) = request
+        .parameters
+        .get("footprint_polygon")
+        .and_then(|v| v.as_array())
+    {
+        let pts: Vec<(f64, f64)> = poly
+            .iter()
+            .filter_map(|p| p.as_array())
+            .filter_map(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)))
+            .collect();
+        if pts.len() >= 3 {
+            let (mut xmin, mut xmax, mut zmin, mut zmax) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for (x, z) in &pts {
+                xmin = xmin.min(*x);
+                xmax = xmax.max(*x);
+                zmin = zmin.min(*z);
+                zmax = zmax.max(*z);
+            }
+            // Footprint coordinates are world units (metres).
+            [((xmax - xmin) / 2.0).max(0.1), 0.1, ((zmax - zmin) / 2.0).max(0.1)]
+        } else {
+            [0.5, 0.5, 0.5]
+        }
+    } else {
+        [0.5, 0.5, 0.5]
+    };
+    // The box factory's raw create request uses `centre` + `half_extents`
+    // (the create_box tool normalises `center`/`size`, but handle_create_entity
+    // bypasses that normalisation).
+    let create_json = serde_json::json!({
+        "type": "box",
+        "centre": placement.translate,
+        "half_extents": half_extents,
+        "semantic": {
+            "element_class": request.target_class,
+            "refinement_state": "Schematic",
+            "parameters": request.parameters,
+        }
+    });
+    let root = handle_create_entity(world, create_json)?;
+
+    // 2. Run the curated recipe via the existing promote path; recipe parameters
+    //    are passed as overrides so the generate fn can read them.
+    let promote = handle_promote_refinement(
+        world,
+        root,
+        target_state,
+        Some(request.family_id.clone()),
+        request.parameters.clone(),
+    )?;
+
+    // 3. Created ids = everything new since the snapshot, excluding the root.
+    let after = collect_ids(world);
+    let mut created_element_ids: Vec<u64> = after
+        .difference(&before)
+        .copied()
+        .filter(|id| *id != root)
+        .collect();
+    created_element_ids.sort_unstable();
+
+    Ok(InstantiateRecipeResult {
+        root_element_id: root,
+        created_element_ids,
+        state: promote.new_state,
+    })
+}
+
 #[cfg(feature = "model-api")]
 fn handle_demote_refinement(
     world: &mut World,
@@ -20057,17 +20349,60 @@ fn handle_explain_finding(_world: &World, finding_id: String) -> ApiResult<serde
 #[cfg(feature = "model-api")]
 pub fn handle_list_element_classes(world: &World) -> Vec<ElementClassInfo> {
     use crate::capability_registry::CapabilityRegistry;
+    use crate::plugins::refinement::RefinementState;
     let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
         return Vec::new();
     };
+    // Iterate refinement states in monotonic order so the served ladder is
+    // ordered and deterministic (the descriptor stores them in HashMaps).
+    const STATES: [RefinementState; 5] = [
+        RefinementState::Conceptual,
+        RefinementState::Schematic,
+        RefinementState::Constructible,
+        RefinementState::Detailed,
+        RefinementState::FabricationReady,
+    ];
     registry
         .element_class_descriptors()
         .iter()
-        .map(|d| ElementClassInfo {
-            id: d.id.0.clone(),
-            label: d.label.clone(),
-            description: d.description.clone(),
-            semantic_roles: d.semantic_roles.iter().map(|r| r.0.clone()).collect(),
+        .map(|d| {
+            let mut obligations_by_state = Vec::new();
+            for state in STATES {
+                let obligations: Vec<ClassObligationTemplateInfo> = d
+                    .class_min_obligations
+                    .get(&state)
+                    .map(|templates| {
+                        templates
+                            .iter()
+                            .map(|t| ClassObligationTemplateInfo {
+                                id: t.id.0.clone(),
+                                role: t.role.0.clone(),
+                                required_by_state: t.required_by_state.as_str().to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let promotion_critical_paths: Vec<String> = d
+                    .class_min_promotion_critical_paths
+                    .get(&state)
+                    .map(|paths| paths.iter().map(|p| p.0.clone()).collect())
+                    .unwrap_or_default();
+                if obligations.is_empty() && promotion_critical_paths.is_empty() {
+                    continue;
+                }
+                obligations_by_state.push(ClassStateObligationsInfo {
+                    refinement_state: state.as_str().to_string(),
+                    obligations,
+                    promotion_critical_paths,
+                });
+            }
+            ElementClassInfo {
+                id: d.id.0.clone(),
+                label: d.label.clone(),
+                description: d.description.clone(),
+                semantic_roles: d.semantic_roles.iter().map(|r| r.0.clone()).collect(),
+                obligations_by_state,
+            }
         })
         .collect()
 }
@@ -20231,6 +20566,10 @@ pub fn handle_select_recipe(
                         return None;
                     }
                     Some(RecipeRankingInfo {
+                        how_to_instantiate: format!(
+                            "Call instantiate_recipe {{ family_id: {:?}, target_class: {:?}, parameters: {{...}} }}",
+                            d.id.0, d.target_class.0
+                        ),
                         id: d.id.0.clone(),
                         target_class: d.target_class.0.clone(),
                         label: d.label.clone(),
@@ -20257,6 +20596,10 @@ pub fn handle_select_recipe(
                         })
                     })
                     .map(|draft| RecipeRankingInfo {
+                        how_to_instantiate: format!(
+                            "Draft only — use inspect_recipe_draft {{ id: {:?} }} to review; not yet executable via instantiate_recipe",
+                            draft.id
+                        ),
                         id: draft.id,
                         target_class: draft.target_class,
                         label: draft.label,
@@ -21554,6 +21897,62 @@ mod tests {
         assert_eq!(summary.entity_counts.get("plane"), Some(&1));
         assert_eq!(summary.entity_counts.get("polyline"), Some(&1));
         assert!(summary.bounding_box.is_some());
+    }
+
+    #[test]
+    fn list_element_classes_exposes_per_state_obligation_ladder() {
+        use crate::capability_registry::{
+            ElementClassDescriptor, ElementClassId, ObligationTemplate,
+        };
+        use crate::plugins::refinement::{ClaimPath, ObligationId, RefinementState, SemanticRole};
+        use std::collections::HashMap;
+
+        let mut class_min_obligations: HashMap<RefinementState, Vec<ObligationTemplate>> =
+            HashMap::new();
+        class_min_obligations.insert(
+            RefinementState::Constructible,
+            vec![ObligationTemplate {
+                id: ObligationId("structure".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Constructible,
+            }],
+        );
+        let mut class_min_promotion_critical_paths: HashMap<RefinementState, Vec<ClaimPath>> =
+            HashMap::new();
+        class_min_promotion_critical_paths.insert(
+            RefinementState::Constructible,
+            vec![ClaimPath("thickness_mm".into())],
+        );
+
+        let mut registry = CapabilityRegistry::default();
+        registry.register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "test".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations,
+            class_min_promotion_critical_paths,
+            parameter_schema: serde_json::json!({}),
+        });
+
+        let mut world = World::new();
+        world.insert_resource(registry);
+
+        let classes = handle_list_element_classes(&world);
+        assert_eq!(classes.len(), 1);
+        // Only the Constructible state carries content, so exactly one rung is
+        // surfaced through the MCP-facing handler.
+        let ladder = &classes[0].obligations_by_state;
+        assert_eq!(ladder.len(), 1);
+        assert_eq!(ladder[0].refinement_state, "Constructible");
+        assert_eq!(ladder[0].obligations.len(), 1);
+        assert_eq!(ladder[0].obligations[0].id, "structure");
+        assert_eq!(ladder[0].obligations[0].role, "primary_structure");
+        assert_eq!(ladder[0].obligations[0].required_by_state, "Constructible");
+        assert_eq!(
+            ladder[0].promotion_critical_paths,
+            vec!["thickness_mm".to_string()]
+        );
     }
 
     #[test]

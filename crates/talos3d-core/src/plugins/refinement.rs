@@ -170,24 +170,34 @@ must contain *strictly more resolved content* than a lower level of the same
 design. A "promotion" that adds no resolved structure is not a promotion — it
 is only relabelling, and is invalid.
 
-Generic meaning of each level (domain packs specialise the *content*, not the
-*intent*):
+Each level is defined by *which decisions are resolved*, and therefore *which
+downstream consumer can rely on the model*. A promotion resolves the next band
+of decisions; it is not a label you grant ahead of the content. (Domain packs
+specialise the *content* of each band, not the *intent*.)
 
 - **Conceptual** — intent only. Coarse aggregate/massing elements; major
   parameters captured as data; major decisions may remain explicitly open.
-  Little or nothing detailed to validate yet.
-- **Schematic** — intent + coordination. The same coarse roots persist;
-  coordination data is tightened and key top-level decisions are resolved.
-  Explicit repeated members are still optional.
+  *Consumer:* feasibility, footprint/envelope fit. Little to validate yet.
+- **Schematic** — intent + coordination. The same coarse roots persist; the
+  top-level system/facet decisions are resolved and coordination data
+  (spacing, declared layer/build-up stacks, performance targets, bearing or
+  load strategy) is tightened — **declared as intent, not yet exploded into
+  members**. *Consumer:* early estimate / performance model.
 - **Constructible** — buildable. The coarse root persists as an identity
   anchor and is linked (`refined_into` / `refinement_of`) to an explicit
   realisation: reusable definitions, their occurrences, derived variants,
-  justified singletons, and the structural/connective relations that make it
-  actually buildable. Outstanding obligations are resolved.
-- **Detailed** — full assembly detail, added where downstream use justifies
-  it. Same structural rules apply.
-- **FabricationReady** — resolved to fabrication/manufacturing specificity
-  (connections, catalog/BOM-level definiteness).
+  justified singletons, declared build-ups realised as real sub-elements,
+  hosted components occupying declared voids, and the structural/connective
+  relations that make it actually buildable. **Every obligation in force at
+  this level is resolved.** *Consumer:* pricing, permit, quantity takeoff.
+- **Detailed** — resolved interfaces. The junctions *between* the Constructible
+  parts are worked out (how members meet, bear, and frame around hosted
+  voids), added where downstream use justifies it. *Consumer:* coordination /
+  clash / permit set.
+- **FabricationReady** — every part is an orderable, fabricable instance:
+  catalog/BOM-level definiteness, connection hardware scheduled, material
+  grades and cut/quantity data resolved. *Consumer:* the shop or manufacturer
+  that builds it without an RFI.
 
 ## The identical-vs-level contradiction
 
@@ -221,6 +231,120 @@ promotion adds no structure, stop — you have misread the task. Two wrong
 answers to avoid: (a) identical output across levels (makes the refinement
 axis vacuous); (b) a higher-level label on lower-level content (an
 unsubstantiated claim).
+"#;
+
+/// Platform-level anti-bluff authoring gate (ADR-042). Domain-neutral, composed
+/// into every served `AuthoringGuidance.prompt_text` ahead of domain content so
+/// that an agent — which receives ALL its guidance over MCP and never reads the
+/// repo or source — is told, at authoring time, to use curated generators and
+/// never substitute hand-rolled primitives for missing expertise. Bump the
+/// owning guidance `version` when this text changes.
+pub const ANTI_BLUFF_AUTHORING_GATE: &str = r#"# Before you author geometry — the anti-bluff gate (read this second)
+
+Domain expertise (recipes, assembly patterns, parametric generators, priors) is
+curated and consumed through tools — it is not something you reconstruct by hand.
+Before you author or refine **any** element class at a target refinement state:
+
+1. **Discover the curated path first.** Call `select_recipe(element_class,
+   {target_state})`; also consult `list_recipe_families`, `parametric.list_types`,
+   and `list_generation_priors`. If a curated path exists, **use it** (a recipe,
+   an assembly pattern, or `definition` + `occurrence`).
+2. **No curated path ⇒ a knowledge gap, not a licence to improvise.** An empty
+   `select_recipe` result is a `CorpusGap`. Do **not** approximate the assembly
+   from primitives. Instead: call `request_corpus_expansion`, then either
+   acquire/curate a draft (`save_recipe_draft` / `save_assembly_pattern_draft`)
+   and validate it, or — if you cannot ground it this session — **stop and tell
+   the user in plain language**. Unknowns are reported, never bluffed.
+
+**What counts as a bluff (prohibited):** ungrounded geometry authored *outside* a
+recipe, assembly pattern, or definition/occurrence, for a class that has — or
+should have — a curated path. Approximating a sloped, framed, or layered assembly
+(roofs, trusses, stud walls, envelope build-ups) with axis-aligned boxes or
+ad-hoc meshes is never a valid substitute. Raw primitives are legitimate only as
+the committed body of a curated recipe/pattern, or as `Conceptual` massing.
+
+**A registered type that emits no geometry is also a gap.** Some generators are
+derivation-only (they compute quantities but do not place geometry). Verify that
+the path you took actually produced geometry; if it did not, that is a gap to
+record — not a reason to fall back to primitives.
+
+**If interim stand-in geometry is truly unavoidable, never do it silently.** In
+the same step you must: (a) `request_corpus_expansion` for the missing asset,
+(b) record an `LLMHeuristic` claim grounding with rationale on the entity, and
+(c) leave it blocked from promotion past `Conceptual`. There must never be
+hand-rolled geometry without a recorded gap grounding it.
+
+**Verify before you declare done.** Render the result (`take_screenshot`) and
+actually inspect the geometry. A green entity count or a set refinement label is
+not evidence the model is correct.
+"#;
+
+/// Platform-level composition contract. Domain-neutral, composed into every
+/// served `AuthoringGuidance.prompt_text` after the refinement-level semantics
+/// and anti-bluff gate. It tells an MCP-only agent *how* resolved structure is
+/// actually added as a model refines — through the platform's reuse/derive,
+/// hosting, and obligation mechanisms — so detail is composed, not improvised.
+/// These mechanisms (definitions, occurrences, hosting/voids, obligations) are
+/// platform capabilities shared across every domain; the domain pack supplies
+/// only the concrete content. Bump the owning guidance `version` when this text
+/// changes.
+pub const COMPONENT_COMPOSITION_CONTRACT: &str = r#"# How resolved detail is added — composition, hosting, obligations (read this third)
+
+Refinement is "more committed structure", not "more geometry". Three platform
+mechanisms carry that structure; use them instead of ad-hoc geometry.
+
+## Reuse vs. singletons — by level
+
+Detail is added as a phase change from *singletons that describe intent* to
+*families with instances*:
+
+- At `Conceptual` / `Schematic`, prefer aggregate/singleton entities that carry
+  intent; explicit repeated members are usually premature.
+- At `Constructible` and above, any member that recurs by *role and topology*
+  (two or more of the same kind) MUST be one reusable `Definition` placed as N
+  `Occurrence`s (placement + a bounded override allowlist only), never inlined
+  copies. Genuinely unique members stay singletons.
+- When a new member is a *modification* of an existing family, derive it
+  (`base_definition_id`) rather than authoring topology from scratch.
+- At `FabricationReady`, every fabricable part should belong to a `Definition`
+  that carries one shop/BOM identity, with its `Occurrence`s as the placed
+  instances. This is what makes quantities and fabrication output tractable:
+  you cost or fabricate the `Definition` once and place it many times.
+
+## Hosting contracts — composition instead of ad-hoc cuts
+
+When one component is embedded in another (a component set into an opening or
+void in a host), model it as a *hosting contract*, never a free-floating overlap
+or an unmanaged boolean subtraction:
+
+- The host `Definition` declares where and how it accepts hosted components (the
+  void it offers and the bounds it accepts).
+- The hosted component declares the void it needs; placement is *validated*
+  against the host contract (`occurrence.validate_host_fit`,
+  `definition.validate_host_contract`) and occupies a declared void
+  (`bim_void.declare_for_definition`, `bim_void.plan_placement`) cut in the host.
+- Place hosted components with `definition.instantiate_hosted` / `occurrence.place`
+  rather than subtracting primitive geometry by hand.
+- The host↔hosted relation is first-class and *survives refinement*: at higher
+  levels the declared void deterministically drives the surrounding edge/framing
+  detail.
+
+## Obligations — the machine-checkable level contract
+
+Each element class declares, per level, the obligations that must be resolved
+before an entity can legitimately claim that level:
+
+- `list_element_classes` returns the per-state obligation ladder for each class
+  (what must be resolved, by which level, for which role).
+- `get_obligations(element_id)` returns the live status on a concrete entity.
+- A promotion is valid only once every obligation in force at the target level
+  is resolved — each one `SatisfiedBy` a real sub-element, or explicitly
+  `Deferred` / `Waived` with a reason.
+- Before promoting, call `preview_promotion` to see what is still missing, and
+  `run_validation` afterwards to confirm nothing in force is left `Unresolved`.
+
+Do not set a level whose obligations you have not resolved — that is the same
+unsubstantiated-claim error as relabelling without adding structure.
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1657,6 +1781,31 @@ mod tests {
             s.to_lowercase().contains("identical"),
             "semantics must address the identical-vs-level contradiction"
         );
+    }
+
+    #[test]
+    fn composition_contract_states_reuse_hosting_and_obligations() {
+        let s = COMPONENT_COMPOSITION_CONTRACT;
+        // The three platform mechanisms by which detail is added.
+        assert!(s.contains("Occurrence"), "must describe reuse via Occurrences");
+        assert!(
+            s.contains("base_definition_id"),
+            "must describe derivation of family variants"
+        );
+        assert!(
+            s.to_lowercase().contains("hosting"),
+            "must describe the hosting contract for embedded components"
+        );
+        // It must point the MCP-only agent at the machine-checkable contract.
+        for tool in [
+            "list_element_classes",
+            "get_obligations",
+            "preview_promotion",
+            "run_validation",
+            "validate_host_fit",
+        ] {
+            assert!(s.contains(tool), "composition contract must reference {tool}");
+        }
     }
 
     #[test]
