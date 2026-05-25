@@ -2202,9 +2202,8 @@ mod pp_098_occurrence_cache_tests {
     use serde_json::json;
 
     use crate::plugins::modeling::definition::{
-        CompoundDefinition, DefinitionKind, DefinitionVisibility, Interface, OverridePolicy,
-        ParameterBinding, ParameterDef, ParameterMetadata, ParameterSchema,
-        RectangularExtrusionEvaluator,
+        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterBinding,
+        ParameterDef, ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator,
     };
     use crate::plugins::modeling::mesh_generation::{spawn_primitive_meshes, PlaneMaterial};
 
@@ -3071,9 +3070,8 @@ mod pp_098_occurrence_cache_tests {
 mod trig_and_rotation_tests {
     use super::*;
     use crate::plugins::modeling::definition::{
-        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterBinding,
-        ParameterDef, ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator,
-        TransformBinding,
+        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterDef,
+        ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator, TransformBinding,
     };
     use serde_json::json;
 
@@ -3340,7 +3338,6 @@ mod trig_and_rotation_tests {
 #[cfg(test)]
 mod bounds_from_aabb_tests {
     use super::*;
-    use crate::authored_entity::EntityBounds;
     use bevy::math::{Vec3, Vec3A};
 
     /// Build a minimal `GlobalTransform` at the given translation (identity rotation/scale).
