@@ -2500,6 +2500,32 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_set_occurrence_material_override(
+        &self,
+        request: SetOccurrenceMaterialOverrideRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SetOccurrenceMaterialOverride { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_clear_occurrence_material_override(
+        &self,
+        request: ClearOccurrenceMaterialOverrideRequest,
+    ) -> ApiResult<Value> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ClearOccurrenceMaterialOverride { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_make_occurrence_unique(
         &self,
         request: OccurrenceMakeUniqueRequest,
@@ -7563,6 +7589,36 @@ impl ModelApiServer {
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_update_occurrence_overrides(params.element_id, params.overrides)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "occurrence.set_material_override",
+        description = "Set a typed material override on an occurrence. Requires: element_id and assignment. The override shadows the Definition material assignment."
+    )]
+    pub(super) async fn occurrence_set_material_override_tool(
+        &self,
+        Parameters(params): Parameters<SetOccurrenceMaterialOverrideRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_set_occurrence_material_override(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "occurrence.clear_material_override",
+        description = "Clear an occurrence material override so it inherits the Definition material assignment. Requires: element_id."
+    )]
+    pub(super) async fn occurrence_clear_material_override_tool(
+        &self,
+        Parameters(params): Parameters<ClearOccurrenceMaterialOverrideRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_clear_occurrence_material_override(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
