@@ -463,6 +463,7 @@ fn spawn_evaluated_fillet_meshes(
 fn evaluated_csg_to_mesh(evaluated: &EvaluatedCsg) -> Mesh {
     let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
     let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
+    let uvs = projected_uvs_from_positions_normals(&positions, &normals);
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -470,7 +471,7 @@ fn evaluated_csg_to_mesh(evaluated: &EvaluatedCsg) -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; positions.len()]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(evaluated.indices.clone()));
     mesh
 }
@@ -478,6 +479,7 @@ fn evaluated_csg_to_mesh(evaluated: &EvaluatedCsg) -> Mesh {
 fn evaluated_fillet_to_mesh(evaluated: &EvaluatedFillet) -> Mesh {
     let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
     let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
+    let uvs = projected_uvs_from_positions_normals(&positions, &normals);
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -485,7 +487,7 @@ fn evaluated_fillet_to_mesh(evaluated: &EvaluatedFillet) -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; positions.len()]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(evaluated.indices.clone()));
     mesh
 }
@@ -493,6 +495,7 @@ fn evaluated_fillet_to_mesh(evaluated: &EvaluatedFillet) -> Mesh {
 fn evaluated_feature_to_mesh(evaluated: &EvaluatedFeature) -> Mesh {
     let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
     let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
+    let uvs = projected_uvs_from_positions_normals(&positions, &normals);
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -500,7 +503,7 @@ fn evaluated_feature_to_mesh(evaluated: &EvaluatedFeature) -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; positions.len()]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(evaluated.indices.clone()));
     mesh
 }
@@ -542,6 +545,7 @@ fn spawn_evaluated_mirror_meshes(
 fn evaluated_mirror_to_mesh(evaluated: &EvaluatedMirror) -> Mesh {
     let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
     let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
+    let uvs = projected_uvs_from_positions_normals(&positions, &normals);
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -549,7 +553,7 @@ fn evaluated_mirror_to_mesh(evaluated: &EvaluatedMirror) -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; positions.len()]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(evaluated.indices.clone()));
     mesh
 }
@@ -591,6 +595,7 @@ fn spawn_evaluated_array_meshes(
 fn evaluated_array_to_mesh(evaluated: &EvaluatedArray) -> Mesh {
     let positions: Vec<[f32; 3]> = evaluated.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
     let normals: Vec<[f32; 3]> = evaluated.normals.iter().map(|n| [n.x, n.y, n.z]).collect();
+    let uvs = projected_uvs_from_positions_normals(&positions, &normals);
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -598,7 +603,7 @@ fn evaluated_array_to_mesh(evaluated: &EvaluatedArray) -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; positions.len()]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(evaluated.indices.clone()));
     mesh
 }
@@ -612,6 +617,7 @@ fn editable_mesh_asset(editable: &EditableMesh) -> Mesh {
     let pos_arr: Vec<[f32; 3]> = positions.iter().map(|v| [v.x, v.y, v.z]).collect();
     let norm_arr: Vec<[f32; 3]> = normals.iter().map(|n| [n.x, n.y, n.z]).collect();
     let indices: Vec<u32> = triangles.iter().flat_map(|t| t.iter().copied()).collect();
+    let uvs = projected_uvs_from_positions_normals(&pos_arr, &norm_arr);
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -619,7 +625,7 @@ fn editable_mesh_asset(editable: &EditableMesh) -> Mesh {
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos_arr.clone());
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, norm_arr);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; pos_arr.len()]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(indices));
     mesh
 }
@@ -716,14 +722,35 @@ fn triangle_mesh_asset(primitive: &TriangleMesh) -> Mesh {
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
+    let uvs = projected_uvs_from_positions_normals(&positions, &normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        vec![[0.0, 0.0]; primitive.vertices.len()],
-    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+fn projected_uvs_from_positions_normals(
+    positions: &[[f32; 3]],
+    normals: &[[f32; 3]],
+) -> Vec<[f32; 2]> {
+    positions
+        .iter()
+        .enumerate()
+        .map(|(index, [x, y, z])| {
+            let [nx, ny, nz] = normals.get(index).copied().unwrap_or([0.0, 1.0, 0.0]);
+            let ax = nx.abs();
+            let ay = ny.abs();
+            let az = nz.abs();
+            if ay >= ax && ay >= az {
+                [*x, *z]
+            } else if ax >= az {
+                [*z, *y]
+            } else {
+                [*x, *y]
+            }
+        })
+        .collect()
 }
 
 fn compute_triangle_mesh_normals(primitive: &TriangleMesh) -> Vec<Vec3> {
@@ -844,5 +871,41 @@ mod pp_098_mesh_generation_cache_tests {
         let mesh = app.world().get::<Mesh3d>(entity).expect("mesh");
         assert_eq!(mesh.id(), seeded_handle.id());
         assert!(!app.world().entity(entity).contains::<NeedsMesh>());
+    }
+}
+
+#[cfg(test)]
+mod pp_199_texture_uv_generation_tests {
+    use super::*;
+
+    fn uv_values(mesh: &Mesh) -> Vec<[f32; 2]> {
+        match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+            Some(bevy::mesh::VertexAttributeValues::Float32x2(values)) => values.clone(),
+            other => panic!("expected Float32x2 UVs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn triangle_mesh_asset_generates_non_degenerate_projected_uvs() {
+        let primitive = TriangleMesh {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(4.0, 0.0, 0.0),
+                Vec3::new(4.0, 0.0, 2.0),
+                Vec3::new(0.0, 0.0, 2.0),
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            normals: Some(vec![Vec3::Y; 4]),
+            name: Some("slab".to_string()),
+        };
+
+        let mesh = triangle_mesh_asset(&primitive);
+        let uvs = uv_values(&mesh);
+
+        assert_eq!(uvs.len(), primitive.vertices.len());
+        assert_eq!(uvs[0], [0.0, 0.0]);
+        assert_eq!(uvs[1], [4.0, 0.0]);
+        assert_eq!(uvs[2], [4.0, 2.0]);
+        assert!(uvs.iter().any(|uv| *uv != uvs[0]));
     }
 }
