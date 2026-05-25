@@ -320,7 +320,7 @@ fn dxf_num(n: f32) -> String {
 fn dxf_escape_text(s: &str) -> String {
     // DXF TEXT (group code 1) disallows line breaks. Keep special chars as-is
     // except newlines, which we strip.
-    s.replace('\n', " ").replace('\r', " ")
+    s.replace(['\n', '\r'], " ")
 }
 
 #[cfg(test)]

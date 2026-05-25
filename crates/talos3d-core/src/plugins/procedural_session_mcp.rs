@@ -252,10 +252,10 @@ pub fn world_commit(
 /// Commit, optionally translating each step into a real model mutation
 /// through the supplied [`SessionStepExecutor`]. The MCP transport passes
 /// the `model-api`-backed executor so commits produce real geometry.
-pub fn world_commit_with_executor<'e>(
+pub fn world_commit_with_executor(
     world: &mut World,
     req: SessionCommitRequest,
-    executor: Option<&'e mut dyn SessionStepExecutor>,
+    executor: Option<&mut dyn SessionStepExecutor>,
 ) -> Result<CommitReport, SessionError> {
     // Reading-only resources first.
     let tool_registry = world.resource::<SessionToolRegistry>().clone();

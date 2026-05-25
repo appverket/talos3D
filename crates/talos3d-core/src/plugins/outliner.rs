@@ -304,7 +304,7 @@ pub fn collect_outline_forest(world: &mut World) -> Vec<OutlineEntry> {
         .map(|(eid, _)| *eid)
         .filter(|eid| !member_set.contains(eid) && !relation_set.contains(eid))
         .collect();
-    root_eids.sort_by(|a, b| ctx.label_for(*a).cmp(&ctx.label_for(*b)));
+    root_eids.sort_by_key(|a| ctx.label_for(*a));
 
     let mut roots: Vec<OutlineEntry> = Vec::new();
     for eid in root_eids {
@@ -353,7 +353,7 @@ fn build_entry(ctx: &BuildContext, eid: u64, visited: &mut HashSet<u64>) -> Outl
             .copied()
             .filter(|m| ctx.entity_by_eid.contains_key(m) && !visited.contains(m))
             .collect();
-        members.sort_by(|a, b| ctx.label_for(*a).cmp(&ctx.label_for(*b)));
+        members.sort_by_key(|a| ctx.label_for(*a));
         for member in members {
             if visited.contains(&member) {
                 continue;
@@ -595,7 +595,7 @@ mod tests {
     };
     use serde_json::json;
 
-    fn node_for<'a>(tree: &'a OutlinerTree, eid: u64) -> Option<&'a OutlinerNode> {
+    fn node_for(tree: &OutlinerTree, eid: u64) -> Option<&OutlinerNode> {
         tree.nodes.iter().find(|node| node.node_id == eid)
     }
 
@@ -643,7 +643,7 @@ mod tests {
         assert!(root_ids.contains(&4), "standalone element should be a root");
         assert!(!root_ids.contains(&2), "member must not be a root");
         assert!(!root_ids.contains(&3), "member must not be a root");
-        assert!(root_ids.contains(&5) == false, "relation must be excluded");
+        assert!(!root_ids.contains(&5), "relation must be excluded");
 
         let group = node_for(&tree, 1).expect("group node");
         assert_eq!(group.kind, OutlinerKind::Group);

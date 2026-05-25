@@ -465,12 +465,12 @@ fn draw_browser_panel(
                             ))
                             .selected(selected)
                             .wrap();
-                            if ui.add_sized([ui.available_width(), 36.0], label).clicked() {
-                                if state.selected_id.as_deref() != Some(id.as_str()) {
-                                    state.selected_id = Some(id.clone());
-                                    if let Some(def) = registry.get(&id) {
-                                        state.load_def(def);
-                                    }
+                            if ui.add_sized([ui.available_width(), 36.0], label).clicked()
+                                && state.selected_id.as_deref() != Some(id.as_str())
+                            {
+                                state.selected_id = Some(id.clone());
+                                if let Some(def) = registry.get(&id) {
+                                    state.load_def(def);
                                 }
                             }
                         });
@@ -1879,62 +1879,6 @@ fn texture_row(
     ui.end_row();
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::curation::{SourceLicense, SourceTier};
-
-    #[test]
-    fn source_draft_builds_entry_with_optional_fields() {
-        let draft = SourceDraftState {
-            source_id: "poly_haven.material.brick_wall".to_string(),
-            revision: "2026-04-20".to_string(),
-            title: "Poly Haven Brick Wall".to_string(),
-            publisher: "Poly Haven".to_string(),
-            tier_idx: source_tier_to_idx(SourceTier::AdHoc),
-            license_idx: source_license_to_idx(SourceLicense::PublicDomain),
-            jurisdiction: "SE".to_string(),
-            canonical_url: "https://polyhaven.com/a/brick_wall".to_string(),
-            metadata_json: "{ \"provider\": \"poly_haven\", \"asset_slug\": \"brick_wall\" }"
-                .to_string(),
-            ..Default::default()
-        };
-
-        let entry = draft.build_entry().expect("draft should be valid");
-        assert_eq!(entry.source_id.0, "poly_haven.material.brick_wall");
-        assert_eq!(entry.revision.0, "2026-04-20");
-        assert_eq!(entry.tier, SourceTier::AdHoc);
-        assert_eq!(entry.license, SourceLicense::PublicDomain);
-        assert_eq!(
-            entry.jurisdiction.as_ref().map(|j| j.0.as_str()),
-            Some("SE")
-        );
-        assert_eq!(
-            entry.canonical_url.as_deref(),
-            Some("https://polyhaven.com/a/brick_wall")
-        );
-        assert_eq!(entry.metadata["provider"], "poly_haven");
-    }
-
-    #[test]
-    fn ambientcg_preset_sets_bootstrap_defaults() {
-        let mut draft = SourceDraftState {
-            preset_idx: 1,
-            ..Default::default()
-        };
-        draft.apply_preset();
-
-        assert_eq!(draft.publisher, "ambientCG");
-        assert_eq!(source_tier_by_idx(draft.tier_idx), SourceTier::AdHoc);
-        assert_eq!(
-            source_license_by_idx(draft.license_idx),
-            SourceLicense::PublicDomain
-        );
-        assert!(draft.canonical_url.contains("ambientcg.com"));
-        assert!(draft.metadata_json.contains("\"provider\": \"ambientcg\""));
-    }
-}
-
 fn draw_material_list_thumbnail(
     ui: &mut egui::Ui,
     contexts: &mut EguiContexts,
@@ -2154,5 +2098,61 @@ fn idx_to_alpha_mode(idx: usize) -> MaterialAlphaMode {
         3 => MaterialAlphaMode::Premultiplied,
         4 => MaterialAlphaMode::Add,
         _ => MaterialAlphaMode::Opaque,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::curation::{SourceLicense, SourceTier};
+
+    #[test]
+    fn source_draft_builds_entry_with_optional_fields() {
+        let draft = SourceDraftState {
+            source_id: "poly_haven.material.brick_wall".to_string(),
+            revision: "2026-04-20".to_string(),
+            title: "Poly Haven Brick Wall".to_string(),
+            publisher: "Poly Haven".to_string(),
+            tier_idx: source_tier_to_idx(SourceTier::AdHoc),
+            license_idx: source_license_to_idx(SourceLicense::PublicDomain),
+            jurisdiction: "SE".to_string(),
+            canonical_url: "https://polyhaven.com/a/brick_wall".to_string(),
+            metadata_json: "{ \"provider\": \"poly_haven\", \"asset_slug\": \"brick_wall\" }"
+                .to_string(),
+            ..Default::default()
+        };
+
+        let entry = draft.build_entry().expect("draft should be valid");
+        assert_eq!(entry.source_id.0, "poly_haven.material.brick_wall");
+        assert_eq!(entry.revision.0, "2026-04-20");
+        assert_eq!(entry.tier, SourceTier::AdHoc);
+        assert_eq!(entry.license, SourceLicense::PublicDomain);
+        assert_eq!(
+            entry.jurisdiction.as_ref().map(|j| j.0.as_str()),
+            Some("SE")
+        );
+        assert_eq!(
+            entry.canonical_url.as_deref(),
+            Some("https://polyhaven.com/a/brick_wall")
+        );
+        assert_eq!(entry.metadata["provider"], "poly_haven");
+    }
+
+    #[test]
+    fn ambientcg_preset_sets_bootstrap_defaults() {
+        let mut draft = SourceDraftState {
+            preset_idx: 1,
+            ..Default::default()
+        };
+        draft.apply_preset();
+
+        assert_eq!(draft.publisher, "ambientCG");
+        assert_eq!(source_tier_by_idx(draft.tier_idx), SourceTier::AdHoc);
+        assert_eq!(
+            source_license_by_idx(draft.license_idx),
+            SourceLicense::PublicDomain
+        );
+        assert!(draft.canonical_url.contains("ambientcg.com"));
+        assert!(draft.metadata_json.contains("\"provider\": \"ambientcg\""));
     }
 }

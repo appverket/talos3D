@@ -652,7 +652,7 @@ fn mesh_triangle_indices(mesh: &Mesh, vertex_count: usize) -> Option<Vec<u32>> {
     match mesh.indices() {
         Some(Indices::U32(values)) => Some(values.clone()),
         Some(Indices::U16(values)) => Some(values.iter().map(|v| *v as u32).collect()),
-        None if vertex_count % 3 == 0 => Some((0..vertex_count as u32).collect()),
+        None if vertex_count.is_multiple_of(3) => Some((0..vertex_count as u32).collect()),
         None => None,
     }
 }

@@ -1008,7 +1008,7 @@ fn execute_add_spot_elevation(
         world,
         parameters,
         ElevationCurve {
-            points: points.drain(..).collect(),
+            points: std::mem::take(&mut points),
             elevation,
             source_layer,
             curve_type: ElevationCurveType::Supplementary,

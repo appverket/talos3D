@@ -323,7 +323,7 @@ impl DimensionStyleRegistry {
     /// name is stale. Never panics; if the registry is empty, returns a
     /// freshly-built `architectural_metric` preset as a safety net.
     #[must_use]
-    pub fn resolve<'a>(&'a self, name: Option<&str>) -> DimensionStyle {
+    pub fn resolve(&self, name: Option<&str>) -> DimensionStyle {
         if let Some(n) = name {
             if let Some(s) = self.styles.get(n) {
                 return s.clone();

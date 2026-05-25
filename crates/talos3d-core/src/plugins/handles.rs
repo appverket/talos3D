@@ -1063,37 +1063,6 @@ fn take_property_handle_drag(world: &mut World) -> Option<PropertyHandleDrag> {
         .take()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn move_and_scale_handles_use_handle_position_as_anchor() {
-        let handle_position = Vec3::new(1.0, 2.0, 3.0);
-        let fallback = Some(Vec3::new(9.0, 9.0, 9.0));
-
-        assert_eq!(
-            transform_handle_initial_cursor(TransformMode::Moving, handle_position, fallback),
-            Some(handle_position)
-        );
-        assert_eq!(
-            transform_handle_initial_cursor(TransformMode::Scaling, handle_position, fallback),
-            Some(handle_position)
-        );
-    }
-
-    #[test]
-    fn rotate_handles_keep_cursor_based_anchor() {
-        let handle_position = Vec3::new(1.0, 2.0, 3.0);
-        let fallback = Some(Vec3::new(9.0, 9.0, 9.0));
-
-        assert_eq!(
-            transform_handle_initial_cursor(TransformMode::Rotating, handle_position, fallback),
-            fallback
-        );
-    }
-}
-
 fn clear_pending_handle_press(world: &mut World) {
     world.resource_mut::<HandleInteractionState>().pressed = None;
 }
@@ -1133,5 +1102,36 @@ fn draw_ring(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
             gizmos.line(previous, point, color);
         }
         previous = Some(point);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_and_scale_handles_use_handle_position_as_anchor() {
+        let handle_position = Vec3::new(1.0, 2.0, 3.0);
+        let fallback = Some(Vec3::new(9.0, 9.0, 9.0));
+
+        assert_eq!(
+            transform_handle_initial_cursor(TransformMode::Moving, handle_position, fallback),
+            Some(handle_position)
+        );
+        assert_eq!(
+            transform_handle_initial_cursor(TransformMode::Scaling, handle_position, fallback),
+            Some(handle_position)
+        );
+    }
+
+    #[test]
+    fn rotate_handles_keep_cursor_based_anchor() {
+        let handle_position = Vec3::new(1.0, 2.0, 3.0);
+        let fallback = Some(Vec3::new(9.0, 9.0, 9.0));
+
+        assert_eq!(
+            transform_handle_initial_cursor(TransformMode::Rotating, handle_position, fallback),
+            fallback
+        );
     }
 }

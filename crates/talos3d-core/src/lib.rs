@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+
 extern crate self as talos3d_core;
 
 pub mod authored_entity;

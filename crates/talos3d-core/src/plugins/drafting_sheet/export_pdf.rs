@@ -138,7 +138,7 @@ pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
 
 fn write_obj(out: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, payload: &[u8]) {
     offsets.push(out.len());
-    let _ = write!(out, "{id} 0 obj\n");
+    let _ = writeln!(out, "{id} 0 obj");
     out.extend_from_slice(payload);
     out.extend_from_slice(b"\nendobj\n");
 }

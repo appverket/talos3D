@@ -461,16 +461,12 @@ pub type ValidatorFn = Arc<dyn Fn(Entity, &World) -> Vec<Finding> + Send + Sync>
 ///   [`crate::plugins::validation::entity_has_unresolved_promotion_findings`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Default)]
 pub enum ConstraintRole {
     Discovery,
+    #[default]
     Validation,
     Promotion,
-}
-
-impl Default for ConstraintRole {
-    fn default() -> Self {
-        Self::Validation
-    }
 }
 
 impl ConstraintRole {

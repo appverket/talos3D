@@ -300,8 +300,8 @@ impl CuratedManifestRegistry {
     /// asset_id)` declared by the manifest body via its kind's walker
     /// hooks, plus a list of `RefField`s that were marked `required` but
     /// resolved to no value. `kinds` provides the descriptor lookup.
-    pub fn walk_manifest<'a>(
-        &'a self,
+    pub fn walk_manifest(
+        &self,
         id: &AssetId,
         kinds: &ManifestKindRegistry,
     ) -> Option<ManifestWalkReport> {

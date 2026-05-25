@@ -41,6 +41,7 @@ impl SceneLightKind {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "directional" | "sun" => Some(Self::Directional),
@@ -100,15 +101,9 @@ impl Default for SceneLightingSettings {
     }
 }
 
-#[derive(Resource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Resource, Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SceneLightObjectVisibility {
     pub visible: bool,
-}
-
-impl Default for SceneLightObjectVisibility {
-    fn default() -> Self {
-        Self { visible: false }
-    }
 }
 
 pub fn scene_light_objects_visible(world: &World) -> bool {
@@ -664,9 +659,7 @@ impl AuthoredEntityFactory for SceneLightFactory {
         if !scene_light_objects_visible(world) {
             return None;
         }
-        let Some(mut query) = world.try_query::<(Entity, &SceneLightNode, &Transform)>() else {
-            return None;
-        };
+        let mut query = world.try_query::<(Entity, &SceneLightNode, &Transform)>()?;
         query
             .iter(world)
             .filter_map(|(entity, node, transform)| {
@@ -919,7 +912,7 @@ fn draw_scene_light_gizmos(
 }
 
 fn serialize_scene_light_object_visibility(state: &SceneLightObjectVisibility) -> Value {
-    serde_json::to_value(state).unwrap_or_else(|_| Value::Null)
+    serde_json::to_value(state).unwrap_or(Value::Null)
 }
 
 fn deserialize_scene_light_object_visibility(value: &Value) -> Option<SceneLightObjectVisibility> {

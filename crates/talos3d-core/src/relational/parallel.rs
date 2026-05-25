@@ -243,7 +243,7 @@ mod tests {
         let root = NodeId::param(1, "root");
         let mut nodes: BTreeSet<NodeId> = [root.clone()].into_iter().collect();
         for i in 0..64u64 {
-            let leaf = NodeId::param(1, &format!("n{i}"));
+            let leaf = NodeId::param(1, format!("n{i}"));
             g.add_dependency(leaf.clone(), root.clone()).unwrap();
             nodes.insert(leaf);
         }

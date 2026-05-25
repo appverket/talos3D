@@ -25,16 +25,14 @@ pub const PARAMETRIC_DRAFT_KIND: &str = "parametric_draft.v1";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum KnowledgeResidency {
     SessionCache,
+    #[default]
     ProjectFile,
-    WorkspaceKnowledge { relative_path: String },
-}
-
-impl Default for KnowledgeResidency {
-    fn default() -> Self {
-        Self::ProjectFile
-    }
+    WorkspaceKnowledge {
+        relative_path: String,
+    },
 }
 
 /// Evidence to be supplied for a claim before publication or gate promotion.

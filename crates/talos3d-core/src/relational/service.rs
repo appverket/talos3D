@@ -52,7 +52,7 @@ impl ParametricComponent {
         edges: &BTreeMap<String, Vec<String>>,
     ) -> Self {
         let mut graph = DependencyGraph::new();
-        for (name, _) in &params.roles {
+        for name in params.roles.keys() {
             graph.add_node(NodeId::param(component, name.clone()));
         }
         for (derived, inputs) in edges {
@@ -262,9 +262,9 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(trace.contains(&"half".to_string()));
-        assert!(trace.contains(&"pitch".to_string()));
-        assert!(trace.contains(&"heel".to_string()));
-        assert!(trace.contains(&"span".to_string()), "transitive via half");
+        assert!(trace.contains("half"));
+        assert!(trace.contains("pitch"));
+        assert!(trace.contains("heel"));
+        assert!(trace.contains("span"), "transitive via half");
     }
 }

@@ -647,9 +647,7 @@ fn occurrence_generated_part_bounds(
     world: &World,
     entity_ref: EntityRef<'_>,
 ) -> Option<EntityBounds> {
-    if entity_ref.get::<OccurrenceIdentity>().is_none() {
-        return None;
-    }
+    entity_ref.get::<OccurrenceIdentity>()?;
     let owner = entity_ref.get::<ElementId>().copied()?;
     let mut query = world.try_query::<(
         &GeneratedOccurrencePart,
