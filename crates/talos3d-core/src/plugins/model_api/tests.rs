@@ -1238,6 +1238,19 @@ async fn mcp_tools_return_structured_model_data() {
     assert!(tool_names.contains("set_camera"));
     assert!(tool_names.contains("take_screenshot"));
     assert!(tool_names.contains("export_drawing"));
+    assert!(tool_names.contains("export.fidelity.describe"));
+
+    let manifests: Vec<crate::plugins::export_fidelity::ExportFidelityManifest> = server
+        .export_fidelity_describe_tool(Parameters(ExportFidelityRequest {
+            surface: Some("drawing.pdf".into()),
+            path: None,
+        }))
+        .await
+        .expect("export fidelity tool should succeed")
+        .into_typed()
+        .expect("export fidelity result should deserialize");
+    assert_eq!(manifests.len(), 1);
+    assert_eq!(manifests[0].surface_id, "drawing.pdf");
 
     let listed: Vec<EntityEntry> = server
         .list_entities_tool()
