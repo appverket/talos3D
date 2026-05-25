@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use serde_json::json;
-use talos3d_architectural::snapshots::{OpeningFactory, WallFactory};
+use talos3d_architecture_elements::snapshots::{OpeningFactory, WallFactory};
 use talos3d_core::{
     capability_registry::{AssemblyTypeDescriptor, CapabilityRegistry, RelationTypeDescriptor},
     plugins::{
@@ -72,6 +72,8 @@ fn init_assembly_test_world() -> World {
         valid_target_types: vec!["wall".into()],
         parameter_schema: json!({}),
         participates_in_dependency_graph: true,
+        external_classification: None,
+        host_contract_kind: None,
     });
     registry.register_relation_type(RelationTypeDescriptor {
         relation_type: "adjacent_to".into(),
@@ -81,6 +83,8 @@ fn init_assembly_test_world() -> World {
         valid_target_types: vec![],
         parameter_schema: json!({}),
         participates_in_dependency_graph: false,
+        external_classification: None,
+        host_contract_kind: None,
     });
     registry.register_relation_type(RelationTypeDescriptor {
         relation_type: "supports".into(),
@@ -90,6 +94,8 @@ fn init_assembly_test_world() -> World {
         valid_target_types: vec![],
         parameter_schema: json!({}),
         participates_in_dependency_graph: false,
+        external_classification: None,
+        host_contract_kind: None,
     });
     registry.register_relation_type(RelationTypeDescriptor {
         relation_type: "bounds".into(),
@@ -99,6 +105,8 @@ fn init_assembly_test_world() -> World {
         valid_target_types: vec![],
         parameter_schema: json!({}),
         participates_in_dependency_graph: false,
+        external_classification: None,
+        host_contract_kind: None,
     });
     world.insert_resource(registry);
     world

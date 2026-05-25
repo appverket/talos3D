@@ -160,7 +160,7 @@ fn check_rule_pack_backlinks_all_resolved_with_se_pack() {
 fn check_rule_pack_backlinks_detects_missing_passage() {
     use std::sync::Arc;
     use talos3d_core::capability_registry::{
-        Applicability, ConstraintDescriptor, ConstraintId, PassageRef, Severity,
+        Applicability, ConstraintDescriptor, ConstraintId, ConstraintRole, PassageRef, Severity,
     };
 
     let mut world = init_world();
