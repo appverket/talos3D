@@ -28,11 +28,15 @@ use crate::plugins::{
     ui::{tool_window_max_size, tool_window_rect},
 };
 
-const MATERIALS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(480.0, 560.0);
-const MATERIALS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(340.0, 280.0);
-const MATERIALS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(640.0, 760.0);
+const MATERIALS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(760.0, 640.0);
+const MATERIALS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(420.0, 320.0);
+const MATERIALS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(1040.0, 820.0);
 const MATERIAL_LIST_THUMBNAIL_SIZE: f32 = 30.0;
 const TEXTURE_SLOT_THUMBNAIL_SIZE: f32 = 52.0;
+const MATERIAL_LIST_WIDTH: f32 = 196.0;
+const FORM_LABEL_WIDTH: f32 = 124.0;
+const FORM_FIELD_MIN_WIDTH: f32 = 220.0;
+const SOURCES_STACK_BREAKPOINT: f32 = 620.0;
 const SOURCE_TIER_OPTIONS: [(&str, SourceTier); 5] = [
     ("canonical", SourceTier::Canonical),
     ("jurisdictional", SourceTier::Jurisdictional),
@@ -409,21 +413,28 @@ fn draw_browser_panel(
     pending: &mut PendingCommandInvocations,
     selected_assignments: &[(u64, Option<MaterialAssignment>)],
 ) {
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         // --- Left: list of materials ---
         ui.vertical(|ui| {
-            ui.set_min_width(160.0);
-            ui.set_max_width(180.0);
+            ui.set_min_width(MATERIAL_LIST_WIDTH);
+            ui.set_max_width(MATERIAL_LIST_WIDTH);
 
             // Search bar
-            ui.horizontal(|ui| {
-                ui.label("🔍");
-                ui.text_edit_singleline(&mut state.search);
-            });
+            ui.add(
+                egui::TextEdit::singleline(&mut state.search)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Search materials"),
+            );
             ui.separator();
 
             // New material button
-            if ui.button("+ New").clicked() {
+            if ui
+                .add_sized(
+                    [ui.available_width(), 0.0],
+                    egui::Button::new("+ New Material"),
+                )
+                .clicked()
+            {
                 let name = registry.generate_unique_name();
                 let def = registry.create(name);
                 let id = def.id.clone();
@@ -474,7 +485,7 @@ fn draw_browser_panel(
                             ))
                             .selected(selected)
                             .wrap();
-                            if ui.add_sized([ui.available_width(), 36.0], label).clicked()
+                            if ui.add_sized([ui.available_width(), 42.0], label).clicked()
                                 && state.selected_id.as_deref() != Some(id.as_str())
                             {
                                 state.selected_id = Some(id.clone());
@@ -485,8 +496,8 @@ fn draw_browser_panel(
                         });
 
                         if selected {
-                            ui.horizontal(|ui| {
-                                ui.add_space(16.0);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_space(MATERIAL_LIST_THUMBNAIL_SIZE + 4.0);
                                 if ui
                                     .small_button("Apply to selection")
                                     .on_hover_text("Apply this material to all selected entities")
@@ -522,7 +533,7 @@ fn draw_browser_panel(
 
         // --- Right: editor ---
         ui.vertical(|ui| {
-            ui.set_min_width(240.0);
+            ui.set_min_width(280.0);
 
             draw_editor_tabs(ui, state);
             ui.separator();
@@ -585,32 +596,30 @@ fn draw_browser_panel(
 }
 
 fn draw_editor_tabs(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
-    ui.horizontal(|ui| {
-        if ui
-            .selectable_label(state.editor_tab == EditorTab::Properties, "Properties")
-            .clicked()
-        {
-            state.editor_tab = EditorTab::Properties;
-        }
-        if ui
-            .selectable_label(state.editor_tab == EditorTab::Textures, "Textures")
-            .clicked()
-        {
-            state.editor_tab = EditorTab::Textures;
-        }
-        if ui
-            .selectable_label(state.editor_tab == EditorTab::Selection, "Selection")
-            .clicked()
-        {
-            state.editor_tab = EditorTab::Selection;
-        }
-        if ui
-            .selectable_label(state.editor_tab == EditorTab::Sources, "Sources")
-            .clicked()
-        {
-            state.editor_tab = EditorTab::Sources;
-        }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        editor_tab_button(ui, state, EditorTab::Properties, "Properties");
+        editor_tab_button(ui, state, EditorTab::Textures, "Textures");
+        editor_tab_button(ui, state, EditorTab::Selection, "Selection");
+        editor_tab_button(ui, state, EditorTab::Sources, "Sources");
     });
+}
+
+fn editor_tab_button(
+    ui: &mut egui::Ui,
+    state: &mut MaterialsWindowState,
+    tab: EditorTab,
+    label: &str,
+) {
+    if ui
+        .add_sized(
+            [86.0, 24.0],
+            egui::Button::new(label).selected(state.editor_tab == tab),
+        )
+        .clicked()
+    {
+        state.editor_tab = tab;
+    }
 }
 
 // ─── Editor panel ─────────────────────────────────────────────────────────────
@@ -660,382 +669,446 @@ fn draw_material_editor(
     });
 }
 
+fn form_grid(id: impl std::hash::Hash, ui: &mut egui::Ui, add_rows: impl FnOnce(&mut egui::Ui)) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .min_col_width(FORM_LABEL_WIDTH)
+        .show(ui, add_rows);
+}
+
+fn form_label(ui: &mut egui::Ui, label: &str) {
+    ui.set_min_width(FORM_LABEL_WIDTH);
+    ui.label(label);
+}
+
+fn full_width_text_edit(ui: &mut egui::Ui, text: &mut String, hint: &str) -> egui::Response {
+    ui.add_sized(
+        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+        egui::TextEdit::singleline(text)
+            .desired_width(f32::INFINITY)
+            .hint_text(hint),
+    )
+}
+
+fn full_width_multiline(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    rows: usize,
+    hint: &str,
+    code: bool,
+) -> egui::Response {
+    let editor = egui::TextEdit::multiline(text)
+        .desired_width(f32::INFINITY)
+        .desired_rows(rows)
+        .hint_text(hint);
+    let editor = if code { editor.code_editor() } else { editor };
+    ui.add_sized([ui.available_width(), 0.0], editor)
+}
+
+fn small_value_pair(
+    ui: &mut egui::Ui,
+    first_label: &str,
+    first: &mut f32,
+    second_label: &str,
+    second: &mut f32,
+    speed: f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        let half_width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(84.0);
+        let first_response = ui.add_sized(
+            [half_width, 0.0],
+            egui::Slider::new(first, range.clone())
+                .text(first_label)
+                .fixed_decimals(if speed < 0.05 { 2 } else { 1 }),
+        );
+        let second_response = ui.add_sized(
+            [half_width, 0.0],
+            egui::Slider::new(second, range)
+                .text(second_label)
+                .fixed_decimals(if speed < 0.05 { 2 } else { 1 }),
+        );
+        first_response.union(second_response)
+    })
+    .inner
+}
+
 fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
     egui::ScrollArea::vertical()
         .id_salt("mat_props")
         .show(ui, |ui| {
-            egui::Grid::new("mat_prop_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    // Name
-                    ui.label("Name");
-                    if ui.text_edit_singleline(&mut state.name_buf).changed() {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+            form_grid("mat_prop_grid", ui, |ui| {
+                // Name
+                form_label(ui, "Name");
+                if full_width_text_edit(ui, &mut state.name_buf, "Material name").changed() {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Material Spec");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut state.spec_ref_buf)
-                                .hint_text("material_spec.v1/slug"),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Material Spec");
+                if full_width_text_edit(ui, &mut state.spec_ref_buf, "material_spec.v1/slug")
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    // Base colour
-                    ui.label("Base Color");
-                    let [r, g, b, a] = state.base_color;
-                    let mut col = egui::Color32::from_rgba_premultiplied(
-                        (r * 255.0) as u8,
-                        (g * 255.0) as u8,
-                        (b * 255.0) as u8,
-                        (a * 255.0) as u8,
-                    );
-                    if ui.color_edit_button_srgba(&mut col).changed() {
-                        let [cr, cg, cb, ca] = col.to_srgba_unmultiplied();
-                        state.base_color = [
-                            cr as f32 / 255.0,
-                            cg as f32 / 255.0,
-                            cb as f32 / 255.0,
-                            ca as f32 / 255.0,
-                        ];
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                // Base colour
+                form_label(ui, "Base Color");
+                let [r, g, b, a] = state.base_color;
+                let mut col = egui::Color32::from_rgba_premultiplied(
+                    (r * 255.0) as u8,
+                    (g * 255.0) as u8,
+                    (b * 255.0) as u8,
+                    (a * 255.0) as u8,
+                );
+                if ui.color_edit_button_srgba(&mut col).changed() {
+                    let [cr, cg, cb, ca] = col.to_srgba_unmultiplied();
+                    state.base_color = [
+                        cr as f32 / 255.0,
+                        cg as f32 / 255.0,
+                        cb as f32 / 255.0,
+                        ca as f32 / 255.0,
+                    ];
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    // Roughness
-                    ui.label("Roughness");
-                    if ui
-                        .add(egui::Slider::new(&mut state.roughness, 0.0..=1.0).fixed_decimals(2))
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                // Roughness
+                form_label(ui, "Roughness");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.roughness, 0.0..=1.0).fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    // Metallic
-                    ui.label("Metallic");
-                    if ui
-                        .add(egui::Slider::new(&mut state.metallic, 0.0..=1.0).fixed_decimals(2))
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                // Metallic
+                form_label(ui, "Metallic");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.metallic, 0.0..=1.0).fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    // Reflectance
-                    ui.label("Reflectance");
-                    if ui
-                        .add(egui::Slider::new(&mut state.reflectance, 0.0..=1.0).fixed_decimals(2))
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                // Reflectance
+                form_label(ui, "Reflectance");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.reflectance, 0.0..=1.0).fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Specular Tint");
-                    let [sr, sg, sb] = state.specular_tint;
-                    let mut scol = egui::Color32::from_rgb(
-                        (sr.clamp(0.0, 1.0) * 255.0) as u8,
-                        (sg.clamp(0.0, 1.0) * 255.0) as u8,
-                        (sb.clamp(0.0, 1.0) * 255.0) as u8,
-                    );
-                    if ui.color_edit_button_srgba(&mut scol).changed() {
-                        let [cr, cg, cb, _] = scol.to_srgba_unmultiplied();
-                        state.specular_tint =
-                            [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Specular Tint");
+                let [sr, sg, sb] = state.specular_tint;
+                let mut scol = egui::Color32::from_rgb(
+                    (sr.clamp(0.0, 1.0) * 255.0) as u8,
+                    (sg.clamp(0.0, 1.0) * 255.0) as u8,
+                    (sb.clamp(0.0, 1.0) * 255.0) as u8,
+                );
+                if ui.color_edit_button_srgba(&mut scol).changed() {
+                    let [cr, cg, cb, _] = scol.to_srgba_unmultiplied();
+                    state.specular_tint = [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    // Emissive
-                    ui.label("Emissive");
-                    let [er, eg, eb] = state.emissive;
-                    let mut ecol = egui::Color32::from_rgb(
-                        (er.clamp(0.0, 1.0) * 255.0) as u8,
-                        (eg.clamp(0.0, 1.0) * 255.0) as u8,
-                        (eb.clamp(0.0, 1.0) * 255.0) as u8,
-                    );
-                    if ui.color_edit_button_srgba(&mut ecol).changed() {
-                        let [cr, cg, cb, _] = ecol.to_srgba_unmultiplied();
-                        state.emissive = [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                // Emissive
+                form_label(ui, "Emissive");
+                let [er, eg, eb] = state.emissive;
+                let mut ecol = egui::Color32::from_rgb(
+                    (er.clamp(0.0, 1.0) * 255.0) as u8,
+                    (eg.clamp(0.0, 1.0) * 255.0) as u8,
+                    (eb.clamp(0.0, 1.0) * 255.0) as u8,
+                );
+                if ui.color_edit_button_srgba(&mut ecol).changed() {
+                    let [cr, cg, cb, _] = ecol.to_srgba_unmultiplied();
+                    state.emissive = [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Emissive Strength");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut state.emissive_exposure_weight, 0.0..=8.0)
-                                .fixed_decimals(2),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Emissive Strength");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.emissive_exposure_weight, 0.0..=8.0)
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Diffuse Transmission");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut state.diffuse_transmission, 0.0..=1.0)
-                                .fixed_decimals(2),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Diffuse Transmission");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.diffuse_transmission, 0.0..=1.0)
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Specular Transmission");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut state.specular_transmission, 0.0..=1.0)
-                                .fixed_decimals(2),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Specular Transmission");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.specular_transmission, 0.0..=1.0)
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Thickness (m)");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut state.thickness)
-                                .speed(0.005)
-                                .range(0.0..=10.0),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Thickness");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.thickness, 0.0..=10.0)
+                            .text("m")
+                            .fixed_decimals(3),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("IOR");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut state.ior)
-                                .speed(0.01)
-                                .range(1.0..=3.0),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "IOR");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.ior, 1.0..=3.0).fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Attenuation Dist.");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut state.attenuation_distance)
-                                .speed(0.05)
-                                .range(0.0..=1000.0),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Attenuation Dist.");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.attenuation_distance, 0.0..=1000.0)
+                            .text("m")
+                            .fixed_decimals(1),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Attenuation Color");
-                    let [atr, atg, atb] = state.attenuation_color;
-                    let mut atcol = egui::Color32::from_rgb(
-                        (atr.clamp(0.0, 1.0) * 255.0) as u8,
-                        (atg.clamp(0.0, 1.0) * 255.0) as u8,
-                        (atb.clamp(0.0, 1.0) * 255.0) as u8,
-                    );
-                    if ui.color_edit_button_srgba(&mut atcol).changed() {
-                        let [cr, cg, cb, _] = atcol.to_srgba_unmultiplied();
-                        state.attenuation_color =
-                            [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Attenuation Color");
+                let [atr, atg, atb] = state.attenuation_color;
+                let mut atcol = egui::Color32::from_rgb(
+                    (atr.clamp(0.0, 1.0) * 255.0) as u8,
+                    (atg.clamp(0.0, 1.0) * 255.0) as u8,
+                    (atb.clamp(0.0, 1.0) * 255.0) as u8,
+                );
+                if ui.color_edit_button_srgba(&mut atcol).changed() {
+                    let [cr, cg, cb, _] = atcol.to_srgba_unmultiplied();
+                    state.attenuation_color =
+                        [cr as f32 / 255.0, cg as f32 / 255.0, cb as f32 / 255.0];
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Clearcoat");
-                    if ui
-                        .add(egui::Slider::new(&mut state.clearcoat, 0.0..=1.0).fixed_decimals(2))
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Clearcoat");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.clearcoat, 0.0..=1.0).fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Clearcoat Rough.");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut state.clearcoat_perceptual_roughness, 0.0..=1.0)
-                                .fixed_decimals(2),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Clearcoat Rough.");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.clearcoat_perceptual_roughness, 0.0..=1.0)
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Anisotropy");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut state.anisotropy_strength, 0.0..=1.0)
-                                .fixed_decimals(2),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Anisotropy");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.anisotropy_strength, 0.0..=1.0)
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    ui.label("Aniso Rotation (°)");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut state.anisotropy_rotation_deg)
-                                .speed(1.0)
-                                .suffix("°"),
-                        )
-                        .changed()
-                    {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
+                form_label(ui, "Aniso Rotation");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.anisotropy_rotation_deg, -180.0..=180.0)
+                            .text("deg")
+                            .fixed_decimals(0),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
 
-                    // Alpha mode
-                    ui.label("Alpha Mode");
-                    egui::ComboBox::from_id_salt("alpha_mode_combo")
-                        .selected_text(alpha_mode_name(state.alpha_mode_idx))
-                        .show_ui(ui, |ui| {
-                            for (i, name) in ALPHA_MODE_NAMES.iter().enumerate() {
-                                if ui
-                                    .selectable_label(state.alpha_mode_idx == i, *name)
-                                    .clicked()
-                                {
-                                    state.alpha_mode_idx = i;
-                                    state.dirty = true;
-                                }
+                // Alpha mode
+                form_label(ui, "Alpha Mode");
+                egui::ComboBox::from_id_salt("alpha_mode_combo")
+                    .selected_text(alpha_mode_name(state.alpha_mode_idx))
+                    .show_ui(ui, |ui| {
+                        for (i, name) in ALPHA_MODE_NAMES.iter().enumerate() {
+                            if ui
+                                .selectable_label(state.alpha_mode_idx == i, *name)
+                                .clicked()
+                            {
+                                state.alpha_mode_idx = i;
+                                state.dirty = true;
                             }
-                        });
-                    ui.end_row();
-
-                    if state.alpha_mode_idx == 1 {
-                        // Mask
-                        ui.label("Alpha Cutoff");
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut state.alpha_cutoff, 0.0..=1.0)
-                                    .fixed_decimals(2),
-                            )
-                            .changed()
-                        {
-                            state.dirty = true;
-                        }
-                        ui.end_row();
-                    }
-
-                    // Double-sided
-                    ui.label("Double-sided");
-                    if ui.checkbox(&mut state.double_sided, "").changed() {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
-
-                    ui.label("Unlit");
-                    if ui.checkbox(&mut state.unlit, "").changed() {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
-
-                    ui.label("Fog Enabled");
-                    if ui.checkbox(&mut state.fog_enabled, "").changed() {
-                        state.dirty = true;
-                    }
-                    ui.end_row();
-
-                    ui.label("Projection");
-                    egui::ComboBox::from_id_salt("material_texture_projection")
-                        .selected_text(texture_projection_name(state.texture_projection_idx))
-                        .show_ui(ui, |ui| {
-                            for (idx, name) in TEXTURE_PROJECTION_NAMES.iter().enumerate() {
-                                if ui
-                                    .selectable_value(&mut state.texture_projection_idx, idx, *name)
-                                    .changed()
-                                {
-                                    state.dirty = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-
-                    // UV scale
-                    ui.label("UV Tiling (X, Y)");
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut state.uv_scale[0])
-                                    .speed(0.05)
-                                    .range(0.01..=100.0)
-                                    .prefix("X:"),
-                            )
-                            .changed()
-                        {
-                            state.dirty = true;
-                        }
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut state.uv_scale[1])
-                                    .speed(0.05)
-                                    .range(0.01..=100.0)
-                                    .prefix("Y:"),
-                            )
-                            .changed()
-                        {
-                            state.dirty = true;
                         }
                     });
-                    ui.end_row();
+                ui.end_row();
 
-                    ui.label("UV Offset (U, V)");
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut state.uv_offset[0])
-                                    .speed(0.02)
-                                    .prefix("U:"),
-                            )
-                            .changed()
-                        {
-                            state.dirty = true;
-                        }
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut state.uv_offset[1])
-                                    .speed(0.02)
-                                    .prefix("V:"),
-                            )
-                            .changed()
-                        {
-                            state.dirty = true;
+                if state.alpha_mode_idx == 1 {
+                    // Mask
+                    form_label(ui, "Alpha Cutoff");
+                    if ui
+                        .add_sized(
+                            [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                            egui::Slider::new(&mut state.alpha_cutoff, 0.0..=1.0).fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.end_row();
+                }
+
+                // Double-sided
+                form_label(ui, "Double-sided");
+                if ui.checkbox(&mut state.double_sided, "").changed() {
+                    state.dirty = true;
+                }
+                ui.end_row();
+
+                form_label(ui, "Unlit");
+                if ui.checkbox(&mut state.unlit, "").changed() {
+                    state.dirty = true;
+                }
+                ui.end_row();
+
+                form_label(ui, "Fog Enabled");
+                if ui.checkbox(&mut state.fog_enabled, "").changed() {
+                    state.dirty = true;
+                }
+                ui.end_row();
+
+                form_label(ui, "Projection");
+                egui::ComboBox::from_id_salt("material_texture_projection")
+                    .selected_text(texture_projection_name(state.texture_projection_idx))
+                    .show_ui(ui, |ui| {
+                        for (idx, name) in TEXTURE_PROJECTION_NAMES.iter().enumerate() {
+                            if ui
+                                .selectable_value(&mut state.texture_projection_idx, idx, *name)
+                                .changed()
+                            {
+                                state.dirty = true;
+                            }
                         }
                     });
-                    ui.end_row();
+                ui.end_row();
 
-                    // UV rotation
-                    ui.label("UV Rotation (°)");
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut state.uv_rotation_deg)
-                                    .speed(1.0)
-                                    .suffix("°"),
-                            )
-                            .changed()
-                        {
-                            state.dirty = true;
-                        }
+                // UV scale
+                form_label(ui, "UV Tiling");
+                let mut uv_scale_x = state.uv_scale[0];
+                let mut uv_scale_y = state.uv_scale[1];
+                if small_value_pair(
+                    ui,
+                    "X",
+                    &mut uv_scale_x,
+                    "Y",
+                    &mut uv_scale_y,
+                    0.05,
+                    0.01..=100.0,
+                )
+                .changed()
+                {
+                    state.uv_scale = [uv_scale_x, uv_scale_y];
+                    state.dirty = true;
+                }
+                ui.end_row();
+
+                form_label(ui, "UV Offset");
+                let mut uv_offset_u = state.uv_offset[0];
+                let mut uv_offset_v = state.uv_offset[1];
+                if small_value_pair(
+                    ui,
+                    "U",
+                    &mut uv_offset_u,
+                    "V",
+                    &mut uv_offset_v,
+                    0.02,
+                    -10.0..=10.0,
+                )
+                .changed()
+                {
+                    state.uv_offset = [uv_offset_u, uv_offset_v];
+                    state.dirty = true;
+                }
+                ui.end_row();
+
+                // UV rotation
+                form_label(ui, "UV Rotation");
+                ui.vertical(|ui| {
+                    if ui
+                        .add_sized(
+                            [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                            egui::Slider::new(&mut state.uv_rotation_deg, -180.0..=180.0)
+                                .text("deg")
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        state.dirty = true;
+                    }
+                    ui.horizontal_wrapped(|ui| {
                         for degrees in [0.0, 90.0, 180.0, 270.0] {
                             if ui.small_button(format!("{degrees:.0}°")).clicked() {
                                 state.uv_rotation_deg = degrees;
@@ -1043,32 +1116,32 @@ fn draw_properties_tab(ui: &mut egui::Ui, state: &mut MaterialsWindowState) {
                             }
                         }
                     });
-                    ui.end_row();
+                });
+                ui.end_row();
 
-                    ui.label("UV Flip");
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut state.uv_flip[0], "U").changed() {
-                            state.dirty = true;
-                        }
-                        if ui.checkbox(&mut state.uv_flip[1], "V").changed() {
-                            state.dirty = true;
-                        }
-                    });
-                    ui.end_row();
-
-                    ui.label("Depth Bias");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut state.depth_bias)
-                                .speed(0.01)
-                                .range(-10.0..=10.0),
-                        )
-                        .changed()
-                    {
+                form_label(ui, "UV Flip");
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut state.uv_flip[0], "U").changed() {
                         state.dirty = true;
                     }
-                    ui.end_row();
+                    if ui.checkbox(&mut state.uv_flip[1], "V").changed() {
+                        state.dirty = true;
+                    }
                 });
+                ui.end_row();
+
+                form_label(ui, "Depth Bias");
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(FORM_FIELD_MIN_WIDTH), 0.0],
+                        egui::Slider::new(&mut state.depth_bias, -10.0..=10.0).fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    state.dirty = true;
+                }
+                ui.end_row();
+            });
         });
 }
 
@@ -1156,13 +1229,12 @@ fn draw_selection_tab(
         .small()
         .weak(),
     );
-    ui.add(
-        egui::TextEdit::multiline(&mut state.selection_assignment_json)
-            .desired_rows(14)
-            .code_editor()
-            .hint_text(
-                "{\n  \"type\": \"single\",\n  \"render\": \"material_def.v1/oak_finish\"\n}",
-            ),
+    full_width_multiline(
+        ui,
+        &mut state.selection_assignment_json,
+        14,
+        "{\n  \"type\": \"single\",\n  \"render\": \"material_def.v1/oak_finish\"\n}",
+        true,
     );
 
     if let Some(status) = &state.selection_status {
@@ -1224,10 +1296,16 @@ fn draw_sources_tab(
     }
 
     ui.add_space(8.0);
-    ui.columns(2, |columns| {
-        draw_source_registry_column(&mut columns[0], state, source_registry, nomination_queue);
-        draw_source_draft_column(&mut columns[1], state, source_registry, nomination_queue);
-    });
+    if ui.available_width() < SOURCES_STACK_BREAKPOINT {
+        draw_source_registry_column(ui, state, source_registry, nomination_queue);
+        ui.add_space(8.0);
+        draw_source_draft_column(ui, state, source_registry, nomination_queue);
+    } else {
+        ui.columns(2, |columns| {
+            draw_source_registry_column(&mut columns[0], state, source_registry, nomination_queue);
+            draw_source_draft_column(&mut columns[1], state, source_registry, nomination_queue);
+        });
+    }
 }
 
 fn draw_source_registry_column(
@@ -1246,9 +1324,12 @@ fn draw_source_registry_column(
             );
         });
         ui.horizontal(|ui| {
-            ui.label("Search");
-            ui.text_edit_singleline(&mut state.source_search);
-            if ui.small_button("New Draft").clicked() {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.source_search)
+                    .desired_width((ui.available_width() - 92.0).max(120.0))
+                    .hint_text("Search title, publisher, id, or URL"),
+            );
+            if ui.button("New Draft").clicked() {
                 state.selected_source_key = None;
                 state.source_draft = SourceDraftState::default();
                 state.source_status_message = None;
@@ -1289,16 +1370,17 @@ fn draw_source_registry_column(
                                 "{}\n{} @ {}",
                                 entry.title, entry.source_id.0, entry.revision.0
                             );
+                            let button_width = (ui.available_width() - 56.0).max(120.0);
                             if ui
                                 .add_sized(
-                                    [ui.available_width() - 44.0, 36.0],
-                                    egui::Button::new(label).selected(selected),
+                                    [button_width, 44.0],
+                                    egui::Button::new(label).selected(selected).wrap(),
                                 )
                                 .clicked()
                             {
                                 state.selected_source_key = Some(key.clone());
                             }
-                            if ui.small_button("Load").clicked() {
+                            if ui.button("Load").clicked() {
                                 state.selected_source_key = Some(key.clone());
                                 state.source_draft.load_from_entry(entry);
                                 state.source_status_message =
@@ -1307,16 +1389,9 @@ fn draw_source_registry_column(
                             }
                         });
                         ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} / {} / {}",
-                                    source_tier_label(entry.tier),
-                                    source_license_label(entry.license),
-                                    source_status_label(&entry.status)
-                                ))
-                                .small()
-                                .weak(),
-                            );
+                            source_chip(ui, source_tier_label(entry.tier));
+                            source_chip(ui, source_license_label(entry.license));
+                            source_chip(ui, source_status_label(&entry.status));
                             if let Some(url) = &entry.canonical_url {
                                 ui.hyperlink_to("open", url);
                             }
@@ -1412,6 +1487,11 @@ fn draw_source_registry_column(
     });
 }
 
+fn source_chip(ui: &mut egui::Ui, label: &str) {
+    let text = egui::RichText::new(label).small().weak();
+    ui.label(text);
+}
+
 fn draw_source_draft_column(
     ui: &mut egui::Ui,
     state: &mut MaterialsWindowState,
@@ -1436,9 +1516,10 @@ fn draw_source_draft_column(
         );
 
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label("Template");
+        form_grid("material_source_template_grid", ui, |ui| {
+            form_label(ui, "Template");
             egui::ComboBox::from_id_salt("source_preset_combo")
+                .width(ui.available_width().max(FORM_FIELD_MIN_WIDTH))
                 .selected_text(
                     SOURCE_PRESET_NAMES
                         .get(state.source_draft.preset_idx)
@@ -1461,34 +1542,41 @@ fn draw_source_draft_column(
                 ));
                 state.source_status_is_error = false;
             }
+            ui.end_row();
         });
 
         ui.add_space(6.0);
         egui::ScrollArea::vertical()
             .id_salt("material_source_draft")
             .show(ui, |ui| {
-                egui::Grid::new("material_source_draft_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Source ID");
-                        ui.text_edit_singleline(&mut state.source_draft.source_id);
+                form_grid("material_source_draft_grid", ui, |ui| {
+                        form_label(ui, "Source ID");
+                        full_width_text_edit(
+                            ui,
+                            &mut state.source_draft.source_id,
+                            "provider.asset_or_document",
+                        );
                         ui.end_row();
 
-                        ui.label("Revision");
-                        ui.text_edit_singleline(&mut state.source_draft.revision);
+                        form_label(ui, "Revision");
+                        full_width_text_edit(ui, &mut state.source_draft.revision, "2026.05");
                         ui.end_row();
 
-                        ui.label("Title");
-                        ui.text_edit_singleline(&mut state.source_draft.title);
+                        form_label(ui, "Title");
+                        full_width_text_edit(ui, &mut state.source_draft.title, "Source title");
                         ui.end_row();
 
-                        ui.label("Publisher");
-                        ui.text_edit_singleline(&mut state.source_draft.publisher);
+                        form_label(ui, "Publisher");
+                        full_width_text_edit(
+                            ui,
+                            &mut state.source_draft.publisher,
+                            "Publisher or provider",
+                        );
                         ui.end_row();
 
-                        ui.label("Tier");
+                        form_label(ui, "Tier");
                         egui::ComboBox::from_id_salt("material_source_tier")
+                            .width(ui.available_width().max(FORM_FIELD_MIN_WIDTH))
                             .selected_text(source_tier_name(state.source_draft.tier_idx))
                             .show_ui(ui, |ui| {
                                 for (idx, (label, _)) in SOURCE_TIER_OPTIONS.iter().enumerate() {
@@ -1498,11 +1586,12 @@ fn draw_source_draft_column(
                                         *label,
                                     );
                                 }
-                            });
+                        });
                         ui.end_row();
 
-                        ui.label("License");
+                        form_label(ui, "License");
                         egui::ComboBox::from_id_salt("material_source_license")
+                            .width(ui.available_width().max(FORM_FIELD_MIN_WIDTH))
                             .selected_text(source_license_name(state.source_draft.license_idx))
                             .show_ui(ui, |ui| {
                                 for (idx, (label, _)) in SOURCE_LICENSE_OPTIONS.iter().enumerate()
@@ -1513,41 +1602,50 @@ fn draw_source_draft_column(
                                         *label,
                                     );
                                 }
-                            });
+                        });
                         ui.end_row();
 
-                        ui.label("Jurisdiction");
-                        ui.text_edit_singleline(&mut state.source_draft.jurisdiction);
+                        form_label(ui, "Jurisdiction");
+                        full_width_text_edit(
+                            ui,
+                            &mut state.source_draft.jurisdiction,
+                            "Optional jurisdiction tag",
+                        );
                         ui.end_row();
 
-                        ui.label("Canonical URL");
-                        ui.text_edit_singleline(&mut state.source_draft.canonical_url);
+                        form_label(ui, "Canonical URL");
+                        full_width_text_edit(
+                            ui,
+                            &mut state.source_draft.canonical_url,
+                            "https://...",
+                        );
                         ui.end_row();
                     });
 
                 ui.add_space(6.0);
                 ui.label("Metadata JSON");
-                ui.add(
-                    egui::TextEdit::multiline(&mut state.source_draft.metadata_json)
-                        .desired_rows(7)
-                        .code_editor()
-                        .hint_text("{\n  \"provider\": \"ambientcg\",\n  \"asset_id\": \"\"\n}"),
+                full_width_multiline(
+                    ui,
+                    &mut state.source_draft.metadata_json,
+                    7,
+                    "{\n  \"provider\": \"ambientcg\",\n  \"asset_id\": \"\"\n}",
+                    true,
                 );
 
                 ui.add_space(6.0);
                 ui.label("Justification / import notes");
-                ui.add(
-                    egui::TextEdit::multiline(&mut state.source_draft.justification)
-                        .desired_rows(4)
-                        .hint_text(
-                            "Why this source should be imported, promoted, or preserved in the project.",
-                        ),
+                full_width_multiline(
+                    ui,
+                    &mut state.source_draft.justification,
+                    4,
+                    "Why this source should be imported, promoted, or preserved in the project.",
+                    false,
                 );
 
                 let tier = source_tier_by_idx(state.source_draft.tier_idx);
                 let can_register_directly = matches!(tier, SourceTier::Project | SourceTier::AdHoc);
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let register_response = ui.add_enabled(
                         can_register_directly,
                         egui::Button::new("Register Project Source"),
@@ -1824,66 +1922,63 @@ fn draw_textures_tab(
     egui::ScrollArea::vertical()
         .id_salt("mat_textures")
         .show(ui, |ui| {
-            egui::Grid::new("mat_tex_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    texture_row(
-                        ui,
-                        contexts,
-                        &mut state.preview_texture_handles,
-                        asset_server,
-                        texture_registry,
-                        images,
-                        "Base Color",
-                        &mut state.base_color_tex,
-                        &mut state.dirty,
-                    );
-                    texture_row(
-                        ui,
-                        contexts,
-                        &mut state.preview_texture_handles,
-                        asset_server,
-                        texture_registry,
-                        images,
-                        "Normal Map",
-                        &mut state.normal_map_tex,
-                        &mut state.dirty,
-                    );
-                    texture_row(
-                        ui,
-                        contexts,
-                        &mut state.preview_texture_handles,
-                        asset_server,
-                        texture_registry,
-                        images,
-                        "Metallic/Roughness",
-                        &mut state.metallic_roughness_tex,
-                        &mut state.dirty,
-                    );
-                    texture_row(
-                        ui,
-                        contexts,
-                        &mut state.preview_texture_handles,
-                        asset_server,
-                        texture_registry,
-                        images,
-                        "Emissive",
-                        &mut state.emissive_tex,
-                        &mut state.dirty,
-                    );
-                    texture_row(
-                        ui,
-                        contexts,
-                        &mut state.preview_texture_handles,
-                        asset_server,
-                        texture_registry,
-                        images,
-                        "Occlusion",
-                        &mut state.occlusion_tex,
-                        &mut state.dirty,
-                    );
-                });
+            form_grid("mat_tex_grid", ui, |ui| {
+                texture_row(
+                    ui,
+                    contexts,
+                    &mut state.preview_texture_handles,
+                    asset_server,
+                    texture_registry,
+                    images,
+                    "Base Color",
+                    &mut state.base_color_tex,
+                    &mut state.dirty,
+                );
+                texture_row(
+                    ui,
+                    contexts,
+                    &mut state.preview_texture_handles,
+                    asset_server,
+                    texture_registry,
+                    images,
+                    "Normal Map",
+                    &mut state.normal_map_tex,
+                    &mut state.dirty,
+                );
+                texture_row(
+                    ui,
+                    contexts,
+                    &mut state.preview_texture_handles,
+                    asset_server,
+                    texture_registry,
+                    images,
+                    "Metallic/Roughness",
+                    &mut state.metallic_roughness_tex,
+                    &mut state.dirty,
+                );
+                texture_row(
+                    ui,
+                    contexts,
+                    &mut state.preview_texture_handles,
+                    asset_server,
+                    texture_registry,
+                    images,
+                    "Emissive",
+                    &mut state.emissive_tex,
+                    &mut state.dirty,
+                );
+                texture_row(
+                    ui,
+                    contexts,
+                    &mut state.preview_texture_handles,
+                    asset_server,
+                    texture_registry,
+                    images,
+                    "Occlusion",
+                    &mut state.occlusion_tex,
+                    &mut state.dirty,
+                );
+            });
         });
 }
 
@@ -1900,7 +1995,7 @@ fn texture_row(
     slot: &mut Option<TextureRef>,
     dirty: &mut bool,
 ) {
-    ui.label(label);
+    form_label(ui, label);
     ui.horizontal(|ui| {
         if let Some(texture) = slot.as_ref() {
             draw_texture_thumbnail(
@@ -1930,18 +2025,23 @@ fn texture_row(
             .map(|t| t.label(Some(texture_registry)).to_string())
             .unwrap_or_else(|| "(none)".to_string());
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new(&current).weak());
+            ui.add_sized(
+                [ui.available_width(), 0.0],
+                egui::Label::new(egui::RichText::new(&current).weak()).wrap(),
+            );
 
-            if ui.small_button("Upload").clicked() {
-                if let Some(tex) = pick_texture_file() {
-                    *slot = Some(tex);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Upload").clicked() {
+                    if let Some(tex) = pick_texture_file() {
+                        *slot = Some(tex);
+                        *dirty = true;
+                    }
+                }
+                if slot.is_some() && ui.button("Clear").clicked() {
+                    *slot = None;
                     *dirty = true;
                 }
-            }
-            if slot.is_some() && ui.small_button("✕").clicked() {
-                *slot = None;
-                *dirty = true;
-            }
+            });
         });
     });
     ui.end_row();
