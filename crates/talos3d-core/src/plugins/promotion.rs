@@ -31,6 +31,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::capability_registry::{AssemblyMemberRoleDescriptor, DuplicateRoleGroupingPolicy};
 use crate::plugins::{
     definition_authoring::{DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry},
     identity::ElementId,
@@ -722,6 +723,10 @@ pub struct SemanticAssemblyPromotionInput {
     /// keeps it explicit so the adapter remains deterministic and
     /// unit-testable.
     pub relation_classification: RelationClassificationRules,
+    /// Caller-provided role descriptors from the capability registry.
+    /// PP-108 uses these to preview duplicate-role grouping decisions
+    /// before actual collection-slot emission lands.
+    pub role_descriptors: Vec<AssemblyMemberRoleDescriptor>,
     /// Original assembly-level parameters carried into the promoted
     /// Definition's provenance (PP-A2DB-1 trivially passes them
     /// through; rich parameter inference lands later).
@@ -805,10 +810,33 @@ pub struct SemanticGraphMigrationDiff {
     /// the relation descriptor. PP-A2DB-2.
     #[serde(default)]
     pub preserved_relations: Vec<PreservedRelation>,
+    /// PP-108 preview decisions for duplicate member roles. This is
+    /// intentionally separate from the emitted child slots: the
+    /// current adapter still emits stable indexed slots, while the
+    /// diff tells UI/agents which roles are descriptor-backed
+    /// collection-slot candidates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_role_grouping_decisions: Vec<DuplicateRoleGroupingDecision>,
     /// Free-form preview warnings (capability projection outdated,
     /// duplicate role indexed, etc.).
     #[serde(default)]
     pub warnings: Vec<MigrationWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DuplicateRoleGroupingDecision {
+    pub role: String,
+    pub count: usize,
+    pub decision: DuplicateRoleSlotDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_vocabulary_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateRoleSlotDecision {
+    IndexedSingleSlots,
+    CollectionSlotCandidate,
 }
 
 /// Where one endpoint of a `SemanticRelationTemplate` resolves inside
@@ -1123,12 +1151,38 @@ impl SemanticAssemblyPromotionSource {
         let mut member_slot_ids: Vec<(ElementId, String)> = Vec::with_capacity(input.members.len());
         let mut warnings: Vec<MigrationWarning> = Vec::new();
         let mut role_role_counts: HashMap<String, usize> = HashMap::new();
+        let role_descriptor_by_role: HashMap<&str, &AssemblyMemberRoleDescriptor> = input
+            .role_descriptors
+            .iter()
+            .map(|descriptor| (descriptor.role.as_str(), descriptor))
+            .collect();
+        let mut duplicate_role_grouping_decisions = Vec::new();
 
         for member in &input.members {
             *role_role_counts.entry(member.role.clone()).or_insert(0) += 1;
         }
         for (role, count) in &role_role_counts {
             if *count > 1 {
+                let role_descriptor = role_descriptor_by_role.get(role.as_str()).copied();
+                let decision = match role_descriptor
+                    .map(|descriptor| descriptor.duplicate_role_policy)
+                    .unwrap_or_default()
+                {
+                    DuplicateRoleGroupingPolicy::IndexedSingleSlots => {
+                        DuplicateRoleSlotDecision::IndexedSingleSlots
+                    }
+                    DuplicateRoleGroupingPolicy::CollectionSlotAllowed => {
+                        DuplicateRoleSlotDecision::CollectionSlotCandidate
+                    }
+                };
+                duplicate_role_grouping_decisions.push(DuplicateRoleGroupingDecision {
+                    role: role.clone(),
+                    count: *count,
+                    decision,
+                    role_vocabulary_version: role_descriptor
+                        .and_then(|descriptor| descriptor.role_vocabulary_version.clone())
+                        .or_else(|| input.capability.role_vocabulary_version.clone()),
+                });
                 warnings.push(MigrationWarning::DuplicateRoleIndexed {
                     role: role.clone(),
                     count: *count,
@@ -1440,6 +1494,7 @@ impl SemanticAssemblyPromotionSource {
             orphaned_memberships: Vec::new(),
             candidate_relation_templates,
             preserved_relations,
+            duplicate_role_grouping_decisions,
             warnings,
         };
 
@@ -2108,6 +2163,7 @@ mod tests {
             external_graph: ExternalGraph::default(),
             internal_relations: Vec::new(),
             relation_classification: RelationClassificationRules::default(),
+            role_descriptors: Vec::new(),
             source_parameters: serde_json::Value::Null,
             source_label: "Test Assembly".into(),
         }
@@ -2239,6 +2295,51 @@ mod tests {
             .filter(|w| matches!(w, MigrationWarning::DuplicateRoleIndexed { .. }))
             .count();
         assert_eq!(warning_count, 1);
+        assert_eq!(
+            out.migration_diff.duplicate_role_grouping_decisions,
+            vec![DuplicateRoleGroupingDecision {
+                role: "wall".into(),
+                count: 3,
+                decision: DuplicateRoleSlotDecision::IndexedSingleSlots,
+                role_vocabulary_version: Some("v1".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn assembly_adapter_reports_collection_slot_candidate_for_descriptor_backed_duplicate_role() {
+        let adapter = SemanticAssemblyPromotionSource {
+            name: "Wall Trio".into(),
+            replace_source: false,
+            provenance: PromotionProvenance::default(),
+        };
+        let mut input = assembly_input_for(vec![
+            member(1, "stud", AssemblyMemberKind::AuthoredEntity, None),
+            member(2, "stud", AssemblyMemberKind::AuthoredEntity, None),
+            member(3, "plate", AssemblyMemberKind::AuthoredEntity, None),
+        ]);
+        input.role_descriptors = vec![AssemblyMemberRoleDescriptor {
+            role: "stud".into(),
+            duplicate_role_policy: DuplicateRoleGroupingPolicy::CollectionSlotAllowed,
+            role_vocabulary_version: Some("framing-v2".into()),
+        }];
+
+        let out = adapter.build_plan_and_diff(input).unwrap();
+        let slots = match &out.plan.output_shape {
+            PromotionOutputShape::Compound { child_slots } => child_slots,
+            other => panic!("expected compound plan, got {other:?}"),
+        };
+        let slot_ids: Vec<&str> = slots.iter().map(|s| s.slot_id.as_str()).collect();
+        assert_eq!(slot_ids, vec!["stud_1", "stud_2", "plate"]);
+        assert_eq!(
+            out.migration_diff.duplicate_role_grouping_decisions,
+            vec![DuplicateRoleGroupingDecision {
+                role: "stud".into(),
+                count: 2,
+                decision: DuplicateRoleSlotDecision::CollectionSlotCandidate,
+                role_vocabulary_version: Some("framing-v2".into()),
+            }]
+        );
     }
 
     #[test]
@@ -2562,6 +2663,7 @@ mod tests {
                 parameters: serde_json::Value::Null,
                 classification: None,
             }],
+            duplicate_role_grouping_decisions: Vec::new(),
             warnings: Vec::new(),
         };
         let json = serde_json::to_string(&diff).unwrap();
