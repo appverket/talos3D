@@ -22,6 +22,7 @@ pub mod drafting_sheet;
 pub mod drawing_export;
 pub mod egui_chrome;
 pub mod entity_labels;
+pub mod export_fidelity;
 pub mod face_edit;
 pub mod grid;
 pub mod grounding_gate;

@@ -3423,6 +3423,20 @@ pub(super) struct ExportDraftingSheetRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ExportFidelityRequest {
+    /// Optional surface id, e.g. drawing.png, drawing.pdf, drawing.svg,
+    /// drawing.dxf, or definition_library.json. Omit with `path` to infer from
+    /// extension; omit both to list every known export surface.
+    #[serde(default)]
+    pub(super) surface: Option<String>,
+    /// Optional file path whose extension is used to infer the export surface.
+    #[serde(default)]
+    pub(super) path: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PlaceSheetDimensionRequest {
     /// Paper-mm endpoint A in the current sheet's 2D frame.
     pub a: [f32; 2],
@@ -6433,6 +6447,40 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(serde_json::json!({ "path": path }))
+    }
+
+    #[tool(
+        name = "export.fidelity.describe",
+        description = "Describe what an export surface preserves, degrades, or omits. Accepts optional surface or path; omit both to list all known manifests."
+    )]
+    pub(super) async fn export_fidelity_describe_tool(
+        &self,
+        Parameters(params): Parameters<ExportFidelityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let manifests = if let Some(surface) = params.surface {
+            vec![
+                crate::plugins::export_fidelity::export_fidelity_manifest_for_surface(&surface)
+                    .ok_or_else(|| {
+                        McpError::invalid_params(
+                            format!("unknown export fidelity surface: {surface}"),
+                            None,
+                        )
+                    })?,
+            ]
+        } else if let Some(path) = params.path {
+            vec![
+                crate::plugins::export_fidelity::export_fidelity_manifest_for_path(&path)
+                    .ok_or_else(|| {
+                        McpError::invalid_params(
+                            format!("could not infer export fidelity surface from path: {path}"),
+                            None,
+                        )
+                    })?,
+            ]
+        } else {
+            crate::plugins::export_fidelity::all_export_fidelity_manifests()
+        };
+        json_tool_result(manifests)
     }
 
     #[tool(
