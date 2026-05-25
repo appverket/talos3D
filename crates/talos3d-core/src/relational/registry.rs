@@ -754,10 +754,7 @@ mod tests {
     fn representation_evaluates_sizes_from_default_drivers() {
         let ty = repr_type();
         let overrides = BTreeMap::new();
-        let members = ty
-            .evaluate_representation(&overrides)
-            .unwrap()
-            .unwrap();
+        let members = ty.evaluate_representation(&overrides).unwrap().unwrap();
 
         // box_a: size = [1000, 500, 100], translate = [0, 0, 0]
         let a = &members[0];
@@ -773,10 +770,7 @@ mod tests {
     fn representation_evaluates_translation_from_driver() {
         let ty = repr_type();
         let overrides = BTreeMap::new();
-        let members = ty
-            .evaluate_representation(&overrides)
-            .unwrap()
-            .unwrap();
+        let members = ty.evaluate_representation(&overrides).unwrap().unwrap();
 
         // box_b: translated X = w = 1000 mm
         let b = &members[1];
@@ -790,12 +784,15 @@ mod tests {
         let ty = repr_type();
         let mut overrides = BTreeMap::new();
         overrides.insert("w".to_string(), Value::from(2000.0));
-        let members = ty
-            .evaluate_representation(&overrides)
-            .unwrap()
-            .unwrap();
-        assert!((members[0].size[0] - 2000.0).abs() < 1e-6, "width = override w");
-        assert!((members[1].translate[0] - 2000.0).abs() < 1e-6, "tx = override w");
+        let members = ty.evaluate_representation(&overrides).unwrap().unwrap();
+        assert!(
+            (members[0].size[0] - 2000.0).abs() < 1e-6,
+            "width = override w"
+        );
+        assert!(
+            (members[1].translate[0] - 2000.0).abs() < 1e-6,
+            "tx = override w"
+        );
     }
 
     #[test]
@@ -845,8 +842,14 @@ mod tests {
             .expect("type has a representation");
         assert!(result.is_err(), "expected Err on unresolvable expr");
         let msg = result.unwrap_err();
-        assert!(msg.contains("bad_box"), "error should name the member label: {msg}");
-        assert!(msg.contains("size[1]"), "error should name the failing field: {msg}");
+        assert!(
+            msg.contains("bad_box"),
+            "error should name the member label: {msg}"
+        );
+        assert!(
+            msg.contains("size[1]"),
+            "error should name the failing field: {msg}"
+        );
     }
 
     #[test]
@@ -894,9 +897,7 @@ mod tests {
             derivations: BTreeMap::new(),
             transform: TransformBindings::default(),
             public: false,
-            representation: Some(ParametricRepresentation {
-                members: vec![tri],
-            }),
+            representation: Some(ParametricRepresentation { members: vec![tri] }),
         };
 
         let members = ty

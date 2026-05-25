@@ -91,6 +91,13 @@ pub fn workspace_library_subpath() -> PathBuf {
     PathBuf::from(".talos3d").join("libraries")
 }
 
+/// Canonical relative path from a workspace root to resident acquired
+/// knowledge assets. Residency here is only where bytes live; curation
+/// semantics still come from `CurationMeta.scope` (`Project`, `Org`, etc.).
+pub fn workspace_knowledge_subpath() -> PathBuf {
+    PathBuf::from(".talos3d").join("knowledge")
+}
+
 /// Marker directory that identifies a workspace root: every
 /// workspace places its Talos3D state under `.talos3d/`.
 fn workspace_marker_subpath() -> &'static Path {
@@ -101,6 +108,10 @@ fn workspace_marker_subpath() -> &'static Path {
 /// root. Pure path join; no filesystem access.
 pub fn workspace_library_root_for(workspace_root: &Path) -> PathBuf {
     workspace_root.join(workspace_library_subpath())
+}
+
+pub fn workspace_knowledge_root_for(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(workspace_knowledge_subpath())
 }
 
 /// Explicitly create `<workspace-root>/.talos3d/libraries/`.
@@ -129,6 +140,31 @@ pub fn ensure_workspace_library_root(
         message: error.to_string(),
     })?;
     Ok(library_root)
+}
+
+pub fn ensure_workspace_knowledge_root(
+    workspace_root: &Path,
+) -> Result<PathBuf, WorkspaceLibraryRootError> {
+    let marker = workspace_root.join(workspace_marker_subpath());
+    if !marker.exists() {
+        return Err(WorkspaceLibraryRootError::MissingWorkspaceMarker {
+            workspace_root: workspace_root.to_path_buf(),
+        });
+    }
+    if !marker.is_dir() {
+        return Err(WorkspaceLibraryRootError::WorkspaceMarkerIsNotDirectory {
+            marker_path: marker,
+        });
+    }
+
+    let knowledge_root = workspace_knowledge_root_for(workspace_root);
+    std::fs::create_dir_all(&knowledge_root).map_err(|error| {
+        WorkspaceLibraryRootError::CreateFailed {
+            path: knowledge_root.clone(),
+            message: error.to_string(),
+        }
+    })?;
+    Ok(knowledge_root)
 }
 
 /// Walk upward from `start_dir` (inclusive) looking for a directory
@@ -220,10 +256,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_knowledge_subpath_is_dot_talos3d_slash_knowledge() {
+        let sub = workspace_knowledge_subpath();
+        assert_eq!(sub, Path::new(".talos3d").join("knowledge"));
+    }
+
+    #[test]
     fn workspace_library_root_for_joins_the_canonical_subpath() {
         let root = Path::new("/tmp/example/workspace");
         let lib_root = workspace_library_root_for(root);
         assert_eq!(lib_root, root.join(".talos3d").join("libraries"));
+    }
+
+    #[test]
+    fn workspace_knowledge_root_for_joins_the_canonical_subpath() {
+        let root = Path::new("/tmp/example/workspace");
+        let knowledge_root = workspace_knowledge_root_for(root);
+        assert_eq!(knowledge_root, root.join(".talos3d").join("knowledge"));
     }
 
     #[test]
@@ -236,6 +285,21 @@ mod tests {
 
         assert_eq!(library_root, tmp.path().join(".talos3d").join("libraries"));
         assert!(library_root.is_dir());
+    }
+
+    #[test]
+    fn ensure_workspace_knowledge_root_creates_knowledge_under_existing_marker() {
+        let tmp = TempDir::new().expect("tempdir should be creatable");
+        fs::create_dir_all(tmp.path().join(".talos3d")).expect("marker dir creatable");
+
+        let knowledge_root =
+            ensure_workspace_knowledge_root(tmp.path()).expect("knowledge root should be created");
+
+        assert_eq!(
+            knowledge_root,
+            tmp.path().join(".talos3d").join("knowledge")
+        );
+        assert!(knowledge_root.is_dir());
     }
 
     #[test]

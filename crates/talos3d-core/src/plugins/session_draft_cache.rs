@@ -245,6 +245,9 @@ mod tests {
     use super::*;
     use crate::plugins::{
         assembly_pattern_drafts::{AssemblyPatternDraftArtifact, AssemblyPatternDraftStatus},
+        knowledge_assets::{
+            default_assembly_pattern_draft_meta, default_recipe_draft_meta, KnowledgeResidency,
+        },
         recipe_drafts::{RecipeDraftArtifact, RecipeDraftParameter, RecipeDraftStatus},
         storage::{LocalFileBackend, Storage},
     };
@@ -277,6 +280,8 @@ mod tests {
             .resource_mut::<RecipeDraftRegistry>()
             .save(RecipeDraftArtifact {
                 id: String::new(),
+                meta: default_recipe_draft_meta(),
+                residency: KnowledgeResidency::SessionCache,
                 label: "Roof Recipe".into(),
                 description: "cached recipe draft".into(),
                 target_class: "roof_system".into(),
@@ -289,6 +294,8 @@ mod tests {
                 jurisdiction: Some("SE".into()),
                 gap_id: None,
                 source_passage_refs: vec!["SE/mono_truss".into()],
+                evidence_slots: Vec::new(),
+                runtime_claims: Vec::new(),
                 acquisition_context: serde_json::json!({ "source": "test" }),
                 draft_script: serde_json::json!({ "steps": [] }),
                 notes: vec!["draft".into()],
@@ -301,6 +308,8 @@ mod tests {
             .resource_mut::<AssemblyPatternDraftRegistry>()
             .save(AssemblyPatternDraftArtifact {
                 id: String::new(),
+                meta: default_assembly_pattern_draft_meta(),
+                residency: KnowledgeResidency::SessionCache,
                 label: "Wall Pattern".into(),
                 description: "cached pattern draft".into(),
                 target_types: vec!["wall_assembly".into()],
@@ -314,6 +323,8 @@ mod tests {
                 jurisdiction: Some("SE".into()),
                 gap_id: None,
                 source_passage_refs: vec!["SE/wall".into()],
+                evidence_slots: Vec::new(),
+                runtime_claims: Vec::new(),
                 acquisition_context: serde_json::json!({ "source": "test" }),
                 notes: vec!["pattern".into()],
                 status: AssemblyPatternDraftStatus::Installed,

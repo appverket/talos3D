@@ -1787,7 +1787,10 @@ mod tests {
     fn composition_contract_states_reuse_hosting_and_obligations() {
         let s = COMPONENT_COMPOSITION_CONTRACT;
         // The three platform mechanisms by which detail is added.
-        assert!(s.contains("Occurrence"), "must describe reuse via Occurrences");
+        assert!(
+            s.contains("Occurrence"),
+            "must describe reuse via Occurrences"
+        );
         assert!(
             s.contains("base_definition_id"),
             "must describe derivation of family variants"
@@ -1804,7 +1807,10 @@ mod tests {
             "run_validation",
             "validate_host_fit",
         ] {
-            assert!(s.contains(tool), "composition contract must reference {tool}");
+            assert!(
+                s.contains(tool),
+                "composition contract must reference {tool}"
+            );
         }
     }
 

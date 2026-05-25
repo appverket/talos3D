@@ -3340,8 +3340,8 @@ mod trig_and_rotation_tests {
 #[cfg(test)]
 mod bounds_from_aabb_tests {
     use super::*;
-    use bevy::math::{Vec3A, Vec3};
     use crate::authored_entity::EntityBounds;
+    use bevy::math::{Vec3, Vec3A};
 
     /// Build a minimal `GlobalTransform` at the given translation (identity rotation/scale).
     fn global_transform_at(translation: Vec3) -> GlobalTransform {

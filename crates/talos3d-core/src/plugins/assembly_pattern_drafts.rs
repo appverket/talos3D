@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::capability_registry::{
     AssemblyPatternDescriptor, AssemblyPatternLayerDescriptor, AssemblyPatternRelationRule,
 };
+use crate::curation::{CurationMeta, Scope};
+use crate::plugins::knowledge_assets::{
+    default_assembly_pattern_draft_meta, draft_meta, EvidenceSlot, KnowledgeResidency,
+    RuntimeCapabilityClaim, ASSEMBLY_PATTERN_DRAFT_KIND,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
@@ -50,6 +55,10 @@ impl AssemblyPatternDraftStatus {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct AssemblyPatternDraftArtifact {
     pub id: String,
+    #[serde(default = "default_assembly_pattern_draft_meta")]
+    pub meta: CurationMeta,
+    #[serde(default)]
+    pub residency: KnowledgeResidency,
     pub label: String,
     pub description: String,
     pub target_types: Vec<String>,
@@ -63,6 +72,10 @@ pub struct AssemblyPatternDraftArtifact {
     pub jurisdiction: Option<String>,
     pub gap_id: Option<String>,
     pub source_passage_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_slots: Vec<EvidenceSlot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_claims: Vec<RuntimeCapabilityClaim>,
     pub acquisition_context: serde_json::Value,
     pub notes: Vec<String>,
     pub status: AssemblyPatternDraftStatus,
@@ -109,6 +122,16 @@ impl AssemblyPatternDraftRegistry {
         if draft.id.trim().is_empty() {
             draft.id = format!("assembly-pattern-draft-{}", self.next_serial);
             self.next_serial += 1;
+        }
+
+        if draft.meta.id.as_str().is_empty() {
+            draft.meta = existing
+                .as_ref()
+                .map(|entry| entry.meta.clone())
+                .unwrap_or_else(|| assembly_pattern_draft_meta_for(&draft, Scope::Project));
+        }
+        if draft.meta.id.as_str().is_empty() {
+            draft.meta = assembly_pattern_draft_meta_for(&draft, Scope::Project);
         }
 
         draft.created_at = existing
@@ -160,6 +183,14 @@ impl AssemblyPatternDraftRegistry {
         self.entries.values().cloned().collect()
     }
 
+    pub fn project_assets(&self) -> Vec<AssemblyPatternDraftArtifact> {
+        self.entries
+            .values()
+            .filter(|entry| entry.meta.scope == Scope::Project)
+            .cloned()
+            .collect()
+    }
+
     pub fn restore(&mut self, drafts: Vec<AssemblyPatternDraftArtifact>) {
         self.entries.clear();
         self.next_serial = 0;
@@ -193,6 +224,24 @@ impl AssemblyPatternDraftRegistry {
             .map(AssemblyPatternDraftArtifact::to_descriptor)
             .collect()
     }
+}
+
+pub fn assembly_pattern_draft_asset_id(id: &str) -> String {
+    format!("{ASSEMBLY_PATTERN_DRAFT_KIND}/{id}")
+}
+
+pub fn assembly_pattern_draft_meta_for(
+    draft: &AssemblyPatternDraftArtifact,
+    scope: Scope,
+) -> CurationMeta {
+    draft_meta(
+        assembly_pattern_draft_asset_id(&draft.id),
+        ASSEMBLY_PATTERN_DRAFT_KIND,
+        scope,
+        draft.jurisdiction.as_deref(),
+        draft.gap_id.as_deref(),
+        None,
+    )
 }
 
 pub struct AssemblyPatternDraftPlugin;
