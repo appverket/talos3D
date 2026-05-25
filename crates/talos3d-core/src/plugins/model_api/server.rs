@@ -2446,6 +2446,71 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_list_workspace_definition_libraries(
+        &self,
+        request: Value,
+    ) -> ApiResult<Vec<DefinitionLibraryEntry>> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListWorkspaceDefinitionLibraries { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_create_workspace_definition_library(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionLibraryEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::CreateWorkspaceDefinitionLibrary { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_import_workspace_definition_draft(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionLibraryEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ImportWorkspaceDefinitionDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_workspace_definition_draft(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionLibraryEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateWorkspaceDefinitionDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_delete_workspace_definition_draft(
+        &self,
+        request: Value,
+    ) -> ApiResult<DefinitionLibraryEntry> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::DeleteWorkspaceDefinitionDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_instantiate_definition(
         &self,
         request: Value,
@@ -7532,6 +7597,81 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(path)
+    }
+
+    #[tool(
+        name = "definition.library.workspace.list",
+        description = "List workspace definition libraries under an existing .talos3d/libraries root. Accepts workspace_root or start_dir."
+    )]
+    pub(super) async fn definition_library_workspace_list_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entries = self
+            .request_list_workspace_definition_libraries(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entries)
+    }
+
+    #[tool(
+        name = "definition.library.workspace.create",
+        description = "Create a workspace definition library JSON file under an existing .talos3d/libraries root. Requires: workspace_root, name."
+    )]
+    pub(super) async fn definition_library_workspace_create_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_create_workspace_definition_library(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition.library.workspace.import_draft",
+        description = "Import a validated Definition draft into a workspace library. Requires: library_id, draft_id."
+    )]
+    pub(super) async fn definition_library_workspace_import_draft_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_import_workspace_definition_draft(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition.library.workspace.update_draft",
+        description = "Replace a workspace library draft definition with a validated Definition draft. Requires: library_id, draft_id."
+    )]
+    pub(super) async fn definition_library_workspace_update_draft_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_update_workspace_definition_draft(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
+    }
+
+    #[tool(
+        name = "definition.library.workspace.delete_draft",
+        description = "Delete a draft definition from a workspace library. Requires: library_id, definition_id."
+    )]
+    pub(super) async fn definition_library_workspace_delete_draft_tool(
+        &self,
+        Parameters(json): Parameters<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let entry = self
+            .request_delete_workspace_definition_draft(json)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(entry)
     }
 
     #[tool(
