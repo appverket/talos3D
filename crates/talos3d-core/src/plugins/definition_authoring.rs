@@ -1389,6 +1389,42 @@ fn ensure_local_parameter<'a>(
         .ok_or_else(|| format!("Parameter '{}' not found", name))
 }
 
+fn ensure_local_child_slot<'a>(
+    definition: &'a mut Definition,
+    effective_before: &Definition,
+    slot_id: &str,
+) -> Result<&'a mut ChildSlotDef, String> {
+    let has_local = definition
+        .compound
+        .as_ref()
+        .map(|compound| {
+            compound
+                .child_slots
+                .iter()
+                .any(|slot| slot.slot_id == slot_id)
+        })
+        .unwrap_or(false);
+    if !has_local {
+        let slot = effective_before
+            .compound
+            .as_ref()
+            .and_then(|compound| {
+                compound
+                    .child_slots
+                    .iter()
+                    .find(|slot| slot.slot_id == slot_id)
+                    .cloned()
+            })
+            .ok_or_else(|| format!("Child slot '{}' not found", slot_id))?;
+        ensure_local_compound(definition).child_slots.push(slot);
+    }
+    ensure_local_compound(definition)
+        .child_slots
+        .iter_mut()
+        .find(|slot| slot.slot_id == slot_id)
+        .ok_or_else(|| format!("Child slot '{}' not found", slot_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1484,40 +1520,4 @@ mod tests {
             "definition_browser.rs must not contain \"Use Glass Material\" (PP-DBUX5 agreement)"
         );
     }
-}
-
-fn ensure_local_child_slot<'a>(
-    definition: &'a mut Definition,
-    effective_before: &Definition,
-    slot_id: &str,
-) -> Result<&'a mut ChildSlotDef, String> {
-    let has_local = definition
-        .compound
-        .as_ref()
-        .map(|compound| {
-            compound
-                .child_slots
-                .iter()
-                .any(|slot| slot.slot_id == slot_id)
-        })
-        .unwrap_or(false);
-    if !has_local {
-        let slot = effective_before
-            .compound
-            .as_ref()
-            .and_then(|compound| {
-                compound
-                    .child_slots
-                    .iter()
-                    .find(|slot| slot.slot_id == slot_id)
-                    .cloned()
-            })
-            .ok_or_else(|| format!("Child slot '{}' not found", slot_id))?;
-        ensure_local_compound(definition).child_slots.push(slot);
-    }
-    ensure_local_compound(definition)
-        .child_slots
-        .iter_mut()
-        .find(|slot| slot.slot_id == slot_id)
-        .ok_or_else(|| format!("Child slot '{}' not found", slot_id))
 }

@@ -486,13 +486,13 @@ pub fn sync_preview_to_target(world: &mut World) {
     };
 
     // ── Update the resource ───────────────────────────────────────────────────
-    let mut scene = world.resource_mut::<DefinitionPreviewScene>();
-    scene.current_definition_id = target_definition_id;
-    scene.occurrence_root = new_root;
-    scene.current_registry_signature = registry_signature;
-    let camera_entity = scene.camera_entity;
-    let camera_distance_scale = scene.camera_distance_scale;
-    drop(scene);
+    let (camera_entity, camera_distance_scale) = {
+        let mut scene = world.resource_mut::<DefinitionPreviewScene>();
+        scene.current_definition_id = target_definition_id;
+        scene.occurrence_root = new_root;
+        scene.current_registry_signature = registry_signature;
+        (scene.camera_entity, scene.camera_distance_scale)
+    };
     frame_preview_camera(world, camera_entity, camera_distance_scale);
 }
 
@@ -589,7 +589,7 @@ pub fn draw_preview_slot_highlight(
     let hovered_slot_id = state
         .hovered_node
         .as_ref()
-        .and_then(|n| selected_slot_id_from_node(n));
+        .and_then(selected_slot_id_from_node);
 
     for (part, extrusion, rotation) in &preview_parts {
         let rot = rotation.copied().unwrap_or_default().0;
@@ -609,15 +609,10 @@ pub fn draw_preview_slot_highlight(
 
         // Hover pulse — only when the hovered slot differs from the selection.
         if let Some(hov_id) = &hovered_slot_id {
-            if Some(hov_id.as_str()) != selected_slot_id.as_deref() {
-                if slot_path_matches(&part.slot_path, hov_id) {
-                    draw_extrusion_wireframe_preview(
-                        &mut gizmos,
-                        extrusion,
-                        rot,
-                        PREVIEW_HOVER_COLOR,
-                    );
-                }
+            if Some(hov_id.as_str()) != selected_slot_id.as_deref()
+                && slot_path_matches(&part.slot_path, hov_id)
+            {
+                draw_extrusion_wireframe_preview(&mut gizmos, extrusion, rot, PREVIEW_HOVER_COLOR);
             }
         }
     }
@@ -678,8 +673,8 @@ pub fn resolve_preview_click(
             continue;
         };
         let aabb = Aabb3d {
-            min: bounds.min.into(),
-            max: bounds.max.into(),
+            min: bounds.min,
+            max: bounds.max,
         };
         if let Some(dist) = ray_aabb_intersection(ray.origin, *ray.direction, aabb) {
             if closest.is_none_or(|(best, _)| dist < best) {
@@ -1047,10 +1042,12 @@ mod tests {
     fn preview_element_id_sentinel_is_out_of_normal_range() {
         // Normal IDs are allocated from 0 upward.  The sentinel must be well
         // above any value a real document would reach.
-        assert!(
-            PREVIEW_ELEMENT_ID_SENTINEL.0 > 1_000_000,
-            "sentinel must be far above normal element id range"
-        );
+        const {
+            assert!(
+                PREVIEW_ELEMENT_ID_SENTINEL.0 > 1_000_000,
+                "sentinel must be far above normal element id range"
+            );
+        }
     }
 
     #[test]

@@ -1522,9 +1522,7 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
                                 );
                                 let btn = ui
                                     .small_button("↑ Promote to definition default")
-                                    .on_hover_text(format!(
-                                        "Make this override the new default for every occurrence of this definition"
-                                    ));
+                                    .on_hover_text("Make this override the new default for every occurrence of this definition".to_string());
                                 if btn.clicked() {
                                     crate::plugins::command_registry::queue_command_invocation_resource(
                                         &mut data.pending_command_invocations,
@@ -1960,7 +1958,7 @@ fn draw_property_panel_semantic_header(
                             d.domain_data
                                 .get("architectural")
                                 .and_then(|a| a.get("material_assignment"))
-                                .and_then(|ma| material_assignment_from_value(ma))
+                                .and_then(material_assignment_from_value)
                                 .and_then(|a| a.render_material_id(None))
                         });
 

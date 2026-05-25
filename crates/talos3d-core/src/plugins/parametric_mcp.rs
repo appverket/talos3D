@@ -54,6 +54,7 @@ pub struct ParametricInstanceRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Default)]
 pub struct CreateParametricRequest {
     /// ID of a registered parametric type (from `parametric.list_types`).
     /// May be omitted when `representation` is provided (inline dynamic authoring).
@@ -193,7 +194,7 @@ pub fn world_create(
                 driver_units_map.insert(name.clone(), Unit::Dimensionless);
             }
         }
-        for (name, _) in &req.derivations {
+        for name in req.derivations.keys() {
             params = params.derived(name);
         }
 
@@ -982,20 +983,5 @@ mod tests {
             public_types.iter().all(|t| !t.id.starts_with("ephemeral.")),
             "ephemeral types must not appear in list_types"
         );
-    }
-}
-
-impl Default for CreateParametricRequest {
-    fn default() -> Self {
-        Self {
-            type_id: String::new(),
-            overrides: BTreeMap::new(),
-            placement: None,
-            representation: None,
-            defaults: BTreeMap::new(),
-            driver_units: BTreeMap::new(),
-            derivations: BTreeMap::new(),
-            label: None,
-        }
     }
 }

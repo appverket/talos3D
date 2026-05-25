@@ -620,7 +620,9 @@ fn pdf_document(rgb: &RgbImage) -> Result<Vec<u8>, String> {
         &mut out,
         &mut offsets,
         2,
-        format!("<< /Type /Pages /Kids [3 0 R] /Count 1 >>").as_bytes(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+            .to_string()
+            .as_bytes(),
     )?;
     write_pdf_object(
         &mut out,
@@ -676,7 +678,7 @@ fn write_pdf_object(
     content: &[u8],
 ) -> Result<(), String> {
     offsets.push(out.len());
-    write!(out, "{object_id} 0 obj\n").map_err(|error| error.to_string())?;
+    writeln!(out, "{object_id} 0 obj").map_err(|error| error.to_string())?;
     out.extend_from_slice(content);
     out.extend_from_slice(b"\nendobj\n");
     Ok(())

@@ -117,6 +117,7 @@ fn mark_terrain_surfaces_dirty_on_curve_changes(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn regenerate_terrain_meshes(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -384,6 +385,7 @@ pub fn volume_above_datum(mesh: &TriangleMesh, datum_y: f32) -> Option<f64> {
     Some(volume)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsert_terrain_mesh_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,

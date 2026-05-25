@@ -194,9 +194,7 @@ fn entity_exists(world: &World, id: ElementId) -> bool {
 }
 
 fn entity_class(world: &World, id: ElementId) -> Option<String> {
-    let Some(mut query) = world.try_query::<EntityRef>() else {
-        return None;
-    };
+    let mut query = world.try_query::<EntityRef>()?;
     for entity_ref in query.iter(world) {
         if entity_ref.get::<ElementId>().copied() != Some(id) {
             continue;

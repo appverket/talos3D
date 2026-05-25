@@ -282,8 +282,13 @@ where
     polyline.push(start);
     polyline.push(current);
 
-    for i in 1..walls.len() {
-        let (a, b) = endpoints[i];
+    for (i, (a, b)) in endpoints
+        .iter()
+        .copied()
+        .enumerate()
+        .take(walls.len())
+        .skip(1)
+    {
         let next = if dist(current, a) <= tolerance {
             b
         } else if dist(current, b) <= tolerance {
@@ -1028,7 +1033,7 @@ impl AuthoredEntityFactory for FoundationFactory {
             .get("sample_spacing")
             .and_then(Value::as_f64)
             .unwrap_or(1.0);
-        if !(sample_spacing > 0.0) {
+        if sample_spacing <= 0.0 {
             return Err("sample_spacing must be > 0".to_string());
         }
         Ok(FoundationSnapshot {

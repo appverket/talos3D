@@ -941,7 +941,7 @@ pub fn eval(
         // Project this single step's dispatch by building a tiny
         // throwaway one-step script and running it through `replay()`
         // with the dry-run dispatcher.
-        let projection = project_single_step(session, &registry, &step, &descriptor);
+        let projection = project_single_step(session, registry, &step, &descriptor);
         match projection {
             Ok(p) => {
                 dry_run = Some(p);
@@ -1710,8 +1710,10 @@ mod tests {
     #[test]
     fn step_count_quota_rejects() {
         let reg = registry_with(vec![descriptor("a.tool", false)]);
-        let mut config = ProceduralSessionConfig::default();
-        config.max_steps = 2;
+        let config = ProceduralSessionConfig {
+            max_steps: 2,
+            ..Default::default()
+        };
         let mut s = fresh_session(allowed(&["a.tool"]));
         for i in 0..2 {
             let step = EvalStep {

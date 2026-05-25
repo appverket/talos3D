@@ -3776,7 +3776,7 @@ fn draw_context_slot(
             .domain_data
             .get("architectural")
             .and_then(|a| a.get("material_assignment"))
-            .and_then(|ma| material_assignment_from_value(ma))
+            .and_then(material_assignment_from_value)
             .and_then(|a| a.render_material_id(None));
 
         draw_slot_material_chip_readonly(
@@ -4284,11 +4284,11 @@ fn technical_view_json_for_node(
             .interface
             .parameters
             .get(name)
-            .map(|p| pretty_json(p))
+            .map(pretty_json)
             .unwrap_or_else(|| "{}".to_string()),
         DefinitionEditorNode::Slot(slot_id) => compound
             .and_then(|c| c.child_slots.iter().find(|s| s.slot_id == *slot_id))
-            .map(|s| pretty_json(s))
+            .map(pretty_json)
             .unwrap_or_else(|| "{}".to_string()),
         DefinitionEditorNode::SlotParameterBinding {
             slot_id,
@@ -4300,19 +4300,19 @@ fn technical_view_json_for_node(
                     .iter()
                     .find(|b| b.target_param == *parameter_name)
             })
-            .map(|b| pretty_json(b))
+            .map(pretty_json)
             .unwrap_or_else(|| "{}".to_string()),
         DefinitionEditorNode::Anchor(anchor_id) => compound
             .and_then(|c| c.anchors.iter().find(|a| a.id == *anchor_id))
-            .map(|a| pretty_json(a))
+            .map(pretty_json)
             .unwrap_or_else(|| "{}".to_string()),
         DefinitionEditorNode::Constraint(constraint_id) => compound
             .and_then(|c| c.constraints.iter().find(|c| c.id == *constraint_id))
-            .map(|c| pretty_json(c))
+            .map(pretty_json)
             .unwrap_or_else(|| "{}".to_string()),
         DefinitionEditorNode::DerivedParameter(name) => compound
             .and_then(|c| c.derived_parameters.iter().find(|d| d.name == *name))
-            .map(|d| pretty_json(d))
+            .map(pretty_json)
             .unwrap_or_else(|| "{}".to_string()),
     }
 }
@@ -4504,7 +4504,7 @@ fn draw_assets_strip(
             .domain_data
             .get("architectural")
             .and_then(|a| a.get("material_assignment"))
-            .and_then(|ma| material_assignment_from_value(ma))
+            .and_then(material_assignment_from_value)
             .and_then(|a| a.render_material_id(None));
 
         draw_material_chip(
@@ -4537,27 +4537,26 @@ fn draw_assets_strip(
         );
 
         // "Clear material" link — only visible when a material is currently set.
-        if has_material_assignment {
-            if ui
+        if has_material_assignment
+            && ui
                 .small_button("Clear")
                 .on_hover_text("Remove the material assignment from this definition")
                 .clicked()
-            {
-                match apply_patch_to_draft(
-                    definitions,
-                    libraries,
-                    drafts,
-                    active_draft_id,
-                    DefinitionPatch::SetDomainDataMaterial { material_id: None },
-                ) {
-                    Ok(()) => {
-                        if let Some(draft) = drafts.get(active_draft_id) {
-                            state.domain_data_buffer = pretty_json(&draft.working_copy.domain_data);
-                        }
-                        status.set_feedback("Material assignment cleared".to_string(), 2.0);
+        {
+            match apply_patch_to_draft(
+                definitions,
+                libraries,
+                drafts,
+                active_draft_id,
+                DefinitionPatch::SetDomainDataMaterial { material_id: None },
+            ) {
+                Ok(()) => {
+                    if let Some(draft) = drafts.get(active_draft_id) {
+                        state.domain_data_buffer = pretty_json(&draft.working_copy.domain_data);
                     }
-                    Err(error) => status.set_feedback(error, 2.0),
+                    status.set_feedback("Material assignment cleared".to_string(), 2.0);
                 }
+                Err(error) => status.set_feedback(error, 2.0),
             }
         }
     }

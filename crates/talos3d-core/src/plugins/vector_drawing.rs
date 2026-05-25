@@ -1229,7 +1229,7 @@ pub fn drawing_to_pdf(drawing: &DrawingGeometry) -> Vec<u8> {
 
 fn write_pdf_obj(out: &mut Vec<u8>, offsets: &mut Vec<usize>, id: usize, content: &[u8]) {
     offsets.push(out.len());
-    write!(out, "{id} 0 obj\n").unwrap();
+    writeln!(out, "{id} 0 obj").unwrap();
     out.extend_from_slice(content);
     out.extend_from_slice(b"\nendobj\n");
 }
@@ -1767,7 +1767,7 @@ fn mesh_triangle_indices(mesh: &Mesh, vertex_count: usize) -> Option<Vec<u32>> {
     match mesh.indices() {
         Some(Indices::U32(values)) => Some(values.clone()),
         Some(Indices::U16(values)) => Some(values.iter().map(|v| *v as u32).collect()),
-        None if vertex_count % 3 == 0 => Some((0..vertex_count as u32).collect()),
+        None if vertex_count.is_multiple_of(3) => Some((0..vertex_count as u32).collect()),
         None => None,
     }
 }

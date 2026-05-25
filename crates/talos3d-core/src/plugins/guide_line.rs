@@ -1122,7 +1122,7 @@ fn cleanup_guide_line_tool(mut commands: Commands) {
 }
 
 fn handle_guide_line_tool(world: &mut World) {
-    let egui_wants_input = world.resource::<EguiWantsInput>().clone();
+    let egui_wants_input = *world.resource::<EguiWantsInput>();
     let just_pressed_keys: Vec<KeyCode> = world
         .resource::<ButtonInput<KeyCode>>()
         .get_just_pressed()

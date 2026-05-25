@@ -1758,7 +1758,7 @@ mod tests {
 
     fn count_entities_with(world: &mut World, target: ElementId) -> usize {
         let mut q = world.query::<&ElementId>();
-        q.iter(&world).filter(|eid| **eid == target).count()
+        q.iter(world).filter(|eid| **eid == target).count()
     }
 
     #[test]
@@ -2391,11 +2391,10 @@ mod tests {
                 .get("needs_room"),
             Some(&ExternalRelationClassification::RequiredContext),
         );
-        assert!(input
+        assert!(!input
             .relation_classification
             .by_descriptor
-            .get("ad_hoc")
-            .is_none());
+            .contains_key("ad_hoc"));
         // `default_unknown` stays None — unknown descriptors must
         // surface as warnings, not silently classify.
         assert!(input.relation_classification.default_unknown.is_none());

@@ -38,6 +38,7 @@ impl RecipeDraftStatus {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "gap_detected" => Some(Self::GapDetected),

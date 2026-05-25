@@ -44,22 +44,17 @@ const PAPER_MM_PER_WORLD_M: f32 = 20.0;
 
 // ─── Settings resource ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderTonemapping {
     None,
     Reinhard,
     ReinhardLuminance,
     AcesFitted,
+    #[default]
     AgX,
     SomewhatBoringDisplayTransform,
     TonyMcMapface,
     BlenderFilmic,
-}
-
-impl Default for RenderTonemapping {
-    fn default() -> Self {
-        Self::AgX
-    }
 }
 
 impl RenderTonemapping {
@@ -76,6 +71,7 @@ impl RenderTonemapping {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value.to_ascii_lowercase().as_str() {
             "none" => Some(Self::None),
@@ -1043,7 +1039,7 @@ fn mesh_triangle_indices(mesh: &Mesh, vertex_count: usize) -> Option<Vec<u32>> {
     match mesh.indices() {
         Some(Indices::U32(values)) => Some(values.clone()),
         Some(Indices::U16(values)) => Some(values.iter().map(|value| *value as u32).collect()),
-        None if vertex_count % 3 == 0 => Some((0..vertex_count as u32).collect()),
+        None if vertex_count.is_multiple_of(3) => Some((0..vertex_count as u32).collect()),
         None => None,
     }
 }

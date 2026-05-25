@@ -325,15 +325,13 @@ impl HostThroughStack {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum HostThroughAxisPolicy {
+    #[default]
     ChartNormal,
-    ExplicitVector { axis: Vec3 },
-}
-
-impl Default for HostThroughAxisPolicy {
-    fn default() -> Self {
-        Self::ChartNormal
-    }
+    ExplicitVector {
+        axis: Vec3,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -680,29 +678,28 @@ pub struct ChartSpaceBounds {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum OpeningDepthPolicy {
+    #[default]
     ThroughHost,
-    SymmetricDepth { depth: f32 },
-    OffsetDepth { start_offset: f32, end_offset: f32 },
-}
-
-impl Default for OpeningDepthPolicy {
-    fn default() -> Self {
-        Self::ThroughHost
-    }
+    SymmetricDepth {
+        depth: f32,
+    },
+    OffsetDepth {
+        start_offset: f32,
+        end_offset: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum OpeningClearancePolicy {
+    #[default]
     None,
-    Uniform { margin: f32 },
-}
-
-impl Default for OpeningClearancePolicy {
-    fn default() -> Self {
-        Self::None
-    }
+    Uniform {
+        margin: f32,
+    },
 }
 
 #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]

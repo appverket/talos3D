@@ -680,7 +680,7 @@ impl AuthoredEntityFactory for PolarArrayFactory {
 
         let center = request
             .get("center")
-            .and_then(|v| parse_vec3_opt(v))
+            .and_then(parse_vec3_opt)
             .unwrap_or(Vec3::ZERO);
 
         Ok(PolarArraySnapshot {

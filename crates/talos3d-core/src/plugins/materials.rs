@@ -145,7 +145,7 @@ impl TexturePayload {
 
     fn label(&self) -> &str {
         match self {
-            Self::AssetPath(path) => path.split('/').last().unwrap_or(path),
+            Self::AssetPath(path) => path.split('/').next_back().unwrap_or(path),
             Self::Embedded { .. } => "<embedded>",
         }
     }
@@ -362,7 +362,7 @@ impl TextureRef {
                 .and_then(|registry| registry.get(id))
                 .map(|asset| asset.payload.label())
                 .unwrap_or(id.as_str()),
-            TextureRef::AssetPath { path: p } => p.split('/').last().unwrap_or(p),
+            TextureRef::AssetPath { path: p } => p.split('/').next_back().unwrap_or(p),
             TextureRef::Embedded { .. } => "<embedded>",
         }
     }
@@ -811,21 +811,12 @@ impl MaterialDef {
 
 /// Project-level catalogue of material definitions.  Serialisable so it is
 /// saved with the project file.
-#[derive(Resource, Debug, Clone, Serialize, Deserialize)]
+#[derive(Resource, Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MaterialRegistry {
     /// Ordered by insertion time (BTreeMap gives stable JSON output).
     materials: BTreeMap<String, MaterialDef>,
     /// Iteration order (insertion order).
     order: Vec<String>,
-}
-
-impl Default for MaterialRegistry {
-    fn default() -> Self {
-        Self {
-            materials: BTreeMap::new(),
-            order: Vec::new(),
-        }
-    }
 }
 
 impl MaterialRegistry {

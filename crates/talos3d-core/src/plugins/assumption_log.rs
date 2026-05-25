@@ -231,7 +231,7 @@ impl AssumptionLog {
     /// independent of the source — it tells the user the assumption
     /// will not be revisited automatically.
     pub fn project_brief(&self) -> Vec<String> {
-        self.entries.iter().map(|e| project_entry(e)).collect()
+        self.entries.iter().map(project_entry).collect()
     }
 
     /// Projection grouped by `kind`, useful for findings panels that

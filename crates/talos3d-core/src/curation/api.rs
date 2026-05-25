@@ -10,9 +10,9 @@
 //!
 //! Scope for PP80 slice 6: source-registry inspection + nomination flow
 //! + cross-kind corpus-gap reporting. The asset-level tools
-//! (`cite_source`, `inspect_provenance`, `explain_asset_lineage`,
-//! `publication_status`) require `RecipeArtifact` / `MaterialSpec` to
-//! exist; they land alongside those kinds in PP81 / PP83.
+//!   (`cite_source`, `inspect_provenance`, `explain_asset_lineage`,
+//!   `publication_status`) require `RecipeArtifact` / `MaterialSpec` to
+//!   exist; they land alongside those kinds in PP81 / PP83.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -301,16 +301,17 @@ pub fn approve_nomination(world: &mut World, nomination_id: &str) -> ApiResult<N
             code: "curation.nomination_queue_missing".into(),
             message: "NominationQueue resource not installed".into(),
         })?;
-    let Some(mut registry) = world.get_resource_mut::<SourceRegistry>() else {
-        // Put the queue back before returning the error.
-        world.insert_resource(queue);
-        return Err(ApiFailure {
-            code: "curation.source_registry_missing".into(),
-            message: "SourceRegistry resource not installed".into(),
-        });
+    let result = {
+        let Some(mut registry) = world.get_resource_mut::<SourceRegistry>() else {
+            // Put the queue back before returning the error.
+            world.insert_resource(queue);
+            return Err(ApiFailure {
+                code: "curation.source_registry_missing".into(),
+                message: "SourceRegistry resource not installed".into(),
+            });
+        };
+        queue.approve(&id, &mut registry)
     };
-    let result = queue.approve(&id, &mut registry);
-    drop(registry);
     world.insert_resource(queue);
     match result {
         Ok(n) => Ok(NominationInfo::from(&n)),

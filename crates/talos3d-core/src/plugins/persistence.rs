@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -315,7 +315,7 @@ pub fn new_document(world: &mut World) {
 
 // --- Internal ---
 
-fn save_to_path(world: &mut World, path: &PathBuf) -> Result<(), String> {
+fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
     let project = build_project_file(world)?;
     let json = serde_json::to_string_pretty(&project).map_err(|e| e.to_string())?;
     let key = path.to_string_lossy().into_owned();
@@ -324,12 +324,12 @@ fn save_to_path(world: &mut World, path: &PathBuf) -> Result<(), String> {
     world.resource_mut::<History>().mark_save_point();
     world
         .resource_mut::<DocumentState>()
-        .mark_saved(path.clone());
+        .mark_saved(path.to_path_buf());
 
     Ok(())
 }
 
-fn load_from_path(world: &mut World, path: &PathBuf) -> Result<(), String> {
+fn load_from_path(world: &mut World, path: &Path) -> Result<(), String> {
     let key = path.to_string_lossy().into_owned();
     let contents = String::from_utf8(world.resource::<Storage>().0.load(&key)?)
         .map_err(|error| error.to_string())?;
@@ -337,7 +337,7 @@ fn load_from_path(world: &mut World, path: &PathBuf) -> Result<(), String> {
     load_project(world, project)?;
 
     let mut doc_state = world.resource_mut::<DocumentState>();
-    doc_state.mark_saved(path.clone());
+    doc_state.mark_saved(path.to_path_buf());
 
     Ok(())
 }
@@ -820,6 +820,26 @@ fn clear_scene(world: &mut World) {
     for entity in entities_to_despawn {
         let _ = world.despawn(entity);
     }
+}
+
+fn primary_shortcut_state(world: &mut World, key: KeyCode) -> (bool, bool) {
+    let keys = world.resource::<ButtonInput<KeyCode>>();
+    let primary_modifier_pressed = if cfg!(target_os = "macos") {
+        keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
+    } else {
+        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
+    };
+    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+
+    (
+        primary_modifier_pressed && keys.just_pressed(key),
+        shift_pressed,
+    )
+}
+
+fn set_feedback(world: &mut World, message: String) {
+    let mut status_bar_data = world.resource_mut::<StatusBarData>();
+    status_bar_data.set_feedback(message, FEEDBACK_DURATION_SECONDS);
 }
 
 #[cfg(test)]
@@ -1667,7 +1687,7 @@ mod tests {
         use crate::plugins::modeling::assembly::{
             AssemblyFactory, AssemblyMemberRef, RelationFactory, SemanticAssembly,
         };
-        use crate::plugins::modeling::definition::{ChildSlotDef, CompoundDefinition};
+        use crate::plugins::modeling::definition::CompoundDefinition;
         use crate::plugins::promotion::{PromotionOutputShape, SemanticAssemblyPromotionSource};
         use crate::plugins::promotion_world::{
             apply_assembly_migration_diff, commit_assembly_promotion,
@@ -1738,7 +1758,7 @@ mod tests {
         promoted_def.id = promoted_definition_id.clone();
         if let PromotionOutputShape::Compound { child_slots } = &out.plan.output_shape {
             promoted_def.compound = Some(CompoundDefinition {
-                child_slots: child_slots.iter().cloned().collect::<Vec<ChildSlotDef>>(),
+                child_slots: child_slots.to_vec(),
                 ..Default::default()
             });
         }
@@ -2165,24 +2185,4 @@ mod tests {
             source_relation_snapshot_ref: None,
         };
     }
-}
-
-fn primary_shortcut_state(world: &mut World, key: KeyCode) -> (bool, bool) {
-    let keys = world.resource::<ButtonInput<KeyCode>>();
-    let primary_modifier_pressed = if cfg!(target_os = "macos") {
-        keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
-    } else {
-        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
-    };
-    let shift_pressed = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-
-    (
-        primary_modifier_pressed && keys.just_pressed(key),
-        shift_pressed,
-    )
-}
-
-fn set_feedback(world: &mut World, message: String) {
-    let mut status_bar_data = world.resource_mut::<StatusBarData>();
-    status_bar_data.set_feedback(message, FEEDBACK_DURATION_SECONDS);
 }

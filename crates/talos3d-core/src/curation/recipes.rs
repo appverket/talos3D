@@ -496,7 +496,7 @@ mod tests {
             ),
         };
 
-        let descriptors = vec![
+        let descriptors = [
             make_descriptor("pier_foundation"),
             make_descriptor("slab_on_grade"),
         ];

@@ -652,11 +652,13 @@ pub enum SlotLayout {
 
 /// Whether a child slot stands for a single child or a
 /// deterministic collection of N children.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum SlotMultiplicity {
     /// One child. The default; existing slots round-trip as
     /// `Single` after a deserialize-from-old-JSON without the
     /// `multiplicity` key.
+    #[default]
     Single,
     /// N children laid out per a `SlotLayout`. The generated
     /// children expose stable indexed `slot_path`s of the form
@@ -665,12 +667,6 @@ pub enum SlotMultiplicity {
         layout: SlotLayout,
         count: SlotCount,
     },
-}
-
-impl Default for SlotMultiplicity {
-    fn default() -> Self {
-        Self::Single
-    }
 }
 
 impl SlotMultiplicity {
@@ -857,8 +853,10 @@ impl Interface {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DefinitionVisibility {
     /// Top-level reusable family; shown in the browser and discovery by default.
+    #[default]
     PublicRoot,
     /// A shallow specialisation of a `PublicRoot` (e.g. a colour variant).
     /// Shown alongside its root in default discovery.
@@ -867,12 +865,6 @@ pub enum DefinitionVisibility {
     /// frame). Excluded from default browser/MCP listing; always reachable
     /// through composition, parent links, and the `include_internal` path.
     InternalPart,
-}
-
-impl Default for DefinitionVisibility {
-    fn default() -> Self {
-        Self::PublicRoot
-    }
 }
 
 impl DefinitionVisibility {
@@ -1272,14 +1264,16 @@ pub enum DefinitionLibraryScope {
 ///
 /// This is a per-`DefinitionLibrary` aggregate placeholder for slice
 /// 1. Per-definition draft status, content-addressed
-/// `DefinitionRevision`, and the `LockPolicy`/`SnapshotPolicy`
-/// orthogonal axes land in PP-LIBPUB-2.
+///    `DefinitionRevision`, and the `LockPolicy`/`SnapshotPolicy`
+///    orthogonal axes land in PP-LIBPUB-2.
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DefinitionDraftStatus {
     /// Draft is structurally valid (or has not been validated) and
     /// can be instantiated.
+    #[default]
     Active,
     /// Draft persists in a blocked state — typically a host-contract
     /// failure during migration. Blocked drafts cannot become the
@@ -1293,12 +1287,6 @@ pub enum DefinitionDraftStatus {
         /// payloads.
         reason: String,
     },
-}
-
-impl Default for DefinitionDraftStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 impl DefinitionDraftStatus {

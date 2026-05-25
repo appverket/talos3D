@@ -106,18 +106,10 @@ impl Default for ValidityFloor {
 /// hook in the `HookRegistry` and runs it after the floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[derive(Default)]
 pub struct PublicationPolicy {
     pub global_validity_floor: ValidityFloor,
     pub jurisdiction_hook: Option<JurisdictionPolicyHookId>,
-}
-
-impl Default for PublicationPolicy {
-    fn default() -> Self {
-        Self {
-            global_validity_floor: ValidityFloor::default(),
-            jurisdiction_hook: None,
-        }
-    }
 }
 
 impl PublicationPolicy {

@@ -75,8 +75,10 @@ mod tests {
 
     #[test]
     fn show_all_false_hides_everything() {
-        let mut v = DraftingVisibility::default();
-        v.show_all = false;
+        let v = DraftingVisibility {
+            show_all: false,
+            ..Default::default()
+        };
         assert!(!v.is_visible("architectural_imperial", DimensionKindTag::Linear));
     }
 
