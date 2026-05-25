@@ -7864,11 +7864,10 @@ struct InstantiateRecipePlacement {
     /// World-space translation in metres.
     #[serde(default)]
     translate: [f64; 3],
-    /// Euler angles in degrees (XYZ order). LIMITATION: not yet applied — recipe
-    /// results are built axis-aligned (the wall runs along X). Orienting a
-    /// recipe's many generated sub-elements is a tracked follow-up. For a part
-    /// that must be rotated now, use `create_box` (it honours a rotation
-    /// quaternion) or the parametric path.
+    /// Euler angles in degrees (XYZ order), applied to the whole generated
+    /// result. The recipe lays out its sub-elements in the host frame, so e.g.
+    /// `[0,90,0]` turns an X-running wall into a Z-running one — use this to
+    /// place the perpendicular walls of a rectangular building.
     #[serde(default)]
     rotate_euler_deg: [f64; 3],
 }
@@ -20081,6 +20080,18 @@ fn handle_instantiate_recipe(
     } else {
         [0.5, 0.5, 0.5]
     };
+    // Orientation: the recipe lays out its sub-elements in the host's local
+    // frame, so rotating the host box rotates the whole generated assembly
+    // coherently. Convert the requested Euler angles (degrees, XYZ) to the
+    // box rotation quaternion `[x, y, z, w]`.
+    let r = &placement.rotate_euler_deg;
+    let rotation = Quat::from_euler(
+        EulerRot::XYZ,
+        (r[0] as f32).to_radians(),
+        (r[1] as f32).to_radians(),
+        (r[2] as f32).to_radians(),
+    )
+    .to_array();
     // The box factory's raw create request uses `centre` + `half_extents`
     // (the create_box tool normalises `center`/`size`, but handle_create_entity
     // bypasses that normalisation).
@@ -20088,6 +20099,7 @@ fn handle_instantiate_recipe(
         "type": "box",
         "centre": placement.translate,
         "half_extents": half_extents,
+        "rotation": rotation,
         "semantic": {
             "element_class": request.target_class,
             "refinement_state": "Schematic",
