@@ -8,8 +8,10 @@ use crate::{
     capability_registry::{CapabilityRegistry, DefaultsRegistry},
     curation::{Nomination, NominationQueue, SourceRegistry, SourceRegistryEntry, SourceTier},
     plugins::{
+        assembly_pattern_drafts::{AssemblyPatternDraftArtifact, AssemblyPatternDraftRegistry},
         bundled_definition_libraries::apply_bundled_definition_libraries,
         commands::snapshot_dependency_order,
+        corpus_gap::{CorpusGap, CorpusGapQueue},
         definition_preview_scene::PreviewOnly,
         document_properties::DocumentProperties,
         document_state::DocumentState,
@@ -27,6 +29,7 @@ use crate::{
         },
         named_views::NamedViewRegistry,
         property_edit::PropertyEditState,
+        recipe_drafts::{RecipeDraftArtifact, RecipeDraftRegistry},
         selection::Selected,
         storage::Storage,
         tools::{ActiveTool, Preview},
@@ -98,6 +101,16 @@ struct ProjectFile {
     /// an agent's proposed additions survive across authoring sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nominations: Option<Vec<Nomination>>,
+    /// Project-scope dynamically acquired recipe draft assets (PP-DKC-3).
+    /// These are curation-shaped assets, not the legacy session-cache schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    knowledge_recipe_drafts: Option<Vec<RecipeDraftArtifact>>,
+    /// Project-scope dynamically acquired assembly-pattern draft assets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    knowledge_assembly_pattern_drafts: Option<Vec<AssemblyPatternDraftArtifact>>,
+    /// Unresolved corpus gaps and their typed lineage context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    corpus_gaps: Option<Vec<CorpusGap>>,
     entities: Vec<PersistedEntityRecord>,
 }
 
@@ -279,6 +292,15 @@ pub fn new_document(world: &mut World) {
     if let Some(mut queue) = world.get_resource_mut::<NominationQueue>() {
         *queue = NominationQueue::default();
     }
+    if let Some(mut queue) = world.get_resource_mut::<CorpusGapQueue>() {
+        queue.restore(Vec::new());
+    }
+    if let Some(mut registry) = world.get_resource_mut::<RecipeDraftRegistry>() {
+        registry.restore(Vec::new());
+    }
+    if let Some(mut registry) = world.get_resource_mut::<AssemblyPatternDraftRegistry>() {
+        registry.restore(Vec::new());
+    }
     world.resource_mut::<ElementIdAllocator>().set_next(1);
     ensure_default_lighting_scene(world);
     world.resource_mut::<History>().clear();
@@ -426,6 +448,32 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
             Some(q.list().iter().cloned().collect::<Vec<_>>())
         }
     });
+    let knowledge_recipe_drafts = world.get_resource::<RecipeDraftRegistry>().and_then(|q| {
+        let drafts = q.project_assets();
+        if drafts.is_empty() {
+            None
+        } else {
+            Some(drafts)
+        }
+    });
+    let knowledge_assembly_pattern_drafts = world
+        .get_resource::<AssemblyPatternDraftRegistry>()
+        .and_then(|q| {
+            let drafts = q.project_assets();
+            if drafts.is_empty() {
+                None
+            } else {
+                Some(drafts)
+            }
+        });
+    let corpus_gaps = world.get_resource::<CorpusGapQueue>().and_then(|q| {
+        let gaps = q.snapshot();
+        if gaps.is_empty() {
+            None
+        } else {
+            Some(gaps)
+        }
+    });
 
     Ok(ProjectFile {
         version: PROJECT_FILE_VERSION,
@@ -441,6 +489,9 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         lighting,
         sources,
         nominations,
+        knowledge_recipe_drafts,
+        knowledge_assembly_pattern_drafts,
+        corpus_gaps,
         entities,
     })
 }
@@ -460,6 +511,9 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         lighting,
         sources,
         nominations,
+        knowledge_recipe_drafts,
+        knowledge_assembly_pattern_drafts,
+        corpus_gaps,
         entities,
     } = project;
 
@@ -623,6 +677,18 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     if let Some(mut queue) = world.get_resource_mut::<NominationQueue>() {
         queue.restore(nominations.unwrap_or_default());
     }
+    world.init_resource::<CorpusGapQueue>();
+    world
+        .resource_mut::<CorpusGapQueue>()
+        .restore(corpus_gaps.unwrap_or_default());
+    world.init_resource::<RecipeDraftRegistry>();
+    world
+        .resource_mut::<RecipeDraftRegistry>()
+        .restore(knowledge_recipe_drafts.unwrap_or_default());
+    world.init_resource::<AssemblyPatternDraftRegistry>();
+    world
+        .resource_mut::<AssemblyPatternDraftRegistry>()
+        .restore(knowledge_assembly_pattern_drafts.unwrap_or_default());
 
     recognized.sort_by_key(snapshot_dependency_order);
     for snapshot in &recognized {
@@ -630,6 +696,12 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         stamp_authored_entity_dependencies(world, snapshot);
     }
 
+    if !opaque.is_empty() {
+        warn!(
+            "Loaded {} opaque persisted entity record(s); they will be preserved on save but are not editable until a matching authored-entity factory is registered",
+            opaque.len()
+        );
+    }
     world.insert_resource(OpaquePersistedEntities(opaque));
     if !had_lighting {
         ensure_default_lighting_scene(world);
@@ -1125,6 +1197,9 @@ mod tests {
                 lighting: Some(SceneLightingSettings::default()),
                 sources: None,
                 nominations: None,
+                knowledge_recipe_drafts: None,
+                knowledge_assembly_pattern_drafts: None,
+                corpus_gaps: None,
                 entities: Vec::new(),
             },
         )
@@ -1153,6 +1228,9 @@ mod tests {
                 lighting: None,
                 sources: None,
                 nominations: None,
+                knowledge_recipe_drafts: None,
+                knowledge_assembly_pattern_drafts: None,
+                corpus_gaps: None,
                 entities: Vec::new(),
             },
         )
@@ -1184,12 +1262,69 @@ mod tests {
                 lighting: None,
                 sources: None,
                 nominations: None,
+                knowledge_recipe_drafts: None,
+                knowledge_assembly_pattern_drafts: None,
+                corpus_gaps: None,
                 entities: Vec::new(),
             },
         )
         .expect_err("current project files must use the expected producer format tag");
 
         assert!(error.contains("Unsupported project format tag 'pre-adr049'"));
+    }
+
+    #[test]
+    fn unknown_entity_records_round_trip_as_opaque_records() {
+        let mut target = World::new();
+        target.insert_resource(CapabilityRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        let unknown_record = PersistedEntityRecord {
+            type_name: "future.semantic_entity".to_string(),
+            data: serde_json::json!({
+                "element_id": 42,
+                "future_field": {
+                    "semantic_intent": "preserve-me",
+                    "confidence": 0.87
+                }
+            }),
+        };
+        let project = ProjectFile {
+            version: PROJECT_FILE_VERSION,
+            created_by: Some(current_project_created_by()),
+            next_element_id: 43,
+            document_properties: Some(DocumentProperties::default()),
+            layers: None,
+            materials: None,
+            textures: None,
+            definitions: None,
+            definition_libraries: None,
+            named_views: None,
+            lighting: Some(SceneLightingSettings::default()),
+            sources: None,
+            nominations: None,
+            knowledge_recipe_drafts: None,
+            knowledge_assembly_pattern_drafts: None,
+            corpus_gaps: None,
+            entities: vec![unknown_record.clone()],
+        };
+
+        load_project(&mut target, project).expect("project with future entity should load");
+
+        let opaque = target.resource::<OpaquePersistedEntities>();
+        assert_eq!(opaque.0, vec![unknown_record.clone()]);
+
+        let saved = build_project_file(&mut target).expect("project should reserialize");
+        assert!(
+            saved.entities.contains(&unknown_record),
+            "unknown future entity data must be preserved for save/load portability"
+        );
     }
 
     #[test]
@@ -1471,6 +1606,9 @@ mod tests {
             lighting: Some(SceneLightingSettings::default()),
             sources: None,
             nominations: None,
+            knowledge_recipe_drafts: None,
+            knowledge_assembly_pattern_drafts: None,
+            corpus_gaps: None,
             entities: vec![
                 PersistedEntityRecord {
                     type_name: "dimension_line".to_string(),

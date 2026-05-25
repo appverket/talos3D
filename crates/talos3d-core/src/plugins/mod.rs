@@ -35,6 +35,7 @@ pub mod import;
 pub mod inference;
 pub mod input_ownership;
 pub mod keymap;
+pub mod knowledge_assets;
 pub mod layers;
 pub mod layers_panel;
 pub mod lighting;

@@ -27,8 +27,8 @@ use crate::plugins::refinement::{
 use crate::relational::graph::NodeId;
 use crate::relational::param_expr::{ScalarExpr, Unit};
 use crate::relational::registry::{
-    Placement, ParametricRegistry, ParametricRepresentation, ParametricSnapshot, ParametricStore,
-    ParametricTypeDef,
+    ParametricRegistry, ParametricRepresentation, ParametricSnapshot, ParametricStore,
+    ParametricTypeDef, Placement,
 };
 use crate::relational::transform::{TransformAxis, TransformGesture, TransformOutcome};
 
@@ -218,7 +218,9 @@ pub fn world_create(
         eid
     } else {
         if req.type_id.is_empty() {
-            return Err("type_id is required when no inline representation is provided".to_string());
+            return Err(
+                "type_id is required when no inline representation is provided".to_string(),
+            );
         }
         if reg.get(&req.type_id).is_none() {
             return Err(format!("unknown parametric type '{}'", req.type_id));
@@ -242,7 +244,10 @@ pub fn world_create(
 
     let snapshot = world_inspect(world, InspectParametricRequest { instance_id })?;
 
-    Ok(CreateParametricResponse { snapshot, element_ids })
+    Ok(CreateParametricResponse {
+        snapshot,
+        element_ids,
+    })
 }
 
 /// Materialise one `ProfileExtrusion` entity per evaluated representation
@@ -674,7 +679,10 @@ mod tests {
         .unwrap();
         let id = resp.snapshot.instance_id;
         assert_eq!(resp.snapshot.derived["half"], json!(500.0));
-        assert!(resp.element_ids.is_empty(), "box_type has no representation");
+        assert!(
+            resp.element_ids.is_empty(),
+            "box_type has no representation"
+        );
         // edit via set_driver
         let dr = world_set_driver(
             w,
@@ -817,10 +825,11 @@ mod tests {
         // Old element ids must be gone from the world.
         for old_eid in &old_ids {
             let mut q = w.query::<&crate::plugins::identity::ElementId>();
-            let still_exists = q
-                .iter(w)
-                .any(|e| e.0 == *old_eid);
-            assert!(!still_exists, "old entity {old_eid} should have been despawned");
+            let still_exists = q.iter(w).any(|e| e.0 == *old_eid);
+            assert!(
+                !still_exists,
+                "old entity {old_eid} should have been despawned"
+            );
         }
 
         // New ids should differ.
@@ -858,20 +867,24 @@ mod tests {
             &ClaimGrounding,
             &ParametricInstanceRef,
         )>();
-        let found = q
-            .iter(w)
-            .find(|(e, _, _, _, _)| e.0 == first_eid);
+        let found = q.iter(w).find(|(e, _, _, _, _)| e.0 == first_eid);
 
         let (_, refinement, provenance, grounding, inst_ref) =
             found.expect("entity should carry provenance components");
 
         assert_eq!(refinement.state, RefinementState::Conceptual);
         assert!(
-            provenance.rationale.as_ref().unwrap().contains("test.repr_box"),
+            provenance
+                .rationale
+                .as_ref()
+                .unwrap()
+                .contains("test.repr_box"),
             "provenance should mention the type id"
         );
         assert!(
-            grounding.claims.contains_key(&ClaimPath("parametric_source".to_string())),
+            grounding
+                .claims
+                .contains_key(&ClaimPath("parametric_source".to_string())),
             "claim grounding should have parametric_source entry"
         );
         assert_eq!(inst_ref.instance_id, resp.snapshot.instance_id);
@@ -957,7 +970,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resp.element_ids.len(), 3, "should produce 3 entities for 3 members");
+        assert_eq!(
+            resp.element_ids.len(),
+            3,
+            "should produce 3 entities for 3 members"
+        );
 
         // The ephemeral type must not be listed as public.
         let public_types = world_list_types(w);

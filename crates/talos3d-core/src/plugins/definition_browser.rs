@@ -3154,9 +3154,7 @@ fn draw_effective_parameter_table(
                         } else {
                             match &resolved_param.provenance {
                                 ValueProvenance::DefinitionDefault => "definition default",
-                                ValueProvenance::OccurrenceOverride => {
-                                    "occurrence / host contract"
-                                }
+                                ValueProvenance::OccurrenceOverride => "occurrence / host contract",
                             }
                             .to_string()
                         };
@@ -3164,8 +3162,7 @@ fn draw_effective_parameter_table(
                             || matches!(
                                 &resolved_param.provenance,
                                 ValueProvenance::OccurrenceOverride
-                            )
-                        {
+                            ) {
                             "read-only here"
                         } else {
                             match parameter.override_policy {
@@ -3589,7 +3586,8 @@ fn draw_context_slot(
         slot_id,
     ) {
         Ok(context) => {
-            if let Ok(component_definition) = preview_reg.effective_definition(&context.definition_id)
+            if let Ok(component_definition) =
+                preview_reg.effective_definition(&context.definition_id)
             {
                 match preview_reg
                     .resolve_bound_params_checked(&context.definition_id, &context.overrides)

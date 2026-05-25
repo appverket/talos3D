@@ -100,6 +100,22 @@ impl CorpusGapQueue {
         &self.gaps
     }
 
+    pub fn snapshot(&self) -> Vec<CorpusGap> {
+        self.gaps.clone()
+    }
+
+    pub fn restore(&mut self, gaps: Vec<CorpusGap>) {
+        self.gaps = gaps;
+        self.next_serial = self
+            .gaps
+            .iter()
+            .filter_map(|gap| gap.id.0.strip_prefix("gap-"))
+            .filter_map(|value| value.parse::<u64>().ok())
+            .max()
+            .map(|value| value.saturating_add(1))
+            .unwrap_or(0);
+    }
+
     /// Resolve (remove) a gap by id.  Returns `true` if the gap was found and
     /// removed, `false` if no gap with that id exists.
     pub fn resolve(&mut self, id: &CorpusGapId) -> bool {

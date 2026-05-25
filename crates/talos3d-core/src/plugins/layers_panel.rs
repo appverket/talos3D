@@ -317,8 +317,7 @@ fn render_layer(
             // Name (inline rename, or click to activate).
             if is_renaming {
                 let response = ui.text_edit_singleline(&mut state.rename_buffer);
-                let commit = response.lost_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let commit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if commit {
                     let new_name = state.rename_buffer.trim().to_string();
                     if !new_name.is_empty() && new_name != layer.name {
@@ -382,7 +381,9 @@ fn render_member(
         let is_selected = selected.contains(&member.entity);
         let label = format!("- {}", member.label);
         let inner = ui
-            .dnd_drag_source(drag_id, payload, |ui| ui.selectable_label(is_selected, label))
+            .dnd_drag_source(drag_id, payload, |ui| {
+                ui.selectable_label(is_selected, label)
+            })
             .inner;
         if inner.clicked() {
             let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
@@ -413,8 +414,11 @@ fn disclosure(ui: &mut egui::Ui, expanded: bool) -> bool {
             c + egui::vec2(-2.0, 4.0),
         ]
     };
-    ui.painter()
-        .add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::NONE,
+    ));
     response.clicked()
 }
 
@@ -536,7 +540,10 @@ mod tests {
             .expect("walls layer");
         assert_eq!(walls.member_count, 2);
         assert_eq!(data.members_by_layer.get("Walls").unwrap().len(), 2);
-        assert_eq!(data.members_by_layer.get(DEFAULT_LAYER_NAME).unwrap().len(), 1);
+        assert_eq!(
+            data.members_by_layer.get(DEFAULT_LAYER_NAME).unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -587,9 +594,14 @@ mod tests {
                 commands_queue.apply(world);
             });
         });
-        assert!(world.resource::<LayerRegistry>().layers.contains_key("Roof"));
+        assert!(world
+            .resource::<LayerRegistry>()
+            .layers
+            .contains_key("Roof"));
         assert_eq!(
-            world.get::<LayerAssignment>(entity).map(|a| a.layer.clone()),
+            world
+                .get::<LayerAssignment>(entity)
+                .map(|a| a.layer.clone()),
             Some("Roof".to_string())
         );
     }

@@ -19,7 +19,9 @@ use crate::{
     authored_entity::EntityScope,
     capability_registry::CapabilityRegistry,
     plugins::{
-        camera::OrbitCamera, cursor::cursor_window_position, egui_chrome::EguiWantsInput,
+        camera::OrbitCamera,
+        cursor::cursor_window_position,
+        egui_chrome::EguiWantsInput,
         identity::ElementId,
         input_ownership::{InputOwnership, InputPhase},
         tools::ActiveTool,
@@ -30,13 +32,12 @@ pub struct UxHarnessPlugin;
 
 impl Plugin for UxHarnessPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UxHarnessState>()
-            .add_systems(
-                Update,
-                process_ux_harness_step
-                    .after(InputPhase::SyncOwnership)
-                    .before(InputPhase::ToolInput),
-            );
+        app.init_resource::<UxHarnessState>().add_systems(
+            Update,
+            process_ux_harness_step
+                .after(InputPhase::SyncOwnership)
+                .before(InputPhase::ToolInput),
+        );
     }
 }
 

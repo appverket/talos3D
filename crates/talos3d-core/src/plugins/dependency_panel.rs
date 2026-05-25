@@ -148,7 +148,10 @@ impl Plugin for DependencyPanelPlugin {
                 },
                 execute_toggle_dependency_graph,
             )
-            .add_systems(Update, build_dependency_panel_data.before(EguiChromeSystems));
+            .add_systems(
+                Update,
+                build_dependency_panel_data.before(EguiChromeSystems),
+            );
     }
 }
 
@@ -303,7 +306,9 @@ fn render_no_selection(
     selected: &HashSet<Entity>,
     action: &mut Option<DependencySelectAction>,
 ) {
-    ui.weak("Select an element to inspect what it depends on and what a change to it propagates to.");
+    ui.weak(
+        "Select an element to inspect what it depends on and what a change to it propagates to.",
+    );
     let with_edges: Vec<u64> = data
         .nodes
         .iter()
@@ -439,8 +444,11 @@ fn collapsing_header(ui: &mut egui::Ui, label: &str, expanded: bool) -> bool {
                 c + egui::vec2(-2.0, 4.0),
             ]
         };
-        ui.painter()
-            .add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+        ui.painter().add(egui::Shape::convex_polygon(
+            points,
+            color,
+            egui::Stroke::NONE,
+        ));
         if response.clicked() || ui.label(egui::RichText::new(label).weak()).clicked() {
             clicked = true;
         }
