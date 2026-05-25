@@ -565,6 +565,19 @@ pub struct SetMaterialAssignmentRequest {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SetOccurrenceMaterialOverrideRequest {
+    pub element_id: u64,
+    pub assignment: MaterialAssignment,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClearOccurrenceMaterialOverrideRequest {
+    pub element_id: u64,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EntityMaterialAssignmentInfo {
     pub element_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1061,6 +1074,8 @@ pub struct DefinitionDraftEntry {
     pub dirty: bool,
     pub full: Value,
     pub effective_full: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

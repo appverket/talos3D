@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use crate::plugins::{
     commands::{enqueue_create_definition, enqueue_update_definition},
     history::apply_pending_history_commands,
+    materials::MaterialAssignment,
     modeling::definition::{
         AnchorDef, AxisRef, ChildSlotDef, CompoundDefinition, ConstraintDef, Definition,
         DefinitionId, DefinitionKind, DefinitionLibraryId, DefinitionLibraryRegistry,
@@ -193,6 +194,19 @@ pub enum DefinitionPatch {
     RemoveChildSlotMultiplicity {
         slot_id: String,
     },
+    /// Typed patch for the core `Definition.material_assignment` slot.
+    ///
+    /// `None` clears the assignment.
+    SetMaterialAssignment {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment: Option<MaterialAssignment>,
+    },
+    /// Clear the core `Definition.material_assignment` slot.
+    RemoveMaterialAssignment,
+    /// Deprecated PP-099 compatibility patch for architecture-domain legacy
+    /// material storage. Use `SetMaterialAssignment` or
+    /// `RemoveMaterialAssignment` instead.
+    ///
     /// Typed patch that writes (or clears) the architectural material assignment
     /// stored at `domain_data.architectural.material_assignment.material_id`.
     ///
@@ -203,6 +217,18 @@ pub enum DefinitionPatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         material_id: Option<String>,
     },
+}
+
+impl DefinitionPatch {
+    pub fn deprecation_warning(&self) -> Option<&'static str> {
+        match self {
+            Self::SetDomainDataMaterial { .. } => Some(
+                "DefinitionPatch::SetDomainDataMaterial is deprecated; use \
+                 SetMaterialAssignment or RemoveMaterialAssignment.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1298,6 +1324,12 @@ fn apply_patch_to_definition(
             let slot = ensure_local_child_slot(definition, effective_before, &slot_id)?;
             slot.multiplicity = SlotMultiplicity::Single;
         }
+        DefinitionPatch::SetMaterialAssignment { assignment } => {
+            definition.material_assignment = assignment;
+        }
+        DefinitionPatch::RemoveMaterialAssignment => {
+            definition.material_assignment = None;
+        }
         DefinitionPatch::SetDomainDataMaterial { material_id } => {
             // Ensure domain_data is an object.
             if !definition.domain_data.is_object() {
@@ -1502,6 +1534,58 @@ mod tests {
             removed.is_none(),
             "material_assignment should be removed after None patch"
         );
+    }
+
+    #[test]
+    fn set_material_assignment_patch_writes_core_slot() {
+        let assignment = MaterialAssignment::new("builtin.glass.blue_tint_glazing_80");
+        let result = apply_single_patch(DefinitionPatch::SetMaterialAssignment {
+            assignment: Some(assignment.clone()),
+        })
+        .expect("patch should succeed");
+
+        assert_eq!(result.material_assignment, Some(assignment));
+        assert!(
+            result
+                .domain_data
+                .get("architectural")
+                .and_then(|a| a.get("material_assignment"))
+                .is_none(),
+            "typed material patch should not write legacy domain_data"
+        );
+    }
+
+    #[test]
+    fn remove_material_assignment_patch_clears_core_slot() {
+        let mut drafts = DefinitionDraftRegistry::default();
+        let definitions = DefinitionRegistry::default();
+        let libraries = DefinitionLibraryRegistry::default();
+        let mut definition = blank_definition("Test");
+        definition.material_assignment = Some(MaterialAssignment::new("oak_finish"));
+        let draft = DefinitionDraft {
+            draft_id: DefinitionDraftId::new(),
+            source_definition_id: None,
+            source_library_id: None,
+            working_copy: definition,
+            dirty: false,
+        };
+        let draft_id = drafts.insert(draft);
+
+        apply_patch_to_draft(
+            &definitions,
+            &libraries,
+            &mut drafts,
+            &draft_id,
+            DefinitionPatch::RemoveMaterialAssignment,
+        )
+        .expect("patch should succeed");
+
+        assert!(drafts
+            .get(&draft_id)
+            .expect("draft still exists")
+            .working_copy
+            .material_assignment
+            .is_none());
     }
 
     #[test]

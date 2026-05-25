@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 
+#[cfg(feature = "model-api")]
+use crate::authored_entity::AuthoredEntity;
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::CapabilityRegistry;
 #[cfg(feature = "model-api")]
@@ -4671,6 +4673,7 @@ fn draft_to_entry(
         dirty: draft.dirty,
         full: serde_json::to_value(&draft.working_copy).unwrap_or(Value::Null),
         effective_full,
+        warnings: Vec::new(),
     }
 }
 
@@ -5391,6 +5394,11 @@ pub fn handle_patch_definition_draft(
     let libraries = world
         .resource::<crate::plugins::modeling::definition::DefinitionLibraryRegistry>()
         .clone();
+    let warnings = patches
+        .iter()
+        .filter_map(|patch| patch.deprecation_warning().map(str::to_string))
+        .collect::<Vec<_>>();
+
     {
         let mut drafts =
             world.resource_mut::<crate::plugins::definition_authoring::DefinitionDraftRegistry>();
@@ -5405,7 +5413,9 @@ pub fn handle_patch_definition_draft(
         }
     }
 
-    handle_get_definition_draft(world, draft_id.to_string())
+    let mut entry = handle_get_definition_draft(world, draft_id.to_string())?;
+    entry.warnings = warnings;
+    Ok(entry)
 }
 
 #[cfg(feature = "model-api")]
@@ -6864,6 +6874,54 @@ pub fn handle_update_occurrence_overrides(
             label: "Update occurrence overrides",
             before: before_snapshots,
             after: after_snapshots,
+        },
+    );
+
+    flush_model_api_write_pipeline(world);
+    Ok(after_json)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_set_occurrence_material_override(
+    world: &mut World,
+    request: SetOccurrenceMaterialOverrideRequest,
+) -> ApiResult<Value> {
+    crate::plugins::materials::validate_material_assignment(world, &request.assignment)?;
+    handle_occurrence_material_override(world, request.element_id, Some(request.assignment))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_clear_occurrence_material_override(
+    world: &mut World,
+    request: ClearOccurrenceMaterialOverrideRequest,
+) -> ApiResult<Value> {
+    handle_occurrence_material_override(world, request.element_id, None)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_occurrence_material_override(
+    world: &mut World,
+    element_id: u64,
+    assignment: Option<MaterialAssignment>,
+) -> ApiResult<Value> {
+    use crate::plugins::commands::enqueue_apply_entity_changes;
+
+    let eid = ElementId(element_id);
+    let before = capture_entity_snapshot(world, eid)
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+
+    let mut after = occurrence_snapshot(&before)
+        .ok_or_else(|| format!("Entity {element_id} is not an occurrence"))?
+        .clone();
+    after.identity.material_override = assignment;
+    let after_json = after.to_json();
+
+    enqueue_apply_entity_changes(
+        world,
+        ApplyEntityChangesCommand {
+            label: "Update occurrence material override",
+            before: vec![before],
+            after: vec![BoxedEntity(Box::new(after))],
         },
     );
 

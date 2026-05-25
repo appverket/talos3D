@@ -497,6 +497,14 @@ pub(super) enum ModelApiRequest {
         overrides: Value,
         response: oneshot::Sender<ApiResult<Value>>,
     },
+    SetOccurrenceMaterialOverride {
+        request: SetOccurrenceMaterialOverrideRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
+    ClearOccurrenceMaterialOverride {
+        request: ClearOccurrenceMaterialOverrideRequest,
+        response: oneshot::Sender<ApiResult<Value>>,
+    },
     MakeOccurrenceUnique {
         request: OccurrenceMakeUniqueRequest,
         response: oneshot::Sender<ApiResult<MakeOccurrenceUniqueResult>>,
@@ -1477,6 +1485,12 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             let _ = response.send(handle_update_occurrence_overrides(
                 world, element_id, overrides,
             ));
+        }
+        ModelApiRequest::SetOccurrenceMaterialOverride { request, response } => {
+            let _ = response.send(handle_set_occurrence_material_override(world, request));
+        }
+        ModelApiRequest::ClearOccurrenceMaterialOverride { request, response } => {
+            let _ = response.send(handle_clear_occurrence_material_override(world, request));
         }
         ModelApiRequest::MakeOccurrenceUnique { request, response } => {
             let _ = response.send(handle_make_occurrence_unique(world, request));

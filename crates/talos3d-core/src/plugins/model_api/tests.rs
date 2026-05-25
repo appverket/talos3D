@@ -2122,6 +2122,63 @@ fn definition_draft_lifecycle_creates_patches_validates_and_publishes() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn definition_draft_patch_sets_core_material_assignment_and_warns_for_legacy() {
+    let mut world = init_model_api_test_world();
+
+    let draft = handle_create_definition_draft(&mut world, make_rect_extrusion_request())
+        .expect("draft should be created");
+    let assignment = MaterialAssignment::new("oak_finish");
+    let assignment_json = serde_json::to_value(&assignment).expect("assignment serializes");
+
+    let patched = handle_patch_definition_draft(
+        &mut world,
+        json!({
+            "draft_id": draft.draft_id,
+            "patch": {
+                "op": "set_material_assignment",
+                "assignment": assignment_json
+            }
+        }),
+    )
+    .expect("typed material patch should apply");
+
+    assert_eq!(patched.full["material_assignment"], assignment_json);
+    assert!(patched.warnings.is_empty());
+    assert!(
+        patched.full["domain_data"]
+            .get("architectural")
+            .and_then(|a| a.get("material_assignment"))
+            .is_none(),
+        "typed material patch should not write legacy architecture domain_data"
+    );
+
+    let cleared = handle_patch_definition_draft(
+        &mut world,
+        json!({
+            "draft_id": patched.draft_id,
+            "patch": { "op": "remove_material_assignment" }
+        }),
+    )
+    .expect("remove material patch should apply");
+    assert!(cleared.full.get("material_assignment").is_none());
+
+    let legacy = handle_patch_definition_draft(
+        &mut world,
+        json!({
+            "draft_id": cleared.draft_id,
+            "patch": {
+                "op": "set_domain_data_material",
+                "material_id": "builtin.glass.blue_tint_glazing_80"
+            }
+        }),
+    )
+    .expect("legacy material patch remains accepted for one release cycle");
+    assert_eq!(legacy.warnings.len(), 1);
+    assert!(legacy.warnings[0].contains("SetDomainDataMaterial is deprecated"));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn derived_definition_draft_can_be_compiled_and_explained() {
     let mut world = init_model_api_test_world();
 
@@ -2761,6 +2818,53 @@ fn occurrence_update_overrides_changes_only_the_target() {
         resolved_b["height"]["provenance"],
         json!("DefinitionDefault")
     );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn occurrence_material_override_tools_set_and_clear_core_slot() {
+    let mut world = init_model_api_test_world();
+    for id in ["oak_finish", "walnut_finish"] {
+        world
+            .resource_mut::<crate::plugins::materials::MaterialRegistry>()
+            .upsert(MaterialDef {
+                id: id.to_string(),
+                name: id.to_string(),
+                ..Default::default()
+            });
+    }
+
+    let def = handle_create_definition(&mut world, make_rect_extrusion_request())
+        .expect("create definition should succeed");
+    let occ_id = handle_place_occurrence(
+        &mut world,
+        json!({ "definition_id": def.definition_id, "label": "MaterialOverrideWall" }),
+    )
+    .expect("place occurrence should succeed");
+
+    let assignment = MaterialAssignment::new("oak_finish");
+    let updated = handle_set_occurrence_material_override(
+        &mut world,
+        SetOccurrenceMaterialOverrideRequest {
+            element_id: occ_id,
+            assignment: assignment.clone(),
+        },
+    )
+    .expect("set occurrence material override should succeed");
+    assert_eq!(
+        serde_json::from_value::<MaterialAssignment>(
+            updated["identity"]["material_override"].clone()
+        )
+        .expect("override should serialize as a typed assignment"),
+        assignment
+    );
+
+    let cleared = handle_clear_occurrence_material_override(
+        &mut world,
+        ClearOccurrenceMaterialOverrideRequest { element_id: occ_id },
+    )
+    .expect("clear occurrence material override should succeed");
+    assert!(cleared["identity"].get("material_override").is_none());
 }
 
 #[cfg(feature = "model-api")]
