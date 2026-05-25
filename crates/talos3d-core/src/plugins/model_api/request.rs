@@ -28,6 +28,10 @@ pub(super) enum ModelApiRequest {
         format_hint: Option<String>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    AcceptSemanticShadowCandidate {
+        request: AcceptSemanticShadowCandidateRequest,
+        response: oneshot::Sender<ApiResult<EntityDetails>>,
+    },
     ListHandles {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Vec<HandleInfo>>>,
@@ -941,6 +945,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(handle_import_file(world, &path, format_hint.as_deref()));
+        }
+        ModelApiRequest::AcceptSemanticShadowCandidate { request, response } => {
+            let _ = response.send(handle_accept_semantic_shadow_candidate(world, request));
         }
         ModelApiRequest::ListHandles {
             element_id,

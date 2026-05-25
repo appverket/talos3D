@@ -21,6 +21,7 @@ use crate::{
         },
         commands::{BeginCommandGroup, CreateEntityCommand, EndCommandGroup},
         history::HistorySet,
+        semantic_shadow::semantic_shadow_for_import_request,
         ui::StatusBarData,
     },
 };
@@ -286,6 +287,7 @@ struct PendingImportJobs {
 
 struct ImportJobResult {
     display_path: PathBuf,
+    format_name: &'static str,
     requests: Result<Vec<Value>, String>,
 }
 
@@ -311,9 +313,11 @@ pub fn start_import_job(
     thread::Builder::new()
         .name("talos3d-import".to_string())
         .spawn(move || {
+            let format_name = importer.format_name();
             let requests = importer.import(&staged_path);
             let _ = sender.send(ImportJobResult {
                 display_path,
+                format_name,
                 requests,
             });
         })
@@ -354,7 +358,11 @@ pub fn import_file_now(
     let importer = world
         .resource::<ImportRegistry>()
         .resolve_importer(&staged_path, format_hint)?;
-    let requests = importer.import(&staged_path)?;
+    let requests = attach_import_semantic_shadows(
+        importer.import(&staged_path)?,
+        importer.format_name(),
+        path.file_name().and_then(|name| name.to_str()),
+    );
     let snapshots = import_requests_to_snapshots(world, requests)?;
     let element_ids = snapshots
         .iter()
@@ -429,6 +437,11 @@ fn poll_import_jobs(world: &mut World) {
                     .and_then(|file_name| file_name.to_str())
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| "file".to_string());
+                let requests = attach_import_semantic_shadows(
+                    requests,
+                    result.format_name,
+                    Some(source_name.as_str()),
+                );
                 *world.resource_mut::<ImportReviewState>() =
                     build_import_review_state(Some(source_name), requests);
                 set_import_feedback(
@@ -515,6 +528,31 @@ fn import_requests_to_snapshots(
         snapshots.push(snapshot);
     }
     Ok(snapshots)
+}
+
+fn attach_import_semantic_shadows(
+    requests: Vec<Value>,
+    format_name: &str,
+    source_name: Option<&str>,
+) -> Vec<Value> {
+    requests
+        .into_iter()
+        .map(|mut request| {
+            if request.get("semantic_shadow").is_none() {
+                if let Some(shadow) =
+                    semantic_shadow_for_import_request(format_name, source_name, &request)
+                {
+                    if let Some(object) = request.as_object_mut() {
+                        object.insert(
+                            "semantic_shadow".to_string(),
+                            serde_json::to_value(shadow).unwrap_or(Value::Null),
+                        );
+                    }
+                }
+            }
+            request
+        })
+        .collect()
 }
 
 fn queue_import_group(

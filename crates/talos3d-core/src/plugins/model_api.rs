@@ -383,6 +383,7 @@ fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> Entity
         snapshot: snapshot.to_json(),
         geometry_semantics: geometry_semantics_for_snapshot(world, snapshot),
         semantic: semantic_details_for_entity(world, snapshot.element_id()),
+        semantic_shadow: semantic_shadow_for_entity(world, snapshot.element_id()),
         properties: snapshot
             .property_fields()
             .into_iter()
@@ -398,6 +399,17 @@ fn entity_details_from_snapshot(world: &World, snapshot: &BoxedEntity) -> Entity
             })
             .collect(),
     }
+}
+
+fn semantic_shadow_for_entity(
+    world: &World,
+    element_id: ElementId,
+) -> Option<crate::plugins::semantic_shadow::SemanticShadow> {
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    q.iter(world)
+        .find(|entity_ref| entity_ref.get::<ElementId>().copied() == Some(element_id))?
+        .get::<crate::plugins::semantic_shadow::SemanticShadow>()
+        .cloned()
 }
 
 fn semantic_details_for_entity(
@@ -7869,6 +7881,7 @@ fn handle_array_dissolve(world: &mut World, element_id: u64) -> ApiResult<u64> {
         primitive: tri_mesh,
         layer: None,
         material_assignment: None,
+        semantic_shadow: None,
     };
 
     send_event(
@@ -8061,6 +8074,7 @@ fn handle_mirror_dissolve(world: &mut World, element_id: u64) -> ApiResult<u64> 
         primitive: tri_mesh,
         layer: None,
         material_assignment: None,
+        semantic_shadow: None,
     };
 
     send_event(
@@ -8422,6 +8436,90 @@ pub fn handle_import_file(
     let element_ids = import_file_now(world, std::path::Path::new(path), format_hint)?;
     flush_model_api_write_pipeline(world);
     Ok(element_ids)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_accept_semantic_shadow_candidate(
+    world: &mut World,
+    request: AcceptSemanticShadowCandidateRequest,
+) -> Result<EntityDetails, String> {
+    use crate::plugins::semantic_shadow::SemanticShadowCandidateStatus;
+
+    let element_id = ElementId(request.element_id);
+    let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
+    let entity = q
+        .iter(world)
+        .find_map(|(entity, id)| (*id == element_id).then_some(entity))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+
+    let shadow = world
+        .get::<crate::plugins::semantic_shadow::SemanticShadow>(entity)
+        .cloned()
+        .ok_or_else(|| format!("Entity {} has no semantic shadow", request.element_id))?;
+    let candidate = shadow
+        .candidates
+        .iter()
+        .find(|candidate| candidate.id == request.candidate_id)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Entity {} semantic shadow has no candidate '{}'",
+                request.element_id, request.candidate_id
+            )
+        })?;
+    let element_class = request
+        .element_class
+        .or(candidate.element_class)
+        .ok_or_else(|| {
+            format!(
+                "Semantic shadow candidate '{}' does not name a native element_class",
+                request.candidate_id
+            )
+        })?;
+
+    apply_semantic_annotation(
+        world,
+        element_id,
+        SemanticEntityAnnotationRequest {
+            element_class: Some(element_class),
+            refinement_state: request
+                .refinement_state
+                .or_else(|| Some("Conceptual".to_string())),
+            parameters: request.parameters.unwrap_or(candidate.parameters),
+            unresolved_decisions: candidate.unresolved_decisions,
+            source_refs: candidate.source_refs,
+            rationale: request.rationale.or_else(|| {
+                Some(format!(
+                    "Accepted semantic shadow candidate '{}'",
+                    request.candidate_id
+                ))
+            }),
+        },
+    )?;
+
+    let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
+    let entity = q
+        .iter(world)
+        .find_map(|(entity, id)| (*id == element_id).then_some(entity))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    if let Some(mut shadow) =
+        world.get_mut::<crate::plugins::semantic_shadow::SemanticShadow>(entity)
+    {
+        if let Some(candidate) = shadow
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == request.candidate_id)
+        {
+            candidate.status = SemanticShadowCandidateStatus::AcceptedNativeClaim;
+        }
+    }
+
+    get_entity_details(world, element_id).ok_or_else(|| {
+        format!(
+            "Entity {} not found after semantic shadow acceptance",
+            element_id.0
+        )
+    })
 }
 
 #[cfg(feature = "model-api")]

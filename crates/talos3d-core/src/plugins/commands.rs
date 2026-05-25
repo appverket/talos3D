@@ -600,6 +600,7 @@ pub(crate) fn enqueue_create_triangle_mesh(
             },
             layer: None,
             material_assignment: None,
+            semantic_shadow: None,
         }
         .into(),
     );

@@ -60,6 +60,7 @@ pub struct EntityDetails {
     pub snapshot: serde_json::Value,
     pub geometry_semantics: Option<GeometrySemantics>,
     pub semantic: Option<EntitySemanticDetails>,
+    pub semantic_shadow: Option<crate::plugins::semantic_shadow::SemanticShadow>,
     pub properties: Vec<EntityPropertyDetails>,
 }
 
@@ -840,6 +841,21 @@ pub struct SemanticEntityAnnotationRequest {
     pub unresolved_decisions: Vec<crate::plugins::refinement::UnresolvedDecisionRecord>,
     #[serde(default)]
     pub source_refs: Vec<crate::plugins::refinement::SemanticSourceRef>,
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcceptSemanticShadowCandidateRequest {
+    pub element_id: u64,
+    pub candidate_id: String,
+    #[serde(default)]
+    pub element_class: Option<String>,
+    #[serde(default)]
+    pub refinement_state: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
     #[serde(default)]
     pub rationale: Option<String>,
 }
