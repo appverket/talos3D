@@ -135,10 +135,38 @@ pub struct AssemblyTypeDescriptor {
     pub expected_member_types: Vec<String>,
     /// What roles are valid for members.
     pub expected_member_roles: Vec<String>,
+    /// Optional role-level descriptors. PP-108 uses these to let a
+    /// capability explicitly declare duplicate-role collection grouping
+    /// policy without changing the legacy `expected_member_roles` list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_role_descriptors: Vec<AssemblyMemberRoleDescriptor>,
     /// What relationship types are expected between members.
     pub expected_relation_types: Vec<String>,
     /// JSON Schema for assembly-level parameters.
     pub parameter_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DuplicateRoleGroupingPolicy {
+    /// Repeated roles remain separate indexed single slots unless a
+    /// later preview/authoring step explicitly changes the plan.
+    #[default]
+    IndexedSingleSlots,
+    /// Repeated roles may be represented as a collection slot when the
+    /// promotion path supports collection member realization.
+    CollectionSlotAllowed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct AssemblyMemberRoleDescriptor {
+    pub role: String,
+    #[serde(default)]
+    pub duplicate_role_policy: DuplicateRoleGroupingPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role_vocabulary_version: Option<String>,
 }
 
 /// Describes a relationship type contributed by a capability.
@@ -1959,6 +1987,63 @@ where
             app.world().contains_resource::<T>(),
             "Required workbench resource '{}' is missing",
             std::any::type_name::<T>()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for PP108 assembly role descriptors
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod pp108_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_assembly_type_descriptor_defaults_empty_role_descriptors() {
+        let descriptor: AssemblyTypeDescriptor = serde_json::from_value(serde_json::json!({
+            "assembly_type": "wall_system",
+            "label": "Wall System",
+            "description": "Legacy descriptor without role metadata",
+            "expected_member_types": ["stud", "plate"],
+            "expected_member_roles": ["stud", "plate"],
+            "expected_relation_types": ["attached_to"],
+            "parameter_schema": {}
+        }))
+        .unwrap();
+
+        assert!(descriptor.member_role_descriptors.is_empty());
+    }
+
+    #[test]
+    fn assembly_role_descriptor_round_trips_duplicate_grouping_policy() {
+        let descriptor = AssemblyTypeDescriptor {
+            assembly_type: "wall_system".into(),
+            label: "Wall System".into(),
+            description: "Descriptor with role metadata".into(),
+            expected_member_types: vec!["stud".into()],
+            expected_member_roles: vec!["stud".into()],
+            member_role_descriptors: vec![AssemblyMemberRoleDescriptor {
+                role: "stud".into(),
+                duplicate_role_policy: DuplicateRoleGroupingPolicy::CollectionSlotAllowed,
+                role_vocabulary_version: Some("framing-v2".into()),
+            }],
+            expected_relation_types: vec!["attached_to".into()],
+            parameter_schema: serde_json::json!({}),
+        };
+
+        let json = serde_json::to_string(&descriptor).unwrap();
+        assert!(json.contains("collection_slot_allowed"));
+        let back: AssemblyTypeDescriptor = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.member_role_descriptors[0].duplicate_role_policy,
+            DuplicateRoleGroupingPolicy::CollectionSlotAllowed
+        );
+        assert_eq!(
+            back.member_role_descriptors[0]
+                .role_vocabulary_version
+                .as_deref(),
+            Some("framing-v2")
         );
     }
 }

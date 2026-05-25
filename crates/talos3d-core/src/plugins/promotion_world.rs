@@ -120,6 +120,7 @@ pub fn gather_semantic_assembly_input(
         // slice C4b) which seeds the rules from the live capability
         // registry.
         relation_classification: crate::plugins::promotion::RelationClassificationRules::default(),
+        role_descriptors: Vec::new(),
         source_parameters: assembly.parameters.clone(),
         source_label: assembly.label.clone(),
     })
@@ -165,6 +166,13 @@ pub fn gather_semantic_assembly_input_with_capability(
         host_contract_kinds,
         default_unknown: None,
     };
+    if let Some(desc) = capability
+        .assembly_type_descriptors()
+        .iter()
+        .find(|desc| desc.assembly_type == input.capability.assembly_type)
+    {
+        input.role_descriptors = desc.member_role_descriptors.clone();
+    }
     Ok(input)
 }
 
@@ -1425,6 +1433,7 @@ mod tests {
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
             preserved_relations: Vec::new(),
+            duplicate_role_grouping_decisions: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -1504,6 +1513,7 @@ mod tests {
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
             preserved_relations: Vec::new(),
+            duplicate_role_grouping_decisions: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1593,6 +1603,7 @@ mod tests {
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
             preserved_relations: Vec::new(),
+            duplicate_role_grouping_decisions: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -1671,6 +1682,7 @@ mod tests {
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
             preserved_relations: Vec::new(),
+            duplicate_role_grouping_decisions: Vec::new(),
             warnings: Vec::new(),
         };
         let err = apply_assembly_migration_diff(&mut world, &diff, elem(500)).unwrap_err();
@@ -1931,6 +1943,7 @@ mod tests {
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
             preserved_relations: Vec::new(),
+            duplicate_role_grouping_decisions: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -2003,6 +2016,7 @@ mod tests {
             orphaned_memberships: Vec::new(),
             candidate_relation_templates: Vec::new(),
             preserved_relations: Vec::new(),
+            duplicate_role_grouping_decisions: Vec::new(),
             warnings: Vec::new(),
         };
         let committed = commit_assembly_promotion(
@@ -2420,6 +2434,49 @@ mod tests {
         let input =
             gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
         assert!(input.relation_classification.by_descriptor.is_empty());
+    }
+
+    #[test]
+    fn gather_with_capability_carries_assembly_member_role_descriptors() {
+        use crate::capability_registry::{
+            AssemblyMemberRoleDescriptor, AssemblyTypeDescriptor, CapabilityRegistry,
+            DuplicateRoleGroupingPolicy,
+        };
+        let mut world = world_with_allocator();
+        spawn_authored_leaf(&mut world, elem(10));
+        spawn_assembly(
+            &mut world,
+            elem(1),
+            "wall_system",
+            "Wall System",
+            vec![member(elem(10), "stud")],
+            serde_json::Value::Null,
+        );
+
+        let mut registry = CapabilityRegistry::default();
+        registry.register_assembly_type(AssemblyTypeDescriptor {
+            assembly_type: "wall_system".into(),
+            label: "Wall System".into(),
+            description: "Wall assembly descriptor".into(),
+            expected_member_types: vec!["stud".into()],
+            expected_member_roles: vec!["stud".into()],
+            member_role_descriptors: vec![AssemblyMemberRoleDescriptor {
+                role: "stud".into(),
+                duplicate_role_policy: DuplicateRoleGroupingPolicy::CollectionSlotAllowed,
+                role_vocabulary_version: Some("framing-v2".into()),
+            }],
+            expected_relation_types: Vec::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+
+        let input =
+            gather_semantic_assembly_input_with_capability(&world, &registry, elem(1)).unwrap();
+        assert_eq!(input.role_descriptors.len(), 1);
+        assert_eq!(input.role_descriptors[0].role, "stud");
+        assert_eq!(
+            input.role_descriptors[0].duplicate_role_policy,
+            DuplicateRoleGroupingPolicy::CollectionSlotAllowed
+        );
     }
 
     #[test]
