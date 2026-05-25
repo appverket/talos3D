@@ -4,15 +4,21 @@ Talos3D is intentionally AI-friendly. This file helps AI-assisted contributors
 and automation clients work against the same public architecture that human
 contributors use.
 
-## Read First
+When this repo is checked out inside the Talos3D multi-repo workspace, read the
+workspace root `AGENTS.md` before this file.
 
-1. [README.md](./README.md)
-2. [docs/ENGINE_FORK_WORKFLOW.md](./docs/ENGINE_FORK_WORKFLOW.md)
-3. [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md)
-4. [docs/DEVELOPER_ONBOARDING.md](./docs/DEVELOPER_ONBOARDING.md)
-5. [docs/PLATFORM_ARCHITECTURE.md](./docs/PLATFORM_ARCHITECTURE.md)
-6. [docs/EXTENSION_ARCHITECTURE.md](./docs/EXTENSION_ARCHITECTURE.md)
-7. [docs/CAPABILITY_PLUGIN_API.md](./docs/CAPABILITY_PLUGIN_API.md)
+## Read By Task
+
+- First time in this repo: [README.md](./README.md) and
+  [docs/DEVELOPER_ONBOARDING.md](./docs/DEVELOPER_ONBOARDING.md).
+- MCP/model API work: [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md).
+- Capability/plugin work:
+  [docs/CAPABILITY_PLUGIN_API.md](./docs/CAPABILITY_PLUGIN_API.md) and
+  [docs/EXTENSION_ARCHITECTURE.md](./docs/EXTENSION_ARCHITECTURE.md).
+- Platform boundary or cross-domain work:
+  [docs/PLATFORM_ARCHITECTURE.md](./docs/PLATFORM_ARCHITECTURE.md).
+- Bevy, egui, `bevy_egui`, engine upgrades, or panel sizing:
+  [docs/ENGINE_FORK_WORKFLOW.md](./docs/ENGINE_FORK_WORKFLOW.md).
 
 ## Public Architecture Rules
 
@@ -31,18 +37,9 @@ contributors use.
 - When creating commits in this repository, use only
   `apphjon <dev@appverket.com>` for both author and committer.
 - Never commit as any other identity or personal email address.
-- Do not treat the `private/` directory as public project content.
-- If a task touches Bevy, egui, `bevy_egui`, engine upgrades, or panel sizing
-  regressions, read [docs/ENGINE_FORK_WORKFLOW.md](./docs/ENGINE_FORK_WORKFLOW.md)
-  before changing dependencies or proposing branch structure.
-
-## Workspace Worktrees
-
-When this repository is used inside the Talos3D multi-repo workspace, agent
-worktrees should live at `/Users/torstenek/dev/appverket/talos3D/.worktrees/talos3d-core`
-unless the workspace ledger says otherwise. Some sibling crates resolve
-`talos3d-core` through relative paths, so worktrees under
-`talos3d-core/.worktrees/` do not compile reliably in that workspace layout.
+- Do not add architecture, naval, business, billing, customer, or Appverket
+  operations semantics to the public core. Reduce domain work to genuinely
+  domain-neutral platform capability first.
 
 ## MCP Guidance
 
