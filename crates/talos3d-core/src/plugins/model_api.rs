@@ -1129,7 +1129,7 @@ fn handle_list_materials(world: &World) -> Vec<MaterialInfo> {
     world
         .resource::<MaterialRegistry>()
         .all()
-        .map(|def| MaterialInfo::from_def(def, &texture_registry))
+        .map(|def| MaterialInfo::from_def(def, texture_registry))
         .collect()
 }
 
@@ -1139,7 +1139,7 @@ fn handle_get_material(world: &World, id: &str) -> Result<MaterialInfo, String> 
     world
         .resource::<MaterialRegistry>()
         .get(id)
-        .map(|def| MaterialInfo::from_def(def, &texture_registry))
+        .map(|def| MaterialInfo::from_def(def, texture_registry))
         .ok_or_else(|| format!("Material '{id}' not found"))
 }
 
@@ -1221,6 +1221,67 @@ fn handle_apply_material(world: &mut World, req: ApplyMaterialRequest) -> Result
         applied.push(eid);
     }
     Ok(applied)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_assign_material(
+    world: &mut World,
+    req: AssignMaterialRequest,
+) -> Result<AssignMaterialResponse, String> {
+    if req.element_ids.is_empty() {
+        return Err("assign_material requires at least one element_id".to_string());
+    }
+
+    let requested_id = req
+        .material_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+
+    let (material_id, created_material) = if let Some(base_color) = req.base_color {
+        let mut def = MaterialDef::new(
+            req.name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "Assigned Material".to_string()),
+        );
+        if let Some(id) = requested_id {
+            def.id = id;
+        }
+        def.base_color = base_color;
+        if let Some(perceptual_roughness) = req.perceptual_roughness {
+            def.perceptual_roughness = perceptual_roughness;
+        }
+        if let Some(metallic) = req.metallic {
+            def.metallic = metallic;
+        }
+        let material_id = def.id.clone();
+        let created_material = !world.resource::<MaterialRegistry>().contains(&material_id);
+        world.resource_mut::<MaterialRegistry>().upsert(def);
+        (material_id, created_material)
+    } else {
+        let material_id = requested_id
+            .ok_or_else(|| "assign_material requires material_id or base_color".to_string())?;
+        if !world.resource::<MaterialRegistry>().contains(&material_id) {
+            return Err(format!("Material '{material_id}' not found"));
+        }
+        (material_id, false)
+    };
+
+    let assignments = handle_set_material_assignment(
+        world,
+        SetMaterialAssignmentRequest {
+            element_ids: req.element_ids,
+            assignment: MaterialAssignment::new(material_id.clone()),
+        },
+    )?;
+
+    Ok(AssignMaterialResponse {
+        material_id,
+        created_material,
+        assignments,
+    })
 }
 
 #[cfg(feature = "model-api")]
@@ -2111,9 +2172,7 @@ fn scene_light_info_from_parts(
 
 #[cfg(feature = "model-api")]
 fn scene_light_info_from_world(world: &World, element_id: ElementId) -> Option<SceneLightInfo> {
-    let Some(mut query) = world.try_query::<(&ElementId, &SceneLightNode, &Transform)>() else {
-        return None;
-    };
+    let mut query = world.try_query::<(&ElementId, &SceneLightNode, &Transform)>()?;
     query.iter(world).find_map(|(current_id, node, transform)| {
         (*current_id == element_id)
             .then(|| scene_light_info_from_parts(*current_id, node, transform))
@@ -4947,8 +5006,7 @@ fn find_representation_index(
         .iter()
         .enumerate()
         .filter_map(|(index, representation)| {
-            if &representation.kind == kind
-                && role.map_or(true, |role| &representation.role == role)
+            if &representation.kind == kind && role.is_none_or(|role| &representation.role == role)
             {
                 Some(index)
             } else {
@@ -9557,10 +9615,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     let mut no_curated_paths = Vec::new();
     if let Some(registry) = world.get_resource::<CapabilityRegistry>() {
         for class in registry.element_class_descriptors() {
-            let recipe_count = registry
-                .recipe_family_descriptors(Some(&class.id))
-                .into_iter()
-                .count();
+            let recipe_count = registry.recipe_family_descriptors(Some(&class.id)).len();
             if recipe_count == 0 {
                 no_curated_paths.push(NoCuratedPathInfo {
                     element_class: class.id.0.clone(),

@@ -178,6 +178,10 @@ pub(super) enum ModelApiRequest {
         request: ApplyMaterialRequest,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    AssignMaterial {
+        request: AssignMaterialRequest,
+        response: oneshot::Sender<ApiResult<AssignMaterialResponse>>,
+    },
     RemoveMaterial {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
@@ -1141,6 +1145,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::ApplyMaterial { request, response } => {
             let _ = response.send(handle_apply_material(world, request));
+        }
+        ModelApiRequest::AssignMaterial { request, response } => {
+            let _ = response.send(handle_assign_material(world, request));
         }
         ModelApiRequest::RemoveMaterial {
             element_ids,

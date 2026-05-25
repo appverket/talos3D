@@ -814,6 +814,19 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_assign_material(
+        &self,
+        request: AssignMaterialRequest,
+    ) -> ApiResult<AssignMaterialResponse> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::AssignMaterial { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_remove_material(&self, element_ids: Vec<u64>) -> ApiResult<Vec<u64>> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -5581,6 +5594,21 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(applied)
+    }
+
+    #[tool(
+        name = "assign_material",
+        description = "Assign a material to one or more entities. Pass material_id to use an existing registry material, or pass base_color as [r,g,b,a] with optional name, perceptual_roughness, and metallic to create a project material and assign it."
+    )]
+    pub(super) async fn assign_material_tool(
+        &self,
+        Parameters(params): Parameters<AssignMaterialRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let assigned = self
+            .request_assign_material(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(assigned)
     }
 
     #[tool(

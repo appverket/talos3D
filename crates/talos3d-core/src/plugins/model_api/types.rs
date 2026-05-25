@@ -294,16 +294,12 @@ impl MaterialInfo {
         fn tex_data(t: &Option<TextureRef>, texture_registry: &TextureRegistry) -> Option<String> {
             match t {
                 Some(TextureRef::TextureAsset { id }) => {
-                    texture_registry
-                        .get(id)
-                        .and_then(|asset| match &asset.payload {
-                            crate::plugins::materials::TexturePayload::Embedded {
-                                data, ..
-                            } => Some(data.clone()),
-                            crate::plugins::materials::TexturePayload::AssetPath(path) => {
-                                Some(path.clone())
-                            }
-                        })
+                    texture_registry.get(id).map(|asset| match &asset.payload {
+                        crate::plugins::materials::TexturePayload::Embedded { data, .. } => {
+                            data.clone()
+                        }
+                        crate::plugins::materials::TexturePayload::AssetPath(path) => path.clone(),
+                    })
                 }
                 Some(TextureRef::Embedded { data, .. }) => Some(data.clone()),
                 Some(TextureRef::AssetPath { path: p }) => Some(p.clone()),
@@ -495,6 +491,30 @@ fn default_uv_scale() -> [f32; 2] {
 pub struct ApplyMaterialRequest {
     pub material_id: String,
     pub element_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssignMaterialRequest {
+    pub element_ids: Vec<u64>,
+    #[serde(default)]
+    pub material_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub base_color: Option<[f32; 4]>,
+    #[serde(default)]
+    pub perceptual_roughness: Option<f32>,
+    #[serde(default)]
+    pub metallic: Option<f32>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssignMaterialResponse {
+    pub material_id: String,
+    pub created_material: bool,
+    pub assignments: Vec<EntityMaterialAssignmentInfo>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
