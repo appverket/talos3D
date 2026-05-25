@@ -507,6 +507,39 @@ pub struct AssignMaterialRequest {
     pub perceptual_roughness: Option<f32>,
     #[serde(default)]
     pub metallic: Option<f32>,
+    #[serde(default)]
+    pub base_color_texture: Option<AssignMaterialTextureRef>,
+    #[serde(default)]
+    pub normal_map_texture: Option<AssignMaterialTextureRef>,
+    #[serde(default)]
+    pub metallic_roughness_texture: Option<AssignMaterialTextureRef>,
+    #[serde(default)]
+    pub emissive_texture: Option<AssignMaterialTextureRef>,
+    #[serde(default)]
+    pub occlusion_texture: Option<AssignMaterialTextureRef>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssignMaterialTextureRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<AssignMaterialAssetTextureRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded: Option<AssignMaterialEmbeddedTextureRef>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssignMaterialAssetTextureRef {
+    pub path: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssignMaterialEmbeddedTextureRef {
+    pub data: String,
+    #[serde(default)]
+    pub mime: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

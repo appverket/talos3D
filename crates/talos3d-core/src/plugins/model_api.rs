@@ -29,8 +29,6 @@ use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
 use crate::plugins::identity::ElementIdAllocator;
 use crate::plugins::materials::MaterialAssignment;
-#[cfg(feature = "model-api")]
-use crate::plugins::materials::MaterialDef;
 use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
@@ -57,7 +55,9 @@ use crate::plugins::{
     lighting::{
         create_daylight_rig, scene_light_object_exposed, SceneLightNode, SceneLightingSettings,
     },
-    materials::{normalize_material_textures, MaterialRegistry, TextureRef, TextureRegistry},
+    materials::{
+        normalize_material_textures, MaterialDef, MaterialRegistry, TextureRef, TextureRegistry,
+    },
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
     selection::Selected,
@@ -1239,7 +1239,8 @@ fn handle_assign_material(
         .filter(|id| !id.is_empty())
         .map(str::to_string);
 
-    let (material_id, created_material) = if let Some(base_color) = req.base_color {
+    let has_material_payload = assign_material_request_has_material_payload(&req);
+    let (material_id, created_material) = if has_material_payload {
         let mut def = MaterialDef::new(
             req.name
                 .clone()
@@ -1249,15 +1250,21 @@ fn handle_assign_material(
         if let Some(id) = requested_id {
             def.id = id;
         }
-        def.base_color = base_color;
+        if let Some(base_color) = req.base_color {
+            def.base_color = base_color;
+        }
         if let Some(perceptual_roughness) = req.perceptual_roughness {
             def.perceptual_roughness = perceptual_roughness;
         }
         if let Some(metallic) = req.metallic {
             def.metallic = metallic;
         }
+        apply_assign_material_texture_refs(&req, &mut def)?;
         let material_id = def.id.clone();
         let created_material = !world.resource::<MaterialRegistry>().contains(&material_id);
+        if let Some(mut textures) = world.get_resource_mut::<TextureRegistry>() {
+            normalize_material_textures(&mut def, &mut textures);
+        }
         world.resource_mut::<MaterialRegistry>().upsert(def);
         (material_id, created_material)
     } else {
@@ -1282,6 +1289,75 @@ fn handle_assign_material(
         created_material,
         assignments,
     })
+}
+
+#[cfg(feature = "model-api")]
+fn assign_material_request_has_material_payload(req: &AssignMaterialRequest) -> bool {
+    req.base_color.is_some()
+        || req.perceptual_roughness.is_some()
+        || req.metallic.is_some()
+        || req.base_color_texture.is_some()
+        || req.normal_map_texture.is_some()
+        || req.metallic_roughness_texture.is_some()
+        || req.emissive_texture.is_some()
+        || req.occlusion_texture.is_some()
+}
+
+#[cfg(feature = "model-api")]
+fn apply_assign_material_texture_refs(
+    req: &AssignMaterialRequest,
+    def: &mut MaterialDef,
+) -> Result<(), String> {
+    def.base_color_texture =
+        assign_material_texture_ref(req.base_color_texture.as_ref(), "base_color_texture")?;
+    def.normal_map_texture =
+        assign_material_texture_ref(req.normal_map_texture.as_ref(), "normal_map_texture")?;
+    def.metallic_roughness_texture = assign_material_texture_ref(
+        req.metallic_roughness_texture.as_ref(),
+        "metallic_roughness_texture",
+    )?;
+    def.emissive_texture =
+        assign_material_texture_ref(req.emissive_texture.as_ref(), "emissive_texture")?;
+    def.occlusion_texture =
+        assign_material_texture_ref(req.occlusion_texture.as_ref(), "occlusion_texture")?;
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn assign_material_texture_ref(
+    texture: Option<&AssignMaterialTextureRef>,
+    field: &str,
+) -> Result<Option<TextureRef>, String> {
+    let Some(texture) = texture else {
+        return Ok(None);
+    };
+    match (&texture.asset, &texture.embedded) {
+        (Some(asset), None) => {
+            let path = asset.path.trim();
+            if path.is_empty() {
+                Err(format!("{field}.asset.path must be non-empty"))
+            } else {
+                Ok(Some(TextureRef::AssetPath {
+                    path: path.to_string(),
+                }))
+            }
+        }
+        (None, Some(embedded)) => {
+            if embedded.data.is_empty() {
+                Err(format!("{field}.embedded.data must be non-empty"))
+            } else {
+                Ok(Some(TextureRef::Embedded {
+                    data: embedded.data.clone(),
+                    mime: embedded
+                        .mime
+                        .clone()
+                        .unwrap_or_else(|| "image/png".to_string()),
+                }))
+            }
+        }
+        (None, None) => Err(format!("{field} requires asset or embedded")),
+        (Some(_), Some(_)) => Err(format!("{field} accepts only one of asset or embedded")),
+    }
 }
 
 #[cfg(feature = "model-api")]

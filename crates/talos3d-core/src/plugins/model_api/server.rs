@@ -5598,7 +5598,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "assign_material",
-        description = "Assign a material to one or more entities. Pass material_id to use an existing registry material, or pass base_color as [r,g,b,a] with optional name, perceptual_roughness, and metallic to create a project material and assign it."
+        description = "Assign a material to one or more entities. Pass material_id to use an existing registry material, or pass base_color and/or texture references such as base_color_texture: { asset: { path } } with optional name, perceptual_roughness, and metallic to create a project material and assign it."
     )]
     pub(super) async fn assign_material_tool(
         &self,

@@ -4614,6 +4614,11 @@ fn assign_material_uses_existing_registry_material() {
             base_color: None,
             perceptual_roughness: None,
             metallic: None,
+            base_color_texture: None,
+            normal_map_texture: None,
+            metallic_roughness_texture: None,
+            emissive_texture: None,
+            occlusion_texture: None,
         },
     )
     .expect("assign_material should accept existing registry material ids");
@@ -4642,6 +4647,11 @@ fn assign_material_can_create_color_material() {
             base_color: Some([0.05, 0.26, 0.18, 1.0]),
             perceptual_roughness: Some(0.72),
             metallic: Some(0.0),
+            base_color_texture: None,
+            normal_map_texture: None,
+            metallic_roughness_texture: None,
+            emissive_texture: None,
+            occlusion_texture: None,
         },
     )
     .expect("assign_material should create and assign ad hoc color materials");
@@ -4659,6 +4669,63 @@ fn assign_material_can_create_color_material() {
     assert_eq!(material.name, "Deep Green Paint");
     assert_eq!(material.base_color, [0.05, 0.26, 0.18, 1.0]);
     assert_eq!(material.perceptual_roughness, 0.72);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn assign_material_can_create_asset_textured_material() {
+    let mut world = init_model_api_test_world();
+    world.spawn((ElementId(42),));
+
+    let assigned = handle_assign_material(
+        &mut world,
+        AssignMaterialRequest {
+            element_ids: vec![42],
+            material_id: Some("project.brick.textured".to_string()),
+            name: Some("Textured Brick".to_string()),
+            base_color: Some([0.72, 0.31, 0.22, 1.0]),
+            perceptual_roughness: Some(0.9),
+            metallic: None,
+            base_color_texture: Some(AssignMaterialTextureRef {
+                asset: Some(AssignMaterialAssetTextureRef {
+                    path: "textures/brick_albedo.ktx2".to_string(),
+                }),
+                embedded: None,
+            }),
+            normal_map_texture: None,
+            metallic_roughness_texture: Some(AssignMaterialTextureRef {
+                asset: Some(AssignMaterialAssetTextureRef {
+                    path: "textures/brick_orm.png".to_string(),
+                }),
+                embedded: None,
+            }),
+            emissive_texture: None,
+            occlusion_texture: None,
+        },
+    )
+    .expect("assign_material should create textured registry materials");
+
+    assert_eq!(assigned.material_id, "project.brick.textured");
+    assert_eq!(
+        assigned.assignments[0].assignment,
+        Some(MaterialAssignment::new("project.brick.textured"))
+    );
+    let material = world
+        .resource::<crate::plugins::materials::MaterialRegistry>()
+        .get("project.brick.textured")
+        .expect("textured material should be inserted into registry");
+    assert_eq!(
+        material.base_color_texture,
+        Some(crate::plugins::materials::TextureRef::AssetPath {
+            path: "textures/brick_albedo.ktx2".to_string()
+        })
+    );
+    assert_eq!(
+        material.metallic_roughness_texture,
+        Some(crate::plugins::materials::TextureRef::AssetPath {
+            path: "textures/brick_orm.png".to_string()
+        })
+    );
 }
 
 #[cfg(feature = "model-api")]
