@@ -814,25 +814,95 @@ fn occurrence_generated_bounds(world: &World, owner: ElementId) -> Option<Entity
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
-    let Some(mut query) = world.try_query::<(
+
+    // --- Path 1: generated parts that carry a ProfileExtrusion (analytically exact,
+    //             no async Bevy Aabb needed). This is the fast path for compound slots.
+    if let Some(mut query) = world.try_query::<(
         &GeneratedOccurrencePart,
         &ProfileExtrusion,
         Option<&ShapeRotation>,
-    )>() else {
-        return None;
-    };
-    for (generated, extrusion, rotation) in query.iter(world) {
-        if generated.owner != owner {
-            continue;
+    )>() {
+        for (generated, extrusion, rotation) in query.iter(world) {
+            if generated.owner != owner {
+                continue;
+            }
+            let Some(bounds) = extrusion.bounds(rotation.copied().unwrap_or_default().0) else {
+                continue;
+            };
+            min = min.min(bounds.min);
+            max = max.max(bounds.max);
+            any = true;
         }
-        let Some(bounds) = extrusion.bounds(rotation.copied().unwrap_or_default().0) else {
-            continue;
-        };
-        min = min.min(bounds.min);
-        max = max.max(bounds.max);
-        any = true;
     }
+
+    // --- Path 2: generated parts that used the cached-mesh path (Mesh3d + Aabb).
+    //             Compound slots that hit the representation cache take this path.
+    if let Some(mut query) = world.try_query::<(
+        &GeneratedOccurrencePart,
+        &bevy::camera::primitives::Aabb,
+        &GlobalTransform,
+    )>() {
+        for (generated, aabb, global_transform) in query.iter(world) {
+            if generated.owner != owner {
+                continue;
+            }
+            let bounds = aabb_to_entity_bounds(aabb, global_transform);
+            min = min.min(bounds.min);
+            max = max.max(bounds.max);
+            any = true;
+        }
+    }
+
+    // --- Path 3: root occurrence entity itself when it carries a cached mesh.
+    //             Single-leaf occurrences (non-compound, non-profile-extrusion) land here.
+    if let Some(mut query) = world.try_query::<(
+        &ElementId,
+        &bevy::camera::primitives::Aabb,
+        &GlobalTransform,
+    )>() {
+        for (eid, aabb, global_transform) in query.iter(world) {
+            if *eid != owner {
+                continue;
+            }
+            let bounds = aabb_to_entity_bounds(aabb, global_transform);
+            min = min.min(bounds.min);
+            max = max.max(bounds.max);
+            any = true;
+        }
+    }
+
     any.then_some(EntityBounds { min, max })
+}
+
+/// Convert a Bevy axis-aligned bounding box (local space) plus a `GlobalTransform`
+/// into an [`EntityBounds`] in world space.
+fn aabb_to_entity_bounds(
+    aabb: &bevy::camera::primitives::Aabb,
+    global_transform: &GlobalTransform,
+) -> EntityBounds {
+    let center = Vec3::from(aabb.center);
+    let half = Vec3::from(aabb.half_extents);
+    let local_corners = [
+        center + Vec3::new(-half.x, -half.y, -half.z),
+        center + Vec3::new(-half.x, -half.y, half.z),
+        center + Vec3::new(half.x, -half.y, half.z),
+        center + Vec3::new(half.x, -half.y, -half.z),
+        center + Vec3::new(-half.x, half.y, -half.z),
+        center + Vec3::new(-half.x, half.y, half.z),
+        center + Vec3::new(half.x, half.y, half.z),
+        center + Vec3::new(half.x, half.y, -half.z),
+    ];
+    let mut world_min = Vec3::splat(f32::MAX);
+    let mut world_max = Vec3::splat(f32::MIN);
+    for corner in &local_corners {
+        let world_corner = global_transform.transform_point(*corner);
+        world_min = world_min.min(world_corner);
+        world_max = world_max.max(world_corner);
+    }
+    EntityBounds {
+        min: world_min,
+        max: world_max,
+    }
 }
 
 fn draw_occurrence_bounds(gizmos: &mut Gizmos, bounds: EntityBounds, color: Color) {
@@ -3259,6 +3329,96 @@ mod trig_and_rotation_tests {
         assert!(
             dot > 0.9999,
             "without rotation_euler_deg the child should inherit parent identity rotation, dot={dot:.6}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// occurrence_generated_bounds — coverage for Aabb+GlobalTransform path (fix #1)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod bounds_from_aabb_tests {
+    use super::*;
+    use bevy::math::{Vec3A, Vec3};
+    use crate::authored_entity::EntityBounds;
+
+    /// Build a minimal `GlobalTransform` at the given translation (identity rotation/scale).
+    fn global_transform_at(translation: Vec3) -> GlobalTransform {
+        GlobalTransform::from(Transform::from_translation(translation))
+    }
+
+    /// Construct a `bevy::camera::primitives::Aabb` centered at `center` with given half-extents.
+    fn make_aabb(center: Vec3, half: Vec3) -> bevy::camera::primitives::Aabb {
+        bevy::camera::primitives::Aabb {
+            center: Vec3A::from(center),
+            half_extents: Vec3A::from(half),
+        }
+    }
+
+    #[test]
+    fn aabb_to_entity_bounds_identity_transform() {
+        // Aabb centred at (1, 2, 3) with half_extents (0.5, 0.5, 0.5) in an entity
+        // placed at origin → world bounds should be [0.5,1.5]×[1.5,2.5]×[2.5,3.5].
+        let aabb = make_aabb(Vec3::new(1.0, 2.0, 3.0), Vec3::splat(0.5));
+        let gt = global_transform_at(Vec3::ZERO);
+        let bounds = aabb_to_entity_bounds(&aabb, &gt);
+        assert!((bounds.min.x - 0.5).abs() < 1e-5, "min.x {}", bounds.min.x);
+        assert!((bounds.max.x - 1.5).abs() < 1e-5, "max.x {}", bounds.max.x);
+        assert!((bounds.min.y - 1.5).abs() < 1e-5, "min.y {}", bounds.min.y);
+        assert!((bounds.max.y - 2.5).abs() < 1e-5, "max.y {}", bounds.max.y);
+        assert!((bounds.min.z - 2.5).abs() < 1e-5, "min.z {}", bounds.min.z);
+        assert!((bounds.max.z - 3.5).abs() < 1e-5, "max.z {}", bounds.max.z);
+    }
+
+    #[test]
+    fn aabb_to_entity_bounds_with_translation() {
+        // Aabb centred at origin with half_extents (1, 1, 1), entity translated by (5, 0, 0)
+        // → world bounds should be [4, 6]×[-1,1]×[-1,1].
+        let aabb = make_aabb(Vec3::ZERO, Vec3::ONE);
+        let gt = global_transform_at(Vec3::new(5.0, 0.0, 0.0));
+        let bounds = aabb_to_entity_bounds(&aabb, &gt);
+        assert!((bounds.min.x - 4.0).abs() < 1e-5, "min.x {}", bounds.min.x);
+        assert!((bounds.max.x - 6.0).abs() < 1e-5, "max.x {}", bounds.max.x);
+    }
+
+    /// Test that `occurrence_generated_bounds` returns `Some` when the root entity
+    /// carries a Bevy `Aabb` (cached-mesh path, no ProfileExtrusion on it directly).
+    #[test]
+    fn occurrence_generated_bounds_from_root_aabb() {
+        use bevy::math::Vec3A;
+
+        let owner = ElementId(42);
+        let mut world = World::new();
+
+        // Spawn the root occurrence entity, giving it an ElementId, Transform/GlobalTransform,
+        // and a pre-attached Aabb (in a real app Bevy computes this from the mesh asset;
+        // we attach it directly to simulate the steady-state after one render frame).
+        let gt = global_transform_at(Vec3::new(1.0, 0.0, 0.0));
+        world.spawn((
+            owner,
+            Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+            gt,
+            bevy::camera::primitives::Aabb {
+                center: Vec3A::ZERO,
+                half_extents: Vec3A::new(2.0, 1.5, 0.15),
+            },
+        ));
+
+        let bounds = occurrence_generated_bounds(&world, owner)
+            .expect("should return bounds when root entity has Aabb");
+
+        // World min.x = translate(1) + (-2) = -1.0
+        assert!(
+            (bounds.min.x - (-1.0)).abs() < 1e-4,
+            "expected min.x ≈ -1.0, got {}",
+            bounds.min.x
+        );
+        // World max.x = translate(1) + 2 = 3.0
+        assert!(
+            (bounds.max.x - 3.0).abs() < 1e-4,
+            "expected max.x ≈ 3.0, got {}",
+            bounds.max.x
         );
     }
 }
