@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 use serde_json::json;
-use talos3d_architectural::{
+use talos3d_architecture_elements::{
     components::{BimData, Opening, OpeningKind, ParentWall, Wall},
     snapshots::{OpeningFactory, WallFactory},
 };
@@ -65,6 +65,7 @@ fn architectural_entities_appear_in_list_and_summary() {
                 end: Vec2::new(5.0, 0.0),
                 height: 3.0,
                 thickness: 0.2,
+                layers: Vec::new(),
             },
             BimData::default(),
         ))

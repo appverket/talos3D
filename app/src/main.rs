@@ -5,7 +5,7 @@ use bevy::{
 };
 #[cfg(feature = "model-api")]
 use std::env;
-use talos3d_architectural::ArchitecturalPlugin;
+use talos3d_architecture_elements::ArchitecturalPlugin;
 use talos3d_architecture_core::ArchitectureCorePlugin;
 use talos3d_core::capability_registry::DefaultsRegistry;
 #[cfg(feature = "model-api")]
