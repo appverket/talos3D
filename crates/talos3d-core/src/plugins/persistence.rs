@@ -6,7 +6,10 @@ use serde_json::Value;
 
 use crate::{
     capability_registry::{CapabilityRegistry, DefaultsRegistry},
-    curation::{Nomination, NominationQueue, SourceRegistry, SourceRegistryEntry, SourceTier},
+    curation::{
+        MaterialSpec, MaterialSpecRegistry, Nomination, NominationQueue, SourceRegistry,
+        SourceRegistryEntry, SourceTier,
+    },
     plugins::{
         assembly_pattern_drafts::{AssemblyPatternDraftArtifact, AssemblyPatternDraftRegistry},
         bundled_definition_libraries::apply_bundled_definition_libraries,
@@ -101,6 +104,11 @@ struct ProjectFile {
     /// an agent's proposed additions survive across authoring sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nominations: Option<Vec<Nomination>>,
+    /// Project-scope `MaterialSpec` entries (ADR-040 / PP83). Shipped pack
+    /// specs remain in code/packs; only project-local material knowledge is
+    /// serialized into the `.talos3d` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    material_specs: Option<Vec<MaterialSpec>>,
     /// Project-scope dynamically acquired recipe draft assets (PP-DKC-3).
     /// These are curation-shaped assets, not the legacy session-cache schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -292,6 +300,9 @@ pub fn new_document(world: &mut World) {
     if let Some(mut queue) = world.get_resource_mut::<NominationQueue>() {
         *queue = NominationQueue::default();
     }
+    if let Some(mut registry) = world.get_resource_mut::<MaterialSpecRegistry>() {
+        registry.replace_project_scope(std::iter::empty());
+    }
     if let Some(mut queue) = world.get_resource_mut::<CorpusGapQueue>() {
         queue.restore(Vec::new());
     }
@@ -448,6 +459,16 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
             Some(q.list().iter().cloned().collect::<Vec<_>>())
         }
     });
+    let material_specs = world
+        .get_resource::<MaterialSpecRegistry>()
+        .and_then(|registry| {
+            let specs = registry.project_scope_specs();
+            if specs.is_empty() {
+                None
+            } else {
+                Some(specs)
+            }
+        });
     let knowledge_recipe_drafts = world.get_resource::<RecipeDraftRegistry>().and_then(|q| {
         let drafts = q.project_assets();
         if drafts.is_empty() {
@@ -489,6 +510,7 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
         lighting,
         sources,
         nominations,
+        material_specs,
         knowledge_recipe_drafts,
         knowledge_assembly_pattern_drafts,
         corpus_gaps,
@@ -511,6 +533,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         lighting,
         sources,
         nominations,
+        material_specs,
         knowledge_recipe_drafts,
         knowledge_assembly_pattern_drafts,
         corpus_gaps,
@@ -677,6 +700,10 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     if let Some(mut queue) = world.get_resource_mut::<NominationQueue>() {
         queue.restore(nominations.unwrap_or_default());
     }
+    world.init_resource::<MaterialSpecRegistry>();
+    world
+        .resource_mut::<MaterialSpecRegistry>()
+        .replace_project_scope(material_specs.unwrap_or_default());
     world.init_resource::<CorpusGapQueue>();
     world
         .resource_mut::<CorpusGapQueue>()
@@ -1217,6 +1244,7 @@ mod tests {
                 lighting: Some(SceneLightingSettings::default()),
                 sources: None,
                 nominations: None,
+                material_specs: None,
                 knowledge_recipe_drafts: None,
                 knowledge_assembly_pattern_drafts: None,
                 corpus_gaps: None,
@@ -1248,6 +1276,7 @@ mod tests {
                 lighting: None,
                 sources: None,
                 nominations: None,
+                material_specs: None,
                 knowledge_recipe_drafts: None,
                 knowledge_assembly_pattern_drafts: None,
                 corpus_gaps: None,
@@ -1282,6 +1311,7 @@ mod tests {
                 lighting: None,
                 sources: None,
                 nominations: None,
+                material_specs: None,
                 knowledge_recipe_drafts: None,
                 knowledge_assembly_pattern_drafts: None,
                 corpus_gaps: None,
@@ -1329,6 +1359,7 @@ mod tests {
             lighting: Some(SceneLightingSettings::default()),
             sources: None,
             nominations: None,
+            material_specs: None,
             knowledge_recipe_drafts: None,
             knowledge_assembly_pattern_drafts: None,
             corpus_gaps: None,
@@ -1345,6 +1376,68 @@ mod tests {
             saved.entities.contains(&unknown_record),
             "unknown future entity data must be preserved for save/load portability"
         );
+    }
+
+    #[test]
+    fn project_material_specs_round_trip_through_project_file() {
+        let mut source = World::new();
+        source.insert_resource(CapabilityRegistry::default());
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        source.insert_resource(DefinitionRegistry::default());
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+
+        let mut specs = MaterialSpecRegistry::default();
+        for idx in 0..5 {
+            specs.insert(MaterialSpec::draft(
+                MaterialSpec::asset_id_for(format!("project_spec_{idx}")),
+                crate::curation::MaterialSpecBody {
+                    display_name: format!("Project Material Spec {idx}"),
+                    classification: vec!["test.project".into()],
+                    density_kg_m3: Some(400.0 + idx as f32),
+                    notes: Some("PP-083 persistence regression fixture".into()),
+                    ..Default::default()
+                },
+                crate::plugins::refinement::AgentId("codex".into()),
+                Some("project material spec round-trip".into()),
+            ));
+        }
+        let expected_specs = specs.project_scope_specs();
+        source.insert_resource(specs);
+
+        let project = build_project_file(&mut source).expect("project should serialize");
+        let persisted_specs = project
+            .material_specs
+            .as_ref()
+            .expect("project-scope material specs should persist");
+        assert_eq!(persisted_specs.len(), 5);
+
+        let json = serde_json::to_string(&project).expect("project should serialize to JSON");
+        let project: ProjectFile =
+            serde_json::from_str(&json).expect("project should deserialize from JSON");
+
+        let mut target = World::new();
+        target.insert_resource(CapabilityRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        let reloaded = target.resource::<MaterialSpecRegistry>();
+        assert_eq!(reloaded.project_scope_specs().len(), 5);
+        for spec in expected_specs {
+            assert_eq!(reloaded.get(&spec.meta.id), Some(&spec));
+        }
     }
 
     #[test]
@@ -1626,6 +1719,7 @@ mod tests {
             lighting: Some(SceneLightingSettings::default()),
             sources: None,
             nominations: None,
+            material_specs: None,
             knowledge_recipe_drafts: None,
             knowledge_assembly_pattern_drafts: None,
             corpus_gaps: None,

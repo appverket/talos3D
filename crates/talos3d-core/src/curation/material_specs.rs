@@ -201,6 +201,25 @@ impl MaterialSpecRegistry {
         self.entries.values()
     }
 
+    pub fn project_scope_specs(&self) -> Vec<MaterialSpec> {
+        self.entries
+            .values()
+            .filter(|spec| spec.meta.scope == Scope::Project)
+            .cloned()
+            .collect()
+    }
+
+    pub fn replace_project_scope<I>(&mut self, specs: I)
+    where
+        I: IntoIterator<Item = MaterialSpec>,
+    {
+        self.entries
+            .retain(|_, spec| spec.meta.scope != Scope::Project);
+        for spec in specs {
+            self.insert(spec);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
