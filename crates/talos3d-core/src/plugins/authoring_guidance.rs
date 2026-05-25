@@ -1,9 +1,10 @@
 //! Authoring guidance (Slice A of the `COMPONENT_STRUCTURE` proposal).
 //!
-//! Per `private/architecture_knowledge/COMPONENT_STRUCTURE.md`, Talos3D owns a
-//! single canonical guidance document that tells authoring agents how to
-//! choose between reusable `Definition`s, derived families, and singleton
-//! entities, and how that decision composes with progressive refinement.
+//! Talos3D owns a single active guidance document that tells authoring agents
+//! how to choose between reusable `Definition`s, derived families, and
+//! singleton entities, and how that decision composes with progressive
+//! refinement. Core owns this resource and transport surface; each capability
+//! owns its repo-scoped guidance content.
 //!
 //! This module defines:
 //!

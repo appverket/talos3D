@@ -23395,7 +23395,8 @@ mod tests {
                 },
                 references: vec![GuidanceReference {
                     kind: "canonical_markdown".to_string(),
-                    target: "private/architecture_knowledge/COMPONENT_STRUCTURE.md".to_string(),
+                    target: "talos3d-architecture/docs/authoring/COMPONENT_STRUCTURE.md"
+                        .to_string(),
                     note: None,
                 }],
             });
