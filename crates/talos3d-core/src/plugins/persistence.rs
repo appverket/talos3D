@@ -895,7 +895,11 @@ mod tests {
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
         },
         property_edit::PropertyEditState,
-        refinement::{RefinementState, RefinementStateComponent},
+        refinement::{
+            AgentId, AuthoringMode, AuthoringProvenance, ClaimGrounding, ClaimPath, ClaimRecord,
+            Grounding, Obligation, ObligationId, ObligationSet, ObligationStatus, RefinementState,
+            RefinementStateComponent, RuleId, SemanticRole,
+        },
         tools::ActiveTool,
         transform::TransformState,
     };
@@ -1650,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_assembly_refinement_state_round_trips_through_project() {
+    fn semantic_assembly_refinement_sidecars_round_trip_through_project() {
         let mut source = World::new();
         let mut source_factories = CapabilityRegistry::default();
         source_factories.register_factory(AssemblyFactory);
@@ -1665,6 +1669,36 @@ mod tests {
         source.insert_resource(ElementIdAllocator::default());
         source.insert_resource(OpaquePersistedEntities::default());
 
+        let obligations = ObligationSet {
+            entries: vec![
+                Obligation {
+                    id: ObligationId("primary_structure_resolved".into()),
+                    role: SemanticRole("primary_structure".into()),
+                    required_by_state: RefinementState::Constructible,
+                    status: ObligationStatus::SatisfiedBy(77),
+                },
+                Obligation {
+                    id: ObligationId("energy_model_pending".into()),
+                    role: SemanticRole("energy_performance".into()),
+                    required_by_state: RefinementState::Detailed,
+                    status: ObligationStatus::Deferred("awaiting envelope spec".into()),
+                },
+            ],
+        };
+        let mut claim_grounding = ClaimGrounding::default();
+        claim_grounding.claims.insert(
+            ClaimPath("gross_floor_area_m2".into()),
+            ClaimRecord {
+                grounding: Grounding::ExplicitRule(RuleId("pp185_area_fixture".into())),
+                set_at: 1_779_715_200,
+                set_by: Some(AgentId("codex".into())),
+            },
+        );
+        let authoring_provenance = AuthoringProvenance {
+            mode: AuthoringMode::Freeform,
+            rationale: Some("PP-185 persistence fixture".into()),
+        };
+
         source.spawn((
             ElementId(77),
             SemanticAssembly {
@@ -1677,6 +1711,9 @@ mod tests {
             RefinementStateComponent {
                 state: RefinementState::FabricationReady,
             },
+            obligations.clone(),
+            claim_grounding.clone(),
+            authoring_provenance.clone(),
         ));
 
         let project = build_project_file(&mut source).expect("project should serialize");
@@ -1688,6 +1725,24 @@ mod tests {
         assert_eq!(
             assembly_record.data["Assembly"]["refinement_state"].as_str(),
             Some("FabricationReady")
+        );
+        assert!(
+            assembly_record.data["Assembly"]
+                .get("obligations")
+                .is_some(),
+            "obligations should persist with the semantic assembly snapshot"
+        );
+        assert!(
+            assembly_record.data["Assembly"]
+                .get("claim_grounding")
+                .is_some(),
+            "claim grounding should persist with the semantic assembly snapshot"
+        );
+        assert!(
+            assembly_record.data["Assembly"]
+                .get("authoring_provenance")
+                .is_some(),
+            "authoring provenance should persist with the semantic assembly snapshot"
         );
 
         let mut target = World::new();
@@ -1710,12 +1765,21 @@ mod tests {
 
         load_project(&mut target, project).expect("project should load");
 
-        let mut query = target.query::<(&ElementId, &RefinementStateComponent)>();
+        let mut query = target.query::<(
+            &ElementId,
+            &RefinementStateComponent,
+            &ObligationSet,
+            &ClaimGrounding,
+            &AuthoringProvenance,
+        )>();
         let restored = query
             .iter(&target)
-            .find(|(element_id, _)| **element_id == ElementId(77))
-            .expect("assembly refinement state should reload");
+            .find(|(element_id, _, _, _, _)| **element_id == ElementId(77))
+            .expect("assembly refinement sidecars should reload");
         assert_eq!(restored.1.state, RefinementState::FabricationReady);
+        assert_eq!(restored.2, &obligations);
+        assert_eq!(restored.3, &claim_grounding);
+        assert_eq!(restored.4, &authoring_provenance);
     }
 
     #[test]

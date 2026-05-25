@@ -3891,6 +3891,9 @@ pub fn handle_create_assembly(
             metadata: request.metadata,
         },
         refinement_state: None,
+        obligations: None,
+        claim_grounding: None,
+        authoring_provenance: None,
     };
 
     let mut relation_snapshots: Vec<RelationSnapshot> = Vec::new();

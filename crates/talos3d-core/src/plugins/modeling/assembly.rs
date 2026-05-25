@@ -13,7 +13,10 @@ use crate::{
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
-        refinement::{RefinementState, RefinementStateComponent},
+        refinement::{
+            AuthoringProvenance, ClaimGrounding, ObligationSet, RefinementState,
+            RefinementStateComponent,
+        },
     },
 };
 
@@ -81,6 +84,12 @@ pub struct AssemblySnapshot {
     pub assembly: SemanticAssembly,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refinement_state: Option<RefinementState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligations: Option<ObligationSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_grounding: Option<ClaimGrounding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_provenance: Option<AuthoringProvenance>,
 }
 
 impl From<AssemblySnapshot> for BoxedEntity {
@@ -185,12 +194,32 @@ impl AuthoredEntity for AssemblySnapshot {
                     state: refinement_state,
                 });
             }
+            if let Some(obligations) = &self.obligations {
+                world.entity_mut(entity).insert(obligations.clone());
+            }
+            if let Some(claim_grounding) = &self.claim_grounding {
+                world.entity_mut(entity).insert(claim_grounding.clone());
+            }
+            if let Some(authoring_provenance) = &self.authoring_provenance {
+                world
+                    .entity_mut(entity)
+                    .insert(authoring_provenance.clone());
+            }
         } else {
             let mut entity = world.spawn((self.element_id, self.assembly.clone()));
             if let Some(refinement_state) = self.refinement_state {
                 entity.insert(RefinementStateComponent {
                     state: refinement_state,
                 });
+            }
+            if let Some(obligations) = &self.obligations {
+                entity.insert(obligations.clone());
+            }
+            if let Some(claim_grounding) = &self.claim_grounding {
+                entity.insert(claim_grounding.clone());
+            }
+            if let Some(authoring_provenance) = &self.authoring_provenance {
+                entity.insert(authoring_provenance.clone());
             }
         }
     }
@@ -369,11 +398,17 @@ impl AuthoredEntityFactory for AssemblyFactory {
         let refinement_state = entity_ref
             .get::<RefinementStateComponent>()
             .map(|component| component.state);
+        let obligations = entity_ref.get::<ObligationSet>().cloned();
+        let claim_grounding = entity_ref.get::<ClaimGrounding>().cloned();
+        let authoring_provenance = entity_ref.get::<AuthoringProvenance>().cloned();
         Some(
             AssemblySnapshot {
                 element_id,
                 assembly: assembly.clone(),
                 refinement_state,
+                obligations,
+                claim_grounding,
+                authoring_provenance,
             }
             .into(),
         )
@@ -462,6 +497,9 @@ impl AuthoredEntityFactory for AssemblyFactory {
                 metadata,
             },
             refinement_state: None,
+            obligations: None,
+            claim_grounding: None,
+            authoring_provenance: None,
         }
         .into())
     }
