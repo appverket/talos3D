@@ -1164,7 +1164,23 @@ fn poll_model_api_requests_services_channel_queries() {
 #[cfg(feature = "model-api")]
 #[test]
 fn import_handlers_list_importers_and_create_triangle_meshes() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::SemanticRole;
+    use crate::plugins::semantic_shadow::SemanticShadowCandidateStatus;
+
     let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("imported_foreign_geometry".to_string()),
+            label: "Imported Foreign Geometry".to_string(),
+            description: "Foreign import context accepted into native semantic inspection."
+                .to_string(),
+            semantic_roles: vec![SemanticRole("foreign_context".to_string())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: json!({}),
+        });
 
     let importers = world.resource::<ImportRegistry>().list_importers();
     assert_eq!(importers.len(), 1);
@@ -1181,6 +1197,53 @@ fn import_handlers_list_importers_and_create_triangle_meshes() {
     assert_eq!(
         snapshot["TriangleMesh"]["primitive"]["name"],
         json!("Imported")
+    );
+    assert_eq!(
+        snapshot["TriangleMesh"]["semantic_shadow"]["candidates"][0]["status"],
+        json!("inferred")
+    );
+    assert_eq!(
+        snapshot["TriangleMesh"]["semantic_shadow"]["gaps"][0]["category"],
+        json!("unsupported_semantics")
+    );
+    let details = get_entity_details(&world, ElementId(imported_ids[0]))
+        .expect("triangle mesh details should exist");
+    assert!(details.semantic.is_none());
+    let shadow = details
+        .semantic_shadow
+        .expect("imported triangle mesh should carry semantic shadow");
+    assert_eq!(
+        shadow.candidates[0].element_class.as_deref(),
+        Some("imported_foreign_geometry")
+    );
+    assert_eq!(
+        shadow.candidates[0].status,
+        SemanticShadowCandidateStatus::Inferred
+    );
+
+    let accepted = handle_accept_semantic_shadow_candidate(
+        &mut world,
+        AcceptSemanticShadowCandidateRequest {
+            element_id: imported_ids[0],
+            candidate_id: "imported_foreign_geometry".to_string(),
+            element_class: None,
+            refinement_state: Some("Conceptual".to_string()),
+            parameters: None,
+            rationale: None,
+        },
+    )
+    .expect("semantic shadow candidate should accept through model API path");
+    let semantic = accepted
+        .semantic
+        .expect("accepted shadow should become native semantic details");
+    assert_eq!(
+        semantic.element_class.as_deref(),
+        Some("imported_foreign_geometry")
+    );
+    assert_eq!(semantic.semantic_roles, vec!["foreign_context".to_string()]);
+    assert_eq!(
+        accepted.semantic_shadow.unwrap().candidates[0].status,
+        SemanticShadowCandidateStatus::AcceptedNativeClaim
     );
 
     let entities = list_entities(&world);
@@ -1233,6 +1296,7 @@ async fn mcp_tools_return_structured_model_data() {
     assert!(tool_names.contains("list_entities"));
     assert!(tool_names.contains("create_entity"));
     assert!(tool_names.contains("create_box"));
+    assert!(tool_names.contains("semantic_shadow.accept_candidate"));
     assert!(tool_names.contains("place_dimension_between_handles"));
     assert!(tool_names.contains("get_camera"));
     assert!(tool_names.contains("set_camera"));

@@ -126,6 +126,19 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_accept_semantic_shadow_candidate(
+        &self,
+        request: AcceptSemanticShadowCandidateRequest,
+    ) -> ApiResult<EntityDetails> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::AcceptSemanticShadowCandidate { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_list_handles(&self, element_id: u64) -> ApiResult<Vec<HandleInfo>> {
         let (response, receiver) = oneshot::channel();
         self.sender
@@ -4900,6 +4913,21 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(element_ids)
+    }
+
+    #[tool(
+        name = "semantic_shadow.accept_candidate",
+        description = "Accept an inferred semantic shadow candidate for an imported entity and write the resulting native semantic annotation through the model API path."
+    )]
+    pub(super) async fn accept_semantic_shadow_candidate_tool(
+        &self,
+        Parameters(params): Parameters<AcceptSemanticShadowCandidateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let details = self
+            .request_accept_semantic_shadow_candidate(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(details)
     }
 
     #[tool(

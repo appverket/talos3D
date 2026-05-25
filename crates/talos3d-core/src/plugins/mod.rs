@@ -67,6 +67,7 @@ pub mod scenario_scoring;
 pub mod scene_ray;
 pub mod section_fill;
 pub mod selection;
+pub mod semantic_shadow;
 pub mod session_draft_cache;
 pub mod shading;
 pub mod snap;

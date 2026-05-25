@@ -31,6 +31,7 @@ use crate::{
                 ShapeRotation, SpherePrimitive, TriangleMesh,
             },
         },
+        semantic_shadow::SemanticShadow,
     },
 };
 
@@ -54,6 +55,8 @@ pub struct TriangleMeshSnapshot {
     pub layer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material_assignment: Option<MaterialAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_shadow: Option<SemanticShadow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -419,6 +422,7 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             },
             layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
+            semantic_shadow: self.semantic_shadow.clone(),
         }
         .into()
     }
@@ -445,6 +449,7 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             },
             layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
+            semantic_shadow: self.semantic_shadow.clone(),
         }
         .into()
     }
@@ -465,6 +470,7 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             },
             layer: self.layer.clone(),
             material_assignment: self.material_assignment.clone(),
+            semantic_shadow: self.semantic_shadow.clone(),
         }
         .into()
     }
@@ -575,6 +581,11 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             } else {
                 entity.remove::<MaterialAssignment>();
             }
+            if let Some(semantic_shadow) = &self.semantic_shadow {
+                entity.insert(semantic_shadow.clone());
+            } else {
+                entity.remove::<SemanticShadow>();
+            }
         } else {
             let mut entity = world.spawn((
                 self.element_id,
@@ -587,6 +598,9 @@ impl AuthoredEntity for TriangleMeshSnapshot {
             }
             if let Some(material_assignment) = &self.material_assignment {
                 entity.insert(material_assignment.clone());
+            }
+            if let Some(semantic_shadow) = &self.semantic_shadow {
+                entity.insert(semantic_shadow.clone());
             }
         }
     }
@@ -767,6 +781,7 @@ impl AuthoredEntityFactory for TriangleMeshFactory {
                 primitive: primitive.clone(),
                 layer: entity_ref.get::<LayerAssignment>().map(|a| a.layer.clone()),
                 material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
+                semantic_shadow: entity_ref.get::<SemanticShadow>().cloned(),
             }
             .into(),
         )
@@ -816,6 +831,12 @@ impl AuthoredEntityFactory for TriangleMeshFactory {
             material_assignment: object
                 .get("material_assignment")
                 .and_then(material_assignment_from_value),
+            semantic_shadow: object
+                .get("semantic_shadow")
+                .map(|value| {
+                    serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+                })
+                .transpose()?,
         };
         validate_triangle_mesh(&snapshot.primitive)?;
         Ok(snapshot.into())
@@ -901,6 +922,7 @@ impl AuthoredEntityFactory for TriangleMeshFactory {
                     primitive: primitive.clone(),
                     layer: entity_ref.get::<LayerAssignment>().map(|a| a.layer.clone()),
                     material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
+                    semantic_shadow: entity_ref.get::<SemanticShadow>().cloned(),
                 }
                 .center(),
             );
@@ -1742,6 +1764,7 @@ mod tests {
                 },
                 layer: None,
                 material_assignment: None,
+                semantic_shadow: None,
             }),
         ];
 
