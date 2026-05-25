@@ -198,6 +198,18 @@ pub(super) enum ModelApiRequest {
         request: SetMaterialAssignmentRequest,
         response: oneshot::Sender<ApiResult<Vec<EntityMaterialAssignmentInfo>>>,
     },
+    GetTextureMapping {
+        request: GetTextureMappingRequest,
+        response: oneshot::Sender<ApiResult<TextureMappingInfo>>,
+    },
+    UpdateTextureMapping {
+        request: UpdateTextureMappingRequest,
+        response: oneshot::Sender<ApiResult<TextureMappingInfo>>,
+    },
+    ResetTextureMapping {
+        request: ResetTextureMappingRequest,
+        response: oneshot::Sender<ApiResult<TextureMappingInfo>>,
+    },
     BimMaterialAssignLayered {
         request: BimMaterialAssignLayeredRequest,
         response: oneshot::Sender<ApiResult<Value>>,
@@ -1198,6 +1210,15 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::SetMaterialAssignment { request, response } => {
             let _ = response.send(handle_set_material_assignment(world, request));
+        }
+        ModelApiRequest::GetTextureMapping { request, response } => {
+            let _ = response.send(handle_get_texture_mapping(world, request));
+        }
+        ModelApiRequest::UpdateTextureMapping { request, response } => {
+            let _ = response.send(handle_update_texture_mapping(world, request));
+        }
+        ModelApiRequest::ResetTextureMapping { request, response } => {
+            let _ = response.send(handle_reset_texture_mapping(world, request));
         }
         ModelApiRequest::BimMaterialAssignLayered { request, response } => {
             let _ = response.send(handle_bim_material_assign_layered(world, request));

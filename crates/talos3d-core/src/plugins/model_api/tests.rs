@@ -1296,6 +1296,9 @@ async fn mcp_tools_return_structured_model_data() {
     assert!(tool_names.contains("list_entities"));
     assert!(tool_names.contains("create_entity"));
     assert!(tool_names.contains("create_box"));
+    assert!(tool_names.contains("get_texture_mapping"));
+    assert!(tool_names.contains("update_texture_mapping"));
+    assert!(tool_names.contains("reset_texture_mapping"));
     assert!(tool_names.contains("semantic_shadow.accept_candidate"));
     assert!(tool_names.contains("place_dimension_between_handles"));
     assert!(tool_names.contains("get_camera"));
@@ -4825,6 +4828,7 @@ fn material_assignment_round_trips_layer_sets() {
                     render: Some(crate::plugins::materials::material_def_asset_id(
                         "oak_finish",
                     )),
+                    mapping: None,
                 },
             },
             crate::plugins::materials::MaterialLayer {
@@ -4985,6 +4989,197 @@ fn assign_material_can_create_asset_textured_material() {
             path: "textures/brick_orm.png".to_string()
         })
     );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn texture_mapping_tools_update_material_defaults() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<crate::plugins::materials::MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "project.cedar".to_string(),
+            name: "Project Cedar".to_string(),
+            ..Default::default()
+        });
+
+    let updated = handle_update_texture_mapping(
+        &mut world,
+        UpdateTextureMappingRequest {
+            material_id: Some("project.cedar".to_string()),
+            element_id: None,
+            mapping: TextureMappingDto {
+                projection: "uv".to_string(),
+                uv_scale: [0.25, 0.5],
+                uv_offset: [0.1, 0.2],
+                uv_rotation_deg: 90.0,
+                flip_u: true,
+                flip_v: false,
+                blend_sharpness: 4.0,
+            },
+        },
+    )
+    .expect("material mapping should update");
+
+    assert_eq!(updated.target, "material");
+    assert_eq!(updated.source, "material_default");
+    assert!(updated.renderer_supported);
+    assert_eq!(updated.mapping.uv_scale, [0.25, 0.5]);
+    assert_eq!(updated.mapping.uv_offset, [0.1, 0.2]);
+    assert_eq!(updated.mapping.uv_rotation_deg, 90.0);
+    assert!(updated.mapping.flip_u);
+
+    let fetched = handle_get_texture_mapping(
+        &world,
+        GetTextureMappingRequest {
+            material_id: Some("project.cedar".to_string()),
+            element_id: None,
+        },
+    )
+    .expect("material mapping should be inspectable");
+    assert_eq!(fetched, updated);
+
+    let reset = handle_reset_texture_mapping(
+        &mut world,
+        ResetTextureMappingRequest {
+            material_id: Some("project.cedar".to_string()),
+            element_id: None,
+        },
+    )
+    .expect("material mapping should reset");
+    assert_eq!(reset.mapping.uv_scale, [1.0, 1.0]);
+    assert_eq!(reset.mapping.uv_offset, [0.0, 0.0]);
+    assert_eq!(reset.mapping.uv_rotation_deg, 0.0);
+    assert!(!reset.mapping.flip_u);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn texture_mapping_tools_update_assignment_override() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<crate::plugins::materials::MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "project.cedar".to_string(),
+            name: "Project Cedar".to_string(),
+            ..Default::default()
+        });
+    world.spawn((ElementId(42), MaterialAssignment::new("project.cedar")));
+
+    let updated = handle_update_texture_mapping(
+        &mut world,
+        UpdateTextureMappingRequest {
+            material_id: None,
+            element_id: Some(42),
+            mapping: TextureMappingDto {
+                projection: "uv".to_string(),
+                uv_scale: [2.0, 3.0],
+                uv_offset: [0.0, 0.25],
+                uv_rotation_deg: 270.0,
+                flip_u: false,
+                flip_v: true,
+                blend_sharpness: 4.0,
+            },
+        },
+    )
+    .expect("assignment mapping should update");
+
+    assert_eq!(updated.target, "element");
+    assert_eq!(updated.material_id.as_deref(), Some("project.cedar"));
+    assert_eq!(updated.source, "assignment_override");
+    assert_eq!(updated.mapping.uv_scale, [2.0, 3.0]);
+    assert!(updated.mapping.flip_v);
+    assert_eq!(
+        world
+            .resource::<crate::plugins::materials::MaterialRegistry>()
+            .get("project.cedar")
+            .expect("material exists")
+            .uv_scale,
+        [1.0, 1.0],
+        "assignment override must not mutate the shared material"
+    );
+
+    let reset = handle_reset_texture_mapping(
+        &mut world,
+        ResetTextureMappingRequest {
+            material_id: None,
+            element_id: Some(42),
+        },
+    )
+    .expect("assignment mapping should reset");
+    assert_eq!(reset.source, "material_default");
+    assert_eq!(reset.mapping.uv_scale, [1.0, 1.0]);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn texture_mapping_reports_unsupported_projection_and_uv_diagnostics() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<crate::plugins::materials::MaterialRegistry>()
+        .upsert(MaterialDef {
+            id: "project.cedar".to_string(),
+            name: "Project Cedar".to_string(),
+            ..Default::default()
+        });
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; 3]);
+    let mesh_handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
+    world.spawn((
+        ElementId(42),
+        MaterialAssignment::new("project.cedar"),
+        Mesh3d(mesh_handle),
+    ));
+
+    let updated = handle_update_texture_mapping(
+        &mut world,
+        UpdateTextureMappingRequest {
+            material_id: Some("project.cedar".to_string()),
+            element_id: None,
+            mapping: TextureMappingDto {
+                projection: "triplanar".to_string(),
+                uv_scale: [1.0, 1.0],
+                uv_offset: [0.0, 0.0],
+                uv_rotation_deg: 0.0,
+                flip_u: false,
+                flip_v: false,
+                blend_sharpness: 8.0,
+            },
+        },
+    )
+    .expect("unsupported projection should still be authored");
+    assert!(!updated.renderer_supported);
+    assert!(updated
+        .renderer_note
+        .as_deref()
+        .unwrap_or_default()
+        .contains("not yet rendered"));
+
+    let entity_mapping = handle_get_texture_mapping(
+        &world,
+        GetTextureMappingRequest {
+            material_id: None,
+            element_id: Some(42),
+        },
+    )
+    .expect("entity mapping should be inspectable");
+    assert_eq!(entity_mapping.source, "material_default");
+    let diagnostics = entity_mapping
+        .uv_diagnostics
+        .expect("entity target should include uv diagnostics");
+    assert!(diagnostics.has_uv0);
+    assert!(diagnostics.degenerate);
+    assert!(diagnostics
+        .messages
+        .iter()
+        .any(|message| message.contains("identical")));
 }
 
 #[cfg(feature = "model-api")]
@@ -5475,6 +5670,7 @@ fn deleting_material_keeps_spec_binding_when_assignment_has_fallback() {
             render: Some(crate::plugins::materials::material_def_asset_id(
                 "paint_white",
             )),
+            mapping: None,
         }),
     ));
 
@@ -5491,6 +5687,7 @@ fn deleting_material_keeps_spec_binding_when_assignment_has_fallback() {
             crate::plugins::materials::MaterialBinding {
                 spec: Some(spec_id),
                 render: None,
+                mapping: None,
             }
         ))
     );

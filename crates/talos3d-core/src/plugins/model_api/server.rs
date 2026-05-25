@@ -882,6 +882,45 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_get_texture_mapping(
+        &self,
+        request: GetTextureMappingRequest,
+    ) -> ApiResult<TextureMappingInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetTextureMapping { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_update_texture_mapping(
+        &self,
+        request: UpdateTextureMappingRequest,
+    ) -> ApiResult<TextureMappingInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::UpdateTextureMapping { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_reset_texture_mapping(
+        &self,
+        request: ResetTextureMappingRequest,
+    ) -> ApiResult<TextureMappingInfo> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ResetTextureMapping { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_bim_material_assign_layered(
         &self,
         request: BimMaterialAssignLayeredRequest,
@@ -5787,6 +5826,51 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(updated)
+    }
+
+    #[tool(
+        name = "get_texture_mapping",
+        description = "Inspect texture mapping for either a material_id default or an element_id assignment. Exactly one target is required; element targets include UV diagnostics."
+    )]
+    pub(super) async fn get_texture_mapping_tool(
+        &self,
+        Parameters(params): Parameters<GetTextureMappingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_get_texture_mapping(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(info)
+    }
+
+    #[tool(
+        name = "update_texture_mapping",
+        description = "Patch texture mapping for either a material_id default or an element_id assignment override. Exactly one target is required. Mapping supports projection, uv_scale, uv_offset, uv_rotation_deg, flip_u, flip_v, and blend_sharpness."
+    )]
+    pub(super) async fn update_texture_mapping_tool(
+        &self,
+        Parameters(params): Parameters<UpdateTextureMappingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_update_texture_mapping(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(info)
+    }
+
+    #[tool(
+        name = "reset_texture_mapping",
+        description = "Reset texture mapping for either a material_id default or an element_id assignment override. Material targets reset to renderer defaults; element targets clear the assignment override."
+    )]
+    pub(super) async fn reset_texture_mapping_tool(
+        &self,
+        Parameters(params): Parameters<ResetTextureMappingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let info = self
+            .request_reset_texture_mapping(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(info)
     }
 
     #[tool(

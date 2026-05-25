@@ -271,7 +271,13 @@ pub struct MaterialInfo {
     pub fog_enabled: bool,
     pub depth_bias: f32,
     pub uv_scale: [f32; 2],
+    pub uv_offset: [f32; 2],
     pub uv_rotation_deg: f32,
+    pub uv_flip: [bool; 2],
+    pub texture_projection: String,
+    pub texture_blend_sharpness: f32,
+    pub texture_mapping_renderer_supported: bool,
+    pub texture_mapping_renderer_note: Option<String>,
     /// Base64-encoded image data (no data-URI prefix) or `null`.
     pub base_color_texture: Option<String>,
     pub base_color_texture_mime: Option<String>,
@@ -353,7 +359,16 @@ impl MaterialInfo {
             fog_enabled: def.fog_enabled,
             depth_bias: def.depth_bias,
             uv_scale: def.uv_scale,
+            uv_offset: def.uv_offset,
             uv_rotation_deg: def.uv_rotation.to_degrees(),
+            uv_flip: def.uv_flip,
+            texture_projection: texture_projection_name(def.texture_projection).to_string(),
+            texture_blend_sharpness: def.texture_blend_sharpness,
+            texture_mapping_renderer_supported: def.texture_mapping().renderer_supported(),
+            texture_mapping_renderer_note: def
+                .texture_mapping()
+                .renderer_support_note()
+                .map(str::to_string),
             base_color_texture: tex_data(&def.base_color_texture, texture_registry),
             base_color_texture_mime: tex_mime(&def.base_color_texture, texture_registry),
             normal_map_texture: tex_data(&def.normal_map_texture, texture_registry),
@@ -369,6 +384,89 @@ impl MaterialInfo {
             occlusion_texture_mime: tex_mime(&def.occlusion_texture, texture_registry),
         }
     }
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextureMappingDto {
+    #[serde(default = "default_texture_projection")]
+    pub projection: String,
+    #[serde(default = "default_uv_scale")]
+    pub uv_scale: [f32; 2],
+    #[serde(default)]
+    pub uv_offset: [f32; 2],
+    #[serde(default)]
+    pub uv_rotation_deg: f32,
+    #[serde(default)]
+    pub flip_u: bool,
+    #[serde(default)]
+    pub flip_v: bool,
+    #[serde(default = "default_texture_blend_sharpness")]
+    pub blend_sharpness: f32,
+}
+
+impl TextureMappingDto {
+    #[cfg(feature = "model-api")]
+    pub(super) fn from_mapping(mapping: crate::plugins::materials::TextureMapping) -> Self {
+        Self {
+            projection: texture_projection_name(mapping.projection).to_string(),
+            uv_scale: [mapping.scale.x, mapping.scale.y],
+            uv_offset: [mapping.offset.x, mapping.offset.y],
+            uv_rotation_deg: mapping.rotation.to_degrees(),
+            flip_u: mapping.flip_u,
+            flip_v: mapping.flip_v,
+            blend_sharpness: mapping.blend_sharpness,
+        }
+    }
+
+    #[cfg(feature = "model-api")]
+    pub(super) fn to_mapping(&self) -> Result<crate::plugins::materials::TextureMapping, String> {
+        let projection = parse_texture_projection(&self.projection)?;
+        Ok(crate::plugins::materials::TextureMapping {
+            projection,
+            scale: Vec3::new(self.uv_scale[0], self.uv_scale[1], 1.0),
+            offset: Vec3::new(self.uv_offset[0], self.uv_offset[1], 0.0),
+            rotation: self.uv_rotation_deg.to_radians(),
+            blend_sharpness: self.blend_sharpness,
+            flip_u: self.flip_u,
+            flip_v: self.flip_v,
+        })
+    }
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn texture_projection_name(
+    projection: crate::plugins::materials::TextureProjection,
+) -> &'static str {
+    match projection {
+        crate::plugins::materials::TextureProjection::Uv => "uv",
+        crate::plugins::materials::TextureProjection::Planar => "planar",
+        crate::plugins::materials::TextureProjection::Box => "box",
+        crate::plugins::materials::TextureProjection::Triplanar => "triplanar",
+    }
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn parse_texture_projection(
+    projection: &str,
+) -> Result<crate::plugins::materials::TextureProjection, String> {
+    match projection.trim().to_lowercase().as_str() {
+        "" | "uv" => Ok(crate::plugins::materials::TextureProjection::Uv),
+        "planar" => Ok(crate::plugins::materials::TextureProjection::Planar),
+        "box" => Ok(crate::plugins::materials::TextureProjection::Box),
+        "triplanar" => Ok(crate::plugins::materials::TextureProjection::Triplanar),
+        other => Err(format!(
+            "unsupported texture projection '{other}'; expected uv, planar, box, or triplanar"
+        )),
+    }
+}
+
+fn default_texture_projection() -> String {
+    "uv".to_string()
+}
+
+fn default_texture_blend_sharpness() -> f32 {
+    4.0
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -426,7 +524,15 @@ pub struct CreateMaterialRequest {
     #[serde(default = "default_uv_scale")]
     pub uv_scale: [f32; 2],
     #[serde(default)]
+    pub uv_offset: [f32; 2],
+    #[serde(default)]
     pub uv_rotation_deg: f32,
+    #[serde(default)]
+    pub uv_flip: [bool; 2],
+    #[serde(default = "default_texture_projection")]
+    pub texture_projection: String,
+    #[serde(default = "default_texture_blend_sharpness")]
+    pub texture_blend_sharpness: f32,
     /// Base64-encoded image data.  Defaults to `"image/png"` if
     /// `base_color_texture_mime` is not provided.
     pub base_color_texture: Option<String>,
@@ -583,6 +689,60 @@ pub struct EntityMaterialAssignmentInfo {
     pub element_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment: Option<MaterialAssignment>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetTextureMappingRequest {
+    #[serde(default)]
+    pub material_id: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UpdateTextureMappingRequest {
+    #[serde(default)]
+    pub material_id: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<u64>,
+    pub mapping: TextureMappingDto,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResetTextureMappingRequest {
+    #[serde(default)]
+    pub material_id: Option<String>,
+    #[serde(default)]
+    pub element_id: Option<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UvDiagnosticsInfo {
+    pub inspected: bool,
+    pub has_mesh: bool,
+    pub has_uv0: bool,
+    pub uv_count: usize,
+    pub vertex_count: usize,
+    pub degenerate: bool,
+    pub messages: Vec<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TextureMappingInfo {
+    pub target: String,
+    pub material_id: Option<String>,
+    pub element_id: Option<u64>,
+    pub source: String,
+    pub mapping: TextureMappingDto,
+    pub renderer_supported: bool,
+    pub renderer_note: Option<String>,
+    pub assignment: Option<MaterialAssignment>,
+    pub uv_diagnostics: Option<UvDiagnosticsInfo>,
 }
 
 #[cfg(feature = "model-api")]
