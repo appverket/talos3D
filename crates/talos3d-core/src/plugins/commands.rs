@@ -379,6 +379,15 @@ fn queue_delete_entities_commands(world: &mut World) {
                             refinement_state: entity_ref
                                 .get::<crate::plugins::refinement::RefinementStateComponent>()
                                 .map(|component| component.state),
+                            obligations: entity_ref
+                                .get::<crate::plugins::refinement::ObligationSet>()
+                                .cloned(),
+                            claim_grounding: entity_ref
+                                .get::<crate::plugins::refinement::ClaimGrounding>()
+                                .cloned(),
+                            authoring_provenance: entity_ref
+                                .get::<crate::plugins::refinement::AuthoringProvenance>()
+                                .cloned(),
                         };
                         repair_before.push(before);
                         repair_after.push(BoxedEntity::from(after));
