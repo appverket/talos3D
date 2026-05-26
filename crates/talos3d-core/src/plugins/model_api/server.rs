@@ -1382,10 +1382,14 @@ impl ModelApiServer {
 
     // --- Screenshot ---
 
-    async fn request_take_screenshot(&self, path: String) -> ApiResult<String> {
+    async fn request_take_screenshot(&self, path: String, include_ui: bool) -> ApiResult<String> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::TakeScreenshot { path, response })
+            .send(ModelApiRequest::TakeScreenshot {
+                path,
+                include_ui,
+                response,
+            })
             .map_err(|_| "model API request channel closed".to_string())?;
         let saved_path = receiver
             .await
@@ -3448,6 +3452,9 @@ pub(super) struct TakeScreenshotRequest {
     /// File path to save the screenshot. Defaults to /tmp/talos_screenshot.png.
     #[serde(default = "default_screenshot_path")]
     pub(super) path: String,
+    /// Include egui app chrome and panels instead of returning the cropped modeling viewport.
+    #[serde(default)]
+    pub(super) include_ui: bool,
 }
 
 #[cfg(feature = "model-api")]
@@ -6518,14 +6525,14 @@ impl ModelApiServer {
 
     #[tool(
         name = "take_screenshot",
-        description = "Capture the modeling viewport and save it to disk. The exported image is cropped to the active viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Raster formats save as images; PDF and SVG embed the same cropped viewport capture."
+        description = "Capture a screenshot and save it to disk. By default the image is cropped to the active modeling viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Pass include_ui=true to capture the full app window with egui panels and chrome for UX validation. Raster formats save as images; PDF and SVG embed the captured image."
     )]
     pub(super) async fn take_screenshot_tool(
         &self,
         Parameters(params): Parameters<TakeScreenshotRequest>,
     ) -> Result<CallToolResult, McpError> {
         let path = self
-            .request_take_screenshot(params.path)
+            .request_take_screenshot(params.path, params.include_ui)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(serde_json::json!({ "path": path }))

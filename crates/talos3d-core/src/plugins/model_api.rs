@@ -3651,12 +3651,20 @@ fn handle_split_box_face(
 // --- Screenshot Handler ---
 
 #[cfg(feature = "model-api")]
-fn handle_take_screenshot(world: &mut World, path: &str) -> Result<String, String> {
+fn handle_take_screenshot(
+    world: &mut World,
+    path: &str,
+    include_ui: bool,
+) -> Result<String, String> {
     use std::path::PathBuf;
 
     let path_buf = PathBuf::from(path);
     let path_owned = path.to_string();
-    crate::plugins::drawing_export::queue_viewport_export(world, &path_buf)?;
+    if include_ui {
+        crate::plugins::drawing_export::queue_app_window_export(world, &path_buf)?;
+    } else {
+        crate::plugins::drawing_export::queue_viewport_export(world, &path_buf)?;
+    }
 
     Ok(path_owned)
 }

@@ -352,6 +352,7 @@ pub(super) enum ModelApiRequest {
     // --- Screenshot ---
     TakeScreenshot {
         path: String,
+        include_ui: bool,
         response: oneshot::Sender<ApiResult<String>>,
     },
     ExportDrawing {
@@ -1366,8 +1367,12 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             ));
         }
         // --- Screenshot ---
-        ModelApiRequest::TakeScreenshot { path, response } => {
-            let _ = response.send(handle_take_screenshot(world, &path));
+        ModelApiRequest::TakeScreenshot {
+            path,
+            include_ui,
+            response,
+        } => {
+            let _ = response.send(handle_take_screenshot(world, &path, include_ui));
         }
         ModelApiRequest::ExportDrawing { path, response } => {
             let _ = response.send(handle_export_drawing(world, &path));

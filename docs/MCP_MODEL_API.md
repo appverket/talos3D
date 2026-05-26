@@ -303,7 +303,7 @@ For fillet/chamfer specifically:
 
 - `list_importers`
 - `import_file`
-- `take_screenshot`
+- `take_screenshot` (`include_ui: true` captures the full egui app window for UX QA)
 - `export_drawing`
 
 `model_summary` now also reports `assembly_counts` and `relation_counts` in
@@ -345,7 +345,8 @@ Renderer control also now supports drawing-style viewport composition:
   `visible_edge_overlay_enabled`
 - drawing exports can be written directly as `png`, `pdf`, or `svg` through
   `export_drawing`; `take_screenshot` now accepts the same output formats when
-  a path extension requests them
+  a path extension requests them, and can include app chrome/panels with
+  `include_ui: true`
 - the same viewpoint and drawing toggles are also reachable through
   `invoke_command` and discoverable through `list_commands` / `list_toolbars`
   using the `view.*` command family (`view.front`, `view.back`, `view.top`,
@@ -362,7 +363,8 @@ For the basic interactive workflow an agent should be able to:
 2. Discover its stable corner handles with `list_handles`.
 3. Dimension between two corners with `place_dimension_between_handles`.
 4. Reposition the live camera with `set_camera`.
-5. Capture the viewport with `take_screenshot`.
+5. Capture the viewport with `take_screenshot`, or pass `include_ui: true` when
+   validating egui panels and other app chrome.
 
 Example requests:
 
