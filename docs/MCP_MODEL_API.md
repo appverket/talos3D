@@ -148,8 +148,10 @@ When enabled, Talos3D exposes MCP endpoints in two forms:
 - stdio transport for local process-based integrations
 - streamable HTTP at `http://127.0.0.1:<port>/mcp`
 
-Create a local `.mcp.json` in the repository root if your MCP client supports
-repository-scoped config:
+On startup the app writes local, untracked `.mcp.json` files for the detected
+Talos3D core checkout and outer multi-repo workspace, when those roots are
+discoverable from the launch directory. That gives fresh MCP clients a
+repository-scoped endpoint config with the actual bound port:
 
 ```json
 {
@@ -161,8 +163,10 @@ repository-scoped config:
 }
 ```
 
-That file is intentionally ignored so local ports and instance choices do not
-end up committed.
+Those files are intentionally ignored so local ports and instance choices do not
+end up committed. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit
+config files when launching from a packaged app or another directory. Set
+`TALOS3D_WRITE_MCP_CONFIG=false` to disable writing local client configs.
 
 ## Instance Discovery
 
@@ -180,6 +184,12 @@ The manifest includes:
 
 After connecting, clients should call `get_instance_info` to confirm they are
 attached to the intended instance.
+
+If MCP tool discovery is empty in a fresh agent session, that only means the
+client did not load a Talos3D server yet. Check `.mcp.json` first, then fall
+back to the instance registry above. Prefer manifests whose `pid` is still
+running and whose `http_url` responds to MCP `initialize`; stale manifests can
+remain after an app process exits.
 
 ## Tool Surface
 

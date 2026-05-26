@@ -50,8 +50,9 @@ automation clients.
 - Use the same command surface the UI uses for inspection and edits
 - Discover capability vocabulary and inspect or create semantic assemblies and
   relations through the same public interface
-- Create a local, untracked `.mcp.json` only if your MCP client wants a
-  repository-scoped endpoint config
+- On startup the app writes local, untracked `.mcp.json` files for detected
+  Talos3D checkout roots so fresh MCP clients can find the running HTTP
+  endpoint from repository-scoped config
 
 Start with [docs/MCP_MODEL_API.md](./docs/MCP_MODEL_API.md).
 

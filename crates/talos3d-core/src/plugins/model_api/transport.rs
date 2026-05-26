@@ -12,6 +12,12 @@ const MODEL_API_PORT_ENV: &str = "TALOS3D_MODEL_API_PORT";
 const MODEL_API_REGISTRY_DIR_ENV: &str = "TALOS3D_INSTANCE_REGISTRY_DIR";
 #[cfg(feature = "model-api")]
 const MODEL_API_DEFAULT_REGISTRY_DIR: &str = "/tmp/talos3d-instances";
+#[cfg(feature = "model-api")]
+const MODEL_API_MCP_CONFIG_PATHS_ENV: &str = "TALOS3D_MCP_CONFIG_PATHS";
+#[cfg(feature = "model-api")]
+const MODEL_API_WRITE_MCP_CONFIG_ENV: &str = "TALOS3D_WRITE_MCP_CONFIG";
+#[cfg(feature = "model-api")]
+const MODEL_API_MCP_SERVER_NAME: &str = "talos3d";
 
 #[cfg(feature = "model-api")]
 pub(super) fn spawn_model_api_server(
@@ -174,6 +180,7 @@ pub(super) fn resolve_model_api_runtime() -> Result<(ModelApiRuntimeInfo, StdTcp
         started_at_unix_ms,
         requested_port,
     };
+    write_local_mcp_client_configs(&runtime_info);
 
     Ok((runtime_info, listener))
 }
@@ -261,6 +268,118 @@ fn write_instance_registry_manifest(
 }
 
 #[cfg(feature = "model-api")]
+fn write_local_mcp_client_configs(runtime_info: &ModelApiRuntimeInfo) {
+    if env::var(MODEL_API_WRITE_MCP_CONFIG_ENV)
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+    {
+        return;
+    }
+
+    for path in mcp_config_paths() {
+        if let Err(error) = write_mcp_client_config(&path, &runtime_info.http_url) {
+            eprintln!(
+                "failed to write MCP client config {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn mcp_config_paths() -> Vec<PathBuf> {
+    if let Ok(value) = env::var(MODEL_API_MCP_CONFIG_PATHS_ENV) {
+        let paths: Vec<PathBuf> = env::split_paths(&value).collect();
+        if !paths.is_empty() {
+            return paths;
+        }
+    }
+
+    let current_dir = match env::current_dir() {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+    default_mcp_config_paths_from(&current_dir)
+}
+
+#[cfg(feature = "model-api")]
+fn default_mcp_config_paths_from(current_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for dir in current_dir.ancestors() {
+        if is_talos3d_core_root(dir) || is_talos3d_workspace_root(dir) {
+            let path = dir.join(".mcp.json");
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+#[cfg(feature = "model-api")]
+fn is_talos3d_core_root(dir: &Path) -> bool {
+    dir.join("docs/MCP_MODEL_API.md").is_file()
+        && dir.join("app/Cargo.toml").is_file()
+        && dir.join("crates/talos3d-core").is_dir()
+}
+
+#[cfg(feature = "model-api")]
+fn is_talos3d_workspace_root(dir: &Path) -> bool {
+    dir.join("AGENTS.md").is_file()
+        && dir.join("talos3d-core/docs/MCP_MODEL_API.md").is_file()
+        && dir.join("talos3d-core/app/Cargo.toml").is_file()
+}
+
+#[cfg(feature = "model-api")]
+fn write_mcp_client_config(path: &Path, http_url: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let existing = match fs::read_to_string(path) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let config = merged_mcp_client_config(existing.as_deref(), http_url)?;
+    let bytes = serde_json::to_vec_pretty(&config)
+        .map_err(|error| format!("failed to serialize MCP client config: {error}"))?;
+    fs::write(path, [bytes.as_slice(), b"\n"].concat()).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn merged_mcp_client_config(
+    existing: Option<&str>,
+    http_url: &str,
+) -> Result<serde_json::Value, String> {
+    let mut root = match existing {
+        Some(contents) if !contents.trim().is_empty() => {
+            serde_json::from_str::<serde_json::Value>(contents)
+                .map_err(|error| format!("existing config is not valid JSON: {error}"))?
+        }
+        _ => serde_json::json!({}),
+    };
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let object = root.as_object_mut().expect("root was normalized to object");
+    let servers = object
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    if !servers.is_object() {
+        *servers = serde_json::json!({});
+    }
+    servers
+        .as_object_mut()
+        .expect("mcpServers was normalized to object")
+        .insert(
+            MODEL_API_MCP_SERVER_NAME.to_string(),
+            serde_json::json!({ "url": http_url }),
+        );
+    Ok(root)
+}
+
+#[cfg(feature = "model-api")]
 pub(super) fn annotate_window_title_with_model_api_instance(
     runtime_info: Res<ModelApiRuntimeInfo>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
@@ -275,4 +394,48 @@ pub(super) fn annotate_window_title_with_model_api_instance(
         "{} [{} @ {}]",
         window.title, runtime_info.instance_id, runtime_info.http_port
     );
+}
+
+#[cfg(all(test, feature = "model-api"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_client_config_merge_preserves_existing_servers() {
+        let existing = r#"{
+  "mcpServers": {
+    "other": { "command": "other-mcp" }
+  }
+}"#;
+
+        let config = merged_mcp_client_config(Some(existing), "http://127.0.0.1:24842/mcp")
+            .expect("config should merge");
+
+        assert_eq!(
+            config["mcpServers"]["talos3d"]["url"],
+            "http://127.0.0.1:24842/mcp"
+        );
+        assert_eq!(config["mcpServers"]["other"]["command"], "other-mcp");
+    }
+
+    #[test]
+    fn default_mcp_config_paths_include_core_and_outer_workspace_roots() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let workspace = temp.path();
+        let core = workspace.join("talos3d-core");
+        fs::create_dir_all(core.join("docs")).expect("docs dir should be created");
+        fs::create_dir_all(core.join("app")).expect("app dir should be created");
+        fs::create_dir_all(core.join("crates/talos3d-core")).expect("crate dir should be created");
+        fs::write(workspace.join("AGENTS.md"), "").expect("workspace marker should be written");
+        fs::write(core.join("docs/MCP_MODEL_API.md"), "")
+            .expect("MCP doc marker should be written");
+        fs::write(core.join("app/Cargo.toml"), "").expect("app marker should be written");
+
+        let paths = default_mcp_config_paths_from(&core.join("app"));
+
+        assert_eq!(
+            paths,
+            vec![core.join(".mcp.json"), workspace.join(".mcp.json")]
+        );
+    }
 }
