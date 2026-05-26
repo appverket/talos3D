@@ -783,7 +783,7 @@ fn agent_workflow_create_box_dimension_camera_and_screenshot_is_supported() {
             .expect("time should be monotonic")
             .as_millis()
     ));
-    let saved_path = handle_take_screenshot(&mut world, screenshot_path.to_str().unwrap())
+    let saved_path = handle_take_screenshot(&mut world, screenshot_path.to_str().unwrap(), false)
         .expect("take_screenshot should queue a capture");
     assert_eq!(saved_path, screenshot_path.to_string_lossy().to_string());
     assert!(world

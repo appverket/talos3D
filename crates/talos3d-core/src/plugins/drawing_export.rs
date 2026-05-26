@@ -181,10 +181,17 @@ impl PendingViewportExportStage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewportExportScope {
+    Viewport,
+    AppWindow,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingViewportExport {
     path: PathBuf,
     stage: PendingViewportExportStage,
+    scope: ViewportExportScope,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
@@ -194,13 +201,21 @@ pub(crate) struct ViewportExportState {
 
 impl ViewportExportState {
     pub(crate) fn ui_suppressed(&self) -> bool {
-        self.pending.is_some()
+        matches!(
+            self.pending.as_ref().map(|pending| pending.scope),
+            Some(ViewportExportScope::Viewport)
+        )
     }
 
     pub(crate) fn annotation_overlays_suppressed(&self) -> bool {
         matches!(
-            self.pending.as_ref().map(|pending| pending.stage),
-            Some(PendingViewportExportStage::FlushUiFrame)
+            self.pending
+                .as_ref()
+                .map(|pending| (pending.scope, pending.stage)),
+            Some((
+                ViewportExportScope::Viewport,
+                PendingViewportExportStage::FlushUiFrame
+            ))
         )
     }
 }
@@ -422,6 +437,19 @@ fn export_sheet_drawing(world: &World, path: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<(), String> {
+    queue_screenshot_export(world, path, ViewportExportScope::Viewport)
+}
+
+#[cfg(feature = "model-api")]
+pub(crate) fn queue_app_window_export(world: &mut World, path: &Path) -> Result<(), String> {
+    queue_screenshot_export(world, path, ViewportExportScope::AppWindow)
+}
+
+fn queue_screenshot_export(
+    world: &mut World,
+    path: &Path,
+    scope: ViewportExportScope,
+) -> Result<(), String> {
     let _ = viewport_export_format_from_path(path)?;
     if world.resource::<ViewportExportState>().pending.is_some() {
         return Err("A viewport export is already in progress.".to_string());
@@ -438,6 +466,7 @@ pub(crate) fn queue_viewport_export(world: &mut World, path: &Path) -> Result<()
     world.resource_mut::<ViewportExportState>().pending = Some(PendingViewportExport {
         path: path.to_path_buf(),
         stage: PendingViewportExportStage::FlushUiFrame,
+        scope,
     });
     Ok(())
 }
@@ -458,7 +487,10 @@ fn process_pending_viewport_export(world: &mut World) {
         pending
     };
 
-    let viewport_capture = capture_viewport(world);
+    let viewport_capture = match pending.scope {
+        ViewportExportScope::Viewport => capture_viewport(world),
+        ViewportExportScope::AppWindow => None,
+    };
     world
         .commands()
         .spawn(Screenshot::primary_window())
@@ -924,6 +956,7 @@ mod tests {
             pending: Some(PendingViewportExport {
                 path: PathBuf::from("/tmp/drawing.png"),
                 stage: PendingViewportExportStage::FlushUiFrame,
+                scope: ViewportExportScope::Viewport,
             }),
         };
 
@@ -932,6 +965,20 @@ mod tests {
 
         state.pending.as_mut().unwrap().stage = PendingViewportExportStage::CaptureNextFrame;
         assert!(state.ui_suppressed());
+        assert!(!state.annotation_overlays_suppressed());
+    }
+
+    #[test]
+    fn app_window_export_keeps_ui_and_overlays_visible() {
+        let state = ViewportExportState {
+            pending: Some(PendingViewportExport {
+                path: PathBuf::from("/tmp/app-window.png"),
+                stage: PendingViewportExportStage::FlushUiFrame,
+                scope: ViewportExportScope::AppWindow,
+            }),
+        };
+
+        assert!(!state.ui_suppressed());
         assert!(!state.annotation_overlays_suppressed());
     }
 }
