@@ -348,6 +348,65 @@ Do not set a level whose obligations you have not resolved — that is the same
 unsubstantiated-claim error as relabelling without adding structure.
 "#;
 
+/// Platform-level orientation for the Semantic Procedural Session (ADR-051).
+/// Domain-neutral, composed into every served `AuthoringGuidance.prompt_text`
+/// after the composition contract so an MCP-only agent learns *when* to reach
+/// for `procedural_session.*` instead of streaming individual Model-API
+/// mutations. The five tools themselves are domain-neutral capabilities of
+/// `talos3d-core`; the orientation lives here next to the other domain-neutral
+/// preambles. Bump the owning guidance `version` when this text changes.
+pub const PROCEDURAL_SESSION_ORIENTATION: &str = r#"# Composing multi-step authoring — the procedural session (read this fourth)
+
+Most edits are a single Model-API call (`definition.create`, `occurrence.place`,
+`set_property`, `instantiate_recipe`, …). When the work is a **sequence** of
+calls that share parameters, depend on each other's outputs, or must validate
+as a whole before any of it commits, do not stream those calls into the live
+model. Open a **Semantic Procedural Session** (ADR-051) and assemble the
+sequence there first.
+
+**Reach for `procedural_session.*` when any of these are true:**
+
+1. **Repeated or datum-derived placement.** Rows of openings, fixture grids,
+   stud spacing, truss stations — anything where step N's position depends on
+   step N-1's output. The session captures bindings between steps so you do
+   not recompute coordinates by hand.
+2. **Multi-step authoring that must validate as a whole.** A wall plus its
+   openings plus their hosted hardware should commit together or not at all.
+   Use `procedural_session.eval` in `dry_run` to project obligations and
+   findings before any command queues.
+3. **You are about to author a reusable recipe.** Build the sequence in a
+   session, validate it, then `procedural_session.export` it as a durable
+   `recipe.authoring_script.v1` artifact. Do not hand-write recipe JSON.
+4. **You want a safe scratchpad against a declared scope.** A session
+   declares its refinement target, stage transition, MutationScope, and
+   allowed-tool set up front; the platform type-checks each step against the
+   registered capability/command descriptors and enforces the scope.
+
+**Do not** use a session for a single isolated mutation, for read-only queries
+(`get_*`, `list_*`, `take_screenshot`), or as a way to bypass the anti-bluff
+gate above — a session that hand-rolls primitives for an element class with a
+curated path is still a bluff.
+
+**The five tools, in order of use:**
+
+- `procedural_session.create` — open a session against a declared spec; get
+  `session_id` and the session-scoped guidance overlay.
+- `procedural_session.eval` — append/preview one step. Modes: `bind_only`
+  (type-check + append), `dry_run` (project commands/obligations/findings;
+  do not append), `dry_run_and_bind`. Iterate here, cheaply.
+- `procedural_session.snapshot` — inspect the accumulated `AuthoringScript`,
+  live bindings, outstanding obligations, and accrued findings.
+- `procedural_session.commit` — flush the script through the command queue
+  (ADR-002 / ADR-011). Policies: `require_clean`, `accept_with_waivers`,
+  `accept_partial`.
+- `procedural_session.export` — freeze the script as a durable curated
+  artifact (`recipe.authoring_script.v1`); the session stays re-exportable
+  until close.
+
+**Verify before declaring done.** A clean commit report is not evidence the
+geometry is right — render the result (`take_screenshot`) and look.
+"#;
+
 // ---------------------------------------------------------------------------
 // RefinementStateComponent
 // ---------------------------------------------------------------------------
@@ -1811,6 +1870,37 @@ mod tests {
             assert!(
                 s.contains(tool),
                 "composition contract must reference {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn procedural_session_orientation_names_all_five_tools_and_when_to_use() {
+        let s = PROCEDURAL_SESSION_ORIENTATION;
+        // All five tools are named, in their canonical dotted form, so an
+        // MCP-only agent can grep the served prompt for them.
+        for tool in [
+            "procedural_session.create",
+            "procedural_session.eval",
+            "procedural_session.snapshot",
+            "procedural_session.commit",
+            "procedural_session.export",
+        ] {
+            assert!(s.contains(tool), "orientation must name {tool}");
+        }
+        // The "when to use" framing must be present — the whole point of the
+        // block is that descriptions alone leave agents guessing.
+        assert!(
+            s.to_lowercase().contains("when") && s.contains("Reach for"),
+            "orientation must state when to reach for procedural_session.*"
+        );
+        // The eval modes must be discoverable from the orientation alone, so
+        // an agent does not have to re-read each tool description to plan a
+        // dry-run loop.
+        for mode in ["bind_only", "dry_run", "dry_run_and_bind"] {
+            assert!(
+                s.contains(mode),
+                "orientation must surface eval mode {mode}"
             );
         }
     }
