@@ -8171,7 +8171,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "procedural_session.create",
-        description = "Open a new Semantic Procedural Session against a declared refinement target, stage transition, MutationScope, and allowed-tool set. Returns the new session_id and an initial snapshot including any session-scoped guidance overlay. See ADR-051."
+        description = "Open a stateful, validated scratchpad for a MULTI-STEP authoring sequence — repeated placements, datum-derived layouts, atomic multi-call edits, or recipe authoring. Prefer this over streaming individual Model-API mutations when steps share parameters, depend on each other's outputs (bindings), or must commit atomically. Declares refinement target, stage transition, MutationScope, and allowed tools up front. Returns session_id and a session-scoped guidance overlay. See ADR-051 and the procedural-session orientation in get_authoring_guidance for full when/why guidance."
     )]
     pub(super) async fn procedural_session_create_tool(
         &self,
@@ -8188,7 +8188,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "procedural_session.eval",
-        description = "Append/preview a single step against an open session. Modes: bind_only (type-check + append), dry_run (project expected commands/obligations/findings; do not append), dry_run_and_bind. Type-checks against the registered capability/command descriptors and enforces MutationScope."
+        description = "Append or preview ONE step in an open session — the inner loop for assembling a multi-step authoring sequence. Modes: bind_only (type-check + append), dry_run (project expected commands, obligations, and findings WITHOUT appending — use this to explore cheaply), dry_run_and_bind. Steps reference prior step outputs by binding, so you do not recompute coordinates by hand. Type-checked against the registered capability/command descriptors; enforces the session's MutationScope."
     )]
     pub(super) async fn procedural_session_eval_tool(
         &self,
@@ -8203,7 +8203,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "procedural_session.snapshot",
-        description = "Return full session state: declared spec, accumulated AuthoringScript, live bindings, outstanding obligations, accrued findings, and a recent audit excerpt."
+        description = "Inspect an open session before committing: declared spec, accumulated AuthoringScript, live bindings between steps, outstanding obligations, accrued findings, and a recent audit excerpt. Use between eval iterations to confirm the script is what you intend, or before commit to confirm there are no blocking findings."
     )]
     pub(super) async fn procedural_session_snapshot_tool(
         &self,
@@ -8220,7 +8220,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "procedural_session.commit",
-        description = "Commit the accumulated AuthoringScript through the existing command queue (ADR-002 / ADR-011). Policies: require_clean, accept_with_waivers, accept_partial. Returns enqueued command ids, post-commit findings, remaining obligations, carry-over (accept_partial), and optional in-line export handle."
+        description = "Flush the session's accumulated AuthoringScript to the world through the command queue (ADR-002 / ADR-011) — this is the step that actually mutates the model. Policies: require_clean (refuse on any finding), accept_with_waivers, accept_partial (commit clean prefix, return carry-over). Returns enqueued command ids, post-commit findings, remaining obligations, and an optional in-line export handle. Render and inspect the result before declaring done — a clean commit report is not evidence the geometry is right."
     )]
     pub(super) async fn procedural_session_commit_tool(
         &self,
@@ -8237,7 +8237,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "procedural_session.export",
-        description = "Freeze the session's accumulated AuthoringScript as a durable curated artifact. v1 target: authoring_script (kind `recipe.authoring_script.v1`). Session remains re-exportable until close."
+        description = "Freeze the session's accumulated AuthoringScript as a durable curated artifact (kind `recipe.authoring_script.v1`) — the supported way to turn a validated session into a reusable recipe. Do not hand-write recipe JSON; build the sequence in a session, validate via eval/snapshot, then export. The session remains re-exportable until close."
     )]
     pub(super) async fn procedural_session_export_tool(
         &self,
