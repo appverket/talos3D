@@ -5,8 +5,9 @@ use bevy::{
 };
 #[cfg(feature = "model-api")]
 use std::env;
-use talos3d_architecture_elements::ArchitecturalPlugin;
 use talos3d_architecture_core::ArchitectureCorePlugin;
+use talos3d_architecture_elements::ArchitecturalPlugin;
+use talos3d_architecture_product::ArchitectureProductPlugin;
 use talos3d_core::capability_registry::DefaultsRegistry;
 #[cfg(feature = "model-api")]
 use talos3d_core::plugins::model_api::ModelApiPlugin;
@@ -111,6 +112,7 @@ fn main() {
     .add_plugins(BundledDefinitionLibrariesPlugin)
     .add_plugins(DefinitionPreviewPlugin)
     .add_plugins(ArchitecturalPlugin)
+    .add_plugins(ArchitectureProductPlugin)
     // PP70–PP78 semantic substrate: element classes, recipe families, domain
     // validators, catalog providers, and generation priors. Per ADR-037 these
     // live in a separate capability crate; the legacy ArchitecturalPlugin

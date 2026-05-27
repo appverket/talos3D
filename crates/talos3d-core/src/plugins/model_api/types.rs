@@ -1082,6 +1082,8 @@ pub struct RenderSettingsInfo {
     pub grid_enabled: bool,
     pub background_rgb: [f32; 3],
     pub paper_fill_enabled: bool,
+    pub xray_enabled: bool,
+    pub xray_surface_alpha: f32,
 }
 
 impl RenderSettingsInfo {
@@ -1114,6 +1116,8 @@ impl RenderSettingsInfo {
             grid_enabled: settings.grid_enabled,
             background_rgb: settings.background_rgb,
             paper_fill_enabled: settings.paper_fill_enabled,
+            xray_enabled: settings.xray_enabled,
+            xray_surface_alpha: settings.xray_surface_alpha,
         }
     }
 }
@@ -1148,6 +1152,8 @@ pub struct RenderSettingsUpdateRequest {
     pub grid_enabled: Option<bool>,
     pub background_rgb: Option<[f32; 3]>,
     pub paper_fill_enabled: Option<bool>,
+    pub xray_enabled: Option<bool>,
+    pub xray_surface_alpha: Option<f32>,
 }
 
 // --- Definition / Occurrence types ---

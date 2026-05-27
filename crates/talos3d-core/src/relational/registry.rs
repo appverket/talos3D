@@ -345,11 +345,11 @@ impl ParametricRegistry {
     }
 }
 
-/// World-space placement for a parametric instance (millimetres + Euler degrees).
+/// World-space placement for a parametric instance (metres + Euler degrees).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct Placement {
-    /// World-space translation in mm: [tx, ty, tz].
+    /// World-space translation in model metres: [tx, ty, tz].
     #[serde(default)]
     pub translate: [f64; 3],
     /// Euler rotation in degrees (X, Y, Z application order): [rx_deg, ry_deg, rz_deg].

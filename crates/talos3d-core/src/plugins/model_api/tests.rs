@@ -14,6 +14,7 @@ use crate::plugins::modeling::{
 use crate::plugins::modeling::{
     generic_factory::PrimitiveFactory,
     primitives::{BoxPrimitive, PlanePrimitive, Polyline, ShapeRotation},
+    profile::{Profile2d, ProfileExtrusion},
     snapshots::PolylineFactory,
 };
 #[cfg(feature = "model-api")]
@@ -93,6 +94,56 @@ fn list_entities_and_model_summary_reflect_authored_world() {
     assert_eq!(summary.entity_counts.get("plane"), Some(&1));
     assert_eq!(summary.entity_counts.get("polyline"), Some(&1));
     assert!(summary.bounding_box.is_some());
+}
+
+#[test]
+fn model_summary_uses_primitive_extents_not_only_centres() {
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    registry.register_factory(PrimitiveFactory::<ProfileExtrusion>::new());
+    world.insert_resource(registry);
+
+    world.spawn((
+        ElementId(1),
+        BoxPrimitive {
+            centre: Vec3::new(10.0, 2.0, -3.0),
+            half_extents: Vec3::new(2.0, 0.5, 4.0),
+        },
+        ShapeRotation::default(),
+    ));
+    world.spawn((
+        ElementId(2),
+        ProfileExtrusion {
+            centre: Vec3::ZERO,
+            profile: Profile2d::rectangle(4.0, 0.2),
+            height: 1.0,
+        },
+        ShapeRotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4)),
+    ));
+
+    let bounding_box = model_summary(&world)
+        .bounding_box
+        .expect("summary should contain authored primitive bounds");
+
+    assert!(
+        bounding_box.min[0] <= -1.4,
+        "min x = {:?}",
+        bounding_box.min
+    );
+    assert!(
+        bounding_box.max[0] >= 12.0,
+        "max x = {:?}",
+        bounding_box.max
+    );
+    assert!(
+        bounding_box.min[1] <= -1.4,
+        "min y = {:?}",
+        bounding_box.min
+    );
+    assert!(bounding_box.max[1] >= 2.5, "max y = {:?}", bounding_box.max);
+    assert_eq!(bounding_box.min[2], -7.0);
+    assert_eq!(bounding_box.max[2], 1.0);
 }
 
 #[cfg(feature = "model-api")]
@@ -1504,6 +1555,60 @@ async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
     ] {
         assert!(tool_names.contains(expected), "missing MCP tool {expected}");
     }
+
+    // The procedural interpreter must be able to run the read-only checks an
+    // MCP authoring agent uses before saving generated geometry.
+    let pure_query_spec = crate::curation::procedural_session::SessionSpec {
+        refinement_target: None,
+        stage_transition: crate::curation::procedural_session::StageTransition::PureQuery,
+        mutation_scope: crate::curation::MutationScope::None,
+        allowed_tools: [
+            McpToolId::new("model_summary"),
+            McpToolId::new("run_validation_v2"),
+        ]
+        .into_iter()
+        .collect(),
+        seed: Some(2),
+        parameter_schema: None,
+    };
+    let pure_query: crate::plugins::procedural_session_mcp::SessionCreateResponse = server
+        .procedural_session_create_tool(Parameters(SessionCreateRequest {
+            spec: pure_query_spec,
+        }))
+        .await
+        .expect("pure query session create should succeed")
+        .into_typed()
+        .expect("pure query create response should deserialize");
+    for (id, tool) in [
+        ("summary_check", "model_summary"),
+        ("validation_check", "run_validation_v2"),
+    ] {
+        server
+            .procedural_session_eval_tool(Parameters(SessionEvalRequest {
+                session_id: pure_query.session_id.clone(),
+                step: crate::curation::procedural_session::EvalStep {
+                    id: StepId::new(id),
+                    tool: McpToolId::new(tool),
+                    args: Default::default(),
+                    bindings: Default::default(),
+                    essential: true,
+                    precondition: None,
+                },
+                mode: crate::curation::procedural_session::EvalMode::BindOnly,
+            }))
+            .await
+            .expect("read-only procedural check should bind");
+    }
+    let pure_commit: crate::curation::CommitReport = server
+        .procedural_session_commit_tool(Parameters(SessionCommitRequest {
+            session_id: pure_query.session_id.clone(),
+            options: crate::curation::CommitOptions::default(),
+        }))
+        .await
+        .expect("read-only procedural checks should commit")
+        .into_typed()
+        .expect("pure query commit report should deserialize");
+    assert_eq!(pure_commit.steps_run.len(), 2);
 
     // 1. Open a session for net-new top-level authoring: ProjectRoot
     //    scope, (none) -> Conceptual, only `create_box` allowed.
@@ -3944,7 +4049,8 @@ fn render_settings_round_trip_and_validate() {
             visible_edge_overlay_enabled: Some(true),
             grid_enabled: Some(false),
             background_rgb: Some([1.0, 1.0, 1.0]),
-            paper_fill_enabled: Some(true),
+            xray_enabled: Some(true),
+            xray_surface_alpha: Some(0.25),
             ..Default::default()
         },
     )
@@ -3960,7 +4066,33 @@ fn render_settings_round_trip_and_validate() {
     assert!(updated.visible_edge_overlay_enabled);
     assert!(!updated.grid_enabled);
     assert_eq!(updated.background_rgb, [1.0, 1.0, 1.0]);
-    assert!(updated.paper_fill_enabled);
+    assert!(updated.xray_enabled);
+    assert_eq!(updated.xray_surface_alpha, 0.25);
+    assert!(!updated.paper_fill_enabled);
+
+    let paper = handle_set_render_settings(
+        &mut world,
+        RenderSettingsUpdateRequest {
+            paper_fill_enabled: Some(true),
+            ..Default::default()
+        },
+    )
+    .expect("paper fill should disable xray mode");
+    assert!(paper.paper_fill_enabled);
+    assert!(!paper.xray_enabled);
+
+    let clamped = handle_set_render_settings(
+        &mut world,
+        RenderSettingsUpdateRequest {
+            xray_enabled: Some(true),
+            xray_surface_alpha: Some(2.0),
+            ..Default::default()
+        },
+    )
+    .expect("xray alpha should clamp to supported transparency bounds");
+    assert!(clamped.xray_enabled);
+    assert!(!clamped.paper_fill_enabled);
+    assert_eq!(clamped.xray_surface_alpha, 0.95);
 
     let error = handle_set_render_settings(
         &mut world,
@@ -4352,6 +4484,15 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .no_curated_path
         .expect("missing recipe path should be first-class");
     assert_eq!(gap.suggested_next_tool, "request_corpus_expansion");
+    assert!(!gap.gap_record_is_terminal);
+    assert!(gap
+        .required_next_tools
+        .iter()
+        .any(|tool| tool.contains("materialize_learned_asset")));
+    assert!(gap
+        .completion_criteria
+        .iter()
+        .any(|criterion| criterion.contains("consultable-only drafts do not close")));
     assert!(discovery
         .guidance_card_ids
         .contains(&"dkg.no_curated_path".to_string()));
@@ -4362,7 +4503,12 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "request_corpus_expansion",
         "save_recipe_draft",
         "save_assembly_pattern_draft",
+        "definition.create",
+        "definition.instantiate_hosted",
+        "bim_void.declare_for_definition",
         "parametric.create",
+        "materialize_learned_asset",
+        "run_validation_v2",
         "take_screenshot",
     ]);
     for card in handle_list_guidance_cards(&world, None) {
@@ -4383,6 +4529,9 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(card
         .referenced_tool_ids
         .contains(&"save_recipe_draft".to_string()));
+    assert!(card
+        .referenced_tool_ids
+        .contains(&"materialize_learned_asset".to_string()));
 }
 
 #[cfg(feature = "model-api")]
@@ -4460,6 +4609,26 @@ fn executable_learned_asset_materializes_through_parametric_path() {
         },
     )
     .expect("learned asset should save");
+
+    let ranking = handle_select_recipe(
+        &world,
+        "roof_system".into(),
+        serde_json::json!({
+            "target_state": "Conceptual",
+            "include_session_drafts": true
+        }),
+    )
+    .expect("select_recipe should surface executable learned asset");
+    assert_eq!(ranking.len(), 1);
+    assert!(ranking[0].is_session_draft);
+    assert!(ranking[0].executable);
+    assert_eq!(
+        ranking[0].execution_path.as_deref(),
+        Some("materialize_learned_asset")
+    );
+    assert!(ranking[0]
+        .how_to_instantiate
+        .contains("materialize_learned_asset"));
 
     let result = handle_materialize_learned_asset(
         &mut world,
@@ -4601,6 +4770,11 @@ fn installed_recipe_drafts_are_consultable_from_recipe_discovery() {
     assert_eq!(ranking.len(), 1);
     assert_eq!(ranking[0].id, installed.id);
     assert!(ranking[0].is_session_draft);
+    assert!(!ranking[0].executable);
+    assert!(ranking[0].execution_path.is_none());
+    assert!(ranking[0]
+        .how_to_instantiate
+        .contains("not executable until"));
 }
 
 #[cfg(feature = "model-api")]

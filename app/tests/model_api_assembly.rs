@@ -52,6 +52,7 @@ fn init_assembly_test_world() -> World {
         description: "A house".into(),
         expected_member_types: vec!["wall".into()],
         expected_member_roles: vec!["exterior_wall".into()],
+        member_role_descriptors: Vec::new(),
         expected_relation_types: vec!["hosted_on".into()],
         parameter_schema: json!({}),
     });
@@ -61,6 +62,7 @@ fn init_assembly_test_world() -> World {
         description: "A room".into(),
         expected_member_types: vec!["wall".into()],
         expected_member_roles: vec!["boundary".into()],
+        member_role_descriptors: Vec::new(),
         expected_relation_types: vec![],
         parameter_schema: json!({}),
     });

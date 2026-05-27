@@ -41,6 +41,7 @@ const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 const PAPER_BACKGROUND_RGB: [f32; 3] = [1.0, 1.0, 1.0];
 const PAPER_MM_PER_WORLD_M: f32 = 20.0;
+const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.32;
 
 // ─── Settings resource ───────────────────────────────────────────────────────
 
@@ -159,6 +160,10 @@ pub struct RenderSettings {
     pub background_rgb: [f32; 3],
     /// Swap scene materials for white unlit fill so drawing edges read cleanly.
     pub paper_fill_enabled: bool,
+    /// Make surface materials semi-transparent to inspect hidden/interior parts.
+    pub xray_enabled: bool,
+    /// Alpha applied to surface materials while X-ray mode is enabled.
+    pub xray_surface_alpha: f32,
 }
 
 impl Default for RenderSettings {
@@ -190,14 +195,24 @@ impl Default for RenderSettings {
             grid_enabled: true,
             background_rgb: DEFAULT_BACKGROUND_RGB,
             paper_fill_enabled: false,
+            xray_enabled: false,
+            xray_surface_alpha: DEFAULT_XRAY_SURFACE_ALPHA,
         }
     }
 }
 
 #[derive(Component, Debug, Clone)]
-struct PaperFillMaterialOverride {
+struct SurfaceMaterialOverride {
     original: Handle<StandardMaterial>,
     override_handle: Handle<StandardMaterial>,
+    mode: SurfaceMaterialMode,
+    xray_alpha: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceMaterialMode {
+    PaperFill,
+    Xray,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -224,6 +239,7 @@ impl Plugin for RenderPipelinePlugin {
                     command_ids: vec![
                         "view.apply_paper_preset".to_string(),
                         "view.toggle_grid".to_string(),
+                        "view.toggle_xray".to_string(),
                         "view.toggle_outline".to_string(),
                         "view.toggle_wireframe".to_string(),
                     ],
@@ -270,6 +286,26 @@ impl Plugin for RenderPipelinePlugin {
             )
             .register_command(
                 CommandDescriptor {
+                    id: "view.toggle_xray".to_string(),
+                    label: "Toggle X-Ray".to_string(),
+                    description: "Toggle X-ray surface transparency.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: Some("icon.view_xray".to_string()),
+                    hint: Some(
+                        "Make surfaces semi-transparent to inspect hidden geometry".to_string(),
+                    ),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_toggle_xray,
+            )
+            .register_command(
+                CommandDescriptor {
                     id: "view.toggle_outline".to_string(),
                     label: "Toggle Outline".to_string(),
                     description: "Toggle visible-edge outline rendering.".to_string(),
@@ -311,7 +347,7 @@ impl Plugin for RenderPipelinePlugin {
                 (
                     sync_render_settings,
                     sync_clear_color,
-                    sync_paper_fill_materials,
+                    sync_surface_display_materials,
                 ),
             )
             .add_systems(
@@ -351,6 +387,15 @@ fn execute_toggle_grid(world: &mut World, _: &Value) -> Result<CommandResult, St
     })
 }
 
+fn execute_toggle_xray(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    update_render_settings(world, "", |settings| {
+        settings.xray_enabled = !settings.xray_enabled;
+        if settings.xray_enabled {
+            settings.paper_fill_enabled = false;
+        }
+    })
+}
+
 fn execute_toggle_outline(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     update_render_settings(world, "", |settings| {
         settings.visible_edge_overlay_enabled = !settings.visible_edge_overlay_enabled;
@@ -379,8 +424,9 @@ fn update_render_settings(
 
         if feedback.is_empty() {
             format!(
-                "Grid {} · Outline {} · Wireframe {}",
+                "Grid {} · X-Ray {} · Outline {} · Wireframe {}",
                 on_off(settings.grid_enabled),
+                on_off(settings.xray_enabled),
                 on_off(settings.visible_edge_overlay_enabled),
                 on_off(settings.wireframe_overlay_enabled)
             )
@@ -421,6 +467,7 @@ pub(crate) fn apply_paper_drawing_preset(settings: &mut RenderSettings) {
     settings.background_rgb = PAPER_BACKGROUND_RGB;
     settings.grid_enabled = false;
     settings.paper_fill_enabled = true;
+    settings.xray_enabled = false;
     settings.visible_edge_overlay_enabled = true;
     settings.contour_overlay_enabled = false;
     settings.wireframe_overlay_enabled = false;
@@ -522,48 +569,128 @@ fn sync_clear_color(settings: Res<RenderSettings>, mut clear_color: ResMut<Clear
     }
 }
 
-fn sync_paper_fill_materials(
+fn sync_surface_display_materials(
     settings: Res<RenderSettings>,
     mut commands: Commands,
     mut mesh_query: Query<(
         Entity,
         &mut MeshMaterial3d<StandardMaterial>,
-        Option<&PaperFillMaterialOverride>,
+        Option<&SurfaceMaterialOverride>,
     )>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let target_mode = active_surface_material_mode(&settings);
     for (entity, mut material_handle, override_state) in &mut mesh_query {
-        match (settings.paper_fill_enabled, override_state) {
-            (true, None) => {
+        match (target_mode, override_state) {
+            (Some(mode), Some(state))
+                if surface_material_override_is_current(state, mode, &settings) => {}
+            (Some(mode), Some(state)) => {
+                let original = state.original.clone();
+                material_handle.0 = original.clone();
+                materials.remove(state.override_handle.id());
+                if let Some(source) = materials.get(&original).cloned() {
+                    let xray_alpha = xray_alpha_for_mode(mode, &settings);
+                    let override_material = display_override_material(&source, mode, xray_alpha);
+                    let override_handle = materials.add(override_material);
+                    material_handle.0 = override_handle.clone();
+                    commands.entity(entity).insert(SurfaceMaterialOverride {
+                        original,
+                        override_handle,
+                        mode,
+                        xray_alpha,
+                    });
+                } else {
+                    commands.entity(entity).remove::<SurfaceMaterialOverride>();
+                }
+            }
+            (Some(mode), None) => {
                 let original = material_handle.0.clone();
                 let Some(source) = materials.get(&original).cloned() else {
                     continue;
                 };
-                let mut override_material = source;
-                override_material.base_color = Color::WHITE;
-                override_material.emissive = LinearRgba::BLACK;
-                override_material.perceptual_roughness = 1.0;
-                override_material.metallic = 0.0;
-                override_material.reflectance = 0.0;
-                override_material.unlit = true;
-                override_material.alpha_mode = AlphaMode::Opaque;
+                let xray_alpha = xray_alpha_for_mode(mode, &settings);
+                let override_material = display_override_material(&source, mode, xray_alpha);
                 let override_handle = materials.add(override_material);
                 material_handle.0 = override_handle.clone();
-                commands.entity(entity).insert(PaperFillMaterialOverride {
+                commands.entity(entity).insert(SurfaceMaterialOverride {
                     original,
                     override_handle,
+                    mode,
+                    xray_alpha,
                 });
             }
-            (false, Some(state)) => {
+            (None, Some(state)) => {
                 material_handle.0 = state.original.clone();
                 materials.remove(state.override_handle.id());
-                commands
-                    .entity(entity)
-                    .remove::<PaperFillMaterialOverride>();
+                commands.entity(entity).remove::<SurfaceMaterialOverride>();
             }
             _ => {}
         }
     }
+}
+
+fn surface_material_override_is_current(
+    state: &SurfaceMaterialOverride,
+    mode: SurfaceMaterialMode,
+    settings: &RenderSettings,
+) -> bool {
+    state.mode == mode
+        && match mode {
+            SurfaceMaterialMode::PaperFill => true,
+            SurfaceMaterialMode::Xray => {
+                (state.xray_alpha - xray_alpha_for_mode(mode, settings)).abs() < f32::EPSILON
+            }
+        }
+}
+
+fn xray_alpha_for_mode(mode: SurfaceMaterialMode, settings: &RenderSettings) -> f32 {
+    match mode {
+        SurfaceMaterialMode::PaperFill => 1.0,
+        SurfaceMaterialMode::Xray => settings.xray_surface_alpha.clamp(0.02, 0.95),
+    }
+}
+
+fn active_surface_material_mode(settings: &RenderSettings) -> Option<SurfaceMaterialMode> {
+    if settings.paper_fill_enabled {
+        Some(SurfaceMaterialMode::PaperFill)
+    } else if settings.xray_enabled {
+        Some(SurfaceMaterialMode::Xray)
+    } else {
+        None
+    }
+}
+
+fn display_override_material(
+    source: &StandardMaterial,
+    mode: SurfaceMaterialMode,
+    xray_alpha: f32,
+) -> StandardMaterial {
+    match mode {
+        SurfaceMaterialMode::PaperFill => paper_fill_material_from(source),
+        SurfaceMaterialMode::Xray => xray_material_from(source, xray_alpha),
+    }
+}
+
+fn paper_fill_material_from(source: &StandardMaterial) -> StandardMaterial {
+    let mut override_material = source.clone();
+    override_material.base_color = Color::WHITE;
+    override_material.emissive = LinearRgba::BLACK;
+    override_material.perceptual_roughness = 1.0;
+    override_material.metallic = 0.0;
+    override_material.reflectance = 0.0;
+    override_material.unlit = true;
+    override_material.alpha_mode = AlphaMode::Opaque;
+    override_material
+}
+
+fn xray_material_from(source: &StandardMaterial, xray_alpha: f32) -> StandardMaterial {
+    let mut override_material = source.clone();
+    override_material
+        .base_color
+        .set_alpha(xray_alpha.clamp(0.02, 0.95));
+    override_material.alpha_mode = AlphaMode::Blend;
+    override_material.cull_mode = None;
+    override_material
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1186,6 +1313,7 @@ impl FeatureEdgeState {
 mod tests {
     use super::*;
     use crate::plugins::ui::StatusBarData;
+    use bevy::render::render_resource::Face;
 
     #[test]
     fn internal_triangle_diagonal_is_not_treated_as_contour() {
@@ -1217,6 +1345,8 @@ mod tests {
         assert!(!settings.visible_edge_overlay_enabled);
         assert!(settings.grid_enabled);
         assert!(!settings.paper_fill_enabled);
+        assert!(!settings.xray_enabled);
+        assert_eq!(settings.xray_surface_alpha, DEFAULT_XRAY_SURFACE_ALPHA);
         assert_eq!(settings.background_rgb, DEFAULT_BACKGROUND_RGB);
     }
 
@@ -1238,9 +1368,115 @@ mod tests {
         assert!(!settings.ssr_enabled);
         assert!(!settings.grid_enabled);
         assert!(settings.paper_fill_enabled);
+        assert!(!settings.xray_enabled);
         assert!(settings.visible_edge_overlay_enabled);
         assert!(!settings.wireframe_overlay_enabled);
         assert!(!settings.contour_overlay_enabled);
+    }
+
+    #[test]
+    fn xray_command_disables_paper_fill_and_toggles_transparent_surface_mode() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings {
+            paper_fill_enabled: true,
+            ..RenderSettings::default()
+        })
+        .insert_resource(StatusBarData::default());
+
+        execute_toggle_xray(app.world_mut(), &Value::Null).expect("xray should toggle on");
+
+        let settings = app.world().resource::<RenderSettings>();
+        assert!(settings.xray_enabled);
+        assert!(!settings.paper_fill_enabled);
+        assert_eq!(
+            active_surface_material_mode(settings),
+            Some(SurfaceMaterialMode::Xray)
+        );
+
+        execute_toggle_xray(app.world_mut(), &Value::Null).expect("xray should toggle off");
+
+        let settings = app.world().resource::<RenderSettings>();
+        assert!(!settings.xray_enabled);
+        assert_eq!(active_surface_material_mode(settings), None);
+    }
+
+    #[test]
+    fn paper_fill_wins_when_material_modes_are_both_enabled() {
+        let settings = RenderSettings {
+            paper_fill_enabled: true,
+            xray_enabled: true,
+            ..RenderSettings::default()
+        };
+
+        assert_eq!(
+            active_surface_material_mode(&settings),
+            Some(SurfaceMaterialMode::PaperFill)
+        );
+    }
+
+    #[test]
+    fn xray_material_uses_bevy_transparent_blend_material() {
+        let source = StandardMaterial {
+            base_color: Color::srgba(0.2, 0.4, 0.6, 1.0),
+            alpha_mode: AlphaMode::Opaque,
+            cull_mode: Some(Face::Back),
+            ..Default::default()
+        };
+
+        let xray = xray_material_from(&source, 0.25);
+
+        assert_eq!(xray.alpha_mode, AlphaMode::Blend);
+        assert_eq!(xray.base_color.alpha(), 0.25);
+        assert_eq!(xray.cull_mode, None);
+        assert_eq!(
+            xray.base_color.to_srgba().red,
+            source.base_color.to_srgba().red
+        );
+        assert_eq!(
+            xray.base_color.to_srgba().green,
+            source.base_color.to_srgba().green
+        );
+        assert_eq!(
+            xray.base_color.to_srgba().blue,
+            source.base_color.to_srgba().blue
+        );
+    }
+
+    #[test]
+    fn xray_material_clamps_alpha_to_visible_transparency_bounds() {
+        let source = StandardMaterial::default();
+
+        assert_eq!(xray_material_from(&source, -1.0).base_color.alpha(), 0.02);
+        assert_eq!(xray_material_from(&source, 2.0).base_color.alpha(), 0.95);
+    }
+
+    #[test]
+    fn xray_override_state_expires_when_alpha_changes() {
+        let mut settings = RenderSettings {
+            xray_enabled: true,
+            xray_surface_alpha: 0.25,
+            ..RenderSettings::default()
+        };
+        let state = SurfaceMaterialOverride {
+            original: Handle::default(),
+            override_handle: Handle::default(),
+            mode: SurfaceMaterialMode::Xray,
+            xray_alpha: 0.25,
+        };
+
+        assert!(surface_material_override_is_current(
+            &state,
+            SurfaceMaterialMode::Xray,
+            &settings
+        ));
+
+        settings.xray_surface_alpha = 0.4;
+
+        assert!(!surface_material_override_is_current(
+            &state,
+            SurfaceMaterialMode::Xray,
+            &settings
+        ));
     }
 
     #[test]

@@ -642,6 +642,14 @@ fn draw_view_paper(c: &mut Canvas) {
     c.line(9.0, 15.0, 17.0, 15.0);
 }
 
+fn draw_view_xray(c: &mut Canvas) {
+    c.rounded_rect(5.0, 5.0, 14.0, 14.0, 1.5);
+    c.line(8.0, 8.0, 16.0, 16.0);
+    c.line(16.0, 8.0, 8.0, 16.0);
+    c.line(3.0, 12.0, 7.0, 12.0);
+    c.line(17.0, 12.0, 21.0, 12.0);
+}
+
 // Wall: vertical rectangle with hatching
 fn draw_wall(c: &mut Canvas) {
     c.rounded_rect(6.0, 3.0, 12.0, 18.0, 1.5);
@@ -737,6 +745,7 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "view_outline" => draw_view_outline(&mut c),
         "view_grid" => draw_view_grid(&mut c),
         "view_paper" => draw_view_paper(&mut c),
+        "view_xray" => draw_view_xray(&mut c),
         "wall" => draw_wall(&mut c),
         "opening" => draw_opening(&mut c),
         "definitions" => draw_definitions(&mut c),

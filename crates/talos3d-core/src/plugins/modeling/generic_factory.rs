@@ -224,7 +224,16 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
                 .entity_counts
                 .entry(P::TYPE_NAME.to_string())
                 .or_insert(0) += 1;
-            summary.bounding_points.push(primitive.centre());
+            let rotation = entity_ref
+                .get::<ShapeRotation>()
+                .copied()
+                .unwrap_or_default();
+            if let Some(bounds) = primitive.bounds(rotation.0) {
+                summary.bounding_points.push(bounds.min);
+                summary.bounding_points.push(bounds.max);
+            } else {
+                summary.bounding_points.push(primitive.centre());
+            }
         }
     }
 }
