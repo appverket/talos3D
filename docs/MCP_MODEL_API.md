@@ -319,10 +319,13 @@ For fillet/chamfer specifically:
 `model_summary` now also reports `assembly_counts` and `relation_counts` in
 addition to entity counts and capability-defined metrics.
 
-Session recipe drafts are intentionally **consultable but not executable**
-today. Installed drafts can be appended to `list_recipe_families` and
-`select_recipe` when the caller opts in, but `promote_refinement` still only
-executes shipped/native recipes.
+Session recipe drafts are **not executable by `instantiate_recipe`**. Installed
+drafts can be appended to `list_recipe_families` and `select_recipe` when the
+caller opts in, but `select_recipe` marks them `executable: false` unless they
+carry an evidence-backed `geometry_emission` runtime claim and a
+`draft_script.parametric_create` replay payload. Executable learned assets are
+materialized with `materialize_learned_asset`; consultable-only drafts and
+corpus-gap records do not close an authoring gap.
 
 ## Lighting And Viewport Lookdev
 

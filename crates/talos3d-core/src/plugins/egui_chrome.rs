@@ -205,6 +205,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         label: "Display",
         command_ids: &[
             "view.toggle_grid",
+            "view.toggle_xray",
             "view.toggle_outline",
             "view.toggle_wireframe",
             "view.toggle_guide_lines",
@@ -3175,7 +3176,26 @@ fn draw_render_settings_window(
                 };
                 ui.label(egui::RichText::new(paper_mode_status).small().color(CHROME_MUTED));
                 ui.checkbox(&mut settings.grid_enabled, "Show Grid");
-                ui.checkbox(&mut settings.paper_fill_enabled, "White Paper Fill");
+                if ui
+                    .checkbox(&mut settings.xray_enabled, "X-Ray Surfaces")
+                    .changed()
+                    && settings.xray_enabled
+                {
+                    settings.paper_fill_enabled = false;
+                }
+                ui.add_enabled_ui(settings.xray_enabled, |ui| {
+                    ui.add(
+                        egui::Slider::new(&mut settings.xray_surface_alpha, 0.05..=0.9)
+                            .text("X-Ray Alpha"),
+                    );
+                });
+                if ui
+                    .checkbox(&mut settings.paper_fill_enabled, "White Paper Fill")
+                    .changed()
+                    && settings.paper_fill_enabled
+                {
+                    settings.xray_enabled = false;
+                }
                 ui.checkbox(
                     &mut settings.visible_edge_overlay_enabled,
                     "Visible Edge Overlay",
@@ -3194,7 +3214,7 @@ fn draw_render_settings_window(
                 });
                 ui.label(
                     egui::RichText::new(
-                        "Paper fill swaps scene materials to white unlit surfaces. Visible edges keep sharp and silhouette edges while hiding occluded edges. Wireframe remains a full construction overlay.",
+                        "X-ray swaps scene materials to Bevy transparent surfaces. Paper fill swaps scene materials to white unlit surfaces. Visible edges keep sharp and silhouette edges while hiding occluded edges. Wireframe remains a full construction overlay.",
                     )
                     .small()
                     .color(CHROME_MUTED),

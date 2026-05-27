@@ -1927,6 +1927,10 @@ impl ModelApiServer {
             context: serde_json::Value::Null,
             reported_by: String::new(),
             reported_at: 0,
+            status: "unknown".into(),
+            gap_record_is_terminal: false,
+            required_next_tools: Vec::new(),
+            completion_criteria: Vec::new(),
         })
     }
 
@@ -3706,6 +3710,8 @@ impl CapabilitySnapshotInfo {
                 "list_element_classes".into(),
                 "select_recipe".into(),
                 "request_corpus_expansion".into(),
+                "save_recipe_draft".into(),
+                "materialize_learned_asset".into(),
             ],
         }
     }
@@ -3762,6 +3768,12 @@ pub struct NoCuratedPathInfo {
     pub element_class: String,
     pub missing_artifact_kind: String,
     pub suggested_next_tool: String,
+    #[serde(default)]
+    pub gap_record_is_terminal: bool,
+    #[serde(default)]
+    pub required_next_tools: Vec<String>,
+    #[serde(default)]
+    pub completion_criteria: Vec<String>,
     pub guidance_card_ids: Vec<String>,
     pub related_installed_or_learned_asset_ids: Vec<String>,
 }
@@ -3836,9 +3848,13 @@ pub struct RecipeRankingInfo {
     pub weight: f32,
     #[serde(default)]
     pub is_session_draft: bool,
-    /// One-line hint for how to instantiate this recipe. Always points to
-    /// `instantiate_recipe { family_id, target_class, parameters }` so agents
-    /// never need to hand-roll the two-step create+promote pattern.
+    /// True only when this ranking can emit geometry through the named execution path.
+    #[serde(default)]
+    pub executable: bool,
+    /// MCP tool that can materialise this ranking, when executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_path: Option<String>,
+    /// One-line hint for how to instantiate or materialise this path.
     pub how_to_instantiate: String,
 }
 
@@ -3999,6 +4015,15 @@ pub struct CorpusGapInfo {
     pub context: serde_json::Value,
     pub reported_by: String,
     pub reported_at: i64,
+    /// Open until a usable knowledge asset is installed and, for authoring tasks,
+    /// proven executable. Creating this record is not itself completion.
+    pub status: String,
+    #[serde(default)]
+    pub gap_record_is_terminal: bool,
+    #[serde(default)]
+    pub required_next_tools: Vec<String>,
+    #[serde(default)]
+    pub completion_criteria: Vec<String>,
 }
 
 /// Serialisable passage lookup result, returned by `lookup_source_passage`.
@@ -6291,7 +6316,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "get_render_settings",
-        description = "Get the current viewport renderer settings, including tonemapping, exposure, post-processing, drawing overlays, grid visibility, paper fill, and background color."
+        description = "Get the current viewport renderer settings, including tonemapping, exposure, post-processing, drawing overlays, grid visibility, paper fill, X-ray surface transparency, and background color."
     )]
     pub(super) async fn get_render_settings_tool(&self) -> Result<CallToolResult, McpError> {
         let settings = self
@@ -6303,7 +6328,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "set_render_settings",
-        description = "Update viewport renderer settings. Pass any subset of tonemapping, exposure, post-processing, drawing overlays, grid visibility, paper fill, and background color fields."
+        description = "Update viewport renderer settings. Pass any subset of tonemapping, exposure, post-processing, drawing overlays, grid visibility, paper fill, X-ray surface transparency, and background color fields."
     )]
     pub(super) async fn set_render_settings_tool(
         &self,
@@ -7158,8 +7183,10 @@ impl ModelApiServer {
     #[tool(
         name = "request_corpus_expansion",
         description = "Push a corpus-gap record requesting new coverage. Returns the created \
-            CorpusGapInfo record. element_class and jurisdiction are optional; kind is required \
-            (e.g. 'rule_pack', 'catalog', 'passage'); rationale is a free-form explanation."
+            open CorpusGapInfo record plus required closeout tools and completion criteria. \
+            This records the missing knowledge; it does not close the gap. element_class and \
+            jurisdiction are optional; kind is required (e.g. 'rule_pack', 'catalog', \
+            'passage', 'recipe'); rationale is a free-form explanation."
     )]
     pub(super) async fn request_corpus_expansion_tool(
         &self,
@@ -7260,7 +7287,9 @@ impl ModelApiServer {
         name = "save_recipe_draft",
         description = "Create or update a session recipe draft. This stores acquisition context, \
             linked corpus gap/source passages, parameter shape, and an opaque draft_script payload. \
-            If recipe_draft_id is omitted a new session id is allocated."
+            If recipe_draft_id is omitted a new session id is allocated. A draft closes an authoring \
+            gap only when it is installed, has an evidence-backed geometry_emission runtime claim, \
+            and can be materialized with materialize_learned_asset."
     )]
     pub(super) async fn save_recipe_draft_tool(
         &self,
@@ -7276,7 +7305,9 @@ impl ModelApiServer {
     #[tool(
         name = "set_recipe_draft_status",
         description = "Update a session recipe draft status. Use installed to make a draft \
-            consultable from list_recipe_families/select_recipe when the caller opts in."
+            consultable from list_recipe_families/select_recipe when the caller opts in. \
+            Installed does not imply executable; select_recipe reports executable=false unless \
+            materialize_learned_asset can replay the learned asset."
     )]
     pub(super) async fn set_recipe_draft_status_tool(
         &self,

@@ -2944,6 +2944,18 @@ fn handle_set_render_settings(
     }
     if let Some(value) = request.paper_fill_enabled {
         settings.paper_fill_enabled = value;
+        if value {
+            settings.xray_enabled = false;
+        }
+    }
+    if let Some(value) = request.xray_enabled {
+        settings.xray_enabled = value;
+        if value {
+            settings.paper_fill_enabled = false;
+        }
+    }
+    if let Some(value) = request.xray_surface_alpha {
+        settings.xray_surface_alpha = value.clamp(0.02, 0.95);
     }
 
     let info = RenderSettingsInfo::from_settings(&settings);
@@ -8409,8 +8421,9 @@ fn flush_model_api_write_pipeline(world: &mut World) {
 /// produces real geometry / authored entities (ADR-051, PP-SPS-3/4).
 ///
 /// Supported step tools in v1: `create_box`, `create_entity`,
-/// `set_property`. Each returns a JSON object containing the affected
-/// `element_id` so later steps can bind to it.
+/// `set_property`, plus read-only checks such as `model_summary` and
+/// `run_validation_v2`. Mutating tools return a JSON object containing the
+/// affected `element_id` so later steps can bind to it.
 #[cfg(feature = "model-api")]
 pub struct ModelApiStepExecutor;
 
@@ -8451,6 +8464,20 @@ impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiSte
                     .map_err(|e| to_err("set_property_failed", e))?;
                 Ok(result)
             }
+            "model_summary" => serde_json::to_value(model_summary(world))
+                .map_err(|e| to_err("model_summary_failed", e.to_string())),
+            "run_validation_v2" => {
+                let element_id = args.get("element_id").and_then(|value| {
+                    if value.is_null() {
+                        Some(None)
+                    } else {
+                        value.as_u64().map(Some)
+                    }
+                });
+                crate::plugins::validation::validation_sweep_system(world);
+                serde_json::to_value(handle_run_validation_v2(world, element_id.unwrap_or(None)))
+                    .map_err(|e| to_err("run_validation_v2_failed", e.to_string()))
+            }
             other => Err(to_err(
                 "unsupported_tool",
                 format!("ModelApiStepExecutor does not support tool '{other}'"),
@@ -8486,6 +8513,26 @@ pub fn register_model_api_session_tools(
         tool: McpToolId::new("set_property"),
         mutates: true,
         default_stub: Some(serde_json::json!({ "ok": true })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("model_summary"),
+        mutates: false,
+        default_stub: Some(serde_json::json!({
+            "entity_counts": {},
+            "assembly_counts": {},
+            "relation_counts": {},
+            "bounding_box": null,
+            "metrics": {}
+        })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("run_validation_v2"),
+        mutates: false,
+        default_stub: Some(serde_json::json!([])),
         creates_obligations: Vec::new(),
         satisfies_obligation_ids: Vec::new(),
     });
@@ -10358,6 +10405,9 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                     element_class: class.id.0.clone(),
                     missing_artifact_kind: "recipe_or_executable_asset".into(),
                     suggested_next_tool: "request_corpus_expansion".into(),
+                    gap_record_is_terminal: false,
+                    required_next_tools: curated_gap_required_next_tools(),
+                    completion_criteria: curated_gap_completion_criteria(),
                     guidance_card_ids: must_read_guidance_card_ids.clone(),
                     related_installed_or_learned_asset_ids: session_recipe_draft_ids
                         .iter()
@@ -10428,6 +10478,14 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
             "parametric.list_types".into(),
             "list_corpus_gaps".into(),
             "request_corpus_expansion".into(),
+            "save_recipe_draft".into(),
+            "save_assembly_pattern_draft".into(),
+            "materialize_learned_asset".into(),
+            "definition.create".into(),
+            "definition.instantiate".into(),
+            "definition.instantiate_hosted".into(),
+            "bim_void.declare_for_definition".into(),
+            "bim_void.plan_placement".into(),
             "list_guidance_cards".into(),
             "get_guidance_card".into(),
             "get_authoring_guidance".into(),
@@ -10437,6 +10495,41 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         .map(|bytes| bytes.len())
         .unwrap_or_default();
     snapshot
+}
+
+#[cfg(feature = "model-api")]
+fn curated_gap_required_next_tools() -> Vec<String> {
+    vec![
+        "request_corpus_expansion".into(),
+        "save_recipe_draft or save_assembly_pattern_draft or definition.create".into(),
+        "set_recipe_draft_status or definition.draft.publish".into(),
+        "select_recipe with include_session_drafts=true".into(),
+        "materialize_learned_asset or instantiate_recipe or definition.instantiate_hosted".into(),
+        "run_validation_v2".into(),
+        "take_screenshot".into(),
+    ]
+}
+
+#[cfg(feature = "model-api")]
+fn curated_gap_completion_criteria() -> Vec<String> {
+    vec![
+        "Gap record exists and remains open until usable knowledge is installed.".into(),
+        "Acquired knowledge is represented as a recipe draft, assembly pattern draft, or Definition rather than ad-hoc geometry.".into(),
+        "The selected path reports executable=true, or a Definition/host contract validates before placement.".into(),
+        "Geometry is produced through materialize_learned_asset, instantiate_recipe, or Definition instantiation; consultable-only drafts do not close the gap.".into(),
+        "Validation and screenshot review pass before the client reports completion.".into(),
+    ]
+}
+
+#[cfg(feature = "model-api")]
+fn recipe_draft_has_materialization_path(
+    draft: &crate::plugins::recipe_drafts::RecipeDraftArtifact,
+) -> bool {
+    let has_geometry_claim = draft
+        .runtime_claims
+        .iter()
+        .any(|claim| claim.claim_id == "geometry_emission" && claim.is_evidence_backed());
+    has_geometry_claim && draft.draft_script.get("parametric_create").is_some()
 }
 
 #[cfg(feature = "model-api")]
@@ -10607,6 +10700,8 @@ pub fn handle_select_recipe(
                         label: d.label.clone(),
                         weight,
                         is_session_draft: false,
+                        executable: true,
+                        execution_path: Some("instantiate_recipe".into()),
                     })
                 })
                 .collect()
@@ -10627,18 +10722,33 @@ pub fn handle_select_recipe(
                                 .any(|state| state == ts.as_str())
                         })
                     })
-                    .map(|draft| RecipeRankingInfo {
-                        how_to_instantiate: format!(
-                            "Draft only — use inspect_recipe_draft {{ id: {:?} }} to review; not yet executable via instantiate_recipe",
-                            draft.id
-                        ),
-                        id: draft.id,
-                        target_class: draft.target_class,
-                        label: draft.label,
-                        // Installed drafts are consultable but intentionally rank below
-                        // executable shipped recipes until invocation exists.
-                        weight: 0.25,
-                        is_session_draft: true,
+                    .map(|draft| {
+                        let executable = recipe_draft_has_materialization_path(&draft);
+                        let execution_path =
+                            executable.then(|| "materialize_learned_asset".to_string());
+                        let how_to_instantiate = if executable {
+                            format!(
+                                "Call materialize_learned_asset {{ asset_id: {:?}, overrides: {{...}} }}; do not call instantiate_recipe for session drafts",
+                                draft.meta.id.as_str()
+                            )
+                        } else {
+                            format!(
+                                "Draft only — use get_recipe_draft {{ recipe_draft_id: {:?} }} to review; not executable until it has draft_script.parametric_create plus an evidence-backed geometry_emission runtime claim",
+                                draft.id
+                            )
+                        };
+                        RecipeRankingInfo {
+                            how_to_instantiate,
+                            id: draft.id,
+                            target_class: draft.target_class,
+                            label: draft.label,
+                            // Executable learned assets still rank below shipped recipes;
+                            // non-executable drafts are consultable only.
+                            weight: if executable { 0.75 } else { 0.25 },
+                            is_session_draft: true,
+                            executable,
+                            execution_path,
+                        }
                     }),
             );
         }
@@ -10757,7 +10867,7 @@ pub fn handle_discover_curated_paths(
         }
     }
 
-    let has_path = !recipe_rankings.is_empty()
+    let has_path = recipe_rankings.iter().any(|ranking| ranking.executable)
         || !parametric_types.is_empty()
         || !generation_priors.is_empty();
     let no_curated_path = (!has_path).then(|| NoCuratedPathInfo {
@@ -10767,6 +10877,9 @@ pub fn handle_discover_curated_paths(
             .unwrap_or_else(|| "<unspecified>".into()),
         missing_artifact_kind: format!("{path_kind}_curated_path"),
         suggested_next_tool: "request_corpus_expansion".into(),
+        gap_record_is_terminal: false,
+        required_next_tools: curated_gap_required_next_tools(),
+        completion_criteria: curated_gap_completion_criteria(),
         guidance_card_ids: guidance_card_ids.clone(),
         related_installed_or_learned_asset_ids: related_asset_ids.clone(),
     });
@@ -10821,7 +10934,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "dkg.no_curated_path".into(),
             title: "No Curated Path Is A Gap".into(),
             task_tags: vec!["gap".into(), "anti_bluff".into()],
-            summary: "Empty discovery is explicit NoCuratedPath; request corpus expansion instead of hand-rolling domain geometry.".into(),
+            summary: "Empty discovery is explicit NoCuratedPath; request corpus expansion is only the opening step, never completion.".into(),
             referenced_tool_ids: vec![
                 "discover_curated_paths".into(),
                 "request_corpus_expansion".into(),
@@ -10837,11 +10950,15 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "dkg.close_gap".into(),
             title: "Close The Gap As Knowledge".into(),
             task_tags: vec!["curation".into(), "draft".into()],
-            summary: "Save acquired expertise as a curation-shaped draft with evidence slots and project scope before relying on it later.".into(),
+            summary: "After recording a gap, acquire and install a recipe, assembly pattern, or Definition; consultable-only drafts do not close authoring gaps.".into(),
             referenced_tool_ids: vec![
                 "save_recipe_draft".into(),
                 "save_assembly_pattern_draft".into(),
+                "definition.create".into(),
+                "definition.instantiate_hosted".into(),
+                "bim_void.declare_for_definition".into(),
                 "parametric.create".into(),
+                "materialize_learned_asset".into(),
             ],
             next_card_ids: vec!["dkg.executable_asset".into()],
             json_examples: vec![serde_json::json!({
@@ -10855,10 +10972,15 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "dkg.executable_asset".into(),
             title: "Executable Learned Assets".into(),
             task_tags: vec!["execution".into(), "geometry".into()],
-            summary: "Only evidence-backed runtime claims can advertise geometry emission or re-synthesis behavior.".into(),
-            referenced_tool_ids: vec!["parametric.create".into(), "take_screenshot".into()],
+            summary: "A learned asset closes an authoring gap only after it has an executable path, evidence-backed geometry claim, validation, and screenshot review.".into(),
+            referenced_tool_ids: vec![
+                "materialize_learned_asset".into(),
+                "parametric.create".into(),
+                "run_validation_v2".into(),
+                "take_screenshot".into(),
+            ],
             next_card_ids: Vec::new(),
-            json_examples: vec![serde_json::json!({ "type_id": "learned.asset", "overrides": {} })],
+            json_examples: vec![serde_json::json!({ "asset_id": "recipe_draft.v1/learned.asset", "overrides": {} })],
         },
     ]
 }
@@ -12032,6 +12154,10 @@ fn corpus_gap_to_info(gap: &crate::plugins::corpus_gap::CorpusGap) -> CorpusGapI
         context: gap.context.clone(),
         reported_by: gap.reported_by.clone(),
         reported_at: gap.reported_at,
+        status: "open".into(),
+        gap_record_is_terminal: false,
+        required_next_tools: curated_gap_required_next_tools(),
+        completion_criteria: curated_gap_completion_criteria(),
     }
 }
 
