@@ -151,6 +151,14 @@ impl Plugin for ModelApiPlugin {
         }
         app.add_systems(Update, poll_model_api_requests.before(HistorySet::Queue));
         app.add_systems(Startup, annotate_window_title_with_model_api_instance);
+        // Load user-installed recipes and passages from disk into their
+        // in-memory registries (Change-3 / Change-7). Runs after all
+        // domain plugins have populated shipped content so installed assets
+        // layer on top.
+        app.add_systems(
+            Startup,
+            crate::plugins::knowledge_persistence::load_knowledge_on_startup,
+        );
         spawn_model_api_server(sender, runtime_info, http_listener);
     }
 }
@@ -9767,14 +9775,53 @@ pub fn handle_promote_refinement(
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
 
+    // If the recipe_id matches an AuthoringScript body in the
+    // RecipeArtifactRegistry, replay it now before delegating to
+    // apply_promote_refinement for the state-machine update.
+    // Draft-only recipes (RecipeDraftRegistry only) are still not
+    // executable — they must be installed via install_recipe_from_session_export
+    // before use (Change-2).
     if let Some(recipe_id) = recipe_id.as_deref() {
-        if world
+        let script_opt = world
+            .get_resource::<crate::curation::RecipeArtifactRegistry>()
+            .and_then(|reg| {
+                let fid = crate::capability_registry::RecipeFamilyId(recipe_id.to_string());
+                reg.get_by_family(&fid)
+            })
+            .and_then(|artifact| artifact.body.script().cloned());
+
+        if let Some(script) = script_opt {
+            // Build a parameter map from the overrides JSON object.
+            let params: serde_json::Map<String, serde_json::Value> = overrides
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+
+            let mut executor = ModelApiStepExecutor;
+            let mut dispatcher = crate::plugins::procedural_session_mcp::CommandQueueDispatcher {
+                world,
+                session_id: crate::curation::SessionId("recipe_replay".into()),
+                step_order: std::collections::VecDeque::new(),
+                executor: Some(&mut executor),
+            };
+            let oracle = crate::curation::procedural_session::AlwaysPassOracle;
+
+            crate::curation::replay::replay_with_lookup(
+                &script,
+                params,
+                &mut dispatcher,
+                &oracle,
+                &crate::curation::replay::NoRecipeLookup,
+                0,
+            )
+            .map_err(|e| format!("AuthoringScript replay failed: {e}"))?;
+        } else if world
             .get_resource::<crate::plugins::recipe_drafts::RecipeDraftRegistry>()
             .and_then(|registry| registry.get(recipe_id))
             .is_some()
         {
             return Err(format!(
-                "recipe draft '{recipe_id}' is consultable but not executable yet; use list_recipe_drafts/get_recipe_draft to inspect it"
+                "recipe draft '{recipe_id}' is a draft only; install it first with install_recipe_from_session_export"
             ));
         }
     }

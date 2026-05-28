@@ -88,6 +88,34 @@ pub enum ArgExpr {
     /// Read a claim value from the current element's `ClaimGrounding`
     /// by `ClaimPath`.
     ClaimRef { path: ClaimPath },
+    /// Small arithmetic expression string evaluated at replay time.
+    ///
+    /// Variables resolve from script parameter bindings and captured step
+    /// outputs. Supports the four arithmetic operators, unary minus,
+    /// parentheses, and the following built-in functions:
+    /// `tan`, `sin`, `cos`, `sqrt`, `abs`, `floor`, `ceil`, `round`.
+    /// The constant `pi` is always available.
+    ///
+    /// Example: `"eave_y + (width / 2.0) * tan(pitch_rad)"`.
+    Expr { formula: String },
+    /// Compose a JSON array whose elements are themselves `ArgExpr`s,
+    /// resolved recursively at replay time. This is what lets a recipe
+    /// argument that must be an array — e.g. a `centre: [x, y, z]` vector or
+    /// a `vertices: [[x,y,z], ...]` mesh buffer — have *computed* components
+    /// rather than fixed literals. Each element may be a `Param`, an `Expr`
+    /// formula, a nested `Array`, etc.
+    ///
+    /// Example (a box centre derived from footprint params):
+    /// `{ "expr": "array", "items": [
+    ///     { "expr": "expr", "formula": "(min_x + max_x) / 2.0" },
+    ///     { "expr": "expr", "formula": "top_datum_m - slab_thickness_m / 2.0" },
+    ///     { "expr": "expr", "formula": "(min_z + max_z) / 2.0" } ] }`.
+    Array { items: Vec<ArgExpr> },
+    /// Compose a JSON object whose values are themselves `ArgExpr`s, resolved
+    /// recursively at replay time. Enables computed structured arguments such
+    /// as `footprint: { kind: "polyline", vertices: [...] }` where the
+    /// vertices are derived from parameters.
+    Object { entries: BTreeMap<String, ArgExpr> },
 }
 
 /// Scope within which an `AuthoringScript` is permitted to mutate world
@@ -165,6 +193,210 @@ fn default_true() -> bool {
     true
 }
 
+/// A single instruction in an `AuthoringScript`'s step sequence.
+///
+/// Most instructions are plain `Call` steps; the `Repeat` and `CallRecipe`
+/// variants add looping and sub-recipe delegation without introducing a
+/// new IR layer — they are still executed entirely through the same
+/// `ToolDispatcher` and `PostconditionOracle` interfaces as `Call` steps.
+///
+/// Serde: uses `untagged` so existing plain `Step` JSON continues to
+/// deserialise as `ScriptInstruction::Call`.  New variants use a
+/// discriminator field (`kind = "repeat"` / `kind = "call_recipe"`) that
+/// the `untagged` deserialiser detects via field presence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum ScriptInstruction {
+    /// Delegating sub-recipe call. Resolved against `RecipeArtifactRegistry`
+    /// at replay time; up to `MAX_CALL_RECIPE_DEPTH` nested levels allowed.
+    ///
+    /// Placed before `Repeat` in the untagged discriminator order so that a
+    /// JSON object containing `kind = "call_recipe"` is matched here before
+    /// falling through to `Call`.
+    CallRecipe {
+        /// Unique identifier within the enclosing script.
+        id: StepId,
+        /// Must equal `"call_recipe"` in serialised form.
+        #[serde(rename = "kind")]
+        _kind: CallRecipeKindTag,
+        /// Recipe family id as registered in `RecipeArtifactRegistry`.
+        family_id: String,
+        /// Parameter expressions evaluated at replay time.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        parameters: BTreeMap<String, ArgExpr>,
+        /// If `Some`, bind the called recipe's root entity_id to this name
+        /// so that later steps (or postconditions) can reference it via
+        /// `ArgExpr::StepOutput { step_id: <this step's id>, path: "entity_id" }`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<String>,
+    },
+    /// Loop a block of sub-instructions a computed number of times.
+    ///
+    /// At replay time `count` is evaluated to a non-negative integer.  The
+    /// `body` is then executed `count` times with `var` bound to the current
+    /// loop index (0-based).  Nested `Repeat` blocks are allowed; the depth
+    /// limit matches `MAX_CALL_RECIPE_DEPTH`.  Postconditions on body steps
+    /// are checked per-iteration.
+    Repeat {
+        /// Unique identifier within the enclosing script.
+        id: StepId,
+        /// Must equal `"repeat"` in serialised form.
+        #[serde(rename = "kind")]
+        _kind: RepeatKindTag,
+        /// Name of the loop-index variable (integer, 0-based) injected into
+        /// the parameter environment while executing `body`.
+        var: String,
+        /// Expression that evaluates to the loop count (non-negative integer).
+        count: ArgExpr,
+        /// Instructions to execute on each iteration.
+        body: Vec<ScriptInstruction>,
+    },
+    /// A single MCP tool dispatch — the original and most common instruction.
+    Call(Step),
+}
+
+/// Discriminator for `ScriptInstruction::Repeat`.  Always serialises as
+/// the string `"repeat"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RepeatKindTag {
+    Repeat,
+}
+
+impl Default for RepeatKindTag {
+    fn default() -> Self { Self::Repeat }
+}
+
+/// Discriminator for `ScriptInstruction::CallRecipe`.  Always serialises as
+/// the string `"call_recipe"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CallRecipeKindTag {
+    CallRecipe,
+}
+
+impl Default for CallRecipeKindTag {
+    fn default() -> Self { Self::CallRecipe }
+}
+
+/// Maximum nesting depth for `ScriptInstruction::CallRecipe` and
+/// `ScriptInstruction::Repeat` blocks.  Deep nesting almost certainly
+/// indicates an authoring mistake; this limit also guards against cycles.
+pub const MAX_CALL_RECIPE_DEPTH: usize = 16;
+
+impl ScriptInstruction {
+    /// Return the instruction's `StepId`.
+    pub fn id(&self) -> &StepId {
+        match self {
+            Self::Call(s) => &s.id,
+            Self::Repeat { id, .. } => id,
+            Self::CallRecipe { id, .. } => id,
+        }
+    }
+
+    /// Return the inner `Step` if this is a `Call` instruction.
+    pub fn as_call(&self) -> Option<&Step> {
+        if let Self::Call(s) = self { Some(s) } else { None }
+    }
+
+    /// Construct a plain `Call` instruction.
+    pub fn call(step: Step) -> Self {
+        Self::Call(step)
+    }
+
+    /// Collect all `StepId`s referenced by `ArgExpr::StepOutput` inside
+    /// this instruction (recursing into `Repeat.body`).
+    pub fn collect_step_refs(&self, out: &mut BTreeSet<StepId>) {
+        match self {
+            Self::Call(step) => {
+                for arg in step.args.values() {
+                    collect_step_refs(arg, out);
+                }
+                if let Some(p) = &step.precondition {
+                    collect_pred_step_refs(p, out);
+                }
+                for pc in step.args.values() {
+                    collect_step_refs(pc, out);
+                }
+            }
+            Self::Repeat { count, body, .. } => {
+                collect_step_refs(count, out);
+                for instr in body {
+                    instr.collect_step_refs(out);
+                }
+            }
+            Self::CallRecipe { parameters, .. } => {
+                for expr in parameters.values() {
+                    collect_step_refs(expr, out);
+                }
+            }
+        }
+    }
+
+    /// Collect all parameter names referenced by `ArgExpr::Param` inside
+    /// this instruction (recursing into `Repeat.body`).
+    pub fn collect_param_refs(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Self::Call(step) => {
+                for arg in step.args.values() {
+                    collect_param_refs(arg, out);
+                }
+                if let Some(p) = &step.precondition {
+                    collect_pred_param_refs(p, out);
+                }
+            }
+            Self::Repeat { count, body, var, .. } => {
+                collect_param_refs(count, out);
+                // The loop variable is locally introduced — remove it from
+                // the set of external params if it shadowed one.
+                let mut body_params = BTreeSet::new();
+                for instr in body {
+                    instr.collect_param_refs(&mut body_params);
+                }
+                body_params.remove(var);
+                out.extend(body_params);
+            }
+            Self::CallRecipe { parameters, .. } => {
+                for expr in parameters.values() {
+                    collect_param_refs(expr, out);
+                }
+            }
+        }
+    }
+
+    /// Collect all `McpToolId`s used by `Call` steps in this instruction
+    /// (recursing into `Repeat.body`).  Used by `allowed_tools` validation.
+    pub fn collect_tools(&self, out: &mut BTreeSet<McpToolId>) {
+        match self {
+            Self::Call(step) => { out.insert(step.tool.clone()); }
+            Self::Repeat { body, .. } => {
+                for instr in body { instr.collect_tools(out); }
+            }
+            Self::CallRecipe { .. } => {
+                // CallRecipe dispatches to a sub-script; no direct tool used
+                // at this level.
+            }
+        }
+    }
+
+    /// Collect all `StepId`s declared by this instruction and its children.
+    pub fn collect_declared_ids(&self, out: &mut BTreeSet<StepId>) {
+        out.insert(self.id().clone());
+        if let Self::Repeat { body, .. } = self {
+            for instr in body { instr.collect_declared_ids(out); }
+        }
+    }
+}
+
+impl From<Step> for ScriptInstruction {
+    fn from(step: Step) -> Self {
+        Self::Call(step)
+    }
+}
+
 /// Statements the script promises to establish post-run. Verified by
 /// the replay executor after the last step; any unmet postcondition is
 /// a hard error.
@@ -220,8 +452,9 @@ pub struct AuthoringScript {
     pub allowed_tools: BTreeSet<McpToolId>,
     /// Where mutations are permitted.
     pub mutation_scope: MutationScope,
-    /// The ordered list of steps.
-    pub steps: Vec<Step>,
+    /// The ordered list of instructions.  Plain `Call` steps are the common
+    /// case; `Repeat` and `CallRecipe` are control-flow extensions.
+    pub steps: Vec<ScriptInstruction>,
     /// Statements the script promises to establish.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub postconditions: Vec<Postcondition>,
@@ -253,13 +486,8 @@ impl AuthoringScript {
     /// StepOutput`. Useful for cycle detection and dead-step analysis.
     pub fn referenced_step_ids(&self) -> BTreeSet<StepId> {
         let mut out = BTreeSet::new();
-        for step in &self.steps {
-            for arg in step.args.values() {
-                collect_step_refs(arg, &mut out);
-            }
-            if let Some(p) = &step.precondition {
-                collect_pred_step_refs(p, &mut out);
-            }
+        for instr in &self.steps {
+            instr.collect_step_refs(&mut out);
         }
         for pc in &self.postconditions {
             match pc {
@@ -283,17 +511,8 @@ impl AuthoringScript {
     pub fn validate_structure(&self) -> Result<(), AuthoringScriptStructuralError> {
         use AuthoringScriptStructuralError::*;
         let mut ids = BTreeSet::new();
-        for step in &self.steps {
-            if !ids.insert(step.id.clone()) {
-                return Err(DuplicateStepId(step.id.clone()));
-            }
-            if !self.allowed_tools.contains(&step.tool) {
-                return Err(ToolNotInAllowedSet {
-                    step: step.id.clone(),
-                    tool: step.tool.clone(),
-                });
-            }
-        }
+        // Collect all declared ids and validate Call tools.
+        self.validate_instructions(&self.steps, &mut ids)?;
         let referenced = self.referenced_step_ids();
         for r in &referenced {
             if !ids.contains(r) {
@@ -313,15 +532,42 @@ impl AuthoringScript {
         Ok(())
     }
 
+    fn validate_instructions(
+        &self,
+        instrs: &[ScriptInstruction],
+        ids: &mut BTreeSet<StepId>,
+    ) -> Result<(), AuthoringScriptStructuralError> {
+        use AuthoringScriptStructuralError::*;
+        for instr in instrs {
+            let id = instr.id().clone();
+            if !ids.insert(id.clone()) {
+                return Err(DuplicateStepId(id));
+            }
+            match instr {
+                ScriptInstruction::Call(step) => {
+                    if !self.allowed_tools.contains(&step.tool) {
+                        return Err(ToolNotInAllowedSet {
+                            step: step.id.clone(),
+                            tool: step.tool.clone(),
+                        });
+                    }
+                }
+                ScriptInstruction::Repeat { body, .. } => {
+                    self.validate_instructions(body, ids)?;
+                }
+                ScriptInstruction::CallRecipe { .. } => {
+                    // family_id resolution is deferred to replay time;
+                    // no static tool-set check needed here.
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn referenced_params(&self) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
-        for step in &self.steps {
-            for arg in step.args.values() {
-                collect_param_refs(arg, &mut out);
-            }
-            if let Some(p) = &step.precondition {
-                collect_pred_param_refs(p, &mut out);
-            }
+        for instr in &self.steps {
+            instr.collect_param_refs(&mut out);
         }
         for pc in &self.postconditions {
             match pc {
@@ -346,14 +592,40 @@ impl AuthoringScript {
 }
 
 fn collect_step_refs(expr: &ArgExpr, out: &mut BTreeSet<StepId>) {
-    if let ArgExpr::StepOutput { step_id, .. } = expr {
-        out.insert(step_id.clone());
+    match expr {
+        ArgExpr::StepOutput { step_id, .. } => {
+            out.insert(step_id.clone());
+        }
+        ArgExpr::Array { items } => {
+            for item in items {
+                collect_step_refs(item, out);
+            }
+        }
+        ArgExpr::Object { entries } => {
+            for v in entries.values() {
+                collect_step_refs(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
 fn collect_param_refs(expr: &ArgExpr, out: &mut BTreeSet<String>) {
-    if let ArgExpr::Param { name } = expr {
-        out.insert(name.clone());
+    match expr {
+        ArgExpr::Param { name } => {
+            out.insert(name.clone());
+        }
+        ArgExpr::Array { items } => {
+            for item in items {
+                collect_param_refs(item, out);
+            }
+        }
+        ArgExpr::Object { entries } => {
+            for v in entries.values() {
+                collect_param_refs(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -434,7 +706,7 @@ mod tests {
         McpToolId::new(name)
     }
 
-    fn step(id: &str, tool_name: &str) -> Step {
+    fn call_step(id: &str, tool_name: &str) -> Step {
         Step {
             id: StepId::new(id),
             tool: tool(tool_name),
@@ -445,7 +717,12 @@ mod tests {
         }
     }
 
-    fn minimal_script_with(steps: Vec<Step>, tools: Vec<McpToolId>) -> AuthoringScript {
+    // Convenience: returns a ScriptInstruction::Call wrapping a Step.
+    fn step(id: &str, tool_name: &str) -> ScriptInstruction {
+        ScriptInstruction::Call(call_step(id, tool_name))
+    }
+
+    fn minimal_script_with(steps: Vec<ScriptInstruction>, tools: Vec<McpToolId>) -> AuthoringScript {
         let mut s = AuthoringScript::stub(MutationScope::None);
         for t in tools {
             s.allowed_tools.insert(t);
@@ -494,7 +771,7 @@ mod tests {
 
     #[test]
     fn validate_structure_rejects_unknown_step_reference() {
-        let mut a = step("a", "t");
+        let mut a = call_step("a", "t");
         a.args.insert(
             "x".into(),
             ArgExpr::StepOutput {
@@ -502,7 +779,7 @@ mod tests {
                 path: OutputPath::new("$"),
             },
         );
-        let s = minimal_script_with(vec![a], vec![tool("t")]);
+        let s = minimal_script_with(vec![ScriptInstruction::Call(a)], vec![tool("t")]);
         assert!(matches!(
             s.validate_structure(),
             Err(AuthoringScriptStructuralError::UnknownStepReference(_))
@@ -511,9 +788,9 @@ mod tests {
 
     #[test]
     fn validate_structure_accepts_valid_script_with_step_ref() {
-        let mut a = step("a", "t");
+        let mut a = call_step("a", "t");
         a.bindings.insert("out".into(), OutputPath::new("$.id"));
-        let mut b = step("b", "t");
+        let mut b = call_step("b", "t");
         b.args.insert(
             "source".into(),
             ArgExpr::StepOutput {
@@ -521,7 +798,10 @@ mod tests {
                 path: OutputPath::new("out"),
             },
         );
-        let s = minimal_script_with(vec![a, b], vec![tool("t")]);
+        let s = minimal_script_with(
+            vec![ScriptInstruction::Call(a), ScriptInstruction::Call(b)],
+            vec![tool("t")],
+        );
         assert!(s.validate_structure().is_ok());
     }
 
@@ -538,17 +818,20 @@ mod tests {
 
     #[test]
     fn referenced_step_ids_walks_preconditions_and_postconditions() {
-        let mut a = step("a", "t");
+        let mut a = call_step("a", "t");
         a.bindings
             .insert("out".into(), OutputPath::new("$.element_id"));
-        let mut b = step("b", "t");
+        let mut b = call_step("b", "t");
         b.precondition = Some(Predicate::Defined {
             expr: ArgExpr::StepOutput {
                 step_id: StepId::new("a"),
                 path: OutputPath::new("out"),
             },
         });
-        let mut s = minimal_script_with(vec![a, b], vec![tool("t")]);
+        let mut s = minimal_script_with(
+            vec![ScriptInstruction::Call(a), ScriptInstruction::Call(b)],
+            vec![tool("t")],
+        );
         s.postconditions.push(Postcondition::Relation {
             relation_kind: "bears_on".into(),
             from: ArgExpr::StepOutput {
@@ -637,7 +920,7 @@ mod tests {
             "required": ["length_mm"]
         });
         s.parameter_defaults.insert("length_mm".into(), 2400.into());
-        let mut step_a = step("create_def", "create_definition");
+        let mut step_a = call_step("create_def", "create_definition");
         step_a.args.insert(
             "length_mm".into(),
             ArgExpr::Param {
@@ -647,7 +930,7 @@ mod tests {
         step_a
             .bindings
             .insert("def_id".into(), OutputPath::new("$.definition_id"));
-        s.steps.push(step_a);
+        s.steps.push(ScriptInstruction::Call(step_a));
         s.postconditions.push(Postcondition::Claim {
             path: ClaimPath("length_mm".into()),
             grounding: GroundingKind::ExplicitRule(crate::plugins::refinement::RuleId(
@@ -711,5 +994,76 @@ mod tests {
         // importable via `super`.
         let _: crate::curation::provenance::ExcerptRef =
             crate::curation::provenance::ExcerptRef::new("§8:22");
+    }
+
+    // ---- Change-4: ArgExpr::Expr ----
+
+    #[test]
+    fn arg_expr_expr_round_trips() {
+        let e = ArgExpr::Expr {
+            formula: "eave_y + (width / 2.0) * tan(pitch_rad)".into(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: ArgExpr = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, e);
+    }
+
+    // ---- Change-5 & 6: ScriptInstruction round-trips ----
+
+    #[test]
+    fn script_instruction_call_round_trips() {
+        let instr = ScriptInstruction::Call(Step {
+            id: StepId::new("create_box"),
+            tool: McpToolId::new("create_box"),
+            args: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+            essential: true,
+            precondition: None,
+        });
+        let json = serde_json::to_string(&instr).unwrap();
+        let parsed: ScriptInstruction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, instr);
+    }
+
+    #[test]
+    fn script_instruction_repeat_round_trips() {
+        let instr = ScriptInstruction::Repeat {
+            id: StepId::new("place_studs"),
+            _kind: RepeatKindTag::Repeat,
+            var: "i".into(),
+            count: ArgExpr::Param { name: "count".into() },
+            body: vec![ScriptInstruction::Call(Step {
+                id: StepId::new("place_stud"),
+                tool: McpToolId::new("create_box"),
+                args: BTreeMap::new(),
+                bindings: BTreeMap::new(),
+                essential: true,
+                precondition: None,
+            })],
+        };
+        let json = serde_json::to_string(&instr).unwrap();
+        let parsed: ScriptInstruction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, instr);
+    }
+
+    #[test]
+    fn script_instruction_call_recipe_round_trips() {
+        let instr = ScriptInstruction::CallRecipe {
+            id: StepId::new("call_stud"),
+            _kind: CallRecipeKindTag::CallRecipe,
+            family_id: "stud_recipe".into(),
+            parameters: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "height_mm".into(),
+                    ArgExpr::Param { name: "stud_height".into() },
+                );
+                m
+            },
+            binding: Some("stud_entity_id".into()),
+        };
+        let json = serde_json::to_string(&instr).unwrap();
+        let parsed: ScriptInstruction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, instr);
     }
 }

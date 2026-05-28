@@ -893,6 +893,128 @@ pub(super) enum ModelApiRequest {
             Result<crate::plugins::parametric_mcp::ExplainParametricResponse, String>,
         >,
     },
+    // --- Knowledge persistence (Change-2 / Change-3 / Change-7) ---
+    InstallRecipeFromSessionExport {
+        request: InstallRecipeFromSessionExportRequest,
+        response: oneshot::Sender<Result<InstallRecipeResult, String>>,
+    },
+    ListPersistedRecipes {
+        response: oneshot::Sender<Vec<PersistedRecipeInfo>>,
+    },
+    AcquireCorpusPassage {
+        request: AcquireCorpusPassageRequest,
+        response: oneshot::Sender<Result<AcquireCorpusPassageResult, String>>,
+    },
+}
+
+// -----------------------------------------------------------------------
+// Change-2: install_recipe_from_session_export DTOs
+// -----------------------------------------------------------------------
+
+/// Install an exported `AuthoringScript` from a procedural session as a
+/// durable, executable [`RecipeArtifact`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct InstallRecipeFromSessionExportRequest {
+    /// Session id that holds the exported script.
+    pub session_id: String,
+    /// Export handle asset-id returned by `procedural_session.export`.
+    pub export_handle: String,
+    /// Stable family id for the new recipe (e.g. `"my_stair_flight"`).
+    pub family_id: String,
+    /// Human-readable label.
+    pub label: String,
+    /// Short description shown to agents in discovery.
+    pub description: String,
+    /// Supported refinement levels (e.g. `["Schematic", "Constructible"]`).
+    #[serde(default)]
+    pub supported_refinement_levels: Vec<String>,
+    /// Element class this recipe targets (e.g. `"stair_flight"`).
+    /// Optional — if omitted, stored as empty string.
+    #[serde(default)]
+    pub target_class: Option<String>,
+    /// Scope: `"Session"` (in-memory only) or `"Project"` (persisted to disk).
+    /// Defaults to `"Project"`.
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// Result returned by `install_recipe_from_session_export`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct InstallRecipeResult {
+    /// The family id the recipe was registered under.
+    pub family_id: String,
+    /// `"Session"` or `"User"`.
+    pub scope: String,
+    /// Disk path written, if `scope == "User"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_path: Option<String>,
+    /// Refinement levels the recipe claims to support.
+    pub supported_refinement_levels: Vec<String>,
+}
+
+/// Summary of a persisted recipe returned by `list_persisted_recipes`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct PersistedRecipeInfo {
+    pub family_id: String,
+    pub asset_id: String,
+    pub label: String,
+    pub description: String,
+    pub body_kind: String,
+    pub supported_refinement_levels: Vec<String>,
+}
+
+// -----------------------------------------------------------------------
+// Change-7: acquire_corpus_passage DTOs
+// -----------------------------------------------------------------------
+
+/// Store a plain-text passage extracted from an external source into the
+/// `CorpusPassageRegistry` and optionally persist it to disk.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct AcquireCorpusPassageRequest {
+    /// Stable reference id for the passage (e.g. `"IRC_2021_R311_7_8_1"`).
+    pub passage_ref: String,
+    /// Citation / source description.
+    pub citation: String,
+    /// Full plain-text of the passage.
+    pub text: String,
+    /// URL pointing to the source document, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    /// ISO 3166-1 alpha-2 country or regional jurisdiction code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jurisdiction: Option<String>,
+    /// Free-text classification tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    /// License: `"cc0"`, `"public_record"`, `"boverket_public"`,
+    /// `"icc_cite_only"`, `"standards_body_citation_only"`.
+    /// Defaults to `"public_record"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Whether to persist the passage to disk (`true`, default) or only
+    /// register it for this session (`false`).
+    #[serde(default = "default_persist")]
+    pub persist: bool,
+}
+
+fn default_persist() -> bool {
+    true
+}
+
+/// Result returned by `acquire_corpus_passage`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct AcquireCorpusPassageResult {
+    pub passage_ref: String,
+    pub stored: bool,
+    pub registry_size: usize,
+    /// Disk path written, if persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_path: Option<String>,
 }
 
 #[cfg(feature = "model-api")]
@@ -2072,5 +2194,208 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             let r = crate::plugins::parametric_mcp::world_explain(world, request);
             let _ = response.send(r);
         }
+        ModelApiRequest::InstallRecipeFromSessionExport { request, response } => {
+            let r = handle_install_recipe_from_session_export(world, request);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::ListPersistedRecipes { response } => {
+            let r = handle_list_persisted_recipes(world);
+            let _ = response.send(r);
+        }
+        ModelApiRequest::AcquireCorpusPassage { request, response } => {
+            let r = handle_acquire_corpus_passage(world, request);
+            let _ = response.send(r);
+        }
     }
+}
+
+// -----------------------------------------------------------------------
+// Change-2: install_recipe_from_session_export world handler
+// -----------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn handle_install_recipe_from_session_export(
+    world: &mut World,
+    request: InstallRecipeFromSessionExportRequest,
+) -> Result<InstallRecipeResult, String> {
+    use crate::capability_registry::RecipeFamilyId;
+    use crate::curation::{
+        AssetId, AssetKindId, CurationMeta, Provenance, RecipeArtifact, RecipeBody,
+        RecipeArtifactRegistry, Scope, Trust,
+    };
+    use crate::curation::provenance::Confidence;
+    use crate::plugins::refinement::{AgentId, AuthoringMode};
+
+    // Find the exported script in the session registry.
+    let script = {
+        let registry = world
+            .get_resource::<crate::curation::ProceduralSessionRegistry>()
+            .ok_or_else(|| "ProceduralSessionRegistry not available".to_string())?;
+        let session_id = crate::curation::SessionId(request.session_id.clone());
+        let session = registry
+            .get(&session_id)
+            .ok_or_else(|| format!("session '{}' not found", request.session_id))?;
+
+        // Find the exported script matching the export_handle asset_id.
+        let export_asset_id = AssetId(request.export_handle.clone());
+        session
+            .exports()
+            .iter()
+            .find(|e| e.handle.asset_id == export_asset_id)
+            .map(|e| e.script.clone())
+            .ok_or_else(|| {
+                format!(
+                    "export handle '{}' not found in session '{}'",
+                    request.export_handle, request.session_id
+                )
+            })?
+    };
+
+    let scope_str = request.scope.as_deref().unwrap_or("Project");
+    let scope = if scope_str == "Session" {
+        Scope::Session
+    } else {
+        Scope::Project
+    };
+
+    let _family_id = RecipeFamilyId(request.family_id.clone());
+    let asset_id = crate::plugins::knowledge_persistence::installed_recipe_asset_id(&request.family_id);
+
+    let meta = CurationMeta::new(
+        asset_id,
+        AssetKindId(crate::curation::RECIPE_ARTIFACT_KIND.into()),
+        Provenance {
+            author: AgentId("mcp_agent".into()),
+            confidence: Confidence::Medium,
+            lineage: AuthoringMode::Freeform,
+            rationale: Some(request.description.clone()),
+            jurisdiction: None,
+            catalog_dependencies: Vec::new(),
+            evidence: Vec::new(),
+        },
+    )
+    .with_scope(scope)
+    .with_trust(Trust::Draft);
+
+    let artifact = RecipeArtifact {
+        meta,
+        body: RecipeBody::AuthoringScript { script },
+        parameter_schema: serde_json::Value::Null,
+        target_class: request.target_class.clone().unwrap_or_default(),
+        supported_refinement_states: request
+            .supported_refinement_levels
+            .iter()
+            .filter_map(|s| crate::plugins::refinement::RefinementState::from_str(s))
+            .collect(),
+        tests: Vec::new(),
+    };
+
+    // Persist to disk if scope != Session.
+    let persisted_path = if scope != Scope::Session {
+        let path = crate::plugins::knowledge_persistence::persist_recipe(&artifact)?;
+        Some(path.display().to_string())
+    } else {
+        None
+    };
+
+    // Insert into the in-memory registry.
+    world.resource_mut::<RecipeArtifactRegistry>().insert(artifact);
+
+    Ok(InstallRecipeResult {
+        family_id: request.family_id,
+        scope: scope_str.to_string(),
+        persisted_path,
+        supported_refinement_levels: request.supported_refinement_levels,
+    })
+}
+
+// -----------------------------------------------------------------------
+// Change-3: list_persisted_recipes world handler
+// -----------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn handle_list_persisted_recipes(world: &mut World) -> Vec<PersistedRecipeInfo> {
+    let registry = world.get_resource::<crate::curation::RecipeArtifactRegistry>();
+    let Some(registry) = registry else {
+        return Vec::new();
+    };
+    registry
+        .iter()
+        .map(|a| PersistedRecipeInfo {
+            family_id: a
+                .meta
+                .id
+                .0
+                .strip_prefix("installed_recipe/")
+                .unwrap_or(a.meta.id.0.as_str())
+                .to_string(),
+            asset_id: a.meta.id.0.clone(),
+            label: a.meta.id.0.clone(),
+            description: a
+                .meta
+                .provenance
+                .rationale
+                .clone()
+                .unwrap_or_default(),
+            body_kind: if a.body.is_native() {
+                "native_fn_ref".into()
+            } else {
+                "authoring_script".into()
+            },
+            supported_refinement_levels: a
+                .supported_refinement_states
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
+        })
+        .collect()
+}
+
+// -----------------------------------------------------------------------
+// Change-7: acquire_corpus_passage world handler
+// -----------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+fn handle_acquire_corpus_passage(
+    world: &mut World,
+    request: AcquireCorpusPassageRequest,
+) -> Result<AcquireCorpusPassageResult, String> {
+    use crate::capability_registry::PassageRef;
+    use crate::plugins::corpus_gap::CorpusPassageRegistry;
+    use crate::plugins::knowledge_persistence::{
+        persist_passage, PersistedPassage,
+    };
+
+    let persisted = PersistedPassage {
+        passage_ref: request.passage_ref.clone(),
+        text: request.text.clone(),
+        citation: request.citation.clone(),
+        source_url: request.source_url.clone(),
+        jurisdiction: request.jurisdiction.clone(),
+        classification: request.classification.clone(),
+        license: request.license.clone(),
+    };
+
+    let persisted_path = if request.persist {
+        let path = persist_passage(&persisted)?;
+        Some(path.display().to_string())
+    } else {
+        None
+    };
+
+    let provenance = crate::plugins::knowledge_persistence::build_provenance_for_passage(&persisted);
+    let passage_ref = PassageRef(request.passage_ref.clone());
+
+    let registry_size = {
+        let mut registry = world.resource_mut::<CorpusPassageRegistry>();
+        registry.register(passage_ref, request.text, provenance);
+        registry.len()
+    };
+
+    Ok(AcquireCorpusPassageResult {
+        passage_ref: request.passage_ref,
+        stored: true,
+        registry_size,
+        persisted_path,
+    })
 }
