@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 
 use super::graph::{DependencyGraph, NodeId};
-use crate::curation::authoring_script::{ArgExpr, AuthoringScript, Predicate, StepId};
+use crate::curation::authoring_script::{ArgExpr, AuthoringScript, Predicate, ScriptInstruction, Step, StepId};
 
 /// A pure step evaluation: given the tool id and the resolved argument object,
 /// produce the step's output object. Must be deterministic.
@@ -33,7 +33,7 @@ pub type StepEvaluator<'a> = dyn FnMut(&str, &Map<String, Value>) -> Map<String,
 /// (steps depend on their inputs).
 pub fn build_provenance(component: u64, script: &AuthoringScript) -> DependencyGraph {
     let mut g = DependencyGraph::new();
-    for step in &script.steps {
+    for step in call_steps(script) {
         let step_node = NodeId::step(component, step.id.as_str());
         g.add_node(step_node.clone());
         for expr in step.args.values() {
@@ -46,6 +46,19 @@ pub fn build_provenance(component: u64, script: &AuthoringScript) -> DependencyG
     g
 }
 
+/// Iterate only the flat `Call` steps in a script.
+/// `Repeat` and `CallRecipe` instructions are executed by `replay()` and
+/// are not part of the incremental parametric-propagation path.
+fn call_steps(script: &AuthoringScript) -> impl Iterator<Item = &Step> {
+    script.steps.iter().filter_map(|instr| {
+        if let ScriptInstruction::Call(s) = instr {
+            Some(s)
+        } else {
+            None
+        }
+    })
+}
+
 fn add_expr_edges(component: u64, expr: &ArgExpr, step_node: &NodeId, g: &mut DependencyGraph) {
     match expr {
         ArgExpr::Param { name } => {
@@ -55,7 +68,17 @@ fn add_expr_edges(component: u64, expr: &ArgExpr, step_node: &NodeId, g: &mut De
         ArgExpr::StepOutput { step_id, .. } => {
             let _ = g.add_dependency(step_node.clone(), NodeId::step(component, step_id.as_str()));
         }
-        ArgExpr::Literal { .. } | ArgExpr::ClaimRef { .. } => {}
+        ArgExpr::Array { items } => {
+            for item in items {
+                add_expr_edges(component, item, step_node, g);
+            }
+        }
+        ArgExpr::Object { entries } => {
+            for v in entries.values() {
+                add_expr_edges(component, v, step_node, g);
+            }
+        }
+        ArgExpr::Literal { .. } | ArgExpr::ClaimRef { .. } | ArgExpr::Expr { .. } => {}
     }
 }
 
@@ -113,7 +136,21 @@ fn resolve(
                 out.get(key).cloned()
             }
         }
-        ArgExpr::ClaimRef { .. } => None,
+        ArgExpr::Array { items } => {
+            let mut arr = Vec::with_capacity(items.len());
+            for item in items {
+                arr.push(resolve(item, params, outputs)?);
+            }
+            Some(Value::Array(arr))
+        }
+        ArgExpr::Object { entries } => {
+            let mut m = Map::new();
+            for (k, v) in entries {
+                m.insert(k.clone(), resolve(v, params, outputs)?);
+            }
+            Some(Value::Object(m))
+        }
+        ArgExpr::ClaimRef { .. } | ArgExpr::Expr { .. } => None,
     }
 }
 
@@ -139,7 +176,7 @@ pub fn full_eval(
     eval: &mut StepEvaluator<'_>,
 ) -> BTreeMap<StepId, Map<String, Value>> {
     let mut outputs: BTreeMap<StepId, Map<String, Value>> = BTreeMap::new();
-    for step in &script.steps {
+    for step in call_steps(script) {
         let args = resolve_args(step, params, &outputs);
         let out = eval(step.tool.as_str(), &args);
         outputs.insert(step.id.clone(), out);
@@ -175,7 +212,7 @@ pub fn incremental_eval(
     }
     // Also dirty any step that *appeared* (no prior output) so first build of
     // new steps recomputes.
-    for step in &script.steps {
+    for step in call_steps(script) {
         if !prev_outputs.contains_key(&step.id) {
             graph.mark_dirty(NodeId::step(component, step.id.as_str()));
         }
@@ -196,7 +233,7 @@ pub fn incremental_eval(
     // rest. (Script order is a valid topological order of step→step edges.)
     let mut outputs: BTreeMap<StepId, Map<String, Value>> = BTreeMap::new();
     let mut recomputed = Vec::new();
-    for step in &script.steps {
+    for step in call_steps(script) {
         if dirty_steps.contains(&step.id) {
             let args = resolve_args(step, params, &outputs);
             let out = eval(step.tool.as_str(), &args);
@@ -223,7 +260,7 @@ pub fn incremental_eval(
 mod tests {
     use super::*;
     use crate::curation::authoring_script::{
-        AuthoringScript, McpToolId, MutationScope, OutputPath, Step,
+        AuthoringScript, McpToolId, MutationScope, OutputPath, ScriptInstruction, Step,
     };
 
     // Build a small parametric "truss-ish" script:
@@ -235,13 +272,15 @@ mod tests {
         s.allowed_tools.insert(McpToolId::new("half"));
         s.allowed_tools.insert(McpToolId::new("apex"));
         s.allowed_tools.insert(McpToolId::new("make"));
-        let step = |id: &str, tool: &str, args: Vec<(&str, ArgExpr)>| Step {
-            id: StepId::new(id),
-            tool: McpToolId::new(tool),
-            args: args.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
-            bindings: Default::default(),
-            essential: true,
-            precondition: None,
+        let step = |id: &str, tool: &str, args: Vec<(&str, ArgExpr)>| {
+            ScriptInstruction::Call(Step {
+                id: StepId::new(id),
+                tool: McpToolId::new(tool),
+                args: args.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                bindings: Default::default(),
+                essential: true,
+                precondition: None,
+            })
         };
         s.steps.push(step(
             "half",

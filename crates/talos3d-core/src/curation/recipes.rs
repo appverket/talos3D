@@ -166,6 +166,19 @@ impl RecipeArtifact {
     }
 }
 
+/// Derive a `RecipeFamilyId` from a recipe `AssetId` of the form
+/// `<kind>/<family>` (e.g. `recipe.v1/pier_foundation` or
+/// `installed_recipe/floor_slab`). Used to index AuthoringScript recipe
+/// bodies — which do not carry a family id of their own — by family so
+/// `get_by_family` and the replay path can find them.
+fn family_id_from_asset_id(asset_id: &AssetId) -> Option<RecipeFamilyId> {
+    asset_id
+        .0
+        .split_once('/')
+        .map(|(_, family)| RecipeFamilyId(family.to_string()))
+        .filter(|f| !f.0.is_empty())
+}
+
 /// Bevy resource holding all registered `RecipeArtifact`s keyed by
 /// `AssetId`, plus a `family_id → asset_id` index for lookups from the
 /// shipped descriptor vocabulary.
@@ -182,7 +195,18 @@ pub struct RecipeArtifactRegistry {
 impl RecipeArtifactRegistry {
     pub fn insert(&mut self, artifact: RecipeArtifact) -> AssetId {
         let asset_id = artifact.meta.id.clone();
-        if let Some(family) = artifact.family_id().cloned() {
+        // Index by family for `get_by_family`. Native bodies carry the
+        // family id directly; AuthoringScript (learned) bodies do not, so
+        // fall back to deriving it from the asset-id path segment. Both
+        // `recipe.v1/<family>` (shipped) and `installed_recipe/<family>`
+        // (agent-learned) encode the family after the first `/`. Without
+        // this fallback, learned recipes are invisible to `get_by_family`
+        // and `instantiate_recipe`/`promote_refinement` silently no-op.
+        let family = artifact
+            .family_id()
+            .cloned()
+            .or_else(|| family_id_from_asset_id(&asset_id));
+        if let Some(family) = family {
             self.by_family_id.insert(family, asset_id.clone());
         }
         self.entries.insert(asset_id.clone(), artifact);

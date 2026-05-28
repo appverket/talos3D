@@ -43,8 +43,9 @@ pub use assembly_pattern_v2::{
     ASSEMBLY_PATTERN_V2_KIND, ASSEMBLY_PATTERN_V2_SCHEMA_VERSION,
 };
 pub use authoring_script::{
-    ArgExpr, AuthoringScript, AuthoringScriptStructuralError, McpToolId, MutationScope, OutputPath,
-    Postcondition, Predicate, Step, StepId, AUTHORING_SCRIPT_SCHEMA_VERSION,
+    ArgExpr, AuthoringScript, AuthoringScriptStructuralError, CallRecipeKindTag, McpToolId,
+    MutationScope, OutputPath, Postcondition, Predicate, RepeatKindTag, ScriptInstruction, Step,
+    StepId, MAX_CALL_RECIPE_DEPTH, AUTHORING_SCRIPT_SCHEMA_VERSION,
 };
 pub use plugin::CurationPlugin;
 pub use procedural_session::{
@@ -62,8 +63,9 @@ pub use recipes::{
     RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest, RECIPE_ARTIFACT_KIND,
 };
 pub use replay::{
-    replay, InvocationError, InvocationReport, PostconditionOracle, PostconditionResult,
-    PostconditionVerdict, ResolvedPostcondition, ToolCall, ToolDispatchError, ToolDispatcher,
+    replay, replay_with_lookup, InvocationError, InvocationReport, MapRecipeLookup,
+    NoRecipeLookup, PostconditionOracle, PostconditionResult, PostconditionVerdict, RecipeLookup,
+    ResolvedPostcondition, ToolCall, ToolDispatchError, ToolDispatcher,
 };
 
 pub use compat_shim::corpus_provenance_to_registry_entry;

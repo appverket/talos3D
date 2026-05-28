@@ -433,27 +433,35 @@ pub fn synthesize<D: ToolDispatcher, O: PostconditionOracle>(
 /// ignored. This converts the LLM's flat call list into the shape the
 /// replay executor expects.
 fn patch_script_with_calls(script: &AuthoringScript, calls: &[McpCall]) -> AuthoringScript {
-    use super::authoring_script::{ArgExpr, Step, StepId};
+    use super::authoring_script::{ArgExpr, ScriptInstruction, Step, StepId};
 
     // Rebuild steps: keep script metadata, overwrite args with Literal values.
-    let steps: Vec<Step> = script
+    // Only patches Call instructions; Repeat/CallRecipe are passed through unchanged
+    // since the LLM synthesis path only operates on flat call lists today.
+    let steps: Vec<ScriptInstruction> = script
         .steps
         .iter()
         .zip(calls.iter())
-        .map(|(orig_step, call)| {
+        .map(|(orig_instr, call)| {
             let literal_args: BTreeMap<String, ArgExpr> = call
                 .args
                 .iter()
                 .map(|(k, v)| (k.clone(), ArgExpr::Literal { value: v.clone() }))
                 .collect();
-            Step {
-                id: orig_step.id.clone(),
+            // For the synthesis path we always produce a Call instruction;
+            // the original instruction is used only for metadata.
+            let (id, bindings, essential) = match orig_instr {
+                ScriptInstruction::Call(s) => (s.id.clone(), s.bindings.clone(), s.essential),
+                other => (other.id().clone(), BTreeMap::new(), true),
+            };
+            ScriptInstruction::Call(Step {
+                id,
                 tool: call.tool.clone(),
                 args: literal_args,
-                bindings: orig_step.bindings.clone(),
-                essential: orig_step.essential,
+                bindings,
+                essential,
                 precondition: None, // preconditions evaluated by the LLM; we trust its output
-            }
+            })
         })
         .collect();
 
@@ -465,7 +473,7 @@ fn patch_script_with_calls(script: &AuthoringScript, calls: &[McpCall]) -> Autho
     // Trim postconditions that reference steps beyond the patched set.
     // (The oracle will re-verify them anyway.)
     let valid_ids: std::collections::BTreeSet<StepId> =
-        patched.steps.iter().map(|s| s.id.clone()).collect();
+        patched.steps.iter().map(|s| s.id().clone()).collect();
     patched.postconditions.retain(|pc| {
         use super::authoring_script::Postcondition;
         match pc {
@@ -544,10 +552,10 @@ mod tests {
     }
 
     fn minimal_script() -> AuthoringScript {
-        use crate::curation::authoring_script::McpToolId;
+        use crate::curation::authoring_script::{McpToolId, ScriptInstruction};
         let mut s = AuthoringScript::stub(MutationScope::None);
         s.allowed_tools.insert(McpToolId::new("my_tool"));
-        s.steps.push(Step {
+        s.steps.push(ScriptInstruction::Call(Step {
             id: StepId::new("step1"),
             tool: McpToolId::new("my_tool"),
             args: BTreeMap::new(),
@@ -558,7 +566,7 @@ mod tests {
             },
             essential: true,
             precondition: None,
-        });
+        }));
         s
     }
 

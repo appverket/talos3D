@@ -50,7 +50,7 @@ use uuid::Uuid;
 
 use super::authoring_script::{
     ArgExpr, AuthoringScript, AuthoringScriptStructuralError, McpToolId, MutationScope, OutputPath,
-    Postcondition, Predicate, Step, StepId,
+    Postcondition, Predicate, ScriptInstruction, Step, StepId,
 };
 use super::identity::{AssetId, AssetKindId, AssetRevision};
 use super::replay::{
@@ -193,6 +193,12 @@ impl From<EvalStep> for Step {
             essential: s.essential,
             precondition: s.precondition,
         }
+    }
+}
+
+impl From<EvalStep> for crate::curation::ScriptInstruction {
+    fn from(s: EvalStep) -> Self {
+        crate::curation::ScriptInstruction::Call(Step::from(s))
     }
 }
 
@@ -696,6 +702,11 @@ impl ProceduralSession {
         &self.audit
     }
 
+    /// Read-only view of all exported authoring scripts from this session.
+    pub fn exports(&self) -> &[ExportedAuthoringScript] {
+        &self.exported
+    }
+
     /// Convenience helper for the orchestration / MCP layers.
     pub fn snapshot(&mut self) -> SessionSnapshot {
         self.push_audit(AuditEvent::Snapshotted);
@@ -876,7 +887,7 @@ fn precheck_step(
             tool: step.tool.clone(),
         });
     }
-    if session.script.steps.iter().any(|s| s.id == step.id) {
+    if session.script.steps.iter().any(|s| s.id() == &step.id) {
         return Err(SessionError::DuplicateStepId(step.id.clone()));
     }
     Ok(())
@@ -982,7 +993,7 @@ pub fn eval(
         }
 
         // Append step.
-        let s: Step = step.clone().into();
+        let s: ScriptInstruction = step.clone().into();
         session.script.steps.push(s);
         // Make the step's tool implicitly allowed (the spec set may
         // have been empty if caller wants "any registered tool").
@@ -1057,7 +1068,7 @@ fn project_single_step(
     let mut throwaway = session.script.clone();
     throwaway.steps.clear();
     throwaway.allowed_tools.insert(step.tool.clone());
-    let s: Step = step.clone().into();
+    let s: ScriptInstruction = step.clone().into();
     throwaway.steps.push(s);
     throwaway.postconditions.clear();
 
@@ -1345,7 +1356,7 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
 
     // Replay the script through a tagging dispatcher that also enforces
     // MutationScope::None against mutating tools.
-    let step_order: Vec<StepId> = session.script.steps.iter().map(|s| s.id.clone()).collect();
+    let step_order: Vec<StepId> = session.script.steps.iter().map(|s| s.id().clone()).collect();
     let mut tagger =
         CommitTaggingDispatcher::new(dispatcher, session.id.clone(), registry, step_order.clone());
 

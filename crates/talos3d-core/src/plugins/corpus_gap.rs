@@ -253,6 +253,16 @@ impl CorpusPassageRegistry {
     pub fn iter(&self) -> impl Iterator<Item = (&str, &PassageEntry)> {
         self.passages.iter().map(|(k, v)| (k.as_str(), v))
     }
+
+    /// Number of passages currently registered.
+    pub fn len(&self) -> usize {
+        self.passages.len()
+    }
+
+    /// Returns `true` when no passages are registered.
+    pub fn is_empty(&self) -> bool {
+        self.passages.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -3026,6 +3026,47 @@ impl ModelApiServer {
             .await
             .map_err(|_| "model API response channel closed".to_string())?
     }
+
+    // --- Knowledge persistence bridges (Change-2 / Change-3 / Change-7) ---
+
+    async fn request_install_recipe_from_session_export(
+        &self,
+        request: super::request::InstallRecipeFromSessionExportRequest,
+    ) -> Result<super::request::InstallRecipeResult, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::InstallRecipeFromSessionExport { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_list_persisted_recipes(
+        &self,
+    ) -> Result<Vec<super::request::PersistedRecipeInfo>, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ListPersistedRecipes { response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        let recipes = receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?;
+        Ok(recipes)
+    }
+
+    async fn request_acquire_corpus_passage(
+        &self,
+        request: super::request::AcquireCorpusPassageRequest,
+    ) -> Result<super::request::AcquireCorpusPassageResult, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::AcquireCorpusPassage { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -8377,5 +8418,77 @@ impl ModelApiServer {
             .await
             .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(response)
+    }
+
+    // --- Knowledge persistence tools (Change-2 / Change-3 / Change-7) ---
+
+    #[tool(
+        name = "install_recipe_from_session_export",
+        description = "Install an `AuthoringScript` exported from a procedural session as a durable, \
+        executable recipe in the `RecipeArtifactRegistry`. After installation the recipe is callable \
+        via `instantiate_recipe` and `promote_refinement` by its `family_id`. Supply `scope: \
+        \"Project\"` (default) to persist to `~/.talos3d/knowledge/recipes/` and survive restarts; \
+        supply `scope: \"Session\"` for an in-memory-only install. \
+        \n\n\
+        Workflow: (1) build the script in a procedural session, (2) commit it, (3) call \
+        `procedural_session.export` to freeze it as an artifact, (4) call this tool with the \
+        returned `export_handle` to make it executable. Returns `{ family_id, scope, \
+        persisted_path, supported_refinement_levels }`."
+    )]
+    pub(super) async fn install_recipe_from_session_export_tool(
+        &self,
+        Parameters(params): Parameters<
+            super::request::InstallRecipeFromSessionExportRequest,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_install_recipe_from_session_export(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "list_persisted_recipes",
+        description = "List all recipes currently loaded in the `RecipeArtifactRegistry` — both \
+        shipped (native) recipes and user-installed `AuthoringScript` recipes. Returns an array of \
+        `{ family_id, asset_id, label, description, body_kind, supported_refinement_levels }`. \
+        Use this after `install_recipe_from_session_export` to confirm the recipe is registered \
+        and discoverable."
+    )]
+    pub(super) async fn list_persisted_recipes_tool(&self) -> Result<CallToolResult, McpError> {
+        let recipes = self
+            .request_list_persisted_recipes()
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        json_tool_result(recipes)
+    }
+
+    #[tool(
+        name = "acquire_corpus_passage",
+        description = "Store a plain-text passage from an external source (a code section, \
+        regulation excerpt, manufacturer specification, or other knowledge fragment) into the \
+        `CorpusPassageRegistry` so it becomes available as grounding for future curation work. \
+        With `persist: true` (default) the passage is also written to \
+        `~/.talos3d/knowledge/passages/<passage_ref>.json` and reloaded on next startup. \
+        \n\n\
+        Required: `passage_ref` (stable id), `citation` (source name), `text` (plain-text body). \
+        Optional: `source_url`, `jurisdiction` (ISO 3166-1 alpha-2), `classification`, \
+        `license` (`cc0`, `public_record`, `boverket_public`, `icc_cite_only`, \
+        `standards_body_citation_only`). \
+        \n\n\
+        Returns `{ passage_ref, stored, registry_size, persisted_path }`."
+    )]
+    pub(super) async fn acquire_corpus_passage_tool(
+        &self,
+        Parameters(params): Parameters<
+            super::request::AcquireCorpusPassageRequest,
+        >,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_acquire_corpus_passage(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(result)
     }
 }
