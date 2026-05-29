@@ -10851,36 +10851,60 @@ pub fn handle_discover_curated_paths(
     let mut parametric_types = Vec::new();
     let mut generation_priors = Vec::new();
 
+    // Surface the public parametric types whose id/label match an element-class
+    // noun. The match is token-based, not a raw substring: an element class such
+    // as `roof_system` is split on `_` into {`roof`, `system`} and matched
+    // case-insensitively against the dotted type ids (`architecture.roof.*`) and
+    // labels (`Gable Roof System`). A raw `id.contains("roof_system")` never
+    // matched the dotted namespace, which is how the gable/truss roof knowledge
+    // became invisible to an agent discovering by the `roof_system` noun.
+    let collect_parametric_types = |needle: Option<&str>| -> Vec<_> {
+        world
+            .get_resource::<ParametricRegistry>()
+            .map(|registry| {
+                registry
+                    .list_public()
+                    .into_iter()
+                    .filter(|(id, label)| match needle {
+                        None => true,
+                        Some(class) => {
+                            let id_l = id.to_ascii_lowercase();
+                            let label_l = label.to_ascii_lowercase();
+                            class
+                                .split(|c: char| c == '_' || c == '.' || c == ' ')
+                                .filter(|tok| tok.len() >= 3)
+                                .any(|tok| {
+                                    let t = tok.to_ascii_lowercase();
+                                    id_l.contains(&t) || label_l.contains(&t)
+                                })
+                        }
+                    })
+                    .map(
+                        |(id, label)| crate::plugins::parametric_mcp::ParametricTypeInfo {
+                            id,
+                            label,
+                        },
+                    )
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     match path_kind.as_str() {
         "recipe" => {
             let element_class = request
                 .element_class
                 .clone()
                 .ok_or_else(|| "recipe discovery requires element_class".to_string())?;
-            recipe_rankings = handle_select_recipe(world, element_class, request.context)?;
+            recipe_rankings = handle_select_recipe(world, element_class.clone(), request.context)?;
+            // Even on the default `recipe` query, surface matching parametric
+            // types so a single discover_curated_paths call reveals the geometry
+            // path (e.g. the gable roof system + its trusses for `roof_system`)
+            // instead of reporting a bare no-curated-path that hides them.
+            parametric_types = collect_parametric_types(Some(element_class.as_str()));
         }
         "parametric" => {
-            parametric_types = world
-                .get_resource::<ParametricRegistry>()
-                .map(|registry| {
-                    registry
-                        .list_public()
-                        .into_iter()
-                        .filter(|(id, label)| {
-                            request
-                                .element_class
-                                .as_deref()
-                                .is_none_or(|needle| id.contains(needle) || label.contains(needle))
-                        })
-                        .map(
-                            |(id, label)| crate::plugins::parametric_mcp::ParametricTypeInfo {
-                                id,
-                                label,
-                            },
-                        )
-                        .collect()
-                })
-                .unwrap_or_default();
+            parametric_types = collect_parametric_types(request.element_class.as_deref());
         }
         "prior" => {
             let class_id = request
