@@ -8637,6 +8637,15 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
         .map(serde_json::from_value::<SemanticEntityAnnotationRequest>)
         .transpose()
         .map_err(|error| format!("Invalid semantic annotation: {error}"))?;
+    // Defect 2 (atomic create): validate the semantic annotation BEFORE any
+    // geometry is created. An invalid `element_class` / `refinement_state` now
+    // rejects the whole call and leaves no orphan box behind, instead of
+    // silently creating an un-annotated box and only reporting that the
+    // annotation was dropped.
+    let validated_semantic = semantic_annotation
+        .as_ref()
+        .map(|annotation| validate_semantic_annotation(world, annotation))
+        .transpose()?;
     let entity_type = required_string(object, "type")?.to_ascii_lowercase();
     let registry = world.resource::<CapabilityRegistry>();
     let factory = registry.factory_for(&entity_type).ok_or_else(|| {
@@ -8654,8 +8663,8 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
     );
 
     flush_model_api_write_pipeline(world);
-    if let Some(annotation) = semantic_annotation {
-        apply_semantic_annotation(world, element_id, annotation)?;
+    if let (Some(annotation), Some(validated)) = (semantic_annotation, validated_semantic) {
+        apply_semantic_annotation(world, element_id, annotation, validated)?;
     }
 
     get_entity_snapshot(world, element_id)
@@ -8663,28 +8672,183 @@ pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, Strin
         .ok_or_else(|| format!("Failed to create entity of type '{entity_type}'"))
 }
 
+/// How a requested `element_class` term resolves against the registered
+/// vocabulary. Domain-neutral: derived entirely from the `CapabilityRegistry`,
+/// so core never hardcodes domain nouns such as `door` or `window`.
 #[cfg(feature = "model-api")]
-fn apply_semantic_annotation(
-    world: &mut World,
-    element_id: ElementId,
-    annotation: SemanticEntityAnnotationRequest,
-) -> Result<(), String> {
-    use crate::capability_registry::{ElementClassAssignment, ElementClassId};
-    use crate::plugins::refinement::{
-        AuthoringMode, AuthoringProvenance, RefinementState, RefinementStateComponent,
-        SemanticIntent,
+pub(crate) enum ElementClassResolution {
+    /// Registered as a first-class semantic element class.
+    Registered,
+    /// Not an element class, but a recognised native modeling term that already
+    /// has an authoring path: a registered entity factory and/or assembly
+    /// pattern names it (e.g. `door`/`window` → the `opening` entity type and
+    /// the hosted-opening assembly patterns). Annotating it as a
+    /// `semantic.element_class` is wrong; the native path should be used.
+    NativeNonClass {
+        entity_types: Vec<String>,
+        assembly_pattern_ids: Vec<String>,
+    },
+    /// Not recognised anywhere — a genuine candidate for corpus expansion.
+    Unknown,
+}
+
+#[cfg(feature = "model-api")]
+fn assembly_pattern_names_term(
+    descriptor: &crate::capability_registry::AssemblyPatternDescriptor,
+    needle: &str,
+) -> bool {
+    // Match the term against what the pattern *is* (its id, tags, and label
+    // words) — not `target_types`, which name the element classes the pattern
+    // composes with (e.g. `wall_assembly`) rather than aliases of the term.
+    let matches = |s: &str| s.eq_ignore_ascii_case(needle);
+    matches(&descriptor.pattern_id)
+        || descriptor.tags.iter().any(|tag| matches(tag))
+        || descriptor
+            .label
+            .split(|c: char| !c.is_alphanumeric())
+            .any(matches)
+}
+
+/// Classify a requested `element_class` term using only registry data.
+#[cfg(feature = "model-api")]
+pub(crate) fn resolve_element_class_term(world: &World, term: &str) -> ElementClassResolution {
+    use crate::capability_registry::ElementClassId;
+
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return ElementClassResolution::Unknown;
     };
+    if registry
+        .element_class_descriptor(&ElementClassId(term.to_string()))
+        .is_some()
+    {
+        return ElementClassResolution::Registered;
+    }
 
-    let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
-    let entity = q
-        .iter(world)
-        .find_map(|(entity, id)| (*id == element_id).then_some(entity))
-        .ok_or_else(|| format!("Entity {} not found after creation", element_id.0))?;
+    let needle = term.trim();
+    let factory_type_names: Vec<String> = registry
+        .factories()
+        .iter()
+        .map(|factory| factory.type_name().to_string())
+        .collect();
+    let matched_patterns: Vec<&crate::capability_registry::AssemblyPatternDescriptor> = registry
+        .assembly_pattern_descriptors()
+        .iter()
+        .filter(|descriptor| assembly_pattern_names_term(descriptor, needle))
+        .collect();
 
-    let element_class = annotation
-        .element_class
-        .as_deref()
-        .map(|id| ElementClassId(id.to_string()));
+    let mut entity_types: Vec<String> = factory_type_names
+        .iter()
+        .filter(|type_name| type_name.eq_ignore_ascii_case(needle))
+        .cloned()
+        .collect();
+    // Surface the native entity type(s) the matched patterns are authored on,
+    // so the agent learns to use e.g. `entity_type: "opening"` for a door.
+    for pattern in &matched_patterns {
+        for target in &pattern.target_types {
+            let is_factory = factory_type_names
+                .iter()
+                .any(|type_name| type_name.eq_ignore_ascii_case(target));
+            let already = entity_types
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(target));
+            if is_factory && !already {
+                entity_types.push(target.clone());
+            }
+        }
+    }
+    let assembly_pattern_ids: Vec<String> = matched_patterns
+        .iter()
+        .map(|descriptor| descriptor.pattern_id.clone())
+        .collect();
+
+    if entity_types.is_empty() && assembly_pattern_ids.is_empty() {
+        ElementClassResolution::Unknown
+    } else {
+        ElementClassResolution::NativeNonClass {
+            entity_types,
+            assembly_pattern_ids,
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn registered_element_class_ids(world: &World) -> Vec<String> {
+    world
+        .get_resource::<CapabilityRegistry>()
+        .map(|registry| {
+            let mut ids: Vec<String> = registry
+                .element_class_descriptors()
+                .iter()
+                .map(|descriptor| descriptor.id.0.clone())
+                .collect();
+            ids.sort();
+            ids
+        })
+        .unwrap_or_default()
+}
+
+/// Build the agent-facing rejection message when a `semantic.element_class`
+/// fails validation. Distinguishes a recognised native non-class term (point
+/// at the existing path) from a wholly unregistered class (list the registered
+/// classes). This keeps the annotation surface in agreement with
+/// `discover_curated_paths` / `request_corpus_expansion`.
+#[cfg(feature = "model-api")]
+fn unknown_element_class_message(world: &World, term: &str) -> String {
+    match resolve_element_class_term(world, term) {
+        ElementClassResolution::NativeNonClass {
+            entity_types,
+            assembly_pattern_ids,
+        } => {
+            let mut hint = String::new();
+            if !entity_types.is_empty() {
+                hint.push_str(&format!(
+                    " Model it as entity_type {entity_types:?} via create_entity (e.g. hosted_on a wall), not as a semantic element_class."
+                ));
+            }
+            if !assembly_pattern_ids.is_empty() {
+                hint.push_str(&format!(
+                    " Curated assembly pattern(s) cover it: {assembly_pattern_ids:?}."
+                ));
+            }
+            format!(
+                "'{term}' is not a registered semantic element_class; it is a recognised native modeling term.{hint}"
+            )
+        }
+        // Registered should never reach here (only called on a failed lookup),
+        // but fall through to the unknown listing if it somehow does.
+        ElementClassResolution::Registered | ElementClassResolution::Unknown => {
+            let registered = registered_element_class_ids(world);
+            format!(
+                "Unknown element_class '{term}'. It is not a registered semantic element class. \
+                 Registered element classes: [{}]. If this names knowledge that is genuinely \
+                 missing, report it with request_corpus_expansion instead of annotating \
+                 un-curated geometry.",
+                registered.join(", ")
+            )
+        }
+    }
+}
+
+/// Parsed, registry-validated semantic annotation fields, produced by
+/// [`validate_semantic_annotation`] before any geometry is created.
+#[cfg(feature = "model-api")]
+struct ValidatedSemanticAnnotation {
+    element_class: Option<crate::capability_registry::ElementClassId>,
+    refinement_state: Option<crate::plugins::refinement::RefinementState>,
+}
+
+/// Validate a semantic annotation request against the registry without
+/// mutating the world. Returns the parsed `element_class` / `refinement_state`
+/// so the caller can both gate creation (atomicity) and apply the components
+/// afterwards without re-parsing.
+#[cfg(feature = "model-api")]
+fn validate_semantic_annotation(
+    world: &World,
+    annotation: &SemanticEntityAnnotationRequest,
+) -> Result<ValidatedSemanticAnnotation, String> {
+    use crate::capability_registry::ElementClassId;
+    use crate::plugins::refinement::RefinementState;
+
     let refinement_state = annotation
         .refinement_state
         .as_deref()
@@ -8697,17 +8861,43 @@ fn apply_semantic_annotation(
         })
         .transpose()?;
 
-    if let Some(element_class) = &element_class {
-        let registry = world
-            .get_resource::<CapabilityRegistry>()
-            .ok_or_else(|| "CapabilityRegistry is not available".to_string())?;
-        if registry.element_class_descriptor(element_class).is_none() {
-            return Err(format!(
-                "Unknown element_class '{}'; register the domain vocabulary before creating semantically typed entities",
-                element_class.0
-            ));
-        }
-    }
+    let element_class = match annotation.element_class.as_deref() {
+        Some(term) => match resolve_element_class_term(world, term) {
+            ElementClassResolution::Registered => Some(ElementClassId(term.to_string())),
+            _ => return Err(unknown_element_class_message(world, term)),
+        },
+        None => None,
+    };
+
+    Ok(ValidatedSemanticAnnotation {
+        element_class,
+        refinement_state,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn apply_semantic_annotation(
+    world: &mut World,
+    element_id: ElementId,
+    annotation: SemanticEntityAnnotationRequest,
+    validated: ValidatedSemanticAnnotation,
+) -> Result<(), String> {
+    use crate::capability_registry::ElementClassAssignment;
+    use crate::plugins::refinement::{
+        AuthoringMode, AuthoringProvenance, RefinementState, RefinementStateComponent,
+        SemanticIntent,
+    };
+
+    let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
+    let entity = q
+        .iter(world)
+        .find_map(|(entity, id)| (*id == element_id).then_some(entity))
+        .ok_or_else(|| format!("Entity {} not found after creation", element_id.0))?;
+
+    let ValidatedSemanticAnnotation {
+        element_class,
+        refinement_state,
+    } = validated;
 
     let mut entity_mut = world.entity_mut(entity);
     if let Some(element_class) = element_class {
@@ -8797,25 +8987,23 @@ pub fn handle_accept_semantic_shadow_candidate(
             )
         })?;
 
-    apply_semantic_annotation(
-        world,
-        element_id,
-        SemanticEntityAnnotationRequest {
-            element_class: Some(element_class),
-            refinement_state: request
-                .refinement_state
-                .or_else(|| Some("Conceptual".to_string())),
-            parameters: request.parameters.unwrap_or(candidate.parameters),
-            unresolved_decisions: candidate.unresolved_decisions,
-            source_refs: candidate.source_refs,
-            rationale: request.rationale.or_else(|| {
-                Some(format!(
-                    "Accepted semantic shadow candidate '{}'",
-                    request.candidate_id
-                ))
-            }),
-        },
-    )?;
+    let annotation = SemanticEntityAnnotationRequest {
+        element_class: Some(element_class),
+        refinement_state: request
+            .refinement_state
+            .or_else(|| Some("Conceptual".to_string())),
+        parameters: request.parameters.unwrap_or(candidate.parameters),
+        unresolved_decisions: candidate.unresolved_decisions,
+        source_refs: candidate.source_refs,
+        rationale: request.rationale.or_else(|| {
+            Some(format!(
+                "Accepted semantic shadow candidate '{}'",
+                request.candidate_id
+            ))
+        }),
+    };
+    let validated = validate_semantic_annotation(world, &annotation)?;
+    apply_semantic_annotation(world, element_id, annotation, validated)?;
 
     let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
     let entity = q
@@ -10966,10 +11154,50 @@ pub fn handle_discover_curated_paths(
         }
     }
 
+    // Defect 1 (vocabulary surfaces must agree): if the requested term is not a
+    // registered element class but is a recognised native modeling term (e.g.
+    // `door`/`window` → the `opening` entity type + hosted-opening patterns),
+    // surface that explicitly instead of advertising a spurious corpus gap that
+    // the create_box / create_entity annotation surface would later reject.
+    let non_class_term = match request.element_class.as_deref() {
+        Some(term) => match resolve_element_class_term(world, term) {
+            ElementClassResolution::NativeNonClass {
+                entity_types,
+                assembly_pattern_ids,
+            } => {
+                let mut message = format!(
+                    "'{term}' is not a registered semantic element_class; it is a recognised native modeling term."
+                );
+                if !entity_types.is_empty() {
+                    message.push_str(&format!(
+                        " Author it as entity_type {entity_types:?} via create_entity (e.g. hosted_on a wall)."
+                    ));
+                }
+                if !assembly_pattern_ids.is_empty() {
+                    message.push_str(&format!(
+                        " Curated assembly pattern(s) cover it: {assembly_pattern_ids:?} (inspect via list_vocabulary)."
+                    ));
+                }
+                message.push_str(
+                    " Do not request_corpus_expansion for it and do not annotate a box with this element_class.",
+                );
+                Some(NonClassTermInfo {
+                    term: term.to_string(),
+                    message,
+                    native_entity_types: entity_types,
+                    assembly_pattern_ids,
+                })
+            }
+            _ => None,
+        },
+        None => None,
+    };
+
     let has_path = recipe_rankings.iter().any(|ranking| ranking.executable)
         || !parametric_types.is_empty()
         || !generation_priors.is_empty();
-    let no_curated_path = (!has_path).then(|| NoCuratedPathInfo {
+    // A recognised native non-class term is not a gap: it already has a path.
+    let no_curated_path = (non_class_term.is_none() && !has_path).then(|| NoCuratedPathInfo {
         element_class: request
             .element_class
             .clone()
@@ -10991,6 +11219,7 @@ pub fn handle_discover_curated_paths(
         generation_priors,
         related_asset_ids,
         no_curated_path,
+        non_class_term,
         suggested_next_tool: "request_corpus_expansion".into(),
         guidance_card_ids,
     })
@@ -11648,10 +11877,39 @@ pub fn handle_request_corpus_expansion(
     jurisdiction: Option<String>,
     kind: String,
     rationale: String,
-) -> CorpusGapInfo {
+) -> ApiResult<CorpusGapInfo> {
     use crate::curation::AssetKindId;
     use crate::plugins::corpus_gap::{CorpusGap, CorpusGapId, CorpusGapQueue};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Defect 1 (vocabulary surfaces must agree): a recognised native modeling
+    // term (e.g. `door`/`window`, authored as `opening` entities) is not a
+    // corpus gap — it already has a path. Reject it the same way the create_box
+    // / create_entity annotation surface does, instead of silently recording a
+    // spurious gap. Unknown terms (e.g. a not-yet-curated `house`) and
+    // registered classes still record a gap normally.
+    if let Some(term) = element_class.as_deref() {
+        if let ElementClassResolution::NativeNonClass {
+            entity_types,
+            assembly_pattern_ids,
+        } = resolve_element_class_term(world, term)
+        {
+            let mut message = format!(
+                "'{term}' is not an element class and is not a corpus gap; it is a recognised native modeling term."
+            );
+            if !entity_types.is_empty() {
+                message.push_str(&format!(
+                    " Author it as entity_type {entity_types:?} via create_entity (e.g. hosted_on a wall)."
+                ));
+            }
+            if !assembly_pattern_ids.is_empty() {
+                message.push_str(&format!(
+                    " Curated assembly pattern(s) cover it: {assembly_pattern_ids:?}."
+                ));
+            }
+            return Err(message);
+        }
+    }
 
     let reported_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -11677,7 +11935,7 @@ pub fn handle_request_corpus_expansion(
     // Re-borrow to read back the just-inserted gap.
     let queue = world.resource::<CorpusGapQueue>();
     let gap = queue.list().iter().find(|g| g.id == id).unwrap();
-    corpus_gap_to_info(gap)
+    Ok(corpus_gap_to_info(gap))
 }
 
 /// Look up a passage in the `CorpusPassageRegistry`.
