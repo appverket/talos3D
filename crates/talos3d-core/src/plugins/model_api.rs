@@ -10811,6 +10811,43 @@ pub fn handle_select_recipe(
     Ok(viable)
 }
 
+/// Generic class-suffix tokens that are NOT discriminating: they are shared
+/// across unrelated element classes (`roof_system`, `foundation_system`) and a
+/// dotted type id like `architecture.roof.system.gable` contains them too, so
+/// matching on them yields false positives (e.g. `foundation_system` returning
+/// the gable roof type). They are stripped before matching so only the head
+/// noun (`roof`, `foundation`, `wall`) drives discovery.
+#[cfg(feature = "model-api")]
+const CLASS_TOKEN_STOPWORDS: &[&str] = &[
+    "system",
+    "assembly",
+    "type",
+    "element",
+    "component",
+    "member",
+    "unit",
+    "the",
+    "and",
+];
+
+/// True when a parametric type (`id` + human `label`) should surface for an
+/// element-class noun. The class is split on `_`/`.`/space into tokens; tokens
+/// shorter than 3 chars or in [`CLASS_TOKEN_STOPWORDS`] are dropped, and a match
+/// requires at least one remaining token to appear (case-insensitively) in the
+/// id or label. A class made up entirely of stopwords/short tokens matches
+/// nothing rather than everything.
+#[cfg(feature = "model-api")]
+fn parametric_class_token_match(class: &str, id: &str, label: &str) -> bool {
+    let id_l = id.to_ascii_lowercase();
+    let label_l = label.to_ascii_lowercase();
+    class
+        .split(|c: char| c == '_' || c == '.' || c == ' ')
+        .filter(|tok| tok.len() >= 3)
+        .map(|tok| tok.to_ascii_lowercase())
+        .filter(|tok| !CLASS_TOKEN_STOPWORDS.contains(&tok.as_str()))
+        .any(|tok| id_l.contains(&tok) || label_l.contains(&tok))
+}
+
 #[cfg(feature = "model-api")]
 pub fn handle_discover_curated_paths(
     world: &World,
@@ -10858,6 +10895,7 @@ pub fn handle_discover_curated_paths(
     // labels (`Gable Roof System`). A raw `id.contains("roof_system")` never
     // matched the dotted namespace, which is how the gable/truss roof knowledge
     // became invisible to an agent discovering by the `roof_system` noun.
+    //
     let collect_parametric_types = |needle: Option<&str>| -> Vec<_> {
         world
             .get_resource::<ParametricRegistry>()
@@ -10867,17 +10905,7 @@ pub fn handle_discover_curated_paths(
                     .into_iter()
                     .filter(|(id, label)| match needle {
                         None => true,
-                        Some(class) => {
-                            let id_l = id.to_ascii_lowercase();
-                            let label_l = label.to_ascii_lowercase();
-                            class
-                                .split(|c: char| c == '_' || c == '.' || c == ' ')
-                                .filter(|tok| tok.len() >= 3)
-                                .any(|tok| {
-                                    let t = tok.to_ascii_lowercase();
-                                    id_l.contains(&t) || label_l.contains(&t)
-                                })
-                        }
+                        Some(class) => parametric_class_token_match(class, id, label),
                     })
                     .map(
                         |(id, label)| crate::plugins::parametric_mcp::ParametricTypeInfo {

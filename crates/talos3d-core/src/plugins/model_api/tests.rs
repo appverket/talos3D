@@ -6467,3 +6467,39 @@ fn bim_spatial_list_kind_registry_returns_empty_when_unset() {
     let result = handle_bim_spatial_list_kind_registry(&mut world).unwrap();
     assert_eq!(result, serde_json::json!([]));
 }
+
+#[cfg(feature = "model-api")]
+#[test]
+fn parametric_class_token_match_uses_head_noun_not_generic_suffix() {
+    // The dotted gable roof type must surface for the `roof_system` noun...
+    assert!(parametric_class_token_match(
+        "roof_system",
+        "architecture.roof.system.gable",
+        "Gable Roof System",
+    ));
+    assert!(parametric_class_token_match(
+        "roof_system",
+        "architecture.roof.truss.common",
+        "Common Truss",
+    ));
+    // ...but NOT for `foundation_system`: the only shared token is the generic
+    // suffix `system`, which is a stopword. This is the regression that made
+    // discover_curated_paths(foundation_system) wrongly return the gable roof.
+    assert!(!parametric_class_token_match(
+        "foundation_system",
+        "architecture.roof.system.gable",
+        "Gable Roof System",
+    ));
+    // `wall_assembly` shares only the stopword `assembly` with nothing roof-like.
+    assert!(!parametric_class_token_match(
+        "wall_assembly",
+        "architecture.roof.system.gable",
+        "Gable Roof System",
+    ));
+    // A head noun that genuinely matches still works across separators.
+    assert!(parametric_class_token_match(
+        "window",
+        "architecture.window.double-european",
+        "Double European Window",
+    ));
+}
