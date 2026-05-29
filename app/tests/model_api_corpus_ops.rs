@@ -65,7 +65,8 @@ fn request_corpus_expansion_returns_gap_info() {
         Some("SE".into()),
         "rule_pack".into(),
         "need egress rule".into(),
-    );
+    )
+    .expect("stair_straight is not a native non-class term here — gap should record");
 
     assert!(!info.id.is_empty(), "gap id must not be empty");
     assert_eq!(info.element_class.as_deref(), Some("stair_straight"));
@@ -83,7 +84,8 @@ fn list_corpus_gaps_returns_pushed_gap() {
         Some("SE".into()),
         "rule_pack".into(),
         "need egress rule".into(),
-    );
+    )
+    .expect("stair_straight is not a native non-class term here — gap should record");
 
     let gaps = handle_list_corpus_gaps(&world);
     assert_eq!(gaps.len(), 1);

@@ -775,7 +775,7 @@ pub(super) enum ModelApiRequest {
         jurisdiction: Option<String>,
         kind: String,
         rationale: String,
-        response: oneshot::Sender<CorpusGapInfo>,
+        response: oneshot::Sender<ApiResult<CorpusGapInfo>>,
     },
     LookupSourcePassage {
         passage_ref: String,

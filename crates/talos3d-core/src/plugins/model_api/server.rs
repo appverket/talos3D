@@ -1909,29 +1909,20 @@ impl ModelApiServer {
         jurisdiction: Option<String>,
         kind: String,
         rationale: String,
-    ) -> CorpusGapInfo {
+    ) -> ApiResult<CorpusGapInfo> {
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::RequestCorpusExpansion {
-            element_class,
-            jurisdiction,
-            kind,
-            rationale,
-            response,
-        });
-        receiver.await.unwrap_or_else(|_| CorpusGapInfo {
-            id: String::new(),
-            element_class: None,
-            kind: None,
-            jurisdiction: None,
-            missing_artifact_kind: String::new(),
-            context: serde_json::Value::Null,
-            reported_by: String::new(),
-            reported_at: 0,
-            status: "unknown".into(),
-            gap_record_is_terminal: false,
-            required_next_tools: Vec::new(),
-            completion_criteria: Vec::new(),
-        })
+        self.sender
+            .send(ModelApiRequest::RequestCorpusExpansion {
+                element_class,
+                jurisdiction,
+                kind,
+                rationale,
+                response,
+            })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
     }
 
     async fn request_lookup_source_passage(
@@ -4372,8 +4363,32 @@ pub struct CuratedPathDiscoveryInfo {
     pub generation_priors: Vec<GenerationPriorInfo>,
     pub related_asset_ids: Vec<String>,
     pub no_curated_path: Option<NoCuratedPathInfo>,
+    /// Present when the requested `element_class` is not a registered semantic
+    /// element class but is a recognised native modeling term (e.g. `door` /
+    /// `window`, which are authored as `opening` entities, not element classes).
+    /// When set, `no_curated_path` is `None`: this is not a corpus gap, it is a
+    /// pointer to the existing native path. Keeps discovery in agreement with
+    /// the `create_box` / `create_entity` semantic-annotation surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_class_term: Option<NonClassTermInfo>,
     pub suggested_next_tool: String,
     pub guidance_card_ids: Vec<String>,
+}
+
+/// Describes a requested term that is not a registered element class but does
+/// have a native modeling path. Returned by `discover_curated_paths` instead of
+/// a spurious `NoCuratedPath` gap.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NonClassTermInfo {
+    pub term: String,
+    /// Human/agent-readable explanation of why this is not an element class and
+    /// what to do instead.
+    pub message: String,
+    /// Native entity type(s) this term is authored as (e.g. `["opening"]`).
+    pub native_entity_types: Vec<String>,
+    /// Curated assembly pattern id(s) that already cover this term.
+    pub assembly_pattern_ids: Vec<String>,
 }
 
 #[cfg(feature = "model-api")]
@@ -7240,7 +7255,8 @@ impl ModelApiServer {
                 params.kind,
                 params.rationale,
             )
-            .await;
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(gap)
     }
 

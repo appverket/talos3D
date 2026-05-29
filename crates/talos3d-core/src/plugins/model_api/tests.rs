@@ -4242,7 +4242,8 @@ fn save_recipe_draft_fixture(
         Some("SE".into()),
         "recipe".into(),
         "need mono roof framing".into(),
-    );
+    )
+    .expect("roof_system is a registered class — gap should record");
     handle_save_recipe_draft(
         world,
         SaveRecipeDraftRequest {
@@ -4294,7 +4295,8 @@ fn save_assembly_pattern_draft_fixture(
         Some("SE".into()),
         "assembly_pattern".into(),
         "need ventilated rainscreen wall pattern".into(),
-    );
+    )
+    .expect("wall_assembly is a registered class — gap should record");
     handle_save_assembly_pattern_draft(
         world,
         SaveAssemblyPatternDraftRequest {
@@ -4691,7 +4693,8 @@ fn recipe_draft_rejects_unknown_passage_ref() {
         Some("SE".into()),
         "recipe".into(),
         "need mono roof framing".into(),
-    );
+    )
+    .expect("roof_system is a registered class — gap should record");
 
     let error = handle_save_recipe_draft(
         &mut world,
@@ -5754,7 +5757,8 @@ fn assembly_pattern_draft_rejects_unknown_passage_ref() {
         Some("SE".into()),
         "assembly_pattern".into(),
         "need ventilated wall pattern".into(),
-    );
+    )
+    .expect("wall_assembly is a registered class — gap should record");
 
     let error = handle_save_assembly_pattern_draft(
         &mut world,
@@ -6502,4 +6506,212 @@ fn parametric_class_token_match_uses_head_noun_not_generic_suffix() {
         "architecture.window.double-european",
         "Double European Window",
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary-surface agreement + atomic semantic create (PP defect fixes).
+// Defect 1: discover_curated_paths / request_corpus_expansion / create_box's
+//           semantic.element_class must agree on what a term is.
+// Defect 2: a create whose semantic annotation fails validation must leave no
+//           orphan geometry behind.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+#[test]
+fn create_box_with_invalid_element_class_creates_no_orphan_geometry() {
+    // Defect 2 (atomic create): a create_box whose semantic.element_class fails
+    // validation must reject the whole call and leave NO box behind — not create
+    // un-annotated geometry and silently drop only the annotation.
+    let mut world = init_model_api_test_world();
+
+    // A plain (un-annotated) box proves the world can actually create geometry.
+    handle_create_box(
+        &mut world,
+        CreateBoxRequest {
+            center: Some([0.0, 0.0, 0.0]),
+            half_extents: None,
+            size: Some([1.0, 1.0, 1.0]),
+            rotation: None,
+            semantic: None,
+        },
+    )
+    .expect("plain box should be creatable");
+    assert_eq!(list_entities(&world).len(), 1, "baseline: one plain box");
+
+    // A box annotated with an unregistered element_class must be rejected...
+    let result = handle_create_box(
+        &mut world,
+        CreateBoxRequest {
+            center: Some([5.0, 0.0, 0.0]),
+            half_extents: None,
+            size: Some([1.0, 1.0, 1.0]),
+            rotation: None,
+            semantic: Some(SemanticEntityAnnotationRequest {
+                element_class: Some("totally_unregistered_class".to_string()),
+                refinement_state: None,
+                parameters: json!({}),
+                unresolved_decisions: vec![],
+                source_refs: vec![],
+                rationale: None,
+            }),
+        },
+    );
+    let error = result.expect_err("invalid element_class must reject the whole call");
+    assert!(
+        error.contains("totally_unregistered_class"),
+        "error should name the offending class; got: {error}"
+    );
+
+    // ...and crucially must NOT have created an orphan box.
+    assert_eq!(
+        list_entities(&world).len(),
+        1,
+        "no orphan geometry: the rejected call must not add a box"
+    );
+}
+
+#[cfg(feature = "model-api")]
+fn register_hosted_opening_patterns(world: &mut World) {
+    use crate::capability_registry::AssemblyPatternDescriptor;
+    let mut registry = world.resource_mut::<CapabilityRegistry>();
+    for (pattern_id, label, tag) in [
+        ("hosted_window_opening", "Hosted Window Opening", "window"),
+        (
+            "hosted_entrance_door_opening",
+            "Hosted Entrance Door Opening",
+            "door",
+        ),
+    ] {
+        registry.register_assembly_pattern(AssemblyPatternDescriptor {
+            pattern_id: pattern_id.into(),
+            label: label.into(),
+            description: "Hosted opening cut into a wall.".into(),
+            target_types: vec!["opening".into()],
+            axis: "exterior_to_interior".into(),
+            layers: Vec::new(),
+            relation_rules: Vec::new(),
+            root_layer_ids: Vec::new(),
+            requires_support_path: false,
+            tags: vec![tag.into()],
+            parameter_schema: json!({}),
+        });
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn native_non_class_terms_agree_across_discovery_gap_and_annotation() {
+    // Defect 1 (surfaces must agree): door/window are NOT element classes — they
+    // are authored as `opening` entities and covered by hosted-opening assembly
+    // patterns. All three surfaces must treat them as native terms:
+    //   - discover_curated_paths → non_class_term pointer (NOT a corpus gap)
+    //   - request_corpus_expansion → rejected (it is not a gap)
+    //   - create_box semantic.element_class → rejected atomically (no geometry)
+    let mut world = init_model_api_test_world();
+    register_hosted_opening_patterns(&mut world);
+
+    // discover_curated_paths surfaces a native-term pointer, not a gap.
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("window".into()),
+            context: json!({}),
+        },
+    )
+    .expect("discovery should succeed");
+    let non_class = discovery
+        .non_class_term
+        .expect("window should surface as a native non-class term");
+    assert_eq!(non_class.term, "window");
+    assert!(
+        non_class
+            .assembly_pattern_ids
+            .contains(&"hosted_window_opening".to_string()),
+        "native term should point at the covering pattern; got: {:?}",
+        non_class.assembly_pattern_ids
+    );
+    assert!(
+        discovery.no_curated_path.is_none(),
+        "a native term must NOT be advertised as a corpus gap"
+    );
+
+    // request_corpus_expansion rejects the same native term.
+    let gap_error = handle_request_corpus_expansion(
+        &mut world,
+        Some("door".into()),
+        Some("SE".into()),
+        "rule_pack".into(),
+        "tried to gap a door".into(),
+    )
+    .expect_err("door is a native term, not a corpus gap");
+    assert!(
+        gap_error.contains("door"),
+        "rejection should name the term; got: {gap_error}"
+    );
+
+    // create_box's semantic annotation rejects it atomically — no orphan box.
+    let create_result = handle_create_box(
+        &mut world,
+        CreateBoxRequest {
+            center: Some([0.0, 0.0, 0.0]),
+            half_extents: None,
+            size: Some([1.0, 1.0, 1.0]),
+            rotation: None,
+            semantic: Some(SemanticEntityAnnotationRequest {
+                element_class: Some("window".into()),
+                refinement_state: None,
+                parameters: json!({}),
+                unresolved_decisions: vec![],
+                source_refs: vec![],
+                rationale: None,
+            }),
+        },
+    );
+    assert!(
+        create_result.is_err(),
+        "annotating a box as element_class=window must be rejected"
+    );
+    assert!(
+        list_entities(&world).is_empty(),
+        "rejected native-term annotation must not create geometry"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn unknown_term_still_records_corpus_gap_and_no_curated_path() {
+    // Guard the other direction: a genuinely unrecognised term (no factory, no
+    // pattern, not an element class) is still a first-class corpus gap on both
+    // the discovery and the request surfaces — the Defect 1 fix must not swallow
+    // real gaps.
+    let mut world = init_model_api_test_world();
+
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("flux_capacitor".into()),
+            context: json!({}),
+        },
+    )
+    .expect("discovery should succeed");
+    assert!(
+        discovery.non_class_term.is_none(),
+        "an unknown term is not a native non-class term"
+    );
+    assert!(
+        discovery.no_curated_path.is_some(),
+        "an unknown term must still surface as a corpus gap"
+    );
+
+    let gap = handle_request_corpus_expansion(
+        &mut world,
+        Some("flux_capacitor".into()),
+        None,
+        "rule_pack".into(),
+        "genuinely missing knowledge".into(),
+    )
+    .expect("an unknown term must still record a corpus gap");
+    assert!(!gap.id.is_empty(), "recorded gap must have an id");
 }
