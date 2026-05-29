@@ -168,6 +168,22 @@ end up committed. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit
 config files when launching from a packaged app or another directory. Set
 `TALOS3D_WRITE_MCP_CONFIG=false` to disable writing local client configs.
 
+### Access control
+
+The HTTP transport binds to `127.0.0.1` only and additionally enforces a
+loopback access guard on every request: the `Host` header must name a loopback
+authority the server actually bound (defeating DNS-rebinding), and any `Origin`
+header present must be the matching loopback origin (defeating cross-origin
+browser drive-bys). Local stdio/HTTP MCP clients are unaffected — they send a
+loopback `Host` and no browser `Origin`. Requests that fail the guard get
+`403 Forbidden`.
+
+This guard is **not** authentication: it stops untrusted web pages, not other
+local processes or a remote caller arriving through a reverse proxy. Exposing an
+instance beyond the local machine — e.g. a cloud model reaching a web-deployed
+Talos3D over a gateway/bridge — requires a real authn layer (per-instance bearer
+token) at that boundary; the loopback guard alone is insufficient there.
+
 ## Instance Discovery
 
 Each MCP-enabled instance writes a discovery manifest to:

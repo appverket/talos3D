@@ -94,7 +94,13 @@ pub(super) fn spawn_model_api_server(
                         config,
                     );
 
-                let router = axum::Router::new().nest_service("/mcp", service);
+                let guard = LocalAccessGuard::for_port(runtime_info.http_port);
+                let router = axum::Router::new()
+                    .nest_service("/mcp", service)
+                    .layer(axum::middleware::from_fn_with_state(
+                        guard,
+                        enforce_local_access,
+                    ));
                 let addr = format!("{}:{}", runtime_info.http_host, runtime_info.http_port);
                 let tcp_listener = match tokio::net::TcpListener::from_std(http_listener) {
                     Ok(listener) => listener,
@@ -118,6 +124,93 @@ pub(super) fn spawn_model_api_server(
 
     if let Err(error) = spawn_result {
         eprintln!("failed to spawn model API HTTP thread: {error}");
+    }
+}
+
+/// Loopback access guard for the model-api HTTP transport.
+///
+/// The server binds to `127.0.0.1`, but loopback binding alone does not stop a
+/// malicious web page: a site the user visits can have the browser POST
+/// JSON-RPC to `http://127.0.0.1:<port>/mcp` (a DNS-rebinding / cross-origin
+/// drive-by), driving the full MCP tool surface — including file-path save/load
+/// — with no authentication. This guard enforces the MCP Streamable-HTTP
+/// requirement to validate `Origin` and reject non-loopback hosts.
+///
+/// Authn (per-instance bearer token, and the cloud-bridge/gateway path to a
+/// web-deployed instance) is a separate, planned layer; this struct is the seam
+/// it will extend.
+#[cfg(feature = "model-api")]
+#[derive(Clone)]
+struct LocalAccessGuard {
+    allowed_hosts: std::sync::Arc<Vec<String>>,
+    allowed_origins: std::sync::Arc<Vec<String>>,
+}
+
+#[cfg(feature = "model-api")]
+impl LocalAccessGuard {
+    fn for_port(port: u16) -> Self {
+        Self {
+            allowed_hosts: std::sync::Arc::new(vec![
+                format!("127.0.0.1:{port}"),
+                format!("localhost:{port}"),
+                format!("[::1]:{port}"),
+            ]),
+            allowed_origins: std::sync::Arc::new(vec![
+                format!("http://127.0.0.1:{port}"),
+                format!("http://localhost:{port}"),
+                format!("http://[::1]:{port}"),
+            ]),
+        }
+    }
+}
+
+/// Pure access decision, factored out so it can be unit-tested without an HTTP
+/// harness. Returns `true` only when the request looks like a local,
+/// same-origin (or non-browser) client.
+#[cfg(feature = "model-api")]
+fn local_access_allowed(
+    headers: &axum::http::HeaderMap,
+    allowed_hosts: &[String],
+    allowed_origins: &[String],
+) -> bool {
+    // DNS-rebinding defense: the Host header must name a loopback authority we
+    // actually bound. A site that resolves its own name to 127.0.0.1 still
+    // sends its own name in Host, so this rejects it. Absent Host is rejected;
+    // legitimate loopback clients always send it.
+    let host_ok = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|host| allowed_hosts.iter().any(|allowed| allowed == host));
+    if !host_ok {
+        return false;
+    }
+
+    // Cross-origin defense: browsers attach Origin on cross-origin fetch/XHR;
+    // non-browser MCP clients omit it. If present, it must be a loopback origin
+    // we serve.
+    match headers.get(axum::http::header::ORIGIN) {
+        Some(origin) => origin
+            .to_str()
+            .ok()
+            .is_some_and(|origin| allowed_origins.iter().any(|allowed| allowed == origin)),
+        None => true,
+    }
+}
+
+#[cfg(feature = "model-api")]
+async fn enforce_local_access(
+    axum::extract::State(guard): axum::extract::State<LocalAccessGuard>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    if local_access_allowed(
+        request.headers(),
+        &guard.allowed_hosts,
+        &guard.allowed_origins,
+    ) {
+        Ok(next.run(request).await)
+    } else {
+        Err(axum::http::StatusCode::FORBIDDEN)
     }
 }
 
@@ -399,6 +492,76 @@ pub(super) fn annotate_window_title_with_model_api_instance(
 #[cfg(all(test, feature = "model-api"))]
 mod tests {
     use super::*;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn guard() -> LocalAccessGuard {
+        LocalAccessGuard::for_port(24842)
+    }
+
+    fn allowed(headers: &HeaderMap) -> bool {
+        let g = guard();
+        local_access_allowed(headers, &g.allowed_hosts, &g.allowed_origins)
+    }
+
+    #[test]
+    fn loopback_client_without_origin_is_allowed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:24842"));
+        assert!(allowed(&headers));
+    }
+
+    #[test]
+    fn localhost_host_alias_is_allowed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:24842"));
+        assert!(allowed(&headers));
+    }
+
+    #[test]
+    fn same_origin_loopback_request_is_allowed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:24842"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:24842"),
+        );
+        assert!(allowed(&headers));
+    }
+
+    #[test]
+    fn missing_host_is_rejected() {
+        let headers = HeaderMap::new();
+        assert!(!allowed(&headers));
+    }
+
+    #[test]
+    fn dns_rebinding_host_is_rejected() {
+        // Attacker site whose name resolves to 127.0.0.1 still carries its own
+        // authority in the Host header.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("evil.example:24842"));
+        assert!(!allowed(&headers));
+    }
+
+    #[test]
+    fn cross_origin_browser_request_is_rejected() {
+        // Host is spoofable-but-correct via proxies; the Origin attached by a
+        // browser on a cross-origin fetch is what blocks the drive-by.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:24842"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert!(!allowed(&headers));
+    }
+
+    #[test]
+    fn wrong_loopback_port_is_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:9999"));
+        assert!(!allowed(&headers));
+    }
 
     #[test]
     fn mcp_client_config_merge_preserves_existing_servers() {
