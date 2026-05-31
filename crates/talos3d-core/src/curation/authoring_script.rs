@@ -615,6 +615,17 @@ fn collect_param_refs(expr: &ArgExpr, out: &mut BTreeSet<String>) {
         ArgExpr::Param { name } => {
             out.insert(name.clone());
         }
+        ArgExpr::Expr { formula } => {
+            // Formula-driven steps reference parameters by name inside the
+            // expression string (evaluated by the relational expr engine),
+            // never as `ArgExpr::Param`. Treat every identifier token in the
+            // formula as a potential parameter reference. This is an
+            // over-approximation (built-in names such as `sin`/`pi` are also
+            // collected) which is harmless here: the only consumer is the
+            // unreferenced-default tidiness check, which must not flag a
+            // default that a formula actually uses.
+            collect_formula_identifiers(formula, out);
+        }
         ArgExpr::Array { items } => {
             for item in items {
                 collect_param_refs(item, out);
@@ -626,6 +637,27 @@ fn collect_param_refs(expr: &ArgExpr, out: &mut BTreeSet<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Extract every identifier token (`[A-Za-z_][A-Za-z0-9_]*`) from an
+/// expression formula. Domain-neutral lexical scan; does not interpret the
+/// formula. Used to recognise parameter references embedded in formulas.
+fn collect_formula_identifiers(formula: &str, out: &mut BTreeSet<String>) {
+    let bytes = formula.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'_' || c.is_ascii_alphabetic() {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            out.insert(formula[start..i].to_string());
+        } else {
+            i += 1;
+        }
     }
 }
 
@@ -814,6 +846,29 @@ mod tests {
             s.validate_structure(),
             Err(AuthoringScriptStructuralError::UnreferencedParameterDefault(_))
         ));
+    }
+
+    #[test]
+    fn parameter_default_referenced_only_inside_expr_formula_is_accepted() {
+        // A formula-driven step references `eave_y_m` only inside an
+        // `ArgExpr::Expr` formula string (never as `ArgExpr::Param`). Its
+        // default must be recognised as referenced, so validation passes.
+        let mut a = call_step("a", "t");
+        a.args.insert(
+            "center".into(),
+            ArgExpr::Expr {
+                formula: "(eave_y_m + member_t_m/2.0)".into(),
+            },
+        );
+        let mut s = minimal_script_with(vec![ScriptInstruction::Call(a)], vec![tool("t")]);
+        s.parameter_defaults
+            .insert("eave_y_m".into(), Value::from(2.7));
+        s.parameter_defaults
+            .insert("member_t_m".into(), Value::from(0.09));
+        assert!(
+            s.validate_structure().is_ok(),
+            "formula-referenced parameter defaults must not be flagged unreferenced"
+        );
     }
 
     #[test]

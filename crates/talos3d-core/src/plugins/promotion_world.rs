@@ -2467,6 +2467,7 @@ mod tests {
             }],
             expected_relation_types: Vec::new(),
             parameter_schema: serde_json::json!({}),
+            member_obligations: Vec::new(),
         });
 
         let input =

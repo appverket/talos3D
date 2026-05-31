@@ -1617,6 +1617,19 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_resolve_obligation(
+        &self,
+        request: super::request::ResolveObligationRequest,
+    ) -> ApiResult<super::request::ResolveObligationResult> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::ResolveObligation { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_get_authoring_provenance(
         &self,
         element_id: u64,
@@ -3886,6 +3899,11 @@ pub struct RecipeRankingInfo {
     /// MCP tool that can materialise this ranking, when executable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_path: Option<String>,
+    /// Declared parameters (name, value schema, default) the agent can pass
+    /// to `instantiate_recipe`. Surfaced here so a caller can discover the
+    /// accepted parameters up front instead of probing by trial-and-error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<RecipeParameterInfo>,
     /// One-line hint for how to instantiate or materialise this path.
     pub how_to_instantiate: String,
 }
@@ -3964,6 +3982,12 @@ pub struct ValidationFindingInfo {
     pub message: String,
     pub rationale: String,
     pub obligation_id: Option<String>,
+    /// Backlink to the source passage that grounds this finding, if the
+    /// constraint set one. Agents follow it with `lookup_source_passage` to read
+    /// the construction knowledge behind the finding. Carrying it here is what
+    /// makes the passage corpus reactively discoverable from a failed check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passage_ref: Option<String>,
 }
 
 // --- PP74 response types ---
@@ -6874,6 +6898,32 @@ impl ModelApiServer {
     }
 
     #[tool(
+        name = "resolve_obligation",
+        description = "Record that a per-entity class obligation is met (SatisfiedBy a sub-element), \
+            or explicitly Deferred / Waived with a reason. \
+            \n\nPromotion to a refinement level gates on every in-force obligation \
+            (required_by_state <= target_state) being resolved. An Unresolved obligation \
+            blocks the promotion; use this tool to clear the block before calling \
+            promote_refinement. \
+            \n\nResolution variants: \
+            `{ satisfied_by: { element_id: <u64> } }` — child element satisfies the obligation; \
+            `{ deferred: { reason: \"<string>\" } }` — obligation intentionally deferred; \
+            `{ waived: { rationale: \"<string>\" } }` — obligation explicitly out of scope. \
+            \n\nThe change is recorded through the history pipeline and is undoable. \
+            Returns the updated obligation set for the entity."
+    )]
+    pub(super) async fn resolve_obligation_tool(
+        &self,
+        Parameters(params): Parameters<super::request::ResolveObligationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_resolve_obligation(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
         name = "get_authoring_provenance",
         description = "Get the authoring provenance for an entity — how it was created (Freeform, ViaRecipe, Imported, or Refined from a coarser entity)."
     )]
@@ -8325,7 +8375,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "procedural_session.export",
-        description = "Freeze the session's accumulated AuthoringScript as a durable curated artifact (kind `recipe.authoring_script.v1`) — the supported way to turn a validated session into a reusable recipe. Do not hand-write recipe JSON; build the sequence in a session, validate via eval/snapshot, then export. The session remains re-exportable until close."
+        description = "Freeze the session's accumulated AuthoringScript as a curated artifact (kind `recipe.authoring_script.v1`) and return an `export_handle`. This is the first half of publishing a recipe: export only FREEZES the script — it does NOT make it callable. To turn it into a reusable, executable recipe you MUST then call `install_recipe_from_session_export` with the returned handle; only after install can `instantiate_recipe`/`promote_refinement` replay it and `discover_curated_paths`/`select_recipe` surface it to future sessions. Do not hand-write recipe JSON; build the sequence in a session, validate via eval/snapshot, export, then install. The session remains re-exportable until close."
     )]
     pub(super) async fn procedural_session_export_tool(
         &self,

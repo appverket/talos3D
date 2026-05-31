@@ -268,6 +268,71 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
     assert!(snapshot.estimated_json_bytes <= snapshot.size_budget_bytes);
 }
 
+/// Session-contract gate: every `must_read_guidance_card_id` the snapshot
+/// advertises must resolve through `get_guidance_card`. Regression guard for the
+/// case where dynamic authoring-guidance / reference ids (e.g.
+/// `mcp_tool:select_recipe`) were advertised but unregistered.
+#[cfg(feature = "model-api")]
+#[test]
+fn capability_snapshot_must_read_card_ids_all_resolve() {
+    use crate::plugins::authoring_guidance::{
+        AuthoringGuidance, ComponentStructurePolicy, GuidanceReference,
+    };
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+    world.insert_resource(AuthoringGuidance {
+        guidance_id: "test.guidance".into(),
+        version: 3,
+        prompt_text: "Probe curated paths before authoring.".into(),
+        component_structure: ComponentStructurePolicy::default(),
+        references: vec![
+            GuidanceReference {
+                kind: "mcp_tool".into(),
+                target: "select_recipe".into(),
+                note: Some("Probe recipes before hand-rolling geometry.".into()),
+            },
+            GuidanceReference {
+                kind: "mcp_tool".into(),
+                target: "request_corpus_expansion".into(),
+                note: None,
+            },
+        ],
+    });
+
+    let snapshot = handle_get_capability_snapshot(&world, false);
+
+    // The dynamic reference ids must actually be advertised (otherwise this test
+    // would pass vacuously after a future change that drops them).
+    assert!(
+        snapshot
+            .must_read_guidance_card_ids
+            .iter()
+            .any(|id| id == "mcp_tool:select_recipe"),
+        "snapshot should advertise the mcp_tool:select_recipe guidance card, got {:?}",
+        snapshot.must_read_guidance_card_ids
+    );
+    assert!(
+        snapshot
+            .must_read_guidance_card_ids
+            .iter()
+            .any(|id| id == "mcp_tool:request_corpus_expansion"),
+        "snapshot should advertise the mcp_tool:request_corpus_expansion guidance card, got {:?}",
+        snapshot.must_read_guidance_card_ids
+    );
+
+    // The core contract: every advertised id resolves through get_guidance_card.
+    for id in &snapshot.must_read_guidance_card_ids {
+        let card = handle_get_guidance_card(&world, id.clone());
+        assert!(
+            card.is_ok(),
+            "must_read_guidance_card_id '{id}' did not resolve through get_guidance_card: {:?}",
+            card.err()
+        );
+        assert_eq!(&card.unwrap().id, id);
+    }
+}
+
 #[test]
 fn internal_void_proxies_are_hidden_from_user_model_listing_and_summary() {
     use crate::plugins::modeling::void_declaration::OpeningContext;
@@ -4952,6 +5017,262 @@ fn preview_promotion_returns_read_only_refinement_plan() {
     assert!(result.plan.can_commit);
 }
 
+/// Register a "house" assembly type carrying the ADR-042 member-composition
+/// ladder used by the anti-bluff promotion tests below.
+#[cfg(feature = "model-api")]
+fn register_house_with_member_obligations(world: &mut World) {
+    use crate::capability_registry::{
+        AssemblyMemberObligationTemplate, AssemblyTypeDescriptor,
+    };
+    use crate::plugins::refinement::{ObligationId, RefinementState, SemanticRole};
+
+    let member_obligations = vec![
+        AssemblyMemberObligationTemplate {
+            id: ObligationId("house_has_foundation".into()),
+            role: SemanticRole("primary_structure".into()),
+            member_role: "foundation".into(),
+            min_count: 1,
+            required_by_state: RefinementState::Schematic,
+            member_tracks_target_state: true,
+        },
+        AssemblyMemberObligationTemplate {
+            id: ObligationId("house_has_exterior_walls".into()),
+            role: SemanticRole("primary_structure".into()),
+            member_role: "exterior_wall".into(),
+            min_count: 1,
+            required_by_state: RefinementState::Schematic,
+            member_tracks_target_state: true,
+        },
+        AssemblyMemberObligationTemplate {
+            id: ObligationId("house_has_roof".into()),
+            role: SemanticRole("envelope".into()),
+            member_role: "roof_element".into(),
+            min_count: 1,
+            required_by_state: RefinementState::Schematic,
+            member_tracks_target_state: true,
+        },
+    ];
+
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_assembly_type(AssemblyTypeDescriptor {
+            assembly_type: "house".into(),
+            label: "House".into(),
+            description: "A house".into(),
+            expected_member_types: vec!["wall".into()],
+            expected_member_roles: vec![
+                "foundation".into(),
+                "exterior_wall".into(),
+                "roof_element".into(),
+            ],
+            member_role_descriptors: Vec::new(),
+            expected_relation_types: Vec::new(),
+            parameter_schema: serde_json::json!({}),
+            member_obligations,
+        });
+}
+
+#[cfg(feature = "model-api")]
+fn spawn_member(world: &mut World, element_id: u64, state: crate::plugins::refinement::RefinementState) {
+    use crate::plugins::refinement::RefinementStateComponent;
+    world.spawn((ElementId(element_id), RefinementStateComponent { state }));
+}
+
+#[cfg(feature = "model-api")]
+fn spawn_house_assembly(
+    world: &mut World,
+    element_id: u64,
+    members: Vec<(&str, u64)>,
+) {
+    use crate::plugins::modeling::assembly::{AssemblyMemberRef, SemanticAssembly};
+    use crate::plugins::refinement::{RefinementState, RefinementStateComponent};
+
+    let members = members
+        .into_iter()
+        .map(|(role, target)| AssemblyMemberRef {
+            target: ElementId(target),
+            role: role.into(),
+        })
+        .collect();
+    world.spawn((
+        ElementId(element_id),
+        SemanticAssembly {
+            assembly_type: "house".into(),
+            label: "Test House".into(),
+            members,
+            parameters: serde_json::Value::Null,
+            metadata: serde_json::Value::Null,
+        },
+        RefinementStateComponent {
+            state: RefinementState::Conceptual,
+        },
+    ));
+}
+
+/// A bare house (no resolved sub-structure) cannot be previewed as a clean
+/// commit when skipping straight to Detailed — every in-force member
+/// obligation surfaces as a missing input and an error finding.
+#[cfg(feature = "model-api")]
+#[test]
+fn preview_promotion_blocks_bare_assembly_skipping_to_detailed() {
+    let mut world = init_model_api_test_world();
+    register_house_with_member_obligations(&mut world);
+    spawn_house_assembly(&mut world, 500, Vec::new());
+
+    let result = handle_preview_promotion(
+        &mut world,
+        500,
+        "Detailed".to_string(),
+        None,
+        serde_json::json!({}),
+    )
+    .expect("preview should produce a plan even when blocked");
+
+    assert!(
+        !result.plan.can_commit,
+        "bare house promoted across levels must not be committable"
+    );
+    assert_eq!(
+        result.plan.missing_inputs.len(),
+        3,
+        "all three member obligations are in force at Detailed"
+    );
+    assert!(result
+        .plan
+        .missing_inputs
+        .iter()
+        .any(|m| m.contains("house_has_foundation")));
+    // Constructible+ obligations escalate to error severity.
+    assert!(result
+        .findings
+        .iter()
+        .any(|f| f.severity == "error"));
+}
+
+/// A bare house promoted to FabricationReady is likewise blocked.
+#[cfg(feature = "model-api")]
+#[test]
+fn promote_refinement_rejects_bluff_assembly_to_fabrication_ready() {
+    use crate::plugins::refinement::RefinementStateComponent;
+
+    let mut world = init_model_api_test_world();
+    register_house_with_member_obligations(&mut world);
+    spawn_house_assembly(&mut world, 510, Vec::new());
+
+    let error = handle_promote_refinement(
+        &mut world,
+        510,
+        "FabricationReady".to_string(),
+        None,
+        serde_json::json!({}),
+    )
+    .expect_err("bare house promotion must be rejected by the anti-bluff gate");
+
+    assert!(error.contains("unmet member obligation"));
+
+    // The commit must not have mutated state.
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(510))
+        .expect("assembly entity should still exist");
+    let state = world
+        .get::<RefinementStateComponent>(entity)
+        .map(|c| c.state)
+        .unwrap_or_default();
+    assert_eq!(
+        state,
+        crate::plugins::refinement::RefinementState::Conceptual,
+        "rejected promotion must leave the assembly at its original state"
+    );
+}
+
+/// A fully authored house — foundation, exterior wall, and roof all resolved to
+/// the target state — promotes cleanly.
+#[cfg(feature = "model-api")]
+#[test]
+fn promote_refinement_allows_fully_authored_assembly() {
+    use crate::plugins::refinement::{RefinementState, RefinementStateComponent};
+
+    let mut world = init_model_api_test_world();
+    register_house_with_member_obligations(&mut world);
+    spawn_member(&mut world, 601, RefinementState::Detailed);
+    spawn_member(&mut world, 602, RefinementState::Detailed);
+    spawn_member(&mut world, 603, RefinementState::Detailed);
+    spawn_house_assembly(
+        &mut world,
+        600,
+        vec![
+            ("foundation", 601),
+            ("exterior_wall", 602),
+            ("roof_element", 603),
+        ],
+    );
+
+    let preview = handle_preview_promotion(
+        &mut world,
+        600,
+        "Detailed".to_string(),
+        None,
+        serde_json::json!({}),
+    )
+    .expect("preview should succeed");
+    assert!(
+        preview.plan.can_commit,
+        "fully authored house should be committable"
+    );
+    assert!(preview.plan.missing_inputs.is_empty());
+
+    let result = handle_promote_refinement(
+        &mut world,
+        600,
+        "Detailed".to_string(),
+        None,
+        serde_json::json!({}),
+    )
+    .expect("fully authored house promotion should succeed");
+    assert_eq!(result.new_state, "Detailed");
+
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(600)).unwrap();
+    assert_eq!(
+        world
+            .get::<RefinementStateComponent>(entity)
+            .map(|c| c.state),
+        Some(RefinementState::Detailed)
+    );
+}
+
+/// Members that exist but have not themselves been resolved to the target state
+/// do not satisfy a `member_tracks_target_state` obligation.
+#[cfg(feature = "model-api")]
+#[test]
+fn promote_refinement_rejects_assembly_with_underresolved_members() {
+    use crate::plugins::refinement::RefinementState;
+
+    let mut world = init_model_api_test_world();
+    register_house_with_member_obligations(&mut world);
+    // Present in the right roles, but only at Conceptual.
+    spawn_member(&mut world, 701, RefinementState::Conceptual);
+    spawn_member(&mut world, 702, RefinementState::Conceptual);
+    spawn_member(&mut world, 703, RefinementState::Conceptual);
+    spawn_house_assembly(
+        &mut world,
+        700,
+        vec![
+            ("foundation", 701),
+            ("exterior_wall", 702),
+            ("roof_element", 703),
+        ],
+    );
+
+    let error = handle_promote_refinement(
+        &mut world,
+        700,
+        "Detailed".to_string(),
+        None,
+        serde_json::json!({}),
+    )
+    .expect_err("under-resolved members must not satisfy a tracking obligation");
+    assert!(error.contains("resolved to at least Detailed"));
+}
+
 #[cfg(feature = "model-api")]
 #[test]
 fn assembly_pattern_draft_round_trip_with_gap_and_source_refs() {
@@ -6714,4 +7035,392 @@ fn unknown_term_still_records_corpus_gap_and_no_curated_path() {
     )
     .expect("an unknown term must still record a corpus gap");
     assert!(!gap.id.is_empty(), "recorded gap must have an id");
+}
+
+// ---------------------------------------------------------------------------
+// Change 1 — select_recipe surfaces installed RecipeArtifactRegistry entries
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "model-api")]
+#[test]
+fn select_recipe_surfaces_installed_recipe_artifact() {
+    // After install_recipe_from_session_export, an agent-installed
+    // AuthoringScript recipe must appear in select_recipe results even
+    // though there are no native CapabilityRegistry recipe families for
+    // the target class.
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::AgentId;
+    use crate::curation::authoring_script::AuthoringScript;
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+
+    // Build and install a recipe artifact for "synthetic_roof" targeting
+    // "roof_system" — domain-neutral test class.
+    let asset_id = AssetId("installed_recipe/synthetic_roof".into());
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id.clone(),
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("domain-neutral installed recipe for test".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(
+                crate::curation::authoring_script::MutationScope::None,
+            ),
+        },
+        parameter_schema: serde_json::Value::Null,
+        target_class: "roof_system".into(),
+        supported_refinement_states: vec![
+            crate::plugins::refinement::RefinementState::Constructible,
+        ],
+        tests: Vec::new(),
+    };
+
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact);
+    world.insert_resource(registry);
+
+    // With no native CapabilityRegistry family for "roof_system", the
+    // pre-Change-1 result would be empty. After Change 1 it must return
+    // the installed artifact.
+    let ranking = handle_select_recipe(
+        &world,
+        "roof_system".into(),
+        serde_json::json!({ "target_state": "Constructible" }),
+    )
+    .expect("select_recipe should succeed");
+
+    assert_eq!(ranking.len(), 1, "one installed recipe must surface");
+    assert_eq!(ranking[0].target_class, "roof_system");
+    assert!(
+        ranking[0].executable,
+        "installed artifact must be marked executable"
+    );
+    assert_eq!(
+        ranking[0].execution_path.as_deref(),
+        Some("instantiate_recipe"),
+        "execution path must be instantiate_recipe"
+    );
+    assert!(
+        ranking[0].how_to_instantiate.contains("instantiate_recipe"),
+        "how_to_instantiate must name instantiate_recipe"
+    );
+
+    // Also confirm the wrong class returns nothing.
+    let empty = handle_select_recipe(
+        &world,
+        "wall_assembly".into(),
+        serde_json::json!({}),
+    )
+    .expect("select_recipe for different class should succeed");
+    assert!(empty.is_empty(), "different class must return no results");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn select_recipe_surfaces_installed_recipe_parameters_and_defaults() {
+    // An installed AuthoringScript recipe must surface its declared
+    // parameters (names + defaults from parameter_defaults) in the ranking,
+    // so a code-blind agent can discover them without trial-and-error.
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+
+    let mut script = AuthoringScript::stub(MutationScope::None);
+    script.parameter_schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "min_x": {"type": "number"},
+            "pitch_deg": {"type": "number"}
+        },
+        "required": ["min_x", "pitch_deg"]
+    });
+    script
+        .parameter_defaults
+        .insert("min_x".into(), serde_json::json!(-4.5));
+    script
+        .parameter_defaults
+        .insert("pitch_deg".into(), serde_json::json!(45.0));
+
+    let asset_id = AssetId("installed_recipe/synthetic_param_roof".into());
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id,
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("param-bearing installed recipe for test".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript { script },
+        parameter_schema: serde_json::Value::Null,
+        target_class: "roof_system".into(),
+        supported_refinement_states: vec![RefinementState::Constructible],
+        tests: Vec::new(),
+    };
+
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact);
+    world.insert_resource(registry);
+
+    let ranking = handle_select_recipe(
+        &world,
+        "roof_system".into(),
+        serde_json::json!({ "target_state": "Constructible" }),
+    )
+    .expect("select_recipe should succeed");
+
+    assert_eq!(ranking.len(), 1);
+    let names: Vec<&str> = ranking[0]
+        .parameters
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"min_x") && names.contains(&"pitch_deg"),
+        "parameters must surface declared property names, got {names:?}"
+    );
+    let pitch = ranking[0]
+        .parameters
+        .iter()
+        .find(|p| p.name == "pitch_deg")
+        .expect("pitch_deg present");
+    assert_eq!(
+        pitch.default,
+        Some(serde_json::json!(45.0)),
+        "default must come from parameter_defaults"
+    );
+    assert!(
+        ranking[0].how_to_instantiate.contains("pitch_deg=45"),
+        "hint must enumerate parameter names with defaults, got: {}",
+        ranking[0].how_to_instantiate
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Change 2 — resolve_obligation handler
+// ---------------------------------------------------------------------------
+
+/// Build a minimal world with the command pipeline and a single entity that
+/// has an ObligationSet with one `Unresolved` domain-neutral obligation.
+#[cfg(feature = "model-api")]
+fn obligation_test_world() -> (bevy::prelude::World, bevy::ecs::entity::Entity) {
+    use crate::plugins::refinement::{Obligation, ObligationId, ObligationSet, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+    let entity = world
+        .spawn((
+            ElementId(9001),
+            crate::plugins::refinement::RefinementStateComponent {
+                state: crate::plugins::refinement::RefinementState::Conceptual,
+            },
+        ))
+        .id();
+
+    world.entity_mut(entity).insert(ObligationSet {
+        entries: vec![Obligation {
+            id: ObligationId("test_ob".into()),
+            role: SemanticRole("primary_structure".into()),
+            required_by_state: crate::plugins::refinement::RefinementState::Schematic,
+            status: crate::plugins::refinement::ObligationStatus::Unresolved,
+        }],
+    });
+
+    (world, entity)
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn resolve_obligation_sets_satisfied_by() {
+    use crate::plugins::model_api::request::{ObligationResolution, ResolveObligationRequest};
+    use crate::plugins::refinement::{ObligationSet, ObligationStatus};
+
+    let (mut world, entity) = obligation_test_world();
+    // Spawn the "child" entity that satisfies the obligation.
+    world.spawn((ElementId(9999),));
+
+    let result = handle_resolve_obligation(
+        &mut world,
+        ResolveObligationRequest {
+            element_id: 9001,
+            obligation_id: "test_ob".into(),
+            resolution: ObligationResolution::SatisfiedBy { element_id: 9999 },
+        },
+    )
+    .expect("SatisfiedBy resolution must succeed");
+
+    assert_eq!(result.new_status, "SatisfiedBy:9999");
+    // Verify the component was actually updated.
+    let set = world.get::<ObligationSet>(entity).expect("ObligationSet present");
+    assert_eq!(
+        set.entries[0].status,
+        ObligationStatus::SatisfiedBy(9999)
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn resolve_obligation_sets_deferred() {
+    use crate::plugins::model_api::request::{ObligationResolution, ResolveObligationRequest};
+    use crate::plugins::refinement::{ObligationSet, ObligationStatus};
+
+    let (mut world, entity) = obligation_test_world();
+
+    let result = handle_resolve_obligation(
+        &mut world,
+        ResolveObligationRequest {
+            element_id: 9001,
+            obligation_id: "test_ob".into(),
+            resolution: ObligationResolution::Deferred {
+                reason: "awaiting SE input".into(),
+            },
+        },
+    )
+    .expect("Deferred resolution must succeed");
+
+    assert!(result.new_status.starts_with("Deferred:"));
+    let set = world.get::<ObligationSet>(entity).expect("ObligationSet");
+    assert!(matches!(
+        &set.entries[0].status,
+        ObligationStatus::Deferred(r) if r == "awaiting SE input"
+    ));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn resolve_obligation_sets_waived() {
+    use crate::plugins::model_api::request::{ObligationResolution, ResolveObligationRequest};
+    use crate::plugins::refinement::{ObligationSet, ObligationStatus};
+
+    let (mut world, entity) = obligation_test_world();
+
+    let result = handle_resolve_obligation(
+        &mut world,
+        ResolveObligationRequest {
+            element_id: 9001,
+            obligation_id: "test_ob".into(),
+            resolution: ObligationResolution::Waived {
+                rationale: "out of scope".into(),
+            },
+        },
+    )
+    .expect("Waived resolution must succeed");
+
+    assert!(result.new_status.starts_with("Waived:"));
+    let set = world.get::<ObligationSet>(entity).expect("ObligationSet");
+    assert!(matches!(
+        &set.entries[0].status,
+        ObligationStatus::Waived(r) if r == "out of scope"
+    ));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn resolve_obligation_errors_on_unknown_obligation_id() {
+    use crate::plugins::model_api::request::{ObligationResolution, ResolveObligationRequest};
+
+    let (mut world, _) = obligation_test_world();
+
+    let err = handle_resolve_obligation(
+        &mut world,
+        ResolveObligationRequest {
+            element_id: 9001,
+            obligation_id: "nonexistent_ob".into(),
+            resolution: ObligationResolution::Waived {
+                rationale: "test".into(),
+            },
+        },
+    )
+    .expect_err("unknown obligation id must return an error");
+
+    assert!(
+        err.contains("nonexistent_ob"),
+        "error must name the unknown obligation id: {err}"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn resolve_obligation_errors_on_missing_obligation_set() {
+    use crate::plugins::model_api::request::{ObligationResolution, ResolveObligationRequest};
+
+    let mut world = init_model_api_test_world();
+    // Entity with no ObligationSet.
+    world.spawn((
+        ElementId(9002),
+        crate::plugins::refinement::RefinementStateComponent::default(),
+    ));
+
+    let err = handle_resolve_obligation(
+        &mut world,
+        ResolveObligationRequest {
+            element_id: 9002,
+            obligation_id: "load_path".into(),
+            resolution: ObligationResolution::Waived {
+                rationale: "test".into(),
+            },
+        },
+    )
+    .expect_err("missing ObligationSet must return an error");
+
+    assert!(
+        err.to_lowercase().contains("no obligationset")
+            || err.to_lowercase().contains("obligation"),
+        "error must mention ObligationSet: {err}"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn resolve_obligation_errors_when_satisfied_by_child_missing() {
+    use crate::plugins::model_api::request::{ObligationResolution, ResolveObligationRequest};
+
+    let (mut world, _) = obligation_test_world();
+    // Do NOT spawn entity 8888 — it doesn't exist.
+
+    let err = handle_resolve_obligation(
+        &mut world,
+        ResolveObligationRequest {
+            element_id: 9001,
+            obligation_id: "test_ob".into(),
+            resolution: ObligationResolution::SatisfiedBy { element_id: 8888 },
+        },
+    )
+    .expect_err("SatisfiedBy with missing child must return an error");
+
+    assert!(
+        err.contains("8888"),
+        "error must reference the missing child id: {err}"
+    );
 }

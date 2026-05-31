@@ -59,6 +59,11 @@ pub fn passages_dir() -> PathBuf {
     knowledge_dir().join("passages")
 }
 
+/// Sub-path for geometric interference rules.
+pub fn interference_rules_dir() -> PathBuf {
+    knowledge_dir().join("interference_rules")
+}
+
 // -----------------------------------------------------------------------
 // Atomic write helper
 // -----------------------------------------------------------------------
@@ -191,6 +196,49 @@ pub fn load_persisted_passages(registry: &mut CorpusPassageRegistry) {
     }
 }
 
+// -----------------------------------------------------------------------
+// Interference-rule persistence (data-driven geometric clash policy)
+// -----------------------------------------------------------------------
+
+/// Load all `*.json` files from `interference_rules_dir()` into `policy`.
+///
+/// Each file may contain either a single [`InterferenceRule`] object or a JSON
+/// array of them. Malformed files are skipped with a warning rather than
+/// aborting startup, mirroring the recipe/passage loaders.
+pub fn load_persisted_interference_rules(
+    policy: &mut crate::plugins::interference::InterferencePolicy,
+) {
+    use crate::plugins::interference::InterferenceRule;
+
+    let dir = interference_rules_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        // Accept either a bare rule or an array of rules.
+        if let Ok(rule) = serde_json::from_slice::<InterferenceRule>(&bytes) {
+            policy.rules.push(rule);
+            continue;
+        }
+        match serde_json::from_slice::<Vec<InterferenceRule>>(&bytes) {
+            Ok(rules) => policy.rules.extend(rules),
+            Err(e) => {
+                warn!(
+                    "knowledge_persistence: skipping malformed interference rules {:?}: {e}",
+                    path
+                );
+            }
+        }
+    }
+}
+
 /// Persist a single passage to `passages_dir()/<passage_ref>.json`.
 pub fn persist_passage(passage: &PersistedPassage) -> Result<PathBuf, String> {
     let filename = sanitize_filename(&passage.passage_ref);
@@ -253,6 +301,21 @@ pub fn load_knowledge_on_startup(world: &mut bevy::prelude::World) {
         let mut registry = world.resource_mut::<CorpusPassageRegistry>();
         load_persisted_passages(&mut registry);
     }
+    if let Some(mut policy) =
+        world.get_resource_mut::<crate::plugins::interference::InterferencePolicy>()
+    {
+        load_persisted_interference_rules(&mut policy);
+        bevy::log::info!(
+            "knowledge_persistence: interference policy now has {} rule(s) from {:?}",
+            policy.rules.len(),
+            interference_rules_dir()
+        );
+    } else {
+        bevy::log::warn!(
+            "knowledge_persistence: InterferencePolicy resource ABSENT at startup; \
+             interference rules NOT loaded"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -264,4 +327,77 @@ pub fn load_knowledge_on_startup(world: &mut bevy::prelude::World) {
 /// shipped assets.
 pub fn installed_recipe_asset_id(family_id: &str) -> AssetId {
     AssetId(format!("installed_recipe/{family_id}"))
+}
+
+#[cfg(test)]
+mod diag_tests {
+    use super::*;
+    use crate::plugins::interference::InterferencePolicy;
+
+    /// Diagnostic: load interference rules from a temp dir via the real loader.
+    #[test]
+    fn loader_parses_rule_array_from_disk() {
+        let base = std::env::temp_dir().join(format!(
+            "t3d_if_diag_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let rules_dir = base.join("interference_rules");
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        let json = r#"[
+          {"id":"a","label":"A","subject":{"component_roles":["structural_framing"]},
+           "barrier":{"component_roles":["weather_covering"]},
+           "relation":"must_not_penetrate","tolerance_m":0.004,"severity":"error",
+           "rationale":"r","backlink":"DOC"},
+          {"id":"b","subject":{"component_roles":["structural_framing"]},
+           "barrier":{"component_roles":["interior_lining"]},
+           "relation":"must_not_penetrate","severity":"warning"},
+          {"id":"c","subject":{"component_roles":["weather_covering"]},
+           "barrier":{"component_roles":["interior_lining"]},
+           "relation":"must_not_penetrate","severity":"warning"}
+        ]"#;
+        std::fs::write(rules_dir.join("r.json"), json).unwrap();
+
+        // Point the loader at our temp dir.
+        std::env::set_var("TALOS3D_KNOWLEDGE_DIR", &base);
+        let mut policy = InterferencePolicy::default();
+        load_persisted_interference_rules(&mut policy);
+        std::env::remove_var("TALOS3D_KNOWLEDGE_DIR");
+
+        assert_eq!(policy.rules.len(), 3, "expected 3 rules loaded");
+        assert_eq!(policy.rules[0].id, "a");
+        assert_eq!(policy.rules[0].tolerance_m, 0.004);
+    }
+
+    /// Diagnostic: parse the REAL installed interference rules dir (if present).
+    #[test]
+    fn real_installed_rules_parse() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let dir = std::path::PathBuf::from(&home)
+            .join(".talos3d/knowledge/interference_rules");
+        if !dir.exists() {
+            eprintln!("no installed interference_rules dir; skipping");
+            return;
+        }
+        std::env::set_var(
+            "TALOS3D_KNOWLEDGE_DIR",
+            std::path::PathBuf::from(&home).join(".talos3d/knowledge"),
+        );
+        let mut policy = InterferencePolicy::default();
+        load_persisted_interference_rules(&mut policy);
+        std::env::remove_var("TALOS3D_KNOWLEDGE_DIR");
+        eprintln!("REAL_RULES_LOADED={}", policy.rules.len());
+        for r in &policy.rules {
+            eprintln!(
+                "  rule id={} subj_roles={:?} barr_roles={:?} sev={:?}",
+                r.id, r.subject.component_roles, r.barrier.component_roles, r.severity
+            );
+        }
+        assert!(
+            !policy.rules.is_empty(),
+            "installed rules dir present but parsed ZERO rules"
+        );
+    }
 }

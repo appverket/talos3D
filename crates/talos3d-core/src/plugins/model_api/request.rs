@@ -665,6 +665,10 @@ pub(super) enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Vec<ObligationInfo>>>,
     },
+    ResolveObligation {
+        request: ResolveObligationRequest,
+        response: oneshot::Sender<ApiResult<ResolveObligationResult>>,
+    },
     GetAuthoringProvenance {
         element_id: u64,
         response: oneshot::Sender<ApiResult<AuthoringProvenanceInfo>>,
@@ -905,6 +909,50 @@ pub(super) enum ModelApiRequest {
         request: AcquireCorpusPassageRequest,
         response: oneshot::Sender<Result<AcquireCorpusPassageResult, String>>,
     },
+}
+
+// -----------------------------------------------------------------------
+// resolve_obligation DTOs
+// -----------------------------------------------------------------------
+
+/// How an obligation is resolved by the agent.
+///
+/// Exactly one variant should be set.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ObligationResolution {
+    /// Obligation is satisfied by an existing child element (identified by
+    /// `element_id`).
+    SatisfiedBy { element_id: u64 },
+    /// Obligation is intentionally deferred with a human-readable reason.
+    Deferred { reason: String },
+    /// Obligation is waived (explicitly out of scope) with a rationale.
+    Waived { rationale: String },
+}
+
+/// Request payload for `resolve_obligation`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ResolveObligationRequest {
+    /// Element-id of the entity whose obligation is being resolved.
+    pub element_id: u64,
+    /// Id of the obligation within the entity's `ObligationSet`.
+    pub obligation_id: String,
+    /// How the obligation is resolved.
+    pub resolution: ObligationResolution,
+}
+
+/// Result returned by `resolve_obligation`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ResolveObligationResult {
+    pub element_id: u64,
+    pub obligation_id: String,
+    /// Updated status string after the resolution (e.g. `"SatisfiedBy:42"`).
+    pub new_status: String,
+    /// Full updated obligation set for the entity.
+    pub obligations: Vec<ObligationInfo>,
 }
 
 // -----------------------------------------------------------------------
@@ -1880,6 +1928,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(handle_get_obligations(world, element_id));
+        }
+        ModelApiRequest::ResolveObligation { request, response } => {
+            let _ = response.send(handle_resolve_obligation(world, request));
         }
         ModelApiRequest::GetAuthoringProvenance {
             element_id,

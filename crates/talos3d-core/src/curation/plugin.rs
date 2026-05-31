@@ -28,6 +28,19 @@ impl Plugin for CurationPlugin {
         if !app.world().contains_resource::<CapabilityRegistry>() {
             app.init_resource::<CapabilityRegistry>();
         }
+
+        // Generic geometric interference (clash) validator. This is the
+        // always-on, domain-neutral home for it: the constraint carries no
+        // domain knowledge — its rules live entirely in the data-driven
+        // `InterferencePolicy`, populated from the knowledge store at startup.
+        // Registered here (rather than in the legacy `ValidationPlugin`, which
+        // is not wired into the live app) so the on-demand `run_validation`
+        // dispatch and the `validation_sweep_system` can both see it.
+        app.init_resource::<crate::plugins::interference::InterferencePolicy>();
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_constraint(crate::plugins::interference::interference_constraint());
+
         app.init_resource::<SourceRegistry>()
             .init_resource::<NominationQueue>()
             .init_resource::<RecipeArtifactRegistry>()

@@ -16,7 +16,7 @@ use crate::capability_registry::CapabilityRegistry;
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
 use crate::curation::MaterialSpecBody;
 #[cfg(feature = "model-api")]
-use crate::plugins::authoring_guidance::AuthoringGuidance;
+use crate::plugins::authoring_guidance::{AuthoringGuidance, GuidanceReference};
 #[cfg(feature = "model-api")]
 use crate::plugins::command_registry::{
     CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
@@ -548,7 +548,10 @@ mod request;
 #[cfg(all(feature = "model-api", test))]
 use request::handle_model_api_request;
 #[cfg(feature = "model-api")]
-use request::{poll_model_api_requests, ApiResult, ModelApiReceiver, ModelApiRequest};
+use request::{
+    poll_model_api_requests, ApiResult, ModelApiReceiver, ModelApiRequest,
+    ObligationResolution, ResolveObligationRequest, ResolveObligationResult,
+};
 
 #[cfg(feature = "model-api")]
 #[path = "model_api/transport.rs"]
@@ -9836,6 +9839,131 @@ fn handle_get_obligations(world: &World, element_id: u64) -> ApiResult<Vec<Oblig
     Ok(entry.unwrap_or_default())
 }
 
+/// Change 2 — `resolve_obligation` world handler.
+///
+/// Locates the entity's `ObligationSet`, finds the obligation by id, validates
+/// the resolution (e.g. the `SatisfiedBy` child must exist), applies it, and
+/// records the mutation through the command/history pipeline so it is undoable.
+#[cfg(feature = "model-api")]
+pub fn handle_resolve_obligation(
+    world: &mut World,
+    request: ResolveObligationRequest,
+) -> ApiResult<ResolveObligationResult> {
+    use crate::plugins::commands::{ApplyEntityChangesCommand, BeginCommandGroup, EndCommandGroup};
+    use crate::plugins::refinement::{
+        ObligationSet, ObligationStatus,
+    };
+
+    let eid = ElementId(request.element_id);
+    ensure_refinable_entity_exists(world, eid)?;
+
+    // Locate the entity.
+    let entity = {
+        let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
+        q.iter(world)
+            .find(|(_, id)| **id == eid)
+            .map(|(entity, _)| entity)
+            .ok_or_else(|| format!("Entity {} not found", request.element_id))?
+    };
+
+    // Validate: entity must have an ObligationSet.
+    if world.get::<ObligationSet>(entity).is_none() {
+        return Err(format!(
+            "Entity {} has no ObligationSet; promote it to a refinement state that \
+             materialises class obligations before resolving them",
+            request.element_id
+        ));
+    }
+
+    // For SatisfiedBy: validate the child entity exists.
+    if let ObligationResolution::SatisfiedBy { element_id: child_id } = &request.resolution {
+        let child_eid = ElementId(*child_id);
+        let child_exists = {
+            let mut q = world.try_query::<(&ElementId,)>().unwrap();
+            q.iter(world).any(|(id,)| *id == child_eid)
+        };
+        if !child_exists {
+            return Err(format!(
+                "Child entity {} not found; cannot record SatisfiedBy resolution",
+                child_id
+            ));
+        }
+    }
+
+    // Snapshot the obligation set BEFORE the mutation for history.
+    use crate::plugins::refinement::ObligationSetSnapshot;
+    let before_snap = ObligationSetSnapshot::capture(world, entity, request.element_id);
+
+    // Apply the resolution.
+    let new_status = {
+        let mut set = world.get_mut::<ObligationSet>(entity).ok_or_else(|| {
+            format!("ObligationSet disappeared for entity {}", request.element_id)
+        })?;
+
+        let obligation = set
+            .entries
+            .iter_mut()
+            .find(|o| o.id.0 == request.obligation_id)
+            .ok_or_else(|| {
+                format!(
+                    "Obligation '{}' not found on entity {}",
+                    request.obligation_id, request.element_id
+                )
+            })?;
+
+        obligation.status = match &request.resolution {
+            ObligationResolution::SatisfiedBy { element_id: child_id } => {
+                ObligationStatus::SatisfiedBy(*child_id)
+            }
+            ObligationResolution::Deferred { reason } => {
+                ObligationStatus::Deferred(reason.clone())
+            }
+            ObligationResolution::Waived { rationale } => {
+                ObligationStatus::Waived(rationale.clone())
+            }
+        };
+
+        match &obligation.status {
+            ObligationStatus::SatisfiedBy(id) => format!("SatisfiedBy:{id}"),
+            ObligationStatus::Deferred(r) => format!("Deferred:{r}"),
+            ObligationStatus::Waived(r) => format!("Waived:{r}"),
+            ObligationStatus::Unresolved => "Unresolved".into(),
+        }
+    };
+
+    // Snapshot AFTER the mutation and record through the history pipeline.
+    let after_snap = ObligationSetSnapshot::capture(world, entity, request.element_id);
+
+    world
+        .resource_mut::<Messages<BeginCommandGroup>>()
+        .write(BeginCommandGroup {
+            label: "Resolve Obligation",
+        });
+    world
+        .resource_mut::<Messages<ApplyEntityChangesCommand>>()
+        .write(ApplyEntityChangesCommand {
+            label: "Resolve Obligation",
+            before: vec![before_snap.into()],
+            after: vec![after_snap.into()],
+        });
+    world
+        .resource_mut::<Messages<EndCommandGroup>>()
+        .write(EndCommandGroup);
+
+    // Build the result with the full updated obligation set.
+    let obligations = world
+        .get::<ObligationSet>(entity)
+        .map(|set| set.entries.iter().map(obligation_to_info).collect())
+        .unwrap_or_default();
+
+    Ok(ResolveObligationResult {
+        element_id: request.element_id,
+        obligation_id: request.obligation_id,
+        new_status,
+        obligations,
+    })
+}
+
 #[cfg(feature = "model-api")]
 fn handle_get_authoring_provenance(
     world: &World,
@@ -10320,6 +10448,7 @@ pub fn handle_run_validation(
                 message: f.message,
                 rationale: f.rationale,
                 obligation_id: f.obligation_id.map(|id| id.0),
+                passage_ref: None,
             })
             .collect();
 
@@ -10370,6 +10499,7 @@ pub fn handle_run_validation(
                         message: f.message,
                         rationale: f.rationale,
                         obligation_id: None,
+                        passage_ref: f.backlink.as_ref().map(|p| p.0.clone()),
                     });
                 }
             }
@@ -10495,7 +10625,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let recipe_family_ids = world
+    let mut recipe_family_ids = world
         .get_resource::<CapabilityRegistry>()
         .map(|registry| {
             registry
@@ -10505,6 +10635,40 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+
+    // Fold in installed `RecipeArtifactRegistry` recipes (registered via
+    // `install_recipe_from_session_export`). These are durable, executable
+    // recipes that the shipped `CapabilityRegistry.recipe_family_descriptors`
+    // path does not know about. Without this, the snapshot reports
+    // `recipe_family_count: 0` and lists every class under `no_curated_paths`
+    // even when an executable recipe exists for it — actively misdirecting an
+    // MCP-only agent to `request_corpus_expansion` for knowledge it already has.
+    // `installed_recipe_classes` is reused below to suppress those false gaps.
+    let mut installed_recipe_classes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    if let Some(artifact_registry) =
+        world.get_resource::<crate::curation::RecipeArtifactRegistry>()
+    {
+        let already: std::collections::HashSet<String> =
+            recipe_family_ids.iter().cloned().collect();
+        for artifact in artifact_registry.iter() {
+            installed_recipe_classes.insert(artifact.target_class.clone());
+            let asset_id = &artifact.meta.id;
+            let family_id = artifact
+                .family_id()
+                .map(|f| f.0.clone())
+                .unwrap_or_else(|| {
+                    asset_id
+                        .0
+                        .split_once('/')
+                        .map(|(_, tail)| tail.to_string())
+                        .unwrap_or_else(|| asset_id.0.clone())
+                });
+            if !already.contains(&family_id) && !recipe_family_ids.contains(&family_id) {
+                recipe_family_ids.push(family_id);
+            }
+        }
+    }
     let session_recipe_draft_ids = world
         .get_resource::<RecipeDraftRegistry>()
         .map(|registry| {
@@ -10609,7 +10773,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     must_read_guidance_card_ids.push("dkg.no_curated_path".into());
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
-            let id = format!("authoring_guidance:{}", guidance.guidance_id);
+            let id = authoring_guidance_card_id(&guidance.guidance_id);
             must_read_guidance_card_ids.push(id.clone());
             guidance_overrides.push(CapabilitySnapshotFact {
                 classification: "guidance_override".into(),
@@ -10624,18 +10788,33 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                 .iter()
                 .take(guidance_limit.saturating_sub(1))
             {
-                must_read_guidance_card_ids
-                    .push(format!("{}:{}", reference.kind, reference.target));
+                must_read_guidance_card_ids.push(guidance_reference_card_id(reference));
             }
         }
     }
     must_read_guidance_card_ids.truncate(guidance_limit);
 
+    // Session-contract guarantee: the snapshot must never advertise a guidance
+    // card id that `get_guidance_card` cannot resolve. The dynamic
+    // authoring-guidance and reference cards are produced from the same
+    // `AuthoringGuidance` resource by `guidance_cards`, so they normally all
+    // resolve; filtering against the registered set keeps the contract intact
+    // even if a future id source is added without a matching card.
+    let registered_card_ids: std::collections::HashSet<String> = guidance_cards(world)
+        .into_iter()
+        .map(|card| card.id)
+        .collect();
+    must_read_guidance_card_ids.retain(|id| registered_card_ids.contains(id));
+
     let mut no_curated_paths = Vec::new();
     if let Some(registry) = world.get_resource::<CapabilityRegistry>() {
         for class in registry.element_class_descriptors() {
             let recipe_count = registry.recipe_family_descriptors(Some(&class.id)).len();
-            if recipe_count == 0 {
+            // A class has a curated executable path if a shipped native recipe
+            // OR a durable installed `RecipeArtifactRegistry` recipe targets it.
+            // Only the genuine absence of both is a corpus gap.
+            let has_installed_recipe = installed_recipe_classes.contains(&class.id.0);
+            if recipe_count == 0 && !has_installed_recipe {
                 no_curated_paths.push(NoCuratedPathInfo {
                     element_class: class.id.0.clone(),
                     missing_artifact_kind: "recipe_or_executable_asset".into(),
@@ -10850,6 +11029,65 @@ pub fn handle_list_recipe_families_with_options(
 }
 
 #[cfg(feature = "model-api")]
+/// Extract `RecipeParameterInfo`s from a JSON-Schema object value.
+///
+/// Reads parameter names + per-property value schemas from
+/// `schema["properties"]`. Defaults are taken from `defaults` when supplied
+/// (the AuthoringScript `parameter_defaults` map, which the replay engine
+/// actually merges), otherwise from a top-level `schema["defaults"]` map or a
+/// per-property `"default"` key. Domain-neutral: it interprets only the
+/// generic schema shape, never the meaning of any parameter.
+#[cfg(feature = "model-api")]
+fn params_from_schema(
+    schema: &serde_json::Value,
+    defaults: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
+) -> Vec<RecipeParameterInfo> {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let schema_defaults = schema.get("defaults").and_then(|d| d.as_object());
+    props
+        .iter()
+        .map(|(name, value_schema)| {
+            let default = defaults
+                .and_then(|d| d.get(name).cloned())
+                .or_else(|| schema_defaults.and_then(|d| d.get(name).cloned()))
+                .or_else(|| value_schema.get("default").cloned());
+            RecipeParameterInfo {
+                name: name.clone(),
+                value_schema: value_schema.clone(),
+                default,
+            }
+        })
+        .collect()
+}
+
+/// Build the `how_to_instantiate` hint, enumerating known parameter names
+/// (with defaults) so a caller can pass them without trial-and-error.
+#[cfg(feature = "model-api")]
+fn instantiate_hint(
+    family_id: &str,
+    target_class: &str,
+    parameters: &[RecipeParameterInfo],
+) -> String {
+    if parameters.is_empty() {
+        return format!(
+            "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, parameters: {{...}} }}"
+        );
+    }
+    let rendered: Vec<String> = parameters
+        .iter()
+        .map(|p| match &p.default {
+            Some(d) => format!("{}={}", p.name, d),
+            None => format!("{}=<required>", p.name),
+        })
+        .collect();
+    format!(
+        "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, parameters: {{ {} }} }} (omitted params fall back to the defaults shown)",
+        rendered.join(", ")
+    )
+}
+
 pub fn handle_select_recipe(
     world: &World,
     element_class: String,
@@ -10925,10 +11163,20 @@ pub fn handle_select_recipe(
                     if weight <= 0.0 {
                         return None;
                     }
+                    let parameters: Vec<RecipeParameterInfo> = d
+                        .parameters
+                        .iter()
+                        .map(|p| RecipeParameterInfo {
+                            name: p.name.clone(),
+                            value_schema: p.value_schema.clone(),
+                            default: p.default.clone(),
+                        })
+                        .collect();
                     Some(RecipeRankingInfo {
-                        how_to_instantiate: format!(
-                            "Call instantiate_recipe {{ family_id: {:?}, target_class: {:?}, parameters: {{...}} }}",
-                            d.id.0, d.target_class.0
+                        how_to_instantiate: instantiate_hint(
+                            &d.id.0,
+                            &d.target_class.0,
+                            &parameters,
                         ),
                         id: d.id.0.clone(),
                         target_class: d.target_class.0.clone(),
@@ -10937,6 +11185,7 @@ pub fn handle_select_recipe(
                         is_session_draft: false,
                         executable: true,
                         execution_path: Some("instantiate_recipe".into()),
+                        parameters,
                     })
                 })
                 .collect()
@@ -10983,9 +11232,98 @@ pub fn handle_select_recipe(
                             is_session_draft: true,
                             executable,
                             execution_path,
+                            parameters: draft
+                                .parameters
+                                .into_iter()
+                                .map(|parameter| RecipeParameterInfo {
+                                    name: parameter.name,
+                                    value_schema: parameter.value_schema,
+                                    default: parameter.default,
+                                })
+                                .collect(),
                         }
                     }),
             );
+        }
+    }
+
+    // Change 1 — surface installed RecipeArtifactRegistry recipes.
+    //
+    // Installed `AuthoringScript` recipes (registered via
+    // `install_recipe_from_session_export`) live in `RecipeArtifactRegistry`
+    // but are invisible through `CapabilityRegistry.recipe_family_descriptors`
+    // (which only contains shipped native recipes). Without this block, an
+    // agent that installs a `roof_system` recipe and then calls
+    // `select_recipe{element_class:"roof_system"}` would still get an empty
+    // result.
+    //
+    // We build a set of ids already emitted (from native families above) and
+    // only add artifacts not yet present — deduplication guard.
+    {
+        let already_emitted: std::collections::HashSet<String> =
+            viable.iter().map(|r| r.id.clone()).collect();
+
+        if let Some(artifact_registry) =
+            world.get_resource::<crate::curation::RecipeArtifactRegistry>()
+        {
+            for (asset_id, artifact) in artifact_registry.artifacts_for_class(&element_class) {
+                // Apply the same target_state filter as for native families.
+                if let Some(ts) = target_state {
+                    if !artifact.supported_refinement_states.contains(&ts) {
+                        continue;
+                    }
+                }
+
+                // Derive a family id from the asset id (e.g. `installed_recipe/foo` → `foo`).
+                let family_id = artifact
+                    .family_id()
+                    .map(|f| f.0.clone())
+                    .unwrap_or_else(|| {
+                        asset_id
+                            .0
+                            .split_once('/')
+                            .map(|(_, tail)| tail.to_string())
+                            .unwrap_or_else(|| asset_id.0.clone())
+                    });
+
+                if already_emitted.contains(&family_id) {
+                    continue;
+                }
+
+                // Surface the recipe's declared parameters so a caller can
+                // pass them up front. AuthoringScript bodies carry the schema
+                // (+ defaults) under `script`; native bodies mirror it on the
+                // artifact's top-level `parameter_schema`.
+                let parameters = match artifact.body.script() {
+                    Some(script) => params_from_schema(
+                        &script.parameter_schema,
+                        Some(&script.parameter_defaults),
+                    ),
+                    None => params_from_schema(&artifact.parameter_schema, None),
+                };
+
+                viable.push(RecipeRankingInfo {
+                    how_to_instantiate: instantiate_hint(
+                        &family_id,
+                        &artifact.target_class,
+                        &parameters,
+                    ),
+                    id: family_id,
+                    target_class: artifact.target_class.clone(),
+                    label: artifact
+                        .meta
+                        .provenance
+                        .rationale
+                        .clone()
+                        .unwrap_or_else(|| artifact.target_class.clone()),
+                    // Installed/learned recipes rank slightly below shipped ones.
+                    weight: 0.9,
+                    is_session_draft: false,
+                    executable: true,
+                    execution_path: Some("instantiate_recipe".into()),
+                    parameters,
+                });
+            }
         }
     }
 
@@ -11226,8 +11564,8 @@ pub fn handle_discover_curated_paths(
 }
 
 #[cfg(feature = "model-api")]
-pub fn handle_list_guidance_cards(_world: &World, task: Option<String>) -> Vec<GuidanceCardInfo> {
-    let mut cards = dkc_guidance_cards();
+pub fn handle_list_guidance_cards(world: &World, task: Option<String>) -> Vec<GuidanceCardInfo> {
+    let mut cards = guidance_cards(world);
     if let Some(task) = task {
         cards.retain(|card| {
             card.task_tags
@@ -11239,11 +11577,73 @@ pub fn handle_list_guidance_cards(_world: &World, task: Option<String>) -> Vec<G
 }
 
 #[cfg(feature = "model-api")]
-pub fn handle_get_guidance_card(_world: &World, card_id: String) -> ApiResult<GuidanceCardInfo> {
-    dkc_guidance_cards()
+pub fn handle_get_guidance_card(world: &World, card_id: String) -> ApiResult<GuidanceCardInfo> {
+    guidance_cards(world)
         .into_iter()
         .find(|card| card.id == card_id)
         .ok_or_else(|| format!("guidance card not found: '{card_id}'"))
+}
+
+/// Card id for the active authoring guidance. Shared by the capability snapshot
+/// and the guidance-card registry so the two never diverge.
+#[cfg(feature = "model-api")]
+fn authoring_guidance_card_id(guidance_id: &str) -> String {
+    format!("authoring_guidance:{guidance_id}")
+}
+
+/// Card id for a single authoring-guidance reference (`{kind}:{target}`, e.g.
+/// `mcp_tool:select_recipe`). Shared by the snapshot and the registry.
+#[cfg(feature = "model-api")]
+fn guidance_reference_card_id(reference: &GuidanceReference) -> String {
+    format!("{}:{}", reference.kind, reference.target)
+}
+
+/// Every guidance card resolvable through `get_guidance_card`: the static DKG
+/// cards plus the dynamic cards derived from the active [`AuthoringGuidance`]
+/// resource. The capability snapshot's `must_read_guidance_card_ids` are drawn
+/// from this same set, so every advertised id resolves here.
+#[cfg(feature = "model-api")]
+fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
+    let mut cards = dkc_guidance_cards();
+    if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
+        if !guidance.is_empty() {
+            cards.push(GuidanceCardInfo {
+                id: authoring_guidance_card_id(&guidance.guidance_id),
+                title: "Active Authoring Guidance".into(),
+                task_tags: vec!["authoring".into(), "guidance".into()],
+                summary: format!(
+                    "Authoring guidance version {} is prompt-text authoritative; call \
+                     get_authoring_guidance for the full COMPONENT_STRUCTURE contract.",
+                    guidance.version
+                ),
+                referenced_tool_ids: vec!["get_authoring_guidance".into()],
+                next_card_ids: Vec::new(),
+                json_examples: Vec::new(),
+            });
+            for reference in &guidance.references {
+                let referenced_tool_ids = if reference.kind == "mcp_tool" {
+                    vec![reference.target.clone()]
+                } else {
+                    Vec::new()
+                };
+                cards.push(GuidanceCardInfo {
+                    id: guidance_reference_card_id(reference),
+                    title: format!("Authoring reference: {}", reference.target),
+                    task_tags: vec!["authoring".into(), reference.kind.clone()],
+                    summary: reference.note.clone().unwrap_or_else(|| {
+                        format!(
+                            "Active authoring guidance points at {} '{}'.",
+                            reference.kind, reference.target
+                        )
+                    }),
+                    referenced_tool_ids,
+                    next_card_ids: Vec::new(),
+                    json_examples: Vec::new(),
+                });
+            }
+        }
+    }
+    cards
 }
 
 #[cfg(feature = "model-api")]
@@ -11393,6 +11793,9 @@ fn finding_to_info(f: &crate::capability_registry::Finding) -> ValidationFinding
         // obligation_id not carried on PP74 Finding; left None here.
         // The finding_id encodes obligation identity in its string format.
         obligation_id: None,
+        // Surface the grounding passage so an agent can follow it with
+        // `lookup_source_passage` and read the knowledge behind the finding.
+        passage_ref: f.backlink.as_ref().map(|p| p.0.clone()),
     }
 }
 
@@ -11566,7 +11969,7 @@ fn build_refinement_promotion_plan(
     let obligation_templates = class_descriptor
         .map(|class| effective_obligations(class, recipe_descriptor, target_state))
         .unwrap_or_default();
-    let obligation_set = ObligationSet {
+    let mut obligation_set = ObligationSet {
         entries: obligation_templates
             .into_iter()
             .map(|template| Obligation {
@@ -11577,6 +11980,46 @@ fn build_refinement_promotion_plan(
             })
             .collect(),
     };
+
+    // Assembly member-composition obligations (ADR-042 anti-bluff gate).
+    // For a SemanticAssembly whose type declares member obligations, evaluate
+    // them against live membership. All in-force obligations are surfaced in
+    // the obligation set (and thus the findings ladder); the *unmet* ones are
+    // pushed into `missing_inputs` so `can_commit` reflects that promoting past
+    // a level whose sub-structure is absent is not a clean commit.
+    {
+        use crate::plugins::modeling::assembly::SemanticAssembly;
+        use crate::plugins::refinement::evaluate_assembly_member_obligations;
+
+        let assembly = world.get::<SemanticAssembly>(entity).cloned();
+        if let (Some(assembly), Some(registry)) = (assembly, registry) {
+            if let Some(descriptor) = registry.assembly_type_descriptor(&assembly.assembly_type) {
+                if !descriptor.member_obligations.is_empty() {
+                    let evaluated = evaluate_assembly_member_obligations(
+                        world,
+                        &assembly,
+                        &descriptor.member_obligations,
+                        target_state,
+                    );
+                    for ob in evaluated {
+                        if matches!(ob.status, ObligationStatus::Unresolved) {
+                            missing_inputs.push(format!(
+                                "assembly obligation '{}' unmet: {}",
+                                ob.id.0, ob.detail
+                            ));
+                        }
+                        obligation_set.entries.push(Obligation {
+                            id: ob.id,
+                            role: ob.role,
+                            required_by_state: ob.required_by_state,
+                            status: ob.status,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let obligations: Vec<ObligationInfo> = obligation_set
         .entries
         .iter()
@@ -11703,6 +12146,7 @@ fn refinement_finding_to_info(
         message: finding.message,
         rationale: finding.rationale,
         obligation_id: finding.obligation_id.map(|id| id.0),
+        passage_ref: None,
     }
 }
 

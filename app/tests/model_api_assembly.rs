@@ -55,6 +55,7 @@ fn init_assembly_test_world() -> World {
         member_role_descriptors: Vec::new(),
         expected_relation_types: vec!["hosted_on".into()],
         parameter_schema: json!({}),
+        member_obligations: Vec::new(),
     });
     registry.register_assembly_type(AssemblyTypeDescriptor {
         assembly_type: "room".into(),
@@ -65,6 +66,7 @@ fn init_assembly_test_world() -> World {
         member_role_descriptors: Vec::new(),
         expected_relation_types: vec![],
         parameter_schema: json!({}),
+        member_obligations: Vec::new(),
     });
     registry.register_relation_type(RelationTypeDescriptor {
         relation_type: "hosted_on".into(),
