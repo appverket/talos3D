@@ -53,6 +53,18 @@ impl Plugin for CurationPlugin {
                 crate::plugins::validation::occurrence_geometry_non_degenerate_constraint(),
             );
 
+        // ADR-057: data-authored enforcement. A *single* generic declarative
+        // constraint reads the `ConstraintSpecRegistry` each sweep; the rules
+        // themselves are amendable `ConstraintSpec` data loaded from the
+        // knowledge store at startup — adding/tuning a domain rule never
+        // requires a recompile. Registered here for the same reason as the
+        // constraints above (the legacy `ValidationPlugin` is not wired into
+        // the live app).
+        app.init_resource::<crate::plugins::constraint_spec::ConstraintSpecRegistry>();
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_constraint(crate::plugins::constraint_spec::declarative_constraint());
+
         app.init_resource::<SourceRegistry>()
             .init_resource::<NominationQueue>()
             .init_resource::<RecipeArtifactRegistry>()
@@ -66,6 +78,7 @@ impl Plugin for CurationPlugin {
                 (
                     seed_canonical_sources,
                     mirror_recipe_descriptors_to_artifacts,
+                    seed_constraint_specs,
                 )
                     .chain(),
             );
@@ -77,6 +90,17 @@ impl Plugin for CurationPlugin {
 /// content.
 fn seed_canonical_sources(mut registry: ResMut<SourceRegistry>) {
     ensure_canonical_seed(&mut registry);
+}
+
+/// Startup system (ADR-057): load any persisted `ConstraintSpec` JSON from the
+/// knowledge store into the live `ConstraintSpecRegistry`. Idempotent; newest
+/// revision wins on upsert. Domain enforcement therefore arrives as amendable
+/// data — dropping or editing a spec file and restarting changes validation
+/// behaviour with no recompile.
+fn seed_constraint_specs(
+    mut registry: ResMut<crate::plugins::constraint_spec::ConstraintSpecRegistry>,
+) {
+    crate::plugins::constraint_spec::load_persisted_constraint_specs(&mut registry);
 }
 
 #[cfg(test)]
