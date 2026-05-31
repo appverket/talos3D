@@ -29,6 +29,7 @@ use crate::capability_registry::{
 };
 use crate::plugins::{
     identity::ElementId,
+    modeling::occurrence::OccurrenceIdentity,
     refinement::{
         ObligationSet, ObligationStatus, RefinementState, RefinementStateComponent, SemanticRole,
     },
@@ -468,6 +469,124 @@ fn run_declared_state_obligations(subject: Entity, world: &World) -> Vec<Finding
 }
 
 // ---------------------------------------------------------------------------
+// `OccurrenceGeometryNonDegenerate` as a ConstraintDescriptor
+// ---------------------------------------------------------------------------
+
+/// Stable string identifier for the occurrence-geometry non-degenerate constraint.
+pub const OCCURRENCE_GEOMETRY_NON_DEGENERATE_CONSTRAINT_ID: &str =
+    "OccurrenceGeometryNonDegenerate";
+
+/// Minimum bounding-box extent (metres) below which an occurrence is considered
+/// degenerate. An occurrence whose largest axis span is smaller than this value
+/// has evaluated to effectively nothing.
+const OCCURRENCE_BOUNDS_MIN_EXTENT_M: f32 = 1e-4;
+
+/// Build the `OccurrenceGeometryNonDegenerate` constraint descriptor.
+///
+/// Catches occurrences (entities carrying [`OccurrenceIdentity`]) whose
+/// evaluated geometry collapses to a point or zero volume — indicating that the
+/// definition's interface parameters produced no real geometry.  Such
+/// occurrences cannot meaningfully stand in for authored content or satisfy
+/// geometry-bearing obligations.
+///
+/// Registered by `ValidationPlugin::build`.
+pub fn occurrence_geometry_non_degenerate_constraint() -> ConstraintDescriptor {
+    use crate::capability_registry::Severity;
+    use std::sync::Arc;
+
+    ConstraintDescriptor {
+        id: ConstraintId(OCCURRENCE_GEOMETRY_NON_DEGENERATE_CONSTRAINT_ID.into()),
+        label: "Occurrence Geometry Non-Degenerate".into(),
+        description:
+            "An occurrence that instantiates a definition must evaluate to geometry with a \
+             non-degenerate bounding box. An occurrence whose snapshot is absent or whose \
+             bounding-box maximum extent is below the tolerance threshold renders nothing and \
+             is flagged as an error."
+                .into(),
+        applicability: Applicability {
+            element_classes: Vec::new(), // applies to any entity; the validator gates on OccurrenceIdentity
+            required_state: None,
+        },
+        default_severity: Severity::Error,
+        rationale:
+            "A definition occurrence that produces no visible geometry is an authoring defect: \
+             the definition's interface parameters are incomplete or incorrect, or the occurrence \
+             transform collapses the result to a point. Such an occurrence cannot satisfy a \
+             geometry-bearing obligation and must not be promoted."
+                .into(),
+        source_backlink: None,
+        role: ConstraintRole::Validation,
+        validator: Arc::new(run_occurrence_geometry_non_degenerate),
+    }
+}
+
+fn run_occurrence_geometry_non_degenerate(subject: Entity, world: &World) -> Vec<Finding> {
+    use crate::capability_registry::Severity;
+
+    // Only applicable to occurrence entities.
+    let Some(occurrence) = world.get::<OccurrenceIdentity>(subject) else {
+        return Vec::new();
+    };
+    let definition_id = occurrence.definition_id.clone();
+
+    let Some(eid) = world.get::<ElementId>(subject) else {
+        return Vec::new();
+    };
+    let element_id = eid.0;
+
+    // Capture geometry snapshot via the capability registry.
+    let Some(registry) = world.get_resource::<CapabilityRegistry>() else {
+        return Vec::new();
+    };
+    let Some(entity_ref) = world.get_entity(subject).ok() else {
+        return Vec::new();
+    };
+    let snapshot = registry.capture_snapshot(&entity_ref, world);
+
+    let is_degenerate = match snapshot.as_ref().and_then(|s| s.bounds()) {
+        None => true,
+        Some(bounds) => {
+            let extent_x = (bounds.max.x - bounds.min.x).abs();
+            let extent_y = (bounds.max.y - bounds.min.y).abs();
+            let extent_z = (bounds.max.z - bounds.min.z).abs();
+            extent_x.max(extent_y).max(extent_z) < OCCURRENCE_BOUNDS_MIN_EXTENT_M
+        }
+    };
+
+    if !is_degenerate {
+        return Vec::new();
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    vec![Finding {
+        id: FindingId(format!(
+            "{OCCURRENCE_GEOMETRY_NON_DEGENERATE_CONSTRAINT_ID}:{element_id}"
+        )),
+        constraint_id: ConstraintId(OCCURRENCE_GEOMETRY_NON_DEGENERATE_CONSTRAINT_ID.into()),
+        subject: element_id,
+        severity: Severity::Error,
+        message: format!(
+            "Entity {element_id} is an occurrence of definition '{}' but its evaluated geometry \
+             is empty or degenerate (zero bounding extent). The occurrence renders nothing. Fix \
+             the definition interface parameters or occurrence transform so the instantiation \
+             materialises real geometry, or remove this occurrence.",
+            definition_id.0
+        ),
+        rationale:
+            "An occurrence that produces no geometry cannot stand in for real authored content \
+             or satisfy a geometry-bearing obligation. Empty occurrences are authoring defects."
+                .into(),
+        backlink: None,
+        emitted_at: now,
+        role: ConstraintRole::Validation,
+    }]
+}
+
+// ---------------------------------------------------------------------------
 // ValidationPlugin
 // ---------------------------------------------------------------------------
 
@@ -491,6 +610,9 @@ impl Plugin for ValidationPlugin {
         app.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_constraint(declared_state_obligations_constraint());
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_constraint(occurrence_geometry_non_degenerate_constraint());
 
         app.add_systems(PostUpdate, validation_sweep_system);
     }
@@ -981,5 +1103,105 @@ mod tests {
         let bucket = findings.cache.get(&key).expect("findings for entity");
         assert_eq!(bucket.len(), 1);
         assert_eq!(bucket[0].severity, Severity::Error);
+    }
+
+    // -----------------------------------------------------------------------
+    // OccurrenceGeometryNonDegenerate tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn flags_degenerate_occurrence() {
+        use crate::plugins::modeling::{
+            definition::DefinitionId,
+            occurrence::OccurrenceIdentity,
+        };
+
+        let mut world = World::new();
+        let registry = CapabilityRegistry::default();
+        // No factory registered — capture_snapshot will return None for this entity.
+        world.insert_resource(registry);
+
+        // Spawn an occurrence entity with no geometry component.
+        let entity = world.spawn((
+            ElementId(99),
+            OccurrenceIdentity::new(DefinitionId("test_def".into()), 1),
+        )).id();
+
+        let findings = run_occurrence_geometry_non_degenerate(entity, &world);
+
+        assert_eq!(findings.len(), 1, "expected exactly one degenerate-occurrence finding");
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert_eq!(findings[0].subject, 99);
+        assert!(
+            findings[0].id.0.starts_with("OccurrenceGeometryNonDegenerate:"),
+            "finding id must carry the constraint prefix"
+        );
+        assert!(
+            findings[0].message.contains("test_def"),
+            "finding message must name the definition"
+        );
+    }
+
+    #[test]
+    fn accepts_occurrence_with_real_geometry() {
+        use crate::plugins::modeling::{
+            definition::DefinitionId,
+            generic_factory::PrimitiveFactory,
+            occurrence::OccurrenceIdentity,
+            primitives::{BoxPrimitive, ShapeRotation},
+        };
+
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+
+        // Spawn an occurrence with a real, non-degenerate BoxPrimitive.
+        let entity = world.spawn((
+            ElementId(42),
+            OccurrenceIdentity::new(DefinitionId("box_def".into()), 1),
+            BoxPrimitive {
+                centre: Vec3::new(1.0, 0.5, 0.0),
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            ShapeRotation::default(),
+        )).id();
+
+        let findings = run_occurrence_geometry_non_degenerate(entity, &world);
+
+        assert!(
+            findings.is_empty(),
+            "occurrence with real geometry must produce no findings; got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_non_occurrence_entity() {
+        use crate::plugins::modeling::{
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, ShapeRotation},
+        };
+
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+
+        // Spawn a plain box entity with NO OccurrenceIdentity.
+        let entity = world.spawn((
+            ElementId(7),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::new(1.0, 1.0, 1.0),
+            },
+            ShapeRotation::default(),
+        )).id();
+
+        let findings = run_occurrence_geometry_non_degenerate(entity, &world);
+
+        assert!(
+            findings.is_empty(),
+            "non-occurrence entity must produce no findings; got {findings:?}"
+        );
     }
 }
