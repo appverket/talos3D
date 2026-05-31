@@ -8,6 +8,7 @@ pub mod camera;
 pub mod clipping_planes;
 pub mod command_registry;
 pub mod commands;
+pub mod constraint_spec;
 pub mod corpus_gap;
 pub mod cursor;
 pub mod definition_authoring;

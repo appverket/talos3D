@@ -84,7 +84,11 @@ pub struct EntitySelector {
 }
 
 impl EntitySelector {
-    fn matches(&self, class: Option<&str>, role: Option<&str>) -> bool {
+    /// True when `class`/`role` satisfy this selector. An empty facet matches
+    /// anything. `pub` so the declarative constraint substrate (ADR-057,
+    /// `super::constraint_spec`) can reuse the same selector semantics without
+    /// duplicating them.
+    pub fn matches(&self, class: Option<&str>, role: Option<&str>) -> bool {
         if !self.element_classes.is_empty() {
             let Some(class) = class else { return false };
             if !self.element_classes.iter().any(|c| c == class) {
@@ -308,7 +312,10 @@ fn entity_obb(entity: Entity, world: &World) -> Option<Obb> {
     Some(Obb::from_box(prim, rotation))
 }
 
-fn entity_component_role(entity: Entity, world: &World) -> Option<String> {
+/// Read an entity's free-form `component_role` (e.g. `"structural_framing"`)
+/// from `SemanticIntent.parameters`. Shared with the declarative-constraint
+/// substrate (ADR-057) so role matching is defined in exactly one place.
+pub fn entity_component_role(entity: Entity, world: &World) -> Option<String> {
     let intent = world.get::<SemanticIntent>(entity)?;
     intent
         .parameters
@@ -317,7 +324,9 @@ fn entity_component_role(entity: Entity, world: &World) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn entity_class(entity: Entity, world: &World) -> Option<String> {
+/// Read an entity's `element_class` id, if assigned. Shared with the
+/// declarative-constraint substrate (ADR-057).
+pub fn entity_class(entity: Entity, world: &World) -> Option<String> {
     world
         .get::<ElementClassAssignment>(entity)
         .map(|c| c.element_class.0.clone())
