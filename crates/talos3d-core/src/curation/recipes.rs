@@ -235,6 +235,21 @@ impl RecipeArtifactRegistry {
         self.entries.is_empty()
     }
 
+    /// Return all artifacts whose `target_class` matches `class`.
+    ///
+    /// Used by `select_recipe` and `discover_curated_paths` to surface
+    /// installed `AuthoringScript` recipes that are not visible through
+    /// the native `CapabilityRegistry.recipe_family_descriptors` path
+    /// (which only contains shipped native recipes).
+    pub fn artifacts_for_class<'a, 's>(
+        &'a self,
+        class: &'s str,
+    ) -> impl Iterator<Item = (&'a AssetId, &'a RecipeArtifact)> + use<'a, 's> {
+        self.entries
+            .iter()
+            .filter(move |(_, a)| a.target_class == class)
+    }
+
     /// Apply a batch of shipped descriptors to the registry, wrapping
     /// each in a `Shipped / Published` `RecipeArtifact` with a
     /// `NativeFnRef` body. Existing entries for a family are refreshed
@@ -494,6 +509,24 @@ mod tests {
         assert_eq!(schema["defaults"]["thickness_mm"], 200);
         // No default for studs_per_m so it should not appear in defaults.
         assert!(schema["defaults"].get("studs_per_m").is_none());
+    }
+
+    #[test]
+    fn artifacts_for_class_filters_by_target_class() {
+        let mut reg = RecipeArtifactRegistry::default();
+        reg.insert(sample_artifact("roof_gable", "roof_system"));
+        reg.insert(sample_artifact("roof_hip", "roof_system"));
+        reg.insert(sample_artifact("pier_foundation", "foundation_system"));
+
+        let roof: Vec<_> = reg.artifacts_for_class("roof_system").collect();
+        assert_eq!(roof.len(), 2, "should find two roof_system recipes");
+        assert!(roof.iter().all(|(_, a)| a.target_class == "roof_system"));
+
+        let foundation: Vec<_> = reg.artifacts_for_class("foundation_system").collect();
+        assert_eq!(foundation.len(), 1);
+
+        let none: Vec<_> = reg.artifacts_for_class("nonexistent").collect();
+        assert!(none.is_empty());
     }
 
     #[test]

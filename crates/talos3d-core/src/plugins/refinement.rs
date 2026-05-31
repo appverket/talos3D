@@ -344,7 +344,40 @@ before an entity can legitimately claim that level:
 - Before promoting, call `preview_promotion` to see what is still missing, and
   `run_validation` afterwards to confirm nothing in force is left `Unresolved`.
 
-Do not set a level whose obligations you have not resolved — that is the same
+This contract is machine-enforced, not advisory. `promote_refinement` will
+**refuse** to advance an entity to a level while any in-force obligation is
+still `Unresolved`, returning an error that lists the blocking obligation ids.
+That is not a failure — it is the platform handing you the punch list. The loop
+to clear it:
+
+1. Attempt the promotion. If it is blocked, the entity now carries the
+   materialised obligation set (a blocked promote still installs it), so
+   `get_obligations(element_id)` shows every id and its status.
+2. For each blocked obligation, call `resolve_obligation`:
+   - `{ element_id, obligation_id, resolution: { satisfied_by: { element_id: <child> } } }`
+     when a real sub-element fulfils it (build/host that sub-element first);
+   - `{ ..., resolution: { deferred: { reason: "<why>" } } }` to intentionally
+     defer it with a recorded rationale;
+   - `{ ..., resolution: { waived: { rationale: "<why>" } } }` when it is
+     explicitly out of scope.
+   Each call is undoable and returns the updated obligation set.
+3. Re-attempt the promotion. Recorded resolutions are preserved across the
+   re-promote (they are not clobbered back to `Unresolved`), so once every
+   in-force obligation is `SatisfiedBy` / `Deferred` / `Waived` the gate passes.
+
+Important: **building the sub-element does not satisfy the obligation by
+itself.** Instantiating a recipe, placing an occurrence, or spawning a child
+that *could* fulfil an obligation does not auto-link it — the obligation stays
+`Unresolved` until you explicitly record the link with `resolve_obligation`
+`satisfied_by` that child's `element_id`. (A recipe only auto-satisfies the
+specific obligations it declares satisfaction-links for; do not assume it covers
+the class ladder.) So the normal order is: build the sub-element → read its
+`element_id` → `resolve_obligation { satisfied_by }` → re-promote.
+
+Prefer `SatisfiedBy` a genuine sub-element over `Deferred`/`Waived`: deferring or
+waiving records an honest gap, but it does not add the resolved content the level
+claims. Do not reach for `Waived` just to silence the gate. And never try to set
+a level whose obligations you have not resolved — that is the same
 unsubstantiated-claim error as relabelling without adding structure.
 "#;
 
@@ -374,9 +407,17 @@ sequence there first.
    openings plus their hosted hardware should commit together or not at all.
    Use `procedural_session.eval` in `dry_run` to project obligations and
    findings before any command queues.
-3. **You are about to author a reusable recipe.** Build the sequence in a
-   session, validate it, then `procedural_session.export` it as a durable
-   `recipe.authoring_script.v1` artifact. Do not hand-write recipe JSON.
+3. **You are about to author a reusable recipe — or fill a `CorpusGap`.**
+   Build the sequence in a session, validate it, `procedural_session.export`
+   it, then **`install_recipe_from_session_export`** it. Export alone only
+   freezes the script; install is what registers it as a durable, executable
+   recipe that `instantiate_recipe` can replay and that future sessions
+   rediscover. This is the mechanism by which the corpus *learns new
+   construction knowledge as data and improves over time without any code
+   change* — when `select_recipe`/`discover_curated_paths` return nothing for
+   an element class, authoring + installing a session recipe is how you close
+   that gap permanently rather than hand-rolling one-off geometry. Do not
+   hand-write recipe JSON.
 4. **You want a safe scratchpad against a declared scope.** A session
    declares its refinement target, stage transition, MutationScope, and
    allowed-tool set up front; the platform type-checks each step against the
@@ -387,7 +428,7 @@ sequence there first.
 gate above — a session that hand-rolls primitives for an element class with a
 curated path is still a bluff.
 
-**The five tools, in order of use:**
+**The tools, in order of use:**
 
 - `procedural_session.create` — open a session against a declared spec; get
   `session_id` and the session-scoped guidance overlay.
@@ -399,9 +440,28 @@ curated path is still a bluff.
 - `procedural_session.commit` — flush the script through the command queue
   (ADR-002 / ADR-011). Policies: `require_clean`, `accept_with_waivers`,
   `accept_partial`.
-- `procedural_session.export` — freeze the script as a durable curated
-  artifact (`recipe.authoring_script.v1`); the session stays re-exportable
-  until close.
+- `procedural_session.export` — freeze the script as a curated artifact
+  (`recipe.authoring_script.v1`); the session stays re-exportable until close.
+  Export does **not** by itself make the recipe callable.
+- `install_recipe_from_session_export` — register the exported artifact as a
+  durable, **executable** recipe. After install, `instantiate_recipe` and
+  `promote_refinement` can replay it by `family_id`, and `list_persisted_recipes`
+  / `discover_curated_paths` / `select_recipe` surface it to every future
+  session. Use `scope: "Project"` (default) to persist it under
+  `~/.talos3d/knowledge/recipes/` so it survives restarts. **This install step
+  is what turns a one-off authoring episode into reusable corpus knowledge — do
+  not stop at export.**
+
+**Closing a `CorpusGap` as data.** When the curated path for an element class is
+empty, the durable fix is: learn the construction (cite the source; persist it
+with `acquire_corpus_passage` so the grounding survives), build it once in a
+session, `export`, then `install_recipe_from_session_export`. The next agent that
+asks for that element class finds an executable recipe instead of the same gap.
+That is how the corpus improves over time without a code change. (For a single
+immediate parametric component you may instead author an inline
+`parametric.create` `representation` — but that geometry is ephemeral and born
+`Conceptual`; it does not enter the reusable corpus, so prefer the install path
+whenever the knowledge should persist.)
 
 **Verify before declaring done.** A clean commit report is not evidence the
 geometry is right — render the result (`take_screenshot`) and look.
@@ -716,8 +776,185 @@ pub fn validate_declared_state_obligations(
 use crate::plugins::{
     commands::{ApplyEntityChangesCommand, BeginCommandGroup, EndCommandGroup},
     identity::ElementId,
-    modeling::assembly::{RelationSnapshot, SemanticRelation},
+    modeling::assembly::{RelationSnapshot, SemanticAssembly, SemanticRelation},
 };
+
+// ---------------------------------------------------------------------------
+// Assembly member-composition obligations (ADR-042 anti-bluff gate)
+// ---------------------------------------------------------------------------
+
+/// The outcome of evaluating one [`AssemblyMemberObligationTemplate`] against
+/// an assembly's live membership at a promotion target state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvaluatedAssemblyObligation {
+    pub id: ObligationId,
+    pub role: SemanticRole,
+    pub member_role: String,
+    pub required_by_state: RefinementState,
+    pub status: ObligationStatus,
+    /// Human-readable explanation. Empty when satisfied.
+    pub detail: String,
+}
+
+impl EvaluatedAssemblyObligation {
+    pub fn is_unresolved(&self) -> bool {
+        matches!(self.status, ObligationStatus::Unresolved)
+    }
+}
+
+/// Read each member's current refinement state in a single query pass.
+///
+/// Works on `&World` (read-only) so it can be shared by both the preview and
+/// commit paths. Members with no `RefinementStateComponent` default to
+/// `Conceptual`; members whose `ElementId` is not present in the world are
+/// omitted (treated as missing).
+fn member_refinement_states(
+    world: &World,
+    members: &[crate::plugins::modeling::assembly::AssemblyMemberRef],
+) -> HashMap<u64, RefinementState> {
+    let wanted: BTreeSet<u64> = members.iter().map(|m| m.target.0).collect();
+    let mut states = HashMap::new();
+    if wanted.is_empty() {
+        return states;
+    }
+    let Some(mut q) = world.try_query::<(&ElementId, Option<&RefinementStateComponent>)>() else {
+        return states;
+    };
+    for (id, state) in q.iter(world) {
+        if wanted.contains(&id.0) {
+            states.insert(id.0, state.map(|c| c.state).unwrap_or_default());
+        }
+    }
+    states
+}
+
+/// Evaluate an assembly type's member-composition obligations against the
+/// assembly's live membership for a given promotion `target_state`.
+///
+/// An obligation is *in force* when `required_by_state <= target_state`, so
+/// promoting straight from `Conceptual` to `Detailed` still pulls in every
+/// obligation that any skipped intermediate level would have required. An
+/// in-force obligation is `SatisfiedBy` the first qualifying member when at
+/// least `min_count` members match its `member_role` (and, when
+/// `member_tracks_target_state`, have themselves reached `target_state`);
+/// otherwise it is `Unresolved` with a `detail` explaining the shortfall.
+///
+/// Obligations whose `required_by_state` exceeds `target_state` are skipped
+/// entirely (not returned), mirroring the single-element obligation ladder.
+pub fn evaluate_assembly_member_obligations(
+    world: &World,
+    assembly: &SemanticAssembly,
+    member_obligations: &[crate::capability_registry::AssemblyMemberObligationTemplate],
+    target_state: RefinementState,
+) -> Vec<EvaluatedAssemblyObligation> {
+    let member_states = member_refinement_states(world, &assembly.members);
+
+    let mut results = Vec::new();
+    for template in member_obligations {
+        if template.required_by_state > target_state {
+            continue;
+        }
+
+        let required_member_state = template
+            .member_tracks_target_state
+            .then_some(target_state);
+
+        // Members whose role matches this obligation.
+        let role_matches: Vec<u64> = assembly
+            .members
+            .iter()
+            .filter(|m| m.role == template.member_role)
+            .map(|m| m.target.0)
+            .collect();
+
+        let present_count = role_matches.len();
+
+        // Of those, the ones that also meet the required resolved state.
+        let satisfying: Vec<u64> = role_matches
+            .iter()
+            .copied()
+            .filter(|eid| {
+                let state = member_states.get(eid).copied();
+                match (state, required_member_state) {
+                    // Member not present in the world at all.
+                    (None, _) => false,
+                    // Presence is enough.
+                    (Some(_), None) => true,
+                    // Member must itself have reached the target state.
+                    (Some(s), Some(req)) => s >= req,
+                }
+            })
+            .collect();
+
+        let (status, detail) = if satisfying.len() >= template.min_count {
+            (ObligationStatus::SatisfiedBy(satisfying[0]), String::new())
+        } else if let Some(req) = required_member_state {
+            (
+                ObligationStatus::Unresolved,
+                format!(
+                    "needs {} member(s) in role '{}' resolved to at least {}; found {} present, {} at that state",
+                    template.min_count,
+                    template.member_role,
+                    req.as_str(),
+                    present_count,
+                    satisfying.len(),
+                ),
+            )
+        } else {
+            (
+                ObligationStatus::Unresolved,
+                format!(
+                    "needs {} member(s) in role '{}'; found {}",
+                    template.min_count, template.member_role, present_count,
+                ),
+            )
+        };
+
+        results.push(EvaluatedAssemblyObligation {
+            id: template.id.clone(),
+            role: template.role.clone(),
+            member_role: template.member_role.clone(),
+            required_by_state: template.required_by_state,
+            status,
+            detail,
+        });
+    }
+
+    results
+}
+
+/// Resolve an assembly type's member obligations from the registry, evaluate
+/// them, and return any that are `Unresolved`. Returns an empty vector when the
+/// entity is not a `SemanticAssembly`, the assembly type declares no member
+/// obligations, or all in-force obligations are satisfied.
+///
+/// This is the shared core behind both the preview (advisory findings) and the
+/// commit gate (hard rejection).
+pub fn unmet_assembly_member_obligations(
+    world: &World,
+    entity: Entity,
+    target_state: RefinementState,
+) -> Vec<EvaluatedAssemblyObligation> {
+    let Some(assembly) = world.get::<SemanticAssembly>(entity).cloned() else {
+        return Vec::new();
+    };
+    let templates = {
+        let Some(registry) =
+            world.get_resource::<crate::capability_registry::CapabilityRegistry>()
+        else {
+            return Vec::new();
+        };
+        match registry.assembly_type_descriptor(&assembly.assembly_type) {
+            Some(desc) if !desc.member_obligations.is_empty() => desc.member_obligations.clone(),
+            _ => return Vec::new(),
+        }
+    };
+
+    evaluate_assembly_member_obligations(world, &assembly, &templates, target_state)
+        .into_iter()
+        .filter(EvaluatedAssemblyObligation::is_unresolved)
+        .collect()
+}
 
 /// A promote-refinement command payload.
 ///
@@ -856,6 +1093,28 @@ pub fn apply_promote_refinement(
     let before_state = current_state;
     let target_state = request.target_state;
 
+    // Anti-bluff gate (ADR-042): if this entity is a SemanticAssembly whose
+    // type declares member-composition obligations, the promotion target must
+    // be backed by the resolved sub-structure that state demands. Level-skipping
+    // does not skip obligations — every obligation with required_by_state <=
+    // target_state is in force. Reject the commit if any remain unresolved.
+    {
+        let unmet = unmet_assembly_member_obligations(world, entity, target_state);
+        if !unmet.is_empty() {
+            let summary = unmet
+                .iter()
+                .map(|o| format!("{} ({})", o.id.0, o.detail))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "Cannot promote assembly to {} — {} unmet member obligation(s): {}",
+                target_state.as_str(),
+                unmet.len(),
+                summary
+            ));
+        }
+    }
+
     // Read class/recipe assignment from the entity (if any).
     let class_assignment: Option<ElementClassAssignment> =
         world.get::<ElementClassAssignment>(entity).cloned();
@@ -918,14 +1177,39 @@ pub fn apply_promote_refinement(
         }
     };
 
-    // Build the initial ObligationSet from templates (status = Unresolved).
+    // Build the merged ObligationSet from templates.
+    //
+    // Change 3 — merge-not-clobber: on re-promote, preserve any agent-recorded
+    // non-Unresolved status for obligations whose id already existed in the
+    // entity's current ObligationSet. New templates not previously present
+    // start Unresolved as before.
+    let prior_statuses: HashMap<ObligationId, ObligationStatus> = {
+        world
+            .get::<ObligationSet>(entity)
+            .map(|existing| {
+                existing
+                    .entries
+                    .iter()
+                    .filter(|o| !matches!(o.status, ObligationStatus::Unresolved))
+                    .map(|o| (o.id.clone(), o.status.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let initial_obligations: Vec<crate::plugins::refinement::Obligation> = obligation_templates
         .into_iter()
-        .map(|t| crate::plugins::refinement::Obligation {
-            id: t.id,
-            role: t.role,
-            required_by_state: t.required_by_state,
-            status: ObligationStatus::Unresolved,
+        .map(|t| {
+            let status = prior_statuses
+                .get(&t.id)
+                .cloned()
+                .unwrap_or(ObligationStatus::Unresolved);
+            crate::plugins::refinement::Obligation {
+                id: t.id,
+                role: t.role,
+                required_by_state: t.required_by_state,
+                status,
+            }
         })
         .collect();
 
@@ -1050,11 +1334,58 @@ pub fn apply_promote_refinement(
         }
     }
 
-    // Install ObligationSet on the entity (replace any existing one).
+    // Change 4 — per-entity class-obligation promotion gate.
+    //
+    // This gate is a SEPARATE block from the assembly-member-obligation gate
+    // above (~line 1063). It evaluates the entity's own (per-entity-class)
+    // obligations *after* all satisfaction links and bears_on resolution have
+    // been applied, so agent-recorded resolutions (SatisfiedBy, Deferred,
+    // Waived) from a prior resolve_obligation call are visible.
+    //
+    // Only in-force obligations (required_by_state <= target_state) that are
+    // still Unresolved block the promotion. Demotion does not go through this
+    // path, so it is never gated.
+    //
+    // CRITICAL ORDERING: the ObligationSet is materialised on the entity
+    // *before* the gate returns. Obligations are only ever materialised at the
+    // exact state they are keyed at (`effective_obligations` reads
+    // `class_min_obligations[target_state]`), so on a first/direct promote they
+    // are all in-force and Unresolved and the gate would fire. If we returned
+    // before installing, the entity would carry no ObligationSet and
+    // `resolve_obligation` (which requires one) could never run — a dead-end.
+    // Installing first means a blocked promote leaves the obligations queryable
+    // (`get_obligations`) and resolvable (`resolve_obligation`); the agent then
+    // re-promotes and merge-not-clobber preserves the recorded resolutions so
+    // the gate passes. The refinement state itself is only advanced *after* the
+    // gate (`set_refinement_state` below), so a blocked promote does not move
+    // the entity up a level.
+    let unresolved_ids: Vec<String> = obligations
+        .iter()
+        .filter(|o| {
+            o.required_by_state <= target_state
+                && matches!(o.status, ObligationStatus::Unresolved)
+        })
+        .map(|o| o.id.0.clone())
+        .collect();
+
+    // Install ObligationSet on the entity (replace any existing one) BEFORE the
+    // gate so blocked promotions still expose resolvable obligations.
     if !obligations.is_empty() {
         world.entity_mut(entity).insert(ObligationSet {
             entries: obligations,
         });
+    }
+
+    if !unresolved_ids.is_empty() {
+        return Err(format!(
+            "Cannot promote {} to {} — {} unresolved obligation(s): {}; \
+             resolve each with resolve_obligation (SatisfiedBy a sub-element, \
+             or Deferred/Waived with a reason)",
+            request.entity_element_id,
+            target_state.as_str(),
+            unresolved_ids.len(),
+            unresolved_ids.join(", ")
+        ));
     }
 
     // Apply grounding updates from the generate output.
@@ -1280,6 +1611,137 @@ impl AuthoredEntity for RefinementStateSnapshot {
 
 impl From<RefinementStateSnapshot> for BoxedEntity {
     fn from(s: RefinementStateSnapshot) -> Self {
+        BoxedEntity(Box::new(s))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ObligationSetSnapshot — lightweight undo/redo for resolve_obligation
+// ---------------------------------------------------------------------------
+
+/// A snapshot of an entity's `ObligationSet` at a single point in time.
+/// Used as the before/after pair in `ApplyEntityChangesCommand` for
+/// `resolve_obligation` so the change is undoable through the history pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObligationSetSnapshot {
+    pub element_id: ElementId,
+    /// Serialised snapshot of the `ObligationSet::entries`. Stored as JSON
+    /// so undo/redo can re-insert the exact set without coupling to the full
+    /// type from inside `AuthoredEntity::apply_to`.
+    pub entries_json: serde_json::Value,
+}
+
+impl ObligationSetSnapshot {
+    /// Capture the current `ObligationSet` of `entity`.  When the entity
+    /// has no `ObligationSet`, the snapshot records an empty entries array
+    /// so undo correctly removes any obligations that were added.
+    pub fn capture(world: &World, entity: Entity, element_id: u64) -> Self {
+        let entries_json = world
+            .get::<ObligationSet>(entity)
+            .and_then(|set| serde_json::to_value(&set.entries).ok())
+            .unwrap_or(serde_json::Value::Array(Vec::new()));
+
+        Self {
+            element_id: ElementId(element_id),
+            entries_json,
+        }
+    }
+}
+
+impl AuthoredEntity for ObligationSetSnapshot {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn type_name(&self) -> &'static str {
+        "obligation_set_snapshot"
+    }
+
+    fn element_id(&self) -> ElementId {
+        self.element_id
+    }
+
+    fn label(&self) -> String {
+        format!("obligation_set:{}", self.element_id.0)
+    }
+
+    fn center(&self) -> Vec3 {
+        Vec3::ZERO
+    }
+
+    fn bounds(&self) -> Option<EntityBounds> {
+        None
+    }
+
+    fn translate_by(&self, _delta: Vec3) -> BoxedEntity {
+        BoxedEntity(Box::new(self.clone()))
+    }
+
+    fn rotate_by(&self, _rotation: Quat) -> BoxedEntity {
+        BoxedEntity(Box::new(self.clone()))
+    }
+
+    fn scale_by(&self, _factor: Vec3, _center: Vec3) -> BoxedEntity {
+        BoxedEntity(Box::new(self.clone()))
+    }
+
+    fn property_fields(&self) -> Vec<PropertyFieldDef> {
+        Vec::new()
+    }
+
+    fn set_property_json(
+        &self,
+        _name: &str,
+        _value: &serde_json::Value,
+    ) -> Result<BoxedEntity, String> {
+        Err("ObligationSetSnapshot is read-only".to_string())
+    }
+
+    fn handles(&self) -> Vec<HandleInfo> {
+        Vec::new()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn apply_to(&self, world: &mut World) {
+        let Some(entity) = find_entity_by_element_id_readonly(world, self.element_id) else {
+            return;
+        };
+        if let Ok(entries) =
+            serde_json::from_value::<Vec<Obligation>>(self.entries_json.clone())
+        {
+            if entries.is_empty() {
+                world.entity_mut(entity).remove::<ObligationSet>();
+            } else {
+                world
+                    .entity_mut(entity)
+                    .insert(ObligationSet { entries });
+            }
+        }
+    }
+
+    fn remove_from(&self, _world: &mut World) {
+        // Nothing to remove; undo is handled by apply_to with the before snapshot.
+    }
+
+    fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {}
+
+    fn box_clone(&self) -> BoxedEntity {
+        BoxedEntity(Box::new(self.clone()))
+    }
+
+    fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| self == other)
+    }
+}
+
+impl From<ObligationSetSnapshot> for BoxedEntity {
+    fn from(s: ObligationSetSnapshot) -> Self {
         BoxedEntity(Box::new(s))
     }
 }
@@ -1866,12 +2328,23 @@ mod tests {
             "preview_promotion",
             "run_validation",
             "validate_host_fit",
+            // The obligation gate is machine-enforced, so the contract must
+            // teach the escape hatch tool and its three resolution variants.
+            "resolve_obligation",
+            "satisfied_by",
+            "deferred",
+            "waived",
         ] {
             assert!(
                 s.contains(tool),
                 "composition contract must reference {tool}"
             );
         }
+        // It must make clear the gate is enforced, not advisory.
+        assert!(
+            s.contains("machine-enforced"),
+            "contract must state the obligation gate is machine-enforced"
+        );
     }
 
     #[test]
@@ -1903,6 +2376,18 @@ mod tests {
                 "orientation must surface eval mode {mode}"
             );
         }
+        // The durable-reuse loop must not dead-end at export: the orientation
+        // has to name the install step that registers an executable recipe,
+        // and the corpus-gap path that uses it, so an agent learns new
+        // construction as persistent data rather than hand-rolling geometry.
+        assert!(
+            s.contains("install_recipe_from_session_export"),
+            "orientation must name the install step that makes a recipe executable"
+        );
+        assert!(
+            s.contains("CorpusGap") && s.contains("acquire_corpus_passage"),
+            "orientation must connect the install path to closing a corpus gap as data"
+        );
     }
 
     #[test]
@@ -2272,5 +2757,431 @@ mod tests {
         assert!(find_entity_by_element_id_readonly(&world, ElementId(3)).is_none());
         assert!(query_refined_into(&world, ElementId(1)).is_empty());
         assert!(query_parked_refined_into(&world, ElementId(1)).is_empty());
+    }
+
+    // --- Assembly member-composition obligation evaluator (ADR-042) ---
+
+    fn member_template(
+        id: &str,
+        member_role: &str,
+        required_by: RefinementState,
+        tracks: bool,
+    ) -> crate::capability_registry::AssemblyMemberObligationTemplate {
+        crate::capability_registry::AssemblyMemberObligationTemplate {
+            id: ObligationId(id.into()),
+            role: SemanticRole("primary_structure".into()),
+            member_role: member_role.into(),
+            min_count: 1,
+            required_by_state: required_by,
+            member_tracks_target_state: tracks,
+        }
+    }
+
+    fn spawn_member(world: &mut World, eid: u64, state: RefinementState) {
+        world.spawn((ElementId(eid), RefinementStateComponent { state }));
+    }
+
+    fn house_with(members: Vec<(&str, u64)>) -> SemanticAssembly {
+        SemanticAssembly {
+            assembly_type: "house".into(),
+            label: "h".into(),
+            members: members
+                .into_iter()
+                .map(
+                    |(role, target)| crate::plugins::modeling::assembly::AssemblyMemberRef {
+                        target: ElementId(target),
+                        role: role.into(),
+                    },
+                )
+                .collect(),
+            parameters: serde_json::Value::Null,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn assembly_obligation_skipped_above_target_state() {
+        let world = World::new();
+        let templates = vec![member_template(
+            "needs_roof",
+            "roof_element",
+            RefinementState::Detailed,
+            true,
+        )];
+        // Target below the obligation's required_by_state — not in force.
+        let evaluated = evaluate_assembly_member_obligations(
+            &world,
+            &house_with(Vec::new()),
+            &templates,
+            RefinementState::Schematic,
+        );
+        assert!(evaluated.is_empty());
+    }
+
+    #[test]
+    fn assembly_obligation_unresolved_when_member_absent() {
+        let world = World::new();
+        let templates = vec![member_template(
+            "needs_wall",
+            "exterior_wall",
+            RefinementState::Schematic,
+            true,
+        )];
+        let evaluated = evaluate_assembly_member_obligations(
+            &world,
+            &house_with(Vec::new()),
+            &templates,
+            RefinementState::Detailed,
+        );
+        assert_eq!(evaluated.len(), 1);
+        assert!(evaluated[0].is_unresolved());
+    }
+
+    #[test]
+    fn assembly_obligation_unresolved_when_member_underresolved() {
+        let mut world = World::new();
+        spawn_member(&mut world, 11, RefinementState::Conceptual);
+        let templates = vec![member_template(
+            "needs_wall",
+            "exterior_wall",
+            RefinementState::Schematic,
+            true,
+        )];
+        let evaluated = evaluate_assembly_member_obligations(
+            &world,
+            &house_with(vec![("exterior_wall", 11)]),
+            &templates,
+            RefinementState::Detailed,
+        );
+        assert!(evaluated[0].is_unresolved());
+        assert!(evaluated[0].detail.contains("Detailed"));
+    }
+
+    #[test]
+    fn assembly_obligation_satisfied_when_member_tracks_target() {
+        let mut world = World::new();
+        spawn_member(&mut world, 11, RefinementState::Detailed);
+        let templates = vec![member_template(
+            "needs_wall",
+            "exterior_wall",
+            RefinementState::Schematic,
+            true,
+        )];
+        let evaluated = evaluate_assembly_member_obligations(
+            &world,
+            &house_with(vec![("exterior_wall", 11)]),
+            &templates,
+            RefinementState::Detailed,
+        );
+        assert_eq!(evaluated[0].status, ObligationStatus::SatisfiedBy(11));
+    }
+
+    #[test]
+    fn assembly_obligation_presence_only_ignores_member_state() {
+        let mut world = World::new();
+        spawn_member(&mut world, 11, RefinementState::Conceptual);
+        // tracks = false: mere presence in the role satisfies it.
+        let templates = vec![member_template(
+            "needs_wall",
+            "exterior_wall",
+            RefinementState::Schematic,
+            false,
+        )];
+        let evaluated = evaluate_assembly_member_obligations(
+            &world,
+            &house_with(vec![("exterior_wall", 11)]),
+            &templates,
+            RefinementState::Detailed,
+        );
+        assert_eq!(evaluated[0].status, ObligationStatus::SatisfiedBy(11));
+    }
+
+    // --- Change 3 & 4: re-promote merges obligations + gate ---
+
+    /// Builds a world with the command-pipeline resources needed by promote/demote.
+    fn obligation_gate_world() -> World {
+        let mut world = refinement_command_world();
+        // Register CapabilityRegistry with one element class that has one
+        // domain-neutral obligation required by Schematic. No recipe families.
+        use crate::capability_registry::{
+            CapabilityRegistry, ElementClassDescriptor, ElementClassId, ObligationTemplate,
+        };
+        let mut registry = CapabilityRegistry::default();
+        let mut class_min_obligations = HashMap::new();
+        class_min_obligations.insert(
+            RefinementState::Schematic,
+            vec![ObligationTemplate {
+                id: ObligationId("load_path".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Schematic,
+            }],
+        );
+        registry.register_element_class(ElementClassDescriptor {
+            id: ElementClassId("synthetic_element".into()),
+            label: "Synthetic Element".into(),
+            description: "Domain-neutral test class".into(),
+            semantic_roles: Vec::new(),
+            class_min_obligations,
+            class_min_promotion_critical_paths: HashMap::new(),
+            parameter_schema: serde_json::Value::Null,
+        });
+        world.insert_resource(registry);
+        world
+    }
+
+    /// Spawn an entity with an ElementClassAssignment pointing at the
+    /// `synthetic_element` class, starting at Conceptual.
+    fn spawn_synthetic_entity(world: &mut World, eid: u64) -> Entity {
+        use crate::capability_registry::{ElementClassAssignment, ElementClassId};
+        world
+            .spawn((
+                ElementId(eid),
+                RefinementStateComponent {
+                    state: RefinementState::Conceptual,
+                },
+                ElementClassAssignment {
+                    element_class: ElementClassId("synthetic_element".into()),
+                    active_recipe: None,
+                },
+            ))
+            .id()
+    }
+
+    #[test]
+    fn promote_blocked_when_obligation_unresolved() {
+        let mut world = obligation_gate_world();
+        spawn_synthetic_entity(&mut world, 100);
+
+        // Attempting to promote to Schematic must fail because `load_path`
+        // is required_by_state = Schematic and is still Unresolved.
+        let err = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 100,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("unresolved obligation"),
+            "expected gate error, got: {err}"
+        );
+        assert!(err.contains("load_path"), "error should name the obligation: {err}");
+    }
+
+    #[test]
+    fn promote_allowed_after_obligation_deferred() {
+        let mut world = obligation_gate_world();
+        let entity = spawn_synthetic_entity(&mut world, 101);
+
+        // Manually install an ObligationSet with `load_path` marked Deferred.
+        world.entity_mut(entity).insert(ObligationSet {
+            entries: vec![Obligation {
+                id: ObligationId("load_path".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Schematic,
+                status: ObligationStatus::Deferred("pending structural engineer review".into()),
+            }],
+        });
+
+        let state = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 101,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .expect("promotion should succeed with Deferred obligation");
+        assert_eq!(state, RefinementState::Schematic);
+    }
+
+    #[test]
+    fn promote_allowed_after_obligation_waived() {
+        let mut world = obligation_gate_world();
+        let entity = spawn_synthetic_entity(&mut world, 102);
+
+        world.entity_mut(entity).insert(ObligationSet {
+            entries: vec![Obligation {
+                id: ObligationId("load_path".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Schematic,
+                status: ObligationStatus::Waived("out of scope for this phase".into()),
+            }],
+        });
+
+        let state = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 102,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .expect("promotion should succeed with Waived obligation");
+        assert_eq!(state, RefinementState::Schematic);
+    }
+
+    #[test]
+    fn promote_allowed_after_obligation_satisfied_by() {
+        let mut world = obligation_gate_world();
+        let entity = spawn_synthetic_entity(&mut world, 103);
+        // A child entity that "satisfies" the load_path obligation.
+        world.spawn((ElementId(999),));
+
+        world.entity_mut(entity).insert(ObligationSet {
+            entries: vec![Obligation {
+                id: ObligationId("load_path".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Schematic,
+                status: ObligationStatus::SatisfiedBy(999),
+            }],
+        });
+
+        let state = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 103,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .expect("promotion should succeed with SatisfiedBy obligation");
+        assert_eq!(state, RefinementState::Schematic);
+    }
+
+    #[test]
+    fn re_promote_preserves_prior_satisfied_by_status() {
+        // Change 3: re-promoting should NOT clobber a prior SatisfiedBy status.
+        let mut world = obligation_gate_world();
+        let entity = spawn_synthetic_entity(&mut world, 104);
+
+        // First promotion: manually pre-seed SatisfiedBy so it passes the gate.
+        world.entity_mut(entity).insert(ObligationSet {
+            entries: vec![Obligation {
+                id: ObligationId("load_path".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Schematic,
+                status: ObligationStatus::SatisfiedBy(888),
+            }],
+        });
+
+        apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 104,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .expect("first promotion should succeed");
+
+        // Demote back to Conceptual.
+        apply_demote_refinement(
+            &mut world,
+            DemoteRefinementRequest {
+                entity_element_id: 104,
+                target_state: RefinementState::Conceptual,
+            },
+        )
+        .expect("demote should succeed");
+
+        // Re-seed the obligation before the second promote so the gate passes.
+        // (The ObligationSet may have been cleared by demotion — check that
+        // re-promote re-installs with the *merged* status from the component.)
+        world.entity_mut(entity).insert(ObligationSet {
+            entries: vec![Obligation {
+                id: ObligationId("load_path".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Schematic,
+                status: ObligationStatus::SatisfiedBy(888),
+            }],
+        });
+
+        // Re-promote: the SatisfiedBy(888) status must survive the re-materialize.
+        apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 104,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .expect("re-promotion should succeed");
+
+        // Verify the SatisfiedBy survived the merge.
+        let obligation_set = world.get::<ObligationSet>(entity).expect("ObligationSet present");
+        let ob = obligation_set
+            .entries
+            .iter()
+            .find(|o| o.id.0 == "load_path")
+            .expect("load_path obligation present");
+        assert_eq!(
+            ob.status,
+            ObligationStatus::SatisfiedBy(888),
+            "SatisfiedBy status must survive re-promote (Change 3 merge)"
+        );
+    }
+
+    #[test]
+    fn obligation_not_in_force_does_not_block_lower_promote() {
+        // A class where full_spec is required by Constructible (not Schematic).
+        // Promoting to Schematic must NOT be blocked by an unresolved Constructible-level obligation.
+        use crate::capability_registry::{
+            CapabilityRegistry, ElementClassDescriptor, ElementClassAssignment, ElementClassId,
+            ObligationTemplate,
+        };
+        let mut world = refinement_command_world();
+        let mut registry = CapabilityRegistry::default();
+        let mut class_min_obligations = HashMap::new();
+        class_min_obligations.insert(
+            RefinementState::Constructible,
+            vec![ObligationTemplate {
+                id: ObligationId("full_spec".into()),
+                role: SemanticRole("documentation".into()),
+                required_by_state: RefinementState::Constructible,
+            }],
+        );
+        registry.register_element_class(ElementClassDescriptor {
+            id: ElementClassId("future_class".into()),
+            label: "Future Class".into(),
+            description: "Domain-neutral test class with late obligation".into(),
+            semantic_roles: Vec::new(),
+            class_min_obligations,
+            class_min_promotion_critical_paths: HashMap::new(),
+            parameter_schema: serde_json::Value::Null,
+        });
+        world.insert_resource(registry);
+
+        world.spawn((
+            ElementId(200),
+            RefinementStateComponent {
+                state: RefinementState::Conceptual,
+            },
+            crate::capability_registry::ElementClassAssignment {
+                element_class: ElementClassId("future_class".into()),
+                active_recipe: None,
+            },
+        ));
+
+        // Promoting to Schematic: the Constructible-level obligation is NOT in force.
+        let state = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 200,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .expect("Schematic promotion must not be blocked by Constructible obligation");
+        assert_eq!(state, RefinementState::Schematic);
     }
 }

@@ -144,6 +144,47 @@ pub struct AssemblyTypeDescriptor {
     pub expected_relation_types: Vec<String>,
     /// JSON Schema for assembly-level parameters.
     pub parameter_schema: serde_json::Value,
+    /// Substructure obligations the assembly must satisfy to be promoted to a
+    /// given refinement state (ADR-042 anti-bluff gate). Unlike
+    /// `ElementClassDescriptor::class_min_obligations`, which apply to a single
+    /// element, these are *member-composition* obligations: they assert that
+    /// the assembly contains enough members in the required roles, resolved to
+    /// the depth the target state demands. Empty = no machine-enforced ladder
+    /// (legacy permissive behaviour). See
+    /// [`crate::plugins::refinement::evaluate_assembly_member_obligations`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_obligations: Vec<AssemblyMemberObligationTemplate>,
+}
+
+/// A member-composition obligation an assembly type declares (ADR-042).
+///
+/// It asserts that, to legitimately claim a refinement state, an assembly must
+/// contain at least `min_count` members in role `member_role` — and, when
+/// `member_tracks_target_state` is set, that those members have themselves been
+/// resolved to at least the assembly's promotion target. The latter is what
+/// makes the refinement level a *claim about resolved content* rather than a
+/// free label: a `Detailed` house must contain `Detailed` walls, not stubs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct AssemblyMemberObligationTemplate {
+    /// Stable obligation id, unique within the assembly type.
+    pub id: ObligationId,
+    /// Severity classification (e.g. `"primary_structure"`, `"envelope"`),
+    /// reused by the validator severity ladder.
+    pub role: SemanticRole,
+    /// Member role string (matches `AssemblyMemberRef::role`) that satisfies
+    /// this obligation.
+    pub member_role: String,
+    /// Minimum number of matching members required.
+    pub min_count: usize,
+    /// Assembly refinement state at and above which this obligation is in
+    /// force. A promotion whose target is `>= required_by_state` must satisfy
+    /// it — so skipping intermediate levels does not skip the obligation.
+    pub required_by_state: RefinementState,
+    /// When `true`, each satisfying member must itself have reached at least
+    /// the assembly's promotion target state, enforcing the monotonic
+    /// resolved-content contract. When `false`, mere presence satisfies it.
+    pub member_tracks_target_state: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1413,6 +1454,13 @@ impl CapabilityRegistry {
         &self.assembly_type_descriptors
     }
 
+    /// Look up a registered assembly type descriptor by its `assembly_type` id.
+    pub fn assembly_type_descriptor(&self, assembly_type: &str) -> Option<&AssemblyTypeDescriptor> {
+        self.assembly_type_descriptors
+            .iter()
+            .find(|descriptor| descriptor.assembly_type == assembly_type)
+    }
+
     pub fn assembly_pattern_descriptors(&self) -> &[AssemblyPatternDescriptor] {
         &self.assembly_pattern_descriptors
     }
@@ -2030,6 +2078,7 @@ mod pp108_tests {
             }],
             expected_relation_types: vec!["attached_to".into()],
             parameter_schema: serde_json::json!({}),
+            member_obligations: Vec::new(),
         };
 
         let json = serde_json::to_string(&descriptor).unwrap();

@@ -35,6 +35,7 @@ pub mod identity;
 pub mod import;
 pub mod inference;
 pub mod input_ownership;
+pub mod interference;
 pub mod keymap;
 pub mod knowledge_assets;
 pub mod knowledge_persistence;
