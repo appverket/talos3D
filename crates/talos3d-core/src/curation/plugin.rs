@@ -41,6 +41,18 @@ impl Plugin for CurationPlugin {
             .resource_mut::<CapabilityRegistry>()
             .register_constraint(crate::plugins::interference::interference_constraint());
 
+        // Domain-neutral anti-bluff teeth: an Occurrence of a Definition that
+        // evaluates to zero/degenerate geometry renders nothing and must not
+        // be allowed to satisfy a geometry-bearing obligation. Registered here
+        // (same rationale as the interference constraint above) because the
+        // legacy `ValidationPlugin` is not wired into the live app, so the
+        // on-demand `run_validation` dispatch and the sweep can both see it.
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_constraint(
+                crate::plugins::validation::occurrence_geometry_non_degenerate_constraint(),
+            );
+
         app.init_resource::<SourceRegistry>()
             .init_resource::<NominationQueue>()
             .init_resource::<RecipeArtifactRegistry>()
