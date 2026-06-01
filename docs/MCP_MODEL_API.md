@@ -82,8 +82,11 @@ Bevy `StandardMaterial` path.
 Viewport renderer state is also available over MCP through
 `get_render_settings` and `set_render_settings`. Those tools expose
 tonemapping, exposure, SSAO, bloom, SSR, background color, grid visibility,
-paper fill, and drawing overlays so an agent can tune the working view or
-compose export-ready drawing views without simulating UI input.
+paper fill, X-Ray face transparency, and drawing overlays so an agent can tune
+the working view or compose export-ready drawing views without simulating UI
+input. X-Ray is also available as the `view.toggle_xray` command; invoking it
+without parameters toggles the user-facing view, while `enabled` can set an
+explicit on/off state for automation. The default X-Ray face alpha is `0.5`.
 
 Scene lighting is also available over MCP. Ambient lighting is explicit scene
 state, while directional, point, and spot lights are authored entities with

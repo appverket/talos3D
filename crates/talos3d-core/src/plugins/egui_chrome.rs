@@ -3177,7 +3177,7 @@ fn draw_render_settings_window(
                 ui.label(egui::RichText::new(paper_mode_status).small().color(CHROME_MUTED));
                 ui.checkbox(&mut settings.grid_enabled, "Show Grid");
                 if ui
-                    .checkbox(&mut settings.xray_enabled, "X-Ray Surfaces")
+                    .checkbox(&mut settings.xray_enabled, "X-Ray")
                     .changed()
                     && settings.xray_enabled
                 {
@@ -3186,7 +3186,7 @@ fn draw_render_settings_window(
                 ui.add_enabled_ui(settings.xray_enabled, |ui| {
                     ui.add(
                         egui::Slider::new(&mut settings.xray_surface_alpha, 0.05..=0.9)
-                            .text("X-Ray Alpha"),
+                            .text("Face Alpha"),
                     );
                 });
                 if ui
@@ -3214,7 +3214,7 @@ fn draw_render_settings_window(
                 });
                 ui.label(
                     egui::RichText::new(
-                        "X-ray swaps scene materials to Bevy transparent surfaces. Paper fill swaps scene materials to white unlit surfaces. Visible edges keep sharp and silhouette edges while hiding occluded edges. Wireframe remains a full construction overlay.",
+                        "X-Ray swaps scene materials to 50% transparent surfaces by default. Paper fill swaps scene materials to white unlit surfaces. Visible edges keep sharp and silhouette edges while hiding occluded edges. Wireframe remains a full construction overlay.",
                     )
                     .small()
                     .color(CHROME_MUTED),

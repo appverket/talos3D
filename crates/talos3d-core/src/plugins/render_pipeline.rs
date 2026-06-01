@@ -41,7 +41,7 @@ const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 const PAPER_BACKGROUND_RGB: [f32; 3] = [1.0, 1.0, 1.0];
 const PAPER_MM_PER_WORLD_M: f32 = 20.0;
-const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.32;
+const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.5;
 
 // ─── Settings resource ───────────────────────────────────────────────────────
 
@@ -287,15 +287,28 @@ impl Plugin for RenderPipelinePlugin {
             .register_command(
                 CommandDescriptor {
                     id: "view.toggle_xray".to_string(),
-                    label: "Toggle X-Ray".to_string(),
-                    description: "Toggle X-ray surface transparency.".to_string(),
+                    label: "X-Ray".to_string(),
+                    description: "Toggle X-Ray view, rendering scene faces 50% transparent."
+                        .to_string(),
                     category: CommandCategory::View,
-                    parameters: None,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "enabled": {
+                                "type": "boolean",
+                                "description": "Set X-Ray on or off. Omit to toggle the current state."
+                            },
+                            "xray_surface_alpha": {
+                                "type": "number",
+                                "minimum": 0.02,
+                                "maximum": 0.95,
+                                "description": "Optional face alpha override. Defaults to 0.5."
+                            }
+                        }
+                    })),
                     default_shortcut: None,
                     icon: Some("icon.view_xray".to_string()),
-                    hint: Some(
-                        "Make surfaces semi-transparent to inspect hidden geometry".to_string(),
-                    ),
+                    hint: Some("Make faces 50% transparent to inspect hidden geometry".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
@@ -387,9 +400,20 @@ fn execute_toggle_grid(world: &mut World, _: &Value) -> Result<CommandResult, St
     })
 }
 
-fn execute_toggle_xray(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+fn execute_toggle_xray(world: &mut World, parameters: &Value) -> Result<CommandResult, String> {
     update_render_settings(world, "", |settings| {
-        settings.xray_enabled = !settings.xray_enabled;
+        if let Some(alpha) = parameters
+            .get("xray_surface_alpha")
+            .and_then(Value::as_f64)
+            .map(|alpha| alpha as f32)
+        {
+            settings.xray_surface_alpha = alpha.clamp(0.02, 0.95);
+        }
+
+        settings.xray_enabled = parameters
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(!settings.xray_enabled);
         if settings.xray_enabled {
             settings.paper_fill_enabled = false;
         }
@@ -1401,6 +1425,38 @@ mod tests {
     }
 
     #[test]
+    fn xray_command_accepts_explicit_state_for_mcp_invocation() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings::default())
+            .insert_resource(StatusBarData::default());
+
+        execute_toggle_xray(
+            app.world_mut(),
+            &serde_json::json!({
+                "enabled": true,
+                "xray_surface_alpha": 0.62
+            }),
+        )
+        .expect("xray should turn on explicitly");
+
+        let settings = app.world().resource::<RenderSettings>();
+        assert!(settings.xray_enabled);
+        assert_eq!(settings.xray_surface_alpha, 0.62);
+
+        execute_toggle_xray(
+            app.world_mut(),
+            &serde_json::json!({
+                "enabled": false
+            }),
+        )
+        .expect("xray should turn off explicitly");
+
+        let settings = app.world().resource::<RenderSettings>();
+        assert!(!settings.xray_enabled);
+        assert_eq!(settings.xray_surface_alpha, 0.62);
+    }
+
+    #[test]
     fn paper_fill_wins_when_material_modes_are_both_enabled() {
         let settings = RenderSettings {
             paper_fill_enabled: true,
@@ -1423,10 +1479,10 @@ mod tests {
             ..Default::default()
         };
 
-        let xray = xray_material_from(&source, 0.25);
+        let xray = xray_material_from(&source, DEFAULT_XRAY_SURFACE_ALPHA);
 
         assert_eq!(xray.alpha_mode, AlphaMode::Blend);
-        assert_eq!(xray.base_color.alpha(), 0.25);
+        assert_eq!(xray.base_color.alpha(), 0.5);
         assert_eq!(xray.cull_mode, None);
         assert_eq!(
             xray.base_color.to_srgba().red,
