@@ -1,14 +1,20 @@
-//! Bevy plugin that connects the running desktop binary to the talos-catalog
-//! HTTP service via a long-poll change feed.
+//! Bevy plugin that connects the running desktop binary (or browser) to the
+//! talos-catalog HTTP service via a long-poll change feed.
 //!
 //! # Activation
 //!
-//! The plugin always inserts the [`CatalogKindRegistry`] resource so other
-//! plugins can declare their kinds, but it only spawns the catalog poller +
-//! publish worker thread when the `TALOS3D_CATALOG_URL` environment variable
-//! is set. When unset, kind registrations remain inert.
+//! The plugin always inserts the [`CatalogKindRegistry`] and
+//! [`CatalogTransportConfig`] resources so other plugins can declare their
+//! kinds, but it only spawns the catalog poller/worker when a catalog URL is
+//! resolved:
 //!
-//! Set `TALOS3D_ACCOUNT_ID` (optional UUID) to enable tenant-scoped resolution.
+//! - **Native**: `TALOS3D_CATALOG_URL` env var drives
+//!   [`ActiveArtifactStore`] selection (cloud vs local-file fallback).
+//! - **wasm32**: [`CatalogTransportConfig::url`] if set, else a
+//!   `<meta name="talos3d-catalog-url">` in the host document, else inert.
+//!
+//! Set `TALOS3D_ACCOUNT_ID` / `CatalogTransportConfig::account_id` (optional
+//! UUID) to enable tenant-scoped resolution.
 //! Set `TALOS3D_PUBLISHED_BY` (optional UUID) to attribute seeded artifacts.
 //!
 //! # Substrate
@@ -33,16 +39,28 @@
 //! # Architecture
 //!
 //! ```text
-//! OS thread "talos3d-catalog-poller"
-//!   └── current-thread tokio runtime
-//!       ├── ChangePoller (async long-poll loop)
-//!       │   └── per-event: fetch blob if descriptor.auto_fetch_body
-//!       │       └── tokio mpsc -> std::sync::mpsc bridge
-//!       └── publish-job consumer
-//!           └── per PublishJob: client.publish_artifact(...)
-//!               └── result -> std::sync::mpsc bridge
+//! Native:
+//!   OS thread "talos3d-catalog-poller"
+//!     └── current-thread tokio runtime
+//!         ├── ChangePoller (async long-poll loop)
+//!         │   └── per-event: fetch blob if descriptor.auto_fetch_body
+//!         │       └── tokio mpsc -> std::sync::mpsc bridge
+//!         └── publish-job consumer
+//!             └── per PublishJob: client.publish_artifact(...)
+//!                 └── result -> std::sync::mpsc bridge
 //!
-//! Bevy main thread
+//! wasm32 (PP-WCT-1 Stage B):
+//!   Bevy Update: wasm_poll_catalog_system (2-second timer, no JS timer dep)
+//!     └── when timer fires AND no fetch in-flight:
+//!         wasm_bindgen_futures::spawn_local(async {
+//!             GET {base}/v1/changes?since={cursor}&kinds=...
+//!             for each auto-fetch kind: GET {base}/v1/blobs/{hash}
+//!             send CatalogBridgeMessage per event into std::sync::mpsc
+//!             advance stored cursor
+//!         })
+//!   NOTE: publish-from-web is deferred to PP-WCT-2.
+//!
+//! Bevy main thread (both targets):
 //!   PreUpdate: drain_catalog_changes_system
 //!     -> MessageWriter<RemoteCatalogChange>
 //!   PreUpdate: apply_artifact_changes_system  (exclusive, descriptor-driven)
@@ -57,7 +75,7 @@
 //! ```
 //!
 //! The dedicated OS thread with its own `current_thread` runtime keeps
-//! async-tokio completely isolated from the Bevy main loop.
+//! async-tokio completely isolated from the Bevy main loop on native.
 
 // The catalog substrate (kind registry, descriptors, the generic apply /
 // publish / seed pipeline, events, and the plugin) is platform-neutral and
@@ -67,7 +85,7 @@
 // adds the wasm browser-fetch transport.
 mod inner {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
     };
     // Native-only: the worker spawner uses OS threads.
@@ -89,9 +107,49 @@ mod inner {
         definition_publish_request, material_def_publish_request, ChangeEvent,
         PublishArtifactRequest, PublishError, PublishScope,
     };
+    // ChangesResponse is only decoded on wasm (the native path uses the store's
+    // own async subscription loop which returns ChangeEvents directly).
+    #[cfg(target_arch = "wasm32")]
+    use crate::storage::wire::ChangesResponse;
     // Native-only: the store trait + concrete stores back the transport workers.
     #[cfg(not(target_arch = "wasm32"))]
     use crate::storage::{ActiveArtifactStore, ArtifactStore, LocalFileArtifactStore};
+
+    // wasm32-only: browser fetch + futures glue for the change-feed transport.
+    #[cfg(target_arch = "wasm32")]
+    use std::{cell::Cell, rc::Rc, sync::mpsc::Sender};
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_futures::spawn_local;
+
+    // ---- Transport configuration (platform-neutral) -------------------------
+
+    /// Platform-neutral configuration for the catalog change-feed transport.
+    ///
+    /// Always registered by [`RemoteCatalogPlugin`] (via `init_resource`) so
+    /// host apps can insert it before plugin build to supply a catalog URL
+    /// without environment variables.
+    ///
+    /// **Native**: `TALOS3D_CATALOG_URL` / `TALOS3D_ACCOUNT_ID` env vars take
+    /// precedence over this resource (they drive [`ActiveArtifactStore`]
+    /// selection inside the existing `pick_default_store_system`).
+    ///
+    /// **wasm32**: URL resolution order is:
+    /// 1. [`CatalogTransportConfig::url`] if `Some`.
+    /// 2. `<meta name="talos3d-catalog-url" content="…">` in the document.
+    /// 3. `None` → transport stays inert.
+    ///
+    /// Account ID resolution (wasm32):
+    /// 1. [`CatalogTransportConfig::account_id`] if `Some`.
+    /// 2. `<meta name="talos3d-catalog-account" content="…">` in the document.
+    /// 3. `None` → no `&account=…` query parameter appended.
+    #[derive(Resource, Default, Clone, Debug)]
+    pub struct CatalogTransportConfig {
+        /// Base URL of the talos-catalog service, e.g.
+        /// `"https://catalog.example.com"`. No trailing slash.
+        pub url: Option<String>,
+        /// Optional tenant account UUID for scoped artifact resolution.
+        pub account_id: Option<Uuid>,
+    }
 
     // ---- Messages -----------------------------------------------------------
 
@@ -324,6 +382,47 @@ mod inner {
         pub outcome: PublishArtifactOutcome,
     }
 
+    // ---- wasm32 poll state (NonSend resource) --------------------------------
+
+    /// Timer resource for the wasm browser-fetch poll loop.
+    ///
+    /// A plain `Resource` is fine here because `Timer` is `Send`; only
+    /// `WasmCatalogPollState` (which holds `Rc`) must be `NonSend`.
+    #[cfg(target_arch = "wasm32")]
+    #[derive(Resource)]
+    pub(super) struct WasmCatalogPollTimer {
+        pub timer: Timer,
+    }
+
+    /// Non-send resource that holds the wasm poll loop state.
+    ///
+    /// Uses `Rc<Cell<…>>` because wasm32 is single-threaded: we share the
+    /// cursor and in-flight flag between the Bevy system and the
+    /// `spawn_local` future without requiring `Send`. Do NOT attempt to make
+    /// these `Arc<AtomicXxx>` — the wasm target has no scheduler preemption
+    /// and the borrow discipline of `Rc` is correct here.
+    ///
+    /// `publish_tx` is held only to satisfy the `RemoteCatalogState` channel
+    /// contract; publish-from-web is deferred to PP-WCT-2 and the receiver
+    /// is intentionally dropped after construction so any accidental send
+    /// would immediately produce a disconnected-channel error rather than a
+    /// silent backlog.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) struct WasmCatalogPollState {
+        /// Base URL (no trailing slash).
+        pub base_url: String,
+        /// Optional account UUID for `&account=` query param.
+        pub account_id: Option<Uuid>,
+        /// Cursor advanced after each successful poll.
+        pub cursor: Rc<Cell<i64>>,
+        /// `true` while a `spawn_local` fetch is in-flight.
+        pub in_flight: Rc<Cell<bool>>,
+        /// Clone of the sender side of the change-message channel.
+        pub change_tx: Sender<CatalogBridgeMessage>,
+        /// Snapshot of the auto-fetch kind set taken at transport spawn time.
+        pub auto_fetch_kinds: HashSet<String>,
+    }
+
     // ---- Resource -----------------------------------------------------------
 
     /// Bevy resource that holds the channels into the substrate's two
@@ -360,9 +459,11 @@ mod inner {
 
     impl Plugin for RemoteCatalogPlugin {
         fn build(&self, app: &mut App) {
-            // The kind registry is always available so other plugins can
-            // register their kinds regardless of which store is active.
+            // The kind registry and transport config are always available so
+            // other plugins can declare kinds and supply a URL before the
+            // transport is spawned.
             app.init_resource::<CatalogKindRegistry>();
+            app.init_resource::<CatalogTransportConfig>();
             register_builtin_kinds(app);
 
             app.add_message::<RemoteCatalogChange>()
@@ -391,31 +492,21 @@ mod inner {
             // plugin) has flushed and an existing ActiveArtifactStore is
             // observable; `.chain()` enforces fallback-before-worker-spawn.
             //
-            // wasm32: no transport yet. The substrate above is fully present
-            // but inert — nothing inserts RemoteCatalogState, so the apply /
-            // publish systems early-return and seeding is a no-op. PP-WCT-1
-            // Stage B adds the browser-fetch change-feed transport here.
+            // wasm32 (PP-WCT-1 Stage B): spawn_wasm_transport_system inserts
+            // RemoteCatalogState and the NonSend WasmCatalogPollState when a
+            // URL is resolvable; wasm_poll_catalog_system drives the 2-second
+            // fetch loop each Update tick thereafter.
             #[cfg(not(target_arch = "wasm32"))]
             app.add_systems(
                 PostStartup,
                 (pick_default_store_system, spawn_store_workers_system).chain(),
             );
             #[cfg(target_arch = "wasm32")]
-            app.add_systems(PostStartup, wasm_transport_pending_system);
+            {
+                app.add_systems(PostStartup, spawn_wasm_transport_system);
+                app.add_systems(Update, wasm_poll_catalog_system);
+            }
         }
-    }
-
-    /// wasm32 placeholder for the catalog transport (PP-WCT-1 Stage B). Runs
-    /// once at `PostStartup` to make the gap visible at runtime: the catalog
-    /// substrate is present (kinds register, the apply path is wired, bundled
-    /// seeding is available) but no change-feed transport exists yet on web, so
-    /// live updates do not flow. The browser-fetch transport replaces this.
-    #[cfg(target_arch = "wasm32")]
-    fn wasm_transport_pending_system() {
-        bevy::log::debug!(
-            "remote_catalog: wasm change-feed transport not yet implemented \
-             (PP-WCT-1 Stage B); catalog substrate present but inert"
-        );
     }
 
     /// Startup system: installs the default
@@ -448,6 +539,352 @@ mod inner {
                 error!(error = %e, "failed to open local-file store; substrate disabled");
             }
         }
+    }
+
+    // ---- wasm32 transport systems -------------------------------------------
+
+    /// wasm32 browser-fetch catalog change-feed transport (PP-WCT-1 Stage B).
+    ///
+    /// # What this does
+    ///
+    /// Runs once at `PostStartup` as an exclusive world system. Resolves the
+    /// catalog base URL from [`CatalogTransportConfig`] (priority 1) or from
+    /// the document `<meta name="talos3d-catalog-url">` element (priority 2).
+    /// If no URL can be resolved the substrate remains inert — no
+    /// [`RemoteCatalogState`] is inserted.
+    ///
+    /// When a URL is available it:
+    /// - Creates the `std::sync::mpsc` channels that the shared drain/apply
+    ///   pipeline expects.
+    /// - Inserts [`RemoteCatalogState`] (the `Send` resource that the
+    ///   platform-neutral apply path drains).
+    /// - Inserts [`WasmCatalogPollTimer`] (2-second repeating Bevy timer).
+    /// - Inserts [`WasmCatalogPollState`] as a `NonSend` resource (holds
+    ///   `Rc<Cell<…>>` — wasm is single-threaded).
+    ///
+    /// # Not yet implemented (PP-WCT-2)
+    ///
+    /// Publish-from-web: the publish channels are created and wired into
+    /// `RemoteCatalogState` for structural completeness, but the publish
+    /// receiver is immediately dropped. Any [`PublishArtifactRequested`]
+    /// message on wasm will log a warning and be silently dropped by the
+    /// existing `publish_artifact_requests_system` when it tries to send into
+    /// the disconnected channel.
+    ///
+    /// # Live end-to-end verification
+    ///
+    /// The browser + catalog end-to-end is verified at deploy time; there is
+    /// no running browser or catalog service in CI. The pure ingest path
+    /// (change event → [`CatalogBridgeMessage`] → apply → registry) is
+    /// covered by native unit tests via `ingest_change_event`.
+    #[cfg(target_arch = "wasm32")]
+    fn spawn_wasm_transport_system(world: &mut World) {
+        // 1. Resolve base URL.
+        let base_url = {
+            let config = world.resource::<CatalogTransportConfig>();
+            match resolve_wasm_url(config) {
+                Some(u) => u,
+                None => {
+                    bevy::log::debug!(
+                        "remote_catalog (wasm): no catalog URL configured \
+                         (set CatalogTransportConfig::url or \
+                         <meta name=\"talos3d-catalog-url\"> in the document); \
+                         substrate present but inert"
+                    );
+                    return;
+                }
+            }
+        };
+
+        // 2. Resolve optional account id.
+        let account_id = {
+            let config = world.resource::<CatalogTransportConfig>();
+            resolve_wasm_account_id(config)
+        };
+
+        // 3. Snapshot auto-fetch kinds.
+        let auto_fetch_kinds: HashSet<String> = world
+            .resource::<CatalogKindRegistry>()
+            .auto_fetch_kinds()
+            .into_iter()
+            .collect();
+
+        // 4. Create channels.
+        let (change_tx, change_rx) = std::sync::mpsc::channel::<CatalogBridgeMessage>();
+        // Publish channels: receiver dropped immediately — PP-WCT-2.
+        let (publish_tx, _publish_rx_dropped) = std::sync::mpsc::channel::<PublishJob>();
+        let (_publish_results_tx_dropped, publish_results_rx) =
+            std::sync::mpsc::channel::<PublishJobResult>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        bevy::log::info!(
+            "remote_catalog (wasm): browser fetch transport active at {base_url} \
+             (publish-from-web deferred to PP-WCT-2)"
+        );
+
+        // 5. Insert the Send resource the apply pipeline drains.
+        world.insert_resource(RemoteCatalogState {
+            description: format!("browser-fetch:{base_url}"),
+            rx: Mutex::new(change_rx),
+            shutdown,
+            publish_tx: Mutex::new(publish_tx),
+            publish_results_rx: Mutex::new(publish_results_rx),
+        });
+
+        // 6. Insert the poll timer (2-second repeating).
+        world.insert_resource(WasmCatalogPollTimer {
+            timer: Timer::from_seconds(2.0, TimerMode::Repeating),
+        });
+
+        // 7. Insert the NonSend poll state (requires exclusive world access —
+        // the system already is exclusive because it takes `&mut World`).
+        world.insert_non_send_resource(WasmCatalogPollState {
+            base_url,
+            account_id,
+            cursor: Rc::new(Cell::new(0i64)),
+            in_flight: Rc::new(Cell::new(false)),
+            change_tx,
+            auto_fetch_kinds,
+        });
+    }
+
+    /// Resolves the catalog base URL for wasm:
+    /// 1. [`CatalogTransportConfig::url`] if `Some`.
+    /// 2. `<meta name="talos3d-catalog-url" content="…">` in the document.
+    /// 3. `None`.
+    #[cfg(target_arch = "wasm32")]
+    fn resolve_wasm_url(config: &CatalogTransportConfig) -> Option<String> {
+        if let Some(url) = &config.url {
+            return Some(url.clone());
+        }
+        read_meta_content("talos3d-catalog-url")
+    }
+
+    /// Resolves the optional account UUID for wasm:
+    /// 1. [`CatalogTransportConfig::account_id`] if `Some`.
+    /// 2. `<meta name="talos3d-catalog-account" content="…">` parsed as UUID.
+    /// 3. `None`.
+    #[cfg(target_arch = "wasm32")]
+    fn resolve_wasm_account_id(config: &CatalogTransportConfig) -> Option<Uuid> {
+        if let Some(id) = config.account_id {
+            return Some(id);
+        }
+        read_meta_content("talos3d-catalog-account")
+            .and_then(|s| Uuid::parse_str(&s).ok())
+    }
+
+    /// Reads `content` attribute of `<meta name="{name}">` from the document.
+    /// Returns `None` if the document or element is absent, or if the
+    /// attribute is missing / empty.
+    #[cfg(target_arch = "wasm32")]
+    fn read_meta_content(name: &str) -> Option<String> {
+        let window = web_sys::window()?;
+        let document = window.document()?;
+        let selector = format!("meta[name=\"{name}\"]");
+        // query_selector returns Result<Option<Element>, JsValue>.
+        let element = document
+            .query_selector(&selector)
+            .ok()
+            .flatten()?;
+        let content = element.get_attribute("content")?;
+        if content.is_empty() { None } else { Some(content) }
+    }
+
+    /// wasm32 Update system: ticks the poll timer and, when it fires and no
+    /// fetch is already in-flight, spawns a `spawn_local` future that:
+    ///
+    /// 1. `GET {base}/v1/changes?since={cursor}&kinds={kinds}&limit=200`
+    ///    (with optional `&account={uuid}`).
+    /// 2. For each returned [`ChangeEvent`] whose `kind` is in the
+    ///    auto-fetch set: `GET {base}/v1/blobs/{content_hash}`.
+    /// 3. Sends each [`CatalogBridgeMessage`] into the `std::sync::mpsc`
+    ///    channel that [`drain_catalog_changes_system`] drains each tick.
+    /// 4. Advances the stored cursor to `next_cursor`.
+    /// 5. Clears the in-flight flag (also clears it on error so the next
+    ///    tick retries — errors are logged, not fatal).
+    ///
+    /// # Live end-to-end verification
+    ///
+    /// The browser + catalog end-to-end is verified at deploy time; there is
+    /// no running browser or catalog service in CI. See `ingest_change_event`
+    /// for the native-testable pure transform layer.
+    #[cfg(target_arch = "wasm32")]
+    fn wasm_poll_catalog_system(
+        time: Res<Time>,
+        poll_timer: Option<ResMut<WasmCatalogPollTimer>>,
+        poll_state: Option<NonSend<WasmCatalogPollState>>,
+    ) {
+        let (Some(mut poll_timer), Some(poll_state)) = (poll_timer, poll_state) else {
+            return;
+        };
+
+        poll_timer.timer.tick(time.delta());
+        if !poll_timer.timer.just_finished() {
+            return;
+        }
+        if poll_state.in_flight.get() {
+            return;
+        }
+
+        poll_state.in_flight.set(true);
+
+        // Clone the Rc handles + owned values to move into the async future.
+        // Rc is safe here because wasm is single-threaded and spawn_local
+        // never crosses a thread boundary.
+        let base_url = poll_state.base_url.clone();
+        let account_id = poll_state.account_id;
+        let cursor_cell = Rc::clone(&poll_state.cursor);
+        let in_flight_cell = Rc::clone(&poll_state.in_flight);
+        let change_tx = poll_state.change_tx.clone();
+        let auto_fetch_kinds = poll_state.auto_fetch_kinds.clone();
+
+        spawn_local(async move {
+            let result =
+                wasm_fetch_poll(&base_url, account_id, &cursor_cell, &change_tx, &auto_fetch_kinds)
+                    .await;
+            if let Err(err) = result {
+                bevy::log::warn!(
+                    "remote_catalog (wasm): poll error: {}; will retry next tick",
+                    err
+                );
+            }
+            in_flight_cell.set(false);
+        });
+    }
+
+    /// Async inner body of the wasm poll loop. Separated from the system so
+    /// error propagation is clean — the system clears `in_flight` after `await`.
+    #[cfg(target_arch = "wasm32")]
+    async fn wasm_fetch_poll(
+        base_url: &str,
+        account_id: Option<Uuid>,
+        cursor_cell: &Rc<Cell<i64>>,
+        change_tx: &Sender<CatalogBridgeMessage>,
+        auto_fetch_kinds: &HashSet<String>,
+    ) -> Result<(), String> {
+        use gloo_net::http::Request;
+
+        let cursor = cursor_cell.get();
+
+        // 1. Build the changes URL. The `kinds` query param is the
+        // comma-separated subscription filter. We use the auto-fetch kinds,
+        // which matches the native subscription exactly (it also filters on
+        // `registry.auto_fetch_kinds()` — see `spawn_store_workers_system`).
+        // Today every built-in kind is auto-fetch, so this covers all kinds;
+        // subscribing to non-auto-fetch kinds (delivered with `body: None`) is
+        // future work shared with the native path.
+        let kinds_param: String = auto_fetch_kinds
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut url = format!(
+            "{base_url}/v1/changes?since={cursor}&kinds={kinds_param}&limit=200"
+        );
+        if let Some(acct) = account_id {
+            url.push_str(&format!("&account={acct}"));
+        }
+
+        let changes_resp = Request::get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("changes GET failed: {e}"))?;
+
+        if !changes_resp.ok() {
+            return Err(format!(
+                "changes GET returned status {}",
+                changes_resp.status()
+            ));
+        }
+
+        let payload: ChangesResponse = changes_resp
+            .json::<ChangesResponse>()
+            .await
+            .map_err(|e| format!("changes JSON parse failed: {e}"))?;
+
+        // 2. For each event: optionally fetch blob, then send message.
+        for event in payload.changes {
+            let content_hash = event.content_hash.clone();
+            let kind = event.kind.clone();
+
+            let body: Option<Value> = if auto_fetch_kinds.contains(&kind) {
+                let blob_url = format!("{base_url}/v1/blobs/{content_hash}");
+                match Request::get(&blob_url).send().await {
+                    Ok(resp) if resp.ok() => {
+                        match resp.json::<Value>().await {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                bevy::log::warn!(
+                                    "remote_catalog (wasm): blob JSON parse failed \
+                                     for hash={content_hash}: {e}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        bevy::log::warn!(
+                            "remote_catalog (wasm): blob GET status {} \
+                             for hash={content_hash}",
+                            resp.status()
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        bevy::log::warn!(
+                            "remote_catalog (wasm): blob GET failed \
+                             for hash={content_hash}: {e}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Use ingest_change_event to fold the blob decision into the
+            // canonical message type — but since we already fetched above,
+            // we pass a simple closure that returns the pre-fetched body.
+            let already_fetched = body;
+            let msg = ingest_change_event(event, auto_fetch_kinds, |_hash| already_fetched.clone());
+            if change_tx.send(msg).is_err() {
+                // Receiver dropped (app shutting down).
+                return Err("change_tx channel closed".to_owned());
+            }
+        }
+
+        // 3. Advance cursor.
+        cursor_cell.set(payload.next_cursor);
+        Ok(())
+    }
+
+    // ---- Platform-neutral ingest helper -------------------------------------
+
+    /// Converts a [`ChangeEvent`] into a [`CatalogBridgeMessage`], calling
+    /// `fetch_blob` only when the event's `kind` is in `auto_fetch_kinds`.
+    ///
+    /// This function is intentionally free of wasm/fetch types so it can be
+    /// unit-tested on the native host target. The caller supplies a
+    /// `fetch_blob` closure that abstracts the transport (OS blocking read,
+    /// async browser fetch result, or a test stub).
+    ///
+    /// `fetch_blob` receives the `content_hash` and returns `Some(Value)` on
+    /// success or `None` on failure (the caller is responsible for logging).
+    // Used by the wasm transport (cfg'd away on native) and by tests; the
+    // native non-test build never calls it directly, hence the scoped allow.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(super) fn ingest_change_event(
+        event: ChangeEvent,
+        auto_fetch_kinds: &HashSet<String>,
+        fetch_blob: impl FnOnce(&str) -> Option<Value>,
+    ) -> CatalogBridgeMessage {
+        let body = if auto_fetch_kinds.contains(&event.kind) {
+            fetch_blob(&event.content_hash)
+        } else {
+            None
+        };
+        CatalogBridgeMessage { event, body }
     }
 
     // ---- Built-in kinds (definition.v1 + material_def.v1) -------------------
@@ -1277,6 +1714,101 @@ mod inner {
             assert_eq!(app.world().resource::<Messages<ArtifactApplied>>().len(), 0);
         }
 
+        // ---- ingest_change_event unit tests ---------------------------------
+
+        fn make_auto_fetch_set(kinds: &[&str]) -> HashSet<String> {
+            kinds.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn ingest_auto_fetch_kind_calls_fetcher_and_sets_body() {
+            let event = make_change_event("definition.v1");
+            let auto_fetch = make_auto_fetch_set(&["definition.v1"]);
+            let stub_body = serde_json::json!({ "id": "stub-def", "name": "stub" });
+            let stub_body_clone = stub_body.clone();
+            let mut fetcher_called = false;
+
+            let msg = ingest_change_event(event.clone(), &auto_fetch, |hash| {
+                fetcher_called = true;
+                assert_eq!(hash, event.content_hash);
+                Some(stub_body_clone.clone())
+            });
+
+            assert!(fetcher_called, "fetcher must be called for auto-fetch kind");
+            assert_eq!(msg.body.as_ref(), Some(&stub_body));
+            assert_eq!(msg.event.kind, "definition.v1");
+        }
+
+        #[test]
+        fn ingest_non_auto_fetch_kind_skips_fetcher_and_body_is_none() {
+            let event = make_change_event("recipe.v1");
+            let auto_fetch = make_auto_fetch_set(&["definition.v1"]); // recipe.v1 NOT in set
+
+            let msg = ingest_change_event(event.clone(), &auto_fetch, |_hash| {
+                panic!("fetcher must NOT be called for non-auto-fetch kind");
+            });
+
+            assert!(msg.body.is_none(), "body must be None for non-auto-fetch kind");
+            assert_eq!(msg.event.kind, "recipe.v1");
+        }
+
+        // ---- end-to-end native ingest→apply test ----------------------------
+
+        /// Builds a `ChangesResponse` with a `definition.v1` event, runs each
+        /// event through `ingest_change_event` with a stub blob, pushes the
+        /// resulting `CatalogBridgeMessage`s through the existing apply path,
+        /// and asserts that the [`DefinitionRegistry`] gained the entry and
+        /// [`DefinitionRegistryReloaded`] fired.
+        ///
+        /// This test proves the ingest→apply contract on the native host target
+        /// without any browser or catalog service.
+        #[test]
+        fn ingest_to_apply_definition_e2e() {
+            let def = make_definition("e2e-def-001");
+            let def_id = def.id.clone();
+            let def_body = serde_json::to_value(&def).unwrap();
+            let event = make_change_event("definition.v1");
+
+            let auto_fetch = make_auto_fetch_set(&["definition.v1"]);
+            let stub_body = def_body.clone();
+            let msg = ingest_change_event(event, &auto_fetch, |_hash| Some(stub_body));
+
+            // Push message through the apply path.
+            let mut app = build_apply_test_app();
+            app.update();
+
+            app.world_mut()
+                .resource_mut::<Messages<RemoteCatalogChange>>()
+                .write(RemoteCatalogChange {
+                    event: msg.event,
+                    body: msg.body,
+                });
+
+            app.update();
+
+            assert!(
+                app.world()
+                    .resource::<DefinitionRegistry>()
+                    .get(&def_id)
+                    .is_some(),
+                "definition must be present in registry after apply"
+            );
+            assert_eq!(
+                app.world()
+                    .resource::<Messages<DefinitionRegistryReloaded>>()
+                    .len(),
+                1,
+                "DefinitionRegistryReloaded must fire exactly once"
+            );
+            assert_eq!(
+                app.world()
+                    .resource::<Messages<ArtifactApplied>>()
+                    .len(),
+                1,
+                "ArtifactApplied must fire exactly once"
+            );
+        }
+
         // ---- publish tests --------------------------------------------------
 
         #[test]
@@ -1337,8 +1869,8 @@ mod inner {
 pub use crate::storage::wire::PublishScope;
 pub use inner::{
     ArtifactApplied, ArtifactApplier, ArtifactSerializer, BundledContentSeedConfig,
-    BundledContentSeeded, CatalogKindDescriptor, CatalogKindRegistry, DefinitionRegistryReloaded,
-    MaterialRegistryReloaded, PublishArtifactOutcome, PublishArtifactRequested,
-    PublishArtifactResult, PublishRequestBuilder, RemoteCatalogChange, RemoteCatalogPlugin,
-    RemoteCatalogState, SeedLocalIds,
+    BundledContentSeeded, CatalogKindDescriptor, CatalogKindRegistry, CatalogTransportConfig,
+    DefinitionRegistryReloaded, MaterialRegistryReloaded, PublishArtifactOutcome,
+    PublishArtifactRequested, PublishArtifactResult, PublishRequestBuilder, RemoteCatalogChange,
+    RemoteCatalogPlugin, RemoteCatalogState, SeedLocalIds,
 };
