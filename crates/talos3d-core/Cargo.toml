@@ -75,6 +75,12 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"
+# PP-WCT-1 Stage B: browser fetch transport for the catalog change-feed.
+# gloo-net provides a safe async HTTP client over the browser Fetch API.
+# wasm-bindgen-futures bridges Rust Futures to JS Promises so we can drive
+# the async poll loop from spawn_local without a JS timer dependency.
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
+wasm-bindgen-futures = "0.4"
 uuid = { version = "1", features = ["js"] }
 web-sys = { version = "0.3", features = [
     "Document",
