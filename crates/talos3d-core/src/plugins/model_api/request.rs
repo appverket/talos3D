@@ -2425,6 +2425,9 @@ fn handle_acquire_corpus_passage(
         jurisdiction: request.jurisdiction.clone(),
         classification: request.classification.clone(),
         license: request.license.clone(),
+        // Acquiring a passage does not auto-promote it to a proactive must-read
+        // card; that is a deliberate data-authoring step in the passage JSON.
+        proactive_guidance: None,
     };
 
     let persisted_path = if request.persist {

@@ -211,6 +211,37 @@ pub struct PassageEntry {
     pub text: String,
     /// Provenance metadata: source, version, license, jurisdiction.
     pub provenance: CorpusProvenance,
+    /// Optional proactive-guidance promotion. When `Some`, this passage is not
+    /// only reactively discoverable (via `Finding` backlinks / corpus gaps) but
+    /// is surfaced *up front* as a must-read guidance card in the capability
+    /// snapshot. This is the data-driven "skill" hook: a passage that encodes
+    /// generative authoring knowledge (e.g. the recursive substrate chain) can
+    /// declare itself a proactive must-read purely in its JSON, with no code
+    /// change. Core reads the flag; the knowledge lives entirely in data.
+    pub proactive: Option<ProactivePassageGuidance>,
+}
+
+/// Data-driven promotion of a corpus passage into a proactive must-read
+/// guidance card. Populated from the passage's JSON; consumed generically by
+/// the capability-snapshot / guidance-card surface. Domain-neutral: core never
+/// inspects which passage it is, only that it asked to be surfaced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProactivePassageGuidance {
+    /// Card title shown in the snapshot's must-read list.
+    pub title: String,
+    /// Short, decisive summary the agent sees before authoring. Should state
+    /// the generative rule, not just point at the passage.
+    pub summary: String,
+    /// Task tags for card filtering (e.g. `"authoring"`, `"substrate"`).
+    #[serde(default)]
+    pub task_tags: Vec<String>,
+    /// Lower numbers sort earlier in the must-read list. Defaults to 100.
+    #[serde(default = "default_proactive_priority")]
+    pub priority: i32,
+}
+
+fn default_proactive_priority() -> i32 {
+    100
 }
 
 // ---------------------------------------------------------------------------
@@ -235,13 +266,39 @@ impl CorpusPassageRegistry {
         text: impl Into<String>,
         provenance: CorpusProvenance,
     ) {
+        self.register_with_guidance(passage_ref, text, provenance, None);
+    }
+
+    /// Register a passage, optionally promoting it to a proactive must-read
+    /// guidance card via [`ProactivePassageGuidance`]. Overwrites any existing
+    /// entry with the same ref.
+    pub fn register_with_guidance(
+        &mut self,
+        passage_ref: PassageRef,
+        text: impl Into<String>,
+        provenance: CorpusProvenance,
+        proactive: Option<ProactivePassageGuidance>,
+    ) {
         self.passages.insert(
             passage_ref.0,
             PassageEntry {
                 text: text.into(),
                 provenance,
+                proactive,
             },
         );
+    }
+
+    /// All passages flagged as proactive must-read guidance, sorted by
+    /// ascending `priority` then `PassageRef` for deterministic ordering.
+    pub fn proactive_passages(&self) -> Vec<(&str, &ProactivePassageGuidance)> {
+        let mut out: Vec<(&str, &ProactivePassageGuidance)> = self
+            .passages
+            .iter()
+            .filter_map(|(k, v)| v.proactive.as_ref().map(|p| (k.as_str(), p)))
+            .collect();
+        out.sort_by(|a, b| a.1.priority.cmp(&b.1.priority).then(a.0.cmp(b.0)));
+        out
     }
 
     /// Look up a passage by ref.  Returns `None` if not registered.

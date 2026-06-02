@@ -333,6 +333,95 @@ fn capability_snapshot_must_read_card_ids_all_resolve() {
     }
 }
 
+/// A corpus passage that flags itself proactive (in its data) must be surfaced
+/// as an up-front must-read guidance card by the capability snapshot, and that
+/// card must resolve through `get_guidance_card`. This is the data-driven
+/// "skill" hook: an agent reads the generative knowledge before authoring
+/// instead of only discovering it reactively via a validator backlink. Core
+/// stays domain-neutral — it never inspects which passage this is.
+#[cfg(feature = "model-api")]
+#[test]
+fn proactive_passage_surfaces_as_must_read_skill_card() {
+    use crate::capability_registry::PassageRef;
+    use crate::plugins::corpus_gap::{CorpusPassageRegistry, ProactivePassageGuidance};
+    use crate::plugins::knowledge_persistence::{build_provenance_for_passage, PersistedPassage};
+
+    let prov = |passage_ref: &str| {
+        build_provenance_for_passage(&PersistedPassage {
+            passage_ref: passage_ref.into(),
+            text: String::new(),
+            citation: "test".into(),
+            source_url: None,
+            jurisdiction: None,
+            classification: None,
+            license: Some("cc0".into()),
+            proactive_guidance: None,
+        })
+    };
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+
+    let mut passages = CorpusPassageRegistry::default();
+    // A plain passage (no proactive flag) must NOT be promoted.
+    passages.register(
+        PassageRef("REACTIVE_ONLY_PASSAGE".into()),
+        "Some reactively-discoverable detail.",
+        prov("REACTIVE_ONLY_PASSAGE"),
+    );
+    // A proactive passage MUST be promoted to a must-read card.
+    passages.register_with_guidance(
+        PassageRef("SKILL_SUBSTRATE_CHAIN".into()),
+        "Full generative substrate-chain text lives here.",
+        prov("SKILL_SUBSTRATE_CHAIN"),
+        Some(ProactivePassageGuidance {
+            title: "Read first: build top-down along the substrate chain".into(),
+            summary: "Frame establishes pitch; covering is derived from the frame face.".into(),
+            task_tags: vec!["authoring".into(), "substrate".into()],
+            priority: 1,
+        }),
+    );
+    world.insert_resource(passages);
+
+    let snapshot = handle_get_capability_snapshot(&world, false);
+
+    assert!(
+        snapshot
+            .must_read_guidance_card_ids
+            .iter()
+            .any(|id| id == "passage:SKILL_SUBSTRATE_CHAIN"),
+        "proactive passage should be advertised as a must-read card, got {:?}",
+        snapshot.must_read_guidance_card_ids
+    );
+    assert!(
+        !snapshot
+            .must_read_guidance_card_ids
+            .iter()
+            .any(|id| id == "passage:REACTIVE_ONLY_PASSAGE"),
+        "a passage without the proactive flag must NOT be advertised as must-read"
+    );
+
+    // Every advertised card — including the new skill card — must resolve.
+    for id in &snapshot.must_read_guidance_card_ids {
+        let card = handle_get_guidance_card(&world, id.clone());
+        assert!(
+            card.is_ok(),
+            "must_read_guidance_card_id '{id}' did not resolve: {:?}",
+            card.err()
+        );
+    }
+
+    // The resolved skill card carries the decisive summary and points the agent
+    // at lookup_source_passage for the full text.
+    let card = handle_get_guidance_card(&world, "passage:SKILL_SUBSTRATE_CHAIN".into())
+        .expect("skill card resolves");
+    assert!(card.summary.contains("derived from the frame face"));
+    assert!(card
+        .referenced_tool_ids
+        .iter()
+        .any(|t| t == "lookup_source_passage"));
+}
+
 #[test]
 fn internal_void_proxies_are_hidden_from_user_model_listing_and_summary() {
     use crate::plugins::modeling::void_declaration::OpeningContext;
@@ -4932,7 +5021,96 @@ fn promote_refinement_rejects_session_recipe_draft_ids() {
     )
     .expect_err("draft recipe ids must not execute");
 
-    assert!(error.contains("consultable but not executable yet"));
+    assert!(
+        error.contains("draft only") && error.contains("install"),
+        "session/draft recipe ids must be rejected by promote with install guidance, got: {error}"
+    );
+}
+
+/// Enforcement teeth: a recipe that explicitly declares its supported
+/// refinement states must NOT be usable to reach a state outside that set.
+/// This is what stops a covering-only / frameless roof shell (now declared
+/// `["Schematic"]` in data) from being instantiated or promoted to
+/// Constructible+, where it would masquerade as a resolved roof with no
+/// structural-framing substrate. Regression guard for the iter23 trap where a
+/// frameless gable shell auto-promoted to Constructible.
+#[cfg(feature = "model-api")]
+#[test]
+fn promote_refinement_rejects_recipe_beyond_supported_states() {
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let mut world = init_model_api_test_world();
+
+    // A Schematic-capped recipe (e.g. a covering-only shell with no frame).
+    let asset_id = AssetId("installed_recipe/capped_shell".into());
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id,
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("covering-only shell, Schematic max".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(MutationScope::None),
+        },
+        parameter_schema: serde_json::Value::Null,
+        target_class: "roof_system".into(),
+        supported_refinement_states: vec![RefinementState::Schematic],
+        tests: Vec::new(),
+    };
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact);
+    world.insert_resource(registry);
+
+    let element_id = world.resource_mut::<ElementIdAllocator>().next_id();
+    world.spawn((element_id,));
+
+    let error = handle_promote_refinement(
+        &mut world,
+        element_id.0,
+        "Constructible".into(),
+        Some("capped_shell".into()),
+        serde_json::json!({}),
+    )
+    .expect_err("a Schematic-capped recipe must not reach Constructible");
+
+    assert!(
+        error.contains("supports only") && error.contains("Constructible"),
+        "rejection must name the supported-state cap and the refused target, got: {error}"
+    );
+
+    // The same recipe to its supported state must NOT be rejected by the gate.
+    // (It may still fail later for unrelated reasons; we only assert the gate
+    // message is absent.)
+    let to_schematic = handle_promote_refinement(
+        &mut world,
+        element_id.0,
+        "Schematic".into(),
+        Some("capped_shell".into()),
+        serde_json::json!({}),
+    );
+    if let Err(e) = to_schematic {
+        assert!(
+            !e.contains("supports only"),
+            "promoting to a supported state must not trip the supported-states gate, got: {e}"
+        );
+    }
 }
 
 #[cfg(feature = "model-api")]
