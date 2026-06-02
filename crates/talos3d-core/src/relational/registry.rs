@@ -37,6 +37,36 @@ fn is_true_bool(v: &bool) -> bool {
 // Declarative geometry representation
 // ---------------------------------------------------------------------------
 
+/// Per-member semantic identity declaration, propagated to the spawned entity
+/// at materialisation time.
+///
+/// All fields are optional and serde-default so existing capsules without this
+/// field deserialise and materialise with no behaviour change.
+///
+/// Wire shape is intentionally isomorphic to `SemanticEntityAnnotationRequest`
+/// (used by `create_box`) so callers supply the same JSON vocabulary for both
+/// surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ParametricMemberSemantic {
+    /// Registered element-class term (e.g. `"column"`, `"beam"`, `"panel"`).
+    /// Must be present in the capability registry for the annotation to apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_class: Option<String>,
+    /// Target refinement state (e.g. `"Conceptual"`, `"Schematic"`,
+    /// `"Constructible"`, `"Detailed"`, `"FabricationReady"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement_state: Option<String>,
+    /// Arbitrary construction-intent parameters (e.g. `{"construction_role":
+    /// "chord"}`) stored as a `SemanticIntent` component on the entity.
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+    /// Human-readable rationale for the annotation (stored as
+    /// `AuthoringProvenance::rationale`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+}
+
 /// One rectangular-extrusion member whose size, translation, and rotation are
 /// expressed as `ScalarExpr` values evaluated in the same driver+derived
 /// environment as `ParametricTypeDef::derive`.
@@ -69,6 +99,12 @@ pub struct ParametricMember {
     /// Optional human-readable label for debugging / MCP inspection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Optional semantic identity declaration. When present the spawned entity
+    /// receives element-class, refinement-state, and parameters components via
+    /// the same `apply_semantic_annotation` path used by `create_box`.
+    /// Members without this field keep prior behaviour (no regression).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<ParametricMemberSemantic>,
 }
 
 fn default_zero_exprs() -> [ScalarExpr; 3] {
@@ -706,6 +742,7 @@ mod tests {
             rotate_euler_deg: default_zero_exprs(),
             profile_xz: Vec::new(),
             label: Some("box_a".into()),
+            semantic: None,
         };
         // Member 1: same size but translated X = w (placed next to box_a).
         let m1 = ParametricMember {
@@ -722,6 +759,7 @@ mod tests {
             rotate_euler_deg: default_zero_exprs(),
             profile_xz: Vec::new(),
             label: Some("box_b".into()),
+            semantic: None,
         };
 
         ParametricTypeDef {
@@ -822,6 +860,7 @@ mod tests {
             rotate_euler_deg: default_zero_exprs(),
             profile_xz: Vec::new(),
             label: Some("bad_box".into()),
+            semantic: None,
         };
         let ty = ParametricTypeDef {
             id: "test.bad".into(),
@@ -887,6 +926,7 @@ mod tests {
                 [ScalarExpr::lit(Quantity::mm(0.0)), ScalarExpr::param("h")],
             ],
             label: Some("gable".into()),
+            semantic: None,
         };
         let ty = ParametricTypeDef {
             id: "test.tri".into(),
