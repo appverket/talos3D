@@ -8835,9 +8835,9 @@ fn unknown_element_class_message(world: &World, term: &str) -> String {
 /// Parsed, registry-validated semantic annotation fields, produced by
 /// [`validate_semantic_annotation`] before any geometry is created.
 #[cfg(feature = "model-api")]
-struct ValidatedSemanticAnnotation {
-    element_class: Option<crate::capability_registry::ElementClassId>,
-    refinement_state: Option<crate::plugins::refinement::RefinementState>,
+pub(crate) struct ValidatedSemanticAnnotation {
+    pub(crate) element_class: Option<crate::capability_registry::ElementClassId>,
+    pub(crate) refinement_state: Option<crate::plugins::refinement::RefinementState>,
 }
 
 /// Validate a semantic annotation request against the registry without
@@ -8845,7 +8845,7 @@ struct ValidatedSemanticAnnotation {
 /// so the caller can both gate creation (atomicity) and apply the components
 /// afterwards without re-parsing.
 #[cfg(feature = "model-api")]
-fn validate_semantic_annotation(
+pub(crate) fn validate_semantic_annotation(
     world: &World,
     annotation: &SemanticEntityAnnotationRequest,
 ) -> Result<ValidatedSemanticAnnotation, String> {
@@ -8879,7 +8879,7 @@ fn validate_semantic_annotation(
 }
 
 #[cfg(feature = "model-api")]
-fn apply_semantic_annotation(
+pub(crate) fn apply_semantic_annotation(
     world: &mut World,
     element_id: ElementId,
     annotation: SemanticEntityAnnotationRequest,
