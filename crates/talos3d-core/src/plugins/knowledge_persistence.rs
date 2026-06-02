@@ -160,6 +160,12 @@ pub struct PersistedPassage {
     /// Defaults to `"public_record"` if omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// Optional data-driven promotion of this passage into a proactive
+    /// must-read guidance card (surfaced up front by the capability snapshot).
+    /// Omitted by default; present only on passages that encode generative
+    /// authoring "skills" an agent should read before building.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proactive_guidance: Option<crate::plugins::corpus_gap::ProactivePassageGuidance>,
 }
 
 /// Load all `*.json` files from `passages_dir()` into `registry`.
@@ -180,10 +186,11 @@ pub fn load_persisted_passages(registry: &mut CorpusPassageRegistry) {
         match serde_json::from_slice::<PersistedPassage>(&bytes) {
             Ok(p) => {
                 let provenance = build_provenance_for_passage(&p);
-                registry.register(
+                registry.register_with_guidance(
                     crate::capability_registry::PassageRef(p.passage_ref),
                     p.text,
                     provenance,
+                    p.proactive_guidance,
                 );
             }
             Err(e) => {

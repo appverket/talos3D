@@ -10098,13 +10098,50 @@ pub fn handle_promote_refinement(
     // executable — they must be installed via install_recipe_from_session_export
     // before use (Change-2).
     if let Some(recipe_id) = recipe_id.as_deref() {
-        let script_opt = world
+        // Fetch the installed artifact once: we need both its declared
+        // `supported_refinement_states` (to gate the requested target) and its
+        // AuthoringScript body (to replay). Cloning the small Vec + script keeps
+        // the borrow on the registry from outliving the later `&mut world` use.
+        let artifact_opt = world
             .get_resource::<crate::curation::RecipeArtifactRegistry>()
             .and_then(|reg| {
                 let fid = crate::capability_registry::RecipeFamilyId(recipe_id.to_string());
                 reg.get_by_family(&fid)
             })
-            .and_then(|artifact| artifact.body.script().cloned());
+            .map(|artifact| {
+                (
+                    artifact.supported_refinement_states.clone(),
+                    artifact.body.script().cloned(),
+                )
+            });
+
+        let script_opt = if let Some((supported, script)) = artifact_opt {
+            // Enforcement teeth (ADR-042 substrate contract): a recipe that
+            // explicitly declares which refinement states it supports MUST NOT
+            // be used to reach a state outside that set. This is what stops a
+            // covering-only / frameless shell (declared Schematic-max) from
+            // being instantiated or promoted to Constructible+ where it would
+            // masquerade as a resolved roof with no structural frame. An empty
+            // declaration means "unconstrained" for backward compatibility.
+            if !supported.is_empty() && !supported.contains(&target_state) {
+                let supported_labels: Vec<&str> =
+                    supported.iter().map(|s| s.as_str()).collect();
+                return Err(format!(
+                    "recipe '{recipe_id}' supports only refinement state(s) [{}] and cannot \
+                     produce '{}'. This recipe is capped at that level (e.g. a covering-only \
+                     shell with no structural framing is Schematic-max under the substrate \
+                     contract); select a recipe whose supported_refinement_states includes \
+                     '{}' (call select_recipe with that target_state), or build the missing \
+                     substrate (e.g. roof framing) first.",
+                    supported_labels.join(", "),
+                    target_state.as_str(),
+                    target_state.as_str(),
+                ));
+            }
+            script
+        } else {
+            None
+        };
 
         if let Some(script) = script_opt {
             // Build a parameter map from the overrides JSON object.
@@ -10771,6 +10808,22 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     let mut guidance_overrides = Vec::new();
     must_read_guidance_card_ids.push("dkg.snapshot.start".into());
     must_read_guidance_card_ids.push("dkg.no_curated_path".into());
+    // Data-driven proactive "skill" cards come next, before the authoring
+    // override + references, so a passage that encodes generative authoring
+    // knowledge (e.g. the recursive substrate chain) is read up front rather
+    // than only after a validator backlink surfaces it reactively. The set and
+    // its priority are pure data; core just reads the registry.
+    let proactive_passage_card_ids: Vec<String> = world
+        .get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+        .map(|registry| {
+            registry
+                .proactive_passages()
+                .into_iter()
+                .map(|(passage_ref, _)| proactive_passage_card_id(passage_ref))
+                .collect()
+        })
+        .unwrap_or_default();
+    must_read_guidance_card_ids.extend(proactive_passage_card_ids.iter().cloned());
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
             let id = authoring_guidance_card_id(&guidance.guidance_id);
@@ -10792,7 +10845,9 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
             }
         }
     }
-    must_read_guidance_card_ids.truncate(guidance_limit);
+    // Proactive skill cards are decisive must-reads and must not be truncated
+    // away by the base guidance budget; extend the budget by their count.
+    must_read_guidance_card_ids.truncate(guidance_limit + proactive_passage_card_ids.len());
 
     // Session-contract guarantee: the snapshot must never advertise a guidance
     // card id that `get_guidance_card` cannot resolve. The dynamic
@@ -11598,6 +11653,13 @@ fn guidance_reference_card_id(reference: &GuidanceReference) -> String {
     format!("{}:{}", reference.kind, reference.target)
 }
 
+/// Stable guidance-card id for a proactive corpus passage. Namespaced under
+/// `passage:` so it never collides with DKG or authoring-reference ids.
+#[cfg(feature = "model-api")]
+fn proactive_passage_card_id(passage_ref: &str) -> String {
+    format!("passage:{passage_ref}")
+}
+
 /// Every guidance card resolvable through `get_guidance_card`: the static DKG
 /// cards plus the dynamic cards derived from the active [`AuthoringGuidance`]
 /// resource. The capability snapshot's `must_read_guidance_card_ids` are drawn
@@ -11605,6 +11667,29 @@ fn guidance_reference_card_id(reference: &GuidanceReference) -> String {
 #[cfg(feature = "model-api")]
 fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
     let mut cards = dkc_guidance_cards();
+    // Data-driven proactive "skill" cards: any corpus passage that flagged
+    // itself proactive (in its JSON) is surfaced as an up-front must-read
+    // guidance card. Core stays domain-neutral — it never inspects which
+    // passage this is, only that the data asked to be surfaced. The full
+    // passage text remains available via `lookup_source_passage`.
+    if let Some(passages) = world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+    {
+        for (passage_ref, proactive) in passages.proactive_passages() {
+            let mut task_tags = proactive.task_tags.clone();
+            if task_tags.is_empty() {
+                task_tags = vec!["authoring".into(), "substrate".into()];
+            }
+            cards.push(GuidanceCardInfo {
+                id: proactive_passage_card_id(passage_ref),
+                title: proactive.title.clone(),
+                task_tags,
+                summary: proactive.summary.clone(),
+                referenced_tool_ids: vec!["lookup_source_passage".into()],
+                next_card_ids: Vec::new(),
+                json_examples: vec![serde_json::json!({ "passage_ref": passage_ref })],
+            });
+        }
+    }
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
             cards.push(GuidanceCardInfo {
