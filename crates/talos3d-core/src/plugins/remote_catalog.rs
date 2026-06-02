@@ -59,13 +59,20 @@
 //! The dedicated OS thread with its own `current_thread` runtime keeps
 //! async-tokio completely isolated from the Bevy main loop.
 
-#[cfg(not(target_arch = "wasm32"))]
+// The catalog substrate (kind registry, descriptors, the generic apply /
+// publish / seed pipeline, events, and the plugin) is platform-neutral and
+// compiles on every target. Only the *transport* — store selection and the
+// OS-thread poller/publish workers — is native-only; those items carry their
+// own `#[cfg(not(target_arch = "wasm32"))]` inside this module. PP-WCT-1 Stage B
+// adds the wasm browser-fetch transport.
 mod inner {
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
-        thread,
     };
+    // Native-only: the worker spawner uses OS threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::thread;
 
     use bevy::ecs::system::SystemState;
     use bevy::prelude::*;
@@ -82,6 +89,8 @@ mod inner {
         definition_publish_request, material_def_publish_request, ChangeEvent,
         PublishArtifactRequest, PublishError, PublishScope,
     };
+    // Native-only: the store trait + concrete stores back the transport workers.
+    #[cfg(not(target_arch = "wasm32"))]
     use crate::storage::{ActiveArtifactStore, ArtifactStore, LocalFileArtifactStore};
 
     // ---- Messages -----------------------------------------------------------
@@ -295,6 +304,11 @@ mod inner {
     /// `kind` + `local_id` round-trip through the worker unchanged so the
     /// result can be routed back as a strongly-typed
     /// [`PublishArtifactResult`].
+    ///
+    /// On wasm32 the fields are not yet read — the publish worker that
+    /// consumes them is native-only, and the browser publish path is
+    /// PP-WCT-2. The type stays in the platform-neutral channel contract.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(super) struct PublishJob {
         pub kind: &'static str,
         pub local_id: String,
@@ -358,15 +372,6 @@ mod inner {
                 .add_message::<PublishArtifactRequested>()
                 .add_message::<PublishArtifactResult>()
                 .init_resource::<BundledContentSeedConfig>()
-                // Default-store fallback runs in PostStartup so the
-                // Commands buffer from any Startup plugin (e.g.
-                // CloudCatalogPlugin) has flushed and an existing
-                // ActiveArtifactStore is observable. The
-                // `.chain()` enforces fallback-before-worker-spawn.
-                .add_systems(
-                    PostStartup,
-                    (pick_default_store_system, spawn_store_workers_system).chain(),
-                )
                 .add_systems(
                     PreUpdate,
                     (
@@ -378,7 +383,39 @@ mod inner {
                     ),
                 )
                 .add_systems(Update, seed_bundled_content_system);
+
+            // Transport (store selection + worker spawn) is platform-specific.
+            //
+            // Native: the default-store fallback runs in PostStartup so the
+            // Commands buffer from any Startup plugin (e.g. a cloud-store
+            // plugin) has flushed and an existing ActiveArtifactStore is
+            // observable; `.chain()` enforces fallback-before-worker-spawn.
+            //
+            // wasm32: no transport yet. The substrate above is fully present
+            // but inert — nothing inserts RemoteCatalogState, so the apply /
+            // publish systems early-return and seeding is a no-op. PP-WCT-1
+            // Stage B adds the browser-fetch change-feed transport here.
+            #[cfg(not(target_arch = "wasm32"))]
+            app.add_systems(
+                PostStartup,
+                (pick_default_store_system, spawn_store_workers_system).chain(),
+            );
+            #[cfg(target_arch = "wasm32")]
+            app.add_systems(PostStartup, wasm_transport_pending_system);
         }
+    }
+
+    /// wasm32 placeholder for the catalog transport (PP-WCT-1 Stage B). Runs
+    /// once at `PostStartup` to make the gap visible at runtime: the catalog
+    /// substrate is present (kinds register, the apply path is wired, bundled
+    /// seeding is available) but no change-feed transport exists yet on web, so
+    /// live updates do not flow. The browser-fetch transport replaces this.
+    #[cfg(target_arch = "wasm32")]
+    fn wasm_transport_pending_system() {
+        bevy::log::debug!(
+            "remote_catalog: wasm change-feed transport not yet implemented \
+             (PP-WCT-1 Stage B); catalog substrate present but inert"
+        );
     }
 
     /// Startup system: installs the default
@@ -391,6 +428,7 @@ mod inner {
     /// run their own Startup system *before* this one — when
     /// `TALOS3D_CATALOG_URL` is set their plugin inserts the cloud store
     /// first and this default no-ops.
+    #[cfg(not(target_arch = "wasm32"))]
     fn pick_default_store_system(
         mut commands: Commands,
         existing: Option<Res<ActiveArtifactStore>>,
@@ -551,6 +589,7 @@ mod inner {
     ///   to the Bevy main thread as [`CatalogBridgeMessage`]s.
     ///
     /// Inserts the [`RemoteCatalogState`] resource holding the channels.
+    #[cfg(not(target_arch = "wasm32"))]
     fn spawn_store_workers_system(
         mut commands: Commands,
         store_res: Option<Res<ActiveArtifactStore>>,
@@ -1293,10 +1332,9 @@ mod inner {
     }
 }
 
-// Re-export the non-wasm items at module level.
-#[cfg(not(target_arch = "wasm32"))]
+// Re-export the catalog substrate at module level. These are platform-neutral
+// (the native-only transport functions stay private inside `inner`).
 pub use crate::storage::wire::PublishScope;
-#[cfg(not(target_arch = "wasm32"))]
 pub use inner::{
     ArtifactApplied, ArtifactApplier, ArtifactSerializer, BundledContentSeedConfig,
     BundledContentSeeded, CatalogKindDescriptor, CatalogKindRegistry, DefinitionRegistryReloaded,
