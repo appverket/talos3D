@@ -259,6 +259,12 @@ pub fn world_create(
 /// - `world_translate = placement_translate + placement_rot * member_translate`
 /// - `world_rotation  = placement_rot * member_rot`
 ///
+/// When a `ParametricMember` carries a `semantic` annotation the spawned
+/// entity receives `ElementClassAssignment`, `RefinementStateComponent`, and
+/// `SemanticIntent` components via the same `apply_semantic_annotation` path
+/// used by `create_box`. Members without an annotation keep prior behaviour
+/// (no regression).
+///
 /// Returns the list of allocated element IDs (empty when the type has no
 /// representation), or `Err` if any member expression fails to evaluate.
 fn synthesize_parametric_geometry(
@@ -270,6 +276,20 @@ fn synthesize_parametric_geometry(
     let Some(type_def) = reg.get(type_id) else {
         return Ok(Vec::new());
     };
+
+    // Capture the original member descriptors (for semantic annotations) before
+    // the immutable borrow of type_def is released.
+    let original_members: Option<Vec<crate::relational::registry::ParametricMemberSemantic>> =
+        type_def.representation.as_ref().map(|repr| {
+            repr.members
+                .iter()
+                .map(|m| {
+                    m.semantic
+                        .clone()
+                        .unwrap_or_default()
+                })
+                .collect()
+        });
 
     // Read effective overrides from the stored instance.
     let (overrides, placement) = {
@@ -301,110 +321,148 @@ fn synthesize_parametric_geometry(
         placement.translate[2] as f32,
     );
 
-    // Determine refinement state: use Conceptual as the default for parametric
-    // geometry (lowest claim, requires no obligation resolution).
-    let refinement_state = RefinementState::Conceptual;
+    // Determine default refinement state for members that carry no semantic
+    // annotation (lowest claim, requires no obligation resolution).
+    let default_refinement_state = RefinementState::Conceptual;
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let element_ids: Vec<u64> = members
-        .into_iter()
-        .enumerate()
-        .map(|(member_index, m)| {
-            let eid = world.resource::<ElementIdAllocator>().next_id();
+    // Pair each evaluated member with its original semantic descriptor (if any).
+    // `original_members` is `Some` iff the type has a representation, and in
+    // that case it has exactly one entry per member (built from the same slice).
+    let semantics: Vec<Option<crate::relational::registry::ParametricMemberSemantic>> =
+        match original_members {
+            Some(sem_vec) => sem_vec
+                .into_iter()
+                .map(|s| {
+                    // Only propagate when at least one meaningful field is set.
+                    let has_content = s.element_class.is_some()
+                        || s.refinement_state.is_some()
+                        || !s.parameters.is_null()
+                        || s.rationale.is_some();
+                    has_content.then_some(s)
+                })
+                .collect(),
+            None => vec![None; members.len()],
+        };
 
-            // Sizes mm → m. height (Y) drives extrusion height; width
-            // (X) and depth (Z) form the rectangular profile.
-            let width = m.size[0] as f32 * MM_TO_M;
-            let height = m.size[1] as f32 * MM_TO_M;
-            let depth = m.size[2] as f32 * MM_TO_M;
+    let mut element_ids: Vec<u64> = Vec::with_capacity(members.len());
+    for (member_index, (m, maybe_semantic)) in members.into_iter().zip(semantics).enumerate() {
+        let eid = world.resource::<ElementIdAllocator>().next_id();
 
-            // Per-member local rotation.
-            let rx = (m.rotate_euler_deg[0] as f32).to_radians();
-            let ry = (m.rotate_euler_deg[1] as f32).to_radians();
-            let rz = (m.rotate_euler_deg[2] as f32).to_radians();
-            let member_rot = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
+        // Sizes mm → m. height (Y) drives extrusion height; width
+        // (X) and depth (Z) form the rectangular profile.
+        let width = m.size[0] as f32 * MM_TO_M;
+        let height = m.size[1] as f32 * MM_TO_M;
+        let depth = m.size[2] as f32 * MM_TO_M;
 
-            // Compose placement: world_rot = placement_rot * member_rot
-            let world_rot = placement_rot * member_rot;
+        // Per-member local rotation.
+        let rx = (m.rotate_euler_deg[0] as f32).to_radians();
+        let ry = (m.rotate_euler_deg[1] as f32).to_radians();
+        let rz = (m.rotate_euler_deg[2] as f32).to_radians();
+        let member_rot = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
 
-            // Compose translation: world_pos = placement_translate + placement_rot * member_translate
-            let member_translate = Vec3::new(
-                m.translate[0] as f32 * MM_TO_M,
-                m.translate[1] as f32 * MM_TO_M,
-                m.translate[2] as f32 * MM_TO_M,
-            );
-            let world_translate = placement_translate + placement_rot * member_translate;
+        // Compose placement: world_rot = placement_rot * member_rot
+        let world_rot = placement_rot * member_rot;
 
-            // Profile: an arbitrary extruded polygon when the member supplies
-            // `profile_xz` points (mm, in the u→X / v→Z profile plane), else the
-            // default rectangle(width, depth). Polygon profiles keep the
-            // representation general (e.g. a gable triangle) with no per-shape code.
-            let profile = if m.profile_xz.len() >= 3 {
-                let p = |pt: &[f64; 2]| Vec2::new(pt[0] as f32 * MM_TO_M, pt[1] as f32 * MM_TO_M);
-                let start = p(&m.profile_xz[0]);
-                let segments = m.profile_xz[1..]
-                    .iter()
-                    .map(|pt| ProfileSegment::LineTo { to: p(pt) })
-                    .collect();
-                Profile2d { start, segments }
-            } else {
-                Profile2d::rectangle(width, depth)
+        // Compose translation: world_pos = placement_translate + placement_rot * member_translate
+        let member_translate = Vec3::new(
+            m.translate[0] as f32 * MM_TO_M,
+            m.translate[1] as f32 * MM_TO_M,
+            m.translate[2] as f32 * MM_TO_M,
+        );
+        let world_translate = placement_translate + placement_rot * member_translate;
+
+        // Profile: an arbitrary extruded polygon when the member supplies
+        // `profile_xz` points (mm, in the u→X / v→Z profile plane), else the
+        // default rectangle(width, depth). Polygon profiles keep the
+        // representation general (e.g. a gable triangle) with no per-shape code.
+        let profile = if m.profile_xz.len() >= 3 {
+            let p = |pt: &[f64; 2]| Vec2::new(pt[0] as f32 * MM_TO_M, pt[1] as f32 * MM_TO_M);
+            let start = p(&m.profile_xz[0]);
+            let segments = m.profile_xz[1..]
+                .iter()
+                .map(|pt| ProfileSegment::LineTo { to: p(pt) })
+                .collect();
+            Profile2d { start, segments }
+        } else {
+            Profile2d::rectangle(width, depth)
+        };
+        let extrusion = ProfileExtrusion {
+            centre: world_translate,
+            profile,
+            height,
+        };
+
+        // Build a ClaimGrounding that records this entity was generated by
+        // a parametric type, with the type_id as the source.
+        let mut claims = std::collections::HashMap::new();
+        claims.insert(
+            ClaimPath("parametric_source".to_string()),
+            ClaimRecord {
+                grounding: Grounding::LLMHeuristic {
+                    rationale: format!(
+                        "geometry generated by parametric type '{type_id}' instance {instance_id}"
+                    ),
+                    heuristic_tag: HeuristicTag(format!("parametric:{type_id}")),
+                },
+                set_at: now_secs,
+                set_by: None,
+            },
+        );
+        let claim_grounding = ClaimGrounding { claims };
+
+        world.spawn((
+            eid,
+            extrusion,
+            ShapeRotation(world_rot),
+            NeedsMesh,
+            Visibility::Visible,
+            GlobalTransform::default(),
+            ParametricInstanceRef {
+                instance_id,
+                member_index: member_index as u32,
+                member_label: m.label.clone(),
+            },
+            RefinementStateComponent {
+                state: default_refinement_state,
+            },
+            AuthoringProvenance {
+                mode: AuthoringMode::Freeform,
+                rationale: Some(format!(
+                    "parametric type '{type_id}' instance {instance_id} member {member_index}"
+                )),
+            },
+            claim_grounding,
+        ));
+
+        // Apply per-member semantic annotation (element_class, refinement_state,
+        // parameters) if the member declared one.  Uses the same
+        // `validate_semantic_annotation` + `apply_semantic_annotation` path as
+        // `create_box` so semantics are consistent across all creation surfaces.
+        // Gated on `model-api` because the annotation helpers live in that module.
+        #[cfg(feature = "model-api")]
+        if let Some(sem) = maybe_semantic {
+            let annotation = crate::plugins::model_api::SemanticEntityAnnotationRequest {
+                element_class: sem.element_class,
+                refinement_state: sem.refinement_state,
+                parameters: sem.parameters,
+                rationale: sem.rationale,
+                unresolved_decisions: Vec::new(),
+                source_refs: Vec::new(),
             };
-            let extrusion = ProfileExtrusion {
-                centre: world_translate,
-                profile,
-                height,
-            };
+            let validated =
+                crate::plugins::model_api::validate_semantic_annotation(world, &annotation)?;
+            crate::plugins::model_api::apply_semantic_annotation(
+                world, eid, annotation, validated,
+            )?;
+        }
 
-            // Build a ClaimGrounding that records this entity was generated by
-            // a parametric type, with the type_id as the source.
-            let mut claims = std::collections::HashMap::new();
-            claims.insert(
-                ClaimPath("parametric_source".to_string()),
-                ClaimRecord {
-                    grounding: Grounding::LLMHeuristic {
-                        rationale: format!(
-                            "geometry generated by parametric type '{type_id}' instance {instance_id}"
-                        ),
-                        heuristic_tag: HeuristicTag(format!("parametric:{type_id}")),
-                    },
-                    set_at: now_secs,
-                    set_by: None,
-                },
-            );
-            let claim_grounding = ClaimGrounding { claims };
-
-            world.spawn((
-                eid,
-                extrusion,
-                ShapeRotation(world_rot),
-                NeedsMesh,
-                Visibility::Visible,
-                GlobalTransform::default(),
-                ParametricInstanceRef {
-                    instance_id,
-                    member_index: member_index as u32,
-                    member_label: m.label.clone(),
-                },
-                RefinementStateComponent {
-                    state: refinement_state,
-                },
-                AuthoringProvenance {
-                    mode: AuthoringMode::Freeform,
-                    rationale: Some(format!(
-                        "parametric type '{type_id}' instance {instance_id} member {member_index}"
-                    )),
-                },
-                claim_grounding,
-            ));
-
-            eid.0
-        })
-        .collect();
+        element_ids.push(eid.0);
+    }
 
     Ok(element_ids)
 }
@@ -615,6 +673,7 @@ mod tests {
             rotate_euler_deg: zero_exprs(),
             profile_xz: Vec::new(),
             label: Some("member_a".into()),
+            semantic: None,
         };
         let m1 = ParametricMember {
             size: [
@@ -630,6 +689,7 @@ mod tests {
             rotate_euler_deg: zero_exprs(),
             profile_xz: Vec::new(),
             label: Some("member_b".into()),
+            semantic: None,
         };
 
         ParametricTypeDef {
@@ -919,6 +979,7 @@ mod tests {
                 ],
                 profile_xz: Vec::new(),
                 label: Some("inline_0".into()),
+                semantic: None,
             },
             ParametricMember {
                 size: [
@@ -938,6 +999,7 @@ mod tests {
                 ],
                 profile_xz: Vec::new(),
                 label: Some("inline_1".into()),
+                semantic: None,
             },
             ParametricMember {
                 size: [
@@ -957,6 +1019,7 @@ mod tests {
                 ],
                 profile_xz: Vec::new(),
                 label: Some("inline_2".into()),
+                semantic: None,
             },
         ];
 
@@ -983,5 +1046,405 @@ mod tests {
             public_types.iter().all(|t| !t.id.starts_with("ephemeral.")),
             "ephemeral types must not appear in list_types"
         );
+    }
+
+    // ---- Semantic annotation propagation tests (require model-api) ----------
+
+    #[cfg(feature = "model-api")]
+    mod semantic {
+        use super::*;
+        use crate::capability_registry::{
+            CapabilityRegistry, ElementClassAssignment, ElementClassDescriptor, ElementClassId,
+        };
+        use crate::plugins::refinement::{RefinementState, RefinementStateComponent, SemanticIntent};
+        use crate::relational::registry::ParametricMemberSemantic;
+
+        /// Register a minimal test element class so `validate_semantic_annotation`
+        /// resolves it. Uses a domain-neutral name; no architecture nouns.
+        fn register_test_element_class(world: &mut World, class_id: &str) {
+            let mut reg = world
+                .get_resource_mut::<CapabilityRegistry>()
+                .expect("CapabilityRegistry must be present");
+            reg.register_element_class(ElementClassDescriptor {
+                id: ElementClassId(class_id.to_string()),
+                label: class_id.to_string(),
+                description: "test class".to_string(),
+                semantic_roles: Vec::new(),
+                class_min_obligations: std::collections::HashMap::new(),
+                class_min_promotion_critical_paths: std::collections::HashMap::new(),
+                parameter_schema: serde_json::Value::Null,
+            });
+        }
+
+        /// Minimal app with ParametricMcpPlugin + CapabilityRegistry.
+        fn app_with_registry() -> App {
+            let mut app = super::app();
+            app.init_resource::<CapabilityRegistry>();
+            app
+        }
+
+        /// Build a one-member parametric type whose member carries a semantic annotation.
+        fn annotated_member_type(semantic: ParametricMemberSemantic) -> ParametricTypeDef {
+            let params = ComponentParams::default().driver("width", DriverPolicy::Editable);
+            let mut driver_units = BTreeMap::new();
+            driver_units.insert("width".into(), Unit::Mm);
+            let mut defaults = BTreeMap::new();
+            defaults.insert("width".into(), 1000.0);
+
+            let member = ParametricMember {
+                size: [
+                    ScalarExpr::param("width"),
+                    ScalarExpr::lit(Quantity::mm(200.0)),
+                    ScalarExpr::lit(Quantity::mm(100.0)),
+                ],
+                translate: super::zero_exprs(),
+                rotate_euler_deg: super::zero_exprs(),
+                profile_xz: Vec::new(),
+                label: Some("annotated_member".into()),
+                semantic: Some(semantic),
+            };
+
+            ParametricTypeDef {
+                id: "test.annotated".into(),
+                label: "Annotated Type".into(),
+                params,
+                driver_units,
+                defaults,
+                derivations: BTreeMap::new(),
+                transform: crate::relational::transform::TransformBindings::default(),
+                public: true,
+                representation: Some(ParametricRepresentation {
+                    members: vec![member],
+                }),
+            }
+        }
+
+        // P-SEM-1: annotated member propagates element_class, refinement_state,
+        // and parameters to the spawned entity.
+        #[test]
+        fn annotated_member_entity_carries_semantic_components() {
+            let mut app = app_with_registry();
+            let w = app.world_mut();
+
+            register_test_element_class(w, "test_structural_member");
+
+            let sem = ParametricMemberSemantic {
+                element_class: Some("test_structural_member".into()),
+                refinement_state: Some("Schematic".into()),
+                parameters: serde_json::json!({ "construction_role": "chord" }),
+                rationale: Some("annotated for test".into()),
+            };
+            {
+                let mut reg = w.resource_mut::<ParametricRegistry>();
+                reg.register(annotated_member_type(sem));
+            }
+
+            let resp = world_create(
+                w,
+                CreateParametricRequest {
+                    type_id: "test.annotated".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(resp.element_ids.len(), 1, "one member => one entity");
+            let eid_raw = resp.element_ids[0];
+
+            // Locate the entity.
+            let entity = {
+                let mut q = w.query::<(Entity, &crate::plugins::identity::ElementId)>();
+                q.iter(w)
+                    .find_map(|(e, id)| (id.0 == eid_raw).then_some(e))
+                    .expect("entity must exist")
+            };
+
+            // ElementClassAssignment must be present and match the declared class.
+            let assignment = w
+                .get::<ElementClassAssignment>(entity)
+                .expect("ElementClassAssignment must be attached");
+            assert_eq!(
+                assignment.element_class.0, "test_structural_member",
+                "element_class must match the declared annotation"
+            );
+
+            // RefinementStateComponent must reflect the declared state, NOT Conceptual.
+            let refinement = w
+                .get::<RefinementStateComponent>(entity)
+                .expect("RefinementStateComponent must be attached");
+            assert_eq!(
+                refinement.state,
+                RefinementState::Schematic,
+                "refinement_state must be Schematic, not the default Conceptual"
+            );
+
+            // SemanticIntent must carry the declared parameters key.
+            let intent = w
+                .get::<SemanticIntent>(entity)
+                .expect("SemanticIntent must be attached");
+            assert_eq!(
+                intent.parameters.get("construction_role").and_then(|v| v.as_str()),
+                Some("chord"),
+                "parameters must contain construction_role=chord"
+            );
+        }
+
+        // P-SEM-2: member WITHOUT annotation keeps prior behaviour —
+        // no ElementClassAssignment, default Conceptual refinement state.
+        #[test]
+        fn unannotated_member_entity_has_no_class_assignment() {
+            let mut app = app_with_registry();
+            let w = app.world_mut();
+
+            // Use the pre-registered repr_box type (no semantic on any member).
+            let resp = world_create(
+                w,
+                CreateParametricRequest {
+                    type_id: "test.repr_box".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            assert!(!resp.element_ids.is_empty());
+            let eid_raw = resp.element_ids[0];
+
+            let entity = {
+                let mut q = w.query::<(Entity, &crate::plugins::identity::ElementId)>();
+                q.iter(w)
+                    .find_map(|(e, id)| (id.0 == eid_raw).then_some(e))
+                    .expect("entity must exist")
+            };
+
+            // No ElementClassAssignment — no class declared.
+            assert!(
+                w.get::<ElementClassAssignment>(entity).is_none(),
+                "unannotated member must not receive ElementClassAssignment"
+            );
+
+            // Refinement state stays at the default Conceptual.
+            let refinement = w
+                .get::<RefinementStateComponent>(entity)
+                .expect("RefinementStateComponent must be present (set by synthesizer)");
+            assert_eq!(
+                refinement.state,
+                RefinementState::Conceptual,
+                "unannotated member refinement_state must remain Conceptual"
+            );
+
+            // No SemanticIntent inserted.
+            assert!(
+                w.get::<SemanticIntent>(entity).is_none(),
+                "unannotated member must not receive SemanticIntent"
+            );
+        }
+
+        // P-SEM-3: mixed members — first carries annotation, second does not.
+        // Verifies the zip logic applies the annotation only to the right entity.
+        #[test]
+        fn mixed_members_annotation_targets_correct_entity() {
+            let mut app = app_with_registry();
+            let w = app.world_mut();
+
+            register_test_element_class(w, "test_element_a");
+
+            let params = ComponentParams::default().driver("width", DriverPolicy::Editable);
+            let mut driver_units = BTreeMap::new();
+            driver_units.insert("width".into(), Unit::Mm);
+            let mut defaults = BTreeMap::new();
+            defaults.insert("width".into(), 500.0);
+
+            let m0 = ParametricMember {
+                size: [
+                    ScalarExpr::param("width"),
+                    ScalarExpr::lit(Quantity::mm(100.0)),
+                    ScalarExpr::lit(Quantity::mm(50.0)),
+                ],
+                translate: super::zero_exprs(),
+                rotate_euler_deg: super::zero_exprs(),
+                profile_xz: Vec::new(),
+                label: Some("annotated".into()),
+                semantic: Some(ParametricMemberSemantic {
+                    element_class: Some("test_element_a".into()),
+                    refinement_state: Some("Constructible".into()),
+                    parameters: serde_json::json!({ "construction_role": "primary" }),
+                    rationale: None,
+                }),
+            };
+            let m1 = ParametricMember {
+                size: [
+                    ScalarExpr::param("width"),
+                    ScalarExpr::lit(Quantity::mm(100.0)),
+                    ScalarExpr::lit(Quantity::mm(50.0)),
+                ],
+                translate: [
+                    ScalarExpr::param("width"),
+                    ScalarExpr::lit(Quantity::mm(0.0)),
+                    ScalarExpr::lit(Quantity::mm(0.0)),
+                ],
+                rotate_euler_deg: super::zero_exprs(),
+                profile_xz: Vec::new(),
+                label: Some("plain".into()),
+                semantic: None,
+            };
+
+            let mixed_type = ParametricTypeDef {
+                id: "test.mixed".into(),
+                label: "Mixed".into(),
+                params,
+                driver_units,
+                defaults,
+                derivations: BTreeMap::new(),
+                transform: crate::relational::transform::TransformBindings::default(),
+                public: true,
+                representation: Some(ParametricRepresentation {
+                    members: vec![m0, m1],
+                }),
+            };
+            {
+                let mut reg = w.resource_mut::<ParametricRegistry>();
+                reg.register(mixed_type);
+            }
+
+            let resp = world_create(
+                w,
+                CreateParametricRequest {
+                    type_id: "test.mixed".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(resp.element_ids.len(), 2);
+            let (eid0, eid1) = (resp.element_ids[0], resp.element_ids[1]);
+
+            let mut find_entity = |eid_raw: u64| {
+                let mut q = w.query::<(Entity, &crate::plugins::identity::ElementId)>();
+                q.iter(w)
+                    .find_map(|(e, id)| (id.0 == eid_raw).then_some(e))
+                    .expect("entity must exist")
+            };
+
+            let e0 = find_entity(eid0);
+            let e1 = find_entity(eid1);
+
+            // First entity (m0) — annotated.
+            assert!(
+                w.get::<ElementClassAssignment>(e0).is_some(),
+                "annotated member must have ElementClassAssignment"
+            );
+            assert_eq!(
+                w.get::<RefinementStateComponent>(e0).unwrap().state,
+                RefinementState::Constructible,
+            );
+
+            // Second entity (m1) — plain.
+            assert!(
+                w.get::<ElementClassAssignment>(e1).is_none(),
+                "plain member must not have ElementClassAssignment"
+            );
+            assert_eq!(
+                w.get::<RefinementStateComponent>(e1).unwrap().state,
+                RefinementState::Conceptual,
+            );
+        }
+
+        // P-SEM-4: invalid element_class in annotation returns an Err.
+        #[test]
+        fn invalid_element_class_annotation_returns_error() {
+            let mut app = app_with_registry();
+            let w = app.world_mut();
+            // Do NOT register "nonexistent_class".
+
+            let sem = ParametricMemberSemantic {
+                element_class: Some("nonexistent_class".into()),
+                refinement_state: None,
+                parameters: serde_json::Value::Null,
+                rationale: None,
+            };
+            {
+                let mut reg = w.resource_mut::<ParametricRegistry>();
+                reg.register(annotated_member_type(sem));
+            }
+
+            let result = world_create(
+                w,
+                CreateParametricRequest {
+                    type_id: "test.annotated".into(),
+                    ..Default::default()
+                },
+            );
+            assert!(result.is_err(), "unknown element_class must return Err");
+        }
+
+        // P-SEM-5: serde round-trip — a ParametricMember with semantic serialises
+        // and deserialises back to the same value (wire compat).
+        #[test]
+        fn parametric_member_semantic_serde_round_trip() {
+            let member = ParametricMember {
+                size: [
+                    ScalarExpr::lit(Quantity::mm(100.0)),
+                    ScalarExpr::lit(Quantity::mm(200.0)),
+                    ScalarExpr::lit(Quantity::mm(50.0)),
+                ],
+                translate: super::zero_exprs(),
+                rotate_euler_deg: super::zero_exprs(),
+                profile_xz: Vec::new(),
+                label: Some("rt_member".into()),
+                semantic: Some(ParametricMemberSemantic {
+                    element_class: Some("test_rt_class".into()),
+                    refinement_state: Some("Detailed".into()),
+                    parameters: serde_json::json!({ "construction_role": "secondary" }),
+                    rationale: Some("round-trip test".into()),
+                }),
+            };
+
+            let json = serde_json::to_string(&member).expect("serialise");
+            let back: ParametricMember = serde_json::from_str(&json).expect("deserialise");
+
+            let sem = back.semantic.expect("semantic must survive round-trip");
+            assert_eq!(sem.element_class.as_deref(), Some("test_rt_class"));
+            assert_eq!(sem.refinement_state.as_deref(), Some("Detailed"));
+            assert_eq!(
+                sem.parameters.get("construction_role").and_then(|v| v.as_str()),
+                Some("secondary")
+            );
+        }
+
+        // P-SEM-6: a ParametricMember WITHOUT `semantic` field serialises to JSON
+        // that omits the `semantic` key entirely (no-annotation capsules stay
+        // backward-compatible).
+        #[test]
+        fn member_without_semantic_serialises_without_key() {
+            let member = ParametricMember {
+                size: [
+                    ScalarExpr::lit(Quantity::mm(100.0)),
+                    ScalarExpr::lit(Quantity::mm(200.0)),
+                    ScalarExpr::lit(Quantity::mm(50.0)),
+                ],
+                translate: super::zero_exprs(),
+                rotate_euler_deg: super::zero_exprs(),
+                profile_xz: Vec::new(),
+                label: None,
+                semantic: None,
+            };
+
+            let json = serde_json::to_string(&member).expect("serialise");
+            assert!(
+                !json.contains("\"semantic\""),
+                "semantic key must be absent when None: {json}"
+            );
+
+            // Deserialise the serialised JSON back (without `semantic` key) —
+            // must succeed and yield semantic=None. This validates that the
+            // skip_serializing_if=Option::is_none + serde(default) pair is
+            // correct for backward-compatible round-trips.
+            let from_old: ParametricMember =
+                serde_json::from_str(&json).expect("must deserialise without semantic key");
+            assert!(
+                from_old.semantic.is_none(),
+                "member without semantic must deserialise with semantic=None"
+            );
+        }
     }
 }

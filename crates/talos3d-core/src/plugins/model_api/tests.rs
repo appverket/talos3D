@@ -4630,6 +4630,7 @@ fn executable_learned_asset_materializes_through_parametric_path() {
                 rotate_euler_deg: [expr_deg(0.0), expr_deg(0.0), expr_deg(0.0)],
                 profile_xz: Vec::new(),
                 label: Some("learned_member".into()),
+                semantic: None,
             }],
         }),
         defaults: std::collections::BTreeMap::new(),
