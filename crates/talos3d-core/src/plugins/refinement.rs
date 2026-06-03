@@ -1359,11 +1359,23 @@ pub fn apply_promote_refinement(
     // the gate passes. The refinement state itself is only advanced *after* the
     // gate (`set_refinement_state` below), so a blocked promote does not move
     // the entity up a level.
+    // Structural load-path obligations must be `SatisfiedBy` a real bearing
+    // element — they may NOT be closed with `Deferred`/`Waived`. This enforces
+    // real-world erection order: a roof cannot promote until the walls it
+    // `bears_on` exist, and a foundation until what it `bears_on_terrain`
+    // bears on exists. All other obligations still accept Deferred/Waived.
+    fn is_load_path_obligation(id: &str) -> bool {
+        matches!(id, "bears_on" | "bears_on_terrain")
+    }
     let unresolved_ids: Vec<String> = obligations
         .iter()
-        .filter(|o| {
-            o.required_by_state <= target_state
-                && matches!(o.status, ObligationStatus::Unresolved)
+        .filter(|o| o.required_by_state <= target_state)
+        .filter(|o| match &o.status {
+            ObligationStatus::Unresolved => true,
+            ObligationStatus::Deferred(_) | ObligationStatus::Waived(_) => {
+                is_load_path_obligation(o.id.0.as_str())
+            }
+            ObligationStatus::SatisfiedBy(_) => false,
         })
         .map(|o| o.id.0.clone())
         .collect();
@@ -1378,9 +1390,11 @@ pub fn apply_promote_refinement(
 
     if !unresolved_ids.is_empty() {
         return Err(format!(
-            "Cannot promote {} to {} — {} unresolved obligation(s): {}; \
-             resolve each with resolve_obligation (SatisfiedBy a sub-element, \
-             or Deferred/Waived with a reason)",
+            "Cannot promote {} to {} — {} unsatisfied obligation(s): {}; \
+             resolve each with resolve_obligation. Structural load-path \
+             obligations (bears_on, bears_on_terrain) must be SatisfiedBy a real \
+             bearing element (not Deferred/Waived) so components are built in \
+             erection order; other obligations also accept Deferred/Waived with a reason",
             request.entity_element_id,
             target_state.as_str(),
             unresolved_ids.len(),
@@ -2965,7 +2979,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.contains("unresolved obligation"),
+            err.contains("unsatisfied obligation"),
             "expected gate error, got: {err}"
         );
         assert!(err.contains("load_path"), "error should name the obligation: {err}");

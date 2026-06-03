@@ -10292,6 +10292,29 @@ fn handle_instantiate_recipe(
     } else {
         [0.5, 0.5, 0.5]
     };
+    // Anchor-as-locator: recipes parameterized by absolute coordinates (a
+    // min/max footprint or a cx/cy/cz opening centre) position their generated
+    // geometry directly from those params, so the identity-anchor root is only a
+    // semantic locator — its extent is unused. Place it at the geometry centroid
+    // with a negligible extent so it does not render as a stray placeholder box
+    // (previously a 1 m fallback cube stranded at the world origin). Recipes that
+    // instead derive geometry from the anchor extent (length_mm / footprint
+    // polygon) keep the computed extent above.
+    let num = |k: &str| request.parameters.get(k).and_then(serde_json::Value::as_f64);
+    let (anchor_centre, half_extents): ([f64; 3], [f64; 3]) =
+        if let (Some(min_x), Some(max_x), Some(min_z), Some(max_z)) =
+            (num("min_x"), num("max_x"), num("min_z"), num("max_z"))
+        {
+            let y = num("top_datum_m").or_else(|| num("eave_y_m")).unwrap_or(0.0);
+            (
+                [(min_x + max_x) / 2.0, y, (min_z + max_z) / 2.0],
+                [0.01, 0.01, 0.01],
+            )
+        } else if let (Some(cx), Some(cy), Some(cz)) = (num("cx"), num("cy"), num("cz")) {
+            ([cx, cy, cz], [0.01, 0.01, 0.01])
+        } else {
+            (placement.translate, half_extents)
+        };
     // Orientation: the recipe lays out its sub-elements in the host's local
     // frame, so rotating the host box rotates the whole generated assembly
     // coherently. Convert the requested Euler angles (degrees, XYZ) to the
@@ -10309,7 +10332,7 @@ fn handle_instantiate_recipe(
     // bypasses that normalisation).
     let create_json = serde_json::json!({
         "type": "box",
-        "centre": placement.translate,
+        "centre": anchor_centre,
         "half_extents": half_extents,
         "rotation": rotation,
         "semantic": {
