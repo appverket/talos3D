@@ -7,12 +7,97 @@ pub(super) struct ModelApiServer {
     pub(super) tool_router: ToolRouter<Self>,
 }
 
+/// Ensure a tool's top-level input schema is a valid `type: object` schema and
+/// that no nested JSON-Schema node is a bare boolean (which strict MCP clients
+/// reject). Operates in place on the rmcp `JsonObject` (a `serde_json::Map`).
+#[cfg(feature = "model-api")]
+fn sanitize_tool_input_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    schema
+        .entry("type")
+        .or_insert_with(|| serde_json::Value::String("object".to_string()));
+    let mut wrapper = serde_json::Value::Object(std::mem::take(schema));
+    sanitize_schema_node(&mut wrapper);
+    if let serde_json::Value::Object(map) = wrapper {
+        *schema = map;
+    }
+}
+
+/// Recursively rewrite boolean JSON-Schema nodes (`true`/`false`) into object
+/// schemas, recursing only into positions that actually hold subschemas so
+/// non-schema data (enum/const/required/default) is never touched.
+#[cfg(feature = "model-api")]
+fn sanitize_schema_node(node: &mut serde_json::Value) {
+    match node {
+        serde_json::Value::Bool(allowed) => {
+            let mut map = serde_json::Map::new();
+            if !*allowed {
+                map.insert(
+                    "not".to_string(),
+                    serde_json::Value::Object(serde_json::Map::new()),
+                );
+            }
+            *node = serde_json::Value::Object(map);
+        }
+        serde_json::Value::Object(map) => {
+            for key in ["properties", "$defs", "definitions"] {
+                if let Some(serde_json::Value::Object(children)) = map.get_mut(key) {
+                    for child in children.values_mut() {
+                        sanitize_schema_node(child);
+                    }
+                }
+            }
+            for key in [
+                "additionalProperties",
+                "not",
+                "contains",
+                "propertyNames",
+                "if",
+                "then",
+                "else",
+            ] {
+                if let Some(child) = map.get_mut(key) {
+                    sanitize_schema_node(child);
+                }
+            }
+            if let Some(items) = map.get_mut("items") {
+                match items {
+                    serde_json::Value::Array(arr) => {
+                        for child in arr.iter_mut() {
+                            sanitize_schema_node(child);
+                        }
+                    }
+                    other => sanitize_schema_node(other),
+                }
+            }
+            for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+                if let Some(serde_json::Value::Array(arr)) = map.get_mut(key) {
+                    for child in arr.iter_mut() {
+                        sanitize_schema_node(child);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
     pub(super) fn new(sender: mpsc::Sender<ModelApiRequest>) -> Self {
+        let mut tool_router = Self::tool_router();
+        // Sanitize every tool's input schema so the catalog is valid for strict
+        // MCP clients (Claude Code / the Anthropic tool API). schemars renders
+        // `serde_json::Value` fields as boolean (`true`) or type-less schemas,
+        // and a single such schema makes strict clients silently drop the
+        // ENTIRE server's tool list. We ensure the top level is `type: object`
+        // and rewrite boolean JSON-Schema nodes into their object equivalents.
+        for route in tool_router.map.values_mut() {
+            let schema = std::sync::Arc::make_mut(&mut route.attr.input_schema);
+            sanitize_tool_input_schema(schema);
+        }
         Self {
             sender,
-            tool_router: Self::tool_router(),
+            tool_router,
         }
     }
 
@@ -4316,6 +4401,10 @@ pub(super) struct InstantiateRecipeRequest {
     /// Driver keys and units are recipe-specific; consult `list_recipe_families`
     /// for the parameter schema.
     #[serde(default)]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")
+    )]
     pub(super) parameters: serde_json::Value,
     /// Optional placement. `translate` is in **metres** (world coordinates).
     #[serde(default)]
