@@ -10344,14 +10344,19 @@ fn handle_instantiate_recipe(
     let root = handle_create_entity(world, create_json)?;
 
     // 2. Run the curated recipe via the existing promote path; recipe parameters
-    //    are passed as overrides so the generate fn can read them.
-    let promote = handle_promote_refinement(
+    //    are passed as overrides so the generate fn can read them. The recipe's
+    //    `generate` creates sub-element geometry even when the promotion is then
+    //    gated on unresolved obligations, so capture the result (don't `?`) — the
+    //    placement rotation below must apply to the generated geometry regardless
+    //    of whether the gate passed (the agent resolves obligations and re-promotes
+    //    separately).
+    let promote_result = handle_promote_refinement(
         world,
         root,
         target_state,
         Some(request.family_id.clone()),
         request.parameters.clone(),
-    )?;
+    );
 
     // 3. Created ids = everything new since the snapshot, excluding the root.
     let after = collect_ids(world);
@@ -10361,6 +10366,50 @@ fn handle_instantiate_recipe(
         .filter(|id| *id != root)
         .collect();
     created_element_ids.sort_unstable();
+
+    // 4. Honour `placement.rotate_euler_deg` by rotating the generated assembly
+    //    rigidly about the footprint anchor centroid. Recipe scripts emit
+    //    geometry in absolute world coords (the anchor transform does not
+    //    propagate), and the generic `transform` rotate is about the world
+    //    origin — so neither rotates an assembly in place. This does: for each
+    //    generated element, rotate (rotate_by rotates the centre about the
+    //    origin and accumulates orientation) then translate the post-rotation
+    //    centre to its rotated-about-pivot target. Works for any entity type.
+    let rot = placement.rotate_euler_deg;
+    if rot.iter().any(|a| a.abs() > 1e-9) {
+        let q = Quat::from_euler(
+            EulerRot::XYZ,
+            (rot[0] as f32).to_radians(),
+            (rot[1] as f32).to_radians(),
+            (rot[2] as f32).to_radians(),
+        );
+        let pivot = Vec3::new(
+            anchor_centre[0] as f32,
+            anchor_centre[1] as f32,
+            anchor_centre[2] as f32,
+        );
+        for id in &created_element_ids {
+            if let Ok(snap) = capture_snapshot_by_id(world, ElementId(*id)) {
+                let c = snap.center();
+                let target = pivot + q * (c - pivot);
+                let rotated = snap.rotate_by(q);
+                let moved = rotated.translate_by(target - rotated.center());
+                send_event(
+                    world,
+                    ApplyEntityChangesCommand {
+                        label: "recipe placement rotation",
+                        before: vec![snap],
+                        after: vec![moved],
+                    },
+                );
+            }
+        }
+        flush_model_api_write_pipeline(world);
+    }
+
+    // Surface any promotion-gate error only after geometry was recorded and the
+    // placement rotation applied.
+    let promote = promote_result?;
 
     Ok(InstantiateRecipeResult {
         root_element_id: root,
