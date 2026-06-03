@@ -9658,10 +9658,28 @@ fn apply_transform_request(
                 Some(AxisName::Z) => Quat::from_rotation_z(delta_radians),
                 _ => Quat::from_rotation_y(delta_radians),
             };
-            Ok(snapshots
-                .iter()
-                .map(|(_, snapshot)| snapshot.rotate_by(rotation))
-                .collect())
+            match request.pivot {
+                // Rotate rigidly about an explicit pivot so a multi-element
+                // selection orients in place. rotate_by rotates the centre about
+                // the world origin and accumulates orientation; translate the
+                // post-rotation centre to its rotated-about-pivot target.
+                Some(p) => {
+                    let pivot = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+                    Ok(snapshots
+                        .iter()
+                        .map(|(_, snapshot)| {
+                            let c = snapshot.center();
+                            let target = pivot + rotation * (c - pivot);
+                            let rotated = snapshot.rotate_by(rotation);
+                            rotated.translate_by(target - rotated.center())
+                        })
+                        .collect())
+                }
+                None => Ok(snapshots
+                    .iter()
+                    .map(|(_, snapshot)| snapshot.rotate_by(rotation))
+                    .collect()),
+            }
         }
         "scale" => {
             let center = snapshots

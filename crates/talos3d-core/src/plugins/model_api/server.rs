@@ -3212,6 +3212,12 @@ pub struct TransformToolRequest {
     pub operation: String,
     pub axis: Option<String>,
     pub value: Value,
+    /// Optional world-space pivot `[x,y,z]` for `rotate`. When given, the
+    /// selection is rotated rigidly about this point (e.g. a wing's junction
+    /// corner) instead of the world origin — so a whole assembly orients in
+    /// place. Ignored for non-rotate operations.
+    #[serde(default)]
+    pub pivot: Option<[f64; 3]>,
 }
 
 #[cfg(feature = "model-api")]
