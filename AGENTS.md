@@ -40,6 +40,12 @@ workspace root `AGENTS.md` before this file.
 - Do not add architecture, naval, business, billing, customer, or Appverket
   operations semantics to the public core. Reduce domain work to genuinely
   domain-neutral platform capability first.
+- Live viewport rendering and interaction code must be Bevy-native,
+  GPU/batched, or backed by measured performance evidence. Do not ship a naive
+  per-frame CPU, egui-painter, per-entity/per-edge ray-cast, or unbounded
+  immediate-mode implementation for overlays, outlines, selection, snapping, or
+  navigation feedback. If it cannot be made acceptably fast with Bevy-supported
+  mechanisms, keep it offline/export-only or do not implement it.
 
 ## MCP Guidance
 

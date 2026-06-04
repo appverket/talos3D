@@ -15,7 +15,6 @@ use bevy::{
     post_process::bloom::Bloom,
     prelude::*,
 };
-use bevy_egui::{egui, EguiContexts};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -40,7 +39,6 @@ const DEFAULT_BACKGROUND_RGB: [f32; 3] = [0.17, 0.18, 0.20];
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 const PAPER_BACKGROUND_RGB: [f32; 3] = [1.0, 1.0, 1.0];
-const PAPER_MM_PER_WORLD_M: f32 = 20.0;
 const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.5;
 
 // ─── Settings resource ───────────────────────────────────────────────────────
@@ -367,7 +365,6 @@ impl Plugin for RenderPipelinePlugin {
                 Update,
                 (
                     draw_model_edge_overlays.after(MeshGenerationSet::Generate),
-                    draw_silhouette_edge_overlay.after(MeshGenerationSet::Generate),
                     draw_section_fill_overlays.after(MeshGenerationSet::Generate),
                 ),
             );
@@ -492,7 +489,7 @@ pub(crate) fn apply_paper_drawing_preset(settings: &mut RenderSettings) {
     settings.grid_enabled = false;
     settings.paper_fill_enabled = true;
     settings.xray_enabled = false;
-    settings.visible_edge_overlay_enabled = true;
+    settings.visible_edge_overlay_enabled = false;
     settings.contour_overlay_enabled = false;
     settings.wireframe_overlay_enabled = false;
 }
@@ -916,159 +913,12 @@ fn draw_section_fill_overlays(
     }
 }
 
-fn draw_silhouette_edge_overlay(
-    mut contexts: EguiContexts,
-    settings: Res<RenderSettings>,
-    viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
-    mesh_assets: Res<Assets<Mesh>>,
-    camera_query: Query<
-        (&Camera, &GlobalTransform, &Projection, Option<&OrbitCamera>),
-        With<OrbitCamera>,
-    >,
-    mesh_query: Query<(
-        Entity,
-        &ElementId,
-        &Mesh3d,
-        &GlobalTransform,
-        Option<&Visibility>,
-    )>,
-    clip_plane_query: Query<&crate::plugins::clipping_planes::ClipPlaneNode>,
-) {
-    if viewport_export_state.annotation_overlays_suppressed()
-        || !settings.visible_edge_overlay_enabled
-        || !settings.paper_fill_enabled
-    {
-        return;
-    }
-    let Ok(ctx_ref) = contexts.ctx_mut() else {
-        return;
-    };
-    let ctx = ctx_ref.clone();
-    let Ok((camera, camera_transform, projection, orbit)) = camera_query.single() else {
-        return;
-    };
-    let Some(px_per_world_m) = viewport_pixels_per_world_m(camera, camera_transform, orbit) else {
-        return;
-    };
-    let px_per_paper_mm = (px_per_world_m / PAPER_MM_PER_WORLD_M).max(0.5);
-    let camera_position = camera_transform.translation();
-    let camera_forward = camera_transform.forward().as_vec3();
-    let orthographic = matches!(projection, Projection::Orthographic(_));
-    let mut subjects = Vec::new();
-    for (entity, _element_id, mesh_handle, mesh_transform, visibility) in &mesh_query {
-        if visibility.is_some_and(|visibility| *visibility == Visibility::Hidden) {
-            continue;
-        }
-        subjects.push(crate::plugins::vector_drawing::MeshSubject {
-            entity,
-            mesh_handle: mesh_handle.0.clone(),
-            mesh_transform: *mesh_transform,
-        });
-    }
-    let scene_triangles =
-        crate::plugins::vector_drawing::collect_scene_triangles(&subjects, &mesh_assets);
-    let clip_planes: Vec<_> = clip_plane_query
-        .iter()
-        .filter(|plane| plane.active)
-        .map(|plane| (plane.origin, plane.normal))
-        .collect();
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Middle,
-        egui::Id::new("paper_visible_edge_overlay"),
-    ));
-    for subject in &subjects {
-        let Some(mesh) = mesh_assets.get(&subject.mesh_handle) else {
-            continue;
-        };
-        for (start, end, edge_type) in
-            crate::plugins::vector_drawing::collect_classified_visible_edges(
-                mesh,
-                &subject.mesh_transform,
-                subject.entity,
-                camera_position,
-                camera_forward,
-                orthographic,
-                &scene_triangles,
-                &clip_planes,
-            )
-        {
-            let Some((a, b)) =
-                project_world_segment_to_viewport(camera, camera_transform, start, end)
-            else {
-                continue;
-            };
-            painter.line_segment(
-                [a, b],
-                egui::Stroke::new(
-                    edge_stroke_width_px(edge_type, px_per_paper_mm),
-                    edge_overlay_color(edge_type),
-                ),
-            );
-        }
-    }
-}
-
 fn wireframe_overlay_color(settings: &RenderSettings) -> Color {
     if settings.paper_fill_enabled {
         Color::BLACK
     } else {
         WIREFRAME_OVERLAY_COLOR
     }
-}
-
-fn viewport_pixels_per_world_m(
-    camera: &Camera,
-    camera_transform: &GlobalTransform,
-    orbit: Option<&OrbitCamera>,
-) -> Option<f32> {
-    let anchor = orbit.map(|orbit| orbit.focus).unwrap_or_else(|| {
-        camera_transform.translation() + camera_transform.forward().as_vec3() * 10.0
-    });
-    let anchor_px = camera.world_to_viewport(camera_transform, anchor).ok()?;
-    let right_px = camera
-        .world_to_viewport(
-            camera_transform,
-            anchor + camera_transform.right().as_vec3(),
-        )
-        .ok()
-        .map(|px| (px - anchor_px).length());
-    let up_px = camera
-        .world_to_viewport(camera_transform, anchor + camera_transform.up().as_vec3())
-        .ok()
-        .map(|px| (px - anchor_px).length());
-    right_px
-        .into_iter()
-        .chain(up_px)
-        .reduce(f32::max)
-        .filter(|length| *length > 0.0)
-}
-
-fn edge_stroke_width_px(
-    edge_type: crate::plugins::vector_drawing::EdgeType,
-    px_per_paper_mm: f32,
-) -> f32 {
-    (edge_type.default_weight_mm() * px_per_paper_mm).clamp(1.0, 3.5)
-}
-
-fn edge_overlay_color(edge_type: crate::plugins::vector_drawing::EdgeType) -> egui::Color32 {
-    match edge_type {
-        crate::plugins::vector_drawing::EdgeType::Silhouette
-        | crate::plugins::vector_drawing::EdgeType::SectionCut => egui::Color32::BLACK,
-        crate::plugins::vector_drawing::EdgeType::Crease
-        | crate::plugins::vector_drawing::EdgeType::Boundary => egui::Color32::from_rgb(48, 48, 52),
-        crate::plugins::vector_drawing::EdgeType::Dimension => egui::Color32::from_rgb(74, 74, 78),
-    }
-}
-
-fn project_world_segment_to_viewport(
-    camera: &Camera,
-    camera_transform: &GlobalTransform,
-    start: Vec3,
-    end: Vec3,
-) -> Option<(egui::Pos2, egui::Pos2)> {
-    let a = camera.world_to_viewport(camera_transform, start).ok()?;
-    let b = camera.world_to_viewport(camera_transform, end).ok()?;
-    Some((egui::pos2(a.x, a.y), egui::pos2(b.x, b.y)))
 }
 
 fn drawing_overlay_excluded(type_name: &str) -> bool {
@@ -1375,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn paper_preset_enables_white_background_and_outline_mode() {
+    fn paper_preset_enables_white_background_without_live_hidden_line() {
         let mut app = App::new();
         app.insert_resource(RenderSettings::default())
             .insert_resource(PaperDrawingState::default())
@@ -1393,7 +1243,7 @@ mod tests {
         assert!(!settings.grid_enabled);
         assert!(settings.paper_fill_enabled);
         assert!(!settings.xray_enabled);
-        assert!(settings.visible_edge_overlay_enabled);
+        assert!(!settings.visible_edge_overlay_enabled);
         assert!(!settings.wireframe_overlay_enabled);
         assert!(!settings.contour_overlay_enabled);
     }
@@ -1591,11 +1441,11 @@ mod tests {
 
         assert!(enabled);
         assert!(paper_drawing_toggle_active(&paper_state));
-        assert!(settings.visible_edge_overlay_enabled);
+        assert!(!settings.visible_edge_overlay_enabled);
     }
 
     #[test]
-    fn paper_fill_uses_vector_hidden_line_path_not_live_outline() {
+    fn paper_fill_does_not_activate_live_outline_path() {
         let settings = RenderSettings {
             visible_edge_overlay_enabled: true,
             paper_fill_enabled: true,
