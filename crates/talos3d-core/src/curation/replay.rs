@@ -171,7 +171,11 @@ pub enum InvocationError {
     /// avoid pinning a specific validator crate here.
     ParameterSchemaFailed { message: String },
     /// An `ArgExpr::Expr` string could not be evaluated.
-    ExpressionEvalFailed { step: StepId, expr: String, reason: String },
+    ExpressionEvalFailed {
+        step: StepId,
+        expr: String,
+        reason: String,
+    },
     /// A `ScriptInstruction::Repeat` count evaluated to a negative number or
     /// non-integer.
     InvalidRepeatCount { step: StepId, value: Value },
@@ -180,7 +184,10 @@ pub enum InvocationError {
     /// Circular or excessively deep recipe call chain detected.
     CallDepthExceeded { step: StepId, depth: usize },
     /// A sub-recipe invoked by `CallRecipe` failed.
-    CallRecipeFailed { step: StepId, source: Box<InvocationError> },
+    CallRecipeFailed {
+        step: StepId,
+        source: Box<InvocationError>,
+    },
 }
 
 impl std::fmt::Display for InvocationError {
@@ -235,16 +242,12 @@ impl std::fmt::Display for InvocationError {
                 "step '{}' calls unknown recipe family '{family_id}'",
                 step.0,
             ),
-            Self::CallDepthExceeded { step, depth } => write!(
-                f,
-                "step '{}' exceeded max call depth ({depth})",
-                step.0,
-            ),
-            Self::CallRecipeFailed { step, source } => write!(
-                f,
-                "step '{}' sub-recipe failed: {source}",
-                step.0,
-            ),
+            Self::CallDepthExceeded { step, depth } => {
+                write!(f, "step '{}' exceeded max call depth ({depth})", step.0,)
+            }
+            Self::CallRecipeFailed { step, source } => {
+                write!(f, "step '{}' sub-recipe failed: {source}", step.0,)
+            }
         }
     }
 }
@@ -436,24 +439,22 @@ where
                 // Evaluate parameter expressions.
                 let mut resolved_params = Map::new();
                 for (key, expr) in parameters {
-                    let v =
-                        resolve_arg_expr(expr, params, outputs).map_err(|reason| {
-                            InvocationError::UnresolvedArgExpr {
-                                step: id.clone(),
-                                reason,
-                            }
-                        })?;
+                    let v = resolve_arg_expr(expr, params, outputs).map_err(|reason| {
+                        InvocationError::UnresolvedArgExpr {
+                            step: id.clone(),
+                            reason,
+                        }
+                    })?;
                     resolved_params.insert(key.clone(), v);
                 }
 
                 // Resolve the sub-script.
-                let sub_script =
-                    lookup
-                        .lookup(family_id)
-                        .ok_or_else(|| InvocationError::UnknownRecipeFamily {
-                            step: id.clone(),
-                            family_id: family_id.clone(),
-                        })?;
+                let sub_script = lookup.lookup(family_id).ok_or_else(|| {
+                    InvocationError::UnknownRecipeFamily {
+                        step: id.clone(),
+                        family_id: family_id.clone(),
+                    }
+                })?;
 
                 // Recursively replay the sub-script.
                 let sub_report = replay_with_lookup(
@@ -485,10 +486,7 @@ where
                 // Also expose the sub-report's full outputs under a nested key.
                 for (sub_step_id, sub_out) in &sub_report.outputs {
                     for (k, v) in sub_out {
-                        captured.insert(
-                            format!("{}.{}", sub_step_id.0, k),
-                            v.clone(),
-                        );
+                        captured.insert(format!("{}.{}", sub_step_id.0, k), v.clone());
                     }
                 }
                 outputs.insert(id.clone(), captured);
@@ -538,13 +536,12 @@ fn execute_call_step<D: ToolDispatcher>(
         return Ok(());
     }
 
-    let resolved_args =
-        resolve_args(step, params, outputs).map_err(|reason| {
-            InvocationError::UnresolvedArgExpr {
-                step: step.id.clone(),
-                reason,
-            }
-        })?;
+    let resolved_args = resolve_args(step, params, outputs).map_err(|reason| {
+        InvocationError::UnresolvedArgExpr {
+            step: step.id.clone(),
+            reason,
+        }
+    })?;
 
     let call = ToolCall {
         tool: &step.tool,
@@ -640,9 +637,7 @@ fn resolve_arg_expr(
                 path.0
             ))
         }
-        ArgExpr::Expr { formula: expr_str } => {
-            eval_expr(expr_str, params, outputs)
-        }
+        ArgExpr::Expr { formula: expr_str } => eval_expr(expr_str, params, outputs),
         ArgExpr::Array { items } => {
             let mut arr = Vec::with_capacity(items.len());
             for item in items {
@@ -725,8 +720,7 @@ fn eval_expr(
         }
     }
 
-    let result = eval_with_context(expr_str, &ctx)
-        .map_err(|e| format!("expr eval failed: {e}"))?;
+    let result = eval_with_context(expr_str, &ctx).map_err(|e| format!("expr eval failed: {e}"))?;
 
     Ok(eval_value_to_json(result))
 }
@@ -763,9 +757,7 @@ fn eval_value_to_json(v: evalexpr::Value) -> Value {
         EVal::Int(i) => Value::from(i),
         EVal::Boolean(b) => Value::Bool(b),
         EVal::String(s) => Value::String(s),
-        EVal::Tuple(t) => {
-            Value::Array(t.into_iter().map(eval_value_to_json).collect())
-        }
+        EVal::Tuple(t) => Value::Array(t.into_iter().map(eval_value_to_json).collect()),
         EVal::Empty => Value::Null,
     }
 }
@@ -1279,7 +1271,9 @@ mod tests {
         let params = Map::new();
         let outputs = BTreeMap::new();
         let result = resolve_arg_expr(
-            &ArgExpr::Expr { formula: "42".into() },
+            &ArgExpr::Expr {
+                formula: "42".into(),
+            },
             &params,
             &outputs,
         )
@@ -1294,7 +1288,9 @@ mod tests {
         params.insert("x".into(), Value::from(3));
         let outputs = BTreeMap::new();
         let result = resolve_arg_expr(
-            &ArgExpr::Expr { formula: "x * 2".into() },
+            &ArgExpr::Expr {
+                formula: "x * 2".into(),
+            },
             &params,
             &outputs,
         )
@@ -1308,7 +1304,9 @@ mod tests {
         params.insert("width".into(), Value::from(6.0));
         let outputs = BTreeMap::new();
         let result = resolve_arg_expr(
-            &ArgExpr::Expr { formula: "width / 2.0 + 1.0".into() },
+            &ArgExpr::Expr {
+                formula: "width / 2.0 + 1.0".into(),
+            },
             &params,
             &outputs,
         )
@@ -1323,7 +1321,9 @@ mod tests {
         params.insert("width".into(), serde_json::json!(6.0_f64));
         let outputs = BTreeMap::new();
         let result = resolve_arg_expr(
-            &ArgExpr::Expr { formula: "width / 2.0 * tan(pitch_rad)".into() },
+            &ArgExpr::Expr {
+                formula: "width / 2.0 * tan(pitch_rad)".into(),
+            },
             &params,
             &outputs,
         )
@@ -1338,13 +1338,17 @@ mod tests {
         let params = Map::new();
         let outputs = BTreeMap::new();
         let err = resolve_arg_expr(
-            &ArgExpr::Expr { formula: "undefined_var + 1".into() },
+            &ArgExpr::Expr {
+                formula: "undefined_var + 1".into(),
+            },
             &params,
             &outputs,
         )
         .unwrap_err();
-        assert!(err.contains("eval failed") || err.contains("undefined") || err.contains("identifier"),
-            "unexpected error: {err}");
+        assert!(
+            err.contains("eval failed") || err.contains("undefined") || err.contains("identifier"),
+            "unexpected error: {err}"
+        );
     }
 
     // ---- Change-5: Repeat step ----
@@ -1361,16 +1365,15 @@ mod tests {
             id: StepId::new("loop"),
             _kind: RepeatKindTag::Repeat,
             var: "i".into(),
-            count: ArgExpr::Literal { value: Value::from(5u64) },
+            count: ArgExpr::Literal {
+                value: Value::from(5u64),
+            },
             body: vec![ScriptInstruction::Call(Step {
                 id: StepId::new("box"),
                 tool: tool("create_box"),
                 args: {
                     let mut m = BTreeMap::new();
-                    m.insert(
-                        "x_offset".into(),
-                        ArgExpr::Param { name: "i".into() },
-                    );
+                    m.insert("x_offset".into(), ArgExpr::Param { name: "i".into() });
                     m
                 },
                 bindings: BTreeMap::new(),
@@ -1383,7 +1386,9 @@ mod tests {
             .map(|n| serde_json::json!({ "element_id": n + 100u64 }))
             .collect();
         let mut d = FixtureDispatcher::new(responses);
-        let o = FixtureOracle { fail_relation_kind: None };
+        let o = FixtureOracle {
+            fail_relation_kind: None,
+        };
         let report = replay(&s, Map::new(), &mut d, &o).unwrap();
 
         // 5 box dispatches + 1 Repeat step id in steps_run.

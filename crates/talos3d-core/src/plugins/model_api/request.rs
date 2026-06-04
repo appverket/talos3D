@@ -842,6 +842,18 @@ pub(super) enum ModelApiRequest {
         card_id: String,
         response: oneshot::Sender<ApiResult<GuidanceCardInfo>>,
     },
+    ListAgentSkills {
+        filter: crate::plugins::agent_skills::AgentSkillSearch,
+        response: oneshot::Sender<Vec<crate::plugins::agent_skills::AgentSkillSummary>>,
+    },
+    GetAgentSkill {
+        skill_id: String,
+        response: oneshot::Sender<ApiResult<crate::plugins::agent_skills::AgentSkill>>,
+    },
+    SaveAgentSkillDraft {
+        request: crate::plugins::agent_skills::AgentSkillDraftRequest,
+        response: oneshot::Sender<ApiResult<crate::plugins::agent_skills::AgentSkill>>,
+    },
     // --- Semantic Procedural Session (ADR-051, PP-SPS-3) ---
     ProceduralSessionCreate {
         request: crate::plugins::procedural_session_mcp::SessionCreateRequest,
@@ -2196,6 +2208,15 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::GetGuidanceCard { card_id, response } => {
             let _ = response.send(handle_get_guidance_card(world, card_id));
         }
+        ModelApiRequest::ListAgentSkills { filter, response } => {
+            let _ = response.send(handle_list_agent_skills(world, filter));
+        }
+        ModelApiRequest::GetAgentSkill { skill_id, response } => {
+            let _ = response.send(handle_get_agent_skill(world, skill_id));
+        }
+        ModelApiRequest::SaveAgentSkillDraft { request, response } => {
+            let _ = response.send(handle_save_agent_skill_draft(world, request));
+        }
         ModelApiRequest::ProceduralSessionCreate { request, response } => {
             let r = crate::plugins::procedural_session_mcp::world_create(world, request);
             let _ = response.send(r);
@@ -2270,11 +2291,11 @@ fn handle_install_recipe_from_session_export(
     request: InstallRecipeFromSessionExportRequest,
 ) -> Result<InstallRecipeResult, String> {
     use crate::capability_registry::RecipeFamilyId;
-    use crate::curation::{
-        AssetId, AssetKindId, CurationMeta, Provenance, RecipeArtifact, RecipeBody,
-        RecipeArtifactRegistry, Scope, Trust,
-    };
     use crate::curation::provenance::Confidence;
+    use crate::curation::{
+        AssetId, AssetKindId, CurationMeta, Provenance, RecipeArtifact, RecipeArtifactRegistry,
+        RecipeBody, Scope, Trust,
+    };
     use crate::plugins::refinement::{AgentId, AuthoringMode};
 
     // Find the exported script in the session registry.
@@ -2310,7 +2331,8 @@ fn handle_install_recipe_from_session_export(
     };
 
     let _family_id = RecipeFamilyId(request.family_id.clone());
-    let asset_id = crate::plugins::knowledge_persistence::installed_recipe_asset_id(&request.family_id);
+    let asset_id =
+        crate::plugins::knowledge_persistence::installed_recipe_asset_id(&request.family_id);
 
     let meta = CurationMeta::new(
         asset_id,
@@ -2350,7 +2372,9 @@ fn handle_install_recipe_from_session_export(
     };
 
     // Insert into the in-memory registry.
-    world.resource_mut::<RecipeArtifactRegistry>().insert(artifact);
+    world
+        .resource_mut::<RecipeArtifactRegistry>()
+        .insert(artifact);
 
     Ok(InstallRecipeResult {
         family_id: request.family_id,
@@ -2382,12 +2406,7 @@ fn handle_list_persisted_recipes(world: &mut World) -> Vec<PersistedRecipeInfo> 
                 .to_string(),
             asset_id: a.meta.id.0.clone(),
             label: a.meta.id.0.clone(),
-            description: a
-                .meta
-                .provenance
-                .rationale
-                .clone()
-                .unwrap_or_default(),
+            description: a.meta.provenance.rationale.clone().unwrap_or_default(),
             body_kind: if a.body.is_native() {
                 "native_fn_ref".into()
             } else {
@@ -2413,9 +2432,7 @@ fn handle_acquire_corpus_passage(
 ) -> Result<AcquireCorpusPassageResult, String> {
     use crate::capability_registry::PassageRef;
     use crate::plugins::corpus_gap::CorpusPassageRegistry;
-    use crate::plugins::knowledge_persistence::{
-        persist_passage, PersistedPassage,
-    };
+    use crate::plugins::knowledge_persistence::{persist_passage, PersistedPassage};
 
     let persisted = PersistedPassage {
         passage_ref: request.passage_ref.clone(),
@@ -2437,7 +2454,8 @@ fn handle_acquire_corpus_passage(
         None
     };
 
-    let provenance = crate::plugins::knowledge_persistence::build_provenance_for_passage(&persisted);
+    let provenance =
+        crate::plugins::knowledge_persistence::build_provenance_for_passage(&persisted);
     let passage_ref = PassageRef(request.passage_ref.clone());
 
     let registry_size = {

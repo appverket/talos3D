@@ -21,7 +21,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 
 use super::graph::{DependencyGraph, NodeId};
-use crate::curation::authoring_script::{ArgExpr, AuthoringScript, Predicate, ScriptInstruction, Step, StepId};
+use crate::curation::authoring_script::{
+    ArgExpr, AuthoringScript, Predicate, ScriptInstruction, Step, StepId,
+};
 
 /// A pure step evaluation: given the tool id and the resolved argument object,
 /// produce the step's output object. Must be deterministic.

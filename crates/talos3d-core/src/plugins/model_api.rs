@@ -16,6 +16,11 @@ use crate::capability_registry::CapabilityRegistry;
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
 use crate::curation::MaterialSpecBody;
 #[cfg(feature = "model-api")]
+use crate::plugins::agent_skills::{
+    AgentSkill, AgentSkillDraftRequest, AgentSkillId, AgentSkillRegistry, AgentSkillSearch,
+    AgentSkillSummary,
+};
+#[cfg(feature = "model-api")]
 use crate::plugins::authoring_guidance::{AuthoringGuidance, GuidanceReference};
 #[cfg(feature = "model-api")]
 use crate::plugins::command_registry::{
@@ -10904,7 +10909,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
 
     let id_limit = if expanded { usize::MAX } else { 12 };
     let gap_limit = if expanded { usize::MAX } else { 8 };
-    let guidance_limit: usize = 5;
+    let guidance_limit: usize = 9;
 
     let take_ids = |mut ids: Vec<String>| {
         ids.sort();
@@ -11062,6 +11067,17 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let agent_skill_ids = world
+        .get_resource::<AgentSkillRegistry>()
+        .map(|registry| {
+            registry
+                .list()
+                .into_iter()
+                .map(|skill| skill.id.0.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let must_read_agent_skill_ids = take_ids(agent_skill_ids.clone());
 
     let mut must_read_guidance_card_ids = Vec::new();
     let mut guidance_overrides = Vec::new();
@@ -11083,6 +11099,8 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         })
         .unwrap_or_default();
     must_read_guidance_card_ids.extend(proactive_passage_card_ids.iter().cloned());
+    must_read_guidance_card_ids.push("dkg.building_skeleton".into());
+    must_read_guidance_card_ids.push("dkg.visual_morphology".into());
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
             let id = authoring_guidance_card_id(&guidance.guidance_id);
@@ -11164,6 +11182,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         source_count: source_ids.len(),
         curated_manifest_count: curated_manifest_ids.len(),
         material_spec_count: material_spec_ids.len(),
+        agent_skill_count: agent_skill_ids.len(),
         no_curated_path_count,
     };
 
@@ -11180,6 +11199,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         source_ids: take_ids(source_ids),
         curated_manifest_ids: take_ids(curated_manifest_ids),
         material_spec_ids: take_ids(material_spec_ids),
+        agent_skill_ids: take_ids(agent_skill_ids),
         maturity_flags: vec![
             "computed:registry_counts".into(),
             "computed:no_curated_path_summaries".into(),
@@ -11199,6 +11219,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         guidance_overrides,
         no_curated_paths,
         must_read_guidance_card_ids,
+        must_read_agent_skill_ids,
         next_tools: vec![
             "list_element_classes".into(),
             "discover_curated_paths".into(),
@@ -11216,6 +11237,10 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
             "bim_void.plan_placement".into(),
             "list_guidance_cards".into(),
             "get_guidance_card".into(),
+            "list_agent_skills".into(),
+            "find_agent_skills".into(),
+            "get_agent_skill".into(),
+            "save_agent_skill_draft".into(),
             "get_authoring_guidance".into(),
         ],
     };
@@ -11701,12 +11726,7 @@ pub fn handle_discover_curated_paths(
     use crate::relational::registry::ParametricRegistry;
 
     let path_kind = request.path_kind.unwrap_or_else(|| "recipe".into());
-    let guidance_card_ids = vec![
-        "dkg.snapshot.start".into(),
-        "mcp_tool:discover_curated_paths".into(),
-        "dkg.no_curated_path".into(),
-        "dkg.close_gap".into(),
-    ];
+    let guidance_card_ids = guidance_card_ids_for_discovery(request.element_class.as_deref());
     let mut related_asset_ids = Vec::new();
     if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
         related_asset_ids.extend(
@@ -12051,6 +12071,38 @@ fn normalize_curated_path_text(value: &str) -> String {
 }
 
 #[cfg(feature = "model-api")]
+fn guidance_card_ids_for_discovery(element_class: Option<&str>) -> Vec<String> {
+    let mut ids = vec![
+        "dkg.snapshot.start".into(),
+        "mcp_tool:discover_curated_paths".into(),
+        "dkg.no_curated_path".into(),
+        "dkg.close_gap".into(),
+    ];
+    if element_class.is_some_and(|class| {
+        [
+            "house",
+            "villa",
+            "dwelling",
+            "foundation",
+            "wall",
+            "wall_assembly",
+            "roof",
+            "roof_system",
+            "truss",
+            "rafter",
+            "top_plate",
+            "load_path",
+        ]
+        .iter()
+        .any(|needle| class.contains(needle))
+    }) {
+        ids.insert(2, "dkg.building_skeleton".into());
+        ids.insert(3, "dkg.visual_morphology".into());
+    }
+    ids
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_list_guidance_cards(world: &World, task: Option<String>) -> Vec<GuidanceCardInfo> {
     let mut cards = guidance_cards(world);
     if let Some(task) = task {
@@ -12165,6 +12217,52 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
 }
 
 #[cfg(feature = "model-api")]
+pub fn handle_list_agent_skills(world: &World, filter: AgentSkillSearch) -> Vec<AgentSkillSummary> {
+    world
+        .get_resource::<AgentSkillRegistry>()
+        .map(|registry| {
+            registry
+                .search(filter)
+                .into_iter()
+                .map(AgentSkill::summary_info)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_agent_skill(world: &World, skill_id: String) -> ApiResult<AgentSkill> {
+    world
+        .get_resource::<AgentSkillRegistry>()
+        .and_then(|registry| registry.get(&AgentSkillId(skill_id.clone())).cloned())
+        .ok_or_else(|| format!("agent skill not found: '{skill_id}'"))
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_save_agent_skill_draft(
+    world: &mut World,
+    request: AgentSkillDraftRequest,
+) -> ApiResult<AgentSkill> {
+    if request.title.trim().is_empty() {
+        return Err("agent skill title must not be empty".into());
+    }
+    if request.summary.trim().is_empty() {
+        return Err("agent skill summary must not be empty".into());
+    }
+    if request.body_markdown.trim().is_empty() {
+        return Err("agent skill body_markdown must not be empty".into());
+    }
+    if !world.contains_resource::<AgentSkillRegistry>() {
+        world.insert_resource(AgentSkillRegistry::default());
+    }
+    let skill = request.into_skill();
+    world
+        .resource_mut::<AgentSkillRegistry>()
+        .insert(skill.clone());
+    Ok(skill)
+}
+
+#[cfg(feature = "model-api")]
 fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
     vec![
         GuidanceCardInfo {
@@ -12274,8 +12372,94 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             task_tags: vec!["discovery".into(), "authoring".into()],
             summary: "Call get_capability_snapshot before authoring so current registries, gaps, and must-read cards are visible.".into(),
             referenced_tool_ids: vec!["get_capability_snapshot".into()],
-            next_card_ids: vec!["dkg.no_curated_path".into()],
+            next_card_ids: vec![
+                "dkg.no_curated_path".into(),
+                "dkg.building_skeleton".into(),
+                "dkg.visual_morphology".into(),
+            ],
             json_examples: vec![serde_json::json!({ "expanded": false })],
+        },
+        GuidanceCardInfo {
+            id: "dkg.building_skeleton".into(),
+            title: "Houses Need A Structural Skeleton".into(),
+            task_tags: vec![
+                "house".into(),
+                "villa".into(),
+                "dwelling".into(),
+                "foundation".into(),
+                "wall_assembly".into(),
+                "roof_system".into(),
+                "truss".into(),
+                "load_path".into(),
+            ],
+            summary: "For Schematic+ house authoring, the agent must discover or acquire the foundation -> wall frame/top plate -> roof framing/truss load path. Missing roof/truss anatomy, bearing points, or executable paths are CorpusGaps, not permission to draw decorative sticks or stripes.".into(),
+            referenced_tool_ids: vec![
+                "discover_curated_paths".into(),
+                "request_corpus_expansion".into(),
+                "acquire_corpus_passage".into(),
+                "save_assembly_pattern_draft".into(),
+                "save_recipe_draft".into(),
+                "materialize_learned_asset".into(),
+                "create_assembly".into(),
+                "create_relation".into(),
+                "run_validation_v2".into(),
+                "take_screenshot".into(),
+            ],
+            next_card_ids: vec![
+                "dkg.no_curated_path".into(),
+                "dkg.close_gap".into(),
+                "dkg.executable_asset".into(),
+                "dkg.visual_morphology".into(),
+            ],
+            json_examples: vec![
+                serde_json::json!({
+                    "path_kind": "recipe",
+                    "element_class": "roof_system",
+                    "context": {
+                        "target_state": "Constructible",
+                        "required_support_stack": [
+                            "foundation_system",
+                            "wall_assembly",
+                            "top_plate",
+                            "roof_system",
+                            "truss_or_rafter"
+                        ]
+                    }
+                }),
+                serde_json::json!({
+                    "element_class": "truss",
+                    "kind": "recipe_or_assembly_pattern",
+                    "rationale": "Roof is being promoted past schematic but no truss family with top chord, bottom chord, web members, panel points, and bearing-on-top-plate relation is available."
+                }),
+            ],
+        },
+        GuidanceCardInfo {
+            id: "dkg.visual_morphology".into(),
+            title: "Houses Must Read As Houses".into(),
+            task_tags: vec![
+                "house".into(),
+                "villa".into(),
+                "dwelling".into(),
+                "visual".into(),
+                "morphology".into(),
+            ],
+            summary: "For house/villa/dwelling authoring, acquire visual precedent, build a morphology checklist, and reject screenshots that read as shoeboxes, chocolate boxes, stepped-strip gables, bare-framing cages, or floating-stick scenes.".into(),
+            referenced_tool_ids: vec![
+                "discover_curated_paths".into(),
+                "acquire_corpus_passage".into(),
+                "request_corpus_expansion".into(),
+                "take_screenshot".into(),
+                "run_validation_v2".into(),
+            ],
+            next_card_ids: vec!["dkg.close_gap".into(), "dkg.executable_asset".into()],
+            json_examples: vec![serde_json::json!({
+                "element_class": "house",
+                "path_kind": "prior",
+                "context": {
+                    "target_state": "Schematic",
+                    "visual_morphology_required": true
+                }
+            })],
         },
         GuidanceCardInfo {
             id: "dkg.no_curated_path".into(),

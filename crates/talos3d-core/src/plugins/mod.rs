@@ -1,3 +1,4 @@
+pub mod agent_skills;
 pub mod assembly_pattern_drafts;
 pub mod assistant_chat;
 pub mod assumption_log;

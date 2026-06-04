@@ -2246,6 +2246,43 @@ impl ModelApiServer {
             .map_err(|_| "model API response channel closed".to_string())?
     }
 
+    async fn request_list_agent_skills(
+        &self,
+        filter: crate::plugins::agent_skills::AgentSkillSearch,
+    ) -> Vec<crate::plugins::agent_skills::AgentSkillSummary> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(ModelApiRequest::ListAgentSkills { filter, response });
+        receiver.await.unwrap_or_default()
+    }
+
+    async fn request_get_agent_skill(
+        &self,
+        skill_id: String,
+    ) -> ApiResult<crate::plugins::agent_skills::AgentSkill> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::GetAgentSkill { skill_id, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
+    async fn request_save_agent_skill_draft(
+        &self,
+        request: crate::plugins::agent_skills::AgentSkillDraftRequest,
+    ) -> ApiResult<crate::plugins::agent_skills::AgentSkill> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(ModelApiRequest::SaveAgentSkillDraft { request, response })
+            .map_err(|_| "model API request channel closed".to_string())?;
+        receiver
+            .await
+            .map_err(|_| "model API response channel closed".to_string())?
+    }
+
     async fn request_run_validation_v2(
         &self,
         element_id: Option<u64>,
@@ -3847,6 +3884,8 @@ pub struct CapabilitySnapshotInfo {
     pub guidance_overrides: Vec<CapabilitySnapshotFact>,
     pub no_curated_paths: Vec<NoCuratedPathInfo>,
     pub must_read_guidance_card_ids: Vec<String>,
+    #[serde(default)]
+    pub must_read_agent_skill_ids: Vec<String>,
     pub next_tools: Vec<String>,
 }
 
@@ -3863,12 +3902,15 @@ impl CapabilitySnapshotInfo {
             guidance_overrides: Vec::new(),
             no_curated_paths: Vec::new(),
             must_read_guidance_card_ids: Vec::new(),
+            must_read_agent_skill_ids: Vec::new(),
             next_tools: vec![
                 "list_element_classes".into(),
                 "select_recipe".into(),
                 "request_corpus_expansion".into(),
                 "save_recipe_draft".into(),
                 "materialize_learned_asset".into(),
+                "list_agent_skills".into(),
+                "get_agent_skill".into(),
             ],
         }
     }
@@ -3889,6 +3931,8 @@ pub struct CapabilitySnapshotSummary {
     pub source_count: usize,
     pub curated_manifest_count: usize,
     pub material_spec_count: usize,
+    #[serde(default)]
+    pub agent_skill_count: usize,
     pub no_curated_path_count: usize,
 }
 
@@ -3907,6 +3951,8 @@ pub struct CapabilitySnapshotComputed {
     pub source_ids: Vec<String>,
     pub curated_manifest_ids: Vec<String>,
     pub material_spec_ids: Vec<String>,
+    #[serde(default)]
+    pub agent_skill_ids: Vec<String>,
     pub maturity_flags: Vec<String>,
 }
 
@@ -4566,6 +4612,32 @@ pub(super) struct ListGuidanceCardsRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct GetGuidanceCardRequest {
     pub(super) card_id: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(super) struct ListAgentSkillsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) query: Option<String>,
+    #[serde(default)]
+    pub(super) tags: Vec<String>,
+}
+
+impl From<ListAgentSkillsRequest> for crate::plugins::agent_skills::AgentSkillSearch {
+    fn from(request: ListAgentSkillsRequest) -> Self {
+        Self {
+            query: request.query,
+            tags: request.tags,
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct GetAgentSkillRequest {
+    pub(super) skill_id: String,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -7691,6 +7763,65 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(card)
+    }
+
+    #[tool(
+        name = "list_agent_skills",
+        description = "List MCP-visible agent operating-procedure skills. Pass query and/or tags \
+            to narrow results; use get_agent_skill to retrieve the full body."
+    )]
+    pub(super) async fn list_agent_skills_tool(
+        &self,
+        Parameters(params): Parameters<ListAgentSkillsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let skills = self.request_list_agent_skills(params.into()).await;
+        json_tool_result(skills)
+    }
+
+    #[tool(
+        name = "find_agent_skills",
+        description = "Find MCP-visible agent skills by query text or tags. This is an alias for \
+            filtered list_agent_skills, intended for clients that distinguish search from listing."
+    )]
+    pub(super) async fn find_agent_skills_tool(
+        &self,
+        Parameters(params): Parameters<ListAgentSkillsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let skills = self.request_list_agent_skills(params.into()).await;
+        json_tool_result(skills)
+    }
+
+    #[tool(
+        name = "get_agent_skill",
+        description = "Fetch one MCP-visible agent skill by id, including the Markdown procedure \
+            body, referenced tool ids, next skill ids, tags, and trust level."
+    )]
+    pub(super) async fn get_agent_skill_tool(
+        &self,
+        Parameters(params): Parameters<GetAgentSkillRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let skill = self
+            .request_get_agent_skill(params.skill_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(skill)
+    }
+
+    #[tool(
+        name = "save_agent_skill_draft",
+        description = "Save a session-scoped agent skill draft. Use this for new operating \
+            procedures learned during an MCP session; shipped or project promotion remains a \
+            separate curation step."
+    )]
+    pub(super) async fn save_agent_skill_draft_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::agent_skills::AgentSkillDraftRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let skill = self
+            .request_save_agent_skill_draft(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(skill)
     }
 
     #[tool(

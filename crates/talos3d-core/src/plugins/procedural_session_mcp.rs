@@ -272,8 +272,12 @@ pub fn world_commit_with_executor(
             .clone()
     };
 
-    let step_order: std::collections::VecDeque<StepId> =
-        session.script.steps.iter().map(|s| s.id().clone()).collect();
+    let step_order: std::collections::VecDeque<StepId> = session
+        .script
+        .steps
+        .iter()
+        .map(|s| s.id().clone())
+        .collect();
     let oracle = AlwaysPassOracle;
     let result = {
         let mut dispatcher = CommandQueueDispatcher {
