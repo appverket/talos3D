@@ -141,6 +141,16 @@ pub struct EditingContextInfo {
     pub is_root: bool,
     pub stack: Vec<EditingContextEntry>,
     pub breadcrumb: String,
+    /// Active local authoring frame (ADR-058): the product of the entered groups'
+    /// frames. When `frame_is_identity` is false, coordinates you pass to create
+    /// tools are interpreted in this rectified local frame and composed to world
+    /// by `frame_origin` (metres) + `frame_rotate_euler_deg` (degrees, XYZ).
+    #[serde(default)]
+    pub frame_is_identity: bool,
+    #[serde(default)]
+    pub frame_origin: [f32; 3],
+    #[serde(default)]
+    pub frame_rotate_euler_deg: [f32; 3],
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

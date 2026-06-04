@@ -619,6 +619,7 @@ mod tests {
             GroupMembers {
                 name: "Assembly".to_string(),
                 member_ids: vec![ElementId(2), ElementId(3)],
+                frame: crate::plugins::modeling::group::GroupFrame::default(),
             },
         ));
         world.spawn(ElementId(2));
@@ -713,6 +714,7 @@ mod tests {
             GroupMembers {
                 name: "Assembly".to_string(),
                 member_ids: vec![ElementId(2), ElementId(3)],
+                frame: crate::plugins::modeling::group::GroupFrame::default(),
             },
         ));
         world.spawn(ElementId(2));

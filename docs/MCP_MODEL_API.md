@@ -338,6 +338,42 @@ For fillet/chamfer specifically:
 `model_summary` now also reports `assembly_counts` and `relation_counts` in
 addition to entity counts and capability-defined metrics.
 
+### Local coordinate frames (groups as scene-graph nodes) — ADR-058
+
+A group carries a **local coordinate frame** (origin + rotation, identity by
+default). Geometry authored while you are *inside* the group is expressed in that
+rectified local frame and composed to world by the frame — the scene-graph /
+SketchUp-component model. This is the correct way to build an angled or compound
+volume: author it **axis-aligned** in clean local coordinates and let the frame
+carry the angle, so every wall and gable-end inherits the same orientation and
+can never be left disagreeing with the body of the volume.
+
+Two equivalent workflows (no new tool needed):
+
+1. **Frame-first.** Create the group with a frame, enter it, author axis-aligned:
+   ```
+   create_entity {"type":"group","name":"living_wing",
+                  "frame_origin":[12,0,4],"frame_rotate_euler_deg":[0,18,0]}
+   enter_group   {"element_id": <group>}
+   create_box    {... axis-aligned coords in the wing's local frame ...}   // auto-joins the group, composed to world
+   wall / opening / instantiate_recipe ...                                  // all inherit the 18° Y rotation
+   exit_group    {}
+   ```
+2. **Author-then-rotate.** Create a plain group, enter, author axis-aligned at the
+   origin, exit, then rotate the whole assembly as one rigid unit about its
+   junction corner:
+   ```
+   transform {"element_ids":[<group>],"operation":"rotate","axis":"Y",
+              "value":18,"pivot":[12,0,4]}
+   ```
+
+`get_editing_context` reports the active frame (`frame_is_identity`,
+`frame_origin` in metres, `frame_rotate_euler_deg` in degrees) — the product of
+all entered groups' frames, so nesting composes recursively. Transforming a group
+moves/rotates every (recursive) member together and updates the group's frame,
+so the assembly stays editable in its own rectified space afterward. Frames are
+identity-default: plain groups and all non-grouped authoring are unaffected.
+
 Session recipe drafts are **not executable by `instantiate_recipe`**. Installed
 drafts can be appended to `list_recipe_families` and `select_recipe` when the
 caller opts in, but `select_recipe` marks them `executable: false` unless they
