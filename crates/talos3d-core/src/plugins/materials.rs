@@ -853,12 +853,16 @@ impl MaterialDef {
             anisotropy_strength: self.anisotropy_strength,
             anisotropy_rotation: self.anisotropy_rotation,
             alpha_mode: self.alpha_mode.to_bevy(self.alpha_cutoff),
-            double_sided: self.double_sided,
-            cull_mode: if self.double_sided {
-                None
-            } else {
-                Some(bevy::render::render_resource::Face::Back)
-            },
+            // Render double-sided. Talos3D meshes are commonly open surfaces
+            // (triangle_mesh roofs, planes), and the default primitive material is
+            // already double-sided (cull_mode None) — so an *applied* material
+            // must be too, otherwise a roof sheet vanishes when viewed from its
+            // back side (single-winding open surface + back-face culling). Closed
+            // solids are unaffected (their interior faces are self-occluded).
+            // `double_sided: true` also flips back-face normals so both sides are
+            // lit correctly rather than appearing dark from one side.
+            double_sided: true,
+            cull_mode: None,
             unlit: self.unlit,
             fog_enabled: self.fog_enabled,
             depth_bias: self.depth_bias,
