@@ -4675,6 +4675,13 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "exit_group",
         "transform",
         "get_editing_context",
+        // site/terrain cards (dkg.site_from_survey, dkg.terrain_foundation)
+        "import_file",
+        "list_importers",
+        "set_selection",
+        "invoke_command",
+        "list_commands",
+        "take_screenshot",
     ]);
     for card in handle_list_guidance_cards(&world, None) {
         for tool_id in &card.referenced_tool_ids {
