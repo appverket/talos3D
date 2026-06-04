@@ -8638,9 +8638,39 @@ fn execute_model_api_set_entity_property_command(
     })
 }
 
+/// `create_entity` takes a free-form `BTreeMap<String, Value>`, so its nested
+/// fields have no typed schema — strict MCP clients serialize numbers and arrays
+/// as JSON-encoded *strings* (e.g. `"[0, 22, 0]"`, `"0.9"`). Recursively decode
+/// any string that is actually a JSON number/array/object back to its real type
+/// so factory parsing (frame arrays, vertices, sizes, etc.) sees the right type.
+/// Plain words (`"group"`, `"extension_wing"`) and bare booleans are left alone.
+#[cfg(feature = "model-api")]
+fn coerce_stringified_json(value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            let trimmed = s.trim();
+            let looks_like_json = trimmed.starts_with('[')
+                || trimmed.starts_with('{')
+                || trimmed.parse::<f64>().is_ok();
+            if looks_like_json {
+                if let Ok(mut parsed) = serde_json::from_str::<Value>(trimmed) {
+                    if !parsed.is_string() && !parsed.is_boolean() {
+                        coerce_stringified_json(&mut parsed);
+                        *value = parsed;
+                    }
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(coerce_stringified_json),
+        Value::Object(map) => map.values_mut().for_each(coerce_stringified_json),
+        _ => {}
+    }
+}
+
 #[cfg(feature = "model-api")]
 pub fn handle_create_entity(world: &mut World, json: Value) -> Result<u64, String> {
     let mut request_json = json;
+    coerce_stringified_json(&mut request_json);
     let object = request_json
         .as_object_mut()
         .ok_or_else(|| "create_entity expects a JSON object".to_string())?;
