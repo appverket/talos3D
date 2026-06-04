@@ -127,6 +127,7 @@ impl Plugin for ModelApiPlugin {
         let (sender, receiver) = mpsc::channel();
         app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
         app.insert_resource(runtime_info.clone());
+        app.insert_resource(ModelApiDiscoveryCleanup::new(&runtime_info));
         // Ensure the Semantic Procedural Session substrate (ADR-051) is
         // installed so `procedural_session.*` tools have resources to
         // operate on. Idempotent — `ProceduralSessionMcpPlugin` adds
@@ -567,7 +568,7 @@ mod runtime_transport;
 #[cfg(feature = "model-api")]
 use runtime_transport::{
     annotate_window_title_with_model_api_instance, resolve_model_api_runtime,
-    spawn_model_api_server,
+    spawn_model_api_server, ModelApiDiscoveryCleanup,
 };
 
 #[cfg(feature = "model-api")]
