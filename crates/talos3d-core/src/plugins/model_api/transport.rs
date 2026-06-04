@@ -20,6 +20,52 @@ const MODEL_API_WRITE_MCP_CONFIG_ENV: &str = "TALOS3D_WRITE_MCP_CONFIG";
 const MODEL_API_MCP_SERVER_NAME: &str = "talos3d";
 
 #[cfg(feature = "model-api")]
+#[derive(Resource, Debug)]
+pub(super) struct ModelApiDiscoveryCleanup {
+    registry_path: PathBuf,
+    mcp_config_paths: Vec<PathBuf>,
+    http_url: String,
+}
+
+#[cfg(feature = "model-api")]
+impl ModelApiDiscoveryCleanup {
+    pub(super) fn new(runtime_info: &ModelApiRuntimeInfo) -> Self {
+        let mcp_config_paths = if should_write_mcp_config() {
+            mcp_config_paths()
+        } else {
+            Vec::new()
+        };
+        Self {
+            registry_path: PathBuf::from(&runtime_info.registry_path),
+            mcp_config_paths,
+            http_url: runtime_info.http_url.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+impl Drop for ModelApiDiscoveryCleanup {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.registry_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "failed to remove MCP instance registry {}: {error}",
+                    self.registry_path.display()
+                );
+            }
+        }
+        for path in &self.mcp_config_paths {
+            if let Err(error) = remove_matching_mcp_client_config(path, &self.http_url) {
+                eprintln!(
+                    "failed to clean MCP client config {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
 pub(super) fn spawn_model_api_server(
     sender: mpsc::Sender<ModelApiRequest>,
     runtime_info: ModelApiRuntimeInfo,
@@ -362,10 +408,7 @@ fn write_instance_registry_manifest(
 
 #[cfg(feature = "model-api")]
 fn write_local_mcp_client_configs(runtime_info: &ModelApiRuntimeInfo) {
-    if env::var(MODEL_API_WRITE_MCP_CONFIG_ENV)
-        .ok()
-        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
-    {
+    if !should_write_mcp_config() {
         return;
     }
 
@@ -377,6 +420,13 @@ fn write_local_mcp_client_configs(runtime_info: &ModelApiRuntimeInfo) {
             );
         }
     }
+}
+
+#[cfg(feature = "model-api")]
+fn should_write_mcp_config() -> bool {
+    !env::var(MODEL_API_WRITE_MCP_CONFIG_ENV)
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no"))
 }
 
 #[cfg(feature = "model-api")]
@@ -436,6 +486,36 @@ fn write_mcp_client_config(path: &Path, http_url: &str) -> Result<(), String> {
     };
     let config = merged_mcp_client_config(existing.as_deref(), http_url)?;
     let bytes = serde_json::to_vec_pretty(&config)
+        .map_err(|error| format!("failed to serialize MCP client config: {error}"))?;
+    fs::write(path, [bytes.as_slice(), b"\n"].concat()).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn remove_matching_mcp_client_config(path: &Path, http_url: &str) -> Result<(), String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut root = serde_json::from_str::<serde_json::Value>(&contents)
+        .map_err(|error| format!("existing config is not valid JSON: {error}"))?;
+    let Some(servers) = root
+        .get_mut("mcpServers")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(());
+    };
+    let remove = servers
+        .get(MODEL_API_MCP_SERVER_NAME)
+        .and_then(serde_json::Value::as_object)
+        .and_then(|server| server.get("url").or_else(|| server.get("http_url")))
+        .and_then(serde_json::Value::as_str)
+        == Some(http_url);
+    if !remove {
+        return Ok(());
+    }
+    servers.remove(MODEL_API_MCP_SERVER_NAME);
+    let bytes = serde_json::to_vec_pretty(&root)
         .map_err(|error| format!("failed to serialize MCP client config: {error}"))?;
     fs::write(path, [bytes.as_slice(), b"\n"].concat()).map_err(|error| error.to_string())
 }
@@ -599,6 +679,46 @@ mod tests {
         assert_eq!(
             paths,
             vec![core.join(".mcp.json"), workspace.join(".mcp.json")]
+        );
+    }
+
+    #[test]
+    fn cleanup_removes_only_matching_runtime_discovery_records() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let registry_path = temp.path().join("instance.json");
+        let matching_config = temp.path().join("matching.mcp.json");
+        let newer_config = temp.path().join("newer.mcp.json");
+        fs::write(&registry_path, "{}").expect("registry should be written");
+        fs::write(
+            &matching_config,
+            r#"{"mcpServers":{"talos3d":{"url":"http://127.0.0.1:24842/mcp"},"other":{"command":"ok"}}}"#,
+        )
+        .expect("matching config should be written");
+        fs::write(
+            &newer_config,
+            r#"{"mcpServers":{"talos3d":{"url":"http://127.0.0.1:24999/mcp"}}}"#,
+        )
+        .expect("newer config should be written");
+
+        {
+            let cleanup = ModelApiDiscoveryCleanup {
+                registry_path: registry_path.clone(),
+                mcp_config_paths: vec![matching_config.clone(), newer_config.clone()],
+                http_url: "http://127.0.0.1:24842/mcp".into(),
+            };
+            drop(cleanup);
+        }
+
+        assert!(!registry_path.exists());
+        let matching: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(matching_config).unwrap()).unwrap();
+        assert!(matching["mcpServers"].get("talos3d").is_none());
+        assert_eq!(matching["mcpServers"]["other"]["command"], "ok");
+        let newer: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(newer_config).unwrap()).unwrap();
+        assert_eq!(
+            newer["mcpServers"]["talos3d"]["url"],
+            "http://127.0.0.1:24999/mcp"
         );
     }
 }
