@@ -698,35 +698,74 @@ fn attach_mesh_entity(
 }
 
 fn triangle_mesh_asset(primitive: &TriangleMesh) -> Mesh {
-    let positions: Vec<[f32; 3]> = primitive
-        .vertices
-        .iter()
-        .map(|vertex| [vertex.x, vertex.y, vertex.z])
-        .collect();
-    let normals = primitive
-        .normals
-        .clone()
-        .filter(|normals| normals.len() == primitive.vertices.len())
-        .unwrap_or_else(|| compute_triangle_mesh_normals(primitive));
-    let normals: Vec<[f32; 3]> = normals
-        .into_iter()
-        .map(|normal| [normal.x, normal.y, normal.z])
-        .collect();
-    let indices: Vec<u32> = primitive
-        .faces
-        .iter()
-        .flat_map(|face| face.iter().copied())
-        .collect();
-
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     );
-    let uvs = projected_uvs_from_positions_normals(&positions, &normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
+
+    let supplied_normals = primitive
+        .normals
+        .clone()
+        .filter(|normals| normals.len() == primitive.vertices.len());
+
+    if let Some(normals) = supplied_normals {
+        // Author supplied per-vertex normals — honour them with an indexed mesh
+        // (lets the author choose smooth shading for genuinely curved surfaces).
+        let positions: Vec<[f32; 3]> = primitive
+            .vertices
+            .iter()
+            .map(|vertex| [vertex.x, vertex.y, vertex.z])
+            .collect();
+        let normals: Vec<[f32; 3]> = normals
+            .into_iter()
+            .map(|normal| [normal.x, normal.y, normal.z])
+            .collect();
+        let indices: Vec<u32> = primitive
+            .faces
+            .iter()
+            .flat_map(|face| face.iter().copied())
+            .collect();
+        let uvs = projected_uvs_from_positions_normals(&positions, &normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_indices(Indices::U32(indices));
+    } else {
+        // No normals supplied: build FLAT (faceted) shading. Each triangle gets
+        // its own three un-shared vertices carrying the face normal, so faceted
+        // architectural surfaces (gable roofs, walls, slabs) render crisp instead
+        // of smooth/inflated. Averaging normals across shared vertices (the old
+        // behaviour) made any multi-facet roof look like an inflated balloon.
+        let mut positions: Vec<[f32; 3]> = Vec::with_capacity(primitive.faces.len() * 3);
+        let mut normals: Vec<[f32; 3]> = Vec::with_capacity(primitive.faces.len() * 3);
+        for face in &primitive.faces {
+            let [a, b, c] = *face;
+            let (Some(va), Some(vb), Some(vc)) = (
+                primitive.vertices.get(a as usize).copied(),
+                primitive.vertices.get(b as usize).copied(),
+                primitive.vertices.get(c as usize).copied(),
+            ) else {
+                continue;
+            };
+            let normal = (vb - va).cross(vc - va).normalize_or_zero();
+            let normal = if normal.length_squared() <= f32::EPSILON {
+                Vec3::Y
+            } else {
+                normal
+            };
+            for vertex in [va, vb, vc] {
+                positions.push([vertex.x, vertex.y, vertex.z]);
+                normals.push([normal.x, normal.y, normal.z]);
+            }
+        }
+        let uvs = projected_uvs_from_positions_normals(&positions, &normals);
+        let indices: Vec<u32> = (0..positions.len() as u32).collect();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+        mesh.insert_indices(Indices::U32(indices));
+    }
+
     mesh
 }
 
@@ -748,39 +787,6 @@ fn projected_uvs_from_positions_normals(
                 [*z, *y]
             } else {
                 [*x, *y]
-            }
-        })
-        .collect()
-}
-
-fn compute_triangle_mesh_normals(primitive: &TriangleMesh) -> Vec<Vec3> {
-    let mut normals = vec![Vec3::ZERO; primitive.vertices.len()];
-
-    for face in &primitive.faces {
-        let [a, b, c] = *face;
-        let (Some(a), Some(b), Some(c)) = (
-            primitive.vertices.get(a as usize).copied(),
-            primitive.vertices.get(b as usize).copied(),
-            primitive.vertices.get(c as usize).copied(),
-        ) else {
-            continue;
-        };
-
-        let normal = (b - a).cross(c - a).normalize_or_zero();
-        for vertex_index in face {
-            if let Some(accumulator) = normals.get_mut(*vertex_index as usize) {
-                *accumulator += normal;
-            }
-        }
-    }
-
-    normals
-        .into_iter()
-        .map(|normal| {
-            if normal.length_squared() <= f32::EPSILON {
-                Vec3::Y
-            } else {
-                normal.normalize()
             }
         })
         .collect()
