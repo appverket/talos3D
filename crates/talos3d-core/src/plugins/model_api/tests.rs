@@ -4669,6 +4669,12 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "materialize_learned_asset",
         "run_validation_v2",
         "take_screenshot",
+        // ADR-058 local-frame card (dkg.local_frames)
+        "create_entity",
+        "enter_group",
+        "exit_group",
+        "transform",
+        "get_editing_context",
     ]);
     for card in handle_list_guidance_cards(&world, None) {
         for tool_id in &card.referenced_tool_ids {
