@@ -3228,7 +3228,10 @@ pub struct TransformToolRequest {
     pub axis: Option<String>,
     /// rotate: angle in degrees (number); scale: factor (number); move: distance
     /// along `axis` (number) or a free `[dx,dy,dz]` vector (array of 3 numbers).
-    #[cfg_attr(feature = "model-api", schemars(schema_with = "transform_value_schema"))]
+    #[cfg_attr(
+        feature = "model-api",
+        schemars(schema_with = "transform_value_schema")
+    )]
     pub value: Value,
     /// Optional world-space pivot `[x,y,z]` for `rotate`. When given, the
     /// selection is rotated rigidly about this point (e.g. a wing's junction
@@ -4480,7 +4483,7 @@ pub(super) struct SelectRecipeRequest {
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CuratedPathDiscoveryRequest {
-    /// `recipe`, `parametric`, or `prior`. Defaults to `recipe`.
+    /// `recipe`, `parametric`, `definition`, or `prior`. Defaults to `recipe`.
     #[serde(default)]
     pub(super) path_kind: Option<String>,
     /// Element class or concept id the caller wants to author.
@@ -4497,6 +4500,8 @@ pub struct CuratedPathDiscoveryInfo {
     pub element_class: Option<String>,
     pub recipe_rankings: Vec<RecipeRankingInfo>,
     pub parametric_types: Vec<crate::plugins::parametric_mcp::ParametricTypeInfo>,
+    pub definition_assets: Vec<DefinitionPathInfo>,
+    pub curated_assets: Vec<CuratedAssetPathInfo>,
     pub generation_priors: Vec<GenerationPriorInfo>,
     pub related_asset_ids: Vec<String>,
     pub no_curated_path: Option<NoCuratedPathInfo>,
@@ -4526,6 +4531,27 @@ pub struct NonClassTermInfo {
     pub native_entity_types: Vec<String>,
     /// Curated assembly pattern id(s) that already cover this term.
     pub assembly_pattern_ids: Vec<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CuratedAssetPathInfo {
+    pub asset_id: String,
+    pub manifest_kind: String,
+    pub label: Option<String>,
+    pub executable: bool,
+    pub how_to_use: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DefinitionPathInfo {
+    pub library_id: String,
+    pub library_name: String,
+    pub definition_id: String,
+    pub name: String,
+    pub definition_kind: String,
+    pub how_to_instantiate: String,
 }
 
 #[cfg(feature = "model-api")]
@@ -8627,9 +8653,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     )]
     pub(super) async fn install_recipe_from_session_export_tool(
         &self,
-        Parameters(params): Parameters<
-            super::request::InstallRecipeFromSessionExportRequest,
-        >,
+        Parameters(params): Parameters<super::request::InstallRecipeFromSessionExportRequest>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_install_recipe_from_session_export(params)
@@ -8671,9 +8695,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     )]
     pub(super) async fn acquire_corpus_passage_tool(
         &self,
-        Parameters(params): Parameters<
-            super::request::AcquireCorpusPassageRequest,
-        >,
+        Parameters(params): Parameters<super::request::AcquireCorpusPassageRequest>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_acquire_corpus_passage(params)

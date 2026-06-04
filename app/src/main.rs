@@ -17,12 +17,12 @@ use talos3d_core::plugins::{
     assistant_chat::AssistantChatPlugin,
     authoring_guidance::AuthoringGuidancePlugin,
     bundled_definition_libraries::BundledDefinitionLibrariesPlugin,
-    definition_preview_scene::DefinitionPreviewPlugin,
     camera::CameraPlugin,
     clipping_planes::ClippingPlanesPlugin,
     command_registry::CommandRegistryPlugin,
     commands::CommandPlugin,
     cursor::CursorPlugin,
+    definition_preview_scene::DefinitionPreviewPlugin,
     dimension_line::DimensionLinePlugin,
     document_properties::DocumentProperties,
     document_state::DocumentStatePlugin,
@@ -127,6 +127,7 @@ fn main() {
     // See ADR-040 and the CURATION_SUBSTRATE agreement.
     .add_plugins(talos3d_core::curation::CurationPlugin)
     .add_plugins(ArchitectureCorePlugin);
+    app.add_plugins(ArchitectureProductPlugin);
 
     #[cfg(feature = "terrain")]
     app.add_plugins(TerrainPlugin);
