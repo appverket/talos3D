@@ -1364,6 +1364,18 @@ struct PreviousOccurrenceEditContext {
 
 const MUTED_ALPHA: f32 = 0.15;
 
+/// Stores an entity's real material handle while it is dimmed during group/
+/// occurrence editing, so it can be restored on exit. Group-edit muting swaps the
+/// entity to a single shared translucent "muted" material instead of mutating the
+/// shared StandardMaterial asset in place — mutating the shared asset bled the
+/// alpha across every entity that shares the same material id and produced
+/// conflicting per-frame writes (active members forcing alpha 1.0, muted ones
+/// forcing 0.15 on the *same* asset), which flickered the whole model between
+/// transparent and opaque. Per-entity handle swap is conflict-free. See ADR-058
+/// follow-up.
+#[derive(Component)]
+pub struct MutedMaterialRestore(pub Handle<StandardMaterial>);
+
 fn update_group_edit_muting(
     mut commands: Commands,
     edit_context: Res<GroupEditContext>,
@@ -1385,9 +1397,11 @@ fn update_group_edit_muting(
     group_query: Query<(&ElementId, &GroupMembers)>,
     material_query: Query<
         (
+            Entity,
             Option<&ElementId>,
             Option<&GeneratedOccurrencePart>,
             &MeshMaterial3d<StandardMaterial>,
+            Option<&MutedMaterialRestore>,
         ),
         (
             Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
@@ -1395,6 +1409,7 @@ fn update_group_edit_muting(
         ),
     >,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut muted_material: Local<Option<Handle<StandardMaterial>>>,
 ) {
     if edit_context.stack == previous.stack
         && occurrence_edit_context.stack == previous_occurrence.stack
@@ -1404,6 +1419,27 @@ fn update_group_edit_muting(
     previous.stack = edit_context.stack.clone();
     previous_occurrence.stack = occurrence_edit_context.stack.clone();
 
+    // One shared translucent material for all dimmed entities. Built once.
+    let muted_handle = muted_material
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::srgba(0.55, 0.55, 0.58, MUTED_ALPHA),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
+
+    // Restore an entity's real material handle that was saved when it was dimmed.
+    let restore_entity = |commands: &mut Commands, entity: Entity, restore: &MutedMaterialRestore| {
+        if let Ok(mut ec) = commands.get_entity(entity) {
+            ec.insert(MeshMaterial3d::<StandardMaterial>(restore.0.clone()));
+            ec.remove::<MutedMaterialRestore>();
+        }
+    };
+
     if edit_context.is_root() && occurrence_edit_context.is_root() {
         for (entity, _, _, is_muted) in &entity_query {
             if is_muted {
@@ -1412,12 +1448,9 @@ fn update_group_edit_muting(
                 }
             }
         }
-        for (_, _, mat_handle) in &material_query {
-            if let Some(mat) = materials.get_mut(mat_handle) {
-                if mat.base_color.alpha() < 1.0 {
-                    mat.base_color.set_alpha(1.0);
-                    mat.alpha_mode = AlphaMode::Opaque;
-                }
+        for (entity, _, _, _, restore) in &material_query {
+            if let Some(restore) = restore {
+                restore_entity(&mut commands, entity, restore);
             }
         }
     } else {
@@ -1447,8 +1480,8 @@ fn update_group_edit_muting(
             }
         }
 
-        for (element_id, generated_part, mat_handle) in &material_query {
-            let is_muted = !edit_entity_is_active(
+        for (entity, element_id, generated_part, mat_handle, restore) in &material_query {
+            let should_mute = !edit_entity_is_active(
                 element_id,
                 generated_part,
                 active_group_id,
@@ -1456,14 +1489,18 @@ fn update_group_edit_muting(
                 &active_members,
             );
 
-            if let Some(mat) = materials.get_mut(mat_handle) {
-                if is_muted {
-                    mat.base_color.set_alpha(MUTED_ALPHA);
-                    mat.alpha_mode = AlphaMode::Blend;
-                } else {
-                    mat.base_color.set_alpha(1.0);
-                    mat.alpha_mode = AlphaMode::Opaque;
+            if should_mute {
+                // Swap to the shared muted material, remembering the real handle.
+                // Skip if already dimmed (restore present) so we never save the
+                // muted handle as the "original".
+                if restore.is_none() {
+                    if let Ok(mut ec) = commands.get_entity(entity) {
+                        ec.insert(MutedMaterialRestore(mat_handle.0.clone()));
+                        ec.insert(MeshMaterial3d::<StandardMaterial>(muted_handle.clone()));
+                    }
                 }
+            } else if let Some(restore) = restore {
+                restore_entity(&mut commands, entity, restore);
             }
         }
     }
