@@ -614,6 +614,7 @@ fn queue_import_group(
             element_id: group_id,
             name: group_name.unwrap_or_else(|| "Import".to_string()),
             member_ids,
+            frame: crate::plugins::modeling::group::GroupFrame::default(),
             composite: None,
             cached_bounds: None,
         };

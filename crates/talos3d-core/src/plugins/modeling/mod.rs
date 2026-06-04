@@ -888,6 +888,7 @@ fn execute_group(world: &mut World, _: &Value) -> Result<CommandResult, String> 
         element_id: group_id,
         name: "Group".to_string(),
         member_ids: selected_ids,
+        frame: group::GroupFrame::default(),
         composite: None,
         cached_bounds,
     };

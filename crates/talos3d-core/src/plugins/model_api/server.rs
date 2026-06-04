@@ -5213,7 +5213,13 @@ impl ModelApiServer {
 
     #[tool(
         name = "transform",
-        description = "Move, rotate, or scale entities through the command pipeline. Returns CommandResult."
+        description = "Move, rotate, or scale entities through the command pipeline. Returns CommandResult. \
+LOCAL FRAMES (ADR-058): if an element_id is a GROUP, the whole assembly transforms as a rigid unit — every \
+nested member moves/rotates together about `pivot` (default: the group's frame origin, else its bounds centre) \
+and the group's local authoring frame is recorded. This is how you give a whole wing its angle in one call: \
+build the wing axis-aligned inside a group, then rotate the GROUP about the junction corner — every wall and \
+gable inherits the angle, so gable ends can never be left at the wrong angle. rotate `value` is degrees; \
+`pivot` is world-space [x,y,z]."
     )]
     pub(super) async fn transform_tool(
         &self,
@@ -5594,7 +5600,12 @@ impl ModelApiServer {
 
     #[tool(
         name = "enter_group",
-        description = "Enter a group for editing. Only the group's direct children become selectable. Returns the updated editing context."
+        description = "Enter a group for editing — work in its LOCAL coordinate frame (ADR-058). While inside, \
+geometry you author is interpreted in the group's rectified local frame and composed to world by the group's \
+frame, AND is auto-added to the group. So to build an angled volume: create_entity {type:group, \
+frame_rotate_euler_deg:[0,deg,0], frame_origin:[x,y,z]} (or rotate the group later with `transform`), enter it, \
+then author everything AXIS-ALIGNED in clean local coords — the frame carries the angle. get_editing_context \
+reports the active frame. Returns the updated editing context. Call exit_group when done."
     )]
     pub(super) async fn enter_group_tool(
         &self,

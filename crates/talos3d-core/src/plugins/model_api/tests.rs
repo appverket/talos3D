@@ -729,6 +729,7 @@ fn create_box_semantic_annotation_is_inspectable_and_survives_transform() {
             operation: "move".to_string(),
             axis: None,
             value: json!([12.0, 0.0, 0.0]),
+            pivot: None,
         },
     )
     .expect("conceptual block should use the existing transform path");
@@ -1140,6 +1141,7 @@ fn write_handlers_create_transform_delete_and_list_handles() {
             operation: "move".to_string(),
             axis: Some("X".to_string()),
             value: json!(2.5),
+            pivot: None,
         },
     )
     .expect("transform should succeed");
@@ -3637,6 +3639,7 @@ fn hosted_definition_instantiation_derives_anchors_and_relation() {
             operation: "move".to_string(),
             axis: Some("X".to_string()),
             value: json!(0.25),
+            pivot: None,
         },
     )
     .expect_err("internal opening proxy should not be transformable");

@@ -31,7 +31,10 @@ use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
 use crate::plugins::identity::ElementIdAllocator;
 use crate::plugins::materials::MaterialAssignment;
-use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
+use crate::plugins::modeling::group::{
+    collect_group_members_recursive, compute_group_bounds_from_world, group_frame,
+    group_frame_change_snapshots, is_group, GroupEditContext, GroupFrame, GroupMembers,
+};
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
@@ -284,7 +287,12 @@ pub use types::*;
 
 pub fn get_editing_context(world: &World) -> EditingContextInfo {
     let edit_context = world.resource::<GroupEditContext>();
+    let frame = edit_context.active_frame(world);
+    let (ex, ey, ez) = frame.rotation.to_euler(bevy::math::EulerRot::XYZ);
     EditingContextInfo {
+        frame_is_identity: frame.is_identity(),
+        frame_origin: [frame.translation.x, frame.translation.y, frame.translation.z],
+        frame_rotate_euler_deg: [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()],
         is_root: edit_context.is_root(),
         stack: edit_context
             .stack
@@ -3611,6 +3619,7 @@ fn handle_split_box_face(
         element_id: group_id,
         name: "Solid".to_string(),
         member_ids: vec![id_a, id_b],
+        frame: GroupFrame::default(),
         composite: Some(CompositeSolid {
             shared_faces: vec![SharedFace {
                 entity_a: id_a,
@@ -9066,16 +9075,38 @@ pub fn handle_transform(
     for element_id in &request.element_ids {
         ensure_user_editable_entity(world, ElementId(*element_id), "transformed")?;
     }
-    let snapshots = capture_snapshots_by_ids(world, &request.element_ids)?;
-    if snapshots.is_empty() {
+
+    // A group transforms as a rigid unit (ADR-058): its recursive members all
+    // move/rotate together and the group's local frame is updated, so its
+    // contents — authored axis-aligned in the rectified local frame — inherit
+    // the orientation (e.g. a wing's gable ends pick up the wing angle). Plain
+    // entities keep the existing per-element behaviour.
+    let (group_ids, plain_ids): (Vec<u64>, Vec<u64>) = request
+        .element_ids
+        .iter()
+        .copied()
+        .partition(|id| is_group(world, ElementId(*id)));
+
+    let mut before: Vec<BoxedEntity> = Vec::new();
+    let mut after: Vec<BoxedEntity> = Vec::new();
+
+    if !plain_ids.is_empty() {
+        let snapshots = capture_snapshots_by_ids(world, &plain_ids)?;
+        let plain_after = apply_transform_request(&snapshots, &request)?;
+        before.extend(snapshots.into_iter().map(|(_, snapshot)| snapshot));
+        after.extend(plain_after);
+    }
+    for group_id in &group_ids {
+        let (group_before, group_after) =
+            transform_group_as_unit(world, ElementId(*group_id), &request)?;
+        before.extend(group_before);
+        after.extend(group_after);
+    }
+
+    if before.is_empty() {
         return Err("No entities found for the given IDs".to_string());
     }
 
-    let after = apply_transform_request(&snapshots, &request)?;
-    let before = snapshots
-        .iter()
-        .map(|(_, snapshot)| snapshot.clone())
-        .collect();
     send_event(
         world,
         ApplyEntityChangesCommand {
@@ -9699,6 +9730,99 @@ fn apply_transform_request(
                 .map(|(_, snapshot)| snapshot.scale_by(factor, center))
                 .collect())
         }
+        operation => Err(format!(
+            "Invalid transform operation '{operation}'. Valid operations: move, rotate, scale"
+        )),
+    }
+}
+
+/// Transform a whole group as a rigid body (ADR-058): rigidly move/rotate every
+/// leaf member, and update the local frame of the group and any nested subgroup,
+/// so the assembly keeps its internal rectified authoring space. Returns
+/// (before, after) snapshots for the command/history pipeline.
+#[cfg(feature = "model-api")]
+fn transform_group_as_unit(
+    world: &World,
+    group_id: ElementId,
+    request: &TransformToolRequest,
+) -> ApiResult<(Vec<BoxedEntity>, Vec<BoxedEntity>)> {
+    let frame = group_frame(world, group_id).unwrap_or_default();
+    let all_member_ids = collect_group_members_recursive(world, group_id);
+
+    // Effective pivot: explicit request pivot > the group's frame origin >
+    // the group's aggregate bounds centre.
+    let pivot = match request.pivot {
+        Some(p) => Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32),
+        None if !frame.is_identity() => frame.translation,
+        None => compute_group_bounds_from_world(world, &[group_id])
+            .map(|b| b.center())
+            .unwrap_or(Vec3::ZERO),
+    };
+
+    // Leaf members get the rigid transform; reuse apply_transform_request with the
+    // pivot filled in so the rigid-rotate math is shared (DRY) with multi-select.
+    let leaf_ids: Vec<u64> = all_member_ids
+        .iter()
+        .filter(|id| !is_group(world, **id))
+        .map(|id| id.0)
+        .collect();
+    let mut pivoted = request.clone();
+    pivoted.pivot = Some([pivot.x as f64, pivot.y as f64, pivot.z as f64]);
+    let leaf_snaps = capture_snapshots_by_ids(world, &leaf_ids)?;
+    let leaf_after = apply_transform_request(&leaf_snaps, &pivoted)?;
+
+    let mut before: Vec<BoxedEntity> = leaf_snaps.into_iter().map(|(_, s)| s).collect();
+    let mut after: Vec<BoxedEntity> = leaf_after;
+
+    // Update this group's frame and every nested subgroup's frame, rigidly.
+    let mut group_targets = vec![group_id];
+    group_targets.extend(all_member_ids.iter().copied().filter(|id| is_group(world, *id)));
+    for gid in group_targets {
+        let old = group_frame(world, gid).unwrap_or_default();
+        let new = transform_group_frame(&old, request, pivot)?;
+        if let Some((b, a)) = group_frame_change_snapshots(world, gid, new) {
+            before.push(b);
+            after.push(a);
+        }
+    }
+    Ok((before, after))
+}
+
+/// Apply a transform request rigidly to a group's local frame.
+#[cfg(feature = "model-api")]
+fn transform_group_frame(
+    old: &GroupFrame,
+    request: &TransformToolRequest,
+    pivot: Vec3,
+) -> ApiResult<GroupFrame> {
+    let axis = parse_axis(request.axis.as_deref())?;
+    match request.operation.to_ascii_lowercase().as_str() {
+        "move" => {
+            let delta = if let Some(axis) = axis {
+                axis.unit_vector() * scalar_from_value(&request.value)?
+            } else {
+                vec3_from_value(&request.value)?
+            };
+            Ok(GroupFrame {
+                translation: old.translation + delta,
+                rotation: old.rotation,
+            })
+        }
+        "rotate" => {
+            let radians = scalar_from_value(&request.value)?.to_radians();
+            let rotation = match axis {
+                Some(AxisName::X) => Quat::from_rotation_x(radians),
+                Some(AxisName::Z) => Quat::from_rotation_z(radians),
+                _ => Quat::from_rotation_y(radians),
+            };
+            Ok(GroupFrame {
+                translation: pivot + rotation * (old.translation - pivot),
+                rotation: rotation * old.rotation,
+            })
+        }
+        // Assembly scale repositions members but leaves the authoring frame's
+        // orientation/origin unchanged.
+        "scale" => Ok(*old),
         operation => Err(format!(
             "Invalid transform operation '{operation}'. Valid operations: move, rotate, scale"
         )),
@@ -11884,6 +12008,41 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             ],
             next_card_ids: Vec::new(),
             json_examples: vec![serde_json::json!({ "asset_id": "recipe_draft.v1/learned.asset", "overrides": {} })],
+        },
+        GuidanceCardInfo {
+            id: "dkg.local_frames".into(),
+            title: "Author Angled Volumes In A Local Frame".into(),
+            task_tags: vec!["authoring".into(), "groups".into(), "geometry".into()],
+            summary: "To build an angled or compound volume (wings meeting at a non-90 degree \
+angle, a tilted block), do NOT compute rotated world coordinates by hand. Make a group with a \
+local frame, enter it, and author everything AXIS-ALIGNED in clean local coords — the frame \
+carries the angle so every wall and gable-end inherits it and can never be left at the wrong \
+angle. Either set frame_rotate_euler_deg on the group at create time, or build axis-aligned and \
+then `transform` the whole group as one rigid unit about its junction corner. get_editing_context \
+reports the active frame. ADR-058.".into(),
+            referenced_tool_ids: vec![
+                "create_entity".into(),
+                "enter_group".into(),
+                "exit_group".into(),
+                "transform".into(),
+                "get_editing_context".into(),
+            ],
+            next_card_ids: Vec::new(),
+            json_examples: vec![
+                serde_json::json!({
+                    "type": "group",
+                    "name": "living_wing",
+                    "frame_origin": [12.0, 0.0, 4.0],
+                    "frame_rotate_euler_deg": [0.0, 18.0, 0.0]
+                }),
+                serde_json::json!({
+                    "element_ids": ["<group_id>"],
+                    "operation": "rotate",
+                    "axis": "Y",
+                    "value": 18.0,
+                    "pivot": [12.0, 0.0, 4.0]
+                }),
+            ],
         },
     ]
 }

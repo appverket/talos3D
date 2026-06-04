@@ -19,6 +19,76 @@ use crate::{
     },
 };
 
+// --- Local coordinate frame ---
+
+/// A group's local-to-world coordinate frame: an origin (translation) plus an
+/// orientation (rotation). Geometry authored *inside* the group is expressed in
+/// this rectified local frame; the frame composes it to world. This is the
+/// scene-graph / SketchUp-component model — see ADR-058. Default is identity, so
+/// a group with no frame behaves exactly as a flat membership list.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GroupFrame {
+    #[serde(default)]
+    pub translation: Vec3,
+    #[serde(default = "quat_identity")]
+    pub rotation: Quat,
+}
+
+fn quat_identity() -> Quat {
+    Quat::IDENTITY
+}
+
+impl Default for GroupFrame {
+    fn default() -> Self {
+        Self {
+            translation: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }
+    }
+}
+
+impl GroupFrame {
+    pub fn identity() -> Self {
+        Self::default()
+    }
+
+    /// True when this frame applies no transform (the common, zero-cost case).
+    pub fn is_identity(&self) -> bool {
+        self.translation.abs_diff_eq(Vec3::ZERO, 1e-6)
+            && self.rotation.abs_diff_eq(Quat::IDENTITY, 1e-6)
+    }
+
+    /// Compose another frame expressed in *this* frame's local space onto this
+    /// one, yielding a single world-space frame. Used to fold a stack of nested
+    /// group frames (root → leaf) into one effective authoring frame.
+    pub fn then(&self, local: &GroupFrame) -> GroupFrame {
+        GroupFrame {
+            translation: self.translation + self.rotation * local.translation,
+            rotation: self.rotation * local.rotation,
+        }
+    }
+
+    /// Map a point given in this frame's local coordinates to world coordinates.
+    pub fn point_to_world(&self, local: Vec3) -> Vec3 {
+        self.translation + self.rotation * local
+    }
+}
+
+/// Transform a freshly-authored snapshot from a group's local frame into world
+/// space, generically, via the `AuthoredEntity` trait — so every primitive
+/// (box, mesh, wall, occurrence, …) composes the same way with no per-type code.
+/// The snapshot's local centre `c` maps to `frame.point_to_world(c)` and the
+/// whole body is rotated by `frame.rotation`.
+pub fn compose_snapshot_into_frame(snapshot: BoxedEntity, frame: &GroupFrame) -> BoxedEntity {
+    if frame.is_identity() {
+        return snapshot;
+    }
+    let local_centre = snapshot.center();
+    let world_centre = frame.point_to_world(local_centre);
+    let rotated = snapshot.rotate_by(frame.rotation);
+    rotated.translate_by(world_centre - rotated.center())
+}
+
 // --- ECS component ---
 
 /// Marker for entities that should be rendered muted during group editing.
@@ -29,6 +99,10 @@ pub struct GroupEditMuted;
 pub struct GroupMembers {
     pub name: String,
     pub member_ids: Vec<ElementId>,
+    /// Local-to-world coordinate frame for geometry authored inside this group.
+    /// Identity for a plain (flat) group. See ADR-058.
+    #[serde(default)]
+    pub frame: GroupFrame,
 }
 
 // --- Snapshot ---
@@ -38,6 +112,10 @@ pub struct GroupSnapshot {
     pub element_id: ElementId,
     pub name: String,
     pub member_ids: Vec<ElementId>,
+    /// Local-to-world coordinate frame for geometry authored inside this group
+    /// (identity for a plain group). See ADR-058.
+    #[serde(default)]
+    pub frame: GroupFrame,
     /// When present, this group represents a single composite solid shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composite: Option<CompositeSolid>,
@@ -134,6 +212,7 @@ impl AuthoredEntity for GroupSnapshot {
             if let Some(mut members) = world.get_mut::<GroupMembers>(entity) {
                 members.name = self.name.clone();
                 members.member_ids = self.member_ids.clone();
+                members.frame = self.frame;
             }
             let mut entity_mut = world.entity_mut(entity);
             if let Some(composite) = &self.composite {
@@ -148,6 +227,7 @@ impl AuthoredEntity for GroupSnapshot {
                 GroupMembers {
                     name: self.name.clone(),
                     member_ids: self.member_ids.clone(),
+                    frame: self.frame,
                 },
             ));
             if let Some(composite) = &self.composite {
@@ -202,6 +282,7 @@ impl AuthoredEntityFactory for GroupFactory {
                 element_id,
                 name: members.name.clone(),
                 member_ids: members.member_ids.clone(),
+                frame: members.frame,
                 composite,
                 cached_bounds,
             }
@@ -239,11 +320,15 @@ impl AuthoredEntityFactory for GroupFactory {
         let composite = object
             .get("composite")
             .and_then(|v| serde_json::from_value::<CompositeSolid>(v.clone()).ok());
+        // Optional initial local frame: { "frame": { "translation": [x,y,z],
+        // "rotation": [x,y,z,w] } } or { "frame_origin": [..], "frame_rotate_euler_deg": [..] }.
+        let frame = parse_group_frame(object);
         let cached_bounds = compute_group_bounds_from_world(world, &member_ids);
         Ok(GroupSnapshot {
             element_id: world.resource::<ElementIdAllocator>().next_id(),
             name,
             member_ids,
+            frame,
             composite,
             cached_bounds,
         }
@@ -322,6 +407,39 @@ impl AuthoredEntityFactory for GroupFactory {
     }
 }
 
+/// Parse an optional local frame from a create/update request object. Accepts
+/// either a nested `frame` object or top-level `frame_origin` /
+/// `frame_rotate_euler_deg` (degrees, XYZ order) for ergonomic agent authoring.
+pub fn parse_group_frame(object: &serde_json::Map<String, Value>) -> GroupFrame {
+    if let Some(frame) = object
+        .get("frame")
+        .and_then(|v| serde_json::from_value::<GroupFrame>(v.clone()).ok())
+    {
+        return frame;
+    }
+    let translation = object
+        .get("frame_origin")
+        .and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok())
+        .map(Vec3::from)
+        .unwrap_or(Vec3::ZERO);
+    let rotation = object
+        .get("frame_rotate_euler_deg")
+        .and_then(|v| serde_json::from_value::<[f32; 3]>(v.clone()).ok())
+        .map(|[x, y, z]| {
+            Quat::from_euler(
+                EulerRot::XYZ,
+                x.to_radians(),
+                y.to_radians(),
+                z.to_radians(),
+            )
+        })
+        .unwrap_or(Quat::IDENTITY);
+    GroupFrame {
+        translation,
+        rotation,
+    }
+}
+
 // --- Editing context ---
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -337,6 +455,22 @@ impl GroupEditContext {
 
     pub fn current_group(&self) -> Option<ElementId> {
         self.stack.last().copied()
+    }
+
+    /// The effective authoring frame: the product of every group frame on the
+    /// edit stack, folded root → leaf. Identity when at root or when no entered
+    /// group carries a non-identity frame. Geometry authored now is expressed in
+    /// this frame's local coordinates and composed to world by it.
+    pub fn active_frame(&self, world: &World) -> GroupFrame {
+        let mut frame = GroupFrame::identity();
+        for id in &self.stack {
+            if let Some(entity) = find_entity_by_element_id_readonly(world, *id) {
+                if let Some(members) = world.get::<GroupMembers>(entity) {
+                    frame = frame.then(&members.frame);
+                }
+            }
+        }
+        frame
     }
 
     pub fn enter(&mut self, group_id: ElementId) {
@@ -452,6 +586,122 @@ fn draw_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Colo
     // Vertical edges
     for i in 0..4 {
         gizmos.line(corners[i], corners[i + 4], color);
+    }
+}
+
+/// True when the element is a group.
+pub fn is_group(world: &World, element_id: ElementId) -> bool {
+    find_entity_by_element_id_readonly(world, element_id)
+        .and_then(|e| world.get::<GroupMembers>(e))
+        .is_some()
+}
+
+/// Read a group's local frame, if it is a group.
+pub fn group_frame(world: &World, element_id: ElementId) -> Option<GroupFrame> {
+    let entity = find_entity_by_element_id_readonly(world, element_id)?;
+    world.get::<GroupMembers>(entity).map(|m| m.frame)
+}
+
+/// Build before/after group snapshots that set `group_id`'s frame to `new_frame`,
+/// so a frame change flows through command/history (ADR-002).
+pub fn group_frame_change_snapshots(
+    world: &World,
+    group_id: ElementId,
+    new_frame: GroupFrame,
+) -> Option<(BoxedEntity, BoxedEntity)> {
+    let entity = find_entity_by_element_id_readonly(world, group_id)?;
+    let members = world.get::<GroupMembers>(entity)?;
+    let composite = world.get::<CompositeSolid>(entity).cloned();
+    let mk = |frame: GroupFrame| -> BoxedEntity {
+        GroupSnapshot {
+            element_id: group_id,
+            name: members.name.clone(),
+            member_ids: members.member_ids.clone(),
+            frame,
+            composite: composite.clone(),
+            cached_bounds: None,
+        }
+        .into()
+    };
+    Some((mk(members.frame), mk(new_frame)))
+}
+
+/// Build before/after group snapshots that add `new_member` to `group_id`, so a
+/// membership change can flow through the command/history pipeline (ADR-002)
+/// rather than mutating ECS state directly. Returns `None` if the group is
+/// missing or already contains the member.
+pub fn group_membership_add_snapshots(
+    world: &World,
+    group_id: ElementId,
+    new_member: ElementId,
+) -> Option<(BoxedEntity, BoxedEntity)> {
+    let entity = find_entity_by_element_id_readonly(world, group_id)?;
+    let members = world.get::<GroupMembers>(entity)?;
+    if members.member_ids.contains(&new_member) {
+        return None;
+    }
+    let composite = world.get::<CompositeSolid>(entity).cloned();
+    let mk = |ids: Vec<ElementId>| -> BoxedEntity {
+        GroupSnapshot {
+            element_id: group_id,
+            name: members.name.clone(),
+            member_ids: ids,
+            frame: members.frame,
+            composite: composite.clone(),
+            cached_bounds: None,
+        }
+        .into()
+    };
+    let before = mk(members.member_ids.clone());
+    let mut after_ids = members.member_ids.clone();
+    after_ids.push(new_member);
+    let after = mk(after_ids);
+    Some((before, after))
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn approx(a: Vec3, b: Vec3) -> bool {
+        a.abs_diff_eq(b, 1e-4)
+    }
+
+    #[test]
+    fn identity_frame_is_a_noop() {
+        let f = GroupFrame::identity();
+        assert!(f.is_identity());
+        assert!(approx(f.point_to_world(Vec3::new(3.0, 1.0, 2.0)), Vec3::new(3.0, 1.0, 2.0)));
+    }
+
+    #[test]
+    fn point_to_world_applies_rotation_then_translation() {
+        // 90° about Y maps local +X to world -Z, then offset by the origin.
+        let f = GroupFrame {
+            translation: Vec3::new(10.0, 0.0, 5.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        };
+        let world = f.point_to_world(Vec3::X);
+        assert!(approx(world, Vec3::new(10.0, 0.0, 4.0)), "got {world:?}");
+        assert!(!f.is_identity());
+    }
+
+    #[test]
+    fn then_composes_nested_frames_root_to_leaf() {
+        // Parent: +90° about Y at origin. Child (in parent's space): translate +X by 2.
+        let parent = GroupFrame {
+            translation: Vec3::ZERO,
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        };
+        let child = GroupFrame {
+            translation: Vec3::new(2.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+        };
+        let composed = parent.then(&child);
+        // Child origin (2,0,0) in parent space rotates to (0,0,-2) in world.
+        assert!(approx(composed.translation, Vec3::new(0.0, 0.0, -2.0)), "got {:?}", composed.translation);
+        // A point at child-local +X = world: parent rot applied to (2+1,0,0)=(3,0,0) -> (0,0,-3).
+        assert!(approx(composed.point_to_world(Vec3::X), Vec3::new(0.0, 0.0, -3.0)));
     }
 }
 

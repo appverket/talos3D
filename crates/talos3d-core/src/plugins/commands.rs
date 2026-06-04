@@ -24,6 +24,9 @@ use crate::{
 };
 
 #[cfg(feature = "model-api")]
+use crate::plugins::modeling::group::{
+    compose_snapshot_into_frame, group_membership_add_snapshots, GroupEditContext,
+};
 use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink, VoidPlacementOutcome};
 
 pub struct CommandPlugin;
@@ -608,9 +611,39 @@ pub(crate) fn enqueue_create_triangle_mesh(
 }
 
 pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
+    // Local-frame authoring (ADR-058): if the client has entered a group whose
+    // local frame is non-identity, the coordinates just authored are in that
+    // rectified local frame — compose them to world so the geometry inherits the
+    // group's orientation (e.g. an angled wing's walls/roof get the wing angle
+    // automatically). At root the frame is identity and this is a no-op.
+    // The edit-context resource is absent in minimal worlds (e.g. unit tests that
+    // don't add the selection plugin); treat that as "at root" (identity frame).
+    let edit_context = world
+        .get_resource::<GroupEditContext>()
+        .cloned()
+        .unwrap_or_default();
+    let frame = edit_context.active_frame(world);
+    let snapshot = compose_snapshot_into_frame(snapshot, &frame);
+    let new_id = snapshot.element_id();
+
     world
         .resource_mut::<PendingCommandQueue>()
         .push_command(Box::new(CreateEntityHistoryCommand { snapshot }));
+
+    // Auto-add the new entity to the active group, through the command/history
+    // pipeline (ADR-002), so the assembly can later be moved/rotated as a unit.
+    if let Some(group_id) = edit_context.current_group() {
+        if let Some((before, after)) = group_membership_add_snapshots(world, group_id, new_id) {
+            enqueue_apply_entity_changes(
+                world,
+                ApplyEntityChangesCommand {
+                    label: "Add to group",
+                    before: vec![before],
+                    after: vec![after],
+                },
+            );
+        }
+    }
 }
 
 pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEntityChangesCommand) {
