@@ -292,7 +292,11 @@ pub fn get_editing_context(world: &World) -> EditingContextInfo {
     let (ex, ey, ez) = frame.rotation.to_euler(bevy::math::EulerRot::XYZ);
     EditingContextInfo {
         frame_is_identity: frame.is_identity(),
-        frame_origin: [frame.translation.x, frame.translation.y, frame.translation.z],
+        frame_origin: [
+            frame.translation.x,
+            frame.translation.y,
+            frame.translation.z,
+        ],
         frame_rotate_euler_deg: [ex.to_degrees(), ey.to_degrees(), ez.to_degrees()],
         is_root: edit_context.is_root(),
         stack: edit_context
@@ -558,8 +562,8 @@ mod request;
 use request::handle_model_api_request;
 #[cfg(feature = "model-api")]
 use request::{
-    poll_model_api_requests, ApiResult, ModelApiReceiver, ModelApiRequest,
-    ObligationResolution, ResolveObligationRequest, ResolveObligationResult,
+    poll_model_api_requests, ApiResult, ModelApiReceiver, ModelApiRequest, ObligationResolution,
+    ResolveObligationRequest, ResolveObligationResult,
 };
 
 #[cfg(feature = "model-api")]
@@ -9807,7 +9811,12 @@ fn transform_group_as_unit(
 
     // Update this group's frame and every nested subgroup's frame, rigidly.
     let mut group_targets = vec![group_id];
-    group_targets.extend(all_member_ids.iter().copied().filter(|id| is_group(world, *id)));
+    group_targets.extend(
+        all_member_ids
+            .iter()
+            .copied()
+            .filter(|id| is_group(world, *id)),
+    );
     for gid in group_targets {
         let old = group_frame(world, gid).unwrap_or_default();
         let new = transform_group_frame(&old, request, pivot)?;
@@ -10023,9 +10032,7 @@ pub fn handle_resolve_obligation(
     request: ResolveObligationRequest,
 ) -> ApiResult<ResolveObligationResult> {
     use crate::plugins::commands::{ApplyEntityChangesCommand, BeginCommandGroup, EndCommandGroup};
-    use crate::plugins::refinement::{
-        ObligationSet, ObligationStatus,
-    };
+    use crate::plugins::refinement::{ObligationSet, ObligationStatus};
 
     let eid = ElementId(request.element_id);
     ensure_refinable_entity_exists(world, eid)?;
@@ -10049,7 +10056,10 @@ pub fn handle_resolve_obligation(
     }
 
     // For SatisfiedBy: validate the child entity exists.
-    if let ObligationResolution::SatisfiedBy { element_id: child_id } = &request.resolution {
+    if let ObligationResolution::SatisfiedBy {
+        element_id: child_id,
+    } = &request.resolution
+    {
         let child_eid = ElementId(*child_id);
         let child_exists = {
             let mut q = world.try_query::<(&ElementId,)>().unwrap();
@@ -10070,7 +10080,10 @@ pub fn handle_resolve_obligation(
     // Apply the resolution.
     let new_status = {
         let mut set = world.get_mut::<ObligationSet>(entity).ok_or_else(|| {
-            format!("ObligationSet disappeared for entity {}", request.element_id)
+            format!(
+                "ObligationSet disappeared for entity {}",
+                request.element_id
+            )
         })?;
 
         let obligation = set
@@ -10085,12 +10098,10 @@ pub fn handle_resolve_obligation(
             })?;
 
         obligation.status = match &request.resolution {
-            ObligationResolution::SatisfiedBy { element_id: child_id } => {
-                ObligationStatus::SatisfiedBy(*child_id)
-            }
-            ObligationResolution::Deferred { reason } => {
-                ObligationStatus::Deferred(reason.clone())
-            }
+            ObligationResolution::SatisfiedBy {
+                element_id: child_id,
+            } => ObligationStatus::SatisfiedBy(*child_id),
+            ObligationResolution::Deferred { reason } => ObligationStatus::Deferred(reason.clone()),
             ObligationResolution::Waived { rationale } => {
                 ObligationStatus::Waived(rationale.clone())
             }
@@ -10297,8 +10308,7 @@ pub fn handle_promote_refinement(
             // masquerade as a resolved roof with no structural frame. An empty
             // declaration means "unconstrained" for backward compatibility.
             if !supported.is_empty() && !supported.contains(&target_state) {
-                let supported_labels: Vec<&str> =
-                    supported.iter().map(|s| s.as_str()).collect();
+                let supported_labels: Vec<&str> = supported.iter().map(|s| s.as_str()).collect();
                 return Err(format!(
                     "recipe '{recipe_id}' supports only refinement state(s) [{}] and cannot \
                      produce '{}'. This recipe is capped at that level (e.g. a covering-only \
@@ -10318,10 +10328,8 @@ pub fn handle_promote_refinement(
 
         if let Some(script) = script_opt {
             // Build a parameter map from the overrides JSON object.
-            let params: serde_json::Map<String, serde_json::Value> = overrides
-                .as_object()
-                .cloned()
-                .unwrap_or_default();
+            let params: serde_json::Map<String, serde_json::Value> =
+                overrides.as_object().cloned().unwrap_or_default();
 
             let mut executor = ModelApiStepExecutor;
             let mut dispatcher = crate::plugins::procedural_session_mcp::CommandQueueDispatcher {
@@ -10473,12 +10481,19 @@ fn handle_instantiate_recipe(
     // (previously a 1 m fallback cube stranded at the world origin). Recipes that
     // instead derive geometry from the anchor extent (length_mm / footprint
     // polygon) keep the computed extent above.
-    let num = |k: &str| request.parameters.get(k).and_then(serde_json::Value::as_f64);
+    let num = |k: &str| {
+        request
+            .parameters
+            .get(k)
+            .and_then(serde_json::Value::as_f64)
+    };
     let (anchor_centre, half_extents): ([f64; 3], [f64; 3]) =
         if let (Some(min_x), Some(max_x), Some(min_z), Some(max_z)) =
             (num("min_x"), num("max_x"), num("min_z"), num("max_z"))
         {
-            let y = num("top_datum_m").or_else(|| num("eave_y_m")).unwrap_or(0.0);
+            let y = num("top_datum_m")
+                .or_else(|| num("eave_y_m"))
+                .unwrap_or(0.0);
             (
                 [(min_x + max_x) / 2.0, y, (min_z + max_z) / 2.0],
                 [0.01, 0.01, 0.01],
@@ -10928,8 +10943,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     // `installed_recipe_classes` is reused below to suppress those false gaps.
     let mut installed_recipe_classes: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    if let Some(artifact_registry) =
-        world.get_resource::<crate::curation::RecipeArtifactRegistry>()
+    if let Some(artifact_registry) = world.get_resource::<crate::curation::RecipeArtifactRegistry>()
     {
         let already: std::collections::HashSet<String> =
             recipe_family_ids.iter().cloned().collect();
@@ -11680,13 +11694,16 @@ pub fn handle_discover_curated_paths(
     request: CuratedPathDiscoveryRequest,
 ) -> ApiResult<CuratedPathDiscoveryInfo> {
     use crate::capability_registry::{CapabilityRegistry, ElementClassId, PriorScope};
+    use crate::curation::CuratedManifestRegistry;
     use crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry;
+    use crate::plugins::modeling::definition::DefinitionLibraryRegistry;
     use crate::plugins::recipe_drafts::RecipeDraftRegistry;
     use crate::relational::registry::ParametricRegistry;
 
     let path_kind = request.path_kind.unwrap_or_else(|| "recipe".into());
     let guidance_card_ids = vec![
         "dkg.snapshot.start".into(),
+        "mcp_tool:discover_curated_paths".into(),
         "dkg.no_curated_path".into(),
         "dkg.close_gap".into(),
     ];
@@ -11712,6 +11729,14 @@ pub fn handle_discover_curated_paths(
 
     let mut recipe_rankings = Vec::new();
     let mut parametric_types = Vec::new();
+    let mut definition_assets = Vec::new();
+    let mut curated_assets = discover_matching_curated_assets(
+        world
+            .get_resource::<CuratedManifestRegistry>()
+            .into_iter()
+            .flat_map(|registry| registry.iter()),
+        request.element_class.as_deref(),
+    );
     let mut generation_priors = Vec::new();
 
     // Surface the public parametric types whose id/label match an element-class
@@ -11758,7 +11783,54 @@ pub fn handle_discover_curated_paths(
             parametric_types = collect_parametric_types(Some(element_class.as_str()));
         }
         "parametric" => {
+            curated_assets.retain(|asset| {
+                curated_path_matches_request(asset, request.element_class.as_deref())
+            });
             parametric_types = collect_parametric_types(request.element_class.as_deref());
+        }
+        "definition" => {
+            definition_assets = world
+                .get_resource::<DefinitionLibraryRegistry>()
+                .map(|registry| {
+                    let mut assets = Vec::new();
+                    for library in registry.list() {
+                        for definition in library.definitions.values() {
+                            let definition_kind = format!("{:?}", definition.definition_kind);
+                            if !request.element_class.as_deref().is_none_or(|needle| {
+                                curated_path_text_matches(
+                                    needle,
+                                    &[
+                                        library.id.0.as_str(),
+                                        &library.name,
+                                        definition.id.as_str(),
+                                        &definition.name,
+                                        &definition_kind,
+                                    ],
+                                )
+                            }) {
+                                continue;
+                            }
+                            assets.push(DefinitionPathInfo {
+                                library_id: library.id.to_string(),
+                                library_name: library.name.clone(),
+                                definition_id: definition.id.to_string(),
+                                name: definition.name.clone(),
+                                definition_kind,
+                                how_to_instantiate: format!(
+                                    "Call occurrence.create with definition_id {:?}; use definition.library.get first if parameters or hosted contracts must be inspected.",
+                                    definition.id.to_string()
+                                ),
+                            });
+                        }
+                    }
+                    assets.sort_by(|left, right| {
+                        left.library_id
+                            .cmp(&right.library_id)
+                            .then(left.definition_id.cmp(&right.definition_id))
+                    });
+                    assets
+                })
+                .unwrap_or_default();
         }
         "prior" => {
             let class_id = request
@@ -11787,7 +11859,7 @@ pub fn handle_discover_curated_paths(
         }
         other => {
             return Err(format!(
-                "unknown path_kind '{other}'; expected recipe, parametric, or prior"
+                "unknown path_kind '{other}'; expected recipe, parametric, definition, or prior"
             ));
         }
     }
@@ -11833,7 +11905,13 @@ pub fn handle_discover_curated_paths(
 
     let has_path = recipe_rankings.iter().any(|ranking| ranking.executable)
         || !parametric_types.is_empty()
+        || !definition_assets.is_empty()
+        || !curated_assets.is_empty()
         || !generation_priors.is_empty();
+    related_asset_ids.extend(curated_assets.iter().map(|asset| asset.asset_id.clone()));
+    related_asset_ids.sort();
+    related_asset_ids.dedup();
+    related_asset_ids.truncate(12);
     // A recognised native non-class term is not a gap: it already has a path.
     let no_curated_path = (non_class_term.is_none() && !has_path).then(|| NoCuratedPathInfo {
         element_class: request
@@ -11848,19 +11926,128 @@ pub fn handle_discover_curated_paths(
         guidance_card_ids: guidance_card_ids.clone(),
         related_installed_or_learned_asset_ids: related_asset_ids.clone(),
     });
+    let suggested_next_tool = if let Some(non_class_term) = &non_class_term {
+        if non_class_term.native_entity_types.is_empty() {
+            "list_vocabulary"
+        } else {
+            "create_entity"
+        }
+    } else if has_path {
+        match path_kind.as_str() {
+            "recipe" if !recipe_rankings.is_empty() => "instantiate_recipe",
+            "parametric" if !parametric_types.is_empty() => "parametric.create",
+            "definition" if !definition_assets.is_empty() => "occurrence.create",
+            _ => "get_guidance_card",
+        }
+    } else {
+        "request_corpus_expansion"
+    };
 
     Ok(CuratedPathDiscoveryInfo {
         path_kind,
         element_class: request.element_class,
         recipe_rankings,
         parametric_types,
+        definition_assets,
+        curated_assets,
         generation_priors,
         related_asset_ids,
         no_curated_path,
         non_class_term,
-        suggested_next_tool: "request_corpus_expansion".into(),
+        suggested_next_tool: suggested_next_tool.into(),
         guidance_card_ids,
     })
+}
+
+#[cfg(feature = "model-api")]
+fn discover_matching_curated_assets<'a>(
+    manifests: impl Iterator<Item = &'a crate::curation::CuratedManifest>,
+    element_class: Option<&str>,
+) -> Vec<CuratedAssetPathInfo> {
+    let mut assets: Vec<_> = manifests
+        .filter(|manifest| {
+            element_class.is_none_or(|needle| {
+                curated_path_text_matches(
+                    needle,
+                    &[
+                        manifest.meta.id.as_str(),
+                        manifest.manifest_kind.as_str(),
+                        &manifest.body.to_string(),
+                    ],
+                )
+            })
+        })
+        .map(|manifest| CuratedAssetPathInfo {
+            asset_id: manifest.meta.id.as_str().to_string(),
+            manifest_kind: manifest.manifest_kind.as_str().to_string(),
+            label: manifest
+                .body
+                .get("label")
+                .and_then(Value::as_str)
+                .or_else(|| manifest.body.get("name").and_then(Value::as_str))
+                .map(str::to_string),
+            executable: false,
+            how_to_use: "Curated knowledge asset only: inspect the manifest/pattern and use it to ground a draft or parametric/definition authoring path; it is not directly executable via instantiate_recipe.".into(),
+        })
+        .collect();
+    assets.sort_by(|left, right| left.asset_id.cmp(&right.asset_id));
+    assets.truncate(12);
+    assets
+}
+
+#[cfg(feature = "model-api")]
+fn curated_path_matches_request(asset: &CuratedAssetPathInfo, element_class: Option<&str>) -> bool {
+    element_class.is_none_or(|needle| {
+        curated_path_text_matches(
+            needle,
+            &[
+                &asset.asset_id,
+                &asset.manifest_kind,
+                asset.label.as_deref().unwrap_or_default(),
+                &asset.how_to_use,
+            ],
+        )
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn curated_path_text_matches(needle: &str, haystacks: &[&str]) -> bool {
+    let aliases = curated_path_aliases(needle);
+    haystacks.iter().any(|haystack| {
+        let normalized = normalize_curated_path_text(haystack);
+        aliases
+            .iter()
+            .any(|alias| !alias.is_empty() && normalized.contains(alias))
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn curated_path_aliases(needle: &str) -> Vec<String> {
+    let normalized = normalize_curated_path_text(needle);
+    let mut aliases = vec![normalized.clone()];
+    match normalized.as_str() {
+        "roofsystem" => aliases.extend(["roof", "gable", "truss"].map(str::to_string)),
+        "wallassembly" => aliases.extend(["wall", "lightframe", "cavity"].map(str::to_string)),
+        "foundationsystem" => {
+            aliases.extend(["foundation", "slab", "crawlspace"].map(str::to_string))
+        }
+        "window" => aliases.extend(["window", "opening", "glazing"].map(str::to_string)),
+        "door" => aliases.extend(["door", "opening", "entrance"].map(str::to_string)),
+        "house" => aliases.extend(["house", "building", "siteplan"].map(str::to_string)),
+        _ => {}
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+#[cfg(feature = "model-api")]
+fn normalize_curated_path_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
 }
 
 #[cfg(feature = "model-api")]
@@ -11917,7 +12104,8 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
     // guidance card. Core stays domain-neutral — it never inspects which
     // passage this is, only that the data asked to be surfaced. The full
     // passage text remains available via `lookup_source_passage`.
-    if let Some(passages) = world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
+    if let Some(passages) =
+        world.get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
     {
         for (passage_ref, proactive) in passages.proactive_passages() {
             let mut task_tags = proactive.task_tags.clone();
@@ -11979,6 +12167,107 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
 #[cfg(feature = "model-api")]
 fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
     vec![
+        GuidanceCardInfo {
+            id: "authoring_guidance:architecture.component_structure".into(),
+            title: "Architecture Component Structure".into(),
+            task_tags: vec!["architecture".into(), "authoring".into()],
+            summary: "Read get_authoring_guidance and treat its prompt_text as the active architectural COMPONENT_STRUCTURE contract before editing models.".into(),
+            referenced_tool_ids: vec!["get_authoring_guidance".into()],
+            next_card_ids: vec!["dkg.snapshot.start".into()],
+            json_examples: vec![serde_json::json!({})],
+        },
+        GuidanceCardInfo {
+            id: "mcp_tool:select_recipe".into(),
+            title: "Select Recipe".into(),
+            task_tags: vec!["recipe".into(), "anti_bluff".into()],
+            summary: "Probe executable recipe families for the element_class and target_state; an empty result is not permission to hand-roll geometry.".into(),
+            referenced_tool_ids: vec!["select_recipe".into()],
+            next_card_ids: vec!["mcp_tool:discover_curated_paths".into(), "dkg.no_curated_path".into()],
+            json_examples: vec![serde_json::json!({
+                "element_class": "roof_system",
+                "context": { "target_state": "Constructible", "include_session_drafts": true }
+            })],
+        },
+        GuidanceCardInfo {
+            id: "mcp_tool:get_capability_snapshot".into(),
+            title: "Get Capability Snapshot".into(),
+            task_tags: vec!["discovery".into(), "authoring".into()],
+            summary: "Read the live authoring surface: registry counts, known gaps, curated manifests, must-read guidance cards, and next tools.".into(),
+            referenced_tool_ids: vec!["get_capability_snapshot".into()],
+            next_card_ids: vec!["mcp_tool:discover_curated_paths".into()],
+            json_examples: vec![serde_json::json!({ "expanded": true })],
+        },
+        GuidanceCardInfo {
+            id: "mcp_tool:discover_curated_paths".into(),
+            title: "Discover Curated Paths".into(),
+            task_tags: vec!["discovery".into(), "curation".into()],
+            summary: "Search the current runtime for recipes, public parametric types, reusable definitions, priors, and curated manifests related to an element class.".into(),
+            referenced_tool_ids: vec!["discover_curated_paths".into()],
+            next_card_ids: vec!["dkg.no_curated_path".into(), "dkg.close_gap".into()],
+            json_examples: vec![
+                serde_json::json!({
+                    "path_kind": "parametric",
+                    "element_class": "roof_system",
+                    "context": { "target_state": "Constructible" }
+                }),
+                serde_json::json!({
+                    "path_kind": "definition",
+                    "element_class": "window"
+                }),
+            ],
+        },
+        GuidanceCardInfo {
+            id: "mcp_tool:request_corpus_expansion".into(),
+            title: "Request Corpus Expansion".into(),
+            task_tags: vec!["gap".into(), "curation".into()],
+            summary: "Record missing domain knowledge as a CorpusGap before acquiring or drafting new construction knowledge.".into(),
+            referenced_tool_ids: vec!["request_corpus_expansion".into()],
+            next_card_ids: vec!["dkg.close_gap".into()],
+            json_examples: vec![serde_json::json!({
+                "element_class": "roof_system",
+                "missing_artifact_kind": "executable_parametric_or_recipe",
+                "target_state": "Constructible"
+            })],
+        },
+        GuidanceCardInfo {
+            id: "mcp_tool:definition.create".into(),
+            title: "Create Definition".into(),
+            task_tags: vec!["definition".into(), "authoring".into()],
+            summary: "Author reusable families when no matching Definition exists and the construction knowledge has been grounded.".into(),
+            referenced_tool_ids: vec!["definition.create".into()],
+            next_card_ids: vec!["dkg.close_gap".into()],
+            json_examples: vec![serde_json::json!({ "name": "Grounded family name" })],
+        },
+        GuidanceCardInfo {
+            id: "mcp_tool:definition.draft.derive".into(),
+            title: "Derive Definition Draft".into(),
+            task_tags: vec!["definition".into(), "derivation".into()],
+            summary: "Derive variants from existing reusable families when topology mostly matches and only parameters or bounded details change.".into(),
+            referenced_tool_ids: vec!["definition.draft.derive".into()],
+            next_card_ids: vec!["dkg.close_gap".into()],
+            json_examples: vec![serde_json::json!({ "base_definition_id": "def_..." })],
+        },
+        GuidanceCardInfo {
+            id: "parametric_substrate:roof_system".into(),
+            title: "Roof System Parametrics".into(),
+            task_tags: vec!["roof".into(), "parametric".into()],
+            summary: "Use public roof-system parametric types when available; if a truss or roof family lacks representation, treat that as a CorpusGap.".into(),
+            referenced_tool_ids: vec!["discover_curated_paths".into(), "parametric.create".into()],
+            next_card_ids: vec!["dkg.no_curated_path".into()],
+            json_examples: vec![serde_json::json!({
+                "path_kind": "parametric",
+                "element_class": "roof_system"
+            })],
+        },
+        GuidanceCardInfo {
+            id: "canonical_decision:decisions/ADR-042-Agentic-Knowledge-Curation-And-Construction-Expertise.md".into(),
+            title: "ADR-042 Curation Gate".into(),
+            task_tags: vec!["anti_bluff".into(), "curation".into()],
+            summary: "Construction expertise must be represented as evidence-backed curation assets; missing executable knowledge blocks promotion instead of allowing primitive substitutions.".into(),
+            referenced_tool_ids: vec!["request_corpus_expansion".into(), "save_recipe_draft".into(), "save_assembly_pattern_draft".into()],
+            next_card_ids: vec!["dkg.no_curated_path".into()],
+            json_examples: Vec::new(),
+        },
         GuidanceCardInfo {
             id: "dkg.snapshot.start".into(),
             title: "Start With Capability Snapshot".into(),

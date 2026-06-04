@@ -4658,7 +4658,9 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
 
     let known_tools = std::collections::BTreeSet::from([
         "get_capability_snapshot",
+        "get_authoring_guidance",
         "discover_curated_paths",
+        "select_recipe",
         "request_corpus_expansion",
         "save_recipe_draft",
         "save_assembly_pattern_draft",
@@ -4681,7 +4683,8 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "set_selection",
         "invoke_command",
         "list_commands",
-        "take_screenshot",
+        "definition.draft.derive",
+        "occurrence.create",
     ]);
     for card in handle_list_guidance_cards(&world, None) {
         for tool_id in &card.referenced_tool_ids {
@@ -4704,6 +4707,95 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(card
         .referenced_tool_ids
         .contains(&"materialize_learned_asset".to_string()));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn curated_path_discovery_matches_aliases_and_curated_manifests() {
+    use crate::curation::provenance::{Confidence, Lineage, Provenance};
+    use crate::curation::{
+        CuratedManifest, CuratedManifestRegistry, CurationMeta, ManifestKindId, Scope, Trust,
+    };
+    use crate::plugins::refinement::AgentId;
+    use crate::relational::{
+        component::ComponentParams,
+        registry::{ParametricRegistry, ParametricTypeDef},
+        transform::TransformBindings,
+    };
+
+    let mut world = init_model_api_test_world();
+    let mut parametrics = ParametricRegistry::default();
+    parametrics.register(ParametricTypeDef {
+        id: "architecture.roof.system.gable".into(),
+        label: "Gable Roof System".into(),
+        params: ComponentParams::default(),
+        driver_units: Default::default(),
+        defaults: Default::default(),
+        derivations: Default::default(),
+        transform: TransformBindings::default(),
+        public: true,
+        representation: None,
+    });
+    world.insert_resource(parametrics);
+
+    let kind = ManifestKindId::new("assembly_pattern.v2");
+    let asset_id = CuratedManifest::asset_id_for(&kind, "closed_gable_end_wall");
+    let manifest = CuratedManifest {
+        meta: CurationMeta::new(
+            asset_id.clone(),
+            CuratedManifest::asset_kind(),
+            Provenance {
+                author: AgentId("test".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: None,
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        manifest_kind: kind,
+        body: json!({
+            "label": "Closed gable end wall",
+            "target_classes": ["roof_system", "wall_assembly"],
+            "slots": []
+        }),
+    };
+    let mut manifests = CuratedManifestRegistry::default();
+    manifests.insert(manifest);
+    world.insert_resource(manifests);
+
+    let parametric = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("parametric".into()),
+            element_class: Some("roof_system".into()),
+            context: json!({}),
+        },
+    )
+    .expect("parametric discovery should succeed");
+    assert!(parametric
+        .parametric_types
+        .iter()
+        .any(|ty| ty.id == "architecture.roof.system.gable"));
+    assert!(parametric.no_curated_path.is_none());
+
+    let recipe = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("roof_system".into()),
+            context: json!({}),
+        },
+    )
+    .expect("recipe discovery should succeed");
+    assert!(recipe
+        .curated_assets
+        .iter()
+        .any(|asset| asset.asset_id == asset_id.as_str()));
+    assert!(recipe.no_curated_path.is_none());
 }
 
 #[cfg(feature = "model-api")]
@@ -5216,9 +5308,7 @@ fn preview_promotion_returns_read_only_refinement_plan() {
 /// ladder used by the anti-bluff promotion tests below.
 #[cfg(feature = "model-api")]
 fn register_house_with_member_obligations(world: &mut World) {
-    use crate::capability_registry::{
-        AssemblyMemberObligationTemplate, AssemblyTypeDescriptor,
-    };
+    use crate::capability_registry::{AssemblyMemberObligationTemplate, AssemblyTypeDescriptor};
     use crate::plugins::refinement::{ObligationId, RefinementState, SemanticRole};
 
     let member_obligations = vec![
@@ -5268,17 +5358,17 @@ fn register_house_with_member_obligations(world: &mut World) {
 }
 
 #[cfg(feature = "model-api")]
-fn spawn_member(world: &mut World, element_id: u64, state: crate::plugins::refinement::RefinementState) {
+fn spawn_member(
+    world: &mut World,
+    element_id: u64,
+    state: crate::plugins::refinement::RefinementState,
+) {
     use crate::plugins::refinement::RefinementStateComponent;
     world.spawn((ElementId(element_id), RefinementStateComponent { state }));
 }
 
 #[cfg(feature = "model-api")]
-fn spawn_house_assembly(
-    world: &mut World,
-    element_id: u64,
-    members: Vec<(&str, u64)>,
-) {
+fn spawn_house_assembly(world: &mut World, element_id: u64, members: Vec<(&str, u64)>) {
     use crate::plugins::modeling::assembly::{AssemblyMemberRef, SemanticAssembly};
     use crate::plugins::refinement::{RefinementState, RefinementStateComponent};
 
@@ -5338,10 +5428,7 @@ fn preview_promotion_blocks_bare_assembly_skipping_to_detailed() {
         .iter()
         .any(|m| m.contains("house_has_foundation")));
     // Constructible+ obligations escalate to error severity.
-    assert!(result
-        .findings
-        .iter()
-        .any(|f| f.severity == "error"));
+    assert!(result.findings.iter().any(|f| f.severity == "error"));
 }
 
 /// A bare house promoted to FabricationReady is likewise blocked.
@@ -7243,6 +7330,7 @@ fn select_recipe_surfaces_installed_recipe_artifact() {
     // AuthoringScript recipe must appear in select_recipe results even
     // though there are no native CapabilityRegistry recipe families for
     // the target class.
+    use crate::curation::authoring_script::AuthoringScript;
     use crate::curation::{
         provenance::{Confidence, Lineage, Provenance},
         scope_trust::{Scope, Trust},
@@ -7250,7 +7338,6 @@ fn select_recipe_surfaces_installed_recipe_artifact() {
         RECIPE_ARTIFACT_KIND,
     };
     use crate::plugins::refinement::AgentId;
-    use crate::curation::authoring_script::AuthoringScript;
 
     let mut world = World::new();
     world.insert_resource(CapabilityRegistry::default());
@@ -7275,9 +7362,7 @@ fn select_recipe_surfaces_installed_recipe_artifact() {
         .with_scope(Scope::Project)
         .with_trust(Trust::Draft),
         body: RecipeBody::AuthoringScript {
-            script: AuthoringScript::stub(
-                crate::curation::authoring_script::MutationScope::None,
-            ),
+            script: AuthoringScript::stub(crate::curation::authoring_script::MutationScope::None),
         },
         parameter_schema: serde_json::Value::Null,
         target_class: "roof_system".into(),
@@ -7318,12 +7403,8 @@ fn select_recipe_surfaces_installed_recipe_artifact() {
     );
 
     // Also confirm the wrong class returns nothing.
-    let empty = handle_select_recipe(
-        &world,
-        "wall_assembly".into(),
-        serde_json::json!({}),
-    )
-    .expect("select_recipe for different class should succeed");
+    let empty = handle_select_recipe(&world, "wall_assembly".into(), serde_json::json!({}))
+        .expect("select_recipe for different class should succeed");
     assert!(empty.is_empty(), "different class must return no results");
 }
 
@@ -7333,13 +7414,13 @@ fn select_recipe_surfaces_installed_recipe_parameters_and_defaults() {
     // An installed AuthoringScript recipe must surface its declared
     // parameters (names + defaults from parameter_defaults) in the ranking,
     // so a code-blind agent can discover them without trial-and-error.
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
     use crate::curation::{
         provenance::{Confidence, Lineage, Provenance},
         scope_trust::{Scope, Trust},
         AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
         RECIPE_ARTIFACT_KIND,
     };
-    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
     use crate::plugins::refinement::{AgentId, RefinementState};
 
     let mut world = World::new();
@@ -7477,11 +7558,10 @@ fn resolve_obligation_sets_satisfied_by() {
 
     assert_eq!(result.new_status, "SatisfiedBy:9999");
     // Verify the component was actually updated.
-    let set = world.get::<ObligationSet>(entity).expect("ObligationSet present");
-    assert_eq!(
-        set.entries[0].status,
-        ObligationStatus::SatisfiedBy(9999)
-    );
+    let set = world
+        .get::<ObligationSet>(entity)
+        .expect("ObligationSet present");
+    assert_eq!(set.entries[0].status, ObligationStatus::SatisfiedBy(9999));
 }
 
 #[cfg(feature = "model-api")]
