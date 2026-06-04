@@ -3204,6 +3204,21 @@ pub(super) struct ImportFileRequest {
     pub(super) format_hint: Option<String>,
 }
 
+/// Explicit schema for `TransformToolRequest::value`: a number (rotate degrees /
+/// scale factor / axis move distance) or a 3-number `[x,y,z]` vector (free move).
+/// Replaces the type-less schema that `serde_json::Value` would otherwise emit,
+/// which strict MCP tool-call serializers drop.
+#[cfg(feature = "model-api")]
+fn transform_value_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "Number (rotate degrees, scale factor, or axis move distance) or a [x,y,z] array of 3 numbers (free move).",
+        "oneOf": [
+            { "type": "number" },
+            { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+        ]
+    })
+}
+
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3211,6 +3226,9 @@ pub struct TransformToolRequest {
     pub element_ids: Vec<u64>,
     pub operation: String,
     pub axis: Option<String>,
+    /// rotate: angle in degrees (number); scale: factor (number); move: distance
+    /// along `axis` (number) or a free `[dx,dy,dz]` vector (array of 3 numbers).
+    #[cfg_attr(feature = "model-api", schemars(schema_with = "transform_value_schema"))]
     pub value: Value,
     /// Optional world-space pivot `[x,y,z]` for `rotate`. When given, the
     /// selection is rotated rigidly about this point (e.g. a wing's junction
