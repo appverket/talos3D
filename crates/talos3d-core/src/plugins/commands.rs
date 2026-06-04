@@ -23,7 +23,6 @@ use crate::{
     },
 };
 
-#[cfg(feature = "model-api")]
 use crate::plugins::modeling::group::{
     compose_snapshot_into_frame, group_membership_add_snapshots, GroupEditContext,
 };
