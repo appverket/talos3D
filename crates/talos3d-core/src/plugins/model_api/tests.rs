@@ -265,6 +265,12 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
         .guidance_overrides
         .iter()
         .all(|fact| fact.classification == "guidance_override"));
+    assert!(snapshot
+        .must_read_guidance_card_ids
+        .contains(&"dkg.visual_morphology".to_string()));
+    assert!(snapshot
+        .must_read_guidance_card_ids
+        .contains(&"dkg.building_skeleton".to_string()));
     assert!(snapshot.estimated_json_bytes <= snapshot.size_budget_bytes);
 }
 
@@ -4655,12 +4661,35 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(discovery
         .guidance_card_ids
         .contains(&"dkg.no_curated_path".to_string()));
+    assert!(discovery
+        .guidance_card_ids
+        .contains(&"dkg.building_skeleton".to_string()));
+    let skeleton_card = handle_get_guidance_card(&world, "dkg.building_skeleton".into())
+        .expect("card should fetch");
+    assert!(skeleton_card
+        .summary
+        .contains("foundation -> wall frame/top plate"));
+    assert!(skeleton_card.summary.contains("CorpusGaps"));
+    assert!(skeleton_card
+        .referenced_tool_ids
+        .contains(&"acquire_corpus_passage".to_string()));
+    assert!(handle_list_guidance_cards(&world, Some("house".into()))
+        .iter()
+        .any(|card| {
+            card.id == "dkg.visual_morphology"
+                && card.title.contains("Houses")
+                && card.summary.contains("shoeboxes")
+                && card
+                    .referenced_tool_ids
+                    .contains(&"take_screenshot".to_string())
+        }));
 
     let known_tools = std::collections::BTreeSet::from([
         "get_capability_snapshot",
         "get_authoring_guidance",
         "discover_curated_paths",
         "select_recipe",
+        "acquire_corpus_passage",
         "request_corpus_expansion",
         "save_recipe_draft",
         "save_assembly_pattern_draft",
@@ -4669,6 +4698,8 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "bim_void.declare_for_definition",
         "parametric.create",
         "materialize_learned_asset",
+        "create_assembly",
+        "create_relation",
         "run_validation_v2",
         "take_screenshot",
         // ADR-058 local-frame card (dkg.local_frames)
@@ -4796,6 +4827,62 @@ fn curated_path_discovery_matches_aliases_and_curated_manifests() {
         .iter()
         .any(|asset| asset.asset_id == asset_id.as_str()));
     assert!(recipe.no_curated_path.is_none());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn agent_skill_handlers_list_get_and_save_drafts() {
+    use crate::plugins::agent_skills::{
+        AgentSkill, AgentSkillDraftRequest, AgentSkillId, AgentSkillRegistry, AgentSkillTrustLevel,
+    };
+
+    let mut world = init_model_api_test_world();
+    let mut registry = AgentSkillRegistry::default();
+    registry.insert(AgentSkill {
+        id: AgentSkillId("architecture.skill.window_authoring".into()),
+        title: "Window Authoring".into(),
+        summary: "Hosted window workflow".into(),
+        task_tags: vec!["window".into(), "hosted_component".into()],
+        referenced_tool_ids: vec!["definition.instantiate_hosted".into()],
+        next_skill_ids: vec![],
+        body_markdown: "Use Definition occurrences for hosted windows.".into(),
+        trust_level: AgentSkillTrustLevel::Shipped,
+        source_path: Some("assets/agent_skills/architecture_authoring.v1.json".into()),
+    });
+    world.insert_resource(registry);
+
+    let found = handle_list_agent_skills(
+        &world,
+        crate::plugins::agent_skills::AgentSkillSearch {
+            query: Some("window".into()),
+            tags: vec!["hosted_component".into()],
+        },
+    );
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id, "architecture.skill.window_authoring");
+
+    let skill = handle_get_agent_skill(&world, "architecture.skill.window_authoring".into())
+        .expect("skill should fetch by id");
+    assert!(skill
+        .referenced_tool_ids
+        .contains(&"definition.instantiate_hosted".to_string()));
+
+    let draft = handle_save_agent_skill_draft(
+        &mut world,
+        AgentSkillDraftRequest {
+            id: Some("project.skill.opening_review".into()),
+            title: "Opening Review".into(),
+            summary: "Review hosted openings before promotion.".into(),
+            task_tags: vec!["opening".into()],
+            referenced_tool_ids: vec!["run_validation_v2".into()],
+            next_skill_ids: vec!["architecture.skill.window_authoring".into()],
+            body_markdown: "Run validation and inspect rendered geometry.".into(),
+            source_path: None,
+        },
+    )
+    .expect("draft should save");
+    assert_eq!(draft.id.0, "project.skill.opening_review");
+    assert_eq!(draft.trust_level, AgentSkillTrustLevel::SessionDraft);
 }
 
 #[cfg(feature = "model-api")]

@@ -45,7 +45,7 @@ pub use assembly_pattern_v2::{
 pub use authoring_script::{
     ArgExpr, AuthoringScript, AuthoringScriptStructuralError, CallRecipeKindTag, McpToolId,
     MutationScope, OutputPath, Postcondition, Predicate, RepeatKindTag, ScriptInstruction, Step,
-    StepId, MAX_CALL_RECIPE_DEPTH, AUTHORING_SCRIPT_SCHEMA_VERSION,
+    StepId, AUTHORING_SCRIPT_SCHEMA_VERSION, MAX_CALL_RECIPE_DEPTH,
 };
 pub use plugin::CurationPlugin;
 pub use procedural_session::{
@@ -63,8 +63,8 @@ pub use recipes::{
     RecipeArtifact, RecipeArtifactRegistry, RecipeBody, ScenarioTest, RECIPE_ARTIFACT_KIND,
 };
 pub use replay::{
-    replay, replay_with_lookup, InvocationError, InvocationReport, MapRecipeLookup,
-    NoRecipeLookup, PostconditionOracle, PostconditionResult, PostconditionVerdict, RecipeLookup,
+    replay, replay_with_lookup, InvocationError, InvocationReport, MapRecipeLookup, NoRecipeLookup,
+    PostconditionOracle, PostconditionResult, PostconditionVerdict, RecipeLookup,
     ResolvedPostcondition, ToolCall, ToolDispatchError, ToolDispatcher,
 };
 

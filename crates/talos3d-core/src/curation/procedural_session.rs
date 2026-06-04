@@ -1356,7 +1356,12 @@ pub fn commit<D: ToolDispatcher, O: PostconditionOracle>(
 
     // Replay the script through a tagging dispatcher that also enforces
     // MutationScope::None against mutating tools.
-    let step_order: Vec<StepId> = session.script.steps.iter().map(|s| s.id().clone()).collect();
+    let step_order: Vec<StepId> = session
+        .script
+        .steps
+        .iter()
+        .map(|s| s.id().clone())
+        .collect();
     let mut tagger =
         CommitTaggingDispatcher::new(dispatcher, session.id.clone(), registry, step_order.clone());
 

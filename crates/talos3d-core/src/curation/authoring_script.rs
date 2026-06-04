@@ -266,7 +266,9 @@ pub enum RepeatKindTag {
 }
 
 impl Default for RepeatKindTag {
-    fn default() -> Self { Self::Repeat }
+    fn default() -> Self {
+        Self::Repeat
+    }
 }
 
 /// Discriminator for `ScriptInstruction::CallRecipe`.  Always serialises as
@@ -279,7 +281,9 @@ pub enum CallRecipeKindTag {
 }
 
 impl Default for CallRecipeKindTag {
-    fn default() -> Self { Self::CallRecipe }
+    fn default() -> Self {
+        Self::CallRecipe
+    }
 }
 
 /// Maximum nesting depth for `ScriptInstruction::CallRecipe` and
@@ -299,7 +303,11 @@ impl ScriptInstruction {
 
     /// Return the inner `Step` if this is a `Call` instruction.
     pub fn as_call(&self) -> Option<&Step> {
-        if let Self::Call(s) = self { Some(s) } else { None }
+        if let Self::Call(s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     /// Construct a plain `Call` instruction.
@@ -348,7 +356,9 @@ impl ScriptInstruction {
                     collect_pred_param_refs(p, out);
                 }
             }
-            Self::Repeat { count, body, var, .. } => {
+            Self::Repeat {
+                count, body, var, ..
+            } => {
                 collect_param_refs(count, out);
                 // The loop variable is locally introduced — remove it from
                 // the set of external params if it shadowed one.
@@ -371,9 +381,13 @@ impl ScriptInstruction {
     /// (recursing into `Repeat.body`).  Used by `allowed_tools` validation.
     pub fn collect_tools(&self, out: &mut BTreeSet<McpToolId>) {
         match self {
-            Self::Call(step) => { out.insert(step.tool.clone()); }
+            Self::Call(step) => {
+                out.insert(step.tool.clone());
+            }
             Self::Repeat { body, .. } => {
-                for instr in body { instr.collect_tools(out); }
+                for instr in body {
+                    instr.collect_tools(out);
+                }
             }
             Self::CallRecipe { .. } => {
                 // CallRecipe dispatches to a sub-script; no direct tool used
@@ -386,7 +400,9 @@ impl ScriptInstruction {
     pub fn collect_declared_ids(&self, out: &mut BTreeSet<StepId>) {
         out.insert(self.id().clone());
         if let Self::Repeat { body, .. } = self {
-            for instr in body { instr.collect_declared_ids(out); }
+            for instr in body {
+                instr.collect_declared_ids(out);
+            }
         }
     }
 }
@@ -754,7 +770,10 @@ mod tests {
         ScriptInstruction::Call(call_step(id, tool_name))
     }
 
-    fn minimal_script_with(steps: Vec<ScriptInstruction>, tools: Vec<McpToolId>) -> AuthoringScript {
+    fn minimal_script_with(
+        steps: Vec<ScriptInstruction>,
+        tools: Vec<McpToolId>,
+    ) -> AuthoringScript {
         let mut s = AuthoringScript::stub(MutationScope::None);
         for t in tools {
             s.allowed_tools.insert(t);
@@ -1086,7 +1105,9 @@ mod tests {
             id: StepId::new("place_studs"),
             _kind: RepeatKindTag::Repeat,
             var: "i".into(),
-            count: ArgExpr::Param { name: "count".into() },
+            count: ArgExpr::Param {
+                name: "count".into(),
+            },
             body: vec![ScriptInstruction::Call(Step {
                 id: StepId::new("place_stud"),
                 tool: McpToolId::new("create_box"),
@@ -1111,7 +1132,9 @@ mod tests {
                 let mut m = BTreeMap::new();
                 m.insert(
                     "height_mm".into(),
-                    ArgExpr::Param { name: "stud_height".into() },
+                    ArgExpr::Param {
+                        name: "stud_height".into(),
+                    },
                 );
                 m
             },
