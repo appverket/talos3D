@@ -12074,6 +12074,60 @@ reports the active frame. ADR-058.".into(),
                 }),
             ],
         },
+        GuidanceCardInfo {
+            id: "dkg.site_from_survey".into(),
+            title: "Build A Terrain Surface From A Survey".into(),
+            task_tags: vec!["site".into(), "terrain".into(), "import".into()],
+            summary: "If you start from a survey/plot drawing (DWG/DXF), import it with import_file — \
+it creates polylines on named layers. The ground is encoded as height-contour polylines (layers \
+named like HOJDKURVA / contour / elevation / levelcurve), each carrying its elevation. SELECT only \
+those contour polylines with set_selection (NOT property-boundary/building/road layers), then run \
+the terrain command `terrain.prepare_site_surface` via invoke_command to repair the contours, make \
+elevation curves, and drape a Delaunay TIN `terrain_surface` over them — it auto-recenters the \
+survey to local origin. The terrain commands are not standalone tools: discover them with \
+list_commands (terrain.convert_to_elevation_curves, terrain.generate_surface, \
+terrain.prepare_site_surface, terrain.cut_fill_analysis). The resulting terrain_surface is the \
+existing ground; build on it and drape a foundation (see dkg.terrain_foundation). If a project \
+already contains a terrain_surface, skip this and go straight to dkg.terrain_foundation.".into(),
+            referenced_tool_ids: vec![
+                "import_file".into(),
+                "list_importers".into(),
+                "set_selection".into(),
+                "invoke_command".into(),
+                "list_commands".into(),
+            ],
+            next_card_ids: vec!["dkg.terrain_foundation".into()],
+            json_examples: vec![
+                serde_json::json!({ "path": "/path/to/plot.dwg" }),
+                serde_json::json!({ "element_ids": ["<contour_polyline_ids>"] }),
+                serde_json::json!({ "command_id": "terrain.prepare_site_surface", "parameters": {} }),
+            ],
+        },
+        GuidanceCardInfo {
+            id: "dkg.terrain_foundation".into(),
+            title: "Plant A Building On Terrain With A Hugging Foundation".into(),
+            task_tags: vec!["site".into(), "terrain".into(), "foundation".into()],
+            summary: "To seat a building on a `terrain_surface` so it FOLLOWS the ground, do NOT use \
+a flat box slab. Author a foundation entity: create_entity {type:\"foundation\", footprint, \
+floor_datum, below_grade_margin, sample_spacing}. Its top sits flat at floor_datum (the finished \
+floor level), and its UNDERSIDE drapes to the terrain sampled under the footprint minus \
+below_grade_margin — so it hugs the slope and re-meshes automatically when the terrain changes \
+(ADR-034). The footprint is either an explicit polygon (kind:\"polyline\", vertices [[x,z],...]) or \
+the building's wall loop (kind:\"wall_loop\", the perimeter wall element ids). Requirements: a \
+terrain_surface must already exist and the footprint must lie within the terrain extent; pick \
+floor_datum near the terrain height under the building. Build the wall/roof volumes above \
+floor_datum. Verify with take_screenshot from a low angle that the foundation steps down to meet \
+the slope.".into(),
+            referenced_tool_ids: vec!["create_entity".into(), "take_screenshot".into()],
+            next_card_ids: Vec::new(),
+            json_examples: vec![serde_json::json!({
+                "type": "foundation",
+                "footprint": { "kind": "polyline", "vertices": [[-6.0, -5.0], [6.0, -5.0], [6.0, 5.0], [-6.0, 5.0]] },
+                "floor_datum": 9.0,
+                "below_grade_margin": 0.4,
+                "sample_spacing": 0.8
+            })],
+        },
     ]
 }
 
