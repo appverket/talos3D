@@ -715,10 +715,15 @@ fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
     let mut inside = false;
     let mut previous = *polygon.last().unwrap_or(&Vec2::ZERO);
     for current in polygon {
+        // Standard even-odd ray cast. The denominator must keep its sign — the
+        // earlier `.abs()` mirrored the x-intercept for downward edges, which
+        // misclassified interior points and punched holes in clipped surfaces.
+        // It is only evaluated when the edge straddles `point.y` (so it is
+        // never zero thanks to the short-circuiting `&&`).
         let crosses = ((current.y > point.y) != (previous.y > point.y))
             && (point.x
                 < (previous.x - current.x) * (point.y - current.y)
-                    / ((previous.y - current.y).abs().max(f32::EPSILON))
+                    / (previous.y - current.y)
                     + current.x);
         if crosses {
             inside = !inside;
