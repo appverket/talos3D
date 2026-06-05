@@ -706,7 +706,11 @@ fn map_point(point: Point, transforms: &[InsertTransform]) -> [f32; 3] {
     for transform in transforms {
         point = apply_insert_transform(point, transform);
     }
-    let mapped = Vec3::new(point.x as f32, point.z as f32, point.y as f32);
+    // Map CAD (X=East, Y=North, Z=Up) into the Bevy right-handed Y-up world.
+    // East -> -X so that, with the app's top-view camera, north reads up and
+    // east reads right (matching the source drawing). Using +X here would embed
+    // a left-handed / mirrored copy of the terrain.
+    let mapped = Vec3::new(-(point.x as f32), point.z as f32, point.y as f32);
     [mapped.x, mapped.y, mapped.z]
 }
 
@@ -1208,7 +1212,10 @@ fn map_cad_point(point: CadPoint3, transforms: &[CadInsertTransform]) -> Result<
     for transform in transforms {
         point = apply_cad_insert_transform(point, transform);
     }
-    validate_native_vec3(point)
+    // East -> -X, matching `map_point`, so the native DWG path also produces a
+    // non-mirrored, north-up/east-right model.
+    let [x, y, z] = validate_native_vec3(point)?;
+    Ok([-x, y, z])
 }
 
 fn cad_point_to_vec3(point: CadPoint3) -> DVec3 {
@@ -1568,7 +1575,7 @@ mod tests {
 
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[0]["type"], "polyline");
-        assert_eq!(requests[0]["points"][0], serde_json::json!([1.0, 3.0, 2.0]));
+        assert_eq!(requests[0]["points"][0], serde_json::json!([-1.0, 3.0, 2.0]));
         assert_eq!(requests[3]["type"], "triangle_mesh");
         assert_eq!(
             requests[3]["faces"],
@@ -1602,11 +1609,11 @@ mod tests {
         assert_eq!(requests[0]["type"], "polyline");
         assert_eq!(
             requests[0]["points"][0],
-            serde_json::json!([10.0, 2.0, 5.0])
+            serde_json::json!([-10.0, 2.0, 5.0])
         );
         assert_eq!(
             requests[0]["points"][1],
-            serde_json::json!([12.0, 2.0, 5.0])
+            serde_json::json!([-12.0, 2.0, 5.0])
         );
     }
 
@@ -1633,7 +1640,7 @@ mod tests {
         let requests = parse_dxf_requests(&drawing).expect("polyline should import");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["type"], "polyline");
-        assert_eq!(requests[0]["points"][1], serde_json::json!([2.0, 1.0, 0.0]));
+        assert_eq!(requests[0]["points"][1], serde_json::json!([-2.0, 1.0, 0.0]));
     }
 
     #[test]
@@ -1783,8 +1790,8 @@ mod tests {
 
         let requests = parse_dxf_requests(&drawing).expect("model space entities should import");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["points"][0], serde_json::json!([1.0, 0.0, 0.0]));
-        assert_eq!(requests[0]["points"][1], serde_json::json!([2.0, 0.0, 0.0]));
+        assert_eq!(requests[0]["points"][0], serde_json::json!([-1.0, 0.0, 0.0]));
+        assert_eq!(requests[0]["points"][1], serde_json::json!([-2.0, 0.0, 0.0]));
     }
 
     #[test]
@@ -1861,8 +1868,8 @@ mod tests {
 
         let requests = parse_cad_document_requests(&document).expect("native document should map");
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["points"][0], serde_json::json!([1.0, 3.0, 2.0]));
-        assert_eq!(requests[0]["points"][1], serde_json::json!([4.0, 6.0, 5.0]));
+        assert_eq!(requests[0]["points"][0], serde_json::json!([-1.0, 3.0, 2.0]));
+        assert_eq!(requests[0]["points"][1], serde_json::json!([-4.0, 6.0, 5.0]));
         assert_eq!(requests[0]["layer"], "LAYER_A");
         assert_eq!(
             requests[1]["elevation_metadata"]["elevation"],
@@ -1923,11 +1930,11 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(
             requests[0]["points"][0],
-            serde_json::json!([10.0, 5.0, 0.0])
+            serde_json::json!([-10.0, 5.0, 0.0])
         );
         assert_eq!(
             requests[0]["points"][1],
-            serde_json::json!([14.0, 5.0, 0.0])
+            serde_json::json!([-14.0, 5.0, 0.0])
         );
         assert_eq!(requests[0]["layer"], "SYMBOL");
     }
