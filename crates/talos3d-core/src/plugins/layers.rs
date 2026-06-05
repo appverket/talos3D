@@ -7,6 +7,16 @@ use crate::plugins::identity::ElementId;
 
 pub const DEFAULT_LAYER_NAME: &str = "Default";
 
+/// Marker for entities that carry an [`ElementId`] but are scene *infrastructure*
+/// (lights, and any future non-drawable helpers) rather than CAD geometry. The
+/// generic layer system must never sweep these onto a document layer nor drive
+/// their [`Visibility`] from a layer's visible flag — otherwise hiding a layer
+/// (e.g. "Default") would set a light to `Visibility::Hidden`, Bevy would drop
+/// it from rendering, and the whole scene would collapse to ambient-only light.
+/// Infrastructure plugins add this marker to their entities at spawn.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct LayerVisibilityExempt;
+
 pub struct LayerPlugin;
 
 impl Plugin for LayerPlugin {
@@ -179,7 +189,14 @@ impl LayerAssignment {
 /// assignment system `before(assign_default_layer)`.
 pub fn assign_default_layer(
     mut commands: Commands,
-    query: Query<Entity, (With<ElementId>, Without<LayerAssignment>)>,
+    query: Query<
+        Entity,
+        (
+            With<ElementId>,
+            Without<LayerAssignment>,
+            Without<LayerVisibilityExempt>,
+        ),
+    >,
 ) {
     for entity in &query {
         commands
@@ -190,7 +207,7 @@ pub fn assign_default_layer(
 
 fn apply_layer_visibility(
     registry: Res<LayerRegistry>,
-    mut query: Query<(&LayerAssignment, &mut Visibility)>,
+    mut query: Query<(&LayerAssignment, &mut Visibility), Without<LayerVisibilityExempt>>,
 ) {
     if !registry.is_changed() {
         return;
@@ -204,6 +221,57 @@ fn apply_layer_visibility(
         if *visibility != target {
             *visibility = target;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exempt_entities_are_never_layer_managed() {
+        // Regression: scene lights (marked `LayerVisibilityExempt`) must not be
+        // swept onto the Default layer nor have their `Visibility` driven by it.
+        // Hiding the Default layer once collapsed the whole scene to ambient-only
+        // lighting because the auto-assigned lights went `Visibility::Hidden`.
+        let mut app = App::new();
+        app.init_resource::<LayerRegistry>()
+            .init_resource::<LayerState>()
+            .add_systems(Update, (assign_default_layer, apply_layer_visibility).chain());
+
+        let light = app
+            .world_mut()
+            .spawn((ElementId(1), LayerVisibilityExempt, Visibility::Inherited))
+            .id();
+        let geometry = app
+            .world_mut()
+            .spawn((ElementId(2), Visibility::Inherited))
+            .id();
+
+        app.update();
+
+        // Geometry is claimed by the Default layer; the exempt light is not.
+        assert!(app.world().get::<LayerAssignment>(geometry).is_some());
+        assert!(app.world().get::<LayerAssignment>(light).is_none());
+
+        // Hide the Default layer and re-run.
+        app.world_mut()
+            .resource_mut::<LayerRegistry>()
+            .layers
+            .get_mut(DEFAULT_LAYER_NAME)
+            .unwrap()
+            .visible = false;
+        app.update();
+
+        // Geometry follows the layer (hidden); the light stays lit regardless.
+        assert_eq!(
+            *app.world().get::<Visibility>(geometry).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(
+            *app.world().get::<Visibility>(light).unwrap(),
+            Visibility::Inherited
+        );
     }
 }
 

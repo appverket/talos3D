@@ -3,6 +3,7 @@ use bevy::{
     ecs::system::SystemParam,
     input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel},
     input::touch::TouchPhase,
+    picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings},
     prelude::*,
 };
 use bevy_egui::PrimaryEguiContext;
@@ -287,9 +288,14 @@ struct OrbitCameraInput<'w, 's> {
             &'static mut Projection,
         ),
     >,
-    /// All authored geometry with render bounds — used to pick the orbit pivot.
+    /// Raycaster used to pivot the orbit on whatever mesh is centred in the view.
+    ray_cast: MeshRayCast<'w, 's>,
+    /// Visibility lookup so the orbit pivot raycast ignores hidden meshes.
+    mesh_visibility: Query<'w, 's, &'static Visibility>,
+    /// All authored geometry with render bounds — fallback orbit pivot when the
+    /// view centre points at empty space.
     scene_geometry: Query<'w, 's, (&'static GlobalTransform, &'static Aabb), With<ElementId>>,
-    /// Currently-selected authored geometry, preferred as the orbit pivot.
+    /// Currently-selected authored geometry, preferred as the fallback pivot.
     selected_geometry: Query<
         'w,
         's,
@@ -350,29 +356,51 @@ fn orbit_camera(mut input: OrbitCameraInput) {
         || (right_pressed && shift)
         || (space_pan && any_mouse_pressed);
 
-    // When an orbit drag begins, pivot around what the user is looking at: the
-    // selection if any, otherwise the robust center of the scene geometry. The
-    // center is a per-axis median of bounds centers, so far-off stray geometry
-    // (e.g. a drawing's title block hundreds of metres away) can't drag the
-    // pivot off into empty space the way a raw bounding-box center would.
+    // When an orbit drag begins, pivot around what the user is actually looking
+    // at: cast the camera-forward ray (through the view centre) and pivot on the
+    // first mesh it hits, so the orbited geometry spins in place under the
+    // cursor instead of swinging around a distant point. Only when the view
+    // centre points at empty space do we fall back to the selection, then to the
+    // robust per-axis median of scene-geometry centres (median, not bbox-centre,
+    // so a far-off title block can't drag the pivot into empty space).
     let orbit_started = orbiting
         && (input.mouse_buttons.just_pressed(MouseButton::Left)
             || input.mouse_buttons.just_pressed(MouseButton::Right));
     if orbit_started {
-        let mut centers: Vec<Vec3> = input
-            .selected_geometry
-            .iter()
-            .map(|(gt, aabb)| gt.transform_point(Vec3::from(aabb.center)))
-            .collect();
-        if centers.is_empty() {
-            centers = input
-                .scene_geometry
+        let camera_transform = orbit_transform(&orbit);
+        let view_ray = Ray3d::new(camera_transform.translation, camera_transform.forward());
+        let view_center_hit = input
+            .ray_cast
+            .cast_ray(
+                view_ray,
+                &MeshRayCastSettings::default().with_filter(&|entity| {
+                    input
+                        .mesh_visibility
+                        .get(entity)
+                        .map_or(true, |visibility| *visibility != Visibility::Hidden)
+                }),
+            )
+            .first()
+            .map(|(_, hit)| hit.point);
+
+        if let Some(point) = view_center_hit {
+            orbit.focus = point;
+        } else {
+            let mut centers: Vec<Vec3> = input
+                .selected_geometry
                 .iter()
                 .map(|(gt, aabb)| gt.transform_point(Vec3::from(aabb.center)))
                 .collect();
-        }
-        if let Some(center) = median_center(&centers) {
-            orbit.focus = center;
+            if centers.is_empty() {
+                centers = input
+                    .scene_geometry
+                    .iter()
+                    .map(|(gt, aabb)| gt.transform_point(Vec3::from(aabb.center)))
+                    .collect();
+            }
+            if let Some(center) = median_center(&centers) {
+                orbit.focus = center;
+            }
         }
     }
 
