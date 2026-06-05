@@ -64,9 +64,10 @@ constraints.
 
 | Input | Action |
 | --- | --- |
-| Right-drag | Orbit |
-| Middle-drag | Pan |
-| Scroll | Zoom |
+| Alt/Option + drag (or three-finger trackpad) | Orbit |
+| Middle-drag, **Space + drag**, or Shift + right-drag | Pan |
+| Scroll / two-finger | Zoom |
+| Right-click (no drag) | Context menu |
 
 The camera toolbar provides:
 
