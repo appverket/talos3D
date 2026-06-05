@@ -208,16 +208,22 @@ impl AuthoredEntity for ElevationCurveSnapshot {
         // never claims it.
         let layer = contour_layer_name(&self.curve.source_layer).to_string();
         world.resource_mut::<LayerRegistry>().ensure_layer(&layer);
+        // The explicit `Visibility` lets the layer system toggle the curve: the
+        // gizmo that draws contour lines (`draw_elevation_curves`) skips
+        // `Visibility::Hidden`, so hiding e.g. HOJDKURVA hides its contour lines.
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world
-                .entity_mut(entity)
-                .insert((self.curve.clone(), LayerAssignment::new(layer)));
+            world.entity_mut(entity).insert((
+                self.curve.clone(),
+                Visibility::Inherited,
+                LayerAssignment::new(layer),
+            ));
             return;
         }
 
         world.spawn((
             self.element_id,
             self.curve.clone(),
+            Visibility::Inherited,
             LayerAssignment::new(layer),
         ));
     }

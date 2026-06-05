@@ -247,7 +247,7 @@ pub fn draw_layers_window(
 
     // Never let the window grow past the viewport, or the bottom (and the
     // "+ Add Layer" control) becomes unreachable.
-    let max_height = (ctx.screen_rect().height() - 120.0).max(220.0);
+    let max_height = (ctx.input(|i| i.content_rect()).height() - 120.0).max(220.0);
     let mut open = state.visible;
     egui::Window::new("Layers")
         .id(egui::Id::new("talos_layers_window"))
