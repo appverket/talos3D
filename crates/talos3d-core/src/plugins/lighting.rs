@@ -461,6 +461,12 @@ impl AuthoredEntity for SceneLightSnapshot {
                 .spawn((self.element_id, self.node.clone(), transform))
                 .id()
         };
+        // Lights are scene infrastructure, not CAD geometry: exempt them from the
+        // document layer system so hiding a layer can never set a light to
+        // `Visibility::Hidden` and collapse the scene to ambient-only lighting.
+        world
+            .entity_mut(entity)
+            .insert(crate::plugins::layers::LayerVisibilityExempt);
         insert_bevy_light_direct(&mut world.entity_mut(entity), &self.node);
     }
 
