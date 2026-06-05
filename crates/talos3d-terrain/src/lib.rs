@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod components;
+pub mod conforming;
 pub mod cut_fill;
 pub mod generation;
 pub mod heightfield;
@@ -21,6 +22,7 @@ use talos3d_capability_api::{
 
 use crate::{
     commands::TerrainCommandPlugin,
+    conforming::{ConformingSolidFactory, ConformingSolidPlugin},
     generation::TerrainGenerationPlugin,
     review::TerrainReviewPlugin,
     snapshots::{ElevationCurveFactory, TerrainSurfaceFactory},
@@ -52,8 +54,10 @@ impl Plugin for TerrainPlugin {
             .add_plugins(RequireWorkbench::<ModelingWorkbench>::default())
             .register_authored_entity_factory(ElevationCurveFactory)
             .register_authored_entity_factory(TerrainSurfaceFactory)
+            .register_authored_entity_factory(ConformingSolidFactory)
             .register_terrain_provider(TerrainProviderImpl)
             .add_plugins(TerrainCommandPlugin)
+            .add_plugins(ConformingSolidPlugin)
             .add_plugins(TerrainGenerationPlugin)
             .add_plugins(TerrainReviewPlugin)
             .add_plugins(TerrainToolPlugin);
