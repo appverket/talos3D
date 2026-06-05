@@ -18,7 +18,8 @@ pub enum InputOwnership {
     #[default]
     Idle,
     /// A modal operator exclusively owns keyboard + left-mouse input.
-    /// Camera navigation (right/middle mouse) remains available.
+    /// Camera navigation (middle/right mouse, Alt-orbit, Space-pan, scroll-zoom)
+    /// remains available.
     Modal(ModalKind),
     /// The egui UI has focus (palette, property editing, text fields).
     /// Nothing in the 3D viewport processes input.
@@ -64,7 +65,8 @@ pub enum InputPhase {
     /// Active tool input — selection click, box select, face click,
     /// tool activation, and keyboard shortcuts that start new modals.
     ToolInput,
-    /// Camera orbit / pan / zoom (always available via right/middle mouse).
+    /// Camera orbit / pan / zoom. Pan: middle-drag, Space+drag, or
+    /// Shift+right-drag. Orbit: Alt+drag (or three-finger trackpad). Zoom: scroll.
     CameraInput,
 }
 

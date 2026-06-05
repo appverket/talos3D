@@ -8,12 +8,16 @@ use bevy::{
 use bevy_egui::PrimaryEguiContext;
 use serde_json::Value;
 
+use bevy::camera::primitives::Aabb;
+
 use crate::authored_entity::EntityBounds;
 use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     cursor::ViewportUiInset,
     egui_chrome::EguiWantsInput,
+    identity::ElementId,
     input_ownership::InputPhase,
+    selection::Selected,
     toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
 };
 
@@ -283,6 +287,15 @@ struct OrbitCameraInput<'w, 's> {
             &'static mut Projection,
         ),
     >,
+    /// All authored geometry with render bounds — used to pick the orbit pivot.
+    scene_geometry: Query<'w, 's, (&'static GlobalTransform, &'static Aabb), With<ElementId>>,
+    /// Currently-selected authored geometry, preferred as the orbit pivot.
+    selected_geometry: Query<
+        'w,
+        's,
+        (&'static GlobalTransform, &'static Aabb),
+        (With<ElementId>, With<Selected>),
+    >,
 }
 
 fn orbit_camera(mut input: OrbitCameraInput) {
@@ -322,14 +335,46 @@ fn orbit_camera(mut input: OrbitCameraInput) {
         input.trackpad.prev_centroid = None;
     }
 
-    // --- Alt/Option+drag orbit / Shift+right-drag pan ---
-    // Right-click without drag is reserved for the viewport context menu.
+    // --- Pan / orbit modifiers ---
+    // Pan: middle-drag, Space+drag (primary button), or Shift+right-drag.
+    // Orbit: Alt/Option+drag. Right-click without drag is reserved for the
+    // viewport context menu.
     let shift = input.keys.pressed(KeyCode::ShiftLeft) || input.keys.pressed(KeyCode::ShiftRight);
     let orbit_modifier = orbit_modifier_pressed(&input.keys);
+    let space_pan = pan_modifier_pressed(&input.keys);
     let right_pressed = input.mouse_buttons.pressed(MouseButton::Right);
     let any_mouse_pressed = input.mouse_buttons.pressed(MouseButton::Left) || right_pressed;
-    let orbiting = orbit_modifier && any_mouse_pressed;
-    let panning = input.mouse_buttons.pressed(MouseButton::Middle) || (right_pressed && shift);
+    // Space takes precedence: while held, a drag always pans (never orbits).
+    let orbiting = orbit_modifier && any_mouse_pressed && !space_pan;
+    let panning = input.mouse_buttons.pressed(MouseButton::Middle)
+        || (right_pressed && shift)
+        || (space_pan && any_mouse_pressed);
+
+    // When an orbit drag begins, pivot around what the user is looking at: the
+    // selection if any, otherwise the robust center of the scene geometry. The
+    // center is a per-axis median of bounds centers, so far-off stray geometry
+    // (e.g. a drawing's title block hundreds of metres away) can't drag the
+    // pivot off into empty space the way a raw bounding-box center would.
+    let orbit_started = orbiting
+        && (input.mouse_buttons.just_pressed(MouseButton::Left)
+            || input.mouse_buttons.just_pressed(MouseButton::Right));
+    if orbit_started {
+        let mut centers: Vec<Vec3> = input
+            .selected_geometry
+            .iter()
+            .map(|(gt, aabb)| gt.transform_point(Vec3::from(aabb.center)))
+            .collect();
+        if centers.is_empty() {
+            centers = input
+                .scene_geometry
+                .iter()
+                .map(|(gt, aabb)| gt.transform_point(Vec3::from(aabb.center)))
+                .collect();
+        }
+        if let Some(center) = median_center(&centers) {
+            orbit.focus = center;
+        }
+    }
 
     for ev in input.motion.read() {
         if orbiting {
@@ -370,6 +415,31 @@ fn orbit_camera(mut input: OrbitCameraInput) {
 
 pub fn orbit_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
+}
+
+/// Modifier that turns a primary-button drag into a pan (hold Space, then drag —
+/// the Figma/Blender convention). While held, the click/box-select handlers
+/// stand down so the drag pans instead of selecting.
+pub fn pan_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::Space)
+}
+
+/// Outlier-resistant center of a set of geometry centers: the per-axis median.
+/// Returns `None` for an empty set. Median (not mean/bbox-center) keeps the
+/// orbit pivot on the bulk of the geometry even when a few entities sit far away.
+fn median_center(centers: &[Vec3]) -> Option<Vec3> {
+    if centers.is_empty() {
+        return None;
+    }
+    let mut xs: Vec<f32> = centers.iter().map(|c| c.x).collect();
+    let mut ys: Vec<f32> = centers.iter().map(|c| c.y).collect();
+    let mut zs: Vec<f32> = centers.iter().map(|c| c.z).collect();
+    Some(Vec3::new(median(&mut xs), median(&mut ys), median(&mut zs)))
+}
+
+fn median(values: &mut [f32]) -> f32 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values[values.len() / 2]
 }
 
 fn orbit_transform(orbit: &OrbitCamera) -> Transform {
