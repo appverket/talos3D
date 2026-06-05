@@ -34,11 +34,21 @@ const HANDLE_SCALE_COLOR: Color = Color::srgb(1.0, 0.82, 0.28);
 const HANDLE_ENDPOINT_COLOR: Color = Color::srgb(0.42, 0.92, 1.0);
 const HANDLE_ROTATE_COLOR: Color = Color::srgb(0.45, 0.94, 0.55);
 const HANDLE_PARAMETER_COLOR: Color = Color::srgb(1.0, 0.82, 0.28);
-const HANDLE_HOVER_BRIGHTNESS: f32 = 1.25;
+/// Yaw rotate grip: cyan, clearly distinct from white move spheres and gold scale cubes.
+const HANDLE_ROTATE_GRIP_COLOR: Color = Color::srgb(0.30, 0.78, 1.0);
+/// Vertical-lift grip: violet, so the "up" grip reads apart from the white corner grips.
+const HANDLE_VERTICAL_COLOR: Color = Color::srgb(0.74, 0.55, 1.0);
+/// Highlight applied to any hovered/grabbed grip. A fixed high-contrast colour (not a
+/// brightness multiply) so it is visible even on the near-white move grips.
+const HANDLE_HIGHLIGHT_COLOR: Color = Color::srgb(1.0, 0.85, 0.1);
+/// Hovered/grabbed grips are drawn this much larger so the grab is obvious.
+const HANDLE_HIGHLIGHT_SCALE: f32 = 1.6;
 const PIVOT_COLOR: Color = Color::srgb(0.96, 0.35, 0.8);
 const ROTATE_RING_COLOR: Color = Color::srgb(0.42, 0.95, 0.58);
 const ROTATE_RING_SEGMENTS: usize = 24;
 const MOVE_HANDLE_HINT: &str = "Move: drag a corner or control point · snaps to nearby markers";
+const COMBINED_HANDLE_HINT: &str =
+    "Drag a corner to move · the top grip to lift · the ring grip to rotate · M/R/S to narrow";
 
 pub struct HandlesPlugin;
 
@@ -106,7 +116,11 @@ pub fn arm_move_handles(world: &mut World) -> Result<(), String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HandleDisplayMode {
+    /// Unified SketchUp-style manipulator: move corner grips + a vertical-lift
+    /// grip + a yaw rotate ring/grip shown together, so the user grabs different
+    /// grips to move vs rotate without switching modes. Default on selection.
     #[default]
+    Combined,
     Move,
     Scale,
     Rotate,
@@ -167,6 +181,10 @@ enum HandleRenderStyle {
     Move,
     Scale,
     Rotate,
+    /// Yaw rotate grip on the combined gizmo's ring (cyan diamond).
+    RotateGrip,
+    /// Vertical-lift grip on the combined gizmo (violet sphere above the box).
+    VerticalLift,
     Vertex,
     Center,
     Control,
@@ -275,7 +293,7 @@ fn reset_handle_context_on_selection_change(
     }
     handle_state.hovered = None;
     handle_state.pressed = None;
-    handle_context.display_mode = HandleDisplayMode::Move;
+    handle_context.display_mode = HandleDisplayMode::Combined;
     pivot_point.position = None;
 }
 
@@ -603,9 +621,19 @@ fn update_handle_status(
         status_bar_data.command_hint = Some(handle.label.clone());
     } else if status_bar_data.command_hint.is_some() {
         status_bar_data.command_hint = None;
-    } else if !selected_query.is_empty() && handle_context.display_mode == HandleDisplayMode::Move {
-        status_bar_data.hint = MOVE_HANDLE_HINT.to_string();
-    } else if status_bar_data.hint == MOVE_HANDLE_HINT {
+    } else if !selected_query.is_empty()
+        && matches!(
+            handle_context.display_mode,
+            HandleDisplayMode::Combined | HandleDisplayMode::Move
+        )
+    {
+        status_bar_data.hint = match handle_context.display_mode {
+            HandleDisplayMode::Combined => COMBINED_HANDLE_HINT.to_string(),
+            _ => MOVE_HANDLE_HINT.to_string(),
+        };
+    } else if status_bar_data.hint == MOVE_HANDLE_HINT
+        || status_bar_data.hint == COMBINED_HANDLE_HINT
+    {
         status_bar_data.hint.clear();
     }
 }
@@ -648,8 +676,10 @@ fn draw_pivot_indicator(
 }
 
 fn draw_rotate_ring(world: &World, rotate_ring: RotateRingContext, mut gizmos: Gizmos) {
-    if rotate_ring.handle_context.display_mode != HandleDisplayMode::Rotate
-        || !rotate_ring.transform_state.is_idle()
+    if !matches!(
+        rotate_ring.handle_context.display_mode,
+        HandleDisplayMode::Rotate | HandleDisplayMode::Combined
+    ) || !rotate_ring.transform_state.is_idle()
         || rotate_ring.selected_query.is_empty()
     {
         return;
@@ -659,17 +689,34 @@ fn draw_rotate_ring(world: &World, rotate_ring: RotateRingContext, mut gizmos: G
         return;
     };
 
-    let center = rotate_ring.pivot_point.position.or_else(|| {
-        let snapshots = rotate_ring
-            .selected_query
-            .iter()
-            .filter_map(|entity| {
-                let entity_ref = world.get_entity(entity).ok()?;
-                rotate_ring.registry.capture_snapshot(&entity_ref, world)
-            })
-            .collect::<Vec<_>>();
-        selection_center(&snapshots)
-    });
+    let snapshots = rotate_ring
+        .selected_query
+        .iter()
+        .filter_map(|entity| {
+            let entity_ref = world.get_entity(entity).ok()?;
+            rotate_ring.registry.capture_snapshot(&entity_ref, world)
+        })
+        .collect::<Vec<_>>();
+
+    // Combined gizmo: draw the yaw ring around the selection footprint at the same
+    // radius the rotate grip sits on, so ring + grip read as one rotate affordance.
+    if rotate_ring.handle_context.display_mode == HandleDisplayMode::Combined {
+        if let Some(bounds) = union_bounds(&snapshots) {
+            draw_ring(
+                &mut gizmos,
+                bounds.center(),
+                yaw_ring_radius(&bounds),
+                ROTATE_RING_COLOR,
+            );
+        }
+        return;
+    }
+
+    // Rotate mode: compact ring centred on the pivot/selection centre.
+    let center = rotate_ring
+        .pivot_point
+        .position
+        .or_else(|| selection_center(&snapshots));
     let Some(center) = center else {
         return;
     };
@@ -792,6 +839,18 @@ fn build_display_handles(
     };
 
     match display_mode {
+        HandleDisplayMode::Combined => {
+            // Unified manipulator: ground-plane move corners + a vertical-lift grip
+            // + a yaw rotate grip on the ring, all grabbable without switching modes.
+            handles.extend(move_handles(entity, snapshot, bounds));
+            handles.push(vertical_lift_handle(entity, snapshot, bounds));
+            handles.push(rotate_ring_grip(
+                entity,
+                snapshot,
+                bounds,
+                pivot_position.unwrap_or(bounds.center()),
+            ));
+        }
         HandleDisplayMode::Move => {
             handles.extend(move_handles(entity, snapshot, bounds));
         }
@@ -902,6 +961,83 @@ fn rotate_handles(entity: Entity, snapshot: &BoxedEntity, position: Vec3) -> Vec
     }]
 }
 
+/// Combined-gizmo grip that raises/lowers the object along world Y. Placed at the
+/// top-face centre of the bounding box, above the white corner move grips. The Y move
+/// is driven by a camera-facing vertical plane (see `transform::vertical_axis_cursor_y`).
+fn vertical_lift_handle(
+    entity: Entity,
+    snapshot: &BoxedEntity,
+    bounds: EntityBounds,
+) -> ResolvedHandle {
+    // face_centers()[2] is the +Y face centre (see EntityBounds::face_centers).
+    let (top_face, _) = bounds.face_centers()[2];
+    ResolvedHandle {
+        entity,
+        snapshot: snapshot.clone(),
+        id: "move_vertical".to_string(),
+        label: "Lift".to_string(),
+        position: top_face,
+        render_style: HandleRenderStyle::VerticalLift,
+        interaction: HandleInteraction::Transform {
+            mode: TransformMode::Moving,
+            axis: AxisConstraint::Y,
+            pivot_override: None,
+        },
+        screen_position: Vec2::ZERO,
+    }
+}
+
+/// Horizontal (XZ) radius of the yaw ring that encircles a bounding box's footprint.
+/// Shared by the ring visual and the rotate grip so the grip always sits on the ring.
+fn yaw_ring_radius(bounds: &EntityBounds) -> f32 {
+    let span = (bounds.max.x - bounds.min.x).max(bounds.max.z - bounds.min.z);
+    (span * 0.5 * 1.2).max(0.4)
+}
+
+/// Axis-aligned union of the selection's bounding boxes (for the combined yaw ring).
+fn union_bounds(snapshots: &[BoxedEntity]) -> Option<EntityBounds> {
+    let mut acc: Option<EntityBounds> = None;
+    for snapshot in snapshots {
+        if let Some(b) = snapshot.bounds() {
+            acc = Some(match acc {
+                Some(a) => EntityBounds {
+                    min: a.min.min(b.min),
+                    max: a.max.max(b.max),
+                },
+                None => b,
+            });
+        }
+    }
+    acc
+}
+
+/// Combined-gizmo grip that rotates the object about world vertical (yaw). Sits on
+/// the +X point of the yaw ring drawn by `draw_rotate_ring`; rotation pivots about
+/// the selection centre (or the explicit pivot when one is set).
+fn rotate_ring_grip(
+    entity: Entity,
+    snapshot: &BoxedEntity,
+    bounds: EntityBounds,
+    pivot: Vec3,
+) -> ResolvedHandle {
+    let center = bounds.center();
+    let radius = yaw_ring_radius(&bounds);
+    ResolvedHandle {
+        entity,
+        snapshot: snapshot.clone(),
+        id: "rotate_yaw".to_string(),
+        label: "Rotate".to_string(),
+        position: Vec3::new(center.x + radius, center.y, center.z),
+        render_style: HandleRenderStyle::RotateGrip,
+        interaction: HandleInteraction::Transform {
+            mode: TransformMode::Rotating,
+            axis: AxisConstraint::Y,
+            pivot_override: Some(pivot),
+        },
+        screen_position: Vec2::ZERO,
+    }
+}
+
 fn authored_render_style(kind: HandleKind) -> HandleRenderStyle {
     match kind {
         HandleKind::Vertex => HandleRenderStyle::Vertex,
@@ -937,10 +1073,22 @@ fn axis_label(axis: AxisConstraint) -> &'static str {
 
 fn draw_handle(gizmos: &mut Gizmos, handle: &ResolvedHandle, radius: f32, highlighted: bool) {
     let color = handle_color(handle.render_style, highlighted);
+    // Grow the grip when hovered/grabbed so the grab is unmistakable (the old
+    // brightness-only cue was invisible on the near-white move grips).
+    let radius = if highlighted {
+        radius * HANDLE_HIGHLIGHT_SCALE
+    } else {
+        radius
+    };
     match handle.render_style {
         HandleRenderStyle::Scale => draw_cube_handle(gizmos, handle.position, radius, color),
+        // Rotate grip reads as a flat diamond on the yaw ring (distinct from spheres).
+        HandleRenderStyle::RotateGrip => {
+            draw_diamond_handle(gizmos, handle.position, radius * 1.4, color)
+        }
         HandleRenderStyle::Move
         | HandleRenderStyle::Rotate
+        | HandleRenderStyle::VerticalLift
         | HandleRenderStyle::Vertex
         | HandleRenderStyle::Center
         | HandleRenderStyle::Control
@@ -951,27 +1099,24 @@ fn draw_handle(gizmos: &mut Gizmos, handle: &ResolvedHandle, radius: f32, highli
 }
 
 fn handle_color(style: HandleRenderStyle, highlighted: bool) -> Color {
-    let base = match style {
+    // A grabbed/hovered grip always uses one fixed high-contrast colour so the cue is
+    // visible regardless of the grip's resting colour (white move grips clamped the old
+    // brightness multiply to no visible change).
+    if highlighted {
+        return HANDLE_HIGHLIGHT_COLOR;
+    }
+
+    match style {
         HandleRenderStyle::Move => HANDLE_MOVE_COLOR,
         HandleRenderStyle::Scale => HANDLE_SCALE_COLOR,
         HandleRenderStyle::Rotate => HANDLE_ROTATE_COLOR,
+        HandleRenderStyle::RotateGrip => HANDLE_ROTATE_GRIP_COLOR,
+        HandleRenderStyle::VerticalLift => HANDLE_VERTICAL_COLOR,
         HandleRenderStyle::Vertex => HANDLE_ENDPOINT_COLOR,
         HandleRenderStyle::Center => HANDLE_MOVE_COLOR,
         HandleRenderStyle::Control => HANDLE_ROTATE_COLOR,
         HandleRenderStyle::Parameter => HANDLE_PARAMETER_COLOR,
-    };
-
-    if !highlighted {
-        return base;
     }
-
-    let linear = base.to_linear();
-    Color::linear_rgba(
-        (linear.red * HANDLE_HOVER_BRIGHTNESS).min(1.0),
-        (linear.green * HANDLE_HOVER_BRIGHTNESS).min(1.0),
-        (linear.blue * HANDLE_HOVER_BRIGHTNESS).min(1.0),
-        linear.alpha,
-    )
 }
 
 fn handle_world_radius(
