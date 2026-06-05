@@ -60,16 +60,34 @@ invoke_command { "command_id": "terrain.unplant_on_surface",
                  "parameters": { "target_id": <obj> } }
 ```
 
-## Known follow-ups
+## Discoverability
 
-- **Architecture-domain `HuggingFoundation` recipe** (PP-PLANT-E remainder):
-  register the conforming foundation as a curated recipe / parametric type in
-  `talos3d-architecture` so `select_recipe` / `discover_curated_paths` surface it
-  for the `foundation_system` element class (ADR-042). The geometry is grounded in
-  real terrain, so it is a legitimate recipe, not an anti-bluff stand-in.
-- **Arbitrary (non-rectangular) footprints** — today the footprint is a rectangle;
-  real building outlines need polygon footprints.
-- **Heightfield build speed** — IDW per node is O(contour points); a contour-point
-  spatial index would make it O(k)/node (queries are already O(1)).
-- **Undo-stack integration** — plant/unplant are reversible via the explicit
-  command pair; wiring them through the history group for Ctrl+Z is open.
+The conforming foundation is registered as a **shipped agent skill**
+(`terrain.conforming_foundation`, in `TerrainPlugin`) that routes agents to the
+real executable tools (`create_entity {type: conforming_solid}`,
+`terrain.plant_on_surface` / `unplant_on_surface`, `set_property`). It is *not*
+registered as a curated recipe or assembly pattern: a conforming solid is a
+single terrain-derived solid, not a layered material assembly, and schematic
+recipe instantiation is currently a no-op (PP70/PP76) — so an agent skill that
+names the working tools is the honest, non-bluffing discovery surface per
+ADR-042. A code-blind agent searching skills for "foundation" / "terrain" /
+"plant" finds it.
+
+## Status of follow-ups
+
+- **Architecture discoverability** — done via the agent skill above (PP-PLANT-E).
+- **Heightfield build speed** — done: the build spatial-indexes the contour
+  points (≈ one point per cell) for O(k)/node IDW; 178² nodes / 3.6k points went
+  1285 ms → 201 ms (debug). Queries remain O(1).
+- **Undo** — conforming-solid create / move / resize flow through
+  `CreateEntityCommand` / `ApplyEntityChangesCommand`, so they are on the undo
+  stack. `plant_on_surface` / `unplant_on_surface` are a multi-component
+  operation (create foundation + move object + hide original + link), reversible
+  via the explicit command pair rather than a single Ctrl+Z; folding them into
+  one history group is the remaining piece.
+- **Arbitrary (non-rectangular) footprints** — open. The footprint is a rectangle
+  (`half_extents`); planting an existing building uses the object's XZ bounding
+  rectangle, which serves the common case. A true polygon footprint — especially
+  concave outlines (L-shapes) — needs a constrained Delaunay triangulation of the
+  boundary plus interior height samples to stay watertight and conforming; that
+  is the remaining substantial item.
