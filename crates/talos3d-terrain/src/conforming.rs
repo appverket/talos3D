@@ -372,6 +372,20 @@ impl AuthoredEntity for ConformingSolidSnapshot {
                 true,
             ),
             property_field(
+                "position",
+                PropertyValueKind::Vec3,
+                Some(PropertyValue::Vec3(Vec3::new(
+                    self.solid.position.x,
+                    0.0,
+                    self.solid.position.y,
+                ))),
+            ),
+            property_field(
+                "yaw_deg",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.solid.yaw.to_degrees())),
+            ),
+            property_field(
                 "min_thickness",
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.solid.min_thickness)),
@@ -413,6 +427,20 @@ impl AuthoredEntity for ConformingSolidSnapshot {
                     .ok_or_else(|| "Expected string".to_string())?
                     .to_string();
             }
+            // Planting: only the XZ placement is authored — Y rides the surface.
+            "position" => {
+                let arr = value
+                    .as_array()
+                    .ok_or_else(|| "Expected [x, _, z]".to_string())?;
+                if arr.len() != 3 {
+                    return Err("Expected [x, _, z]".to_string());
+                }
+                snapshot.solid.position = Vec2::new(
+                    arr[0].as_f64().unwrap_or(0.0) as f32,
+                    arr[2].as_f64().unwrap_or(0.0) as f32,
+                );
+            }
+            "yaw_deg" => snapshot.solid.yaw = scalar_from_json(value)?.to_radians(),
             "min_thickness" => snapshot.solid.min_thickness = scalar_from_json(value)?.max(0.0),
             "max_depth" => snapshot.solid.max_depth = scalar_from_json(value)?.max(0.01),
             "resolution" => snapshot.solid.resolution = scalar_from_json(value)?.max(0.05),
@@ -432,7 +460,15 @@ impl AuthoredEntity for ConformingSolidSnapshot {
             _ => {
                 return Err(invalid_property_error(
                     "conforming_solid",
-                    &["name", "min_thickness", "max_depth", "half_extents", "resolution"],
+                    &[
+                        "name",
+                        "position",
+                        "yaw_deg",
+                        "min_thickness",
+                        "max_depth",
+                        "half_extents",
+                        "resolution",
+                    ],
                 ))
             }
         }
@@ -697,6 +733,7 @@ fn regenerate_conforming_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn ramp_field() -> TerrainHeightfield {
         // h = x over [0,20] x [0,20].
@@ -765,6 +802,38 @@ mod tests {
             ..Default::default()
         };
         assert!(build_conforming_mesh(&solid, &hf).is_none());
+    }
+
+    #[test]
+    fn drag_rebuilds_stay_within_frame_budget() {
+        // PP-PLANT-C performance evidence: rebuilding the conforming mesh every
+        // frame while dragging must fit comfortably inside a 16 ms frame, so the
+        // underside can re-conform live without throttling for typical footprints.
+        let hf = ramp_field();
+        let mut solid = ConformingSolid {
+            half_extents: Vec2::new(8.0, 6.0),
+            resolution: 0.5,
+            min_thickness: 0.5,
+            max_depth: 3.0,
+            surface_id: ElementId(0),
+            ..Default::default()
+        };
+        let frames = 240usize; // ~4 s of dragging at 60 fps
+        let t0 = Instant::now();
+        let mut tris = 0usize;
+        for k in 0..frames {
+            solid.position = Vec2::new(2.0 + (k as f32 * 0.05) % 14.0, 10.0);
+            if let Some(mesh) = build_conforming_mesh(&solid, &hf) {
+                tris = mesh.count_vertices() / 3;
+            }
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let per_frame = ms / frames as f64;
+        println!(
+            "conforming rebuild: {frames} frames in {:.1} ms = {:.3} ms/frame (~{tris} tris)",
+            ms, per_frame
+        );
+        assert!(per_frame < 8.0, "rebuild too slow for live drag: {per_frame} ms/frame");
     }
 
     #[test]
