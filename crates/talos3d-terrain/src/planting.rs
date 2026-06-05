@@ -178,6 +178,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
     let foundation_id = world.resource::<ElementIdAllocator>().next_id();
     ConformingSolidSnapshot {
         element_id: foundation_id,
+        derived_top: 0.0,
         solid: ConformingSolid {
             name: "Hugging Foundation".to_string(),
             position: center,
