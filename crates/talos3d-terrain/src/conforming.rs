@@ -26,12 +26,13 @@ use serde_json::Value;
 use talos3d_core::{
     authored_entity::{
         invalid_property_error, property_field, property_field_with, read_only_property_field,
-        scalar_from_json, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, PropertyFieldDef,
-        PropertyValue, PropertyValueKind,
+        scalar_from_json, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, HandleKind,
+        PropertyFieldDef, PropertyValue, PropertyValueKind,
     },
     capability_registry::{AuthoredEntityFactory, ModelSummaryAccumulator},
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
+        definition_preview_scene::PreviewOnly,
         identity::{ElementId, ElementIdAllocator},
     },
 };
@@ -86,6 +87,16 @@ impl Default for ConformingSolid {
 /// Marker requesting a (re)build of a conforming solid's derived mesh.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct NeedsConformingMesh;
+
+/// Cached derived top elevation of a conforming solid (`max(grade)+min_thickness`).
+/// Written by the regen system from the height field; read by the snapshot so its
+/// handles/preview sit on the visible solid (the snapshot alone cannot know the
+/// terrain height). A *separate* component so updating it does not retrigger the
+/// `Changed<ConformingSolid>` rebuild.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct ConformingDerived {
+    pub y_top: f32,
+}
 
 /// Result metrics of a conforming-solid build (exposed for tests / property UI).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -231,9 +242,13 @@ fn push_tri(
 }
 
 /// Build the watertight conforming-solid mesh (flat top, conforming benched
-/// underside, vertical walls). `None` if the footprint does not overlap the
-/// surface. Non-indexed with per-face flat normals for crisp edges.
-pub fn build_conforming_mesh(solid: &ConformingSolid, hf: &TerrainHeightfield) -> Option<Mesh> {
+/// underside, vertical walls) plus the derived top elevation `Y_top`. `None` if
+/// the footprint does not overlap the surface. Non-indexed with per-face flat
+/// normals for crisp edges.
+pub fn build_conforming_mesh(
+    solid: &ConformingSolid,
+    hf: &TerrainHeightfield,
+) -> Option<(Mesh, f32)> {
     let s = sample_conforming(solid, hf)?;
     let nx = s.nx;
     let nz = s.nz;
@@ -296,7 +311,7 @@ pub fn build_conforming_mesh(solid: &ConformingSolid, hf: &TerrainHeightfield) -
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(indices));
-    Some(mesh)
+    Some((mesh, y_top))
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +322,11 @@ pub fn build_conforming_mesh(solid: &ConformingSolid, hf: &TerrainHeightfield) -
 pub struct ConformingSolidSnapshot {
     pub element_id: ElementId,
     pub solid: ConformingSolid,
+    /// Cached derived top elevation (from `ConformingDerived`) so handles and the
+    /// drag preview sit on the visible solid. Not authoritative; recomputed on
+    /// regen.
+    #[serde(default)]
+    pub derived_top: f32,
 }
 
 impl From<ConformingSolidSnapshot> for BoxedEntity {
@@ -476,21 +496,125 @@ impl AuthoredEntity for ConformingSolidSnapshot {
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
-        Vec::new()
+        // Place handles on the *visible* solid using the cached derived top. A
+        // centre handle moves it (XZ; Y re-derives); corner handles resize the
+        // footprint. `bounds()` returns None so these authored handles are the
+        // only ones — the generic bounds move-handles would slide the mesh
+        // rigidly instead of re-conforming it.
+        let y = self.derived_top;
+        let corners = self.solid.world_corners();
+        let mut handles: Vec<HandleInfo> = corners
+            .iter()
+            .enumerate()
+            .map(|(index, corner)| HandleInfo {
+                id: format!("corner_{index}"),
+                position: Vec3::new(corner.x, y, corner.y),
+                kind: HandleKind::Vertex,
+                label: format!("Corner {}", index + 1),
+            })
+            .collect();
+        handles.push(HandleInfo {
+            id: "center".to_string(),
+            position: Vec3::new(self.solid.position.x, y, self.solid.position.y),
+            kind: HandleKind::Center,
+            label: "Move".to_string(),
+        });
+        handles
     }
 
     fn bounds(&self) -> Option<EntityBounds> {
-        let corners = self.solid.world_corners();
-        let mut min = Vec3::splat(f32::INFINITY);
-        let mut max = Vec3::splat(f32::NEG_INFINITY);
-        for corner in corners {
-            for y in [0.0_f32, self.solid.max_depth] {
-                let p = Vec3::new(corner.x, y, corner.y);
-                min = min.min(p);
-                max = max.max(p);
-            }
+        // None → the viewport uses the mesh AABB for framing/selection, and the
+        // Move tool shows only our authored (re-conforming) handles.
+        None
+    }
+
+    fn drag_handle(&self, handle_id: &str, cursor: Vec3) -> Option<BoxedEntity> {
+        let mut snapshot = self.clone();
+        if handle_id == "center" {
+            snapshot.solid.position = Vec2::new(cursor.x, cursor.z);
+            return Some(snapshot.into());
         }
-        Some(EntityBounds { min, max })
+        let index = handle_id
+            .strip_prefix("corner_")
+            .and_then(|rest| rest.parse::<usize>().ok())?;
+        let corners = self.solid.world_corners();
+        let opposite = corners[(index + 2) % 4];
+        let cursor_xz = Vec2::new(cursor.x, cursor.z);
+        let new_center = (opposite + cursor_xz) * 0.5;
+        let diag = cursor_xz - opposite;
+        // Express the diagonal in the footprint's un-rotated frame.
+        let (sin, cos) = self.solid.yaw.sin_cos();
+        let local = Vec2::new(cos * diag.x + sin * diag.y, -sin * diag.x + cos * diag.y);
+        snapshot.solid.position = new_center;
+        snapshot.solid.half_extents = (local.abs() * 0.5).max(Vec2::splat(0.25));
+        Some(snapshot.into())
+    }
+
+    fn sync_preview_entity(&self, world: &mut World, existing: Option<Entity>) -> Option<Entity> {
+        // Rebuild the conforming mesh at the dragged footprint so it re-conforms
+        // to grade live (a rigid Transform slide would not). The real entity is
+        // hidden for the duration so the preview isn't doubled.
+        let heightfield = {
+            let mut query = world.query::<(&ElementId, &TerrainHeightfield)>();
+            query
+                .iter(world)
+                .find(|(id, _)| id.0 == self.solid.surface_id.0)
+                .map(|(_, hf)| hf.clone())
+        };
+        let Some(heightfield) = heightfield else {
+            return existing;
+        };
+        let Some((mesh, _)) = build_conforming_mesh(&self.solid, &heightfield) else {
+            return existing;
+        };
+        let material = world
+            .get_resource::<ConformingMaterial>()
+            .map(|material| material.0.clone());
+        let mesh_handle = world.resource_mut::<Assets<Mesh>>().add(mesh);
+
+        if let Some(real) = find_entity_by_element_id(world, self.element_id) {
+            world.entity_mut(real).insert(Visibility::Hidden);
+        }
+
+        if let Some(existing) = existing {
+            let old = world
+                .get_entity(existing)
+                .ok()
+                .and_then(|entity_ref| entity_ref.get::<Mesh3d>().map(|mesh| mesh.0.clone()));
+            if let Ok(mut entity_mut) = world.get_entity_mut(existing) {
+                entity_mut.insert(Mesh3d(mesh_handle));
+            }
+            if let Some(old) = old {
+                world.resource_mut::<Assets<Mesh>>().remove(old.id());
+            }
+            Some(existing)
+        } else {
+            let mut entity = world.spawn((
+                PreviewOnly,
+                Mesh3d(mesh_handle),
+                Transform::IDENTITY,
+                Visibility::Inherited,
+            ));
+            if let Some(material) = material {
+                entity.insert(MeshMaterial3d(material));
+            }
+            Some(entity.id())
+        }
+    }
+
+    fn cleanup_preview_entity(&self, world: &mut World, preview_entity: Entity) {
+        let mesh = world
+            .get_entity(preview_entity)
+            .ok()
+            .and_then(|entity_ref| entity_ref.get::<Mesh3d>().map(|mesh| mesh.0.clone()));
+        if let Some(mesh) = mesh {
+            world.resource_mut::<Assets<Mesh>>().remove(mesh.id());
+        }
+        let _ = world.despawn(preview_entity);
+        // Restore the real solid we hid while previewing.
+        if let Some(real) = find_entity_by_element_id(world, self.element_id) {
+            world.entity_mut(real).insert(Visibility::Inherited);
+        }
     }
 
     fn to_json(&self) -> Value {
@@ -561,6 +685,10 @@ impl AuthoredEntityFactory for ConformingSolidFactory {
             ConformingSolidSnapshot {
                 element_id: *entity_ref.get::<ElementId>()?,
                 solid: entity_ref.get::<ConformingSolid>()?.clone(),
+                derived_top: entity_ref
+                    .get::<ConformingDerived>()
+                    .map(|derived| derived.y_top)
+                    .unwrap_or(0.0),
             }
             .into(),
         )
@@ -628,7 +756,12 @@ impl AuthoredEntityFactory for ConformingSolidFactory {
             solid.name = v.to_string();
         }
 
-        Ok(ConformingSolidSnapshot { element_id, solid }.into())
+        Ok(ConformingSolidSnapshot {
+            element_id,
+            solid,
+            derived_top: 0.0,
+        }
+        .into())
     }
 }
 
@@ -716,11 +849,14 @@ fn regenerate_conforming_meshes(
             // Surface height field not ready yet; retry next frame (keep marker).
             continue;
         };
-        let Some(mesh) = build_conforming_mesh(solid, hf) else {
+        let Some((mesh, y_top)) = build_conforming_mesh(solid, hf) else {
             // Footprint not over the surface; clear the marker so we don't spin.
             commands.entity(entity).try_remove::<NeedsConformingMesh>();
             continue;
         };
+        // Cache the derived top so the snapshot's handles/preview sit on the solid
+        // (separate component → does not retrigger Changed<ConformingSolid>).
+        commands.entity(entity).try_insert(ConformingDerived { y_top });
         match mesh_handle {
             Some(handle) if meshes.get(handle.id()).is_some() => {
                 if let Some(existing) = meshes.get_mut(handle.id()) {
@@ -836,7 +972,7 @@ mod tests {
         let mut tris = 0usize;
         for k in 0..frames {
             solid.position = Vec2::new(2.0 + (k as f32 * 0.05) % 14.0, 10.0);
-            if let Some(mesh) = build_conforming_mesh(&solid, &hf) {
+            if let Some((mesh, _)) = build_conforming_mesh(&solid, &hf) {
                 tris = mesh.count_vertices() / 3;
             }
         }
@@ -859,7 +995,7 @@ mod tests {
             resolution: 1.0,
             ..Default::default()
         };
-        let mesh = build_conforming_mesh(&solid, &hf).expect("mesh");
+        let (mesh, _) = build_conforming_mesh(&solid, &hf).expect("mesh");
         let count = mesh.count_vertices();
         assert!(count > 0 && count % 3 == 0, "non-indexed triangles, got {count}");
     }
