@@ -77,9 +77,23 @@ struct CutFillVisualizationInput<'a> {
     boundary: &'a [Vec2],
 }
 
+/// Whether the terrain's *generated* iso-contour overlay is drawn. These lines
+/// are sliced from the (gridded) surface mesh, so they staircase; they are also
+/// redundant with the imported survey contour layers (e.g. `HOJDKURVA`). Off by
+/// default — toggle via `terrain.toggle_generated_contours`.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct ShowGeneratedContours(pub bool);
+
+impl Default for ShowGeneratedContours {
+    fn default() -> Self {
+        Self(false)
+    }
+}
+
 impl Plugin for TerrainGenerationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainVisualizationState>()
+            .init_resource::<ShowGeneratedContours>()
             .add_systems(Startup, setup_terrain_material)
             .add_systems(
                 Update,
@@ -257,9 +271,13 @@ fn draw_elevation_curves(
 }
 
 fn draw_terrain_contours(
+    show: Res<ShowGeneratedContours>,
     surfaces: Query<(&TerrainMeshCache, Option<&Visibility>)>,
     mut gizmos: Gizmos,
 ) {
+    if !show.0 {
+        return;
+    }
     for (cache, visibility) in &surfaces {
         if visibility.is_some_and(|visibility| *visibility == Visibility::Hidden) {
             continue;
