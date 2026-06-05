@@ -732,7 +732,7 @@ fn triangle_area(a: Vec2, b: Vec2, c: Vec2) -> f32 {
     ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs() * 0.5
 }
 
-fn point_in_polygon_2d(point: Vec2, polygon: &[Vec2]) -> bool {
+pub(crate) fn point_in_polygon_2d(point: Vec2, polygon: &[Vec2]) -> bool {
     if polygon.len() < 3 {
         return false;
     }
@@ -819,7 +819,7 @@ fn cross(a: Vec2, b: Vec2, c: Vec2) -> f32 {
     (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
 }
 
-fn interpolate_height_idw(point: Vec2, contour_points: &[Vec3]) -> f32 {
+pub(crate) fn interpolate_height_idw(point: Vec2, contour_points: &[Vec3]) -> f32 {
     // Keep only the K nearest contour points (by XZ distance). Previously this
     // heap-allocated and fully sorted the distance to *every* contour point on
     // *every* sample, which dominated dense-surface generation. A K-slot
