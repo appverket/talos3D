@@ -4,6 +4,7 @@ pub mod conforming;
 pub mod cut_fill;
 pub mod generation;
 pub mod heightfield;
+pub mod planting;
 pub mod reconstruction;
 pub mod review;
 pub mod snapshots;
@@ -24,6 +25,7 @@ use crate::{
     commands::TerrainCommandPlugin,
     conforming::{ConformingSolidFactory, ConformingSolidPlugin},
     generation::TerrainGenerationPlugin,
+    planting::PlantingPlugin,
     review::TerrainReviewPlugin,
     snapshots::{ElevationCurveFactory, TerrainSurfaceFactory},
     terrain_provider::TerrainProviderImpl,
@@ -58,6 +60,7 @@ impl Plugin for TerrainPlugin {
             .register_terrain_provider(TerrainProviderImpl)
             .add_plugins(TerrainCommandPlugin)
             .add_plugins(ConformingSolidPlugin)
+            .add_plugins(PlantingPlugin)
             .add_plugins(TerrainGenerationPlugin)
             .add_plugins(TerrainReviewPlugin)
             .add_plugins(TerrainToolPlugin);
