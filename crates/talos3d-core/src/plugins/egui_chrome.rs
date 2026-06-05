@@ -233,6 +233,9 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "Panels",
         command_ids: &[
+            "view.toggle_layers",
+            "view.toggle_outliner",
+            "view.toggle_dependency_graph",
             "modeling.toggle_definitions_browser",
             "materials.toggle_browser",
             "lighting.toggle_browser",

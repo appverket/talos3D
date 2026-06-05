@@ -13,7 +13,10 @@ impl Plugin for LayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LayerRegistry>()
             .init_resource::<LayerState>()
-            .add_systems(Update, apply_layer_visibility);
+            // Default fallback runs in Update, strictly after domain plugins
+            // (e.g. terrain) have claimed their entities in PreUpdate. Then
+            // visibility is applied.
+            .add_systems(Update, (assign_default_layer, apply_layer_visibility).chain());
     }
 }
 
@@ -165,6 +168,23 @@ impl LayerAssignment {
         Self {
             layer: DEFAULT_LAYER_NAME.to_string(),
         }
+    }
+}
+
+/// Ensure every authored entity lives on a layer. Any entity carrying an
+/// [`ElementId`] but no [`LayerAssignment`] is placed on the Default layer, so
+/// the layer panel can list and toggle it instead of it being invisible to the
+/// layer system (e.g. derived terrain-surface meshes, freshly created
+/// primitives). Domain plugins may claim entities first by running their own
+/// assignment system `before(assign_default_layer)`.
+pub fn assign_default_layer(
+    mut commands: Commands,
+    query: Query<Entity, (With<ElementId>, Without<LayerAssignment>)>,
+) {
+    for entity in &query {
+        commands
+            .entity(entity)
+            .insert(LayerAssignment::default_layer());
     }
 }
 
