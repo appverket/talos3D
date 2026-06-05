@@ -13,6 +13,7 @@ use talos3d_core::{
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
+        layers::{LayerAssignment, LayerRegistry},
         math::scale_point_around_center,
     },
 };
@@ -23,6 +24,19 @@ use crate::components::{
 };
 
 const CURVE_SELECTION_RADIUS_METRES: f32 = 0.2;
+
+/// Layer the draped terrain surface is placed on.
+const TERRAIN_LAYER_NAME: &str = "Terrain";
+
+/// The layer an elevation curve belongs to: the contour layer it was sourced
+/// from (e.g. `HOJDKURVA`), or a generic `Contours` layer when unknown.
+fn contour_layer_name(source_layer: &str) -> &str {
+    if source_layer.trim().is_empty() {
+        "Contours"
+    } else {
+        source_layer
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ElevationCurveSnapshot {
@@ -189,12 +203,23 @@ impl AuthoredEntity for ElevationCurveSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
+        // Assign the contour to the layer it came from (e.g. HOJDKURVA) at spawn
+        // time, so the layer panel groups it correctly and the Default fallback
+        // never claims it.
+        let layer = contour_layer_name(&self.curve.source_layer).to_string();
+        world.resource_mut::<LayerRegistry>().ensure_layer(&layer);
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world.entity_mut(entity).insert(self.curve.clone());
+            world
+                .entity_mut(entity)
+                .insert((self.curve.clone(), LayerAssignment::new(layer)));
             return;
         }
 
-        world.spawn((self.element_id, self.curve.clone()));
+        world.spawn((
+            self.element_id,
+            self.curve.clone(),
+            LayerAssignment::new(layer),
+        ));
     }
 
     fn remove_from(&self, world: &mut World) {
@@ -407,14 +432,28 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
+        // The draped surface lives on a dedicated `Terrain` layer, assigned at
+        // spawn so the Default fallback never claims it. The explicit
+        // `Visibility` lets the layer system (which queries
+        // `(&LayerAssignment, &mut Visibility)`) show/hide it via that layer.
+        world.resource_mut::<LayerRegistry>().ensure_layer(TERRAIN_LAYER_NAME);
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world
-                .entity_mut(entity)
-                .insert((self.surface.clone(), NeedsTerrainMesh));
+            world.entity_mut(entity).insert((
+                self.surface.clone(),
+                NeedsTerrainMesh,
+                Visibility::Inherited,
+                LayerAssignment::new(TERRAIN_LAYER_NAME),
+            ));
             return;
         }
 
-        world.spawn((self.element_id, self.surface.clone(), NeedsTerrainMesh));
+        world.spawn((
+            self.element_id,
+            self.surface.clone(),
+            NeedsTerrainMesh,
+            Visibility::Inherited,
+            LayerAssignment::new(TERRAIN_LAYER_NAME),
+        ));
     }
 
     fn remove_from(&self, world: &mut World) {
