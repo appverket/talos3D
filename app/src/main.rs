@@ -127,7 +127,8 @@ fn main() {
     // See ADR-040 and the CURATION_SUBSTRATE agreement.
     .add_plugins(talos3d_core::curation::CurationPlugin)
     .add_plugins(ArchitectureCorePlugin);
-    app.add_plugins(ArchitectureProductPlugin);
+    // ArchitectureProductPlugin is already registered in the builder chain above
+    // (a second unconditional add here panics: "plugin was already added").
 
     #[cfg(feature = "terrain")]
     app.add_plugins(TerrainPlugin);
