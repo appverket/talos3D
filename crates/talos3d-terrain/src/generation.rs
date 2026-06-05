@@ -329,6 +329,10 @@ fn build_terrain_faces(
             .collect::<Vec<_>>(),
     );
 
+    // Index breaklines spatially so the per-triangle crossing test only checks
+    // segments near the triangle, instead of all of them (O(faces*breaklines)).
+    let breakline_grid = BreaklineGrid::build(vertices, breakline_segments);
+
     let mut faces = Vec::new();
     for triangle in triangulation.triangles.chunks_exact(3) {
         let face = [triangle[0] as u32, triangle[1] as u32, triangle[2] as u32];
@@ -350,12 +354,97 @@ fn build_terrain_faces(
                 continue;
             }
         }
-        if triangle_crosses_breakline(vertices, face, breakline_segments) {
+        if breakline_grid.triangle_crosses(vertices, face, breakline_segments) {
             continue;
         }
         faces.push(face);
     }
     faces
+}
+
+/// Uniform-grid spatial index of breakline segments keyed by XZ cell. A breakline
+/// is registered in every cell its XZ bounding box touches; a triangle queries
+/// only the cells its own bounding box touches. Because any proper intersection
+/// lies inside both bounding boxes, this yields exactly the same answer as
+/// scanning every breakline (just far fewer tests).
+struct BreaklineGrid {
+    cell: f32,
+    cells: std::collections::HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl BreaklineGrid {
+    const CELL: f32 = 4.0;
+
+    fn build(vertices: &[Vec3], segments: &[BreaklineSegment]) -> Self {
+        let cell = Self::CELL;
+        let mut cells: std::collections::HashMap<(i32, i32), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (index, &(start, end)) in segments.iter().enumerate() {
+            let (Some(a), Some(b)) = (vertices.get(start), vertices.get(end)) else {
+                continue;
+            };
+            let (cx0, cx1, cz0, cz1) = Self::cell_range(a.x.min(b.x), a.x.max(b.x), a.z.min(b.z), a.z.max(b.z), cell);
+            for cx in cx0..=cx1 {
+                for cz in cz0..=cz1 {
+                    cells.entry((cx, cz)).or_default().push(index);
+                }
+            }
+        }
+        Self { cell, cells }
+    }
+
+    fn cell_range(minx: f32, maxx: f32, minz: f32, maxz: f32, cell: f32) -> (i32, i32, i32, i32) {
+        (
+            (minx / cell).floor() as i32,
+            (maxx / cell).floor() as i32,
+            (minz / cell).floor() as i32,
+            (maxz / cell).floor() as i32,
+        )
+    }
+
+    fn triangle_crosses(
+        &self,
+        vertices: &[Vec3],
+        face: [u32; 3],
+        segments: &[BreaklineSegment],
+    ) -> bool {
+        let Some((a, b, c)) = face_points(vertices, face) else {
+            return false;
+        };
+        let minx = a.x.min(b.x).min(c.x);
+        let maxx = a.x.max(b.x).max(c.x);
+        let minz = a.z.min(b.z).min(c.z);
+        let maxz = a.z.max(b.z).max(c.z);
+        let (cx0, cx1, cz0, cz1) = Self::cell_range(minx, maxx, minz, maxz, self.cell);
+        let edges = [
+            (face[0] as usize, face[1] as usize),
+            (face[1] as usize, face[2] as usize),
+            (face[2] as usize, face[0] as usize),
+        ];
+        for cx in cx0..=cx1 {
+            for cz in cz0..=cz1 {
+                let Some(bucket) = self.cells.get(&(cx, cz)) else {
+                    continue;
+                };
+                for &index in bucket {
+                    let breakline = segments[index];
+                    for edge in &edges {
+                        if !shares_endpoint(*edge, breakline)
+                            && segments_properly_intersect_xz(
+                                vertices[edge.0],
+                                vertices[edge.1],
+                                vertices[breakline.0],
+                                vertices[breakline.1],
+                            )
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 fn adaptive_sampling_spacing(surface: &TerrainSurface) -> f32 {
@@ -637,14 +726,44 @@ fn compute_triangle_mesh_normals(primitive: &TriangleMesh) -> Vec<Vec3> {
 }
 
 fn dedupe_vertices(points: Vec<Vec3>) -> Vec<Vec3> {
+    // Keep the first occurrence of each point (within CONTOUR_EPSILON), but use a
+    // 3D spatial hash of kept points so the duplicate test is O(1) instead of a
+    // scan over all kept vertices (O(n^2) overall). Cell size == the distance
+    // threshold, so any earlier point within range lies in one of the 27
+    // neighbouring cells. Output (and order) is identical to the naive scan.
+    let cell = CONTOUR_EPSILON.sqrt().max(f32::MIN_POSITIVE);
+    let key = |p: Vec3| {
+        (
+            (p.x / cell).floor() as i64,
+            (p.y / cell).floor() as i64,
+            (p.z / cell).floor() as i64,
+        )
+    };
+    let mut grid: std::collections::HashMap<(i64, i64, i64), Vec<Vec3>> =
+        std::collections::HashMap::new();
     let mut unique = Vec::<Vec3>::new();
     for point in points {
-        if unique
-            .iter()
-            .any(|existing| existing.distance_squared(point) <= CONTOUR_EPSILON)
-        {
+        let (kx, ky, kz) = key(point);
+        let mut duplicate = false;
+        'search: for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(bucket) = grid.get(&(kx + dx, ky + dy, kz + dz)) {
+                        if bucket
+                            .iter()
+                            .any(|existing| existing.distance_squared(point) <= CONTOUR_EPSILON)
+                        {
+                            duplicate = true;
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        if duplicate {
             continue;
         }
+        grid.entry((kx, ky, kz)).or_default().push(point);
         unique.push(point);
     }
     unique
@@ -753,6 +872,10 @@ fn angle_degrees_xz(origin: Vec2, left: Vec2, right: Vec2) -> f32 {
     dot.acos().to_degrees()
 }
 
+/// Reference (linear-scan) breakline crossing test. Production code uses
+/// [`BreaklineGrid::triangle_crosses`]; this remains as the test oracle the
+/// grid is validated against.
+#[cfg(test)]
 fn triangle_crosses_breakline(
     vertices: &[Vec3],
     face: [u32; 3],
