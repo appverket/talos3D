@@ -333,8 +333,43 @@ impl Plugin for TerrainCommandPlugin {
                 capability_id: Some("terrain".to_string()),
             },
             execute_delete_elevation_curve,
+        )
+        .register_command(
+            CommandDescriptor {
+                id: "terrain.toggle_generated_contours".to_string(),
+                label: "Toggle Generated Contours".to_string(),
+                description: "Show or hide the terrain's generated iso-contour overlay (off by \
+                              default; it staircases and duplicates the survey contour layers)."
+                    .to_string(),
+                category: CommandCategory::View,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "enabled": {"type": "boolean"} }
+                })),
+                default_shortcut: None,
+                icon: None,
+                hint: Some("Toggle the generated terrain contour overlay".to_string()),
+                requires_selection: false,
+                show_in_menu: true,
+                version: 1,
+                activates_tool: None,
+                capability_id: Some("terrain".to_string()),
+            },
+            execute_toggle_generated_contours,
         );
     }
+}
+
+fn execute_toggle_generated_contours(
+    world: &mut World,
+    params: &Value,
+) -> Result<CommandResult, String> {
+    let mut state = world.resource_mut::<crate::generation::ShowGeneratedContours>();
+    state.0 = params
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(!state.0);
+    Ok(CommandResult::empty())
 }
 
 #[derive(Debug, Clone)]
