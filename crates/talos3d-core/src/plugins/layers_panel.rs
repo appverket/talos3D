@@ -47,6 +47,9 @@ pub struct LayersPanelState {
     pub visible: bool,
     /// Layer names whose member list is collapsed.
     pub collapsed: HashSet<String>,
+    /// Layers we have already applied the default-collapsed state to, so each
+    /// layer starts collapsed exactly once (and later user expands stick).
+    pub seen: HashSet<String>,
     /// The layer currently being renamed inline, plus the edit buffer.
     pub renaming: Option<String>,
     pub rename_buffer: String,
@@ -233,16 +236,34 @@ pub fn draw_layers_window(
         return actions;
     }
 
+    // Collapse each layer's member list the first time it appears, so the panel
+    // opens as a tidy list of layer headers instead of a long expanded tree.
+    // Later manual expands persist because `seen` only fires once per layer.
+    for layer in &data.layers {
+        if state.seen.insert(layer.name.clone()) {
+            state.collapsed.insert(layer.name.clone());
+        }
+    }
+
+    // Never let the window grow past the viewport, or the bottom (and the
+    // "+ Add Layer" control) becomes unreachable.
+    let max_height = (ctx.screen_rect().height() - 120.0).max(220.0);
     let mut open = state.visible;
     egui::Window::new("Layers")
         .id(egui::Id::new("talos_layers_window"))
         .default_width(PANEL_DEFAULT_WIDTH)
         .default_height(PANEL_DEFAULT_HEIGHT)
+        .max_height(max_height)
         .resizable(true)
         .open(&mut open)
         .show(ctx, |ui| {
+            // Reserve a footer row for the always-visible "+ Add Layer" button,
+            // and give the scroll area the rest so it actually scrolls.
+            let footer_height = ui.spacing().interact_size.y + 18.0;
+            let scroll_height = (ui.available_height() - footer_height).max(0.0);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
+                .max_height(scroll_height)
                 .show(ui, |ui| {
                     for layer in &data.layers {
                         render_layer(ui, layer, state, data, selected, &mut actions);

@@ -4,7 +4,13 @@ use bevy::{
     prelude::*,
 };
 use delaunator::{triangulate, Point};
-use talos3d_core::plugins::{identity::ElementId, modeling::primitives::TriangleMesh};
+use talos3d_core::plugins::{
+    identity::ElementId, layers::LayerRegistry, modeling::primitives::TriangleMesh,
+};
+
+/// Layer the draped terrain surface lives on (kept in sync with the snapshot
+/// loader, which assigns the same layer at spawn).
+pub const TERRAIN_LAYER_NAME: &str = "Terrain";
 
 use crate::{
     components::{
@@ -79,10 +85,35 @@ impl Plugin for TerrainGenerationPlugin {
                 (
                     mark_terrain_surfaces_dirty_on_curve_changes,
                     regenerate_terrain_meshes,
+                    // Enforce the Terrain layer's visibility on the surface mesh
+                    // every frame, after (re)generation, so the layer panel can
+                    // reliably show/hide the draped surface.
+                    apply_terrain_layer_visibility.after(regenerate_terrain_meshes),
                     draw_elevation_curves,
                     draw_terrain_contours,
                 ),
             );
+    }
+}
+
+/// Drive the draped surface's visibility from the `Terrain` layer. The terrain
+/// mesh is (re)built on the surface entity by `regenerate_terrain_meshes`, which
+/// can reset its `Visibility`; enforcing it here every frame keeps the layer
+/// toggle authoritative for the surface, matching how authored primitives honor
+/// their layer.
+fn apply_terrain_layer_visibility(
+    registry: Res<LayerRegistry>,
+    mut surfaces: Query<&mut Visibility, With<TerrainSurface>>,
+) {
+    let target = if registry.is_visible(TERRAIN_LAYER_NAME) {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut visibility in &mut surfaces {
+        if *visibility != target {
+            *visibility = target;
+        }
     }
 }
 
