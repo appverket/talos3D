@@ -16,6 +16,7 @@ use crate::{
     components::{
         ElevationCurve, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface, TerrainSurfaceRole,
     },
+    heightfield::TerrainHeightfield,
     reconstruction::{
         sample_boundary_support_points, sample_curve_points, sample_interior_support_points,
     },
@@ -161,6 +162,16 @@ fn regenerate_terrain_meshes(
 ) {
     for (entity, surface, element_id, mesh_handle, material_handle) in &surfaces {
         let cache = generate_terrain_mesh_cache(surface, &curves);
+        // Refresh the O(1) height-field query layer alongside the render mesh
+        // (ADR-059, PP-PLANT-A) so conforming placement always reads current grade.
+        match generate_terrain_heightfield(surface, &curves) {
+            Some(heightfield) => {
+                commands.entity(entity).try_insert(heightfield);
+            }
+            None => {
+                commands.entity(entity).try_remove::<TerrainHeightfield>();
+            }
+        }
         let cut_fill_input = cut_fill_visualization_input(
             cut_fill_visualization.as_deref(),
             element_id,
@@ -259,6 +270,29 @@ fn draw_terrain_contours(
     }
 }
 
+/// Build the [`TerrainHeightfield`] query layer for a surface (ADR-059,
+/// PP-PLANT-A). Samples the same source contour points the mesh uses and grids
+/// the IDW field over the surface bounds (clipped to the boundary mask when one
+/// is authored). Returns `None` for surfaces with too few resolved points.
+pub fn generate_terrain_heightfield(
+    surface: &TerrainSurface,
+    curves: &Query<(&talos3d_core::plugins::identity::ElementId, &ElevationCurve)>,
+) -> Option<TerrainHeightfield> {
+    let effective_spacing = adaptive_sampling_spacing(surface);
+    let mut source_points = Vec::new();
+    for source_id in &surface.source_curve_ids {
+        let Some((_, curve)) = curves.iter().find(|(element_id, _)| *element_id == source_id) else {
+            continue;
+        };
+        source_points.extend(
+            sample_curve_points(&curve.points, effective_spacing)
+                .into_iter()
+                .map(|point| point + surface.offset),
+        );
+    }
+    TerrainHeightfield::build(&source_points, &surface.boundary, effective_spacing)
+}
+
 pub fn generate_terrain_mesh_cache(
     surface: &TerrainSurface,
     curves: &Query<(&talos3d_core::plugins::identity::ElementId, &ElevationCurve)>,
@@ -333,6 +367,18 @@ fn build_terrain_faces(
     // segments near the triangle, instead of all of them (O(faces*breaklines)).
     let breakline_grid = BreaklineGrid::build(vertices, breakline_segments);
 
+    // Only contour-to-contour edges can be a "breakline crossing": those are the
+    // real artefact (a triangle bridging across a concave contour gap). An edge
+    // that touches a draped support point is on-surface fill and must never be
+    // deleted — otherwise the interior support grid that boundary clipping adds
+    // punches a pinhole everywhere a grid triangle straddles a contour. The
+    // contour vertices are exactly the endpoints that appear in the breakline
+    // (sampled-contour) segments.
+    let contour_vertices: std::collections::HashSet<usize> = breakline_segments
+        .iter()
+        .flat_map(|&(start, end)| [start, end])
+        .collect();
+
     let mut faces = Vec::new();
     for triangle in triangulation.triangles.chunks_exact(3) {
         let face = [triangle[0] as u32, triangle[1] as u32, triangle[2] as u32];
@@ -354,7 +400,7 @@ fn build_terrain_faces(
                 continue;
             }
         }
-        if breakline_grid.triangle_crosses(vertices, face, breakline_segments) {
+        if breakline_grid.triangle_crosses(vertices, face, breakline_segments, &contour_vertices) {
             continue;
         }
         faces.push(face);
@@ -407,6 +453,7 @@ impl BreaklineGrid {
         vertices: &[Vec3],
         face: [u32; 3],
         segments: &[BreaklineSegment],
+        contour_vertices: &std::collections::HashSet<usize>,
     ) -> bool {
         let Some((a, b, c)) = face_points(vertices, face) else {
             return false;
@@ -429,6 +476,11 @@ impl BreaklineGrid {
                 for &index in bucket {
                     let breakline = segments[index];
                     for edge in &edges {
+                        if !contour_vertices.contains(&edge.0)
+                            || !contour_vertices.contains(&edge.1)
+                        {
+                            continue;
+                        }
                         if !shares_endpoint(*edge, breakline)
                             && segments_properly_intersect_xz(
                                 vertices[edge.0],
@@ -880,6 +932,7 @@ fn triangle_crosses_breakline(
     vertices: &[Vec3],
     face: [u32; 3],
     breakline_segments: &[BreaklineSegment],
+    contour_vertices: &std::collections::HashSet<usize>,
 ) -> bool {
     let edges = [
         (face[0] as usize, face[1] as usize),
@@ -887,15 +940,19 @@ fn triangle_crosses_breakline(
         (face[2] as usize, face[0] as usize),
     ];
     edges.iter().any(|edge| {
-        breakline_segments.iter().any(|breakline| {
-            !shares_endpoint(*edge, *breakline)
-                && segments_properly_intersect_xz(
-                    vertices[edge.0],
-                    vertices[edge.1],
-                    vertices[breakline.0],
-                    vertices[breakline.1],
-                )
-        })
+        // Only contour-to-contour edges can be deleted; edges touching a draped
+        // support vertex are on-surface fill, not a crossing artefact.
+        contour_vertices.contains(&edge.0)
+            && contour_vertices.contains(&edge.1)
+            && breakline_segments.iter().any(|breakline| {
+                !shares_endpoint(*edge, *breakline)
+                    && segments_properly_intersect_xz(
+                        vertices[edge.0],
+                        vertices[edge.1],
+                        vertices[breakline.0],
+                        vertices[breakline.1],
+                    )
+            })
     })
 }
 
@@ -1040,6 +1097,43 @@ mod tests {
             sample_surface_elevation(&mesh, 0.25, 0.25).expect("point inside face should sample");
         assert!(elevation >= 0.0);
         assert!(elevation <= 2.0);
+    }
+
+    #[test]
+    fn terrain_faces_wind_upward_for_lighting() {
+        // Mirror the importer's X-negated layout (East -> -X). Delaunator outputs a
+        // fixed winding; a reflection in X flips the resulting 3D normal sign, so the
+        // generated faces must be normalized to face +Y or directional lighting (the
+        // daylight rig shines from above) produces N.L <= 0 and the surface renders
+        // black. This guards that regression.
+        let mut vertices = Vec::new();
+        for ix in 0..4 {
+            for iz in 0..4 {
+                vertices.push(Vec3::new(-(ix as f32) * 10.0, 0.5, iz as f32 * 10.0));
+            }
+        }
+        let surface = TerrainSurface {
+            name: "wind-test".to_string(),
+            source_curve_ids: vec![],
+            role: Default::default(),
+            datum_elevation: 0.0,
+            boundary: vec![],
+            max_triangle_area: 1.0e9,
+            minimum_angle: 0.0,
+            contour_interval: 0.5,
+            drape_sample_spacing: 1.0,
+            offset: Vec3::ZERO,
+        };
+        let faces = build_terrain_faces(&surface, &vertices, &[]);
+        assert!(!faces.is_empty(), "expected a triangulated surface");
+        for face in &faces {
+            let (a, b, c) = face_points(&vertices, *face).expect("valid face");
+            let normal = (b - a).cross(c - a);
+            assert!(
+                normal.y > 0.0,
+                "terrain face normal must point up (+Y) for lighting, got {normal:?}",
+            );
+        }
     }
 
     #[test]
@@ -1234,16 +1328,49 @@ mod tests {
             Vec3::new(2.0, 0.0, 1.0),
         ];
         let breaklines = vec![(4, 5)];
+        // All corner vertices are contour-sourced here.
+        let contour: std::collections::HashSet<usize> = (0..vertices.len()).collect();
 
+        // A contour-to-contour edge (1->3) crossing the source segment is removed.
         assert!(triangle_crosses_breakline(
             &vertices,
             [0, 1, 3],
-            &breaklines
+            &breaklines,
+            &contour
         ));
+        // An edge that only touches the segment endpoints does not "cross".
         assert!(!triangle_crosses_breakline(
             &vertices,
             [0, 4, 3],
-            &breaklines
+            &breaklines,
+            &contour
+        ));
+    }
+
+    #[test]
+    fn breakline_filter_keeps_draped_support_point_triangles() {
+        // Same geometry, but vertices 0 and 3 are draped *support* points (not on
+        // any contour). The triangle still crosses the segment geometrically, but
+        // it must be kept — deleting it is what punches pinholes in the support
+        // grid. Only contour vertices {1, 2, 4, 5} are contour-sourced here.
+        let vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(2.0, 0.0, 1.0),
+        ];
+        let breaklines = vec![(4, 5)];
+        let contour: std::collections::HashSet<usize> = [1usize, 2, 4, 5].into_iter().collect();
+
+        // Edge 1->3 crosses the segment, but vertex 3 is a support point, so the
+        // triangle is fill and must not be removed.
+        assert!(!triangle_crosses_breakline(
+            &vertices,
+            [0, 1, 3],
+            &breaklines,
+            &contour
         ));
     }
 
@@ -1261,6 +1388,7 @@ mod tests {
             contour_interval: 1.0,
             offset: Vec3::ZERO,
         };
+        // Three stacked contour rows (z = 0, 1, 2); every vertex is contour-sourced.
         let vertices = vec![
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(2.0, 0.0, 0.0),
@@ -1269,7 +1397,9 @@ mod tests {
             Vec3::new(0.0, 0.0, 1.0),
             Vec3::new(2.0, 0.0, 1.0),
         ];
-        let breaklines = vec![(4, 5)];
+        let breaklines = vec![(0, 1), (4, 5), (3, 2)];
+        let contour: std::collections::HashSet<usize> =
+            breaklines.iter().flat_map(|&(a, b)| [a, b]).collect();
 
         let faces = build_terrain_faces(&surface, &vertices, &breaklines);
 
@@ -1277,7 +1407,8 @@ mod tests {
         assert!(faces.iter().all(|face| !triangle_crosses_breakline(
             &vertices,
             *face,
-            &breaklines
+            &breaklines,
+            &contour
         )));
         assert!(faces.iter().all(|face| {
             let (a, b, c) = face_points(&vertices, *face).expect("face indices are valid");
