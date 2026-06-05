@@ -19,6 +19,7 @@ use crate::{
         camera::OrbitCamera,
         commands::{ApplyEntityChangesCommand, CreateEntityCommand},
         cursor::{cursor_viewport_position, CursorWorldPos},
+        scene_ray,
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
         identity::ElementId,
         inference::InferenceEngine,
@@ -945,13 +946,47 @@ fn feature_push_pull_snapshot(
 
 fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>) -> Option<Vec3> {
     let initial_cursor = state.initial_cursor?;
-    let current_cursor = current_transform_cursor(world)?;
-    let raw_delta = current_cursor - initial_cursor;
-    let constrained_delta = apply_move_constraint(raw_delta, state.axis);
+    let constrained_delta = if state.axis == AxisConstraint::Y {
+        // The ground/snap cursor projection carries almost no vertical signal, so a
+        // Y-locked move driven by it is dead. Track the cursor against a camera-facing
+        // vertical plane through the grab point instead, so dragging up/down lifts the
+        // object 1:1 at the grab depth.
+        let cursor_y = vertical_axis_cursor_y(world, initial_cursor)?;
+        Vec3::new(0.0, cursor_y - initial_cursor.y, 0.0)
+    } else {
+        let current_cursor = current_transform_cursor(world)?;
+        apply_move_constraint(current_cursor - initial_cursor, state.axis)
+    };
 
     numeric_value
         .map(|value| numeric_move_delta(state.axis, constrained_delta, value))
         .or(Some(constrained_delta))
+}
+
+/// World-space Y the cursor "points at" on a vertical plane through `anchor` that
+/// faces the camera (its normal is the horizontal component of the camera forward,
+/// so the plane contains world-up). Used to drive vertical-axis (lift) moves, which
+/// the ground-plane cursor projection cannot.
+fn vertical_axis_cursor_y(world: &World, anchor: Vec3) -> Option<f32> {
+    let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
+    let window = window_query.single(world).ok()?;
+    let mut camera_query =
+        world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
+    let (camera, camera_transform) = camera_query
+        .iter(world)
+        .find(|(camera, _)| camera.is_active)
+        .or_else(|| camera_query.iter(world).next())?;
+    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let ray = camera
+        .viewport_to_world(camera_transform, viewport_cursor)
+        .ok()?;
+    let forward = camera_transform.forward();
+    let mut normal = Vec3::new(forward.x, 0.0, forward.z);
+    if normal.length_squared() < 1e-6 {
+        // Near top-down: vertical movement is barely visible; fall back to a stable plane.
+        normal = Vec3::Z;
+    }
+    scene_ray::project_ray_to_plane(ray, anchor, normal.normalize()).map(|hit| hit.y)
 }
 
 fn push_pull_distance(
@@ -1809,6 +1844,31 @@ mod tests {
     use crate::authored_entity::{AuthoredEntity, HandleInfo, PropertyFieldDef};
     use crate::plugins::tools::Preview;
     use serde_json::Value;
+
+    /// The vertical-lift plane (camera-facing, through the grab point) must turn
+    /// vertical cursor movement into vertical world movement: aiming the ray higher
+    /// (less downward) yields a higher Y than aiming it lower. This is the property
+    /// the ground-plane projection lacks.
+    #[test]
+    fn vertical_axis_plane_tracks_cursor_height() {
+        let anchor = Vec3::new(0.0, 2.0, 0.0);
+        // Camera looking along -Z, so the horizontalised forward is (0,0,-1) and the
+        // vertical plane normal is its (non-zero) horizontal part.
+        let normal = Vec3::new(0.0, 0.0, -1.0).normalize();
+        let origin = Vec3::new(0.0, 5.0, 10.0);
+        let aim_low = Ray3d::new(origin, Dir3::new(Vec3::new(0.0, -0.6, -1.0)).unwrap());
+        let aim_high = Ray3d::new(origin, Dir3::new(Vec3::new(0.0, -0.2, -1.0)).unwrap());
+        let y_low = scene_ray::project_ray_to_plane(aim_low, anchor, normal)
+            .unwrap()
+            .y;
+        let y_high = scene_ray::project_ray_to_plane(aim_high, anchor, normal)
+            .unwrap()
+            .y;
+        assert!(
+            y_high > y_low,
+            "aiming higher must lift more: y_high={y_high} y_low={y_low}"
+        );
+    }
 
     #[derive(Clone)]
     struct TestPreviewSnapshot {
