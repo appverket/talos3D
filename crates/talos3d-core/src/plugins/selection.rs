@@ -10,7 +10,7 @@ use crate::{
     authored_entity::{EntityBounds, EntityScope},
     capability_registry::{CapabilityRegistry, HitCandidate},
     plugins::{
-        camera::{orbit_modifier_pressed, OrbitCamera},
+        camera::{orbit_modifier_pressed, pan_modifier_pressed, OrbitCamera},
         commands::DeleteEntitiesCommand,
         cursor::cursor_window_position,
         definition_preview_scene::PreviewOnly,
@@ -200,7 +200,10 @@ fn handle_selection_click(world: &mut World) {
         .resource::<ButtonInput<MouseButton>>()
         .just_released(MouseButton::Left);
     let face_editing = world.resource::<FaceEditContext>().is_active();
-    let orbit_held = orbit_modifier_pressed(world.resource::<ButtonInput<KeyCode>>());
+    let keys = world.resource::<ButtonInput<KeyCode>>();
+    // Camera-navigation modifiers (Alt orbit, Space pan) suppress click-select so
+    // the drag drives the camera instead.
+    let nav_held = orbit_modifier_pressed(keys) || pan_modifier_pressed(keys);
 
     if !ownership.is_idle()
         || egui_ptr
@@ -208,7 +211,7 @@ fn handle_selection_click(world: &mut World) {
         || box_dragging
         || box_just_completed
         || face_editing
-        || orbit_held
+        || nav_held
     {
         return;
     }
@@ -883,6 +886,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         || cx.egui_wants_input.pointer
         || cx.face_edit_context.is_active()
         || orbit_modifier_pressed(&cx.keys)
+        || pan_modifier_pressed(&cx.keys)
     {
         cx.box_state.drag_start = None;
         cx.box_state.is_dragging = false;
