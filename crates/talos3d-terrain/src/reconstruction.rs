@@ -212,18 +212,45 @@ pub fn sample_interior_support_points(
         return Vec::new();
     };
     let spacing = spacing.max(REPAIR_EPSILON);
-    let clearance_squared = (spacing * 0.35).powi(2);
+    let clearance = spacing * 0.35;
+    let clearance_squared = clearance.powi(2);
+
+    // Spatial hash of contour points so the per-sample clearance test is O(1)
+    // instead of O(contour_points). Cell size == clearance radius, so any point
+    // within `clearance` of a sample lies in the sample's cell or an immediate
+    // neighbour; checking the 3x3 block covers them all. Output is identical to
+    // the previous `contour_points.iter().all(...)` scan.
+    let cell = clearance.max(REPAIR_EPSILON);
+    let cell_key = |p: Vec2| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32);
+    let mut grid: HashMap<(i32, i32), Vec<Vec2>> = HashMap::new();
+    for sample in contour_points {
+        let p = Vec2::new(sample.x, sample.z);
+        grid.entry(cell_key(p)).or_default().push(p);
+    }
+    let within_clearance = |point: Vec2| {
+        let (cx, cz) = cell_key(point);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if let Some(bucket) = grid.get(&(cx + dx, cz + dz)) {
+                    if bucket
+                        .iter()
+                        .any(|s| s.distance_squared(point) <= clearance_squared)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+
     let mut samples = Vec::new();
     let mut z = min.y + spacing * 0.5;
     while z < max.y {
         let mut x = min.x + spacing * 0.5;
         while x < max.x {
             let point = Vec2::new(x, z);
-            if point_in_polygon_2d(point, boundary)
-                && contour_points.iter().all(|sample| {
-                    Vec2::new(sample.x, sample.z).distance_squared(point) > clearance_squared
-                })
-            {
+            if point_in_polygon_2d(point, boundary) && !within_clearance(point) {
                 samples.push(Vec3::new(
                     point.x,
                     interpolate_height_idw(point, contour_points),
@@ -793,26 +820,40 @@ fn cross(a: Vec2, b: Vec2, c: Vec2) -> f32 {
 }
 
 fn interpolate_height_idw(point: Vec2, contour_points: &[Vec3]) -> f32 {
-    let mut distances = contour_points
-        .iter()
-        .map(|sample| {
-            (
-                Vec2::new(sample.x, sample.z).distance_squared(point),
-                sample.y,
-            )
-        })
-        .collect::<Vec<_>>();
-    distances.sort_by(|left, right| left.0.total_cmp(&right.0));
-
-    if let Some((distance_squared, elevation)) = distances.first().copied() {
-        if distance_squared <= REPAIR_EPSILON {
-            return elevation;
+    // Keep only the K nearest contour points (by XZ distance). Previously this
+    // heap-allocated and fully sorted the distance to *every* contour point on
+    // *every* sample, which dominated dense-surface generation. A K-slot
+    // insertion buffer finds the same K nearest in a single allocation-free pass;
+    // IDW sums over them order-independently, so the result is unchanged.
+    const K: usize = DEFAULT_IDW_NEIGHBOR_COUNT;
+    let mut best: [(f32, f32); K] = [(f32::INFINITY, 0.0); K]; // (distance_squared, elevation), ascending
+    let mut count = 0usize;
+    for sample in contour_points {
+        let distance_squared = Vec2::new(sample.x, sample.z).distance_squared(point);
+        if count == K && distance_squared >= best[K - 1].0 {
+            continue;
         }
+        let mut i = count.min(K - 1);
+        while i > 0 && best[i - 1].0 > distance_squared {
+            best[i] = best[i - 1];
+            i -= 1;
+        }
+        best[i] = (distance_squared, sample.y);
+        if count < K {
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return 0.0;
+    }
+    if best[0].0 <= REPAIR_EPSILON {
+        return best[0].1;
     }
 
     let mut weighted_sum = 0.0;
     let mut weight_sum = 0.0;
-    for (distance_squared, elevation) in distances.into_iter().take(DEFAULT_IDW_NEIGHBOR_COUNT) {
+    for &(distance_squared, elevation) in best.iter().take(count) {
         let weight = 1.0 / distance_squared.max(REPAIR_EPSILON);
         weighted_sum += elevation * weight;
         weight_sum += weight;
