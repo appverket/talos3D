@@ -29,7 +29,7 @@ use talos3d_core::{
         scalar_from_json, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, PropertyFieldDef,
         PropertyValue, PropertyValueKind,
     },
-    capability_registry::AuthoredEntityFactory,
+    capability_registry::{AuthoredEntityFactory, ModelSummaryAccumulator},
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         identity::{ElementId, ElementIdAllocator},
@@ -570,6 +570,19 @@ impl AuthoredEntityFactory for ConformingSolidFactory {
         let snapshot: ConformingSolidSnapshot =
             serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
         Ok(snapshot.into())
+    }
+
+    fn contribute_model_summary(&self, world: &World, summary: &mut ModelSummaryAccumulator) {
+        let Some(mut query) = world.try_query::<&ConformingSolid>() else {
+            return;
+        };
+        let count = query.iter(world).count();
+        if count > 0 {
+            *summary
+                .entity_counts
+                .entry("conforming_solid".to_string())
+                .or_default() += count;
+        }
     }
 
     fn from_create_request(&self, world: &World, request: &Value) -> Result<BoxedEntity, String> {
