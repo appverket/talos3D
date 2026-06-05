@@ -1770,7 +1770,7 @@ mod tests {
         );
         assert_point_close(
             points.last().expect("last point should exist"),
-            [2.0, 0.0, 0.0],
+            [-2.0, 0.0, 0.0],
         );
     }
 

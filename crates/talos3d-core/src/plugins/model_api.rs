@@ -11427,6 +11427,7 @@ fn instantiate_hint(
     )
 }
 
+#[cfg(feature = "model-api")]
 pub fn handle_select_recipe(
     world: &World,
     element_class: String,
