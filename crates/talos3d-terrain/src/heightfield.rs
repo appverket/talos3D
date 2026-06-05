@@ -10,9 +10,113 @@
 //! *build* is a one-time cost paid when the surface changes (mirroring
 //! [`crate::components::TerrainMeshCache`]).
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
-use crate::reconstruction::{interpolate_height_idw, point_in_polygon_2d};
+use crate::reconstruction::point_in_polygon_2d;
+
+/// IDW neighbour count and epsilon, matching `reconstruction::interpolate_height_idw`.
+const IDW_K: usize = 8;
+const IDW_EPSILON: f32 = 1.0e-4;
+
+/// Uniform-grid spatial index of contour points for `O(k)`-per-node IDW during
+/// the height-field build (instead of scanning every contour point per node).
+/// Finds the same K nearest as the linear scan via expanding-ring search, so the
+/// interpolated heights match within tie-breaking/float tolerance.
+struct ContourGrid<'a> {
+    points: &'a [Vec3],
+    cell: f32,
+    origin: Vec2,
+    max_ring: i32,
+    cells: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl<'a> ContourGrid<'a> {
+    fn build(points: &'a [Vec3], cell: f32, origin: Vec2, extent: Vec2) -> Self {
+        let cell = cell.max(f32::MIN_POSITIVE);
+        let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        for (index, p) in points.iter().enumerate() {
+            let key = (
+                ((p.x - origin.x) / cell).floor() as i32,
+                ((p.z - origin.y) / cell).floor() as i32,
+            );
+            cells.entry(key).or_default().push(index as u32);
+        }
+        let max_ring = ((extent.x.max(extent.y)) / cell).ceil() as i32 + 2;
+        Self {
+            points,
+            cell,
+            origin,
+            max_ring,
+            cells,
+        }
+    }
+
+    fn height_at(&self, point: Vec2) -> f32 {
+        let ci = ((point.x - self.origin.x) / self.cell).floor() as i32;
+        let cj = ((point.y - self.origin.y) / self.cell).floor() as i32;
+        let mut best: [(f32, f32); IDW_K] = [(f32::INFINITY, 0.0); IDW_K];
+        let mut count = 0usize;
+        let mut ring = 0i32;
+        loop {
+            for di in -ring..=ring {
+                for dj in -ring..=ring {
+                    if di.abs() != ring && dj.abs() != ring {
+                        continue; // only the ring shell at Chebyshev distance `ring`
+                    }
+                    let Some(bucket) = self.cells.get(&(ci + di, cj + dj)) else {
+                        continue;
+                    };
+                    for &index in bucket {
+                        let sample = self.points[index as usize];
+                        let d2 = Vec2::new(sample.x, sample.z).distance_squared(point);
+                        if count == IDW_K && d2 >= best[IDW_K - 1].0 {
+                            continue;
+                        }
+                        let mut i = count.min(IDW_K - 1);
+                        while i > 0 && best[i - 1].0 > d2 {
+                            best[i] = best[i - 1];
+                            i -= 1;
+                        }
+                        best[i] = (d2, sample.y);
+                        if count < IDW_K {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            // The nearest unsearched point sits in ring `ring+1`, at least
+            // `ring*cell` away. If that already exceeds the Kth-nearest, stop.
+            let next_ring_min = ring as f32 * self.cell;
+            if (count >= IDW_K && next_ring_min * next_ring_min > best[IDW_K - 1].0)
+                || ring > self.max_ring
+            {
+                break;
+            }
+            ring += 1;
+        }
+
+        if count == 0 {
+            return 0.0;
+        }
+        if best[0].0 <= IDW_EPSILON {
+            return best[0].1;
+        }
+        let mut weighted = 0.0;
+        let mut weight = 0.0;
+        for &(d2, h) in best.iter().take(count) {
+            let w = 1.0 / d2.max(IDW_EPSILON);
+            weighted += h * w;
+            weight += w;
+        }
+        if weight <= IDW_EPSILON {
+            0.0
+        } else {
+            weighted / weight
+        }
+    }
+}
 
 /// Upper bound on grid nodes per axis, so a large site can't produce an
 /// unbounded build. The cell size is widened to respect this cap.
@@ -81,13 +185,20 @@ impl TerrainHeightfield {
         let nx = ((extent.x / cell).ceil() as usize + 1).max(2);
         let nz = ((extent.y / cell).ceil() as usize + 1).max(2);
 
+        // Spatial-index the contour points once so each node's IDW is O(k), not
+        // O(contour points) — the previous per-node scan dominated the build. Size
+        // the grid cell to roughly one point per cell so ring search stays tight.
+        let grid_cell = ((extent.x * extent.y) / contour_points.len().max(1) as f32)
+            .sqrt()
+            .clamp(0.5, 8.0);
+        let grid = ContourGrid::build(contour_points, grid_cell, min, extent);
         let mut heights = vec![0.0f32; nx * nz];
         let mut inside = vec![true; nx * nz];
         for j in 0..nz {
             for i in 0..nx {
                 let p = Vec2::new(min.x + i as f32 * cell, min.y + j as f32 * cell);
                 let idx = j * nx + i;
-                heights[idx] = interpolate_height_idw(p, contour_points);
+                heights[idx] = grid.height_at(p);
                 if has_boundary {
                     inside[idx] = point_in_polygon_2d(p, boundary);
                 }
@@ -244,14 +355,18 @@ mod tests {
     }
 
     #[test]
-    fn node_heights_match_idw_exactly() {
+    fn node_heights_track_idw() {
+        use crate::reconstruction::interpolate_height_idw;
         let pts = ramp_points();
         let hf = TerrainHeightfield::build(&pts, &[], 1.0).expect("build");
         for j in 0..hf.nz {
             for i in 0..hf.nx {
                 let p = Vec2::new(hf.origin.x + i as f32 * hf.cell, hf.origin.y + j as f32 * hf.cell);
                 let expected = interpolate_height_idw(p, &pts);
-                assert!((hf.node_height(i, j).unwrap() - expected).abs() < 1e-4);
+                // Spatial-grid KNN finds the same K nearest as the linear scan;
+                // ties on this perfectly regular grid can swap a neighbour, so
+                // allow a small tolerance.
+                assert!((hf.node_height(i, j).unwrap() - expected).abs() < 0.05);
             }
         }
     }
