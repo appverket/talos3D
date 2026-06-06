@@ -1,4 +1,10 @@
-use bevy::{camera::Projection, ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
+use bevy::{
+    camera::Projection,
+    ecs::system::SystemParam,
+    gizmos::config::{GizmoConfigGroup, GizmoConfigStore},
+    prelude::*,
+    window::PrimaryWindow,
+};
 
 use crate::{
     authored_entity::{BoxedEntity, EntityBounds, HandleKind},
@@ -50,12 +56,22 @@ const MOVE_HANDLE_HINT: &str = "Move: drag a corner or control point · snaps to
 const COMBINED_HANDLE_HINT: &str =
     "Drag a corner to move · the top grip to lift · the ring grip to rotate · M/R/S to narrow";
 
+/// Gizmo config group for the selection manipulator (corner/lift/rotate grips,
+/// the yaw ring, and the pivot marker). Configured at startup with a strongly
+/// negative `depth_bias` so the gizmo always draws ON TOP of the model — the
+/// grips and the back of the ring stay visible and grabbable through the object,
+/// the way SketchUp/Blender manipulators do.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct HandleGizmos;
+
 pub struct HandlesPlugin;
 
 impl Plugin for HandlesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HandleContext>()
             .init_resource::<HandleInteractionState>()
+            .init_gizmo_group::<HandleGizmos>()
+            .add_systems(Startup, configure_handle_gizmos)
             .add_systems(
                 Update,
                 (
@@ -93,6 +109,14 @@ impl Plugin for HandlesPlugin {
                 ),
             );
     }
+}
+
+/// Draw the manipulator gizmo on top of the model. Runs once after the gizmo
+/// plugin initialises. `depth_bias = -1.0` puts it in front of all depth, so the
+/// grips and the far side of the yaw ring are never hidden behind the geometry.
+fn configure_handle_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
+    let (config, _ext) = config_store.config_mut::<HandleGizmos>();
+    config.depth_bias = -1.0;
 }
 
 pub fn arm_move_handles(world: &mut World) -> Result<(), String> {
@@ -657,7 +681,7 @@ fn draw_pivot_indicator(
     pivot_point: Res<PivotPoint>,
     selected_query: Query<Entity, With<Selected>>,
     viewport: HandleViewportQuery,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<HandleGizmos>,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
     if selected_query.is_empty() {
@@ -675,7 +699,7 @@ fn draw_pivot_indicator(
     add_gizmo_line_count(&mut perf_stats, 4);
 }
 
-fn draw_rotate_ring(world: &World, rotate_ring: RotateRingContext, mut gizmos: Gizmos) {
+fn draw_rotate_ring(world: &World, rotate_ring: RotateRingContext, mut gizmos: Gizmos<HandleGizmos>) {
     if !matches!(
         rotate_ring.handle_context.display_mode,
         HandleDisplayMode::Rotate | HandleDisplayMode::Combined
@@ -728,7 +752,7 @@ fn draw_rotate_ring(world: &World, rotate_ring: RotateRingContext, mut gizmos: G
 fn draw_selected_handles(
     world: &World,
     selected_handles: SelectedHandleContext,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<HandleGizmos>,
 ) {
     if !selected_handles.ownership.is_idle()
         || selected_handles.selected_query.is_empty()
@@ -1071,7 +1095,12 @@ fn axis_label(axis: AxisConstraint) -> &'static str {
     }
 }
 
-fn draw_handle(gizmos: &mut Gizmos, handle: &ResolvedHandle, radius: f32, highlighted: bool) {
+fn draw_handle(
+    gizmos: &mut Gizmos<HandleGizmos>,
+    handle: &ResolvedHandle,
+    radius: f32,
+    highlighted: bool,
+) {
     let color = handle_color(handle.render_style, highlighted);
     // Grow the grip when hovered/grabbed so the grab is unmistakable (the old
     // brightness-only cue was invisible on the near-white move grips).
@@ -1152,20 +1181,20 @@ fn handle_world_radius(
     (diameter * 0.5).clamp(HANDLE_MIN_RADIUS_METRES, HANDLE_MAX_RADIUS_METRES)
 }
 
-fn draw_cube_handle(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
+fn draw_cube_handle(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color: Color) {
     gizmos.cube(
         Transform::from_translation(center).with_scale(Vec3::splat(radius * 2.0)),
         color,
     );
 }
 
-fn draw_sphere_handle(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
+fn draw_sphere_handle(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color: Color) {
     gizmos
         .sphere(Isometry3d::from_translation(center), radius, color)
         .resolution(10);
 }
 
-fn draw_diamond_handle(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
+fn draw_diamond_handle(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color: Color) {
     let half = radius;
     let corners = [
         center + Vec3::new(0.0, 0.0, -half),
@@ -1176,7 +1205,7 @@ fn draw_diamond_handle(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Co
     draw_loop(gizmos, corners, color);
 }
 
-fn draw_loop(gizmos: &mut Gizmos, corners: [Vec3; 4], color: Color) {
+fn draw_loop(gizmos: &mut Gizmos<HandleGizmos>, corners: [Vec3; 4], color: Color) {
     for index in 0..corners.len() {
         let next = (index + 1) % corners.len();
         gizmos.line(corners[index], corners[next], color);
@@ -1238,7 +1267,7 @@ fn selection_center(snapshots: &[BoxedEntity]) -> Option<Vec3> {
     )
 }
 
-fn draw_ring(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
+fn draw_ring(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color: Color) {
     let mut previous = None;
     for index in 0..=ROTATE_RING_SEGMENTS {
         let angle = (index as f32 / ROTATE_RING_SEGMENTS as f32) * std::f32::consts::TAU;
