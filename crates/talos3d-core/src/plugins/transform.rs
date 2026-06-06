@@ -954,13 +954,42 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
         let cursor_y = vertical_axis_cursor_y(world, initial_cursor)?;
         Vec3::new(0.0, cursor_y - initial_cursor.y, 0.0)
     } else {
-        let current_cursor = current_transform_cursor(world)?;
+        // Track the cursor on the horizontal plane through the GRAB height, not the
+        // y=0 drawing plane. Grabbing a handle on an object planted high above y=0
+        // (e.g. a building on terrain) otherwise jumps it by the large horizontal
+        // offset between the elevated handle and where its screen ray crosses the
+        // ground. For objects essentially on the drawing plane we keep the original
+        // snap-aware cursor so grid/marker snapping during a ground move is unchanged.
+        let current_cursor = if initial_cursor.y.abs() > 0.05 {
+            horizontal_cursor_at(world, initial_cursor.y).or_else(|| current_transform_cursor(world))?
+        } else {
+            current_transform_cursor(world)?
+        };
         apply_move_constraint(current_cursor - initial_cursor, state.axis)
     };
 
     numeric_value
         .map(|value| numeric_move_delta(state.axis, constrained_delta, value))
         .or(Some(constrained_delta))
+}
+
+/// World point where the cursor ray crosses the horizontal plane at height `plane_y`.
+/// Lets a Moving drag track the cursor at the grab height so handles on elevated
+/// objects don't teleport the object to where their screen ray would hit the ground.
+fn horizontal_cursor_at(world: &World, plane_y: f32) -> Option<Vec3> {
+    let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
+    let window = window_query.single(world).ok()?;
+    let mut camera_query =
+        world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
+    let (camera, camera_transform) = camera_query
+        .iter(world)
+        .find(|(camera, _)| camera.is_active)
+        .or_else(|| camera_query.iter(world).next())?;
+    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let ray = camera
+        .viewport_to_world(camera_transform, viewport_cursor)
+        .ok()?;
+    scene_ray::project_ray_to_plane(ray, Vec3::new(0.0, plane_y, 0.0), Vec3::Y)
 }
 
 /// World-space Y the cursor "points at" on a vertical plane through `anchor` that
@@ -1867,6 +1896,34 @@ mod tests {
         assert!(
             y_high > y_low,
             "aiming higher must lift more: y_high={y_high} y_low={y_low}"
+        );
+    }
+
+    /// A Moving drag must track the cursor on the horizontal plane through the GRAB
+    /// height. Projecting an elevated handle's own screen ray onto that plane returns
+    /// (approximately) the handle — no jump on grab — whereas projecting the same ray
+    /// onto y=0 lands far away (the bug this fixes for objects planted high on terrain).
+    #[test]
+    fn move_cursor_plane_at_grab_height_does_not_jump() {
+        // Handle high above the ground, camera looking down at it from -Z and above.
+        let handle = Vec3::new(4.0, 12.0, 3.0);
+        let cam = Vec3::new(4.0, 22.0, 25.0);
+        let ray = Ray3d::new(cam, Dir3::new(handle - cam).unwrap());
+
+        let at_grab_height =
+            scene_ray::project_ray_to_plane(ray, Vec3::new(0.0, handle.y, 0.0), Vec3::Y).unwrap();
+        let at_ground = scene_ray::project_ray_to_plane(ray, Vec3::ZERO, Vec3::Y).unwrap();
+
+        // Grab-height projection returns the handle itself (no jump).
+        assert!(
+            at_grab_height.distance(handle) < 1e-3,
+            "grab-height projection should equal the handle, got {at_grab_height:?}"
+        );
+        // The y=0 projection is far away horizontally — the teleport we are avoiding.
+        let ground_offset = Vec2::new(at_ground.x - handle.x, at_ground.z - handle.z).length();
+        assert!(
+            ground_offset > 5.0,
+            "y=0 projection should be far from the elevated handle, offset={ground_offset}"
         );
     }
 
