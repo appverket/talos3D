@@ -440,6 +440,25 @@ fn update_transform_preview(world: &mut World) {
                 entity_mut.insert(transform);
             }
         }
+
+        // Members that can't be represented by a rigid Transform (preview_transform
+        // == None) — e.g. terrain-conforming foundations — are previewed by applying
+        // their moved/rotated snapshot live, so their geometry rebuilds at the new
+        // pose each frame. For a conforming solid this re-drapes the underside onto
+        // the terrain under the previewed footprint (its rebuild is O(footprint) with
+        // O(1) height-field lookups, cheap enough per frame). Restored from the
+        // initial snapshot on confirm/cancel like the push/pull live preview.
+        let live_preview: Vec<BoxedEntity> = world
+            .resource::<TransformState>()
+            .initial_snapshots
+            .iter()
+            .zip(preview.after.iter())
+            .filter(|((_, _), after)| after.preview_transform().is_none())
+            .map(|((_, _), after)| after.clone())
+            .collect();
+        for snapshot in &live_preview {
+            snapshot.apply_to(world);
+        }
     }
 
     #[cfg(feature = "perf-stats")]
@@ -527,17 +546,18 @@ fn confirm_transform(world: &mut World) {
 
     let was_push_pull = push_pull_face.is_some();
 
-    // Push/pull mutates entity geometry live — restore from initial snapshot.
-    if was_push_pull {
-        let originals: Vec<_> = world
-            .resource::<TransformState>()
-            .initial_snapshots
-            .iter()
-            .map(|(_, s)| s.clone())
-            .collect();
-        for snapshot in &originals {
-            snapshot.apply_to(world);
-        }
+    // Live-geometry previews (push/pull, and members previewed via apply_to such as
+    // conforming foundations) mutated entity geometry — restore from initial snapshot
+    // so the undoable command below applies from a clean base.
+    let originals: Vec<_> = world
+        .resource::<TransformState>()
+        .initial_snapshots
+        .iter()
+        .filter(|(_, s)| was_push_pull || s.preview_transform().is_none())
+        .map(|(_, s)| s.clone())
+        .collect();
+    for snapshot in &originals {
+        snapshot.apply_to(world);
     }
 
     // Move/Rotate/Scale only modify the entity's Transform — restore it.
@@ -629,17 +649,17 @@ fn cancel_transform(world: &mut World) {
         }
     }
 
-    // Push/pull mutates entity geometry live — restore from initial snapshot.
-    if was_push_pull {
-        let originals: Vec<_> = world
-            .resource::<TransformState>()
-            .initial_snapshots
-            .iter()
-            .map(|(_, s)| s.clone())
-            .collect();
-        for snapshot in &originals {
-            snapshot.apply_to(world);
-        }
+    // Live-geometry previews (push/pull, and members previewed via apply_to such as
+    // conforming foundations) mutated entity geometry — restore from initial snapshot.
+    let originals: Vec<_> = world
+        .resource::<TransformState>()
+        .initial_snapshots
+        .iter()
+        .filter(|(_, s)| was_push_pull || s.preview_transform().is_none())
+        .map(|(_, s)| s.clone())
+        .collect();
+    for snapshot in &originals {
+        snapshot.apply_to(world);
     }
 
     // Move/Rotate/Scale only modify the entity's Transform — restore it.
