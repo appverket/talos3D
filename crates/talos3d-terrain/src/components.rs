@@ -7,9 +7,17 @@ pub const DEFAULT_TERRAIN_MINIMUM_ANGLE: f32 = 10.0;
 pub const DEFAULT_TERRAIN_CONTOUR_INTERVAL: f32 = 1.0;
 pub const DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE: f32 = 1.5;
 pub const DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING: f32 = 2.0;
+/// Surface smoothing strength in `0.0..=1.0`. 0 = raw IDW reconstruction (sharp
+/// terraces/creases along contours); higher relaxes the inter-contour wrinkles via
+/// constrained Laplacian smoothing while keeping surveyed contour heights faithful.
+pub const DEFAULT_TERRAIN_SMOOTHING: f32 = 0.5;
 
 fn default_drape_sample_spacing() -> f32 {
     DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING
+}
+
+fn default_terrain_smoothing() -> f32 {
+    DEFAULT_TERRAIN_SMOOTHING
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -71,6 +79,9 @@ pub struct TerrainSurface {
     pub contour_interval: f32,
     #[serde(default = "default_drape_sample_spacing")]
     pub drape_sample_spacing: f32,
+    /// Render-surface smoothing strength (0..=1); see `DEFAULT_TERRAIN_SMOOTHING`.
+    #[serde(default = "default_terrain_smoothing")]
+    pub smoothing: f32,
     pub offset: Vec3,
 }
 
@@ -86,6 +97,7 @@ impl TerrainSurface {
             minimum_angle: DEFAULT_TERRAIN_MINIMUM_ANGLE,
             contour_interval: DEFAULT_TERRAIN_CONTOUR_INTERVAL,
             drape_sample_spacing: DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
+            smoothing: DEFAULT_TERRAIN_SMOOTHING,
             offset: Vec3::ZERO,
         }
     }

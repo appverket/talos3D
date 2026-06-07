@@ -21,7 +21,7 @@ use crate::{
         ElevationCurve, ElevationCurveType, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface,
         TerrainSurfaceRole, DEFAULT_TERRAIN_CONTOUR_INTERVAL,
         DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE, DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
-        DEFAULT_TERRAIN_MAX_TRIANGLE_AREA, DEFAULT_TERRAIN_MINIMUM_ANGLE,
+        DEFAULT_TERRAIN_MAX_TRIANGLE_AREA, DEFAULT_TERRAIN_MINIMUM_ANGLE, DEFAULT_TERRAIN_SMOOTHING,
     },
     cut_fill::{
         cut_fill_against_datum, cut_fill_between_surfaces, CutFillAnalysisPanelState,
@@ -104,7 +104,8 @@ impl Plugin for TerrainCommandPlugin {
                         "drape_sample_spacing": {"type": "number", "minimum": 0.1},
                         "max_triangle_area": {"type": "number", "minimum": 0.1},
                         "minimum_angle": {"type": "number", "minimum": 0.1, "maximum": 89.0},
-                        "contour_interval": {"type": "number", "minimum": 0.1}
+                        "contour_interval": {"type": "number", "minimum": 0.1},
+                        "smoothing": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Surface smoothing strength: 0 = raw IDW (sharp inter-contour terraces), 1 = strongest constrained-Laplacian smoothing. Contour heights stay faithful."}
                     }
                 })),
                 default_shortcut: None,
@@ -467,6 +468,7 @@ fn execute_generate_surface(world: &mut World, _: &Value) -> Result<CommandResul
             minimum_angle: DEFAULT_TERRAIN_MINIMUM_ANGLE,
             contour_interval: DEFAULT_TERRAIN_CONTOUR_INTERVAL,
             drape_sample_spacing: DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
+            smoothing: DEFAULT_TERRAIN_SMOOTHING,
             offset: Vec3::ZERO,
         },
     };
@@ -521,6 +523,11 @@ fn execute_prepare_site_surface(
         .and_then(Value::as_f64)
         .map(|value| value as f32)
         .unwrap_or(DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING);
+    let smoothing = parameters
+        .get("smoothing")
+        .and_then(Value::as_f64)
+        .map(|value| (value as f32).clamp(0.0, 1.0))
+        .unwrap_or(DEFAULT_TERRAIN_SMOOTHING);
     let max_triangle_area = parameters
         .get("max_triangle_area")
         .and_then(Value::as_f64)
@@ -617,6 +624,7 @@ fn execute_prepare_site_surface(
             minimum_angle,
             contour_interval,
             drape_sample_spacing,
+            smoothing,
             offset: Vec3::ZERO,
         },
     };
@@ -1671,6 +1679,7 @@ mod tests {
                 minimum_angle: 12.0,
                 contour_interval: 0.5,
                 drape_sample_spacing: 0.25,
+                smoothing: 0.0,
                 offset: Vec3::new(1.0, 0.0, 2.0),
             },
         ));
