@@ -892,7 +892,7 @@ mod tests {
                 pts.push(Vec3::new(ix as f32, ix as f32, iz as f32));
             }
         }
-        TerrainHeightfield::build(&pts, &[], 1.0).expect("field")
+        TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("field")
     }
 
     #[test]
@@ -926,7 +926,7 @@ mod tests {
                 pts.push(Vec3::new(x, h, iz as f32));
             }
         }
-        let hf = TerrainHeightfield::build(&pts, &[], 1.0).expect("field");
+        let hf = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("field");
         let solid = ConformingSolid {
             position: Vec2::new(10.0, 10.0),
             half_extents: Vec2::new(6.0, 3.0),
