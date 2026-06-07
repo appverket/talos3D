@@ -326,7 +326,12 @@ pub fn generate_terrain_heightfield(
                 .map(|point| point + surface.offset),
         );
     }
-    TerrainHeightfield::build(&source_points, &surface.boundary, effective_spacing)
+    TerrainHeightfield::build(
+        &source_points,
+        &surface.boundary,
+        effective_spacing,
+        surface.smoothing,
+    )
 }
 
 pub fn generate_terrain_mesh_cache(

@@ -152,7 +152,12 @@ impl TerrainHeightfield {
     /// The build runs IDW per node; for very dense corpora a contour-point
     /// spatial index would make it `O(k)`/node (tracked as a follow-up). Queries
     /// are already O(1).
-    pub fn build(contour_points: &[Vec3], boundary: &[Vec2], cell_hint: f32) -> Option<Self> {
+    pub fn build(
+        contour_points: &[Vec3],
+        boundary: &[Vec2],
+        cell_hint: f32,
+        smoothing: f32,
+    ) -> Option<Self> {
         if contour_points.len() < 3 {
             return None;
         }
@@ -204,6 +209,10 @@ impl TerrainHeightfield {
                 }
             }
         }
+
+        // Match the render surface: relax the IDW inter-contour terraces so the
+        // draped foundations sit on the same smoothed ground the user sees.
+        smooth_grid_heights(&mut heights, nx, nz, contour_points, min, cell, smoothing);
 
         Some(Self {
             origin: min,
@@ -336,6 +345,71 @@ impl TerrainHeightfield {
     }
 }
 
+/// Constrained Laplacian smoothing of a heightfield grid, mirroring the render-mesh
+/// smoothing so foundations drape onto the same ground the user sees. Grid nodes
+/// nearest a surveyed contour point are kept faithful (high data-attachment); other
+/// nodes relax toward their 4-neighbour mean. `smoothing` in `0..=1`; 0 = no-op.
+fn smooth_grid_heights(
+    heights: &mut [f32],
+    nx: usize,
+    nz: usize,
+    contour_points: &[Vec3],
+    origin: Vec2,
+    cell: f32,
+    smoothing: f32,
+) {
+    let s = smoothing.clamp(0.0, 1.0);
+    if s <= 0.0 || nx < 3 || nz < 3 || cell <= 0.0 || heights.len() != nx * nz {
+        return;
+    }
+
+    let mut pinned = vec![false; nx * nz];
+    for point in contour_points {
+        let i = (((point.x - origin.x) / cell).round() as isize).clamp(0, nx as isize - 1) as usize;
+        let j = (((point.z - origin.y) / cell).round() as isize).clamp(0, nz as isize - 1) as usize;
+        pinned[j * nx + i] = true;
+    }
+
+    let original: Vec<f32> = heights.to_vec();
+    let iterations = (3.0 + 12.0 * s).round() as usize;
+    for _ in 0..iterations {
+        let current = heights.to_vec();
+        for j in 0..nz {
+            for i in 0..nx {
+                let idx = j * nx + i;
+                let mut sum = 0.0f32;
+                let mut count = 0u32;
+                if i > 0 {
+                    sum += current[idx - 1];
+                    count += 1;
+                }
+                if i + 1 < nx {
+                    sum += current[idx + 1];
+                    count += 1;
+                }
+                if j > 0 {
+                    sum += current[idx - nx];
+                    count += 1;
+                }
+                if j + 1 < nz {
+                    sum += current[idx + nx];
+                    count += 1;
+                }
+                if count == 0 {
+                    continue;
+                }
+                let mean = sum / count as f32;
+                let attach = if pinned[idx] {
+                    0.85 - 0.45 * s
+                } else {
+                    0.35 - 0.35 * s
+                };
+                heights[idx] = mean + attach * (original[idx] - mean);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,7 +432,7 @@ mod tests {
     fn node_heights_track_idw() {
         use crate::reconstruction::interpolate_height_idw;
         let pts = ramp_points();
-        let hf = TerrainHeightfield::build(&pts, &[], 1.0).expect("build");
+        let hf = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("build");
         for j in 0..hf.nz {
             for i in 0..hf.nx {
                 let p = Vec2::new(hf.origin.x + i as f32 * hf.cell, hf.origin.y + j as f32 * hf.cell);
@@ -374,7 +448,7 @@ mod tests {
     #[test]
     fn height_at_is_bilinear_and_tracks_the_ramp() {
         let pts = ramp_points();
-        let hf = TerrainHeightfield::build(&pts, &[], 1.0).expect("build");
+        let hf = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("build");
         // On a near-planar h=x field, the interpolated height tracks x closely.
         for &(x, z) in &[(2.5_f32, 3.5_f32), (5.0, 5.0), (7.25, 1.0)] {
             let h = hf.height_at(x, z).expect("inside");
@@ -389,7 +463,7 @@ mod tests {
     #[test]
     fn height_at_returns_none_outside_extent() {
         let pts = ramp_points();
-        let hf = TerrainHeightfield::build(&pts, &[], 1.0).expect("build");
+        let hf = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("build");
         assert!(hf.height_at(-50.0, 5.0).is_none());
         assert!(hf.height_at(5.0, 1000.0).is_none());
     }
@@ -404,7 +478,7 @@ mod tests {
             Vec2::new(4.0, 10.0),
             Vec2::new(0.0, 10.0),
         ];
-        let hf = TerrainHeightfield::build(&pts, &boundary, 1.0).expect("build");
+        let hf = TerrainHeightfield::build(&pts, &boundary, 1.0, 0.0).expect("build");
         assert!(hf.height_at(2.0, 5.0).is_some(), "inside boundary");
         assert!(hf.height_at(8.0, 5.0).is_none(), "outside boundary");
     }
@@ -412,7 +486,7 @@ mod tests {
     #[test]
     fn max_over_finds_the_high_corner() {
         let pts = ramp_points(); // h = x, so max is at largest x in the footprint
-        let hf = TerrainHeightfield::build(&pts, &[], 1.0).expect("build");
+        let hf = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("build");
         let footprint = vec![
             Vec2::new(2.0, 2.0),
             Vec2::new(6.0, 2.0),
@@ -439,7 +513,7 @@ mod tests {
         }
 
         let t0 = Instant::now();
-        let hf = TerrainHeightfield::build(&pts, &[], 1.0).expect("build");
+        let hf = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("build");
         let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!(
             "heightfield build: {}x{} nodes from {} points in {:.1} ms",
@@ -480,7 +554,7 @@ mod tests {
             Vec3::new(1000.0, 10.0, 1000.0),
         ];
         // Tiny cell hint would blow up; the cap must widen it.
-        let hf = TerrainHeightfield::build(&pts, &[], 0.01).expect("build");
+        let hf = TerrainHeightfield::build(&pts, &[], 0.01, 0.0).expect("build");
         assert!(hf.nx <= MAX_HEIGHTFIELD_NODES_PER_AXIS + 1);
         assert!(hf.nz <= MAX_HEIGHTFIELD_NODES_PER_AXIS + 1);
     }
