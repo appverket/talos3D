@@ -356,52 +356,48 @@ fn sync_handle_display_mode(
 }
 
 fn update_hovered_handle(world: &World, mut commands: Commands, hover_handles: HoverHandleContext) {
-    let mut next_state = HandleInteractionState {
-        hovered: hover_handles.handle_state.hovered.clone(),
-        pressed: hover_handles.handle_state.pressed.clone(),
-        property_drag: hover_handles.handle_state.property_drag.clone(),
-    };
-
-    if !hover_handles.ownership.is_idle()
+    // Compute only the hovered handle, then update ONLY that field. This system
+    // previously rebuilt and `insert_resource`'d the whole HandleInteractionState
+    // from a stale read every frame, which clobbered the `pressed` field that the
+    // (separately scheduled) press handler sets — so a pending press never survived
+    // to the next frame and a handle drag could never start.
+    let new_hovered: Option<ResolvedHandle> = if !hover_handles.ownership.is_idle()
         || hover_handles.egui_wants_input.pointer
         || hover_handles.face_edit_context.is_active()
         || hover_handles.handle_state.property_drag.is_some()
     {
-        next_state.hovered = None;
-        commands.insert_resource(next_state);
-        return;
-    }
-
-    let Some((cursor_position, camera, camera_transform, _projection)) =
+        None
+    } else if let Some((cursor_position, camera, camera_transform, _projection)) =
         hover_handles.viewport.cursor_and_camera()
-    else {
-        next_state.hovered = None;
-        commands.insert_resource(next_state);
-        return;
+    {
+        hover_handles
+            .selected_query
+            .iter()
+            .filter_map(|entity| {
+                resolve_entity_handles(
+                    world,
+                    &hover_handles.registry,
+                    entity,
+                    camera,
+                    camera_transform,
+                    hover_handles.handle_context.display_mode,
+                    hover_handles.pivot_point.position,
+                )
+            })
+            .flatten()
+            .filter_map(|handle| {
+                let distance = handle.screen_position.distance(cursor_position);
+                (distance <= HANDLE_HIT_TOLERANCE_PX).then_some((distance, handle))
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+            .map(|(_, handle)| handle)
+    } else {
+        None
     };
 
-    next_state.hovered = hover_handles
-        .selected_query
-        .iter()
-        .filter_map(|entity| {
-            resolve_entity_handles(
-                world,
-                &hover_handles.registry,
-                entity,
-                camera,
-                camera_transform,
-                hover_handles.handle_context.display_mode,
-                hover_handles.pivot_point.position,
-            )
-        })
-        .flatten()
-        .filter_map(|handle| {
-            let distance = handle.screen_position.distance(cursor_position);
-            (distance <= HANDLE_HIT_TOLERANCE_PX).then_some((distance, handle))
-        })
-        .min_by(|left, right| left.0.total_cmp(&right.0))
-        .map(|(_, handle)| handle);
-    commands.insert_resource(next_state);
+    commands.queue(move |world: &mut World| {
+        world.resource_mut::<HandleInteractionState>().hovered = new_hovered;
+    });
 }
 
 fn handle_handle_pointer_input(world: &mut World) {
