@@ -99,6 +99,7 @@ impl Plugin for TerrainGenerationPlugin {
                 Update,
                 (
                     mark_terrain_surfaces_dirty_on_curve_changes,
+                    mark_terrain_surfaces_dirty_on_surface_changes,
                     regenerate_terrain_meshes,
                     // Enforce the Terrain layer's visibility on the surface mesh
                     // every frame, after (re)generation, so the layer panel can
@@ -137,6 +138,23 @@ fn setup_terrain_material(mut commands: Commands, mut materials: ResMut<Assets<S
         existing: materials.add(terrain_surface_material(TERRAIN_SURFACE_COLOR)),
         proposed: materials.add(terrain_surface_material(PROPOSED_TERRAIN_SURFACE_COLOR)),
     });
+}
+
+/// Re-drape a surface when its own `TerrainSurface` component changes — e.g. an
+/// agent edits `smoothing` or `drape_sample_spacing` via `set_entity_property`
+/// (MCP) or the inspector. Without this, those edits would be stored but never
+/// take visible effect (regen only watched curve changes). `Changed` also covers
+/// the spawn frame, so newly created surfaces still build. `regenerate_terrain_meshes`
+/// does not mutate `TerrainSurface`, so this does not self-retrigger.
+fn mark_terrain_surfaces_dirty_on_surface_changes(
+    surfaces: Query<(Entity, Option<&NeedsTerrainMesh>), Changed<TerrainSurface>>,
+    mut commands: Commands,
+) {
+    for (entity, needs_mesh) in &surfaces {
+        if needs_mesh.is_none() {
+            commands.entity(entity).insert(NeedsTerrainMesh);
+        }
+    }
 }
 
 fn mark_terrain_surfaces_dirty_on_curve_changes(
@@ -346,13 +364,14 @@ pub fn generate_terrain_mesh_cache(
         ));
     }
 
-    let vertices = dedupe_vertices(source_points);
+    let mut vertices = dedupe_vertices(source_points);
     if vertices.len() < 3 {
         return TerrainMeshCache::default();
     }
 
     let breakline_segments = build_breakline_segments(&vertices, &sampled_curves);
     let faces = build_terrain_faces(surface, &vertices, &breakline_segments);
+    smooth_terrain_heights(&mut vertices, &faces, &sampled_curves, surface.smoothing);
     let mesh = TriangleMesh {
         vertices: vertices.clone(),
         faces: faces.clone(),
@@ -770,6 +789,92 @@ fn cut_fill_delta_color(delta: f32, max_delta: f32) -> [f32; 4] {
     }
 }
 
+/// Constrained Laplacian smoothing of terrain vertex heights. Relaxes the sharp
+/// inter-contour terraces/creases that raw IDW reconstruction produces, while a
+/// per-vertex data-attachment ("tension") keeps the surface faithful — strongly for
+/// surveyed contour vertices, loosely for interpolated interior vertices. Operates on
+/// the already-triangulated mesh, so it never reopens holes (those came from the
+/// sparse contour TIN, not the dense surface). One-time at mesh (re)generation.
+fn smooth_terrain_heights(
+    vertices: &mut [Vec3],
+    faces: &[[u32; 3]],
+    sampled_curves: &[Vec<Vec3>],
+    smoothing: f32,
+) {
+    let s = smoothing.clamp(0.0, 1.0);
+    if s <= 0.0 || vertices.len() < 3 || faces.is_empty() {
+        return;
+    }
+
+    let pinned = contour_pinned_mask(vertices, sampled_curves);
+
+    let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); vertices.len()];
+    for face in faces {
+        let [a, b, c] = *face;
+        neighbors[a as usize].extend_from_slice(&[b, c]);
+        neighbors[b as usize].extend_from_slice(&[a, c]);
+        neighbors[c as usize].extend_from_slice(&[a, b]);
+    }
+
+    let original_y: Vec<f32> = vertices.iter().map(|v| v.y).collect();
+    let iterations = (3.0 + 12.0 * s).round() as usize;
+    for _ in 0..iterations {
+        let current_y: Vec<f32> = vertices.iter().map(|v| v.y).collect();
+        for index in 0..vertices.len() {
+            let adj = &neighbors[index];
+            if adj.is_empty() {
+                continue;
+            }
+            let mean =
+                adj.iter().map(|&j| current_y[j as usize]).sum::<f32>() / adj.len() as f32;
+            // Data attachment: pull the Laplacian mean back toward the original height.
+            // Contour vertices stay near the survey; interior vertices relax fully as
+            // smoothing -> 1. (attach in [0,1]: 1 = unchanged, 0 = pure Laplacian.)
+            let attach = if pinned[index] {
+                0.85 - 0.45 * s
+            } else {
+                0.35 - 0.35 * s
+            };
+            vertices[index].y = mean + attach * (original_y[index] - mean);
+        }
+    }
+}
+
+/// Mark vertices coincident (within `CONTOUR_EPSILON`) with a surveyed contour
+/// sample point, via an O(1) spatial hash over the contour samples.
+fn contour_pinned_mask(vertices: &[Vec3], sampled_curves: &[Vec<Vec3>]) -> Vec<bool> {
+    let cell = CONTOUR_EPSILON.sqrt().max(f32::MIN_POSITIVE);
+    let key = |p: Vec2| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64);
+    let mut grid: std::collections::HashMap<(i64, i64), Vec<Vec2>> =
+        std::collections::HashMap::new();
+    for curve in sampled_curves {
+        for point in curve {
+            let xz = Vec2::new(point.x, point.z);
+            grid.entry(key(xz)).or_default().push(xz);
+        }
+    }
+    vertices
+        .iter()
+        .map(|vertex| {
+            let xz = Vec2::new(vertex.x, vertex.z);
+            let (kx, ky) = key(xz);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    if let Some(bucket) = grid.get(&(kx + dx, ky + dy)) {
+                        if bucket
+                            .iter()
+                            .any(|c| c.distance_squared(xz) <= CONTOUR_EPSILON)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        })
+        .collect()
+}
+
 fn compute_triangle_mesh_normals(primitive: &TriangleMesh) -> Vec<Vec3> {
     let mut normals = vec![Vec3::ZERO; primitive.vertices.len()];
     for face in &primitive.faces {
@@ -1140,6 +1245,7 @@ mod tests {
             minimum_angle: 0.0,
             contour_interval: 0.5,
             drape_sample_spacing: 1.0,
+            smoothing: 0.0,
             offset: Vec3::ZERO,
         };
         let faces = build_terrain_faces(&surface, &vertices, &[]);
@@ -1318,6 +1424,7 @@ mod tests {
             minimum_angle: 10.0,
             drape_sample_spacing: 1.5,
             contour_interval: 0.5,
+            smoothing: 0.0,
             offset: Vec3::ZERO,
         };
 
@@ -1404,6 +1511,7 @@ mod tests {
             minimum_angle: 10.0,
             drape_sample_spacing: 1.0,
             contour_interval: 1.0,
+            smoothing: 0.0,
             offset: Vec3::ZERO,
         };
         // Three stacked contour rows (z = 0, 1, 2); every vertex is contour-sourced.
@@ -1454,6 +1562,7 @@ mod tests {
             minimum_angle: 0.1,
             drape_sample_spacing: 1.0,
             contour_interval: 1.0,
+            smoothing: 0.0,
             offset: Vec3::ZERO,
         };
 

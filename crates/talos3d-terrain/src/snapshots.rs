@@ -351,6 +351,11 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
                 Some(PropertyValue::Scalar(self.surface.drape_sample_spacing)),
             ),
             property_field(
+                "smoothing",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(self.surface.smoothing)),
+            ),
+            property_field(
                 "offset",
                 PropertyValueKind::Vec3,
                 Some(PropertyValue::Vec3(self.surface.offset)),
@@ -380,6 +385,9 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
             "drape_sample_spacing" => {
                 snapshot.surface.drape_sample_spacing = scalar_from_json(value)?
             }
+            "smoothing" => {
+                snapshot.surface.smoothing = scalar_from_json(value)?.clamp(0.0, 1.0)
+            }
             "offset" => snapshot.surface.offset = vec3_from_json(value)?,
             _ => {
                 return Err(invalid_property_error(
@@ -389,6 +397,7 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
                         "name",
                         "contour_interval",
                         "drape_sample_spacing",
+                        "smoothing",
                         "offset",
                     ],
                 ))
@@ -720,6 +729,11 @@ impl AuthoredEntityFactory for TerrainSurfaceFactory {
                     .map(scalar_from_json)
                     .transpose()?
                     .unwrap_or(crate::components::DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING),
+                smoothing: object
+                    .get("smoothing")
+                    .map(scalar_from_json)
+                    .transpose()?
+                    .unwrap_or(crate::components::DEFAULT_TERRAIN_SMOOTHING),
                 offset: object
                     .get("offset")
                     .map(vec3_from_json)
