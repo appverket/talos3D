@@ -47,6 +47,9 @@ const BOX_SELECT_CROSSING_COLOR: Color = Color::srgba(0.2, 1.0, 0.5, 0.15);
 const BOX_SELECT_WINDOW_BORDER: Color = Color::srgba(0.3, 0.6, 1.0, 0.8);
 const BOX_SELECT_CROSSING_BORDER: Color = Color::srgba(0.3, 1.0, 0.6, 0.8);
 const BOX_SELECT_DRAG_THRESHOLD: f32 = 5.0;
+/// A pending marquee start is dropped (treated as a plain click) if the cursor hasn't
+/// moved past the drag threshold within this many frames of the press.
+const BOX_SELECT_START_GRACE_FRAMES: u32 = 18;
 const SELECTION_CLICK_SLOP_PX: f32 = 6.0;
 
 type SelectedCompositeClickQueryItem = (
@@ -128,6 +131,11 @@ struct BoxSelectState {
     is_dragging: bool,
     /// Set on the frame a box-drag completes so the click handler skips.
     just_completed: bool,
+    /// Frames a pending start has waited without the cursor moving far enough to be
+    /// a drag. A plain click (especially on trackpads that don't hold the button)
+    /// otherwise leaves `drag_start` pending and any later cursor move would start a
+    /// spurious marquee — so a start that doesn't move promptly is dropped as a click.
+    pending_frames: u32,
 }
 
 #[derive(Resource, Default)]
@@ -914,6 +922,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
     {
         cx.box_state.drag_start = Some(cursor_position);
         cx.box_state.is_dragging = false;
+        cx.box_state.pending_frames = 0;
     }
 
     if let Some(start) = cx.box_state.drag_start {
@@ -924,6 +933,15 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         let complete = cx.box_state.is_dragging
             && (cx.mouse_buttons.just_released(MouseButton::Left)
                 || cx.mouse_buttons.just_pressed(MouseButton::Left));
+        if !cx.box_state.is_dragging && !complete {
+            // Still just a press that hasn't become a drag — count the wait, and after
+            // the grace window treat it as a click (drop the pending start) so a later
+            // cursor move doesn't begin a spurious marquee.
+            cx.box_state.pending_frames += 1;
+            if cx.box_state.pending_frames > BOX_SELECT_START_GRACE_FRAMES {
+                cx.box_state.drag_start = None;
+            }
+        }
         if complete {
             let end = cursor_position;
             let is_window_select = end.x >= start.x;
