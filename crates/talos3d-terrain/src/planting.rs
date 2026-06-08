@@ -188,6 +188,7 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
             max_depth,
             surface_id,
             resolution,
+            floor_datum: None,
         },
     }
     .apply_to(world);
