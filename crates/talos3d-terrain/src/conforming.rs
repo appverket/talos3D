@@ -188,8 +188,15 @@ fn sample_conforming(solid: &ConformingSolid, hf: &TerrainHeightfield) -> Option
     // max_depth must be at least min_thickness or the bench would clip the top.
     let max_depth = solid.max_depth.max(min_thickness);
     // Top is the explicit floor datum when given (building finished floor), else it
-    // floats `min_thickness` above the highest ground under the footprint.
-    let y_top = solid.floor_datum.unwrap_or(h_max + min_thickness);
+    // floats `min_thickness` above the highest ground under the footprint. A datum is
+    // treated as a *minimum*: the top always rises to clear the ground by at least
+    // `min_thickness`, so a datum set at/below grade can never bury the slab (the
+    // underside would otherwise clamp flat and let the terrain poke through).
+    let terrain_top = h_max + min_thickness;
+    let y_top = solid
+        .floor_datum
+        .map(|d| d.max(terrain_top))
+        .unwrap_or(terrain_top);
     let floor_y = y_top - max_depth;
     // Keep at least `min_thickness` of slab even where the datum sits at/below grade.
     let under_cap = y_top - min_thickness;
@@ -370,14 +377,24 @@ impl AuthoredEntity for ConformingSolidSnapshot {
     }
 
     fn center(&self) -> Vec3 {
-        Vec3::new(self.solid.position.x, 0.0, self.solid.position.y)
+        // Report the real top elevation (datum, or the terrain-derived top) so the
+        // solid participates correctly in group bounds, rotation pivots, and
+        // selection centres instead of collapsing to y = 0.
+        let y = self.solid.floor_datum.unwrap_or(self.derived_top);
+        Vec3::new(self.solid.position.x, y, self.solid.position.y)
     }
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity {
-        // Conforming solids ride the surface: only the XZ placement is authored;
-        // Y is derived from the terrain.
         let mut snapshot = self.clone();
+        // XZ is the authored placement.
         snapshot.solid.position += delta.xz();
+        // Vertical drag lifts/lowers a *datum* foundation: raise the fixed top by
+        // delta.y so the slab rises with the building, its underside still draping to
+        // the terrain. A terrain-relative foundation (no datum) keeps riding the
+        // surface, so vertical drag is a no-op there.
+        if let Some(datum) = snapshot.solid.floor_datum {
+            snapshot.solid.floor_datum = Some(datum + delta.y);
+        }
         snapshot.into()
     }
 
