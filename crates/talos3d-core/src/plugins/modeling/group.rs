@@ -565,6 +565,16 @@ pub fn compute_group_bounds_from_world(
                 min = min.min(bounds.min);
                 max = max.max(bounds.max);
                 any = true;
+            } else if let Some(aabb) = entity_ref.get::<bevy::camera::primitives::Aabb>() {
+                // Members that expose no authored bounds (e.g. terrain-conforming
+                // solids, whose top is terrain-derived) still contribute to the group
+                // box via their rendered mesh AABB. Their Transform is identity (mesh
+                // is built in world space), so the AABB is already world-space.
+                let center = Vec3::from(aabb.center);
+                let half = Vec3::from(aabb.half_extents);
+                min = min.min(center - half);
+                max = max.max(center + half);
+                any = true;
             }
         }
     }

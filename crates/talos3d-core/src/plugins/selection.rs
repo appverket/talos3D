@@ -900,20 +900,28 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         return;
     };
 
-    if cx.mouse_buttons.just_pressed(MouseButton::Left) && !cx.handle_state.captures_pointer() {
+    // Begin a marquee on press (unless one is already in progress — a press while
+    // dragging *completes* it, below). Not gated on the button staying held: some
+    // input devices (Mac trackpads) deliver a press+release in the same frame and
+    // then move the cursor with the button up, so we drive the marquee from cursor
+    // movement, and complete it on a release OR a second press (click-move-click).
+    if cx.mouse_buttons.just_pressed(MouseButton::Left)
+        && !cx.handle_state.captures_pointer()
+        && !cx.box_state.is_dragging
+    {
         cx.box_state.drag_start = Some(cursor_position);
         cx.box_state.is_dragging = false;
     }
 
     if let Some(start) = cx.box_state.drag_start {
-        if cx.mouse_buttons.pressed(MouseButton::Left) {
-            let distance = (cursor_position - start).length();
-            if distance > BOX_SELECT_DRAG_THRESHOLD {
-                cx.box_state.is_dragging = true;
-            }
+        if (cursor_position - start).length() > BOX_SELECT_DRAG_THRESHOLD {
+            cx.box_state.is_dragging = true;
         }
 
-        if cx.mouse_buttons.just_released(MouseButton::Left) && cx.box_state.is_dragging {
+        let complete = cx.box_state.is_dragging
+            && (cx.mouse_buttons.just_released(MouseButton::Left)
+                || cx.mouse_buttons.just_pressed(MouseButton::Left));
+        if complete {
             let end = cursor_position;
             let is_window_select = end.x >= start.x;
 
@@ -1052,7 +1060,12 @@ fn handle_box_select(mut cx: BoxSelectContext) {
             cx.box_state.drag_start = None;
             cx.box_state.is_dragging = false;
             cx.box_state.just_completed = true;
-        } else if !cx.mouse_buttons.pressed(MouseButton::Left) {
+        } else if cx.mouse_buttons.just_released(MouseButton::Left)
+            && !cx.mouse_buttons.just_pressed(MouseButton::Left)
+        {
+            // A held click released without dragging — drop the pending start so it
+            // doesn't linger. (A same-frame press+release tap is kept, so a trackpad
+            // tap-then-move can still begin a marquee.)
             cx.box_state.drag_start = None;
             cx.box_state.is_dragging = false;
         }
