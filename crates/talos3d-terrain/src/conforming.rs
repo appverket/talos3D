@@ -67,6 +67,12 @@ pub struct ConformingSolid {
     pub surface_id: ElementId,
     /// Underside sampling spacing.
     pub resolution: f32,
+    /// Optional fixed top elevation (a building's finished-floor datum). When set,
+    /// the flat top sits at this Y instead of `max(grade) + min_thickness`, so the
+    /// foundation top stays at a chosen level while the underside still drapes to the
+    /// terrain. `None` keeps the terrain-relative top.
+    #[serde(default)]
+    pub floor_datum: Option<f32>,
 }
 
 impl Default for ConformingSolid {
@@ -80,6 +86,7 @@ impl Default for ConformingSolid {
             max_depth: DEFAULT_MAX_DEPTH,
             surface_id: ElementId(0),
             resolution: DEFAULT_CONFORMING_RESOLUTION,
+            floor_datum: None,
         }
     }
 }
@@ -180,14 +187,20 @@ fn sample_conforming(solid: &ConformingSolid, hf: &TerrainHeightfield) -> Option
     let min_thickness = solid.min_thickness.max(0.0);
     // max_depth must be at least min_thickness or the bench would clip the top.
     let max_depth = solid.max_depth.max(min_thickness);
-    let y_top = h_max + min_thickness;
+    // Top is the explicit floor datum when given (building finished floor), else it
+    // floats `min_thickness` above the highest ground under the footprint.
+    let y_top = solid.floor_datum.unwrap_or(h_max + min_thickness);
     let floor_y = y_top - max_depth;
+    // Keep at least `min_thickness` of slab even where the datum sits at/below grade.
+    let under_cap = y_top - min_thickness;
 
     let mut under_y = Vec::with_capacity(nx * nz);
     let mut max_thickness = min_thickness;
     for h in &surf {
         let u = match h {
-            Some(hh) => hh.max(floor_y),
+            // Drape to the terrain, but never above the min-thickness cap nor below
+            // the max-depth bench.
+            Some(hh) => hh.max(floor_y).min(under_cap),
             None => floor_y,
         };
         max_thickness = max_thickness.max(y_top - u);
@@ -429,6 +442,15 @@ impl AuthoredEntity for ConformingSolidSnapshot {
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.solid.resolution)),
             ),
+            // Fixed top elevation (finished-floor datum). Shows the current effective
+            // top; setting it pins the top there while the underside keeps draping.
+            property_field(
+                "floor_datum",
+                PropertyValueKind::Scalar,
+                Some(PropertyValue::Scalar(
+                    self.solid.floor_datum.unwrap_or(self.derived_top),
+                )),
+            ),
             read_only_property_field(
                 "surface_id",
                 "surface id",
@@ -464,6 +486,7 @@ impl AuthoredEntity for ConformingSolidSnapshot {
             "min_thickness" => snapshot.solid.min_thickness = scalar_from_json(value)?.max(0.0),
             "max_depth" => snapshot.solid.max_depth = scalar_from_json(value)?.max(0.01),
             "resolution" => snapshot.solid.resolution = scalar_from_json(value)?.max(0.05),
+            "floor_datum" => snapshot.solid.floor_datum = Some(scalar_from_json(value)?),
             "half_extents" => {
                 let arr = value
                     .as_array()
@@ -488,6 +511,7 @@ impl AuthoredEntity for ConformingSolidSnapshot {
                         "max_depth",
                         "half_extents",
                         "resolution",
+                        "floor_datum",
                     ],
                 ))
             }
@@ -751,6 +775,9 @@ impl AuthoredEntityFactory for ConformingSolidFactory {
         }
         if let Some(v) = object.get("surface_id").and_then(Value::as_u64) {
             solid.surface_id = ElementId(v);
+        }
+        if let Some(v) = object.get("floor_datum").and_then(Value::as_f64) {
+            solid.floor_datum = Some(v as f32);
         }
         if let Some(v) = object.get("name").and_then(Value::as_str) {
             solid.name = v.to_string();
