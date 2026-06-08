@@ -862,7 +862,10 @@ struct BoxSelectContext<'w, 's> {
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
-    camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
+    // Only the orbit (display) camera — not the off-screen screenshot camera, whose
+    // 512² viewport would put the marquee rect (window cursor coords) in a different
+    // space than the projected entities, so nothing ever matched.
+    camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<OrbitCamera>>,
     box_state: ResMut<'w, BoxSelectState>,
     selected_query: Query<'w, 's, Entity, With<Selected>>,
     ownership: Res<'w, InputOwnership>,
@@ -925,20 +928,23 @@ fn handle_box_select(mut cx: BoxSelectContext) {
             let end = cursor_position;
             let is_window_select = end.x >= start.x;
 
-            let Some((camera, camera_transform)) = cx.camera_query.iter().next() else {
+            let Some((camera, camera_transform)) = cx
+                .camera_query
+                .iter()
+                .find(|(camera, _)| camera.is_active)
+                .or_else(|| cx.camera_query.iter().next())
+            else {
                 cx.box_state.drag_start = None;
                 cx.box_state.is_dragging = false;
                 return;
             };
 
-            // Adjust window coordinates to viewport coordinates so they
-            // match the coordinate space returned by world_to_viewport.
-            let viewport_offset = camera
-                .logical_viewport_rect()
-                .map(|rect| rect.min)
-                .unwrap_or(Vec2::ZERO);
-            let rect_min = start.min(end) - viewport_offset;
-            let rect_max = start.max(end) - viewport_offset;
+            // The marquee corners come from the window cursor; compare them in the
+            // same space as `world_to_viewport` (which the working click hit-test uses
+            // directly against the window cursor). Do NOT subtract the viewport offset
+            // here — that double-shifted the rect away from the projected entities.
+            let rect_min = start.min(end);
+            let rect_max = start.max(end);
 
             let additive =
                 cx.keys.pressed(KeyCode::ShiftLeft) || cx.keys.pressed(KeyCode::ShiftRight);
