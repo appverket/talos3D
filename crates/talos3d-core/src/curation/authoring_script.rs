@@ -258,32 +258,22 @@ pub enum ScriptInstruction {
 
 /// Discriminator for `ScriptInstruction::Repeat`.  Always serialises as
 /// the string `"repeat"`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum RepeatKindTag {
+    #[default]
     Repeat,
-}
-
-impl Default for RepeatKindTag {
-    fn default() -> Self {
-        Self::Repeat
-    }
 }
 
 /// Discriminator for `ScriptInstruction::CallRecipe`.  Always serialises as
 /// the string `"call_recipe"`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CallRecipeKindTag {
+    #[default]
     CallRecipe,
-}
-
-impl Default for CallRecipeKindTag {
-    fn default() -> Self {
-        Self::CallRecipe
-    }
 }
 
 /// Maximum nesting depth for `ScriptInstruction::CallRecipe` and

@@ -1,3 +1,4 @@
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 use std::any::Any;
 
 use bevy::prelude::*;
@@ -603,7 +604,9 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .copied()
             .unwrap_or_default();
 
-        if let Some(parent_entity) = find_entity_by_element_id_ref(world, feature.parent) {
+        if let Some(parent_entity) =
+            find_entity_by_element_id_readonly(world, feature.parent)
+        {
             let registry = world.resource::<CapabilityRegistry>();
             if let Ok(parent_ref) = world.get_entity(parent_entity) {
                 if let Some(parent_snapshot) = registry.capture_snapshot(&parent_ref, world) {
@@ -632,15 +635,16 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             .copied()
             .unwrap_or_default();
 
-        let parent_lines = find_entity_by_element_id_ref(world, feature.parent)
-            .and_then(|parent_entity| {
-                let registry = world.resource::<CapabilityRegistry>();
-                let parent_ref = world.get_entity(parent_entity).ok()?;
-                let parent_snapshot = registry.capture_snapshot(&parent_ref, world)?;
-                let parent_factory = registry.factory_for(parent_snapshot.type_name())?;
-                Some(parent_factory.selection_line_count(world, parent_entity))
-            })
-            .unwrap_or(0);
+        let parent_lines =
+            find_entity_by_element_id_readonly(world, feature.parent)
+                .and_then(|parent_entity| {
+                    let registry = world.resource::<CapabilityRegistry>();
+                    let parent_ref = world.get_entity(parent_entity).ok()?;
+                    let parent_snapshot = registry.capture_snapshot(&parent_ref, world)?;
+                    let parent_factory = registry.factory_for(parent_snapshot.type_name())?;
+                    Some(parent_factory.selection_line_count(world, parent_entity))
+                })
+                .unwrap_or(0);
 
         parent_lines + feature.current_operand(rotation.0).wireframe_line_count()
     }
@@ -661,7 +665,8 @@ impl AuthoredEntityFactory for FaceProfileFeatureFactory {
             let hit_entity = if selects_feature {
                 entity
             } else {
-                find_entity_by_element_id_ref(world, feature.parent).unwrap_or(entity)
+                find_entity_by_element_id_readonly(world, feature.parent)
+                    .unwrap_or(entity)
             };
             let hit_distance = local_feature_distance
                 .filter(|distance| {
@@ -858,7 +863,9 @@ pub fn evaluate_face_profile_features(
     world: &World,
 ) {
     for (entity, feature, rotation) in &dirty_features {
-        let Some(parent_entity) = find_entity_by_element_id_ref(world, feature.parent) else {
+        let Some(parent_entity) =
+            find_entity_by_element_id_readonly(world, feature.parent)
+        else {
             continue;
         };
         let Some(parent_tris) = get_entity_triangles(world, parent_entity) else {
@@ -886,12 +893,6 @@ pub fn evaluate_face_profile_features(
         ));
         commands.entity(entity).remove::<NeedsEvaluation>();
     }
-}
-
-fn find_entity_by_element_id_ref(world: &World, element_id: ElementId) -> Option<Entity> {
-    let mut q = world.try_query::<(Entity, &ElementId)>().unwrap();
-    q.iter(world)
-        .find_map(|(entity, eid)| (*eid == element_id).then_some(entity))
 }
 
 fn get_entity_triangles(world: &World, entity: Entity) -> Option<Vec<bsp_csg::CsgTriangle>> {

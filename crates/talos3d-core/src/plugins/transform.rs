@@ -19,7 +19,6 @@ use crate::{
         camera::OrbitCamera,
         commands::{ApplyEntityChangesCommand, CreateEntityCommand},
         cursor::{cursor_viewport_position, CursorWorldPos},
-        scene_ray,
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
         identity::ElementId,
         inference::InferenceEngine,
@@ -31,6 +30,7 @@ use crate::{
             group::GroupMembers,
             profile::ProfileExtrusion,
         },
+        scene_ray,
         selection::Selected,
         snap::SnapResult,
         tools::ActiveTool,
@@ -546,31 +546,7 @@ fn confirm_transform(world: &mut World) {
 
     let was_push_pull = push_pull_face.is_some();
 
-    // Live-geometry previews (push/pull, and members previewed via apply_to such as
-    // conforming foundations) mutated entity geometry — restore from initial snapshot
-    // so the undoable command below applies from a clean base.
-    let originals: Vec<_> = world
-        .resource::<TransformState>()
-        .initial_snapshots
-        .iter()
-        .filter(|(_, s)| was_push_pull || s.preview_transform().is_none())
-        .map(|(_, s)| s.clone())
-        .collect();
-    for snapshot in &originals {
-        snapshot.apply_to(world);
-    }
-
-    // Move/Rotate/Scale only modify the entity's Transform — restore it.
-    restore_preview_transforms(world);
-
-    cleanup_preview_entities(world);
-    world
-        .resource_mut::<ActiveTransformPreview>()
-        .snapshots
-        .clear();
-    world.resource_mut::<TransformState>().clear();
-    world.resource_mut::<PushPullContext>().active_face = None;
-    world.resource_mut::<StatusBarData>().hint.clear();
+    restore_previews_and_clear_session(world, was_push_pull);
 
     // Finalize push/pull with authored boolean feature creation when needed.
     if let Some(pp) = &push_pull_face {
@@ -613,12 +589,49 @@ fn confirm_transform(world: &mut World) {
     }
 
     // After push/pull confirm, deselect the entity and stay in face edit mode
-    if was_push_pull {
-        let mut query = world.query_filtered::<Entity, With<Selected>>();
-        let entities: Vec<Entity> = query.iter(world).collect();
-        for entity in entities {
-            world.entity_mut(entity).remove::<Selected>();
-        }
+    deselect_all_after_push_pull(world, was_push_pull);
+}
+
+/// Shared modal-session teardown for confirm and cancel: restore live-geometry
+/// previews (push/pull, and members previewed via `apply_to` such as conforming
+/// foundations) from their initial snapshots so any follow-up command applies
+/// from a clean base, restore rigid Transform previews, and clear all transform
+/// session state.
+fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
+    let originals: Vec<_> = world
+        .resource::<TransformState>()
+        .initial_snapshots
+        .iter()
+        .filter(|(_, s)| was_push_pull || s.preview_transform().is_none())
+        .map(|(_, s)| s.clone())
+        .collect();
+    for snapshot in &originals {
+        snapshot.apply_to(world);
+    }
+
+    // Move/Rotate/Scale only modify the entity's Transform — restore it.
+    restore_preview_transforms(world);
+
+    cleanup_preview_entities(world);
+    world
+        .resource_mut::<ActiveTransformPreview>()
+        .snapshots
+        .clear();
+    world.resource_mut::<TransformState>().clear();
+    world.resource_mut::<PushPullContext>().active_face = None;
+    world.resource_mut::<StatusBarData>().hint.clear();
+}
+
+/// After a push/pull confirm or cancel, deselect everything while staying in
+/// face edit mode.
+fn deselect_all_after_push_pull(world: &mut World, was_push_pull: bool) {
+    if !was_push_pull {
+        return;
+    }
+    let mut query = world.query_filtered::<Entity, With<Selected>>();
+    let entities: Vec<Entity> = query.iter(world).collect();
+    for entity in entities {
+        world.entity_mut(entity).remove::<Selected>();
     }
 }
 
@@ -649,38 +662,10 @@ fn cancel_transform(world: &mut World) {
         }
     }
 
-    // Live-geometry previews (push/pull, and members previewed via apply_to such as
-    // conforming foundations) mutated entity geometry — restore from initial snapshot.
-    let originals: Vec<_> = world
-        .resource::<TransformState>()
-        .initial_snapshots
-        .iter()
-        .filter(|(_, s)| was_push_pull || s.preview_transform().is_none())
-        .map(|(_, s)| s.clone())
-        .collect();
-    for snapshot in &originals {
-        snapshot.apply_to(world);
-    }
-
-    // Move/Rotate/Scale only modify the entity's Transform — restore it.
-    restore_preview_transforms(world);
-    cleanup_preview_entities(world);
-    world
-        .resource_mut::<ActiveTransformPreview>()
-        .snapshots
-        .clear();
-    world.resource_mut::<TransformState>().clear();
-    world.resource_mut::<PushPullContext>().active_face = None;
-    world.resource_mut::<StatusBarData>().hint.clear();
+    restore_previews_and_clear_session(world, was_push_pull);
 
     // After push/pull cancel, deselect the entity and stay in face edit mode
-    if was_push_pull {
-        let mut query = world.query_filtered::<Entity, With<Selected>>();
-        let entities: Vec<Entity> = query.iter(world).collect();
-        for entity in entities {
-            world.entity_mut(entity).remove::<Selected>();
-        }
-    }
+    deselect_all_after_push_pull(world, was_push_pull);
 }
 
 /// Remove a live CSG node and restore its operands to visible, non-operand state.
@@ -981,7 +966,8 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
         // ground. For objects essentially on the drawing plane we keep the original
         // snap-aware cursor so grid/marker snapping during a ground move is unchanged.
         let current_cursor = if initial_cursor.y.abs() > 0.05 {
-            horizontal_cursor_at(world, initial_cursor.y).or_else(|| current_transform_cursor(world))?
+            horizontal_cursor_at(world, initial_cursor.y)
+                .or_else(|| current_transform_cursor(world))?
         } else {
             current_transform_cursor(world)?
         };

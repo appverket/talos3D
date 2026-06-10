@@ -224,6 +224,37 @@ fn apply_layer_visibility(
     }
 }
 
+pub fn entity_layer_name(world: &World, entity: Entity) -> &str {
+    world
+        .get_entity(entity)
+        .ok()
+        .and_then(|e| e.get::<LayerAssignment>())
+        .map(|a| a.layer.as_str())
+        .unwrap_or(DEFAULT_LAYER_NAME)
+}
+
+pub fn entity_on_locked_layer(world: &World, entity: Entity) -> bool {
+    let registry = world.resource::<LayerRegistry>();
+    let layer_name = entity_layer_name(world, entity);
+    registry.is_locked(layer_name)
+}
+
+pub fn count_entities_per_layer(world: &World) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    let mut q = world.try_query::<EntityRef>().unwrap();
+    for entity_ref in q.iter(world) {
+        if entity_ref.get::<ElementId>().is_none() {
+            continue;
+        }
+        let layer = entity_ref
+            .get::<LayerAssignment>()
+            .map(|a| a.layer.as_str())
+            .unwrap_or(DEFAULT_LAYER_NAME);
+        *counts.entry(layer.to_string()).or_insert(0) += 1;
+    }
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,35 +304,4 @@ mod tests {
             Visibility::Inherited
         );
     }
-}
-
-pub fn entity_layer_name(world: &World, entity: Entity) -> &str {
-    world
-        .get_entity(entity)
-        .ok()
-        .and_then(|e| e.get::<LayerAssignment>())
-        .map(|a| a.layer.as_str())
-        .unwrap_or(DEFAULT_LAYER_NAME)
-}
-
-pub fn entity_on_locked_layer(world: &World, entity: Entity) -> bool {
-    let registry = world.resource::<LayerRegistry>();
-    let layer_name = entity_layer_name(world, entity);
-    registry.is_locked(layer_name)
-}
-
-pub fn count_entities_per_layer(world: &World) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    for entity_ref in q.iter(world) {
-        if entity_ref.get::<ElementId>().is_none() {
-            continue;
-        }
-        let layer = entity_ref
-            .get::<LayerAssignment>()
-            .map(|a| a.layer.as_str())
-            .unwrap_or(DEFAULT_LAYER_NAME);
-        *counts.entry(layer.to_string()).or_insert(0) += 1;
-    }
-    counts
 }

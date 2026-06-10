@@ -1,3 +1,4 @@
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 use std::any::Any;
 
 use bevy::{ecs::world::EntityRef, prelude::*};
@@ -464,7 +465,9 @@ impl GroupEditContext {
     pub fn active_frame(&self, world: &World) -> GroupFrame {
         let mut frame = GroupFrame::identity();
         for id in &self.stack {
-            if let Some(entity) = find_entity_by_element_id_readonly(world, *id) {
+            if let Some(entity) =
+                find_entity_by_element_id_readonly(world, *id)
+            {
                 if let Some(members) = world.get::<GroupMembers>(entity) {
                     frame = frame.then(&members.frame);
                 }
@@ -503,13 +506,6 @@ impl GroupEditContext {
 
 // --- Helper: find entity without &mut World ---
 
-fn find_entity_by_element_id_readonly(world: &World, element_id: ElementId) -> Option<Entity> {
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    q.iter(world)
-        .find(|e| e.get::<ElementId>().copied() == Some(element_id))
-        .map(|e| e.id())
-}
-
 // --- Utility: find which group owns a member ---
 
 pub fn find_group_for_member(world: &World, member_id: ElementId) -> Option<ElementId> {
@@ -526,7 +522,9 @@ pub fn collect_group_members_recursive(world: &World, group_id: ElementId) -> Ve
     let mut result = Vec::new();
     let mut stack = vec![group_id];
     while let Some(id) = stack.pop() {
-        if let Some(entity) = find_entity_by_element_id_readonly(world, id) {
+        if let Some(entity) =
+            find_entity_by_element_id_readonly(world, id)
+        {
             if let Some(members) = world.get::<GroupMembers>(entity) {
                 for member_id in &members.member_ids {
                     result.push(*member_id);
@@ -669,6 +667,26 @@ pub fn group_membership_add_snapshots(
     Some((before, after))
 }
 
+/// Remove a member from any group that contains it.
+pub fn remove_member_from_groups(world: &mut World, member_id: ElementId) {
+    let mut updates = Vec::new();
+    {
+        let mut query = world.query::<(Entity, &GroupMembers)>();
+        for (entity, members) in query.iter(world) {
+            if members.member_ids.contains(&member_id) {
+                let mut new_ids = members.member_ids.clone();
+                new_ids.retain(|id| *id != member_id);
+                updates.push((entity, new_ids));
+            }
+        }
+    }
+    for (entity, new_ids) in updates {
+        if let Some(mut members) = world.get_mut::<GroupMembers>(entity) {
+            members.member_ids = new_ids;
+        }
+    }
+}
+
 #[cfg(test)]
 mod frame_tests {
     use super::*;
@@ -681,7 +699,10 @@ mod frame_tests {
     fn identity_frame_is_a_noop() {
         let f = GroupFrame::identity();
         assert!(f.is_identity());
-        assert!(approx(f.point_to_world(Vec3::new(3.0, 1.0, 2.0)), Vec3::new(3.0, 1.0, 2.0)));
+        assert!(approx(
+            f.point_to_world(Vec3::new(3.0, 1.0, 2.0)),
+            Vec3::new(3.0, 1.0, 2.0)
+        ));
     }
 
     #[test]
@@ -709,28 +730,15 @@ mod frame_tests {
         };
         let composed = parent.then(&child);
         // Child origin (2,0,0) in parent space rotates to (0,0,-2) in world.
-        assert!(approx(composed.translation, Vec3::new(0.0, 0.0, -2.0)), "got {:?}", composed.translation);
+        assert!(
+            approx(composed.translation, Vec3::new(0.0, 0.0, -2.0)),
+            "got {:?}",
+            composed.translation
+        );
         // A point at child-local +X = world: parent rot applied to (2+1,0,0)=(3,0,0) -> (0,0,-3).
-        assert!(approx(composed.point_to_world(Vec3::X), Vec3::new(0.0, 0.0, -3.0)));
-    }
-}
-
-/// Remove a member from any group that contains it.
-pub fn remove_member_from_groups(world: &mut World, member_id: ElementId) {
-    let mut updates = Vec::new();
-    {
-        let mut query = world.query::<(Entity, &GroupMembers)>();
-        for (entity, members) in query.iter(world) {
-            if members.member_ids.contains(&member_id) {
-                let mut new_ids = members.member_ids.clone();
-                new_ids.retain(|id| *id != member_id);
-                updates.push((entity, new_ids));
-            }
-        }
-    }
-    for (entity, new_ids) in updates {
-        if let Some(mut members) = world.get_mut::<GroupMembers>(entity) {
-            members.member_ids = new_ids;
-        }
+        assert!(approx(
+            composed.point_to_world(Vec3::X),
+            Vec3::new(0.0, 0.0, -3.0)
+        ));
     }
 }

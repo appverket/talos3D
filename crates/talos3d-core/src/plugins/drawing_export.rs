@@ -184,6 +184,8 @@ impl PendingViewportExportStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewportExportScope {
     Viewport,
+    /// Whole-window capture; only constructed by the model-api screenshot path.
+    #[cfg_attr(not(feature = "model-api"), allow(dead_code))]
     AppWindow,
 }
 
