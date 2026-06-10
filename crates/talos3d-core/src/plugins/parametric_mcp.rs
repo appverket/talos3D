@@ -283,11 +283,7 @@ fn synthesize_parametric_geometry(
         type_def.representation.as_ref().map(|repr| {
             repr.members
                 .iter()
-                .map(|m| {
-                    m.semantic
-                        .clone()
-                        .unwrap_or_default()
-                })
+                .map(|m| m.semantic.clone().unwrap_or_default())
                 .collect()
         });
 
@@ -351,6 +347,9 @@ fn synthesize_parametric_geometry(
 
     let mut element_ids: Vec<u64> = Vec::with_capacity(members.len());
     for (member_index, (m, maybe_semantic)) in members.into_iter().zip(semantics).enumerate() {
+        // Only the model-api feature consumes the semantic annotation below.
+        #[cfg(not(feature = "model-api"))]
+        let _ = maybe_semantic;
         let eid = world.resource::<ElementIdAllocator>().next_id();
 
         // Sizes mm → m. height (Y) drives extrusion height; width
@@ -1056,7 +1055,9 @@ mod tests {
         use crate::capability_registry::{
             CapabilityRegistry, ElementClassAssignment, ElementClassDescriptor, ElementClassId,
         };
-        use crate::plugins::refinement::{RefinementState, RefinementStateComponent, SemanticIntent};
+        use crate::plugins::refinement::{
+            RefinementState, RefinementStateComponent, SemanticIntent,
+        };
         use crate::relational::registry::ParametricMemberSemantic;
 
         /// Register a minimal test element class so `validate_semantic_annotation`
@@ -1183,7 +1184,10 @@ mod tests {
                 .get::<SemanticIntent>(entity)
                 .expect("SemanticIntent must be attached");
             assert_eq!(
-                intent.parameters.get("construction_role").and_then(|v| v.as_str()),
+                intent
+                    .parameters
+                    .get("construction_role")
+                    .and_then(|v| v.as_str()),
                 Some("chord"),
                 "parameters must contain construction_role=chord"
             );
@@ -1406,7 +1410,9 @@ mod tests {
             assert_eq!(sem.element_class.as_deref(), Some("test_rt_class"));
             assert_eq!(sem.refinement_state.as_deref(), Some("Detailed"));
             assert_eq!(
-                sem.parameters.get("construction_role").and_then(|v| v.as_str()),
+                sem.parameters
+                    .get("construction_role")
+                    .and_then(|v| v.as_str()),
                 Some("secondary")
             );
         }

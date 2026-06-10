@@ -1,3 +1,4 @@
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 use bevy::{
     ecs::{system::SystemParam, world::EntityRef},
     picking::prelude::*,
@@ -610,7 +611,10 @@ fn draw_selected_outlines(
     let is_active_transform = !transform_state.is_idle();
 
     if let Some(active_occurrence_id) = occurrence_edit_context.current_occurrence() {
-        if let Some(active_entity) = find_entity_by_element_id_ref(world, active_occurrence_id) {
+        if let Some(active_entity) = find_entity_by_element_id_readonly(
+            world,
+            active_occurrence_id,
+        ) {
             if let Ok(active_ref) = world.get_entity(active_entity) {
                 if let Some(bounds) = occurrence_generated_part_bounds(world, active_ref) {
                     draw_bounds_wireframe(&mut gizmos, &bounds, Color::srgb(0.2, 0.85, 1.0));
@@ -705,17 +709,12 @@ fn entity_is_visible(world: &World, entity: Entity) -> bool {
 
     entity_ref
         .get::<FeatureOperand>()
-        .and_then(|operand| find_entity_by_element_id_ref(world, operand.owner))
+        .and_then(|operand| {
+            find_entity_by_element_id_readonly(world, operand.owner)
+        })
         .and_then(|feature_entity| world.get_entity(feature_entity).ok())
         .and_then(|feature_ref| feature_ref.get::<Visibility>().copied())
         != Some(Visibility::Hidden)
-}
-
-fn find_entity_by_element_id_ref(world: &World, element_id: ElementId) -> Option<Entity> {
-    let mut query = world.try_query::<(Entity, &ElementId)>().unwrap();
-    query
-        .iter(world)
-        .find_map(|(entity, current_id)| (*current_id == element_id).then_some(entity))
 }
 
 fn choose_selection_hit(
@@ -1474,12 +1473,13 @@ fn update_group_edit_muting(
         .clone();
 
     // Restore an entity's real material handle that was saved when it was dimmed.
-    let restore_entity = |commands: &mut Commands, entity: Entity, restore: &MutedMaterialRestore| {
-        if let Ok(mut ec) = commands.get_entity(entity) {
-            ec.insert(MeshMaterial3d::<StandardMaterial>(restore.0.clone()));
-            ec.remove::<MutedMaterialRestore>();
-        }
-    };
+    let restore_entity =
+        |commands: &mut Commands, entity: Entity, restore: &MutedMaterialRestore| {
+            if let Ok(mut ec) = commands.get_entity(entity) {
+                ec.insert(MeshMaterial3d::<StandardMaterial>(restore.0.clone()));
+                ec.remove::<MutedMaterialRestore>();
+            }
+        };
 
     if edit_context.is_root() && occurrence_edit_context.is_root() {
         for (entity, _, _, is_muted) in &entity_query {

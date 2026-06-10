@@ -26,6 +26,7 @@ use crate::{
 use crate::plugins::modeling::group::{
     compose_snapshot_into_frame, group_membership_add_snapshots, GroupEditContext,
 };
+#[cfg(feature = "model-api")]
 use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink, VoidPlacementOutcome};
 
 pub struct CommandPlugin;
@@ -800,6 +801,15 @@ pub fn despawn_by_element_id(world: &mut World, element_id: ElementId) {
 
 pub fn find_entity_by_element_id(world: &mut World, element_id: ElementId) -> Option<Entity> {
     let mut query = world.query::<(Entity, &ElementId)>();
+    query
+        .iter(world)
+        .find_map(|(entity, current_id)| (*current_id == element_id).then_some(entity))
+}
+
+/// Read-only counterpart of [`find_entity_by_element_id`] for callers that
+/// only hold `&World`.
+pub fn find_entity_by_element_id_readonly(world: &World, element_id: ElementId) -> Option<Entity> {
+    let mut query = world.try_query::<(Entity, &ElementId)>()?;
     query
         .iter(world)
         .find_map(|(entity, current_id)| (*current_id == element_id).then_some(entity))

@@ -101,96 +101,84 @@ impl ModelApiServer {
         }
     }
 
-    async fn request_get_instance_info(&self) -> Result<InstanceInfo, String> {
+    /// Single round-trip to the app world: build a request variant around a
+    /// fresh oneshot sender, post it, and await the reply. Every `request_*`
+    /// wrapper funnels through here so channel-failure handling lives in one
+    /// place.
+    async fn round_trip<T>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<T>) -> ModelApiRequest,
+    ) -> Result<T, String> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(ModelApiRequest::GetInstanceInfo(response))
+            .send(build(response))
             .map_err(|_| "model API request channel closed".to_string())?;
         receiver
             .await
             .map_err(|_| "model API response channel closed".to_string())
     }
 
-    async fn request_list_entities(&self) -> Result<Vec<EntityEntry>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListEntities(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
+    /// Shared body for MCP tools that serialize their typed params and route
+    /// them through a registered command: serialize -> invoke -> JSON result.
+    async fn typed_command_tool<P: serde::Serialize>(
+        &self,
+        command_id: &str,
+        params: P,
+    ) -> Result<CallToolResult, McpError> {
+        let parameters = serde_json::to_value(params)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        let result = self
+            .request_invoke_command(command_id.to_string(), parameters)
             .await
-            .map_err(|_| "model API response channel closed".to_string())
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    async fn request_get_instance_info(&self) -> Result<InstanceInfo, String> {
+        self.round_trip(ModelApiRequest::GetInstanceInfo).await
+    }
+
+    async fn request_list_entities(&self) -> Result<Vec<EntityEntry>, String> {
+        self.round_trip(ModelApiRequest::ListEntities).await
     }
 
     async fn request_get_entity(
         &self,
         element_id: u64,
     ) -> Result<Option<serde_json::Value>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetEntity {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(|response| ModelApiRequest::GetEntity {
+            element_id,
+            response,
+        })
+        .await
     }
 
     async fn request_get_entity_details(
         &self,
         element_id: u64,
     ) -> Result<Option<EntityDetails>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetEntityDetails {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(|response| ModelApiRequest::GetEntityDetails {
+            element_id,
+            response,
+        })
+        .await
     }
 
     async fn request_model_summary(&self) -> Result<ModelSummary, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ModelSummary(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ModelSummary).await
     }
 
     async fn request_outline_tree(&self) -> Result<Value, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::OutlineTree(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::OutlineTree).await
     }
 
     async fn request_list_importers(&self) -> Result<Vec<ImporterDescriptor>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListImporters(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListImporters).await
     }
 
     async fn request_create_entity(&self, json: Value) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateEntity { json, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateEntity { json, response })
+            .await?
     }
 
     async fn request_import_file(
@@ -198,43 +186,31 @@ impl ModelApiServer {
         path: String,
         format_hint: Option<String>,
     ) -> ApiResult<Vec<u64>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ImportFile {
-                path,
-                format_hint,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ImportFile {
+            path,
+            format_hint,
+            response,
+        })
+        .await?
     }
 
     async fn request_accept_semantic_shadow_candidate(
         &self,
         request: AcceptSemanticShadowCandidateRequest,
     ) -> ApiResult<EntityDetails> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::AcceptSemanticShadowCandidate { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::AcceptSemanticShadowCandidate {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_list_handles(&self, element_id: u64) -> ApiResult<Vec<HandleInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListHandles {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ListHandles {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_property_set_get(
@@ -243,18 +219,13 @@ impl ModelApiServer {
         set_name: String,
         property_name: String,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimPropertySetGet {
-                element_id,
-                set_name,
-                property_name,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimPropertySetGet {
+            element_id,
+            set_name,
+            property_name,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_property_set_set(
@@ -265,20 +236,15 @@ impl ModelApiServer {
         property_name: String,
         value: Value,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimPropertySetSet {
-                element_id,
-                definition_id,
-                set_name,
-                property_name,
-                value,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimPropertySetSet {
+            element_id,
+            definition_id,
+            set_name,
+            property_name,
+            value,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_exchange_identity_assign(
@@ -287,18 +253,13 @@ impl ModelApiServer {
         system: String,
         exchange_id: String,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimExchangeIdentityAssign {
-                element_id,
-                system,
-                exchange_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimExchangeIdentityAssign {
+            element_id,
+            system,
+            exchange_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_exchange_identity_get(
@@ -306,30 +267,20 @@ impl ModelApiServer {
         element_id: u64,
         system: String,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimExchangeIdentityGet {
-                element_id,
-                system,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimExchangeIdentityGet {
+            element_id,
+            system,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_exchange_identity_list(&self, element_id: u64) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimExchangeIdentityList {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimExchangeIdentityList {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_void_declare_for_definition(
@@ -337,17 +288,12 @@ impl ModelApiServer {
         definition_id: String,
         declaration: Value,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimVoidDeclareForDefinition {
-                definition_id,
-                declaration,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimVoidDeclareForDefinition {
+            definition_id,
+            declaration,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_void_plan_placement(
@@ -356,18 +302,13 @@ impl ModelApiServer {
         host_element_id: u64,
         filling_element_id: u64,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimVoidPlanPlacement {
-                filling_definition,
-                host_element_id,
-                filling_element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimVoidPlanPlacement {
+            filling_definition,
+            host_element_id,
+            filling_element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_spatial_assign(
@@ -376,84 +317,47 @@ impl ModelApiServer {
         container_element_id: u64,
         container_kind: String,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimSpatialAssign {
-                child_element_id,
-                container_element_id,
-                container_kind,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimSpatialAssign {
+            child_element_id,
+            container_element_id,
+            container_kind,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_spatial_list_kind_registry(&self) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimSpatialListKindRegistry { response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimSpatialListKindRegistry { response })
+            .await?
     }
 
     async fn request_get_document_properties(&self) -> Result<serde_json::Value, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetDocumentProperties(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
+        self.round_trip(ModelApiRequest::GetDocumentProperties)
             .await
-            .map_err(|_| "model API response channel closed".to_string())
     }
 
     async fn request_set_document_properties(
         &self,
         partial: serde_json::Value,
     ) -> ApiResult<serde_json::Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetDocumentProperties { partial, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetDocumentProperties { partial, response })
+            .await?
     }
 
     async fn request_list_toolbars(&self) -> Result<Vec<ToolbarDetails>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListToolbars(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListToolbars).await
     }
 
     async fn request_set_toolbar_layout(
         &self,
         updates: Vec<ToolbarLayoutUpdate>,
     ) -> ApiResult<Vec<ToolbarDetails>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetToolbarLayout { updates, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetToolbarLayout { updates, response })
+            .await?
     }
 
     async fn request_list_commands(&self) -> Result<Value, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListCommands(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListCommands).await
     }
 
     async fn request_invoke_command(
@@ -461,117 +365,69 @@ impl ModelApiServer {
         command_id: String,
         parameters: Value,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::InvokeCommand {
-                command_id,
-                parameters,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::InvokeCommand {
+            command_id,
+            parameters,
+            response,
+        })
+        .await?
     }
 
     async fn request_prepare_site_surface(
         &self,
         request: PrepareSiteSurfaceRequest,
     ) -> ApiResult<crate::plugins::command_registry::CommandResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PrepareSiteSurface { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PrepareSiteSurface { request, response })
+            .await?
     }
 
     async fn request_terrain_cut_fill_analysis(
         &self,
         request: TerrainCutFillAnalysisRequest,
     ) -> ApiResult<crate::plugins::command_registry::CommandResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::TerrainCutFillAnalysis { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::TerrainCutFillAnalysis { request, response })
+            .await?
     }
 
     async fn request_terrain_elevation_at(
         &self,
         request: TerrainElevationAtRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::TerrainElevationAt { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::TerrainElevationAt { request, response })
+            .await?
     }
 
     async fn request_get_editing_context(&self) -> Result<EditingContextInfo, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetEditingContext(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::GetEditingContext).await
     }
 
     async fn request_enter_group(&self, element_id: u64) -> ApiResult<EditingContextInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::EnterGroup {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::EnterGroup {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_exit_group(&self) -> ApiResult<EditingContextInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExitGroup(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(ModelApiRequest::ExitGroup).await?
     }
 
     async fn request_list_group_members(
         &self,
         element_id: u64,
     ) -> ApiResult<Vec<GroupMemberEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListGroupMembers {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ListGroupMembers {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     // --- Layer Management ---
 
     async fn request_list_layers(&self) -> Result<Vec<LayerInfo>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListLayers(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListLayers).await
     }
 
     async fn request_set_layer_visibility(
@@ -579,17 +435,12 @@ impl ModelApiServer {
         name: String,
         visible: bool,
     ) -> ApiResult<Vec<LayerInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetLayerVisibility {
-                name,
-                visible,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetLayerVisibility {
+            name,
+            visible,
+            response,
+        })
+        .await?
     }
 
     async fn request_set_layer_locked(
@@ -597,17 +448,12 @@ impl ModelApiServer {
         name: String,
         locked: bool,
     ) -> ApiResult<Vec<LayerInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetLayerLocked {
-                name,
-                locked,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetLayerLocked {
+            name,
+            locked,
+            response,
+        })
+        .await?
     }
 
     async fn request_assign_layer(
@@ -615,27 +461,17 @@ impl ModelApiServer {
         element_id: u64,
         layer_name: String,
     ) -> ApiResult<Vec<LayerInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::AssignLayer {
-                element_id,
-                layer_name,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::AssignLayer {
+            element_id,
+            layer_name,
+            response,
+        })
+        .await?
     }
 
     async fn request_create_layer(&self, name: String) -> ApiResult<Vec<LayerInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateLayer { name, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateLayer { name, response })
+            .await?
     }
 
     async fn request_rename_layer(
@@ -643,62 +479,35 @@ impl ModelApiServer {
         old_name: String,
         new_name: String,
     ) -> ApiResult<Vec<LayerInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RenameLayer {
-                old_name,
-                new_name,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RenameLayer {
+            old_name,
+            new_name,
+            response,
+        })
+        .await?
     }
 
     async fn request_delete_layer(&self, name: String) -> ApiResult<Vec<LayerInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DeleteLayer { name, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DeleteLayer { name, response })
+            .await?
     }
 
     async fn request_dependency_graph(&self) -> Result<Value, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DependencyGraph(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::DependencyGraph).await
     }
 
     async fn request_entity_dependencies(&self, element_id: u64) -> Result<Value, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::EntityDependencies {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(|response| ModelApiRequest::EntityDependencies {
+            element_id,
+            response,
+        })
+        .await
     }
 
     // --- Named Views ---
 
     async fn request_view_list(&self) -> Result<Vec<NamedViewInfo>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ViewList(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ViewList).await
     }
 
     async fn request_view_save(
@@ -707,28 +516,18 @@ impl ModelApiServer {
         description: Option<String>,
         camera_params: Option<CameraParams>,
     ) -> ApiResult<NamedViewInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ViewSave {
-                name,
-                description,
-                camera_params,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ViewSave {
+            name,
+            description,
+            camera_params,
+            response,
+        })
+        .await?
     }
 
     async fn request_view_restore(&self, name: String) -> ApiResult<NamedViewInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ViewRestore { name, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ViewRestore { name, response })
+            .await?
     }
 
     async fn request_view_update(
@@ -738,29 +537,19 @@ impl ModelApiServer {
         description: Option<String>,
         camera_params: Option<CameraParams>,
     ) -> ApiResult<NamedViewInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ViewUpdate {
-                name,
-                new_name,
-                description,
-                camera_params,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ViewUpdate {
+            name,
+            new_name,
+            description,
+            camera_params,
+            response,
+        })
+        .await?
     }
 
     async fn request_view_delete(&self, name: String) -> ApiResult<()> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ViewDelete { name, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ViewDelete { name, response })
+            .await?
     }
 
     // --- Clipping Planes ---
@@ -772,19 +561,14 @@ impl ModelApiServer {
         normal: [f32; 3],
         active: bool,
     ) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ClipPlaneCreate {
-                name,
-                origin,
-                normal,
-                active,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ClipPlaneCreate {
+            name,
+            origin,
+            normal,
+            active,
+            response,
+        })
+        .await?
     }
 
     async fn request_clip_plane_update(
@@ -795,30 +579,19 @@ impl ModelApiServer {
         normal: Option<[f32; 3]>,
         active: Option<bool>,
     ) -> ApiResult<ClipPlaneInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ClipPlaneUpdate {
-                element_id,
-                name,
-                origin,
-                normal,
-                active,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ClipPlaneUpdate {
+            element_id,
+            name,
+            origin,
+            normal,
+            active,
+            response,
+        })
+        .await?
     }
 
     async fn request_clip_plane_list(&self) -> Result<Vec<ClipPlaneInfo>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ClipPlaneList(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ClipPlaneList).await
     }
 
     async fn request_clip_plane_toggle(
@@ -826,52 +599,31 @@ impl ModelApiServer {
         element_id: u64,
         active: bool,
     ) -> ApiResult<ClipPlaneInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ClipPlaneToggle {
-                element_id,
-                active,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ClipPlaneToggle {
+            element_id,
+            active,
+            response,
+        })
+        .await?
     }
 
     // --- Materials ---
 
     async fn request_list_materials(&self) -> Result<Vec<MaterialInfo>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListMaterials(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListMaterials).await
     }
 
     async fn request_get_material(&self, id: String) -> ApiResult<MaterialInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetMaterial { id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetMaterial { id, response })
+            .await?
     }
 
     async fn request_create_material(
         &self,
         request: CreateMaterialRequest,
     ) -> ApiResult<MaterialInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateMaterial { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateMaterial { request, response })
+            .await?
     }
 
     async fn request_update_material(
@@ -879,252 +631,155 @@ impl ModelApiServer {
         id: String,
         request: CreateMaterialRequest,
     ) -> ApiResult<MaterialInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UpdateMaterial {
-                id,
-                request,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UpdateMaterial {
+            id,
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_delete_material(&self, id: String) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DeleteMaterial { id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DeleteMaterial { id, response })
+            .await?
     }
 
     async fn request_apply_material(&self, request: ApplyMaterialRequest) -> ApiResult<Vec<u64>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ApplyMaterial { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ApplyMaterial { request, response })
+            .await?
     }
 
     async fn request_assign_material(
         &self,
         request: AssignMaterialRequest,
     ) -> ApiResult<AssignMaterialResponse> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::AssignMaterial { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::AssignMaterial { request, response })
+            .await?
     }
 
     async fn request_remove_material(&self, element_ids: Vec<u64>) -> ApiResult<Vec<u64>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RemoveMaterial {
-                element_ids,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RemoveMaterial {
+            element_ids,
+            response,
+        })
+        .await?
     }
 
     async fn request_get_material_assignment(
         &self,
         element_id: u64,
     ) -> ApiResult<EntityMaterialAssignmentInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetMaterialAssignment {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetMaterialAssignment {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_set_material_assignment(
         &self,
         request: SetMaterialAssignmentRequest,
     ) -> ApiResult<Vec<EntityMaterialAssignmentInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetMaterialAssignment { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetMaterialAssignment { request, response })
+            .await?
     }
 
     async fn request_get_texture_mapping(
         &self,
         request: GetTextureMappingRequest,
     ) -> ApiResult<TextureMappingInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetTextureMapping { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetTextureMapping { request, response })
+            .await?
     }
 
     async fn request_update_texture_mapping(
         &self,
         request: UpdateTextureMappingRequest,
     ) -> ApiResult<TextureMappingInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UpdateTextureMapping { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UpdateTextureMapping { request, response })
+            .await?
     }
 
     async fn request_reset_texture_mapping(
         &self,
         request: ResetTextureMappingRequest,
     ) -> ApiResult<TextureMappingInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ResetTextureMapping { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ResetTextureMapping { request, response })
+            .await?
     }
 
     async fn request_bim_material_assign_layered(
         &self,
         request: BimMaterialAssignLayeredRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimMaterialAssignLayered { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimMaterialAssignLayered { request, response })
+            .await?
     }
 
     async fn request_bim_material_assign_constituents(
         &self,
         request: BimMaterialAssignConstituentsRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimMaterialAssignConstituents { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimMaterialAssignConstituents {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_bim_material_get_effective(
         &self,
         request: BimMaterialGetEffectiveRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::BimMaterialGetEffective { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::BimMaterialGetEffective { request, response })
+            .await?
     }
 
     async fn request_quantity_set(&self, request: QuantitySetRequest) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::QuantitySet { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::QuantitySet { request, response })
+            .await?
     }
 
     async fn request_quantity_get(&self, request: QuantityGetRequest) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::QuantityGet { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::QuantityGet { request, response })
+            .await?
     }
 
     async fn request_quantity_list_provenance(
         &self,
         request: QuantityListProvenanceRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::QuantityListProvenance { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::QuantityListProvenance { request, response })
+            .await?
     }
 
     async fn request_quantity_check_invariants(
         &self,
         request: QuantityCheckInvariantsRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::QuantityCheckInvariants { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::QuantityCheckInvariants { request, response })
+            .await?
     }
 
     async fn request_list_material_specs(
         &self,
         filter: ListMaterialSpecsFilter,
     ) -> ApiResult<Vec<MaterialSpecInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListMaterialSpecs { filter, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ListMaterialSpecs { filter, response })
+            .await?
     }
 
     async fn request_get_material_spec(&self, asset_id: String) -> ApiResult<MaterialSpecInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetMaterialSpec { asset_id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetMaterialSpec { asset_id, response })
+            .await?
     }
 
     async fn request_create_material_spec(
         &self,
         request: DraftMaterialSpecRequest,
     ) -> ApiResult<MaterialSpecInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateMaterialSpec { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateMaterialSpec { request, response })
+            .await?
     }
 
     async fn request_update_material_spec(
@@ -1133,18 +788,13 @@ impl ModelApiServer {
         body: MaterialSpecBody,
         rationale: Option<String>,
     ) -> ApiResult<MaterialSpecInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UpdateMaterialSpec {
-                asset_id,
-                body,
-                rationale,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UpdateMaterialSpec {
+            asset_id,
+            body,
+            rationale,
+            response,
+        })
+        .await?
     }
 
     async fn request_save_material_spec(
@@ -1152,295 +802,165 @@ impl ModelApiServer {
         asset_id: String,
         scope: String,
     ) -> ApiResult<MaterialSpecInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SaveMaterialSpec {
-                asset_id,
-                scope,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SaveMaterialSpec {
+            asset_id,
+            scope,
+            response,
+        })
+        .await?
     }
 
     async fn request_publish_material_spec(&self, asset_id: String) -> ApiResult<MaterialSpecInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PublishMaterialSpec { asset_id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PublishMaterialSpec { asset_id, response })
+            .await?
     }
 
     async fn request_delete_material_spec(&self, asset_id: String) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DeleteMaterialSpec { asset_id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DeleteMaterialSpec { asset_id, response })
+            .await?
     }
 
     async fn request_get_lighting_scene(&self) -> Result<LightingSceneInfo, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetLightingScene(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::GetLightingScene).await
     }
 
     async fn request_list_lights(&self) -> Result<Vec<SceneLightInfo>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListLights(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListLights).await
     }
 
     async fn request_create_light(&self, request: CreateLightRequest) -> ApiResult<SceneLightInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateLight { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateLight { request, response })
+            .await?
     }
 
     async fn request_update_light(&self, request: UpdateLightRequest) -> ApiResult<SceneLightInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UpdateLight { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UpdateLight { request, response })
+            .await?
     }
 
     async fn request_delete_light(&self, element_id: u64) -> ApiResult<usize> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DeleteLight {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DeleteLight {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_set_ambient_light(
         &self,
         request: AmbientLightUpdateRequest,
     ) -> ApiResult<AmbientLightInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetAmbientLight { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetAmbientLight { request, response })
+            .await?
     }
 
     async fn request_restore_default_light_rig(&self) -> ApiResult<Vec<SceneLightInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RestoreDefaultLightRig { response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RestoreDefaultLightRig { response })
+            .await?
     }
 
     async fn request_get_render_settings(&self) -> Result<RenderSettingsInfo, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetRenderSettings(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::GetRenderSettings).await
     }
 
     async fn request_set_render_settings(
         &self,
         request: RenderSettingsUpdateRequest,
     ) -> ApiResult<RenderSettingsInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetRenderSettings { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetRenderSettings { request, response })
+            .await?
     }
 
     async fn request_get_camera(&self) -> Result<CameraStateInfo, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetCamera(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::GetCamera).await
     }
 
     async fn request_set_camera(&self, params: CameraParams) -> ApiResult<CameraStateInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetCamera { params, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetCamera { params, response })
+            .await?
     }
 
     // --- Selection ---
 
     async fn request_get_selection(&self) -> Result<Vec<u64>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetSelection(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::GetSelection).await
     }
 
     async fn request_set_selection(&self, element_ids: Vec<u64>) -> ApiResult<Vec<u64>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetSelection {
-                element_ids,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetSelection {
+            element_ids,
+            response,
+        })
+        .await?
     }
 
     async fn request_ux_observe(&self) -> ApiResult<crate::plugins::ux_harness::UxHarnessSnapshot> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UxObserve { response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UxObserve { response })
+            .await?
     }
 
     async fn request_ux_move_pointer(
         &self,
         request: crate::plugins::ux_harness::UxPointerMoveRequest,
     ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UxMovePointer { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UxMovePointer { request, response })
+            .await?
     }
 
     async fn request_ux_click(
         &self,
         request: crate::plugins::ux_harness::UxClickRequest,
     ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UxClick { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UxClick { request, response })
+            .await?
     }
 
     async fn request_ux_drag(
         &self,
         request: crate::plugins::ux_harness::UxDragRequest,
     ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UxDrag { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UxDrag { request, response })
+            .await?
     }
 
     async fn request_ux_press_key(
         &self,
         request: crate::plugins::ux_harness::UxPressKeyRequest,
     ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UxPressKey { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UxPressKey { request, response })
+            .await?
     }
 
     async fn request_align_preview(
         &self,
         request: AlignRequest,
     ) -> ApiResult<Vec<SpatialPreviewEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::AlignPreview { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::AlignPreview { request, response })
+            .await?
     }
 
     async fn request_align_execute(
         &self,
         request: AlignRequest,
     ) -> ApiResult<Vec<SpatialPreviewEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::AlignExecute { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::AlignExecute { request, response })
+            .await?
     }
 
     async fn request_distribute_preview(
         &self,
         request: DistributeRequest,
     ) -> ApiResult<Vec<SpatialPreviewEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DistributePreview { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DistributePreview { request, response })
+            .await?
     }
 
     async fn request_distribute_execute(
         &self,
         request: DistributeRequest,
     ) -> ApiResult<Vec<SpatialPreviewEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DistributeExecute { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DistributeExecute { request, response })
+            .await?
     }
 
     // --- Face Subdivision ---
@@ -1451,47 +971,34 @@ impl ModelApiServer {
         face_id: u32,
         split_position: f32,
     ) -> ApiResult<SplitResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SplitBoxFace {
-                element_id,
-                face_id,
-                split_position,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SplitBoxFace {
+            element_id,
+            face_id,
+            split_position,
+            response,
+        })
+        .await?
     }
 
     // --- Screenshot ---
 
     async fn request_take_screenshot(&self, path: String, include_ui: bool) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::TakeScreenshot {
+        let saved_path = self
+            .round_trip(|response| ModelApiRequest::TakeScreenshot {
                 path,
                 include_ui,
                 response,
             })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        let saved_path = receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())??;
+            .await??;
 
         wait_for_written_file(&saved_path).await?;
         Ok(saved_path)
     }
 
     async fn request_export_drawing(&self, path: String) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExportDrawing { path, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        let saved_path = receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())??;
+        let saved_path = self
+            .round_trip(|response| ModelApiRequest::ExportDrawing { path, response })
+            .await??;
 
         wait_for_written_file(&saved_path).await?;
         Ok(saved_path)
@@ -1502,17 +1009,13 @@ impl ModelApiServer {
         path: String,
         scale_denominator: Option<f32>,
     ) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExportDraftingSheet {
+        let saved_path = self
+            .round_trip(|response| ModelApiRequest::ExportDraftingSheet {
                 path,
                 scale_denominator,
                 response,
             })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        let saved_path = receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())??;
+            .await??;
 
         wait_for_written_file(&saved_path).await?;
         Ok(saved_path)
@@ -1522,117 +1025,68 @@ impl ModelApiServer {
         &self,
         request: PlaceSheetDimensionRequest,
     ) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PlaceSheetDimension { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PlaceSheetDimension { request, response })
+            .await?
     }
 
     async fn request_place_dimension_between_handles(
         &self,
         request: PlaceDimensionBetweenHandlesRequest,
     ) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PlaceDimensionBetweenHandles { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PlaceDimensionBetweenHandles {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_save_project(&self, path: String) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SaveProject { path, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SaveProject { path, response })
+            .await?
     }
 
     async fn request_frame_model(&self) -> ApiResult<BoundingBox> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::FrameModel { response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::FrameModel { response })
+            .await?
     }
 
     async fn request_frame_entities(&self, element_ids: Vec<u64>) -> ApiResult<BoundingBox> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::FrameEntities {
-                element_ids,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::FrameEntities {
+            element_ids,
+            response,
+        })
+        .await?
     }
 
     async fn request_load_project(&self, path: String) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::LoadProject { path, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::LoadProject { path, response })
+            .await?
     }
 
     // --- Semantic Assembly / Relation requests ---
 
     async fn request_list_vocabulary(&self) -> Result<VocabularyInfo, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListVocabulary(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListVocabulary).await
     }
 
     async fn request_create_assembly(
         &self,
         request: CreateAssemblyRequest,
     ) -> ApiResult<CreateAssemblyResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateAssembly { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateAssembly { request, response })
+            .await?
     }
 
     async fn request_get_assembly(&self, element_id: u64) -> ApiResult<AssemblyDetails> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetAssembly {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetAssembly {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_list_assemblies(&self) -> Result<Vec<AssemblyEntry>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListAssemblies(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListAssemblies).await
     }
 
     async fn request_query_relations(
@@ -1641,34 +1095,24 @@ impl ModelApiServer {
         target: Option<u64>,
         relation_type: Option<String>,
     ) -> Result<Vec<RelationEntry>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::QueryRelations {
-                source,
-                target,
-                relation_type,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(|response| ModelApiRequest::QueryRelations {
+            source,
+            target,
+            relation_type,
+            response,
+        })
+        .await
     }
 
     async fn request_list_assembly_members(
         &self,
         element_id: u64,
     ) -> ApiResult<Vec<AssemblyMemberEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListAssemblyMembers {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ListAssemblyMembers {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     // --- Refinement requests (PP70) ---
@@ -1677,58 +1121,38 @@ impl ModelApiServer {
         &self,
         element_id: u64,
     ) -> ApiResult<RefinementStateInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetRefinementState {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetRefinementState {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_get_obligations(&self, element_id: u64) -> ApiResult<Vec<ObligationInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetObligations {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetObligations {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_resolve_obligation(
         &self,
         request: super::request::ResolveObligationRequest,
     ) -> ApiResult<super::request::ResolveObligationResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ResolveObligation { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ResolveObligation { request, response })
+            .await?
     }
 
     async fn request_get_authoring_provenance(
         &self,
         element_id: u64,
     ) -> ApiResult<AuthoringProvenanceInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetAuthoringProvenance {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetAuthoringProvenance {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_get_claim_grounding(
@@ -1736,17 +1160,12 @@ impl ModelApiServer {
         element_id: u64,
         path: Option<String>,
     ) -> ApiResult<Vec<ClaimGroundingEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetClaimGrounding {
-                element_id,
-                path,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetClaimGrounding {
+            element_id,
+            path,
+            response,
+        })
+        .await?
     }
 
     async fn request_promote_refinement(
@@ -1756,19 +1175,14 @@ impl ModelApiServer {
         recipe_id: Option<String>,
         overrides: serde_json::Value,
     ) -> ApiResult<PromoteRefinementResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PromoteRefinement {
-                element_id,
-                target_state,
-                recipe_id,
-                overrides,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PromoteRefinement {
+            element_id,
+            target_state,
+            recipe_id,
+            overrides,
+            response,
+        })
+        .await?
     }
 
     async fn request_demote_refinement(
@@ -1776,33 +1190,23 @@ impl ModelApiServer {
         element_id: u64,
         target_state: String,
     ) -> ApiResult<DemoteRefinementResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DemoteRefinement {
-                element_id,
-                target_state,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DemoteRefinement {
+            element_id,
+            target_state,
+            response,
+        })
+        .await?
     }
 
     async fn request_inspect_refinement_branches(
         &self,
         element_id: u64,
     ) -> ApiResult<Vec<RefinementBranchApiInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::InspectRefinementBranches {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::InspectRefinementBranches {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_discard_refinement_branch(
@@ -1810,90 +1214,62 @@ impl ModelApiServer {
         parent_element_id: u64,
         child_element_id: u64,
     ) -> ApiResult<DiscardRefinementBranchResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DiscardRefinementBranch {
-                parent_element_id,
-                child_element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DiscardRefinementBranch {
+            parent_element_id,
+            child_element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_run_validation(
         &self,
         element_id: u64,
     ) -> ApiResult<Vec<ValidationFindingInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RunValidation {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RunValidation {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_explain_finding(&self, finding_id: String) -> ApiResult<serde_json::Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExplainFinding {
-                finding_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ExplainFinding {
+            finding_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_occurrence_validate_host_fit(
         &self,
         request: ValidateHostFitRequest,
     ) -> ApiResult<HostingValidationResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::OccurrenceValidateHostFit { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::OccurrenceValidateHostFit { request, response })
+            .await?
     }
 
     async fn request_definition_validate_host_contract(
         &self,
         request: ValidateDefinitionHostContractRequest,
     ) -> ApiResult<HostingValidationResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DefinitionValidateHostContract { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DefinitionValidateHostContract {
+            request,
+            response,
+        })
+        .await?
     }
 
     // --- Descriptor discovery requests (PP71) ---
 
     async fn request_list_element_classes(&self) -> Vec<ElementClassInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::ListElementClasses(response));
-        receiver.await.unwrap_or_default()
+        self.round_trip(ModelApiRequest::ListElementClasses)
+            .await
+            .unwrap_or_default()
     }
 
     async fn request_get_capability_snapshot(&self, expanded: bool) -> CapabilitySnapshotInfo {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::GetCapabilitySnapshot { expanded, response });
-        receiver
+        self.round_trip(|response| ModelApiRequest::GetCapabilitySnapshot { expanded, response })
             .await
             .unwrap_or_else(|_| CapabilitySnapshotInfo::empty(expanded))
     }
@@ -1903,13 +1279,13 @@ impl ModelApiServer {
         element_class: Option<String>,
         include_session_drafts: bool,
     ) -> Vec<RecipeFamilyInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::ListRecipeFamilies {
+        self.round_trip(|response| ModelApiRequest::ListRecipeFamilies {
             element_class,
             include_session_drafts,
             response,
-        });
-        receiver.await.unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     async fn request_select_recipe(
@@ -1917,66 +1293,47 @@ impl ModelApiServer {
         element_class: String,
         context: serde_json::Value,
     ) -> ApiResult<Vec<RecipeRankingInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SelectRecipe {
-                element_class,
-                context,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SelectRecipe {
+            element_class,
+            context,
+            response,
+        })
+        .await?
     }
 
     async fn request_discover_curated_paths(
         &self,
         request: CuratedPathDiscoveryRequest,
     ) -> ApiResult<CuratedPathDiscoveryInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DiscoverCuratedPaths { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DiscoverCuratedPaths { request, response })
+            .await?
     }
 
     async fn request_instantiate_recipe(
         &self,
         request: InstantiateRecipeRequest,
     ) -> ApiResult<InstantiateRecipeResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::InstantiateRecipe {
-                request: Box::new(request),
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::InstantiateRecipe {
+            request: Box::new(request),
+            response,
+        })
+        .await?
     }
 
     // --- PP74 requests ---
 
     async fn request_list_constraints(&self, scope: Option<String>) -> Vec<ConstraintInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::ListConstraints { scope, response });
-        receiver.await.unwrap_or_default()
+        self.round_trip(|response| ModelApiRequest::ListConstraints { scope, response })
+            .await
+            .unwrap_or_default()
     }
 
     // --- PP75 requests ---
 
     async fn request_list_catalog_providers(&self) -> Vec<CatalogProviderInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::ListCatalogProviders(response));
-        receiver.await.unwrap_or_default()
+        self.round_trip(ModelApiRequest::ListCatalogProviders)
+            .await
+            .unwrap_or_default()
     }
 
     // --- PP76 requests ---
@@ -1985,20 +1342,20 @@ impl ModelApiServer {
         &self,
         scope_filter: Option<serde_json::Value>,
     ) -> Vec<GenerationPriorInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::ListGenerationPriors {
+        self.round_trip(|response| ModelApiRequest::ListGenerationPriors {
             scope_filter,
             response,
-        });
-        receiver.await.unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     // --- PP78 requests ---
 
     async fn request_list_corpus_gaps(&self) -> Vec<CorpusGapInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::ListCorpusGaps(response));
-        receiver.await.unwrap_or_default()
+        self.round_trip(ModelApiRequest::ListCorpusGaps)
+            .await
+            .unwrap_or_default()
     }
 
     async fn request_request_corpus_expansion(
@@ -2008,35 +1365,25 @@ impl ModelApiServer {
         kind: String,
         rationale: String,
     ) -> ApiResult<CorpusGapInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RequestCorpusExpansion {
-                element_class,
-                jurisdiction,
-                kind,
-                rationale,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RequestCorpusExpansion {
+            element_class,
+            jurisdiction,
+            kind,
+            rationale,
+            response,
+        })
+        .await?
     }
 
     async fn request_lookup_source_passage(
         &self,
         passage_ref: String,
     ) -> ApiResult<PassageLookupInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::LookupSourcePassage {
-                passage_ref,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::LookupSourcePassage {
+            passage_ref,
+            response,
+        })
+        .await?
     }
 
     async fn request_draft_rule_pack(
@@ -2044,29 +1391,22 @@ impl ModelApiServer {
         chunk_id: String,
         element_class: String,
     ) -> ApiResult<DraftRulePackInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DraftRulePack {
-                chunk_id,
-                element_class,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DraftRulePack {
+            chunk_id,
+            element_class,
+            response,
+        })
+        .await?
     }
 
     async fn request_check_rule_pack_backlinks(&self) -> BacklinkCheckReportInfo {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::CheckRulePackBacklinks(response));
-        receiver.await.unwrap_or_else(|_| BacklinkCheckReportInfo {
-            total: 0,
-            resolved: 0,
-            broken: Vec::new(),
-        })
+        self.round_trip(ModelApiRequest::CheckRulePackBacklinks)
+            .await
+            .unwrap_or_else(|_| BacklinkCheckReportInfo {
+                total: 0,
+                resolved: 0,
+                broken: Vec::new(),
+            })
     }
 
     async fn request_list_recipe_drafts(
@@ -2074,46 +1414,31 @@ impl ModelApiServer {
         target_class: Option<String>,
         status: Option<String>,
     ) -> ApiResult<Vec<RecipeDraftInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListRecipeDrafts {
-                target_class,
-                status,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ListRecipeDrafts {
+            target_class,
+            status,
+            response,
+        })
+        .await?
     }
 
     async fn request_get_recipe_draft(
         &self,
         recipe_draft_id: String,
     ) -> ApiResult<RecipeDraftInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetRecipeDraft {
-                recipe_draft_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetRecipeDraft {
+            recipe_draft_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_save_recipe_draft(
         &self,
         request: SaveRecipeDraftRequest,
     ) -> ApiResult<RecipeDraftInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SaveRecipeDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SaveRecipeDraft { request, response })
+            .await?
     }
 
     async fn request_set_recipe_draft_status(
@@ -2121,17 +1446,12 @@ impl ModelApiServer {
         recipe_draft_id: String,
         status: String,
     ) -> ApiResult<RecipeDraftInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetRecipeDraftStatus {
-                recipe_draft_id,
-                status,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetRecipeDraftStatus {
+            recipe_draft_id,
+            status,
+            response,
+        })
+        .await?
     }
 
     async fn request_list_assembly_pattern_drafts(
@@ -2139,46 +1459,31 @@ impl ModelApiServer {
         target_type: Option<String>,
         status: Option<String>,
     ) -> ApiResult<Vec<AssemblyPatternDraftInfo>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListAssemblyPatternDrafts {
-                target_type,
-                status,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ListAssemblyPatternDrafts {
+            target_type,
+            status,
+            response,
+        })
+        .await?
     }
 
     async fn request_get_assembly_pattern_draft(
         &self,
         assembly_pattern_draft_id: String,
     ) -> ApiResult<AssemblyPatternDraftInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetAssemblyPatternDraft {
-                assembly_pattern_draft_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetAssemblyPatternDraft {
+            assembly_pattern_draft_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_save_assembly_pattern_draft(
         &self,
         request: SaveAssemblyPatternDraftRequest,
     ) -> ApiResult<AssemblyPatternDraftInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SaveAssemblyPatternDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SaveAssemblyPatternDraft { request, response })
+            .await?
     }
 
     async fn request_set_assembly_pattern_draft_status(
@@ -2186,30 +1491,20 @@ impl ModelApiServer {
         assembly_pattern_draft_id: String,
         status: String,
     ) -> ApiResult<AssemblyPatternDraftInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetAssemblyPatternDraftStatus {
-                assembly_pattern_draft_id,
-                status,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetAssemblyPatternDraftStatus {
+            assembly_pattern_draft_id,
+            status,
+            response,
+        })
+        .await?
     }
 
     async fn request_materialize_learned_asset(
         &self,
         request: MaterializeLearnedAssetRequest,
     ) -> ApiResult<MaterializeLearnedAssetResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::MaterializeLearnedAsset { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::MaterializeLearnedAsset { request, response })
+            .await?
     }
 
     async fn request_catalog_query(
@@ -2217,95 +1512,68 @@ impl ModelApiServer {
         provider_id: String,
         filter: serde_json::Value,
     ) -> ApiResult<Vec<CatalogRowInfo>> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::CatalogQuery {
+        self.round_trip(|response| ModelApiRequest::CatalogQuery {
             provider_id,
             filter,
             response,
-        });
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        })
+        .await?
     }
 
     async fn request_list_guidance_cards(&self, task: Option<String>) -> Vec<GuidanceCardInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::ListGuidanceCards { task, response });
-        receiver.await.unwrap_or_default()
+        self.round_trip(|response| ModelApiRequest::ListGuidanceCards { task, response })
+            .await
+            .unwrap_or_default()
     }
 
     async fn request_get_guidance_card(&self, card_id: String) -> ApiResult<GuidanceCardInfo> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetGuidanceCard { card_id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetGuidanceCard { card_id, response })
+            .await?
     }
 
     async fn request_list_agent_skills(
         &self,
         filter: crate::plugins::agent_skills::AgentSkillSearch,
     ) -> Vec<crate::plugins::agent_skills::AgentSkillSummary> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(ModelApiRequest::ListAgentSkills { filter, response });
-        receiver.await.unwrap_or_default()
+        self.round_trip(|response| ModelApiRequest::ListAgentSkills { filter, response })
+            .await
+            .unwrap_or_default()
     }
 
     async fn request_get_agent_skill(
         &self,
         skill_id: String,
     ) -> ApiResult<crate::plugins::agent_skills::AgentSkill> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetAgentSkill { skill_id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetAgentSkill { skill_id, response })
+            .await?
     }
 
     async fn request_save_agent_skill_draft(
         &self,
         request: crate::plugins::agent_skills::AgentSkillDraftRequest,
     ) -> ApiResult<crate::plugins::agent_skills::AgentSkill> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SaveAgentSkillDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SaveAgentSkillDraft { request, response })
+            .await?
     }
 
     async fn request_run_validation_v2(
         &self,
         element_id: Option<u64>,
     ) -> Vec<ValidationFindingInfo> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.send(ModelApiRequest::RunValidationV2 {
+        self.round_trip(|response| ModelApiRequest::RunValidationV2 {
             element_id,
             response,
-        });
-        receiver.await.unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
     }
 
     async fn request_explain_finding_v2(&self, finding_id: String) -> ApiResult<serde_json::Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExplainFindingV2 {
-                finding_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ExplainFindingV2 {
+            finding_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_preview_promotion(
@@ -2315,19 +1583,14 @@ impl ModelApiServer {
         recipe_id: Option<String>,
         overrides: serde_json::Value,
     ) -> ApiResult<PreviewPromotionResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PreviewPromotion {
-                element_id,
-                target_state,
-                recipe_id,
-                overrides,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PreviewPromotion {
+            element_id,
+            target_state,
+            recipe_id,
+            overrides,
+            response,
+        })
+        .await?
     }
 
     #[allow(dead_code)]
@@ -2339,279 +1602,171 @@ impl ModelApiServer {
         &self,
         include_internal: bool,
     ) -> Result<Vec<DefinitionEntry>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListDefinitions {
-                include_internal,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(|response| ModelApiRequest::ListDefinitions {
+            include_internal,
+            response,
+        })
+        .await
     }
 
     async fn request_get_definition(&self, definition_id: String) -> ApiResult<DefinitionEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetDefinition {
-                definition_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetDefinition {
+            definition_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_create_definition(&self, request: Value) -> ApiResult<DefinitionEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateDefinition { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateDefinition { request, response })
+            .await?
     }
 
     async fn request_update_definition(&self, request: Value) -> ApiResult<DefinitionEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UpdateDefinition { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UpdateDefinition { request, response })
+            .await?
     }
 
     async fn request_representation_declare(
         &self,
         request: RepresentationDeclareRequest,
     ) -> ApiResult<DefinitionEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RepresentationDeclare { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RepresentationDeclare { request, response })
+            .await?
     }
 
     async fn request_representation_set_lod(
         &self,
         request: RepresentationSetLodRequest,
     ) -> ApiResult<DefinitionEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RepresentationSetLod { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RepresentationSetLod { request, response })
+            .await?
     }
 
     async fn request_representation_set_update_policy(
         &self,
         request: RepresentationSetUpdatePolicyRequest,
     ) -> ApiResult<DefinitionEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::RepresentationSetUpdatePolicy { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::RepresentationSetUpdatePolicy {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_list_definition_drafts(&self) -> Result<Vec<DefinitionDraftEntry>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListDefinitionDrafts(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::ListDefinitionDrafts).await
     }
 
     async fn request_get_definition_draft(
         &self,
         draft_id: String,
     ) -> ApiResult<DefinitionDraftEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetDefinitionDraft { draft_id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetDefinitionDraft { draft_id, response })
+            .await?
     }
 
     async fn request_open_definition_draft(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionDraftEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::OpenDefinitionDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::OpenDefinitionDraft { request, response })
+            .await?
     }
 
     async fn request_create_definition_draft(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionDraftEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateDefinitionDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateDefinitionDraft { request, response })
+            .await?
     }
 
     async fn request_derive_definition_draft(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionDraftEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DeriveDefinitionDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DeriveDefinitionDraft { request, response })
+            .await?
     }
 
     async fn request_patch_definition_draft(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionDraftEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PatchDefinitionDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PatchDefinitionDraft { request, response })
+            .await?
     }
 
     async fn request_publish_definition_draft(
         &self,
         draft_id: String,
     ) -> ApiResult<DefinitionEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PublishDefinitionDraft { draft_id, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PublishDefinitionDraft { draft_id, response })
+            .await?
     }
 
     async fn request_validate_definition(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionValidationResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ValidateDefinition { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ValidateDefinition { request, response })
+            .await?
     }
 
     async fn request_compile_definition(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionCompileResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CompileDefinition { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CompileDefinition { request, response })
+            .await?
     }
 
     async fn request_explain_definition(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionExplainResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExplainDefinition { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ExplainDefinition { request, response })
+            .await?
     }
 
     async fn request_list_definition_libraries(
         &self,
     ) -> Result<Vec<DefinitionLibraryEntry>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListDefinitionLibraries(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
+        self.round_trip(ModelApiRequest::ListDefinitionLibraries)
             .await
-            .map_err(|_| "model API response channel closed".to_string())
     }
 
     async fn request_get_definition_library(&self, library_id: String) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetDefinitionLibrary {
-                library_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::GetDefinitionLibrary {
+            library_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_create_definition_library(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionLibraryEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateDefinitionLibrary { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::CreateDefinitionLibrary { request, response })
+            .await?
     }
 
     async fn request_add_definition_to_library(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionLibraryEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::AddDefinitionToLibrary { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::AddDefinitionToLibrary { request, response })
+            .await?
     }
 
     async fn request_import_definition_library(
         &self,
         path: String,
     ) -> ApiResult<DefinitionLibraryEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ImportDefinitionLibrary { path, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ImportDefinitionLibrary { path, response })
+            .await?
     }
 
     async fn request_export_definition_library(
@@ -2619,118 +1774,89 @@ impl ModelApiServer {
         library_id: String,
         path: String,
     ) -> ApiResult<String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExportDefinitionLibrary {
-                library_id,
-                path,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ExportDefinitionLibrary {
+            library_id,
+            path,
+            response,
+        })
+        .await?
     }
 
     async fn request_list_workspace_definition_libraries(
         &self,
         request: Value,
     ) -> ApiResult<Vec<DefinitionLibraryEntry>> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListWorkspaceDefinitionLibraries { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(
+            |response| ModelApiRequest::ListWorkspaceDefinitionLibraries { request, response },
+        )
+        .await?
     }
 
     async fn request_create_workspace_definition_library(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionLibraryEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::CreateWorkspaceDefinitionLibrary { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(
+            |response| ModelApiRequest::CreateWorkspaceDefinitionLibrary { request, response },
+        )
+        .await?
     }
 
     async fn request_import_workspace_definition_draft(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionLibraryEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ImportWorkspaceDefinitionDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ImportWorkspaceDefinitionDraft {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_update_workspace_definition_draft(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionLibraryEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UpdateWorkspaceDefinitionDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UpdateWorkspaceDefinitionDraft {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_delete_workspace_definition_draft(
         &self,
         request: Value,
     ) -> ApiResult<DefinitionLibraryEntry> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::DeleteWorkspaceDefinitionDraft { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::DeleteWorkspaceDefinitionDraft {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_instantiate_definition(
         &self,
         request: Value,
     ) -> ApiResult<InstantiateDefinitionResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::InstantiateDefinition { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::InstantiateDefinition { request, response })
+            .await?
     }
 
     async fn request_instantiate_hosted_definition(
         &self,
         request: Value,
     ) -> ApiResult<InstantiateDefinitionResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::InstantiateHostedDefinition { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::InstantiateHostedDefinition {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_place_occurrence(&self, request: Value) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::PlaceOccurrence { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::PlaceOccurrence { request, response })
+            .await?
     }
 
     async fn request_update_occurrence_overrides(
@@ -2738,85 +1864,60 @@ impl ModelApiServer {
         element_id: u64,
         overrides: Value,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::UpdateOccurrenceOverrides {
-                element_id,
-                overrides,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::UpdateOccurrenceOverrides {
+            element_id,
+            overrides,
+            response,
+        })
+        .await?
     }
 
     async fn request_set_occurrence_material_override(
         &self,
         request: SetOccurrenceMaterialOverrideRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::SetOccurrenceMaterialOverride { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::SetOccurrenceMaterialOverride {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_clear_occurrence_material_override(
         &self,
         request: ClearOccurrenceMaterialOverrideRequest,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ClearOccurrenceMaterialOverride { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(
+            |response| ModelApiRequest::ClearOccurrenceMaterialOverride { request, response },
+        )
+        .await?
     }
 
     async fn request_make_occurrence_unique(
         &self,
         request: OccurrenceMakeUniqueRequest,
     ) -> ApiResult<MakeOccurrenceUniqueResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::MakeOccurrenceUnique { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::MakeOccurrenceUnique { request, response })
+            .await?
     }
 
     async fn request_explain_occurrence(
         &self,
         element_id: u64,
     ) -> ApiResult<OccurrenceExplainResult> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ExplainOccurrence {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ExplainOccurrence {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_resolve_occurrence(&self, element_id: u64) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ResolveOccurrence {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ResolveOccurrence {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     // --- Array requests ---
@@ -2827,18 +1928,13 @@ impl ModelApiServer {
         count: u32,
         spacing: [f32; 3],
     ) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ArrayCreateLinear {
-                source_id,
-                count,
-                spacing,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ArrayCreateLinear {
+            source_id,
+            count,
+            spacing,
+            response,
+        })
+        .await?
     }
 
     async fn request_array_create_polar(
@@ -2849,20 +1945,15 @@ impl ModelApiServer {
         total_angle_degrees: f32,
         center: [f32; 3],
     ) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ArrayCreatePolar {
-                source_id,
-                count,
-                axis,
-                total_angle_degrees,
-                center,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ArrayCreatePolar {
+            source_id,
+            count,
+            axis,
+            total_angle_degrees,
+            center,
+            response,
+        })
+        .await?
     }
 
     async fn request_array_update(
@@ -2874,47 +1965,32 @@ impl ModelApiServer {
         total_angle_degrees: Option<f32>,
         center: Option<[f32; 3]>,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ArrayUpdate {
-                element_id,
-                count,
-                spacing,
-                axis,
-                total_angle_degrees,
-                center,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ArrayUpdate {
+            element_id,
+            count,
+            spacing,
+            axis,
+            total_angle_degrees,
+            center,
+            response,
+        })
+        .await?
     }
 
     async fn request_array_dissolve(&self, element_id: u64) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ArrayDissolve {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ArrayDissolve {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_array_get(&self, element_id: u64) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ArrayGet {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ArrayGet {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     // --- Mirror requests ---
@@ -2927,20 +2003,15 @@ impl ModelApiServer {
         plane_normal: Option<[f32; 3]>,
         merge: Option<bool>,
     ) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::MirrorCreate {
-                source_id,
-                plane_str,
-                plane_origin,
-                plane_normal,
-                merge,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::MirrorCreate {
+            source_id,
+            plane_str,
+            plane_origin,
+            plane_normal,
+            merge,
+            response,
+        })
+        .await?
     }
 
     async fn request_mirror_update(
@@ -2951,56 +2022,35 @@ impl ModelApiServer {
         plane_normal: Option<[f32; 3]>,
         merge: Option<bool>,
     ) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::MirrorUpdate {
-                element_id,
-                plane_str,
-                plane_origin,
-                plane_normal,
-                merge,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::MirrorUpdate {
+            element_id,
+            plane_str,
+            plane_origin,
+            plane_normal,
+            merge,
+            response,
+        })
+        .await?
     }
 
     async fn request_mirror_dissolve(&self, element_id: u64) -> ApiResult<u64> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::MirrorDissolve {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::MirrorDissolve {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_mirror_get(&self, element_id: u64) -> ApiResult<Value> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::MirrorGet {
-                element_id,
-                response,
-            })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::MirrorGet {
+            element_id,
+            response,
+        })
+        .await?
     }
 
     async fn request_get_authoring_guidance(&self) -> Result<AuthoringGuidance, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::GetAuthoringGuidance(response))
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        self.round_trip(ModelApiRequest::GetAuthoringGuidance).await
     }
 
     // --- Semantic Procedural Session (ADR-051, PP-SPS-3) ---
@@ -3009,26 +2059,16 @@ impl ModelApiServer {
         &self,
         request: crate::plugins::procedural_session_mcp::SessionCreateRequest,
     ) -> Result<crate::plugins::procedural_session_mcp::SessionCreateResponse, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ProceduralSessionCreate { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
+        self.round_trip(|response| ModelApiRequest::ProceduralSessionCreate { request, response })
             .await
-            .map_err(|_| "model API response channel closed".to_string())
     }
 
     async fn request_procedural_session_eval(
         &self,
         request: crate::plugins::procedural_session_mcp::SessionEvalRequest,
     ) -> Result<crate::curation::EvalReport, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ProceduralSessionEval { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ProceduralSessionEval { request, response })
+            .await?
             .map_err(|e| format!("{e}"))
     }
 
@@ -3036,13 +2076,8 @@ impl ModelApiServer {
         &self,
         request: crate::plugins::procedural_session_mcp::SessionSnapshotRequest,
     ) -> Result<crate::curation::SessionSnapshot, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ProceduralSessionSnapshot { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ProceduralSessionSnapshot { request, response })
+            .await?
             .map_err(|e| format!("{e}"))
     }
 
@@ -3050,13 +2085,8 @@ impl ModelApiServer {
         &self,
         request: crate::plugins::procedural_session_mcp::SessionCommitRequest,
     ) -> Result<crate::curation::CommitReport, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ProceduralSessionCommit { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ProceduralSessionCommit { request, response })
+            .await?
             .map_err(|e| format!("{e}"))
     }
 
@@ -3064,13 +2094,8 @@ impl ModelApiServer {
         &self,
         request: crate::plugins::procedural_session_mcp::SessionExportRequest,
     ) -> Result<crate::curation::ExportHandle, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ProceduralSessionExport { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ProceduralSessionExport { request, response })
+            .await?
             .map_err(|e| format!("{e}"))
     }
 
@@ -3079,78 +2104,48 @@ impl ModelApiServer {
     async fn request_parametric_list_types(
         &self,
     ) -> Result<Vec<crate::plugins::parametric_mcp::ParametricTypeInfo>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ParametricListTypes { response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
+        self.round_trip(|response| ModelApiRequest::ParametricListTypes { response })
             .await
-            .map_err(|_| "model API response channel closed".to_string())
     }
 
     async fn request_parametric_create(
         &self,
         request: crate::plugins::parametric_mcp::CreateParametricRequest,
     ) -> Result<crate::plugins::parametric_mcp::CreateParametricResponse, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ParametricCreate { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ParametricCreate { request, response })
+            .await?
     }
 
     async fn request_parametric_inspect(
         &self,
         request: crate::plugins::parametric_mcp::InspectParametricRequest,
     ) -> Result<crate::relational::registry::ParametricSnapshot, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ParametricInspect { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ParametricInspect { request, response })
+            .await?
     }
 
     async fn request_parametric_set_driver(
         &self,
         request: crate::plugins::parametric_mcp::SetParametricDriverRequest,
     ) -> Result<crate::plugins::parametric_mcp::SetDriverResponse, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ParametricSetDriver { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ParametricSetDriver { request, response })
+            .await?
     }
 
     async fn request_parametric_transform(
         &self,
         request: crate::plugins::parametric_mcp::ParametricTransformRequest,
     ) -> Result<crate::relational::transform::TransformOutcome, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ParametricTransform { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ParametricTransform { request, response })
+            .await?
     }
 
     async fn request_parametric_explain(
         &self,
         request: crate::plugins::parametric_mcp::ExplainParametricRequest,
     ) -> Result<crate::plugins::parametric_mcp::ExplainParametricResponse, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ParametricExplain { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::ParametricExplain { request, response })
+            .await?
     }
 
     // --- Knowledge persistence bridges (Change-2 / Change-3 / Change-7) ---
@@ -3159,25 +2154,19 @@ impl ModelApiServer {
         &self,
         request: super::request::InstallRecipeFromSessionExportRequest,
     ) -> Result<super::request::InstallRecipeResult, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::InstallRecipeFromSessionExport { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::InstallRecipeFromSessionExport {
+            request,
+            response,
+        })
+        .await?
     }
 
     async fn request_list_persisted_recipes(
         &self,
     ) -> Result<Vec<super::request::PersistedRecipeInfo>, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::ListPersistedRecipes { response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        let recipes = receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?;
+        let recipes = self
+            .round_trip(|response| ModelApiRequest::ListPersistedRecipes { response })
+            .await?;
         Ok(recipes)
     }
 
@@ -3185,13 +2174,8 @@ impl ModelApiServer {
         &self,
         request: super::request::AcquireCorpusPassageRequest,
     ) -> Result<super::request::AcquireCorpusPassageResult, String> {
-        let (response, receiver) = oneshot::channel();
-        self.sender
-            .send(ModelApiRequest::AcquireCorpusPassage { request, response })
-            .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())?
+        self.round_trip(|response| ModelApiRequest::AcquireCorpusPassage { request, response })
+            .await?
     }
 }
 
@@ -5253,13 +4237,8 @@ impl ModelApiServer {
         &self,
         Parameters(params): Parameters<CreateBoxRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let parameters = serde_json::to_value(params)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-        let result = self
-            .request_invoke_command(CMD_MODEL_API_CREATE_BOX.to_string(), parameters)
+        self.typed_command_tool(CMD_MODEL_API_CREATE_BOX, params)
             .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(result)
     }
 
     #[tool(
@@ -5300,13 +4279,8 @@ impl ModelApiServer {
         &self,
         Parameters(params): Parameters<DeleteEntitiesRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let parameters = serde_json::to_value(params)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-        let result = self
-            .request_invoke_command(CMD_MODEL_API_DELETE_ENTITIES.to_string(), parameters)
+        self.typed_command_tool(CMD_MODEL_API_DELETE_ENTITIES, params)
             .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(result)
     }
 
     #[tool(
@@ -5323,13 +4297,8 @@ gable inherits the angle, so gable ends can never be left at the wrong angle. ro
         &self,
         Parameters(params): Parameters<TransformToolRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let parameters = serde_json::to_value(params)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-        let result = self
-            .request_invoke_command(CMD_MODEL_API_TRANSFORM_ENTITIES.to_string(), parameters)
+        self.typed_command_tool(CMD_MODEL_API_TRANSFORM_ENTITIES, params)
             .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(result)
     }
 
     #[tool(
@@ -5340,13 +4309,8 @@ gable inherits the angle, so gable ends can never be left at the wrong angle. ro
         &self,
         Parameters(params): Parameters<SetPropertyRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let parameters = serde_json::to_value(params)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-        let result = self
-            .request_invoke_command(CMD_MODEL_API_SET_ENTITY_PROPERTY.to_string(), parameters)
+        self.typed_command_tool(CMD_MODEL_API_SET_ENTITY_PROPERTY, params)
             .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(result)
     }
 
     #[tool(
@@ -5357,13 +4321,8 @@ gable inherits the angle, so gable ends can never be left at the wrong angle. ro
         &self,
         Parameters(params): Parameters<SetPropertyRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let parameters = serde_json::to_value(params)
-            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-        let result = self
-            .request_invoke_command(CMD_MODEL_API_SET_ENTITY_PROPERTY.to_string(), parameters)
+        self.typed_command_tool(CMD_MODEL_API_SET_ENTITY_PROPERTY, params)
             .await
-            .map_err(|error| McpError::invalid_params(error, None))?;
-        json_tool_result(result)
     }
 
     #[tool(

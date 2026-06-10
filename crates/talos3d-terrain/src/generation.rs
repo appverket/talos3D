@@ -81,14 +81,8 @@ struct CutFillVisualizationInput<'a> {
 /// are sliced from the (gridded) surface mesh, so they staircase; they are also
 /// redundant with the imported survey contour layers (e.g. `HOJDKURVA`). Off by
 /// default — toggle via `terrain.toggle_generated_contours`.
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct ShowGeneratedContours(pub bool);
-
-impl Default for ShowGeneratedContours {
-    fn default() -> Self {
-        Self(false)
-    }
-}
 
 impl Plugin for TerrainGenerationPlugin {
     fn build(&self, app: &mut App) {

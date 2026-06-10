@@ -25,19 +25,14 @@ impl std::fmt::Display for AgentSkillId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSkillTrustLevel {
     Shipped,
     ProjectDraft,
+    #[default]
     SessionDraft,
-}
-
-impl Default for AgentSkillTrustLevel {
-    fn default() -> Self {
-        Self::SessionDraft
-    }
 }
 
 impl AgentSkillTrustLevel {

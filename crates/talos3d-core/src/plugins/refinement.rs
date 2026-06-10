@@ -16,6 +16,7 @@
 //! function wired into `run_validation`. A richer scheduling engine with Bevy
 //! change detection and caching will land in PP74.
 
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use bevy::prelude::*;
@@ -855,9 +856,7 @@ pub fn evaluate_assembly_member_obligations(
             continue;
         }
 
-        let required_member_state = template
-            .member_tracks_target_state
-            .then_some(target_state);
+        let required_member_state = template.member_tracks_target_state.then_some(target_state);
 
         // Members whose role matches this obligation.
         let role_matches: Vec<u64> = assembly
@@ -939,8 +938,7 @@ pub fn unmet_assembly_member_obligations(
         return Vec::new();
     };
     let templates = {
-        let Some(registry) =
-            world.get_resource::<crate::capability_registry::CapabilityRegistry>()
+        let Some(registry) = world.get_resource::<crate::capability_registry::CapabilityRegistry>()
         else {
             return Vec::new();
         };
@@ -1720,18 +1718,16 @@ impl AuthoredEntity for ObligationSetSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
-        let Some(entity) = find_entity_by_element_id_readonly(world, self.element_id) else {
+        let Some(entity) =
+            find_entity_by_element_id_readonly(world, self.element_id)
+        else {
             return;
         };
-        if let Ok(entries) =
-            serde_json::from_value::<Vec<Obligation>>(self.entries_json.clone())
-        {
+        if let Ok(entries) = serde_json::from_value::<Vec<Obligation>>(self.entries_json.clone()) {
             if entries.is_empty() {
                 world.entity_mut(entity).remove::<ObligationSet>();
             } else {
-                world
-                    .entity_mut(entity)
-                    .insert(ObligationSet { entries });
+                world.entity_mut(entity).insert(ObligationSet { entries });
             }
         }
     }
@@ -1916,16 +1912,12 @@ fn tag_refinement_relation_pair(
     };
 
     for relation_id in [fwd_id, inv_id] {
-        if let Some(entity) = find_entity_by_element_id_readonly(world, relation_id) {
+        if let Some(entity) =
+            find_entity_by_element_id_readonly(world, relation_id)
+        {
             world.entity_mut(entity).insert(branch.clone());
         }
     }
-}
-
-fn find_entity_by_element_id_readonly(world: &World, element_id: ElementId) -> Option<Entity> {
-    let mut q = world.try_query::<(Entity, &ElementId)>()?;
-    q.iter(world)
-        .find_map(|(entity, id)| (*id == element_id).then_some(entity))
 }
 
 fn root_refinement_handle(world: &World, element_id: ElementId) -> ElementId {
@@ -2190,7 +2182,9 @@ pub fn discard_refinement_branch(
 
     let discarded: Vec<u64> = ids_to_despawn.iter().copied().collect();
     for id in &discarded {
-        if let Some(entity) = find_entity_by_element_id_readonly(world, ElementId(*id)) {
+        if let Some(entity) =
+            find_entity_by_element_id_readonly(world, ElementId(*id))
+        {
             let _ = world.despawn(entity);
         }
     }
@@ -2227,7 +2221,9 @@ fn set_refinement_subtree_visibility(
         if !visited.insert(eid.0) {
             continue;
         }
-        if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
+        if let Some(entity) =
+            find_entity_by_element_id_readonly(world, eid)
+        {
             world.entity_mut(entity).insert(visibility);
         }
         for child in query_all_refined_into(world, eid) {
@@ -2667,7 +2663,9 @@ mod tests {
             vec![ElementId(2)]
         );
         assert!(is_parked_refinement_entity(&world, ElementId(2)));
-        let child_entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
+        let child_entity =
+            find_entity_by_element_id_readonly(&world, ElementId(2))
+                .unwrap();
         assert_eq!(
             world.get::<Visibility>(child_entity).copied(),
             Some(Visibility::Hidden)
@@ -2717,7 +2715,9 @@ mod tests {
         assert_eq!(query_refined_into(&world, ElementId(1)), vec![ElementId(2)]);
         assert!(query_parked_refined_into(&world, ElementId(1)).is_empty());
         assert!(!is_parked_refinement_entity(&world, ElementId(2)));
-        let child_entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
+        let child_entity =
+            find_entity_by_element_id_readonly(&world, ElementId(2))
+                .unwrap();
         assert_eq!(
             world.get::<Visibility>(child_entity).copied(),
             Some(Visibility::Visible)
@@ -2766,9 +2766,18 @@ mod tests {
 
         assert!(discarded.contains(&2));
         assert!(discarded.contains(&3));
-        assert!(find_entity_by_element_id_readonly(&world, ElementId(1)).is_some());
-        assert!(find_entity_by_element_id_readonly(&world, ElementId(2)).is_none());
-        assert!(find_entity_by_element_id_readonly(&world, ElementId(3)).is_none());
+        assert!(
+            find_entity_by_element_id_readonly(&world, ElementId(1))
+                .is_some()
+        );
+        assert!(
+            find_entity_by_element_id_readonly(&world, ElementId(2))
+                .is_none()
+        );
+        assert!(
+            find_entity_by_element_id_readonly(&world, ElementId(3))
+                .is_none()
+        );
         assert!(query_refined_into(&world, ElementId(1)).is_empty());
         assert!(query_parked_refined_into(&world, ElementId(1)).is_empty());
     }
@@ -2982,7 +2991,10 @@ mod tests {
             err.contains("unsatisfied obligation"),
             "expected gate error, got: {err}"
         );
-        assert!(err.contains("load_path"), "error should name the obligation: {err}");
+        assert!(
+            err.contains("load_path"),
+            "error should name the obligation: {err}"
+        );
     }
 
     #[test]
@@ -3131,7 +3143,9 @@ mod tests {
         .expect("re-promotion should succeed");
 
         // Verify the SatisfiedBy survived the merge.
-        let obligation_set = world.get::<ObligationSet>(entity).expect("ObligationSet present");
+        let obligation_set = world
+            .get::<ObligationSet>(entity)
+            .expect("ObligationSet present");
         let ob = obligation_set
             .entries
             .iter()
@@ -3149,8 +3163,7 @@ mod tests {
         // A class where full_spec is required by Constructible (not Schematic).
         // Promoting to Schematic must NOT be blocked by an unresolved Constructible-level obligation.
         use crate::capability_registry::{
-            CapabilityRegistry, ElementClassDescriptor, ElementClassAssignment, ElementClassId,
-            ObligationTemplate,
+            CapabilityRegistry, ElementClassDescriptor, ElementClassId, ObligationTemplate,
         };
         let mut world = refinement_command_world();
         let mut registry = CapabilityRegistry::default();
