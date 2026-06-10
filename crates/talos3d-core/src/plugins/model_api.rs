@@ -1,3 +1,4 @@
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 use std::collections::HashMap;
 
 #[cfg(feature = "model-api")]
@@ -1420,8 +1421,9 @@ fn handle_get_material_assignment(
     world: &World,
     element_id: u64,
 ) -> Result<EntityMaterialAssignmentInfo, String> {
-    let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
-        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let entity =
+        find_entity_by_element_id_readonly(world, ElementId(element_id))
+            .ok_or_else(|| format!("Entity {element_id} not found"))?;
     Ok(EntityMaterialAssignmentInfo {
         element_id,
         assignment: world.entity(entity).get::<MaterialAssignment>().cloned(),
@@ -1581,8 +1583,9 @@ fn element_texture_mapping_info(
     world: &World,
     element_id: u64,
 ) -> Result<TextureMappingInfo, String> {
-    let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
-        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let entity =
+        find_entity_by_element_id_readonly(world, ElementId(element_id))
+            .ok_or_else(|| format!("Entity {element_id} not found"))?;
     let assignment = world.entity(entity).get::<MaterialAssignment>().cloned();
     let spec_registry = world.get_resource::<crate::curation::MaterialSpecRegistry>();
     let material_id = assignment
@@ -1850,8 +1853,11 @@ fn resolve_bim_material_target(
             Ok(BimMaterialTarget::Definition(id))
         }
         (None, Some(element_id)) => {
-            let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
-                .ok_or_else(|| format!("Entity {element_id} not found"))?;
+            let entity = find_entity_by_element_id_readonly(
+                world,
+                ElementId(element_id),
+            )
+            .ok_or_else(|| format!("Entity {element_id} not found"))?;
             let identity = world
                 .entity(entity)
                 .get::<OccurrenceIdentity>()
@@ -2313,8 +2319,11 @@ pub fn handle_quantity_get(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::quantity_set::QuantitySet;
 
-    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
-        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let entity = find_entity_by_element_id_readonly(
+        world,
+        ElementId(request.element_id),
+    )
+    .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
     if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
     {
         return Ok(Value::Null);
@@ -2356,8 +2365,11 @@ pub fn handle_quantity_list_provenance(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::quantity_set::QuantitySet;
 
-    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
-        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let entity = find_entity_by_element_id_readonly(
+        world,
+        ElementId(request.element_id),
+    )
+    .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
     if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
     {
         return Ok(Value::Array(Vec::new()));
@@ -2414,8 +2426,11 @@ pub fn handle_quantity_check_invariants(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::quantity_set::QuantitySet;
 
-    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
-        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let entity = find_entity_by_element_id_readonly(
+        world,
+        ElementId(request.element_id),
+    )
+    .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
     if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
     {
         return Ok(serde_json::json!({
@@ -3439,8 +3454,9 @@ fn gather_spatial_entity_plans(
     for element_id in element_ids {
         let element_id = ElementId(*element_id);
         let snapshot = capture_snapshot_by_id(world, element_id)?;
-        let entity = find_entity_by_element_id_readonly(world, element_id)
-            .ok_or_else(|| format!("Entity {} not found", element_id.0))?;
+        let entity =
+            find_entity_by_element_id_readonly(world, element_id)
+                .ok_or_else(|| format!("Entity {} not found", element_id.0))?;
         let locked = crate::plugins::layers::entity_on_locked_layer(world, entity);
         plans.push(SpatialEntityPlan {
             element_id,
@@ -3453,13 +3469,6 @@ fn gather_spatial_entity_plans(
 }
 
 #[cfg(feature = "model-api")]
-fn find_entity_by_element_id_readonly(world: &World, element_id: ElementId) -> Option<Entity> {
-    let mut query = world.try_query::<(Entity, &ElementId)>()?;
-    query
-        .iter(world)
-        .find_map(|(entity, current)| (*current == element_id).then_some(entity))
-}
-
 #[cfg(feature = "model-api")]
 fn alignment_bounds(snapshot: &BoxedEntity) -> crate::authored_entity::EntityBounds {
     snapshot.bounds().unwrap_or_else(|| {
@@ -9675,7 +9684,9 @@ fn ensure_user_editable_entity(
     operation: &str,
 ) -> ApiResult<()> {
     ensure_entity_exists(world, element_id)?;
-    let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
+    let Some(entity) =
+        find_entity_by_element_id_readonly(world, element_id)
+    else {
         return Err(format!("Entity not found: {}", element_id.0));
     };
     if world
@@ -11707,7 +11718,7 @@ fn parametric_class_token_match(class: &str, id: &str, label: &str) -> bool {
     let id_l = id.to_ascii_lowercase();
     let label_l = label.to_ascii_lowercase();
     class
-        .split(|c: char| c == '_' || c == '.' || c == ' ')
+        .split(['_', '.', ' '])
         .filter(|tok| tok.len() >= 3)
         .map(|tok| tok.to_ascii_lowercase())
         .filter(|tok| !CLASS_TOKEN_STOPWORDS.contains(&tok.as_str()))

@@ -1,3 +1,4 @@
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 use super::*;
 use crate::capability_registry::CapabilityRegistry;
 #[cfg(feature = "model-api")]
@@ -5540,8 +5541,9 @@ fn promote_refinement_rejects_bluff_assembly_to_fabrication_ready() {
     assert!(error.contains("unmet member obligation"));
 
     // The commit must not have mutated state.
-    let entity = find_entity_by_element_id_readonly(&world, ElementId(510))
-        .expect("assembly entity should still exist");
+    let entity =
+        find_entity_by_element_id_readonly(&world, ElementId(510))
+            .expect("assembly entity should still exist");
     let state = world
         .get::<RefinementStateComponent>(entity)
         .map(|c| c.state)
@@ -5599,7 +5601,9 @@ fn promote_refinement_allows_fully_authored_assembly() {
     .expect("fully authored house promotion should succeed");
     assert_eq!(result.new_state, "Detailed");
 
-    let entity = find_entity_by_element_id_readonly(&world, ElementId(600)).unwrap();
+    let entity =
+        find_entity_by_element_id_readonly(&world, ElementId(600))
+            .unwrap();
     assert_eq!(
         world
             .get::<RefinementStateComponent>(entity)

@@ -1320,15 +1320,46 @@ fn parse_visualization_mode(value: &str) -> Result<TerrainVisualizationMode, Str
     }
 }
 
-fn terrain_mesh_by_id(
+/// Visit the entity carrying `element_id` and project a value out of it.
+fn with_entity_by_id<R>(
     world: &World,
     element_id: ElementId,
-) -> Option<talos3d_core::plugins::modeling::primitives::TriangleMesh> {
+    project: impl Fn(&EntityRef) -> Option<R>,
+) -> Option<R> {
     let mut q = world.try_query::<EntityRef>()?;
     q.iter(world).find_map(|entity_ref| {
         if entity_ref.get::<ElementId>() != Some(&element_id) {
             return None;
         }
+        project(&entity_ref)
+    })
+}
+
+/// Clone component `T` from the entity carrying `element_id`.
+fn component_by_id<T: Component + Clone>(world: &World, element_id: ElementId) -> Option<T> {
+    with_entity_by_id(world, element_id, |entity_ref| entity_ref.get::<T>().cloned())
+}
+
+/// Element id of the currently selected entity that also carries `T`.
+fn selected_id_with<T: Component>(world: &World, missing_hint: &str) -> Result<ElementId, String> {
+    world
+        .try_query::<EntityRef>()
+        .and_then(|mut q| {
+            q.iter(world).find_map(|entity_ref| {
+                if !entity_ref.contains::<Selected>() || !entity_ref.contains::<T>() {
+                    return None;
+                }
+                entity_ref.get::<ElementId>().copied()
+            })
+        })
+        .ok_or_else(|| missing_hint.to_string())
+}
+
+fn terrain_mesh_by_id(
+    world: &World,
+    element_id: ElementId,
+) -> Option<talos3d_core::plugins::modeling::primitives::TriangleMesh> {
+    with_entity_by_id(world, element_id, |entity_ref| {
         entity_ref
             .get::<TerrainMeshCache>()
             .map(|cache| cache.mesh.clone())
@@ -1336,47 +1367,22 @@ fn terrain_mesh_by_id(
 }
 
 fn selected_terrain_surface_id(world: &World) -> Result<ElementId, String> {
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    q.iter(world)
-        .find_map(|entity_ref| {
-            if !entity_ref.contains::<Selected>() || !entity_ref.contains::<TerrainSurface>() {
-                return None;
-            }
-            entity_ref.get::<ElementId>().copied()
-        })
-        .ok_or_else(|| "Select a terrain surface or provide source_surface_id".to_string())
+    selected_id_with::<TerrainSurface>(
+        world,
+        "Select a terrain surface or provide source_surface_id",
+    )
 }
 
 fn selected_elevation_curve_id(world: &World) -> Result<ElementId, String> {
-    let mut q = world.try_query::<EntityRef>().unwrap();
-    q.iter(world)
-        .find_map(|entity_ref| {
-            if !entity_ref.contains::<Selected>() || !entity_ref.contains::<ElevationCurve>() {
-                return None;
-            }
-            entity_ref.get::<ElementId>().copied()
-        })
-        .ok_or_else(|| "Select an elevation curve or provide curve_id".to_string())
+    selected_id_with::<ElevationCurve>(world, "Select an elevation curve or provide curve_id")
 }
 
 fn terrain_surface_by_id(world: &World, element_id: ElementId) -> Option<TerrainSurface> {
-    let mut q = world.try_query::<EntityRef>()?;
-    q.iter(world).find_map(|entity_ref| {
-        if entity_ref.get::<ElementId>() != Some(&element_id) {
-            return None;
-        }
-        entity_ref.get::<TerrainSurface>().cloned()
-    })
+    component_by_id(world, element_id)
 }
 
 fn elevation_curve_by_id(world: &World, element_id: ElementId) -> Option<ElevationCurve> {
-    let mut q = world.try_query::<EntityRef>()?;
-    q.iter(world).find_map(|entity_ref| {
-        if entity_ref.get::<ElementId>() != Some(&element_id) {
-            return None;
-        }
-        entity_ref.get::<ElevationCurve>().cloned()
-    })
+    component_by_id(world, element_id)
 }
 
 fn format_cut_fill_feedback(result: &CutFillResult) -> String {

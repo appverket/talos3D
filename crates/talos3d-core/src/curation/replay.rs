@@ -710,7 +710,7 @@ fn eval_expr(
     }
 
     // Populate variables from step output bindings.
-    for (_step_id, out_map) in outputs {
+    for out_map in outputs.values() {
         for (k, v) in out_map {
             if let Some(ev) = json_to_eval_value(v) {
                 // Later steps override earlier ones for duplicate keys;
@@ -1355,9 +1355,7 @@ mod tests {
 
     #[test]
     fn replay_repeat_dispatches_n_times() {
-        use super::super::authoring_script::{
-            ArgExpr, CallRecipeKindTag, RepeatKindTag, ScriptInstruction, Step,
-        };
+        use super::super::authoring_script::{ArgExpr, RepeatKindTag, ScriptInstruction, Step};
         let mut s = AuthoringScript::stub(MutationScope::None);
         s.allowed_tools.insert(tool("create_box"));
         // A Repeat that runs its body 5 times.
@@ -1389,7 +1387,7 @@ mod tests {
         let o = FixtureOracle {
             fail_relation_kind: None,
         };
-        let report = replay(&s, Map::new(), &mut d, &o).unwrap();
+        replay(&s, Map::new(), &mut d, &o).unwrap();
 
         // 5 box dispatches + 1 Repeat step id in steps_run.
         assert_eq!(d.calls.len(), 5);
