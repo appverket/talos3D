@@ -214,10 +214,13 @@ Selecting a profile:
   (`authoring`, or `TALOS3D_MCP_PROFILE` when set).
 - **At runtime (any transport):** call `set_session_profile` with
   `{"profile": "full"}` (or any profile name; omit `profile` to report the
-  current one). On change the server emits a `tools/list_changed` notification
-  and subsequent `tools/list` calls return the new frozen list. The HTTP
-  transport is stateless per request, so the switch is scoped to the endpoint
-  you are connected to — fine for a single-user local app.
+  current one). Subsequent `tools/list` calls return the new frozen list. On
+  stdio the server also emits a `tools/list_changed` notification; the HTTP
+  transport is stateless with JSON responses (no channel for server-initiated
+  notifications between requests), so HTTP clients should re-fetch `tools/list`
+  after switching — the tool's response reports the change either way. The
+  switch is scoped to the endpoint/session you are connected to — fine for a
+  single-user local app.
 
 Gating is honest rather than silent: calling a tool outside the active profile
 returns a structured error naming the profiles that contain it and pointing at

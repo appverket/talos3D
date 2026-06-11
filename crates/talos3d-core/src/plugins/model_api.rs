@@ -101,8 +101,7 @@ use rmcp::{
     },
     schemars::JsonSchema,
     service::RequestContext,
-    tool, tool_router, transport, ErrorData as McpError, Peer, RoleServer, ServerHandler,
-    ServiceExt,
+    tool, tool_router, transport, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
 };
 
 #[cfg(feature = "model-api")]
