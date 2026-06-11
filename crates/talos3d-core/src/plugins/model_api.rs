@@ -10367,9 +10367,40 @@ pub fn handle_promote_refinement(
     recipe_id: Option<String>,
     overrides: serde_json::Value,
 ) -> ApiResult<PromoteRefinementResult> {
+    promote_refinement_structured(world, element_id, target_state_str, recipe_id, overrides)
+        .map_err(|e| e.to_string())
+}
+
+/// Every `ElementId` currently present in the world. Snapshotted before and
+/// after recipe execution to attribute created elements to the call.
+fn collect_element_ids(world: &mut World) -> std::collections::HashSet<u64> {
+    // Register the component so the query can be built even on a world where
+    // no ElementId entity has been spawned yet.
+    world.register_component::<ElementId>();
+    let mut q = world.try_query::<(&ElementId,)>().unwrap();
+    q.iter(world).map(|(id,)| id.0).collect()
+}
+
+/// Like [`handle_promote_refinement`] but preserves the structured
+/// [`PromoteError`] so `instantiate_recipe` can distinguish a recoverable
+/// obligation-gate block from a real failure.
+///
+/// A gate block AFTER recipe execution produced side effects (script steps ran
+/// or elements were created) returns `Ok` with `promotion_blocked` set and the
+/// created element ids: the geometry is valid and persists; only the
+/// refinement claim failed. A bare error here read as "nothing happened" and a
+/// blind retry duplicated geometry. A gate block with no side effects remains
+/// an error, preserving plain promote semantics.
+fn promote_refinement_structured(
+    world: &mut World,
+    element_id: u64,
+    target_state_str: String,
+    recipe_id: Option<String>,
+    overrides: serde_json::Value,
+) -> Result<PromoteRefinementResult, crate::plugins::refinement::PromoteError> {
     use crate::plugins::refinement::{
-        apply_promote_refinement, ClaimPath, PromoteRefinementRequest, RecipeId, RefinementState,
-        RefinementStateComponent,
+        apply_promote_refinement, ClaimPath, PromoteError, PromoteRefinementRequest, RecipeId,
+        RefinementState, RefinementStateComponent,
     };
 
     let target_state = RefinementState::from_str(&target_state_str)
@@ -10377,6 +10408,7 @@ pub fn handle_promote_refinement(
 
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
+    let before_ids = collect_element_ids(world);
 
     // If the recipe_id matches a body in the RecipeArtifactRegistry, execute it
     // now before delegating to apply_promote_refinement for the state-machine
@@ -10441,7 +10473,7 @@ pub fn handle_promote_refinement(
                 if !supported.is_empty() && !supported.contains(&target_state) {
                     let supported_labels: Vec<&str> =
                         supported.iter().map(|s| s.as_str()).collect();
-                    return Err(format!(
+                    return Err(PromoteError::Other(format!(
                         "recipe '{recipe_id}' supports only refinement state(s) [{}] and cannot \
                          produce '{}'. This recipe is capped at that level (e.g. a covering-only \
                          shell with no structural framing is Schematic-max under the substrate \
@@ -10451,7 +10483,7 @@ pub fn handle_promote_refinement(
                         supported_labels.join(", "),
                         target_state.as_str(),
                         target_state.as_str(),
-                    ));
+                    )));
                 }
                 match body {
                     ArtifactBody::Script(script) => {
@@ -10482,13 +10514,13 @@ pub fn handle_promote_refinement(
                         // will invoke it below — nothing to do here.
                     }
                     ArtifactBody::NativeUnresolvable { fn_id } => {
-                        return Err(format!(
+                        return Err(PromoteError::Other(format!(
                             "recipe '{recipe_id}' has a NativeFnRef body (fn_id='{fn_id}') but \
                              no generate function is registered in CapabilityRegistry. This \
                              execution path is not available. To fill the gap: call \
                              request_corpus_expansion to declare the corpus gap, then provide \
                              an AuthoringScript body via install_recipe_from_session_export."
-                        ));
+                        )));
                     }
                 }
             }
@@ -10500,9 +10532,9 @@ pub fn handle_promote_refinement(
                     .and_then(|registry| registry.get(recipe_id))
                     .is_some()
                 {
-                    return Err(format!(
+                    return Err(PromoteError::Other(format!(
                         "recipe draft '{recipe_id}' is a draft only; install it first with install_recipe_from_session_export"
-                    ));
+                    )));
                 }
                 // Unknown recipe id — not a draft, not an artifact.
                 // Let apply_promote_refinement proceed (it treats it as a hint
@@ -10550,15 +10582,52 @@ pub fn handle_promote_refinement(
         overrides: overrides_map,
     };
 
-    let new_state = apply_promote_refinement(world, request)?;
+    let promote_result = apply_promote_refinement(world, request);
     flush_model_api_write_pipeline(world);
 
-    Ok(PromoteRefinementResult {
-        element_id,
-        previous_state: previous_state.as_str().to_string(),
-        new_state: new_state.as_str().to_string(),
-        script_steps_run,
-    })
+    // Elements the recipe body created (script replay above or native
+    // `generate` inside apply_promote_refinement). They persist regardless of
+    // whether the gate passed, so they must be attributed in every outcome.
+    let mut created_element_ids: Vec<u64> = collect_element_ids(world)
+        .difference(&before_ids)
+        .copied()
+        .collect();
+    created_element_ids.sort_unstable();
+
+    match promote_result {
+        Ok(new_state) => Ok(PromoteRefinementResult {
+            element_id,
+            previous_state: previous_state.as_str().to_string(),
+            new_state: new_state.as_str().to_string(),
+            script_steps_run,
+            created_element_ids,
+            promotion_blocked: None,
+        }),
+        Err(PromoteError::ObligationsUnsatisfied {
+            unsatisfied_obligations,
+            message,
+        }) if script_steps_run > 0 || !created_element_ids.is_empty() => {
+            Ok(PromoteRefinementResult {
+                element_id,
+                previous_state: previous_state.as_str().to_string(),
+                new_state: previous_state.as_str().to_string(),
+                script_steps_run,
+                created_element_ids,
+                promotion_blocked: Some(PromotionBlockedInfo {
+                    unsatisfied_obligations,
+                    message,
+                }),
+            })
+        }
+        Err(e) if !created_element_ids.is_empty() => Err(PromoteError::Other(format!(
+            "{e}; note: recipe execution already created {} element(s) {:?} before this failure \
+             — they persist in the model; do not retry blindly (that duplicates geometry); \
+             inspect and reuse or delete them first",
+            created_element_ids.len(),
+            created_element_ids
+        ))),
+        Err(e) => Err(e),
+    }
 }
 
 /// `instantiate_recipe`: one-call path from a discovered recipe family to placed
@@ -10583,11 +10652,7 @@ fn handle_instantiate_recipe(
             rotate_euler_deg: [0.0, 0.0, 0.0],
         });
 
-    let collect_ids = |world: &mut World| -> std::collections::HashSet<u64> {
-        let mut q = world.try_query::<(&ElementId,)>().unwrap();
-        q.iter(world).map(|(id,)| id.0).collect()
-    };
-    let before = collect_ids(world);
+    let before = collect_element_ids(world);
 
     // 1. Create the coarse identity-anchor root carrying the element class +
     //    recipe parameters, at the requested placement (metres). The recipe
@@ -10695,7 +10760,7 @@ fn handle_instantiate_recipe(
     //    placement rotation below must apply to the generated geometry regardless
     //    of whether the gate passed (the agent resolves obligations and re-promotes
     //    separately).
-    let promote_result = handle_promote_refinement(
+    let promote_result = promote_refinement_structured(
         world,
         root,
         target_state,
@@ -10704,7 +10769,7 @@ fn handle_instantiate_recipe(
     );
 
     // 3. Created ids = everything new since the snapshot, excluding the root.
-    let after = collect_ids(world);
+    let after = collect_element_ids(world);
     let mut created_element_ids: Vec<u64> = after
         .difference(&before)
         .copied()
@@ -10752,8 +10817,37 @@ fn handle_instantiate_recipe(
         flush_model_api_write_pipeline(world);
     }
 
-    // Surface any promotion-gate error only after geometry was recorded and the
-    // placement rotation applied.
+    // Resolve the promotion outcome only after geometry was recorded and the
+    // placement rotation applied. An obligation-gate block is partial success:
+    // the root anchor (and any generated sub-elements) persist and carry a
+    // resolvable ObligationSet, so the result must say what was created.
+    use crate::plugins::refinement::PromoteError;
+    let promote = match promote_result {
+        Ok(promote) => promote,
+        Err(PromoteError::ObligationsUnsatisfied {
+            unsatisfied_obligations,
+            message,
+        }) => PromoteRefinementResult {
+            element_id: root,
+            previous_state: "Schematic".to_string(),
+            new_state: "Schematic".to_string(),
+            script_steps_run: 0,
+            created_element_ids: Vec::new(),
+            promotion_blocked: Some(PromotionBlockedInfo {
+                unsatisfied_obligations,
+                message,
+            }),
+        },
+        // Real failure. promote_refinement_structured already annotated any
+        // recipe-created sub-elements; add the root anchor this handler created.
+        Err(e) => {
+            return Err(format!(
+                "{e}; note: this instantiate_recipe call already created root anchor element \
+                 {root}, which persists in the model"
+            ));
+        }
+    };
+
     let group_element_id = if created_element_ids.is_empty() {
         None
     } else {
@@ -10773,8 +10867,6 @@ fn handle_instantiate_recipe(
         Some(group_id.0)
     };
 
-    let promote = promote_result?;
-
     // 5. Run validation on the root entity and collect findings. Failures here
     //    are surfaced as structured findings, not as a hard error — placement
     //    succeeded; the caller decides whether to address obligations.
@@ -10788,6 +10880,7 @@ fn handle_instantiate_recipe(
         steps_run_count: promote.script_steps_run,
         recipe_id_used: Some(request.family_id.clone()),
         findings,
+        promotion_blocked: promote.promotion_blocked,
     })
 }
 

@@ -1045,6 +1045,40 @@ pub struct RefinementBranchInfo {
     pub status: RefinementBranchStatus,
 }
 
+/// Why [`apply_promote_refinement`] did not advance the refinement state.
+///
+/// `ObligationsUnsatisfied` is the promotion gate blocking — a first-class,
+/// recoverable outcome, not a defect: any side effects the recipe `generate`
+/// produced before the gate (created sub-elements) persist in the model, and
+/// the entity carries a resolvable `ObligationSet` (the agent calls
+/// `resolve_obligation` per id, then re-promotes). Callers that executed
+/// geometry-producing steps before the gate must surface that partial state
+/// to the client instead of collapsing this variant into a bare error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromoteError {
+    ObligationsUnsatisfied {
+        unsatisfied_obligations: Vec<String>,
+        message: String,
+    },
+    Other(String),
+}
+
+impl std::fmt::Display for PromoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ObligationsUnsatisfied { message, .. } | Self::Other(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl From<String> for PromoteError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 /// Apply a promotion to the world, queuing history commands for undo/redo.
 ///
 /// Returns the new state on success.
@@ -1057,7 +1091,7 @@ pub struct RefinementBranchInfo {
 pub fn apply_promote_refinement(
     world: &mut World,
     request: PromoteRefinementRequest,
-) -> Result<RefinementState, String> {
+) -> Result<RefinementState, PromoteError> {
     use crate::capability_registry::{
         effective_obligations, effective_promotion_critical_paths, ElementClassAssignment,
         GenerateInput, RecipeFamilyId,
@@ -1081,11 +1115,11 @@ pub fn apply_promote_refinement(
         .unwrap_or_default();
 
     if request.target_state <= current_state {
-        return Err(format!(
+        return Err(PromoteError::Other(format!(
             "Cannot promote from {} to {} — target must be higher",
             current_state.as_str(),
             request.target_state.as_str()
-        ));
+        )));
     }
 
     let before_state = current_state;
@@ -1104,12 +1138,15 @@ pub fn apply_promote_refinement(
                 .map(|o| format!("{} ({})", o.id.0, o.detail))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(format!(
-                "Cannot promote assembly to {} — {} unmet member obligation(s): {}",
-                target_state.as_str(),
-                unmet.len(),
-                summary
-            ));
+            return Err(PromoteError::ObligationsUnsatisfied {
+                unsatisfied_obligations: unmet.iter().map(|o| o.id.0.clone()).collect(),
+                message: format!(
+                    "Cannot promote assembly to {} — {} unmet member obligation(s): {}",
+                    target_state.as_str(),
+                    unmet.len(),
+                    summary
+                ),
+            });
         }
     }
 
@@ -1241,7 +1278,7 @@ pub fn apply_promote_refinement(
         if let Some(generate_fn) = generate_fn {
             match generate_fn(input, world) {
                 Ok(output) => (output.satisfaction_links, output.grounding_updates),
-                Err(e) => return Err(format!("Recipe generate failed: {e}")),
+                Err(e) => return Err(PromoteError::Other(format!("Recipe generate failed: {e}"))),
             }
         } else {
             (Vec::new(), HashMap::new())
@@ -1387,7 +1424,7 @@ pub fn apply_promote_refinement(
     }
 
     if !unresolved_ids.is_empty() {
-        return Err(format!(
+        let message = format!(
             "Cannot promote {} to {} — {} unsatisfied obligation(s): {}; \
              resolve each with resolve_obligation. Structural load-path \
              obligations (bears_on, bears_on_terrain) must be SatisfiedBy a real \
@@ -1397,7 +1434,11 @@ pub fn apply_promote_refinement(
             target_state.as_str(),
             unresolved_ids.len(),
             unresolved_ids.join(", ")
-        ));
+        );
+        return Err(PromoteError::ObligationsUnsatisfied {
+            unsatisfied_obligations: unresolved_ids,
+            message,
+        });
     }
 
     // Apply grounding updates from the generate output.
@@ -2966,13 +3007,21 @@ mod tests {
             },
         )
         .unwrap_err();
+        let PromoteError::ObligationsUnsatisfied {
+            unsatisfied_obligations,
+            message,
+        } = &err
+        else {
+            panic!("expected structured gate error, got: {err}");
+        };
         assert!(
-            err.contains("unsatisfied obligation"),
-            "expected gate error, got: {err}"
+            message.contains("unsatisfied obligation"),
+            "expected gate error, got: {message}"
         );
-        assert!(
-            err.contains("load_path"),
-            "error should name the obligation: {err}"
+        assert_eq!(
+            unsatisfied_obligations,
+            &vec!["load_path".to_string()],
+            "gate must name the blocking obligation ids"
         );
     }
 

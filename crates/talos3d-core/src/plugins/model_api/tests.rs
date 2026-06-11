@@ -8351,6 +8351,201 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
     );
 }
 
+/// World with "wall_assembly" registered carrying the given Constructible
+/// obligations (which nothing in the two-box recipe satisfies, so the
+/// promotion gate blocks) and the executable two-box recipe installed as
+/// family "two_box_wall".
+#[cfg(feature = "model-api")]
+fn gated_two_box_world(obligation_ids: &[&str]) -> World {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId, ObligationTemplate};
+    use crate::plugins::refinement::{ObligationId, RefinementState, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+
+    let mut class_min_obligations = std::collections::HashMap::new();
+    class_min_obligations.insert(
+        RefinementState::Constructible,
+        obligation_ids
+            .iter()
+            .map(|id| ObligationTemplate {
+                id: ObligationId((*id).into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Constructible,
+            })
+            .collect(),
+    );
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test element class with unsatisfiable promotion obligations.".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations,
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe(&mut world, "two_box_wall", "wall_assembly");
+    world
+}
+
+/// When the recipe script executes but the post-execution promotion gate then
+/// blocks on unsatisfied obligations, `instantiate_recipe` must report partial
+/// success — the created geometry persists, so the agent must be told exactly
+/// what exists and what blocks the refinement claim. A bare error here reads
+/// as "nothing happened" and a blind retry duplicates geometry (live MCP trace
+/// defect, 2026-06-11: door_unit → Constructible).
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_gated_promotion_reports_partial_state_not_bare_error() {
+    use crate::plugins::refinement::ObligationSet;
+
+    let mut world = gated_two_box_world(&["structure", "thermal_layer"]);
+
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("a gate-blocked instantiation must be partial success, not a bare error");
+
+    // The script's geometry was created and is attributed in the response.
+    assert_eq!(
+        result.created_element_ids.len(),
+        2,
+        "both script-created boxes must be reported; got {:?}",
+        result.created_element_ids
+    );
+    assert_eq!(result.steps_run_count, 2);
+
+    // The refinement claim did NOT advance past the creation state.
+    assert_eq!(
+        result.state, "Schematic",
+        "a blocked promotion must not advance the refinement state"
+    );
+
+    // The block is structured: it names the blocking obligations so the agent
+    // can resolve_obligation + re-promote instead of retrying the instantiate.
+    let blocked = result
+        .promotion_blocked
+        .expect("promotion_blocked must be set when the gate fired");
+    assert_eq!(
+        blocked.unsatisfied_obligations,
+        vec!["structure".to_string(), "thermal_layer".to_string()],
+        "the blocked info must list the unsatisfied obligation ids"
+    );
+    assert!(
+        blocked.message.contains("resolve_obligation"),
+        "the message must point at the recovery path: {}",
+        blocked.message
+    );
+
+    // The root carries a resolvable ObligationSet — the recovery path works.
+    let root_entity = find_entity_by_element_id_readonly(
+        &world,
+        crate::plugins::identity::ElementId(result.root_element_id),
+    )
+    .expect("root entity must exist");
+    assert!(
+        world.get::<ObligationSet>(root_entity).is_some(),
+        "the root must carry the ObligationSet so resolve_obligation can run"
+    );
+}
+
+/// The same defect through the bare `promote_refinement{recipe_id}` path: the
+/// AuthoringScript executed (geometry persists) and the gate then blocked —
+/// the handler must return partial success carrying the created element ids
+/// and the structured block, with the state unchanged.
+#[cfg(feature = "model-api")]
+#[test]
+fn promote_refinement_gate_block_after_script_reports_partial_state() {
+    let mut world = gated_two_box_world(&["structure"]);
+
+    let root = handle_create_entity(
+        &mut world,
+        serde_json::json!({
+            "type": "box",
+            "centre": [0.0, 0.0, 0.0],
+            "half_extents": [0.5, 0.5, 0.5],
+            "semantic": {
+                "element_class": "wall_assembly",
+                "refinement_state": "Schematic",
+                "parameters": {},
+            }
+        }),
+    )
+    .expect("root creation must succeed");
+
+    let result = handle_promote_refinement(
+        &mut world,
+        root,
+        "Constructible".into(),
+        Some("two_box_wall".into()),
+        serde_json::json!({}),
+    )
+    .expect("a gate block after script execution must be partial success");
+
+    assert_eq!(result.script_steps_run, 2);
+    assert_eq!(
+        result.created_element_ids.len(),
+        2,
+        "script-created elements must be attributed; got {:?}",
+        result.created_element_ids
+    );
+    assert_eq!(
+        result.new_state, result.previous_state,
+        "a blocked promotion must not advance the refinement state"
+    );
+    let blocked = result
+        .promotion_blocked
+        .expect("promotion_blocked must be set when the gate fired");
+    assert_eq!(blocked.unsatisfied_obligations, vec!["structure".to_string()]);
+}
+
+/// A gate block with NO recipe side effects (no script ran, nothing created)
+/// keeps the plain-error semantics of promote_refinement: there is no partial
+/// state to report, and the error message already names the recovery path.
+#[cfg(feature = "model-api")]
+#[test]
+fn promote_refinement_gate_block_without_side_effects_stays_error() {
+    let mut world = gated_two_box_world(&["structure"]);
+
+    let root = handle_create_entity(
+        &mut world,
+        serde_json::json!({
+            "type": "box",
+            "centre": [0.0, 0.0, 0.0],
+            "half_extents": [0.5, 0.5, 0.5],
+            "semantic": {
+                "element_class": "wall_assembly",
+                "refinement_state": "Schematic",
+                "parameters": {},
+            }
+        }),
+    )
+    .expect("root creation must succeed");
+
+    let err = handle_promote_refinement(
+        &mut world,
+        root,
+        "Constructible".into(),
+        None,
+        serde_json::json!({}),
+    )
+    .expect_err("a blocked promote with no recipe side effects must remain an error");
+    assert!(
+        err.contains("unsatisfied obligation"),
+        "the error must explain the gate: {err}"
+    );
+}
+
 /// When a recipe is requested by id but the artifact has a `NativeFnRef` body
 /// and the native function is NOT registered in CapabilityRegistry, the handler
 /// must return a structured error mentioning `request_corpus_expansion` — not
