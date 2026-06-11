@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::void_declaration::VoidDeclaration;
-use crate::plugins::materials::MaterialAssignment;
+use crate::plugins::{materials::MaterialAssignment, registry_generation::RegistryGeneration};
 
 // ---------------------------------------------------------------------------
 // Global counters
@@ -1372,11 +1372,21 @@ impl DefinitionLibraryFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Resource)]
 pub struct DefinitionLibraryRegistry {
     libraries: HashMap<DefinitionLibraryId, DefinitionLibrary>,
+    /// Change stamp for UI caches; see [`RegistryGeneration`].
+    #[serde(skip)]
+    generation: RegistryGeneration,
 }
 
 impl DefinitionLibraryRegistry {
+    /// Current change stamp. Differs from the stamp of any prior observation
+    /// if the registry could have changed since.
+    pub fn generation(&self) -> RegistryGeneration {
+        self.generation
+    }
+
     pub fn insert(&mut self, library: DefinitionLibrary) {
         self.libraries.insert(library.id.clone(), library);
+        self.generation.bump();
     }
 
     pub fn create_library(
@@ -1403,7 +1413,10 @@ impl DefinitionLibraryRegistry {
         self.libraries.get(id)
     }
 
+    /// Mutable library access. Conservatively bumps the change stamp because
+    /// the caller may edit the library through the returned reference.
     pub fn get_mut(&mut self, id: &DefinitionLibraryId) -> Option<&mut DefinitionLibrary> {
+        self.generation.bump();
         self.libraries.get_mut(id)
     }
 
@@ -1421,6 +1434,7 @@ impl DefinitionLibraryRegistry {
             .get_mut(library_id)
             .ok_or_else(|| format!("Definition library '{}' not found", library_id))?;
         library.insert(definition);
+        self.generation.bump();
         Ok(())
     }
 
@@ -1432,6 +1446,7 @@ impl DefinitionLibraryRegistry {
     pub fn migrate_legacy_material_assignments(
         &mut self,
     ) -> Vec<(DefinitionLibraryId, Vec<DefinitionId>)> {
+        self.generation.bump();
         let mut report: Vec<(DefinitionLibraryId, Vec<DefinitionId>)> = self
             .libraries
             .iter_mut()
@@ -1505,12 +1520,22 @@ impl OverrideMap {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Resource)]
 pub struct DefinitionRegistry {
     definitions: HashMap<DefinitionId, Definition>,
+    /// Change stamp for UI caches; see [`RegistryGeneration`].
+    #[serde(skip)]
+    generation: RegistryGeneration,
 }
 
 impl DefinitionRegistry {
+    /// Current change stamp. Differs from the stamp of any prior observation
+    /// if the registry could have changed since.
+    pub fn generation(&self) -> RegistryGeneration {
+        self.generation
+    }
+
     /// Insert or replace a definition.
     pub fn insert(&mut self, def: Definition) {
         self.definitions.insert(def.id.clone(), def);
+        self.generation.bump();
     }
 
     /// Look up a definition by id.
@@ -1525,6 +1550,7 @@ impl DefinitionRegistry {
 
     /// Remove a definition, returning it if it existed.
     pub fn remove(&mut self, id: &DefinitionId) -> Option<Definition> {
+        self.generation.bump();
         self.definitions.remove(id)
     }
 
@@ -1533,6 +1559,7 @@ impl DefinitionRegistry {
     /// that were migrated, in deterministic order so callers can log
     /// a stable advisory.
     pub fn migrate_legacy_material_assignments(&mut self) -> Vec<DefinitionId> {
+        self.generation.bump();
         let mut migrated: Vec<DefinitionId> = self
             .definitions
             .iter_mut()

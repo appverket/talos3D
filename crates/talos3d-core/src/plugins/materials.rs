@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::curation::{AssetId, ContentHash, EvidenceRef, MaterialSpecRegistry};
+use crate::plugins::registry_generation::RegistryGeneration;
 
 pub const BUILTIN_MATERIAL_MAIBEC_RED_CEDAR_LIGHT_H2BO: &str =
     "builtin.maibec.red_cedar_light_h2bo";
@@ -895,16 +896,28 @@ pub struct MaterialRegistry {
     materials: BTreeMap<String, MaterialDef>,
     /// Iteration order (insertion order).
     order: Vec<String>,
+    /// Change stamp for UI caches; see [`RegistryGeneration`].
+    #[serde(skip)]
+    generation: RegistryGeneration,
 }
 
 impl MaterialRegistry {
     // --- Read access ---
 
+    /// Current change stamp. Differs from the stamp of any prior observation
+    /// if the registry could have changed since.
+    pub fn generation(&self) -> RegistryGeneration {
+        self.generation
+    }
+
     pub fn get(&self, id: &str) -> Option<&MaterialDef> {
         self.materials.get(id)
     }
 
+    /// Mutable material access. Conservatively bumps the change stamp because
+    /// the caller may edit the material through the returned reference.
     pub fn get_mut(&mut self, id: &str) -> Option<&mut MaterialDef> {
+        self.generation.bump();
         self.materials.get_mut(id)
     }
 
@@ -930,6 +943,7 @@ impl MaterialRegistry {
             self.order.push(id.clone());
         }
         self.materials.insert(id.clone(), def);
+        self.generation.bump();
         id
     }
 
@@ -945,6 +959,7 @@ impl MaterialRegistry {
     pub fn remove(&mut self, id: &str) -> Option<MaterialDef> {
         if let Some(def) = self.materials.remove(id) {
             self.order.retain(|i| i != id);
+            self.generation.bump();
             Some(def)
         } else {
             None

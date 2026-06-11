@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use bevy_egui::{egui, EguiContexts};
@@ -39,6 +40,7 @@ use crate::{
                 HostedOccurrenceContext, OccurrenceIdentity, OccurrenceSnapshot,
             },
         },
+        registry_generation::RegistryGeneration,
         selection::Selected,
         ui::StatusBarData,
     },
@@ -131,6 +133,126 @@ impl BrowsableAsset for DefinitionListEntry {
         parts.join(" · ")
     }
 }
+
+/// Cached, filtered, name-sorted browser entry list.
+///
+/// Building the list walks every definition of the selected source, sorts,
+/// and filters — too much repeated allocation to redo every egui frame with
+/// large libraries. The cache is keyed on the registry change stamps plus the
+/// filter inputs and is only rebuilt when one of them changes. Entries are
+/// shared via `Arc` so the per-frame cost of handing the list to the draw
+/// code is a pointer clone.
+#[derive(Debug, Clone, Default)]
+struct DefinitionListCache {
+    definitions_generation: Option<RegistryGeneration>,
+    libraries_generation: Option<RegistryGeneration>,
+    selected_library_id: Option<String>,
+    show_internal: bool,
+    /// Trimmed, lowercased search needle the entries were filtered with.
+    search: String,
+    entries: Arc<Vec<DefinitionListEntry>>,
+    /// Ids of `entries`, for O(1) selected-id validation.
+    entry_ids: HashSet<String>,
+}
+
+impl DefinitionListCache {
+    /// Return the entry list for the given source + filters, rebuilding it
+    /// only if the registries or the filters changed since the last call.
+    /// `search` must already be trimmed and lowercased.
+    fn entries(
+        &mut self,
+        definitions: &DefinitionRegistry,
+        libraries: &DefinitionLibraryRegistry,
+        selected_library_id: Option<&str>,
+        show_internal: bool,
+        search: &str,
+    ) -> Arc<Vec<DefinitionListEntry>> {
+        let current = (
+            Some(definitions.generation()),
+            Some(libraries.generation()),
+            selected_library_id,
+            show_internal,
+            search,
+        );
+        let cached = (
+            self.definitions_generation,
+            self.libraries_generation,
+            self.selected_library_id.as_deref(),
+            self.show_internal,
+            self.search.as_str(),
+        );
+        if current != cached {
+            self.entries = Arc::new(build_definition_list_entries(
+                definitions,
+                libraries,
+                selected_library_id,
+                show_internal,
+                search,
+            ));
+            self.entry_ids = self
+                .entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            self.definitions_generation = Some(definitions.generation());
+            self.libraries_generation = Some(libraries.generation());
+            self.selected_library_id = selected_library_id.map(str::to_string);
+            self.show_internal = show_internal;
+            self.search = search.to_string();
+        }
+        Arc::clone(&self.entries)
+    }
+
+    /// Whether the cached entry list contains a definition with this id.
+    fn contains_id(&self, id: &str) -> bool {
+        self.entry_ids.contains(id)
+    }
+}
+
+/// Build the browser entry list: all definitions of the selected source
+/// (a definition library, or the document registry when `None`), sorted by
+/// name, minus internal parts unless requested, minus entries not matching
+/// the search needle.
+fn build_definition_list_entries(
+    definitions: &DefinitionRegistry,
+    libraries: &DefinitionLibraryRegistry,
+    selected_library_id: Option<&str>,
+    show_internal: bool,
+    search: &str,
+) -> Vec<DefinitionListEntry> {
+    let mut entries: Vec<DefinitionListEntry> = match selected_library_id {
+        Some(library_id) => libraries
+            .get(&DefinitionLibraryId(library_id.to_string()))
+            .map(|library| {
+                library
+                    .definitions
+                    .values()
+                    .map(DefinitionListEntry::from_definition)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => definitions
+            .list()
+            .into_iter()
+            .map(DefinitionListEntry::from_definition)
+            .collect(),
+    };
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    // Visibility filter: exclude InternalPart definitions from the
+    // default listing.  The toggle allows them to be shown when needed
+    // (e.g. debugging, parent navigation, migration).
+    if !show_internal {
+        entries.retain(|entry| !matches!(entry.visibility, DefinitionVisibility::InternalPart));
+    }
+    if !search.is_empty() {
+        entries.retain(|entry| {
+            entry.id.to_ascii_lowercase().contains(search)
+                || entry.name.to_ascii_lowercase().contains(search)
+        });
+    }
+    entries
+}
+
 /// Which node of the active definition draft the editor is currently focused on.
 ///
 /// This unified selection type replaces the scattered per-kind `selected_*`
@@ -222,6 +344,8 @@ pub struct DefinitionsWindowState {
     /// Per ADR-025 amendment 2026-05-21: internal parts remain fully reachable
     /// via this toggle — they are just not shown in the default listing.
     pub show_internal_definitions: bool,
+    /// Cached browser entry list; see [`DefinitionListCache`].
+    list_cache: DefinitionListCache,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -1324,35 +1448,19 @@ pub fn draw_definitions_window(
         ensure_definition_browser_default_source(state, definitions, &library_entries);
 
         let selected_library_id = state.selected_library_id.clone();
-        let mut definition_entries: Vec<DefinitionListEntry> = match selected_library_id.as_deref()
-        {
-            Some(library_id) => libraries
-                .get(&DefinitionLibraryId(library_id.to_string()))
-                .map(|library| {
-                    library
-                        .definitions
-                        .values()
-                        .map(DefinitionListEntry::from_definition)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            None => definitions
-                .list()
-                .into_iter()
-                .map(DefinitionListEntry::from_definition)
-                .collect(),
-        };
-        definition_entries.sort_by(|left, right| left.name.cmp(&right.name));
-        // Visibility filter: exclude InternalPart definitions from the
-        // default listing.  The toggle allows them to be shown when needed
-        // (e.g. debugging, parent navigation, migration).
-        if !state.show_internal_definitions {
-            definition_entries
-                .retain(|entry| !matches!(entry.visibility, DefinitionVisibility::InternalPart));
-        }
-        asset_browser::retain_matching(&mut definition_entries, &state.search);
+        let search = asset_browser::search_needle(&state.search);
+        let definition_entries = state.list_cache.entries(
+            definitions,
+            libraries,
+            selected_library_id.as_deref(),
+            state.show_internal_definitions,
+            &search,
+        );
 
-        if asset_browser::ensure_selected_id(&mut state.selected_definition_id, &definition_entries)
+        if asset_browser::ensure_selected_id(
+            &mut state.selected_definition_id,
+            definition_entries.as_slice(),
+        )
         {
             state.selected_preview_slot_path = None;
             state.selected_occurrence_overrides = OverrideMap::default();
@@ -1426,7 +1534,7 @@ pub fn draw_definitions_window(
                         state,
                         definitions,
                         &library_entries,
-                        &definition_entries,
+                        definition_entries.as_slice(),
                         drafts,
                         pending,
                     );
@@ -5436,6 +5544,159 @@ mod tests {
             visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,
         }
+    }
+
+    #[test]
+    fn definition_list_cache_reuses_entries_until_inputs_change() {
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(test_definition("b", "Beta", Vec::new()));
+        registry.insert(test_definition("a", "Alpha", Vec::new()));
+        let libraries = crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
+
+        let mut cache = DefinitionListCache::default();
+        let first = cache.entries(&registry, &libraries, None, false, "");
+        assert_eq!(
+            first.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["Alpha", "Beta"],
+            "entries must stay name-sorted"
+        );
+
+        // Unchanged inputs: the cached allocation is reused, not rebuilt.
+        let second = cache.entries(&registry, &libraries, None, false, "");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        // A registry mutation invalidates the cache.
+        registry.insert(test_definition("c", "Gamma", Vec::new()));
+        let third = cache.entries(&registry, &libraries, None, false, "");
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(third.len(), 3);
+        assert!(cache.contains_id("c"));
+
+        // A search change invalidates the cache and filters by id or name.
+        let searched = cache.entries(&registry, &libraries, None, false, "alp");
+        assert_eq!(
+            searched.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert!(cache.contains_id("a"));
+        assert!(!cache.contains_id("b"));
+    }
+
+    #[test]
+    fn definition_list_cache_applies_internal_visibility_toggle() {
+        let mut registry = DefinitionRegistry::default();
+        registry.insert(test_definition("pub", "Public", Vec::new()));
+        let mut internal = test_definition("int", "Internal", Vec::new());
+        internal.visibility = DefinitionVisibility::InternalPart;
+        registry.insert(internal);
+        let libraries = crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
+
+        let mut cache = DefinitionListCache::default();
+        let hidden = cache.entries(&registry, &libraries, None, false, "");
+        assert_eq!(
+            hidden.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["pub"]
+        );
+
+        let shown = cache.entries(&registry, &libraries, None, true, "");
+        assert_eq!(shown.len(), 2);
+        assert!(cache.contains_id("int"));
+    }
+
+    #[test]
+    fn definition_list_cache_follows_selected_library() {
+        let registry = DefinitionRegistry::default();
+        let mut libraries =
+            crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
+        let library_id =
+            libraries.create_library("Windows", DefinitionLibraryScope::ExternalFile, None);
+        libraries
+            .add_definition(&library_id, test_definition("win", "Window", Vec::new()))
+            .unwrap();
+
+        let mut cache = DefinitionListCache::default();
+        assert!(cache.entries(&registry, &libraries, None, false, "").is_empty());
+
+        let from_library =
+            cache.entries(&registry, &libraries, Some(library_id.0.as_str()), false, "");
+        assert_eq!(
+            from_library.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["win"]
+        );
+
+        // Mutating a library through the registry invalidates the cache.
+        libraries
+            .add_definition(&library_id, test_definition("door", "Door", Vec::new()))
+            .unwrap();
+        let updated =
+            cache.entries(&registry, &libraries, Some(library_id.0.as_str()), false, "");
+        assert_eq!(updated.len(), 2);
+    }
+
+    /// Perf probe for the AGENTS.md per-frame UI rule: compares the old
+    /// per-frame rebuild against cached access on a large library. Run with
+    /// `cargo test -p talos3d-core --lib definition_list_cache_perf_probe -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "perf probe; run manually with --ignored --nocapture"]
+    fn definition_list_cache_perf_probe() {
+        let mut registry = DefinitionRegistry::default();
+        for i in 0..1000 {
+            registry.insert(test_definition(
+                &format!("def{i}"),
+                &format!("Definition {i}"),
+                Vec::new(),
+            ));
+        }
+        let libraries = crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
+        let frames = 1000;
+
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            std::hint::black_box(build_definition_list_entries(
+                &registry, &libraries, None, false, "",
+            ));
+        }
+        let rebuild = start.elapsed();
+
+        let mut cache = DefinitionListCache::default();
+        let start = std::time::Instant::now();
+        for _ in 0..frames {
+            std::hint::black_box(cache.entries(&registry, &libraries, None, false, ""));
+        }
+        let cached = start.elapsed();
+
+        println!(
+            "{frames} frames x 1000 definitions: per-frame rebuild {rebuild:?}, cached {cached:?}"
+        );
+    }
+
+    #[test]
+    fn definition_list_cache_detects_whole_registry_replacement() {
+        // Project load replaces the whole registry resource with a freshly
+        // deserialized one. A naive per-registry counter restarts at the same
+        // value on every load, so two different loads would collide; the
+        // process-unique stamp must force a rebuild instead.
+        let mut first = DefinitionRegistry::default();
+        first.insert(test_definition("a", "Alpha", Vec::new()));
+        let mut second = DefinitionRegistry::default();
+        second.insert(test_definition("b", "Beta", Vec::new()));
+
+        let first: DefinitionRegistry =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        let second: DefinitionRegistry =
+            serde_json::from_str(&serde_json::to_string(&second).unwrap()).unwrap();
+        let libraries = crate::plugins::modeling::definition::DefinitionLibraryRegistry::default();
+
+        let mut cache = DefinitionListCache::default();
+        let entries = cache.entries(&first, &libraries, None, false, "");
+        assert_eq!(entries[0].id, "a");
+
+        let entries = cache.entries(&second, &libraries, None, false, "");
+        assert_eq!(
+            entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec!["b"],
+            "replacing the registry resource must invalidate the cache"
+        );
     }
 
     #[test]
