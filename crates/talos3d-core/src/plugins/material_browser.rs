@@ -19,19 +19,20 @@ use crate::curation::{
     SourceRegistryEntry, SourceRevision, SourceTier,
 };
 use crate::plugins::{
+    asset_browser::{self, AssetBrowserWindow, AssetListView, BrowsableAsset},
     command_registry::{queue_command_invocation_resource, PendingCommandInvocations},
     materials::{
         material_assignment_from_value, material_assignment_to_value, normalize_material_textures,
         MaterialAlphaMode, MaterialAssignment, MaterialDef, MaterialRegistry, TextureProjection,
         TextureRef, TextureRegistry,
     },
-    ui::{tool_window_max_size, tool_window_rect},
 };
 
 const MATERIALS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(760.0, 640.0);
 const MATERIALS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(420.0, 320.0);
 const MATERIALS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(1040.0, 820.0);
 const MATERIAL_LIST_THUMBNAIL_SIZE: f32 = 30.0;
+const THUMBNAIL_CORNER_RADIUS: f32 = 6.0;
 const TEXTURE_SLOT_THUMBNAIL_SIZE: f32 = 52.0;
 const MATERIAL_LIST_WIDTH: f32 = 196.0;
 const FORM_LABEL_WIDTH: f32 = 124.0;
@@ -55,6 +56,80 @@ const SOURCE_LICENSE_OPTIONS: [(&str, SourceLicense); 5] = [
     ("user_attached_private", SourceLicense::UserAttachedPrivate),
 ];
 const SOURCE_PRESET_NAMES: [&str; 3] = ["Custom", "ambientCG", "Poly Haven"];
+
+const MATERIALS_BROWSER_WINDOW: AssetBrowserWindow = AssetBrowserWindow {
+    title: "Materials",
+    id_salt: "materials_browser",
+    default_pos: egui::pos2(24.0, 88.0),
+    default_size: MATERIALS_WINDOW_DEFAULT_SIZE,
+    min_size: MATERIALS_WINDOW_MIN_SIZE,
+    max_size: MATERIALS_WINDOW_MAX_SIZE,
+    constrain_with_margin: false,
+};
+
+impl BrowsableAsset for MaterialDef {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn display_name(&self) -> &str {
+        &self.name
+    }
+
+    fn meta_label(&self) -> String {
+        let texture_count = [
+            self.base_color_texture.as_ref(),
+            self.normal_map_texture.as_ref(),
+            self.metallic_roughness_texture.as_ref(),
+            self.emissive_texture.as_ref(),
+            self.occlusion_texture.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .count();
+
+        if texture_count > 0 {
+            format!("{} · {texture_count} tex", self.summary())
+        } else {
+            self.summary()
+        }
+    }
+
+    /// Material ids are generated UUID-like strings, not user-facing: search
+    /// only matches the name.
+    fn matches_search(&self, needle: &str) -> bool {
+        needle.is_empty() || self.name.to_lowercase().contains(needle)
+    }
+}
+
+impl BrowsableAsset for SourceRegistryEntry {
+    fn id(&self) -> &str {
+        &self.source_id.0
+    }
+
+    fn display_name(&self) -> &str {
+        &self.title
+    }
+
+    fn meta_label(&self) -> String {
+        format!("{} @ {}", self.source_id.0, self.revision.0)
+    }
+
+    fn matches_search(&self, needle: &str) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        self.title.to_lowercase().contains(needle)
+            || self.publisher.to_lowercase().contains(needle)
+            || self.source_id.0.to_lowercase().contains(needle)
+            || self.revision.0.to_lowercase().contains(needle)
+            || self
+                .canonical_url
+                .as_deref()
+                .map(|url| url.to_lowercase().contains(needle))
+                .unwrap_or(false)
+    }
+}
 
 // ─── Window state ─────────────────────────────────────────────────────────────
 
@@ -365,37 +440,21 @@ pub fn draw_materials_window(
     pending: &mut PendingCommandInvocations,
     selected_assignments: &[(u64, Option<MaterialAssignment>)],
 ) {
-    if !state.visible {
-        return;
-    }
-
-    let default_rect = tool_window_rect(ctx, egui::pos2(24.0, 88.0), MATERIALS_WINDOW_DEFAULT_SIZE);
-    let mut open = state.visible;
-
-    egui::Window::new("Materials")
-        .id(egui::Id::new("materials_browser"))
-        .default_rect(default_rect)
-        .min_size(MATERIALS_WINDOW_MIN_SIZE)
-        .max_size(tool_window_max_size(ctx, MATERIALS_WINDOW_MAX_SIZE))
-        .constrain_to(ctx.content_rect())
-        .open(&mut open)
-        .show(ctx, |ui| {
-            draw_browser_panel(
-                ui,
-                contexts,
-                state,
-                registry,
-                texture_registry,
-                source_registry,
-                nomination_queue,
-                asset_server,
-                images,
-                pending,
-                selected_assignments,
-            );
-        });
-
-    state.visible = open;
+    state.visible = MATERIALS_BROWSER_WINDOW.show(ctx, state.visible, |ui| {
+        draw_browser_panel(
+            ui,
+            contexts,
+            state,
+            registry,
+            texture_registry,
+            source_registry,
+            nomination_queue,
+            asset_server,
+            images,
+            pending,
+            selected_assignments,
+        );
+    });
 }
 
 // ─── Browser panel (left list + right editor) ─────────────────────────────────
@@ -419,12 +478,7 @@ fn draw_browser_panel(
             ui.set_min_width(MATERIAL_LIST_WIDTH);
             ui.set_max_width(MATERIAL_LIST_WIDTH);
 
-            // Search bar
-            ui.add(
-                egui::TextEdit::singleline(&mut state.search)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Search materials"),
-            );
+            asset_browser::draw_search_bar(ui, &mut state.search, None, "Search materials");
             ui.separator();
 
             // New material button
@@ -447,86 +501,84 @@ fn draw_browser_panel(
             ui.add_space(4.0);
 
             // Material list
-            egui::ScrollArea::vertical()
-                .id_salt("mat_list")
-                .show(ui, |ui| {
-                    let search_lower = state.search.to_lowercase();
-                    let ids: Vec<String> = registry
-                        .all()
-                        .filter(|m| {
-                            search_lower.is_empty() || m.name.to_lowercase().contains(&search_lower)
-                        })
-                        .map(|m| m.id.clone())
-                        .collect();
+            let material_list = AssetListView {
+                id_salt: "mat_list",
+                max_height: None,
+                auto_shrink: [true, true],
+            };
+            material_list.show(ui, |ui| {
+                let needle = asset_browser::search_needle(&state.search);
+                let ids: Vec<String> = registry
+                    .all()
+                    .filter(|m| m.matches_search(&needle))
+                    .map(|m| m.id.clone())
+                    .collect();
 
-                    let mut delete_id: Option<String> = None;
+                let mut delete_id: Option<String> = None;
 
-                    for id in ids {
-                        let Some(def) = registry.get(&id) else {
-                            continue;
-                        };
-                        let selected = state.selected_id.as_deref() == Some(id.as_str());
+                for id in ids {
+                    let Some(def) = registry.get(&id) else {
+                        continue;
+                    };
+                    let selected = state.selected_id.as_deref() == Some(id.as_str());
 
-                        ui.horizontal(|ui| {
-                            draw_material_list_thumbnail(
-                                ui,
-                                contexts,
-                                &mut state.preview_texture_handles,
-                                asset_server,
-                                texture_registry,
-                                images,
-                                def,
-                            );
+                    ui.horizontal(|ui| {
+                        draw_material_list_thumbnail(
+                            ui,
+                            contexts,
+                            &mut state.preview_texture_handles,
+                            asset_server,
+                            texture_registry,
+                            images,
+                            def,
+                        );
 
-                            let label = egui::Button::new(format!(
-                                "{}\n{}",
-                                def.name,
-                                material_meta_label(def)
-                            ))
-                            .selected(selected)
-                            .wrap();
-                            if ui.add_sized([ui.available_width(), 42.0], label).clicked()
-                                && state.selected_id.as_deref() != Some(id.as_str())
+                        let label =
+                            egui::Button::new(format!("{}\n{}", def.name, def.meta_label()))
+                                .selected(selected)
+                                .wrap();
+                        if ui.add_sized([ui.available_width(), 42.0], label).clicked()
+                            && state.selected_id.as_deref() != Some(id.as_str())
+                        {
+                            state.selected_id = Some(id.clone());
+                            if let Some(def) = registry.get(&id) {
+                                state.load_def(def);
+                            }
+                        }
+                    });
+
+                    if selected {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(MATERIAL_LIST_THUMBNAIL_SIZE + 4.0);
+                            if ui
+                                .small_button("Apply to selection")
+                                .on_hover_text("Apply this material to all selected entities")
+                                .clicked()
                             {
-                                state.selected_id = Some(id.clone());
-                                if let Some(def) = registry.get(&id) {
-                                    state.load_def(def);
-                                }
+                                queue_command_invocation_resource(
+                                    pending,
+                                    "materials.apply_to_selection".to_string(),
+                                    serde_json::json!({ "material_id": id }),
+                                );
+                            }
+                            if ui
+                                .small_button("🗑")
+                                .on_hover_text("Delete material")
+                                .clicked()
+                            {
+                                delete_id = Some(id.clone());
                             }
                         });
-
-                        if selected {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.add_space(MATERIAL_LIST_THUMBNAIL_SIZE + 4.0);
-                                if ui
-                                    .small_button("Apply to selection")
-                                    .on_hover_text("Apply this material to all selected entities")
-                                    .clicked()
-                                {
-                                    queue_command_invocation_resource(
-                                        pending,
-                                        "materials.apply_to_selection".to_string(),
-                                        serde_json::json!({ "material_id": id }),
-                                    );
-                                }
-                                if ui
-                                    .small_button("🗑")
-                                    .on_hover_text("Delete material")
-                                    .clicked()
-                                {
-                                    delete_id = Some(id.clone());
-                                }
-                            });
-                        }
                     }
+                }
 
-                    if let Some(id) = delete_id {
-                        registry.remove(&id);
-                        if state.selected_id.as_deref() == Some(id.as_str()) {
-                            state.selected_id = None;
-                        }
+                if let Some(id) = delete_id {
+                    registry.remove(&id);
+                    if state.selected_id.as_deref() == Some(id.as_str()) {
+                        state.selected_id = None;
                     }
-                });
+                }
+            });
         });
 
         ui.separator();
@@ -1338,10 +1390,10 @@ fn draw_source_registry_column(
         });
 
         ui.add_space(4.0);
-        let search_lower = state.source_search.to_lowercase();
+        let needle = asset_browser::search_needle(&state.source_search);
         let mut entries: Vec<&SourceRegistryEntry> = source_registry
             .iter()
-            .filter(|entry| source_matches_search(entry, &search_lower))
+            .filter(|entry| entry.matches_search(&needle))
             .collect();
         entries.sort_by(|left, right| {
             left.title
@@ -1790,21 +1842,6 @@ fn parse_assignment_json(json: &str) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
-fn source_matches_search(entry: &SourceRegistryEntry, search_lower: &str) -> bool {
-    if search_lower.is_empty() {
-        return true;
-    }
-    entry.title.to_lowercase().contains(search_lower)
-        || entry.publisher.to_lowercase().contains(search_lower)
-        || entry.source_id.0.to_lowercase().contains(search_lower)
-        || entry.revision.0.to_lowercase().contains(search_lower)
-        || entry
-            .canonical_url
-            .as_deref()
-            .map(|url| url.to_lowercase().contains(search_lower))
-            .unwrap_or(false)
-}
-
 fn source_key_entry(entry: &SourceRegistryEntry) -> String {
     source_key_parts(&entry.source_id.0, &entry.revision.0)
 }
@@ -2010,9 +2047,10 @@ fn texture_row(
                 egui::Color32::from_gray(52),
             );
         } else {
-            draw_placeholder_thumbnail(
+            asset_browser::draw_placeholder_thumbnail(
                 ui,
                 egui::vec2(TEXTURE_SLOT_THUMBNAIL_SIZE, TEXTURE_SLOT_THUMBNAIL_SIZE),
+                THUMBNAIL_CORNER_RADIUS,
                 egui::Color32::from_gray(52),
                 egui::Color32::from_gray(110),
                 "No\nTexture",
@@ -2101,39 +2139,14 @@ fn draw_texture_thumbnail(
         }
     }
 
-    draw_placeholder_thumbnail(
+    asset_browser::draw_placeholder_thumbnail(
         ui,
         egui::vec2(size, size),
+        THUMBNAIL_CORNER_RADIUS,
         fallback_fill,
         egui::Color32::from_gray(86),
         "",
     );
-}
-
-fn draw_placeholder_thumbnail(
-    ui: &mut egui::Ui,
-    size: egui::Vec2,
-    fill: egui::Color32,
-    stroke_color: egui::Color32,
-    label: &str,
-) {
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    ui.painter().rect_filled(rect, 6.0, fill);
-    ui.painter().rect_stroke(
-        rect,
-        6.0,
-        egui::Stroke::new(1.0, stroke_color),
-        egui::StrokeKind::Inside,
-    );
-    if !label.is_empty() {
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            egui::TextStyle::Small.resolve(ui.style()),
-            egui::Color32::from_gray(220),
-        );
-    }
 }
 
 fn egui_texture_image<'a>(
@@ -2144,7 +2157,7 @@ fn egui_texture_image<'a>(
     let texture_id = contexts
         .image_id(handle)
         .unwrap_or_else(|| contexts.add_image(EguiTextureHandle::Weak(handle.id())));
-    egui::Image::new((texture_id, size)).corner_radius(6.0)
+    egui::Image::new((texture_id, size)).corner_radius(THUMBNAIL_CORNER_RADIUS)
 }
 
 fn cached_texture_handle(
@@ -2184,25 +2197,6 @@ fn material_swatch_color(def: &MaterialDef) -> egui::Color32 {
         (b.clamp(0.0, 1.0) * 255.0) as u8,
         (a.clamp(0.0, 1.0) * 255.0) as u8,
     )
-}
-
-fn material_meta_label(def: &MaterialDef) -> String {
-    let texture_count = [
-        def.base_color_texture.as_ref(),
-        def.normal_map_texture.as_ref(),
-        def.metallic_roughness_texture.as_ref(),
-        def.emissive_texture.as_ref(),
-        def.occlusion_texture.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .count();
-
-    if texture_count > 0 {
-        format!("{} · {texture_count} tex", def.summary())
-    } else {
-        def.summary()
-    }
 }
 
 /// Open a native file picker and return a `TextureRef::Embedded` for the

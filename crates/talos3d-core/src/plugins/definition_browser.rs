@@ -8,6 +8,7 @@ use crate::{
     authored_entity::BoxedEntity,
     capability_registry::CapabilityRegistry,
     plugins::{
+        asset_browser::{self, AssetBrowserWindow, AssetListView, BrowsableAsset},
         command_registry::{
             queue_command_invocation_resource, CommandResult, PendingCommandInvocations,
         },
@@ -39,7 +40,7 @@ use crate::{
             },
         },
         selection::Selected,
-        ui::{tool_window_bounds, tool_window_max_size, tool_window_rect, StatusBarData},
+        ui::StatusBarData,
     },
 };
 
@@ -51,6 +52,27 @@ const INSPECTOR_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(460.0, 360.0);
 const INSPECTOR_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(760.0, 760.0);
 const DEFINITIONS_BROWSER_LEFT_WIDTH: f32 = 300.0;
 const DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT: f32 = 210.0;
+const DEFINITION_THUMBNAIL_CORNER_RADIUS: f32 = 8.0;
+
+const DEFINITIONS_BROWSER_WINDOW: AssetBrowserWindow = AssetBrowserWindow {
+    title: "Definitions",
+    id_salt: "definitions_browser",
+    default_pos: egui::pos2(24.0, 88.0),
+    default_size: DEFINITIONS_WINDOW_DEFAULT_SIZE,
+    min_size: DEFINITIONS_WINDOW_MIN_SIZE,
+    max_size: DEFINITIONS_WINDOW_MAX_SIZE,
+    constrain_with_margin: true,
+};
+
+const DEFINITION_EDITOR_WINDOW: AssetBrowserWindow = AssetBrowserWindow {
+    title: "Definition Editor",
+    id_salt: "definition_inspector",
+    default_pos: egui::pos2(568.0, 88.0),
+    default_size: INSPECTOR_WINDOW_DEFAULT_SIZE,
+    min_size: INSPECTOR_WINDOW_MIN_SIZE,
+    max_size: INSPECTOR_WINDOW_MAX_SIZE,
+    constrain_with_margin: true,
+};
 
 #[derive(Debug, Clone)]
 struct DefinitionListEntry {
@@ -79,6 +101,16 @@ impl DefinitionListEntry {
                 .unwrap_or(0),
             visibility: definition.visibility,
         }
+    }
+}
+
+impl BrowsableAsset for DefinitionListEntry {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn display_name(&self) -> &str {
+        &self.name
     }
 
     fn meta_label(&self) -> String {
@@ -1286,180 +1318,152 @@ pub fn draw_definitions_window(
         return;
     }
 
-    let definitions_rect =
-        tool_window_rect(ctx, egui::pos2(24.0, 88.0), DEFINITIONS_WINDOW_DEFAULT_SIZE);
-    let mut open = state.visible;
-    egui::Window::new("Definitions")
-        .id(egui::Id::new("definitions_browser"))
-        .default_rect(definitions_rect)
-        .min_size(DEFINITIONS_WINDOW_MIN_SIZE)
-        .max_size(tool_window_max_size(ctx, DEFINITIONS_WINDOW_MAX_SIZE))
-        .constrain_to(tool_window_bounds(ctx))
-        .open(&mut open)
-        .show(ctx, |ui| {
-            let mut library_entries = libraries.list();
-            library_entries.sort_by(|left, right| left.name.cmp(&right.name));
-            ensure_definition_browser_default_source(state, definitions, &library_entries);
+    state.visible = DEFINITIONS_BROWSER_WINDOW.show(ctx, state.visible, |ui| {
+        let mut library_entries = libraries.list();
+        library_entries.sort_by(|left, right| left.name.cmp(&right.name));
+        ensure_definition_browser_default_source(state, definitions, &library_entries);
 
-            let selected_library_id = state.selected_library_id.clone();
-            let mut definition_entries: Vec<DefinitionListEntry> =
-                match selected_library_id.as_deref() {
-                    Some(library_id) => libraries
-                        .get(&DefinitionLibraryId(library_id.to_string()))
-                        .map(|library| {
-                            library
-                                .definitions
-                                .values()
-                                .map(DefinitionListEntry::from_definition)
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    None => definitions
-                        .list()
-                        .into_iter()
+        let selected_library_id = state.selected_library_id.clone();
+        let mut definition_entries: Vec<DefinitionListEntry> = match selected_library_id.as_deref()
+        {
+            Some(library_id) => libraries
+                .get(&DefinitionLibraryId(library_id.to_string()))
+                .map(|library| {
+                    library
+                        .definitions
+                        .values()
                         .map(DefinitionListEntry::from_definition)
-                        .collect(),
-                };
-            definition_entries.sort_by(|left, right| left.name.cmp(&right.name));
-            // Visibility filter: exclude InternalPart definitions from the
-            // default listing.  The toggle allows them to be shown when needed
-            // (e.g. debugging, parent navigation, migration).
-            if !state.show_internal_definitions {
-                definition_entries.retain(|entry| {
-                    !matches!(entry.visibility, DefinitionVisibility::InternalPart)
-                });
-            }
-            let search = state.search.trim().to_ascii_lowercase();
-            if !search.is_empty() {
-                definition_entries.retain(|entry| {
-                    entry.id.to_ascii_lowercase().contains(&search)
-                        || entry.name.to_ascii_lowercase().contains(&search)
-                });
-            }
-
-            if state
-                .selected_definition_id
-                .as_ref()
-                .is_none_or(|selected_id| {
-                    !definition_entries
-                        .iter()
-                        .any(|entry| entry.id == *selected_id)
+                        .collect()
                 })
-            {
-                state.selected_definition_id =
-                    definition_entries.first().map(|entry| entry.id.clone());
-                state.selected_preview_slot_path = None;
-                state.selected_occurrence_overrides = OverrideMap::default();
-            }
+                .unwrap_or_default(),
+            None => definitions
+                .list()
+                .into_iter()
+                .map(DefinitionListEntry::from_definition)
+                .collect(),
+        };
+        definition_entries.sort_by(|left, right| left.name.cmp(&right.name));
+        // Visibility filter: exclude InternalPart definitions from the
+        // default listing.  The toggle allows them to be shown when needed
+        // (e.g. debugging, parent navigation, migration).
+        if !state.show_internal_definitions {
+            definition_entries
+                .retain(|entry| !matches!(entry.visibility, DefinitionVisibility::InternalPart));
+        }
+        asset_browser::retain_matching(&mut definition_entries, &state.search);
 
-            let selected_definition_id =
-                state.selected_definition_id.as_deref().unwrap_or_default();
-            let selected_preview_registry = preview_registry_for_selected_source(
-                definitions,
-                libraries,
-                selected_library_id.as_deref(),
-            );
-            let source_definition_ids = source_definition_ids(
-                &selected_preview_registry,
-                definitions,
-                libraries,
-                selected_library_id.as_deref(),
-            );
-            let effective_definition = if selected_definition_id.is_empty() {
-                None
+        if asset_browser::ensure_selected_id(&mut state.selected_definition_id, &definition_entries)
+        {
+            state.selected_preview_slot_path = None;
+            state.selected_occurrence_overrides = OverrideMap::default();
+        }
+
+        let selected_definition_id = state.selected_definition_id.as_deref().unwrap_or_default();
+        let selected_preview_registry = preview_registry_for_selected_source(
+            definitions,
+            libraries,
+            selected_library_id.as_deref(),
+        );
+        let source_definition_ids = source_definition_ids(
+            &selected_preview_registry,
+            definitions,
+            libraries,
+            selected_library_id.as_deref(),
+        );
+        let effective_definition = if selected_definition_id.is_empty() {
+            None
+        } else {
+            selected_preview_registry
+                .effective_definition(&DefinitionId(selected_definition_id.to_string()))
+                .ok()
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("New").clicked() {
+                queue_command_invocation_resource(
+                    pending,
+                    "modeling.create_definition_draft".to_string(),
+                    json!({"name":"New Definition"}),
+                );
+            }
+            if ui
+                .add_enabled(
+                    drafts.active_draft_id.is_some(),
+                    egui::Button::new("Open Editor"),
+                )
+                .clicked()
+            {
+                state.inspector_visible = true;
+            }
+            ui.separator();
+            // Toggle for internal/implementation parts (ADR-025 amendment).
+            let show_internal_label = if state.show_internal_definitions {
+                "Hide Internal"
             } else {
-                selected_preview_registry
-                    .effective_definition(&DefinitionId(selected_definition_id.to_string()))
-                    .ok()
+                "Show Internal"
             };
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("New").clicked() {
-                    queue_command_invocation_resource(
-                        pending,
-                        "modeling.create_definition_draft".to_string(),
-                        json!({"name":"New Definition"}),
-                    );
-                }
-                if ui
-                    .add_enabled(
-                        drafts.active_draft_id.is_some(),
-                        egui::Button::new("Open Editor"),
-                    )
-                    .clicked()
-                {
-                    state.inspector_visible = true;
-                }
-                ui.separator();
-                // Toggle for internal/implementation parts (ADR-025 amendment).
-                let show_internal_label = if state.show_internal_definitions {
-                    "Hide Internal"
-                } else {
-                    "Show Internal"
-                };
-                if ui
-                    .selectable_label(state.show_internal_definitions, show_internal_label)
-                    .on_hover_text(
-                        "Toggle visibility of InternalPart definitions \
+            if ui
+                .selectable_label(state.show_internal_definitions, show_internal_label)
+                .on_hover_text(
+                    "Toggle visibility of InternalPart definitions \
                          (implementation parts such as truss members and window parts).",
-                    )
-                    .clicked()
-                {
-                    state.show_internal_definitions = !state.show_internal_definitions;
-                }
-                ui.separator();
-                ui.label(egui::RichText::new(selection.summary()).small());
-            });
+                )
+                .clicked()
+            {
+                state.show_internal_definitions = !state.show_internal_definitions;
+            }
+            ui.separator();
+            ui.label(egui::RichText::new(selection.summary()).small());
+        });
+        ui.separator();
+
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(DEFINITIONS_BROWSER_LEFT_WIDTH, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    draw_definition_browser_left_panel(
+                        ui,
+                        state,
+                        definitions,
+                        &library_entries,
+                        &definition_entries,
+                        drafts,
+                        pending,
+                    );
+                },
+            );
+
             ui.separator();
 
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(DEFINITIONS_BROWSER_LEFT_WIDTH, ui.available_height()),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        draw_definition_browser_left_panel(
-                            ui,
-                            state,
-                            definitions,
-                            &library_entries,
-                            &definition_entries,
-                            drafts,
-                            pending,
-                        );
-                    },
-                );
-
-                ui.separator();
-
-                ui.vertical(|ui| {
-                    ui.set_width(ui.available_width());
-                    if let Some(definition) = effective_definition.as_ref() {
-                        preview_target.request_with_overrides(
-                            definition.id.clone(),
-                            selected_preview_registry.clone(),
-                            state.selected_occurrence_overrides.clone(),
-                        );
-                        draw_selected_definition_workspace(
-                            ui,
-                            contexts,
-                            state,
-                            selection,
-                            pending,
-                            cursor_world_pos,
-                            preview_scene,
-                            pending_click,
-                            &selected_preview_registry,
-                            &source_definition_ids,
-                            selected_library_id.as_deref(),
-                            definition,
-                        );
-                    } else {
-                        preview_target.clear();
-                        draw_empty_definition_workspace(ui);
-                    }
-                });
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                if let Some(definition) = effective_definition.as_ref() {
+                    preview_target.request_with_overrides(
+                        definition.id.clone(),
+                        selected_preview_registry.clone(),
+                        state.selected_occurrence_overrides.clone(),
+                    );
+                    draw_selected_definition_workspace(
+                        ui,
+                        contexts,
+                        state,
+                        selection,
+                        pending,
+                        cursor_world_pos,
+                        preview_scene,
+                        pending_click,
+                        &selected_preview_registry,
+                        &source_definition_ids,
+                        selected_library_id.as_deref(),
+                        definition,
+                    );
+                } else {
+                    preview_target.clear();
+                    draw_empty_definition_workspace(ui);
+                }
             });
         });
-    state.visible = open;
+    });
     draw_definition_editor(
         ctx,
         contexts,
@@ -1478,7 +1482,6 @@ pub fn draw_definitions_window(
 
 fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry) {
     let size = egui::vec2(40.0, 40.0);
-    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let (fill, accent) = match entry.definition_kind {
         DefinitionKind::Solid => (
             egui::Color32::from_rgb(52, 73, 64),
@@ -1490,12 +1493,12 @@ fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry
         ),
     };
 
-    ui.painter().rect_filled(rect, 8.0, fill);
-    ui.painter().rect_stroke(
-        rect,
-        8.0,
-        egui::Stroke::new(1.0, egui::Color32::from_black_alpha(60)),
-        egui::StrokeKind::Inside,
+    let rect = asset_browser::thumbnail_frame(
+        ui,
+        size,
+        DEFINITION_THUMBNAIL_CORNER_RADIUS,
+        fill,
+        egui::Color32::from_black_alpha(60),
     );
 
     match entry.definition_kind {
@@ -1558,22 +1561,7 @@ fn draw_definition_list_thumbnail(ui: &mut egui::Ui, entry: &DefinitionListEntry
     } else {
         entry.parameter_count.to_string()
     };
-    let badge_rect = egui::Rect::from_min_size(
-        rect.right_bottom() - egui::vec2(16.0, 16.0),
-        egui::vec2(14.0, 14.0),
-    );
-    ui.painter().circle_filled(
-        badge_rect.center(),
-        7.0,
-        egui::Color32::from_black_alpha(70),
-    );
-    ui.painter().text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        badge_text,
-        egui::TextStyle::Small.resolve(ui.style()),
-        egui::Color32::WHITE,
-    );
+    asset_browser::draw_count_badge(ui, rect, &badge_text);
 }
 
 fn ensure_definition_browser_default_source(
@@ -1661,14 +1649,7 @@ fn draw_definition_browser_left_panel(
         });
 
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.label("Search");
-        ui.add(
-            egui::TextEdit::singleline(&mut state.search)
-                .desired_width(ui.available_width())
-                .hint_text("Name or id"),
-        );
-    });
+    asset_browser::draw_search_bar(ui, &mut state.search, Some("Search"), "Name or id");
     ui.separator();
 
     let drafts_height = if !drafts.list().is_empty() {
@@ -1677,51 +1658,52 @@ fn draw_definition_browser_left_panel(
         36.0
     };
     let list_height = (ui.available_height() - drafts_height).max(180.0);
-    egui::ScrollArea::vertical()
-        .id_salt("definitions.browser.list")
-        .max_height(list_height)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if definition_entries.is_empty() {
-                let message = if state.search.trim().is_empty() {
-                    "No definitions in this source."
-                } else {
-                    "No definitions match this search."
-                };
-                ui.label(egui::RichText::new(message).weak());
-            }
-            for entry in definition_entries {
-                let selected = state.selected_definition_id.as_deref() == Some(entry.id.as_str());
-                let response = ui
-                    .horizontal(|ui| {
-                        draw_definition_list_thumbnail(ui, entry);
-                        ui.vertical(|ui| {
-                            let title = ui.selectable_label(selected, &entry.name);
-                            if title.clicked() {
-                                select_definition_in_browser(state, &entry.id, &entry.name);
-                            }
-                            if title.double_clicked() {
-                                queue_open_definition_draft_from_browser(
-                                    pending,
-                                    &entry.id,
-                                    state.selected_library_id.as_deref(),
-                                );
-                            }
-                            ui.label(egui::RichText::new(entry.meta_label()).small().weak());
-                        });
-                    })
-                    .response;
-                response.context_menu(|ui| {
-                    draw_definition_action_menu(
-                        ui,
-                        pending,
-                        &entry.id,
-                        state.selected_library_id.as_deref(),
-                    );
-                });
-                ui.add_space(5.0);
-            }
-        });
+    let definition_list = AssetListView {
+        id_salt: "definitions.browser.list",
+        max_height: Some(list_height),
+        auto_shrink: [false, false],
+    };
+    definition_list.show(ui, |ui| {
+        if definition_entries.is_empty() {
+            asset_browser::draw_empty_list_message(
+                ui,
+                &state.search,
+                "No definitions in this source.",
+                "No definitions match this search.",
+            );
+        }
+        for entry in definition_entries {
+            let selected = state.selected_definition_id.as_deref() == Some(entry.id.as_str());
+            let response = ui
+                .horizontal(|ui| {
+                    draw_definition_list_thumbnail(ui, entry);
+                    ui.vertical(|ui| {
+                        let title = ui.selectable_label(selected, &entry.name);
+                        if title.clicked() {
+                            select_definition_in_browser(state, &entry.id, &entry.name);
+                        }
+                        if title.double_clicked() {
+                            queue_open_definition_draft_from_browser(
+                                pending,
+                                &entry.id,
+                                state.selected_library_id.as_deref(),
+                            );
+                        }
+                        ui.label(egui::RichText::new(entry.meta_label()).small().weak());
+                    });
+                })
+                .response;
+            response.context_menu(|ui| {
+                draw_definition_action_menu(
+                    ui,
+                    pending,
+                    &entry.id,
+                    state.selected_library_id.as_deref(),
+                );
+            });
+            ui.add_space(5.0);
+        }
+    });
 
     ui.separator();
     egui::CollapsingHeader::new("Drafts")
@@ -2071,185 +2053,141 @@ fn draw_definition_editor(
     }
     sync_inspector_state(state, &active_draft);
 
-    let editor_rect = tool_window_rect(ctx, egui::pos2(568.0, 88.0), INSPECTOR_WINDOW_DEFAULT_SIZE);
-    let mut open = state.inspector_visible;
-    egui::Window::new("Definition Editor")
-        .id(egui::Id::new("definition_inspector"))
-        .default_rect(editor_rect)
-        .min_size(INSPECTOR_WINDOW_MIN_SIZE)
-        .max_size(tool_window_max_size(ctx, INSPECTOR_WINDOW_MAX_SIZE))
-        .constrain_to(tool_window_bounds(ctx))
-        .open(&mut open)
-        .show(ctx, |ui| {
-            // ----------------------------------------------------------------
-            // Title bar
-            // ----------------------------------------------------------------
-            ui.horizontal(|ui| {
-                // Left side: name + status pill
-                let heading_text = egui::RichText::new(&active_draft.working_copy.name)
-                    .heading()
-                    .strong();
-                ui.label(heading_text);
-                let (pill_text, pill_color) = if active_draft.dirty {
-                    ("Draft", egui::Color32::from_rgb(220, 140, 50))
-                } else {
-                    ("Published", egui::Color32::from_rgb(80, 180, 110))
-                };
-                ui.label(
-                    egui::RichText::new(pill_text)
-                        .small()
-                        .color(pill_color)
-                        .background_color(egui::Color32::from_black_alpha(40)),
-                );
+    let editor_visible = state.inspector_visible;
+    state.inspector_visible = DEFINITION_EDITOR_WINDOW.show(ctx, editor_visible, |ui| {
+        // ----------------------------------------------------------------
+        // Title bar
+        // ----------------------------------------------------------------
+        ui.horizontal(|ui| {
+            // Left side: name + status pill
+            let heading_text = egui::RichText::new(&active_draft.working_copy.name)
+                .heading()
+                .strong();
+            ui.label(heading_text);
+            let (pill_text, pill_color) = if active_draft.dirty {
+                ("Draft", egui::Color32::from_rgb(220, 140, 50))
+            } else {
+                ("Published", egui::Color32::from_rgb(80, 180, 110))
+            };
+            ui.label(
+                egui::RichText::new(pill_text)
+                    .small()
+                    .color(pill_color)
+                    .background_color(egui::Color32::from_black_alpha(40)),
+            );
 
-                // Right side: action buttons + technical toggle
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
-                        state.inspector_visible = false;
-                    }
-                    if ui.button("Revert").clicked() {
-                        // Revert: reload draft from the published registry copy.
-                        // If a source_definition_id is set we re-open that definition;
-                        // otherwise the draft has no canonical published counterpart.
-                        if let Some(source_id) = &active_draft.source_definition_id.clone() {
-                            match definitions.get(source_id).cloned() {
-                                Some(published) => {
-                                    if let Some(draft_mut) = drafts.get_mut(&active_draft_id) {
-                                        draft_mut.working_copy = published;
-                                        draft_mut.dirty = false;
-                                        state.new_definition_name = drafts
-                                            .get(&active_draft_id)
-                                            .map(|d| d.working_copy.name.clone())
-                                            .unwrap_or_default();
-                                        status.set_feedback(
-                                            "Reverted to published version".to_string(),
-                                            2.0,
-                                        );
-                                    } else {
-                                        status.set_feedback("Draft not found".to_string(), 2.0);
-                                    }
-                                }
-                                None => status.set_feedback(
-                                    format!("Cannot find published definition '{source_id}'"),
-                                    2.0,
-                                ),
-                            }
-                        } else {
-                            status.set_feedback(
-                                "No published version to revert to — draft is standalone"
-                                    .to_string(),
-                                2.0,
-                            );
-                        }
-                    }
-                    if ui.button("Publish").clicked() {
-                        queue_command_invocation_resource(
-                            pending,
-                            "modeling.publish_definition_draft".to_string(),
-                            json!({ "draft_id": active_draft_id.to_string() }),
-                        );
-                    }
-                    ui.toggle_value(&mut state.technical_view, "Technical");
-                });
-            });
-            ui.separator();
-
-            // ----------------------------------------------------------------
-            // Three-column body
-            // ----------------------------------------------------------------
-            let available = ui.available_size();
-            let left_width = (available.x * 0.30).clamp(220.0, 300.0);
-            let right_width = (available.x * 0.22).clamp(150.0, 200.0);
-            let center_width = available.x - left_width - right_width - 16.0; // 16 for separators
-
-            ui.horizontal_top(|ui| {
-                // ── LEFT COLUMN: 3D preview (top) + property tree (bottom) ──
-                ui.allocate_ui_with_layout(
-                    egui::vec2(left_width, ui.available_height()),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(left_width);
-                        // PP-DBUX3: real 3D occurrence preview rendered via RenderTarget::Image.
-                        // PP-DBUX4: pending_click is written here on primary click and consumed
-                        // by the `resolve_preview_click` Bevy system on the same frame.
-                        draw_definition_3d_preview(
-                            ui,
-                            contexts,
-                            preview_scene,
-                            pending_click,
-                            (ui.available_height() * 0.42).max(220.0),
-                        );
-                        ui.separator();
-                        // Property tree
-                        egui::ScrollArea::vertical()
-                            .id_salt("definition_editor.property_tree")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                draw_property_tree(
-                                    ui,
-                                    state,
-                                    &active_draft,
-                                    definitions,
-                                    libraries,
-                                );
-                            });
-                    },
-                );
-
-                ui.separator();
-
-                // ── CENTER COLUMN: context editor or technical view ──
-                ui.allocate_ui_with_layout(
-                    egui::vec2(center_width, ui.available_height()),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(center_width);
-                        egui::ScrollArea::vertical()
-                            .id_salt("definition_editor.center")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                if state.technical_view {
-                                    draw_technical_view(
-                                        ui,
-                                        state,
-                                        definitions,
-                                        libraries,
-                                        drafts,
-                                        &active_draft_id,
-                                        &active_draft,
-                                        status,
+            // Right side: action buttons + technical toggle
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    state.inspector_visible = false;
+                }
+                if ui.button("Revert").clicked() {
+                    // Revert: reload draft from the published registry copy.
+                    // If a source_definition_id is set we re-open that definition;
+                    // otherwise the draft has no canonical published counterpart.
+                    if let Some(source_id) = &active_draft.source_definition_id.clone() {
+                        match definitions.get(source_id).cloned() {
+                            Some(published) => {
+                                if let Some(draft_mut) = drafts.get_mut(&active_draft_id) {
+                                    draft_mut.working_copy = published;
+                                    draft_mut.dirty = false;
+                                    state.new_definition_name = drafts
+                                        .get(&active_draft_id)
+                                        .map(|d| d.working_copy.name.clone())
+                                        .unwrap_or_default();
+                                    status.set_feedback(
+                                        "Reverted to published version".to_string(),
+                                        2.0,
                                     );
                                 } else {
-                                    draw_context_editor(
-                                        ui,
-                                        state,
-                                        definitions,
-                                        libraries,
-                                        drafts,
-                                        pending,
-                                        &active_draft_id,
-                                        &active_draft,
-                                        status,
-                                        material_registry,
-                                    );
+                                    status.set_feedback("Draft not found".to_string(), 2.0);
                                 }
-                            });
-                    },
-                );
+                            }
+                            None => status.set_feedback(
+                                format!("Cannot find published definition '{source_id}'"),
+                                2.0,
+                            ),
+                        }
+                    } else {
+                        status.set_feedback(
+                            "No published version to revert to — draft is standalone".to_string(),
+                            2.0,
+                        );
+                    }
+                }
+                if ui.button("Publish").clicked() {
+                    queue_command_invocation_resource(
+                        pending,
+                        "modeling.publish_definition_draft".to_string(),
+                        json!({ "draft_id": active_draft_id.to_string() }),
+                    );
+                }
+                ui.toggle_value(&mut state.technical_view, "Technical");
+            });
+        });
+        ui.separator();
 
-                ui.separator();
+        // ----------------------------------------------------------------
+        // Three-column body
+        // ----------------------------------------------------------------
+        let available = ui.available_size();
+        let left_width = (available.x * 0.30).clamp(220.0, 300.0);
+        let right_width = (available.x * 0.22).clamp(150.0, 200.0);
+        let center_width = available.x - left_width - right_width - 16.0; // 16 for separators
 
-                // ── RIGHT COLUMN: assets strip ──
-                ui.allocate_ui_with_layout(
-                    egui::vec2(right_width, ui.available_height()),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(right_width);
-                        egui::ScrollArea::vertical()
-                            .id_salt("definition_editor.assets")
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                draw_assets_strip(
+        ui.horizontal_top(|ui| {
+            // ── LEFT COLUMN: 3D preview (top) + property tree (bottom) ──
+            ui.allocate_ui_with_layout(
+                egui::vec2(left_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(left_width);
+                    // PP-DBUX3: real 3D occurrence preview rendered via RenderTarget::Image.
+                    // PP-DBUX4: pending_click is written here on primary click and consumed
+                    // by the `resolve_preview_click` Bevy system on the same frame.
+                    draw_definition_3d_preview(
+                        ui,
+                        contexts,
+                        preview_scene,
+                        pending_click,
+                        (ui.available_height() * 0.42).max(220.0),
+                    );
+                    ui.separator();
+                    // Property tree
+                    egui::ScrollArea::vertical()
+                        .id_salt("definition_editor.property_tree")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            draw_property_tree(ui, state, &active_draft, definitions, libraries);
+                        });
+                },
+            );
+
+            ui.separator();
+
+            // ── CENTER COLUMN: context editor or technical view ──
+            ui.allocate_ui_with_layout(
+                egui::vec2(center_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(center_width);
+                    egui::ScrollArea::vertical()
+                        .id_salt("definition_editor.center")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if state.technical_view {
+                                draw_technical_view(
+                                    ui,
+                                    state,
+                                    definitions,
+                                    libraries,
+                                    drafts,
+                                    &active_draft_id,
+                                    &active_draft,
+                                    status,
+                                );
+                            } else {
+                                draw_context_editor(
                                     ui,
                                     state,
                                     definitions,
@@ -2261,12 +2199,40 @@ fn draw_definition_editor(
                                     status,
                                     material_registry,
                                 );
-                            });
-                    },
-                );
-            });
+                            }
+                        });
+                },
+            );
+
+            ui.separator();
+
+            // ── RIGHT COLUMN: assets strip ──
+            ui.allocate_ui_with_layout(
+                egui::vec2(right_width, ui.available_height()),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(right_width);
+                    egui::ScrollArea::vertical()
+                        .id_salt("definition_editor.assets")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            draw_assets_strip(
+                                ui,
+                                state,
+                                definitions,
+                                libraries,
+                                drafts,
+                                pending,
+                                &active_draft_id,
+                                &active_draft,
+                                status,
+                                material_registry,
+                            );
+                        });
+                },
+            );
         });
-    state.inspector_visible = open;
+    });
 }
 
 // ---------------------------------------------------------------------------
