@@ -4368,7 +4368,7 @@ impl ModelApiServer {
     pub(super) async fn set_session_profile_tool(
         &self,
         Parameters(params): Parameters<SetSessionProfileRequest>,
-        peer: Peer<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let mut changed = false;
         if let Some(requested) = params.profile.as_deref() {
@@ -4384,11 +4384,19 @@ impl ModelApiServer {
                 )
             })?;
             changed = self.profile_state.set(profile);
-            if changed {
-                // Best effort: stateless HTTP transports may have no channel
-                // to deliver server-initiated notifications; the switched list
-                // still takes effect for every subsequent tools/list.
-                let _ = peer.notify_tool_list_changed().await;
+            // Notify only stream-capable transports (stdio). Our streamable
+            // HTTP transport runs stateless with JSON responses, where the
+            // FIRST server->client message becomes the HTTP body — a
+            // notification emitted here would replace the tool result, and no
+            // HTTP client is listening for notifications between requests
+            // anyway. The HTTP transport marks its requests by injecting
+            // `http::request::Parts` into the request extensions.
+            let over_http = context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .is_some();
+            if changed && !over_http {
+                let _ = context.peer.notify_tool_list_changed().await;
             }
         }
         let catalog = profile_tool_catalog();
