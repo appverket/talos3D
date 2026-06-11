@@ -5,6 +5,7 @@
 use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -25,6 +26,7 @@ use crate::plugins::{
         MaterialAlphaMode, MaterialAssignment, MaterialDef, MaterialRegistry, TextureProjection,
         TextureRef, TextureRegistry,
     },
+    registry_generation::RegistryGeneration,
     ui::{tool_window_max_size, tool_window_rect},
 };
 
@@ -111,6 +113,40 @@ pub struct MaterialsWindowState {
     pub source_draft: SourceDraftState,
     pub source_status_message: Option<String>,
     pub source_status_is_error: bool,
+    /// Cached, search-filtered material id list; see [`MaterialListCache`].
+    list_cache: MaterialListCache,
+}
+
+/// Cached list of material ids shown in the browser, in registry insertion
+/// order. Rebuilt only when the registry change stamp or the search string
+/// changes instead of re-collecting every egui frame; shared via `Arc` so a
+/// frame's working copy is a pointer clone.
+#[derive(Debug, Clone, Default)]
+struct MaterialListCache {
+    generation: Option<RegistryGeneration>,
+    /// Lowercased search needle the ids were filtered with.
+    search: String,
+    ids: Arc<Vec<String>>,
+}
+
+impl MaterialListCache {
+    /// Return the filtered id list, rebuilding it only if the registry or the
+    /// search changed since the last call. `search` must already be
+    /// lowercased.
+    fn ids(&mut self, registry: &MaterialRegistry, search: &str) -> Arc<Vec<String>> {
+        if self.generation != Some(registry.generation()) || self.search != search {
+            self.ids = Arc::new(
+                registry
+                    .all()
+                    .filter(|m| search.is_empty() || m.name.to_lowercase().contains(search))
+                    .map(|m| m.id.clone())
+                    .collect(),
+            );
+            self.generation = Some(registry.generation());
+            self.search = search.to_string();
+        }
+        Arc::clone(&self.ids)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -451,21 +487,16 @@ fn draw_browser_panel(
                 .id_salt("mat_list")
                 .show(ui, |ui| {
                     let search_lower = state.search.to_lowercase();
-                    let ids: Vec<String> = registry
-                        .all()
-                        .filter(|m| {
-                            search_lower.is_empty() || m.name.to_lowercase().contains(&search_lower)
-                        })
-                        .map(|m| m.id.clone())
-                        .collect();
+                    let ids = state.list_cache.ids(registry, &search_lower);
 
                     let mut delete_id: Option<String> = None;
 
-                    for id in ids {
-                        let Some(def) = registry.get(&id) else {
+                    for id in ids.iter() {
+                        let id = id.as_str();
+                        let Some(def) = registry.get(id) else {
                             continue;
                         };
-                        let selected = state.selected_id.as_deref() == Some(id.as_str());
+                        let selected = state.selected_id.as_deref() == Some(id);
 
                         ui.horizontal(|ui| {
                             draw_material_list_thumbnail(
@@ -486,10 +517,10 @@ fn draw_browser_panel(
                             .selected(selected)
                             .wrap();
                             if ui.add_sized([ui.available_width(), 42.0], label).clicked()
-                                && state.selected_id.as_deref() != Some(id.as_str())
+                                && state.selected_id.as_deref() != Some(id)
                             {
-                                state.selected_id = Some(id.clone());
-                                if let Some(def) = registry.get(&id) {
+                                state.selected_id = Some(id.to_string());
+                                if let Some(def) = registry.get(id) {
                                     state.load_def(def);
                                 }
                             }
@@ -514,7 +545,7 @@ fn draw_browser_panel(
                                     .on_hover_text("Delete material")
                                     .clicked()
                                 {
-                                    delete_id = Some(id.clone());
+                                    delete_id = Some(id.to_string());
                                 }
                             });
                         }
@@ -2348,5 +2379,65 @@ mod tests {
         );
         assert!(draft.canonical_url.contains("ambientcg.com"));
         assert!(draft.metadata_json.contains("\"provider\": \"ambientcg\""));
+    }
+
+    #[test]
+    fn material_list_cache_reuses_ids_until_registry_or_search_changes() {
+        let mut registry = MaterialRegistry::default();
+        let wood_id = registry.create("Wood").id.clone();
+        let steel_id = registry.create("Steel").id.clone();
+
+        let mut cache = MaterialListCache::default();
+        let first = cache.ids(&registry, "");
+        assert_eq!(
+            *first,
+            vec![wood_id.clone(), steel_id.clone()],
+            "ids must stay in registry insertion order"
+        );
+
+        // Unchanged inputs: the cached allocation is reused, not rebuilt.
+        let second = cache.ids(&registry, "");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        // Search filters by lowercased name and invalidates the cache.
+        let searched = cache.ids(&registry, "woo");
+        assert_eq!(*searched, vec![wood_id.clone()]);
+
+        // Editing a material through get_mut invalidates the cache (renames
+        // must show up in the filtered list).
+        registry.get_mut(&steel_id).unwrap().name = "Wooden Steel".to_string();
+        let renamed = cache.ids(&registry, "woo");
+        assert_eq!(*renamed, vec![wood_id.clone(), steel_id.clone()]);
+
+        // Removal invalidates the cache.
+        registry.remove(&wood_id);
+        let after_remove = cache.ids(&registry, "woo");
+        assert_eq!(*after_remove, vec![steel_id]);
+    }
+
+    #[test]
+    fn material_list_cache_detects_whole_registry_replacement() {
+        // Project load swaps in a freshly deserialized registry; the
+        // process-unique change stamp must invalidate the cache even though
+        // both instances are "new".
+        let mut first = MaterialRegistry::default();
+        first.create("Wood");
+        let mut second = MaterialRegistry::default();
+        second.create("Steel");
+
+        let first: MaterialRegistry =
+            serde_json::from_str(&serde_json::to_string(&first).unwrap()).unwrap();
+        let second: MaterialRegistry =
+            serde_json::from_str(&serde_json::to_string(&second).unwrap()).unwrap();
+
+        let mut cache = MaterialListCache::default();
+        assert_eq!(cache.ids(&first, "").len(), 1);
+        let ids = cache.ids(&second, "");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(
+            second.get(&ids[0]).unwrap().name,
+            "Steel",
+            "replacing the registry resource must invalidate the cache"
+        );
     }
 }

@@ -64,6 +64,7 @@ pub mod promotion_world;
 pub mod property_edit;
 pub mod recipe_drafts;
 pub mod refinement;
+pub mod registry_generation;
 pub mod remote_catalog;
 pub mod render_pipeline;
 pub mod scenario_scoring;
