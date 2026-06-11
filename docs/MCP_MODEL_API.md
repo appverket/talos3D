@@ -394,6 +394,18 @@ state change. Trust the `executable` / `execution_path` fields on
 `select_recipe` / `list_recipe_families` responses — they are computed from the
 actual body type.
 
+When the recipe body executes but the post-execution promotion gate blocks on
+unsatisfied obligations, both tools return **partial success**, not an error:
+the created geometry persists, so the response carries `created_element_ids`,
+the unchanged refinement `state`, and a `promotion_blocked` object
+(`unsatisfied_obligations` + `message`). Do not retry the call — that
+duplicates geometry. Resolve each listed obligation with `resolve_obligation`
+on the root element, then call `promote_refinement` again. A blocked
+`promote_refinement` with no recipe side effects (no script ran, nothing
+created) still returns a plain error. Real execution failures that occur after
+elements were already created return an error whose message lists the
+persisted element ids.
+
 Session recipe drafts are still **not executable by `instantiate_recipe`**.
 Installed drafts can be appended to `list_recipe_families` and `select_recipe`
 when the caller opts in, but `select_recipe` marks them `executable: false`

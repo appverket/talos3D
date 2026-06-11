@@ -3382,16 +3382,43 @@ pub struct PromotionPlanValidatorInfo {
     pub required_state: Option<String>,
 }
 
+/// The promotion gate blocked the refinement claim AFTER the recipe body
+/// executed: the recipe's geometry WAS created and persists in the model (see
+/// the result's `created_element_ids`); only the refinement state did not
+/// advance. Do NOT retry the call — that duplicates geometry. Instead resolve
+/// each listed obligation with `resolve_obligation`, then call
+/// `promote_refinement` again (without the recipe id) to re-run the gate.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromotionBlockedInfo {
+    /// Obligation ids still blocking the target state; each is resolvable via
+    /// `resolve_obligation` (the entity already carries the ObligationSet).
+    pub unsatisfied_obligations: Vec<String>,
+    /// Human-readable gate message explaining how to proceed.
+    pub message: String,
+}
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PromoteRefinementResult {
     pub element_id: u64,
     pub previous_state: String,
+    /// The refinement state the entity now occupies. Equal to
+    /// `previous_state` when `promotion_blocked` is set.
     pub new_state: String,
     /// Number of `AuthoringScript` steps executed during this promotion.
     /// Zero when the body was a `NativeFnRef` or no recipe was supplied.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub script_steps_run: usize,
+    /// Element ids created by recipe execution during this promotion (script
+    /// replay or native `generate`). These persist even when the promotion
+    /// gate subsequently blocks (`promotion_blocked` set).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_element_ids: Vec<u64>,
+    /// Set when the recipe body executed but the obligation gate blocked the
+    /// state advance — partial success, not failure. See [`PromotionBlockedInfo`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_blocked: Option<PromotionBlockedInfo>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -3544,7 +3571,8 @@ pub struct InstantiateRecipeResult {
     /// All element ids created by the recipe `generate` function (may be empty if
     /// the recipe generates no sub-elements, but `root_element_id` is always present).
     pub created_element_ids: Vec<u64>,
-    /// The refinement state the root entity now occupies.
+    /// The refinement state the root entity now occupies. Stays at the
+    /// creation state ("Schematic") when `promotion_blocked` is set.
     pub state: String,
     /// Number of `AuthoringScript` steps executed during instantiation.
     /// Zero for `NativeFnRef`-bodied recipes.
@@ -3557,6 +3585,12 @@ pub struct InstantiateRecipeResult {
     /// Empty when no validators fire or no recipe was run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<ValidationFindingInfo>,
+    /// Set when the recipe executed (geometry above was created and persists)
+    /// but the promotion gate blocked the refinement claim — partial success.
+    /// Do NOT retry instantiate_recipe (that duplicates geometry); resolve the
+    /// listed obligations on `root_element_id`, then re-promote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_blocked: Option<PromotionBlockedInfo>,
 }
 
 #[cfg(feature = "model-api")]
@@ -6204,7 +6238,11 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             sub-element geometry (occurrences, relations, etc.) and satisfying obligations. \
             Available recipes are discovered via `select_recipe` or `list_recipe_families`; \
             prefer `instantiate_recipe` to create a new element AND run its recipe in one call. \
-            The promotion is undoable."
+            The promotion is undoable. \
+            \n\nIf the response carries `promotion_blocked`, the recipe's geometry WAS created \
+            (see `created_element_ids`) but the obligation gate blocked the state advance \
+            (`new_state` == `previous_state`). Do NOT re-run the recipe; resolve the listed \
+            obligations with `resolve_obligation`, then promote again without `recipe_id`."
     )]
     pub(super) async fn promote_refinement_tool(
         &self,
@@ -6387,7 +6425,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             \nOptional: `placement` (`{ translate: [x,y,z] }` in **metres**), \
             `target_state` (default `\"Constructible\"`). \
             \n\nReturns `{ root_element_id, created_element_ids, state }`. After this call, \
-            use `frame_entities([root_element_id])` to verify geometry was placed."
+            use `frame_entities([root_element_id])` to verify geometry was placed. \
+            \n\nIf the response carries `promotion_blocked`, the geometry WAS created (it is \
+            listed in `created_element_ids`) but the promotion gate blocked the refinement \
+            claim on the listed `unsatisfied_obligations`. Do NOT retry this call — that \
+            duplicates geometry. Resolve each obligation with `resolve_obligation` on \
+            `root_element_id`, then call `promote_refinement`."
     )]
     pub(super) async fn instantiate_recipe_tool(
         &self,
