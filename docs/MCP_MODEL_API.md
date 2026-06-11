@@ -265,6 +265,16 @@ Current tool categories include:
 - `run_validation_v2`
 - `explain_finding_v2`
 
+Structured geometric checks (read-only, AABB-level, on demand — intended as a
+cheap first verification pass before `take_screenshot`):
+
+- `get_world_aabb` — world-space AABB per element plus the combined box
+- `check_overlaps` — pairwise AABB intersections (group/member pairs excluded;
+  capped with a `truncated` flag)
+- `check_floating` — elements whose underside hangs above the nearest support
+  (falls back to the y=0 plane when no terrain elevation is available)
+- `check_clearance` — AABB distance between two elements against a minimum
+
 ### Editing and authored changes
 
 - `create_entity`
@@ -276,7 +286,7 @@ Current tool categories include:
 - `delete_entities`
 - `transform`
 - `set_property`
-- `set_entity_property`
+- `set_entity_property` (deprecated alias of `set_property`)
 - `split_box_face`
 
 For fillet/chamfer specifically:
@@ -374,13 +384,29 @@ moves/rotates every (recursive) member together and updates the group's frame,
 so the assembly stays editable in its own rectified space afterward. Frames are
 identity-default: plain groups and all non-grouped authoring are unaffected.
 
-Session recipe drafts are **not executable by `instantiate_recipe`**. Installed
-drafts can be appended to `list_recipe_families` and `select_recipe` when the
-caller opts in, but `select_recipe` marks them `executable: false` unless they
-carry an evidence-backed `geometry_emission` runtime claim and a
+`instantiate_recipe` and `promote_refinement { recipe_id }` **execute**
+registered recipes whose body is an `AuthoringScript`: the script replays
+through the normal command pipeline (undoable), and the response carries the
+created element ids, the number of steps run, the recipe id/revision used, and
+any validation findings. Recipes whose `NativeFnRef` body does not resolve
+return a structured not-executable error instead of silently recording a bare
+state change. Trust the `executable` / `execution_path` fields on
+`select_recipe` / `list_recipe_families` responses — they are computed from the
+actual body type.
+
+Session recipe drafts are still **not executable by `instantiate_recipe`**.
+Installed drafts can be appended to `list_recipe_families` and `select_recipe`
+when the caller opts in, but `select_recipe` marks them `executable: false`
+unless they carry an evidence-backed `geometry_emission` runtime claim and a
 `draft_script.parametric_create` replay payload. Executable learned assets are
 materialized with `materialize_learned_asset`; consultable-only drafts and
 corpus-gap records do not close an authoring gap.
+
+Agent-acquired knowledge is durable at write time: recipe drafts,
+assembly-pattern drafts, and corpus gaps flush to
+`<knowledge_dir>/session/<instance_id>/` on every save/status change (atomic
+writes; I/O failure logs a warning and never fails the authoring call) and are
+recovered into the live registries on the next startup of the same instance.
 
 ## Lighting And Viewport Lookdev
 

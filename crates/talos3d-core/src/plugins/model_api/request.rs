@@ -921,6 +921,23 @@ pub(super) enum ModelApiRequest {
         request: AcquireCorpusPassageRequest,
         response: oneshot::Sender<Result<AcquireCorpusPassageResult, String>>,
     },
+    // --- Geometric validators (Item C) ---
+    GetWorldAabb {
+        request: GetWorldAabbRequest,
+        response: oneshot::Sender<ApiResult<GetWorldAabbResult>>,
+    },
+    CheckOverlaps {
+        request: CheckOverlapsRequest,
+        response: oneshot::Sender<ApiResult<CheckOverlapsResult>>,
+    },
+    CheckFloating {
+        request: CheckFloatingRequest,
+        response: oneshot::Sender<ApiResult<CheckFloatingResult>>,
+    },
+    CheckClearance {
+        request: CheckClearanceRequest,
+        response: oneshot::Sender<ApiResult<CheckClearanceResult>>,
+    },
 }
 
 // -----------------------------------------------------------------------
@@ -2277,6 +2294,19 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::AcquireCorpusPassage { request, response } => {
             let r = handle_acquire_corpus_passage(world, request);
             let _ = response.send(r);
+        }
+        // --- Geometric validators (Item C) ---
+        ModelApiRequest::GetWorldAabb { request, response } => {
+            let _ = response.send(handle_get_world_aabb(world, request));
+        }
+        ModelApiRequest::CheckOverlaps { request, response } => {
+            let _ = response.send(handle_check_overlaps(world, request));
+        }
+        ModelApiRequest::CheckFloating { request, response } => {
+            let _ = response.send(handle_check_floating(world, request));
+        }
+        ModelApiRequest::CheckClearance { request, response } => {
+            let _ = response.send(handle_check_clearance(world, request));
         }
     }
 }

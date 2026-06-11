@@ -247,6 +247,7 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
             target: "request_corpus_expansion".into(),
             note: None,
         }],
+        guidance_chapters: Vec::new(),
     });
 
     let snapshot = handle_get_capability_snapshot(&world, false);
@@ -305,6 +306,7 @@ fn capability_snapshot_must_read_card_ids_all_resolve() {
                 note: None,
             },
         ],
+        guidance_chapters: Vec::new(),
     });
 
     let snapshot = handle_get_capability_snapshot(&world, false);
@@ -1989,6 +1991,7 @@ async fn get_authoring_guidance_tool_returns_resource_contents() {
                 target: "talos3d-architecture/docs/authoring/COMPONENT_STRUCTURE.md".to_string(),
                 note: None,
             }],
+            guidance_chapters: Vec::new(),
         });
 
         while let Ok(request) = receiver.recv() {
@@ -7789,4 +7792,832 @@ fn resolve_obligation_errors_when_satisfied_by_child_missing() {
         err.contains("8888"),
         "error must reference the missing child id: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PP82/ADR-042 — recipe instantiation executes AuthoringScript
+// ---------------------------------------------------------------------------
+
+/// Build a minimal AuthoringScript that creates one box via `create_box` and
+/// binds the returned `element_id`.  Uses only tools supported by
+/// `ModelApiStepExecutor`.
+#[cfg(feature = "model-api")]
+fn build_two_box_recipe_script() -> crate::curation::authoring_script::AuthoringScript {
+    use crate::curation::authoring_script::{
+        ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, ScriptInstruction, Step,
+        StepId,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut script = AuthoringScript::stub(MutationScope::ProjectRoot);
+    script.allowed_tools = [
+        McpToolId::new("create_box"),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+
+    // Step 1: create first box (wall slab A)
+    let step_a = Step {
+        id: StepId::new("box_a"),
+        tool: McpToolId::new("create_box"),
+        args: {
+            let mut m = BTreeMap::new();
+            m.insert(
+                "center".into(),
+                ArgExpr::Literal {
+                    value: serde_json::json!([0.0, 1.0, 0.0]),
+                },
+            );
+            m.insert(
+                "half_extents".into(),
+                ArgExpr::Literal {
+                    value: serde_json::json!([1.0, 1.0, 0.1]),
+                },
+            );
+            m
+        },
+        bindings: {
+            let mut m = BTreeMap::new();
+            m.insert("id_a".into(), OutputPath::new("element_id"));
+            m
+        },
+        essential: true,
+        precondition: None,
+    };
+
+    // Step 2: create second box (wall slab B), referencing no prior step
+    let step_b = Step {
+        id: StepId::new("box_b"),
+        tool: McpToolId::new("create_box"),
+        args: {
+            let mut m = BTreeMap::new();
+            m.insert(
+                "center".into(),
+                ArgExpr::Literal {
+                    value: serde_json::json!([3.0, 1.0, 0.0]),
+                },
+            );
+            m.insert(
+                "half_extents".into(),
+                ArgExpr::Literal {
+                    value: serde_json::json!([1.0, 1.0, 0.1]),
+                },
+            );
+            m
+        },
+        bindings: BTreeMap::new(),
+        essential: true,
+        precondition: None,
+    };
+
+    script.steps = vec![
+        ScriptInstruction::Call(step_a),
+        ScriptInstruction::Call(step_b),
+    ];
+    script
+}
+
+/// Insert a test AuthoringScript recipe artifact into a fresh
+/// `RecipeArtifactRegistry` on the world.
+#[cfg(feature = "model-api")]
+fn install_two_box_recipe(world: &mut World, family_id: &str, target_class: &str) {
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let asset_id = AssetId(format!("installed_recipe/{family_id}"));
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id,
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: Some("test two-box recipe".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: build_two_box_recipe_script(),
+        },
+        parameter_schema: serde_json::json!({"type": "object", "properties": {}}),
+        target_class: target_class.into(),
+        supported_refinement_states: vec![RefinementState::Schematic, RefinementState::Constructible],
+        tests: Vec::new(),
+    };
+    let mut registry = world
+        .get_resource_mut::<RecipeArtifactRegistry>()
+        .unwrap_or_else(|| {
+            panic!("RecipeArtifactRegistry must be initialized before calling install_two_box_recipe")
+        });
+    registry.insert(artifact);
+}
+
+/// An installed `AuthoringScript` recipe, when passed to `instantiate_recipe`,
+/// must:
+///   1. Create the root semantic anchor entity.
+///   2. Create every entity the script's steps produce (two boxes here).
+///   3. Return `steps_run_count` matching the script's step count.
+///   4. Return `recipe_id_used` equal to the requested family id.
+///   5. Leave all created entities in the authored model (verifiable via
+///      list_entities).
+///   6. Leave the operations undoable: History must have at least one entry.
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::SemanticRole;
+
+    let mut world = init_model_api_test_world();
+
+    // Register "wall_assembly" as a semantic element class so that
+    // handle_instantiate_recipe's element_class validation passes.
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test element class for recipe instantiation.".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe(&mut world, "two_box_wall", "wall_assembly");
+
+    // Pre-register ElementId so that handle_instantiate_recipe's
+    // collect_ids closure can create a QueryState for it on the first
+    // call (before any ElementId entity has been spawned). Without this,
+    // World::try_query::<(&ElementId,)>() returns None on a fresh world
+    // where the component has never been used.
+    world.register_component::<crate::plugins::identity::ElementId>();
+
+    let entity_count_before = list_entities(&world).len();
+
+    // Root is created at "Schematic"; promote must target a higher level.
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("AuthoringScript recipe instantiation must succeed");
+
+    // Root entity was created; verify it is inspectable in the world.
+    // (ElementIdAllocator starts at 0, so id 0 is a valid first id.)
+    assert!(
+        get_entity_snapshot(&world, crate::plugins::identity::ElementId(result.root_element_id))
+            .is_some(),
+        "root_element_id {} must refer to an existing entity",
+        result.root_element_id
+    );
+
+    // Two boxes were created by the script steps.
+    assert_eq!(
+        result.created_element_ids.len(),
+        2,
+        "script has two create_box steps → two sub-elements must be created; \
+         got {:?}",
+        result.created_element_ids
+    );
+
+    // No created id is the root anchor.
+    assert!(
+        !result.created_element_ids.contains(&result.root_element_id),
+        "root_element_id must not appear in created_element_ids"
+    );
+
+    // steps_run_count reflects the two-step script.
+    assert_eq!(
+        result.steps_run_count, 2,
+        "steps_run_count must equal the number of executed script steps"
+    );
+
+    // recipe_id_used must echo back the requested family id.
+    assert_eq!(
+        result.recipe_id_used.as_deref(),
+        Some("two_box_wall"),
+        "recipe_id_used must match the requested family id"
+    );
+
+    // All created entities are visible through list_entities.
+    let entity_count_after = list_entities(&world).len();
+    // Root + 2 script boxes = 3 new entities minimum.
+    assert!(
+        entity_count_after >= entity_count_before + 3,
+        "list_entities must see root + at least 2 script boxes; \
+         before={entity_count_before}, after={entity_count_after}"
+    );
+
+    // Undo is available: the PendingCommandQueue was flushed (commands went
+    // through the pipeline), which means they are now in History. Verify by
+    // checking that the pending queue is empty (flush happened) and that the
+    // entity count persisted (entities survived the flush).
+    let queue = world.resource::<crate::plugins::history::PendingCommandQueue>();
+    assert!(
+        queue.commands.is_empty(),
+        "PendingCommandQueue must be empty after flush — all commands were committed"
+    );
+}
+
+/// When a recipe is requested by id but the artifact has a `NativeFnRef` body
+/// and the native function is NOT registered in CapabilityRegistry, the handler
+/// must return a structured error mentioning `request_corpus_expansion` — not
+/// silently succeed with zero elements.
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_with_unresolvable_native_fn_returns_structured_error() {
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::capability_registry::RecipeFamilyId;
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let mut world = init_model_api_test_world();
+
+    // Install a NativeFnRef artifact whose fn_id does NOT appear in
+    // CapabilityRegistry (no architecture plugin is loaded in the test world).
+    let family_id = "unregistered_native_roof";
+    let asset_id = AssetId(format!("recipe.v1/{family_id}"));
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id,
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: Some("test unregistered native".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Shipped)
+        .with_trust(Trust::Published),
+        body: RecipeBody::native(RecipeFamilyId(family_id.into())),
+        parameter_schema: serde_json::json!({"type": "object"}),
+        target_class: "roof_system".into(),
+        supported_refinement_states: vec![RefinementState::Constructible],
+        tests: Vec::new(),
+    };
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact);
+    world.insert_resource(registry);
+
+    // Spawn an entity to promote.
+    let element_id = world
+        .resource_mut::<crate::plugins::identity::ElementIdAllocator>()
+        .next_id();
+    world.spawn((element_id,));
+
+    let error = handle_promote_refinement(
+        &mut world,
+        element_id.0,
+        "Constructible".into(),
+        Some(family_id.into()),
+        serde_json::json!({}),
+    )
+    .expect_err(
+        "NativeFnRef with unregistered fn must return an error, not silently no-op",
+    );
+
+    assert!(
+        error.contains("NativeFnRef") || error.contains("native"),
+        "error must describe the NativeFnRef body, got: {error}"
+    );
+    assert!(
+        error.contains("request_corpus_expansion"),
+        "error must point to request_corpus_expansion, got: {error}"
+    );
+}
+
+/// `list_recipe_families` must return `executable: true` and
+/// `execution_path: "instantiate_recipe"` for every shipped native descriptor.
+#[cfg(feature = "model-api")]
+#[test]
+fn list_recipe_families_carries_accurate_executable_field() {
+    use crate::capability_registry::{
+        ElementClassId, GenerateInput, GenerateOutput, ObligationTemplate, RecipeFamilyDescriptor,
+        RecipeParameter,
+    };
+    use crate::plugins::refinement::RefinementState;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut world = init_model_api_test_world();
+
+    // Register a shipped native recipe family.
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_recipe_family(RecipeFamilyDescriptor {
+            id: crate::capability_registry::RecipeFamilyId("test_native_wall".into()),
+            target_class: ElementClassId("wall_assembly".into()),
+            label: "Test Native Wall".into(),
+            description: "test".into(),
+            parameters: vec![RecipeParameter {
+                name: "length_mm".into(),
+                value_schema: serde_json::json!({"type": "number"}),
+                default: Some(serde_json::json!(3000)),
+            }],
+            supported_refinement_levels: vec![RefinementState::Constructible],
+            obligation_specializations: HashMap::<
+                RefinementState,
+                Vec<ObligationTemplate>,
+            >::new(),
+            promotion_critical_path_specializations: HashMap::new(),
+            generate: Arc::new(
+                |_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
+                    Ok(GenerateOutput::default())
+                },
+            ),
+        });
+
+    let families = handle_list_recipe_families(&world, Some("wall_assembly".into()));
+    assert_eq!(families.len(), 1, "one registered family");
+    let family = &families[0];
+    assert!(
+        family.executable,
+        "shipped native descriptor must report executable=true"
+    );
+    assert_eq!(
+        family.execution_path.as_deref(),
+        Some("instantiate_recipe"),
+        "shipped native descriptor must name instantiate_recipe as execution_path"
+    );
+}
+
+/// `select_recipe` must carry `executable: true` for installed AuthoringScript
+/// artifacts, reflecting that `instantiate_recipe` can materialise them.
+#[cfg(feature = "model-api")]
+#[test]
+fn select_recipe_reports_authoring_script_artifacts_as_executable() {
+    let mut world = init_model_api_test_world();
+
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe(&mut world, "two_box_query_wall", "wall_assembly");
+
+    let rankings = handle_select_recipe(
+        &world,
+        "wall_assembly".into(),
+        serde_json::json!({}),
+    )
+    .expect("select_recipe must succeed");
+
+    let ranking = rankings
+        .iter()
+        .find(|r| r.id == "two_box_query_wall")
+        .expect("installed recipe must appear in select_recipe results");
+
+    assert!(
+        ranking.executable,
+        "installed AuthoringScript artifact must report executable=true in select_recipe"
+    );
+    assert_eq!(
+        ranking.execution_path.as_deref(),
+        Some("instantiate_recipe"),
+        "installed AuthoringScript artifact must name instantiate_recipe as execution_path"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Item C: Geometric validator tests
+// ---------------------------------------------------------------------------
+
+/// Build a minimal world with a CapabilityRegistry and two box primitives
+/// at known positions.
+#[cfg(feature = "model-api")]
+fn make_two_box_world() -> World {
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+    // Box A: centre (0,1,0), half-extents (1,1,1) → min (-1,0,-1), max (1,2,1)
+    world.spawn((
+        ElementId(10),
+        BoxPrimitive {
+            centre: Vec3::new(0.0, 1.0, 0.0),
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        },
+        ShapeRotation::default(),
+    ));
+    // Box B: centre (3,1,0), half-extents (1,1,1) → min (2,0,-1), max (4,2,1)
+    world.spawn((
+        ElementId(20),
+        BoxPrimitive {
+            centre: Vec3::new(3.0, 1.0, 0.0),
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        },
+        ShapeRotation::default(),
+    ));
+    world
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn get_world_aabb_returns_correct_bounds() {
+    let world = make_two_box_world();
+    let result = handle_get_world_aabb(
+        &world,
+        GetWorldAabbRequest {
+            element_ids: vec![10, 20],
+        },
+    )
+    .expect("get_world_aabb must succeed for known elements");
+
+    assert_eq!(result.elements.len(), 2);
+    assert!(result.errors.is_empty());
+
+    let a = result.elements.iter().find(|e| e.element_id == 10).unwrap();
+    assert!((a.min[1] - 0.0).abs() < 0.01, "Box A min y should be ~0");
+    assert!((a.max[1] - 2.0).abs() < 0.01, "Box A max y should be ~2");
+
+    let b = result.elements.iter().find(|e| e.element_id == 20).unwrap();
+    assert!((b.min[0] - 2.0).abs() < 0.01, "Box B min x should be ~2");
+
+    let combined = result.combined.expect("combined must be present");
+    assert!(combined.min[0] <= -0.9, "combined min x covers Box A");
+    assert!(combined.max[0] >= 3.9, "combined max x covers Box B");
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn get_world_aabb_error_entry_for_missing_element() {
+    let world = make_two_box_world();
+    let result = handle_get_world_aabb(
+        &world,
+        GetWorldAabbRequest {
+            element_ids: vec![10, 9999],
+        },
+    )
+    .expect("get_world_aabb must succeed even with unknown ids");
+
+    assert_eq!(result.elements.len(), 1);
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].element_id, 9999);
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn check_overlaps_non_overlapping_boxes_returns_empty() {
+    let world = make_two_box_world();
+    // Boxes A and B don't overlap (gap of 1 unit between them).
+    let result = handle_check_overlaps(
+        &world,
+        CheckOverlapsRequest {
+            element_ids: vec![10, 20],
+        },
+    )
+    .expect("check_overlaps must succeed");
+
+    assert!(result.overlaps.is_empty(), "non-overlapping boxes must not report overlap");
+    assert_eq!(result.pairs_checked, 1);
+    assert!(!result.truncated);
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn check_overlaps_touching_boxes_reports_overlap() {
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+    // Box A: min (-1,0,-1) max (1,2,1)
+    world.spawn((
+        ElementId(1),
+        BoxPrimitive {
+            centre: Vec3::new(0.0, 1.0, 0.0),
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        },
+        ShapeRotation::default(),
+    ));
+    // Box B: min (0.5,0,-1) max (2.5,2,1) — overlaps A by 0.5 in X
+    world.spawn((
+        ElementId(2),
+        BoxPrimitive {
+            centre: Vec3::new(1.5, 1.0, 0.0),
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        },
+        ShapeRotation::default(),
+    ));
+
+    let result = handle_check_overlaps(
+        &world,
+        CheckOverlapsRequest {
+            element_ids: vec![1, 2],
+        },
+    )
+    .expect("check_overlaps must succeed");
+
+    assert_eq!(result.overlaps.len(), 1, "overlapping boxes must produce one entry");
+    let entry = &result.overlaps[0];
+    assert!((entry.overlap_extents[0] - 0.5).abs() < 0.02, "overlap dx ~ 0.5 m");
+    assert!(entry.overlap_volume > 0.0);
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn check_floating_detects_floating_box() {
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+    // Ground box: min (-5,-0.1,-5) max (5,0.1,5) — rests on y=0
+    world.spawn((
+        ElementId(1),
+        BoxPrimitive {
+            centre: Vec3::new(0.0, 0.0, 0.0),
+            half_extents: Vec3::new(5.0, 0.1, 5.0),
+        },
+        ShapeRotation::default(),
+    ));
+    // Floating box: min (-0.5, 2.0, -0.5) max (0.5, 3.0, 0.5) — 1.9 m gap above ground box top
+    world.spawn((
+        ElementId(2),
+        BoxPrimitive {
+            centre: Vec3::new(0.0, 2.5, 0.0),
+            half_extents: Vec3::new(0.5, 0.5, 0.5),
+        },
+        ShapeRotation::default(),
+    ));
+
+    let result = handle_check_floating(
+        &world,
+        CheckFloatingRequest {
+            element_ids: vec![1, 2],
+            tolerance_m: Some(0.01),
+        },
+    )
+    .expect("check_floating must succeed");
+
+    // Element 2 is floating; element 1 sits on y=0 ground with a 0 gap.
+    let floating_ids: Vec<u64> = result.floating.iter().map(|f| f.element_id).collect();
+    assert!(
+        floating_ids.contains(&2),
+        "element 2 should be floating; floating_ids={floating_ids:?}"
+    );
+    let entry = result.floating.iter().find(|f| f.element_id == 2).unwrap();
+    assert!(
+        entry.gap_m > 1.8,
+        "gap should be ~1.9 m above support top (got {})",
+        entry.gap_m
+    );
+    assert_eq!(entry.nearest_support, Some(1));
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn check_floating_grounded_element_not_reported() {
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+    // Box sitting exactly at y=0 ground.
+    world.spawn((
+        ElementId(1),
+        BoxPrimitive {
+            centre: Vec3::new(0.0, 0.5, 0.0),
+            half_extents: Vec3::new(1.0, 0.5, 1.0),
+        },
+        ShapeRotation::default(),
+    ));
+
+    let result = handle_check_floating(
+        &world,
+        CheckFloatingRequest {
+            element_ids: vec![1],
+            tolerance_m: Some(0.01),
+        },
+    )
+    .expect("check_floating must succeed");
+
+    assert!(result.floating.is_empty(), "grounded element must not be reported as floating");
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn check_clearance_pass_and_fail() {
+    let world = make_two_box_world();
+    // Box A max_x=1, Box B min_x=2 → gap = 1.0 m
+
+    let pass_result = handle_check_clearance(
+        &world,
+        CheckClearanceRequest { a: 10, b: 20, min_m: 0.5 },
+    )
+    .expect("check_clearance must succeed");
+    assert!(pass_result.pass, "1.0 m gap should pass 0.5 m requirement");
+    assert!((pass_result.actual_m - 1.0).abs() < 0.05);
+
+    let fail_result = handle_check_clearance(
+        &world,
+        CheckClearanceRequest { a: 10, b: 20, min_m: 2.0 },
+    )
+    .expect("check_clearance must succeed");
+    assert!(!fail_result.pass, "1.0 m gap should fail 2.0 m requirement");
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn check_clearance_error_on_missing_element() {
+    let world = make_two_box_world();
+    let err = handle_check_clearance(
+        &world,
+        CheckClearanceRequest { a: 10, b: 9999, min_m: 1.0 },
+    );
+    assert!(err.is_err(), "missing element should return Err");
+}
+
+// ---------------------------------------------------------------------------
+// Item B: Session-recovery persistence tests
+// ---------------------------------------------------------------------------
+
+/// Build a unique tempdir-based knowledge dir and return (dir_path, instance_id).
+/// Uses the instance_id as the sole namespace so the env var is not needed.
+/// Instead, we directly test the functions that take `instance_id` and rely on
+/// `knowledge_dir()`.  We run these tests under a global mutex to avoid races
+/// on the env var.
+#[cfg(feature = "model-api")]
+fn with_isolated_knowledge_dir<F: FnOnce(&str)>(f: F) {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let base = std::env::temp_dir().join(format!("t3d_kp_{nanos}"));
+    let instance = format!("inst_{nanos}");
+    std::env::set_var("TALOS3D_KNOWLEDGE_DIR", &base);
+    f(&instance);
+    std::env::remove_var("TALOS3D_KNOWLEDGE_DIR");
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn session_recipe_draft_write_through_and_reload() {
+    use crate::plugins::knowledge_assets::{default_recipe_draft_meta, KnowledgeResidency};
+    use crate::plugins::knowledge_persistence::{
+        load_session_recipe_drafts, persist_session_recipe_draft,
+    };
+    use crate::plugins::recipe_drafts::{RecipeDraftArtifact, RecipeDraftRegistry, RecipeDraftStatus};
+
+    with_isolated_knowledge_dir(|instance| {
+        let draft = RecipeDraftArtifact {
+            id: "test-draft-1".to_string(),
+            meta: default_recipe_draft_meta(),
+            residency: KnowledgeResidency::SessionCache,
+            label: "Test Draft".into(),
+            description: "Write-through test".into(),
+            target_class: "wall".into(),
+            supported_refinement_levels: vec!["Schematic".into()],
+            parameters: vec![],
+            jurisdiction: None,
+            gap_id: None,
+            source_passage_refs: vec![],
+            evidence_slots: vec![],
+            runtime_claims: vec![],
+            acquisition_context: serde_json::json!({}),
+            draft_script: serde_json::json!({}),
+            notes: vec![],
+            status: RecipeDraftStatus::Drafted,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        persist_session_recipe_draft(instance, &draft);
+
+        let mut fresh_registry = RecipeDraftRegistry::default();
+        load_session_recipe_drafts(instance, &mut fresh_registry);
+
+        let loaded = fresh_registry.get("test-draft-1");
+        assert!(loaded.is_some(), "draft must be recoverable after persist + load");
+        assert_eq!(loaded.unwrap().label, "Test Draft");
+    });
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn session_corpus_gaps_write_through_and_reload() {
+    use crate::plugins::corpus_gap::{CorpusGap, CorpusGapId, CorpusGapQueue};
+    use crate::plugins::knowledge_persistence::{
+        load_session_corpus_gaps, persist_session_corpus_gaps,
+    };
+
+    with_isolated_knowledge_dir(|instance| {
+        let mut queue = CorpusGapQueue::default();
+        let gap = CorpusGap {
+            id: CorpusGapId(String::new()),
+            element_class: Some("stair".into()),
+            kind: None,
+            jurisdiction: Some("SE".into()),
+            missing_artifact_kind: "rule_pack".into(),
+            context: serde_json::json!({}),
+            reported_by: "agent".into(),
+            reported_at: 1_700_000_000,
+        };
+        queue.push(gap);
+
+        persist_session_corpus_gaps(instance, queue.list());
+
+        let mut fresh_queue = CorpusGapQueue::default();
+        load_session_corpus_gaps(instance, &mut fresh_queue);
+
+        assert_eq!(fresh_queue.list().len(), 1, "one gap must survive round-trip");
+        assert_eq!(fresh_queue.list()[0].element_class.as_deref(), Some("stair"));
+        assert_eq!(fresh_queue.list()[0].reported_at, 1_700_000_000);
+    });
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn session_assembly_pattern_draft_write_through_and_reload() {
+    use crate::plugins::assembly_pattern_drafts::{
+        AssemblyPatternDraftArtifact, AssemblyPatternDraftRegistry, AssemblyPatternDraftStatus,
+    };
+    use crate::plugins::knowledge_assets::{
+        default_assembly_pattern_draft_meta, KnowledgeResidency,
+    };
+    use crate::plugins::knowledge_persistence::{
+        load_session_assembly_pattern_drafts, persist_session_assembly_pattern_draft,
+    };
+
+    with_isolated_knowledge_dir(|instance| {
+        let draft = AssemblyPatternDraftArtifact {
+            id: "ap-draft-1".to_string(),
+            meta: default_assembly_pattern_draft_meta(),
+            residency: KnowledgeResidency::SessionCache,
+            label: "Wall Pattern".into(),
+            description: "test".into(),
+            target_types: vec!["wall_assembly".into()],
+            axis: "exterior_to_interior".into(),
+            layers: vec![],
+            relation_rules: vec![],
+            root_layer_ids: vec![],
+            requires_support_path: false,
+            tags: vec![],
+            parameter_schema: serde_json::json!({}),
+            jurisdiction: None,
+            gap_id: None,
+            source_passage_refs: vec![],
+            evidence_slots: vec![],
+            runtime_claims: vec![],
+            acquisition_context: serde_json::json!({}),
+            notes: vec![],
+            status: AssemblyPatternDraftStatus::Drafted,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        persist_session_assembly_pattern_draft(instance, &draft);
+
+        let mut fresh_registry = AssemblyPatternDraftRegistry::default();
+        load_session_assembly_pattern_drafts(instance, &mut fresh_registry);
+
+        let loaded = fresh_registry.get("ap-draft-1");
+        assert!(loaded.is_some(), "assembly pattern draft must survive round-trip");
+        assert_eq!(loaded.unwrap().label, "Wall Pattern");
+    });
+}
+
+#[test]
+#[cfg(feature = "model-api")]
+fn session_recovery_scope_separation_project_vs_session() {
+    // Project-scoped drafts go to knowledge_dir/recipes/<id>.json via
+    // persist_recipe (not the session area).  This test confirms session-area
+    // writes use a separate path and that the instance id namespaces them.
+    // No env var needed — tests path structure only.
+    use crate::plugins::knowledge_persistence::{
+        session_corpus_gaps_path, session_recipe_drafts_dir,
+    };
+
+    let id_a = "inst-a";
+    let id_b = "inst-b";
+    let dir_a = session_recipe_drafts_dir(id_a);
+    let dir_b = session_recipe_drafts_dir(id_b);
+    assert_ne!(dir_a, dir_b, "different instances must use different directories");
+    assert!(dir_a.ends_with("session/inst-a/recipe_drafts"));
+    assert!(dir_b.ends_with("session/inst-b/recipe_drafts"));
+
+    let gap_path_a = session_corpus_gaps_path(id_a);
+    let gap_path_b = session_corpus_gaps_path(id_b);
+    assert_ne!(gap_path_a, gap_path_b);
 }

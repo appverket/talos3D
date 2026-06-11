@@ -336,6 +336,221 @@ pub fn installed_recipe_asset_id(family_id: &str) -> AssetId {
     AssetId(format!("installed_recipe/{family_id}"))
 }
 
+// -----------------------------------------------------------------------
+// Session-recovery persistence for drafts and corpus gaps
+// -----------------------------------------------------------------------
+//
+// Layout under <knowledge_dir>/session/<instance_id>/:
+//   recipe_drafts/  — one <draft_id>.json per RecipeDraftArtifact
+//   assembly_pattern_drafts/ — one <draft_id>.json per AssemblyPatternDraftArtifact
+//   corpus_gaps.json — full CorpusGapQueue snapshot (small, single file)
+//
+// All writes use atomic_write.  Failure to write logs a warning and continues.
+
+/// Return the session recovery base dir for the given instance id.
+pub fn session_recovery_dir(instance_id: &str) -> PathBuf {
+    knowledge_dir()
+        .join("session")
+        .join(sanitize_filename(instance_id))
+}
+
+/// Sub-path for session-scoped recipe draft recovery.
+pub fn session_recipe_drafts_dir(instance_id: &str) -> PathBuf {
+    session_recovery_dir(instance_id).join("recipe_drafts")
+}
+
+/// Sub-path for session-scoped assembly pattern draft recovery.
+pub fn session_assembly_pattern_drafts_dir(instance_id: &str) -> PathBuf {
+    session_recovery_dir(instance_id).join("assembly_pattern_drafts")
+}
+
+/// Path for the corpus-gap queue snapshot.
+pub fn session_corpus_gaps_path(instance_id: &str) -> PathBuf {
+    session_recovery_dir(instance_id).join("corpus_gaps.json")
+}
+
+/// Persist one [`RecipeDraftArtifact`] into the session recovery area.
+///
+/// Logs a warning on failure; never panics.
+pub fn persist_session_recipe_draft(
+    instance_id: &str,
+    draft: &crate::plugins::recipe_drafts::RecipeDraftArtifact,
+) {
+    let filename = sanitize_filename(&draft.id);
+    let path = session_recipe_drafts_dir(instance_id).join(format!("{filename}.json"));
+    match serde_json::to_vec_pretty(draft) {
+        Ok(bytes) => {
+            if let Err(err) = atomic_write(&path, &bytes) {
+                warn!("knowledge_persistence: failed to write session recipe draft {:?}: {err}", path);
+            }
+        }
+        Err(err) => {
+            warn!("knowledge_persistence: failed to serialize session recipe draft '{}': {err}", draft.id);
+        }
+    }
+}
+
+/// Persist one [`AssemblyPatternDraftArtifact`] into the session recovery area.
+///
+/// Logs a warning on failure; never panics.
+pub fn persist_session_assembly_pattern_draft(
+    instance_id: &str,
+    draft: &crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftArtifact,
+) {
+    let filename = sanitize_filename(&draft.id);
+    let path = session_assembly_pattern_drafts_dir(instance_id).join(format!("{filename}.json"));
+    match serde_json::to_vec_pretty(draft) {
+        Ok(bytes) => {
+            if let Err(err) = atomic_write(&path, &bytes) {
+                warn!("knowledge_persistence: failed to write session assembly pattern draft {:?}: {err}", path);
+            }
+        }
+        Err(err) => {
+            warn!(
+                "knowledge_persistence: failed to serialize session assembly pattern draft '{}': {err}",
+                draft.id
+            );
+        }
+    }
+}
+
+/// Flush the full [`CorpusGapQueue`] snapshot to the session recovery area.
+///
+/// Logs a warning on failure; never panics.
+pub fn persist_session_corpus_gaps(
+    instance_id: &str,
+    gaps: &[crate::plugins::corpus_gap::CorpusGap],
+) {
+    let path = session_corpus_gaps_path(instance_id);
+    match serde_json::to_vec_pretty(gaps) {
+        Ok(bytes) => {
+            if let Err(err) = atomic_write(&path, &bytes) {
+                warn!("knowledge_persistence: failed to write corpus gap queue {:?}: {err}", path);
+            }
+        }
+        Err(err) => {
+            warn!("knowledge_persistence: failed to serialize corpus gap queue: {err}");
+        }
+    }
+}
+
+/// Load session-recovery recipe drafts from disk into `registry`.
+///
+/// Recovered drafts keep their original residency; missing or malformed files
+/// are skipped with a warning.
+pub fn load_session_recipe_drafts(
+    instance_id: &str,
+    registry: &mut crate::plugins::recipe_drafts::RecipeDraftRegistry,
+) {
+    let dir = session_recipe_drafts_dir(instance_id);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        match serde_json::from_slice::<crate::plugins::recipe_drafts::RecipeDraftArtifact>(&bytes) {
+            Ok(draft) => {
+                registry.save(draft);
+            }
+            Err(err) => {
+                warn!(
+                    "knowledge_persistence: skipping malformed session recipe draft {:?}: {err}",
+                    path
+                );
+            }
+        }
+    }
+}
+
+/// Load session-recovery assembly pattern drafts from disk into `registry`.
+///
+/// Malformed files are skipped with a warning.
+pub fn load_session_assembly_pattern_drafts(
+    instance_id: &str,
+    registry: &mut crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry,
+) {
+    let dir = session_assembly_pattern_drafts_dir(instance_id);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        match serde_json::from_slice::<
+            crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftArtifact,
+        >(&bytes)
+        {
+            Ok(draft) => {
+                registry.save(draft);
+            }
+            Err(err) => {
+                warn!(
+                    "knowledge_persistence: skipping malformed session assembly pattern draft {:?}: {err}",
+                    path
+                );
+            }
+        }
+    }
+}
+
+/// Load session-recovery corpus gaps from disk into `queue`.
+///
+/// Missing or malformed file is ignored with a warning.
+pub fn load_session_corpus_gaps(
+    instance_id: &str,
+    queue: &mut crate::plugins::corpus_gap::CorpusGapQueue,
+) {
+    let path = session_corpus_gaps_path(instance_id);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    match serde_json::from_slice::<Vec<crate::plugins::corpus_gap::CorpusGap>>(&bytes) {
+        Ok(gaps) => {
+            for gap in gaps {
+                queue.push(gap);
+            }
+        }
+        Err(err) => {
+            warn!(
+                "knowledge_persistence: skipping malformed corpus gap snapshot {:?}: {err}",
+                path
+            );
+        }
+    }
+}
+
+/// Extend [`load_knowledge_on_startup`] to also recover session drafts and
+/// corpus gaps from a previous session identified by `instance_id`.
+///
+/// Call this from `Startup` systems that have the instance id available,
+/// after the base `load_knowledge_on_startup` system has run.
+pub fn load_session_recovery_on_startup(world: &mut bevy::prelude::World, instance_id: &str) {
+    {
+        let mut registry = world.resource_mut::<crate::plugins::recipe_drafts::RecipeDraftRegistry>();
+        load_session_recipe_drafts(instance_id, &mut registry);
+    }
+    {
+        let mut registry = world
+            .resource_mut::<crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry>();
+        load_session_assembly_pattern_drafts(instance_id, &mut registry);
+    }
+    {
+        let mut queue = world.resource_mut::<crate::plugins::corpus_gap::CorpusGapQueue>();
+        load_session_corpus_gaps(instance_id, &mut queue);
+    }
+}
+
 #[cfg(test)]
 mod diag_tests {
     use super::*;
