@@ -167,7 +167,11 @@ impl Plugin for ModelApiPlugin {
         // layer on top.
         app.add_systems(
             Startup,
-            crate::plugins::knowledge_persistence::load_knowledge_on_startup,
+            (
+                crate::plugins::knowledge_persistence::load_knowledge_on_startup,
+                load_session_recovery_on_startup_system,
+            )
+                .chain(),
         );
         spawn_model_api_server(sender, runtime_info, http_listener);
     }
@@ -10291,88 +10295,138 @@ pub fn handle_promote_refinement(
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
 
-    // If the recipe_id matches an AuthoringScript body in the
-    // RecipeArtifactRegistry, replay it now before delegating to
-    // apply_promote_refinement for the state-machine update.
-    // Draft-only recipes (RecipeDraftRegistry only) are still not
-    // executable — they must be installed via install_recipe_from_session_export
-    // before use (Change-2).
+    // If the recipe_id matches a body in the RecipeArtifactRegistry, execute it
+    // now before delegating to apply_promote_refinement for the state-machine
+    // update. Draft-only recipes (RecipeDraftRegistry only) are not executable
+    // — they must be installed via install_recipe_from_session_export first.
+    //
+    // Three body cases:
+    //   AuthoringScript → replay via replay_with_lookup; capture step count.
+    //   NativeFnRef with fn registered → no-op here; apply_promote_refinement
+    //     invokes the generate fn from CapabilityRegistry.
+    //   NativeFnRef with fn NOT registered → hard error (not a silent no-op);
+    //     the recipe path is broken; caller must request_corpus_expansion.
+    let mut script_steps_run: usize = 0;
     if let Some(recipe_id) = recipe_id.as_deref() {
-        // Fetch the installed artifact once: we need both its declared
-        // `supported_refinement_states` (to gate the requested target) and its
-        // AuthoringScript body (to replay). Cloning the small Vec + script keeps
-        // the borrow on the registry from outliving the later `&mut world` use.
-        let artifact_opt = world
-            .get_resource::<crate::curation::RecipeArtifactRegistry>()
-            .and_then(|reg| {
-                let fid = crate::capability_registry::RecipeFamilyId(recipe_id.to_string());
-                reg.get_by_family(&fid)
-            })
-            .map(|artifact| {
-                (
-                    artifact.supported_refinement_states.clone(),
-                    artifact.body.script().cloned(),
-                )
-            });
+        // Fetch the installed artifact, capturing body kind + script + state
+        // support in one immutable borrow so we can use `&mut world` after.
+        #[derive(Clone)]
+        enum ArtifactBody {
+            Script(crate::curation::authoring_script::AuthoringScript),
+            NativeResolvable,
+            NativeUnresolvable { fn_id: String },
+        }
 
-        let script_opt = if let Some((supported, script)) = artifact_opt {
-            // Enforcement teeth (ADR-042 substrate contract): a recipe that
-            // explicitly declares which refinement states it supports MUST NOT
-            // be used to reach a state outside that set. This is what stops a
-            // covering-only / frameless shell (declared Schematic-max) from
-            // being instantiated or promoted to Constructible+ where it would
-            // masquerade as a resolved roof with no structural frame. An empty
-            // declaration means "unconstrained" for backward compatibility.
-            if !supported.is_empty() && !supported.contains(&target_state) {
-                let supported_labels: Vec<&str> = supported.iter().map(|s| s.as_str()).collect();
-                return Err(format!(
-                    "recipe '{recipe_id}' supports only refinement state(s) [{}] and cannot \
-                     produce '{}'. This recipe is capped at that level (e.g. a covering-only \
-                     shell with no structural framing is Schematic-max under the substrate \
-                     contract); select a recipe whose supported_refinement_states includes \
-                     '{}' (call select_recipe with that target_state), or build the missing \
-                     substrate (e.g. roof framing) first.",
-                    supported_labels.join(", "),
-                    target_state.as_str(),
-                    target_state.as_str(),
-                ));
-            }
-            script
-        } else {
-            None
+        let artifact_lookup: Option<(Vec<crate::plugins::refinement::RefinementState>, ArtifactBody)> = {
+            let fid = crate::capability_registry::RecipeFamilyId(recipe_id.to_string());
+            world
+                .get_resource::<crate::curation::RecipeArtifactRegistry>()
+                .and_then(|reg| reg.get_by_family(&fid))
+                .map(|artifact| {
+                    let supported = artifact.supported_refinement_states.clone();
+                    let body = match &artifact.body {
+                        crate::curation::recipes::RecipeBody::AuthoringScript { script } => {
+                            ArtifactBody::Script(script.clone())
+                        }
+                        crate::curation::recipes::RecipeBody::NativeFnRef { fn_id, .. } => {
+                            // Check whether the generate fn is actually registered.
+                            let has_fn = world
+                                .get_resource::<crate::capability_registry::CapabilityRegistry>()
+                                .and_then(|reg| reg.recipe_family_descriptor(&fid))
+                                .is_some();
+                            if has_fn {
+                                ArtifactBody::NativeResolvable
+                            } else {
+                                ArtifactBody::NativeUnresolvable {
+                                    fn_id: fn_id.0.clone(),
+                                }
+                            }
+                        }
+                    };
+                    (supported, body)
+                })
         };
 
-        if let Some(script) = script_opt {
-            // Build a parameter map from the overrides JSON object.
-            let params: serde_json::Map<String, serde_json::Value> =
-                overrides.as_object().cloned().unwrap_or_default();
-
-            let mut executor = ModelApiStepExecutor;
-            let mut dispatcher = crate::plugins::procedural_session_mcp::CommandQueueDispatcher {
-                world,
-                session_id: crate::curation::SessionId("recipe_replay".into()),
-                step_order: std::collections::VecDeque::new(),
-                executor: Some(&mut executor),
-            };
-            let oracle = crate::curation::procedural_session::AlwaysPassOracle;
-
-            crate::curation::replay::replay_with_lookup(
-                &script,
-                params,
-                &mut dispatcher,
-                &oracle,
-                &crate::curation::replay::NoRecipeLookup,
-                0,
-            )
-            .map_err(|e| format!("AuthoringScript replay failed: {e}"))?;
-        } else if world
-            .get_resource::<crate::plugins::recipe_drafts::RecipeDraftRegistry>()
-            .and_then(|registry| registry.get(recipe_id))
-            .is_some()
-        {
-            return Err(format!(
-                "recipe draft '{recipe_id}' is a draft only; install it first with install_recipe_from_session_export"
-            ));
+        match artifact_lookup {
+            Some((supported, body)) => {
+                // Enforcement teeth (ADR-042 substrate contract): a recipe that
+                // explicitly declares which refinement states it supports MUST NOT
+                // be used to reach a state outside that set.
+                if !supported.is_empty() && !supported.contains(&target_state) {
+                    let supported_labels: Vec<&str> =
+                        supported.iter().map(|s| s.as_str()).collect();
+                    return Err(format!(
+                        "recipe '{recipe_id}' supports only refinement state(s) [{}] and cannot \
+                         produce '{}'. This recipe is capped at that level (e.g. a covering-only \
+                         shell with no structural framing is Schematic-max under the substrate \
+                         contract); select a recipe whose supported_refinement_states includes \
+                         '{}' (call select_recipe with that target_state), or build the missing \
+                         substrate (e.g. roof framing) first.",
+                        supported_labels.join(", "),
+                        target_state.as_str(),
+                        target_state.as_str(),
+                    ));
+                }
+                match body {
+                    ArtifactBody::Script(script) => {
+                        let params: serde_json::Map<String, serde_json::Value> =
+                            overrides.as_object().cloned().unwrap_or_default();
+                        let mut executor = ModelApiStepExecutor;
+                        let mut dispatcher =
+                            crate::plugins::procedural_session_mcp::CommandQueueDispatcher {
+                                world,
+                                session_id: crate::curation::SessionId("recipe_replay".into()),
+                                step_order: std::collections::VecDeque::new(),
+                                executor: Some(&mut executor),
+                            };
+                        let oracle = crate::curation::procedural_session::AlwaysPassOracle;
+                        let report = crate::curation::replay::replay_with_lookup(
+                            &script,
+                            params,
+                            &mut dispatcher,
+                            &oracle,
+                            &crate::curation::replay::NoRecipeLookup,
+                            0,
+                        )
+                        .map_err(|e| format!("AuthoringScript replay failed: {e}"))?;
+                        script_steps_run = report.steps_run.len();
+                    }
+                    ArtifactBody::NativeResolvable => {
+                        // The generate fn is registered; apply_promote_refinement
+                        // will invoke it below — nothing to do here.
+                    }
+                    ArtifactBody::NativeUnresolvable { fn_id } => {
+                        return Err(format!(
+                            "recipe '{recipe_id}' has a NativeFnRef body (fn_id='{fn_id}') but \
+                             no generate function is registered in CapabilityRegistry. This \
+                             execution path is not available. To fill the gap: call \
+                             request_corpus_expansion to declare the corpus gap, then provide \
+                             an AuthoringScript body via install_recipe_from_session_export."
+                        ));
+                    }
+                }
+            }
+            None => {
+                // Recipe id not found in RecipeArtifactRegistry.
+                // Check if it is a draft (not yet installed).
+                if world
+                    .get_resource::<crate::plugins::recipe_drafts::RecipeDraftRegistry>()
+                    .and_then(|registry| registry.get(recipe_id))
+                    .is_some()
+                {
+                    return Err(format!(
+                        "recipe draft '{recipe_id}' is a draft only; install it first with install_recipe_from_session_export"
+                    ));
+                }
+                // Unknown recipe id — not a draft, not an artifact.
+                // Let apply_promote_refinement proceed (it treats it as a hint
+                // for obligation resolution); the id will be recorded on the
+                // refinement branch as the requested recipe. This preserves
+                // backward-compatible behaviour for recipe ids supplied at
+                // promote time without a prior install step (native-only recipes
+                // shipped in CapabilityRegistry but not yet mirrored into
+                // RecipeArtifactRegistry reach this branch too).
+            }
         }
     }
 
@@ -10417,6 +10471,7 @@ pub fn handle_promote_refinement(
         element_id,
         previous_state: previous_state.as_str().to_string(),
         new_state: new_state.as_str().to_string(),
+        script_steps_run,
     })
 }
 
@@ -10615,10 +10670,18 @@ fn handle_instantiate_recipe(
     // placement rotation applied.
     let promote = promote_result?;
 
+    // 5. Run validation on the root entity and collect findings. Failures here
+    //    are surfaced as structured findings, not as a hard error — placement
+    //    succeeded; the caller decides whether to address obligations.
+    let findings = handle_run_validation(world, root).unwrap_or_default();
+
     Ok(InstantiateRecipeResult {
         root_element_id: root,
         created_element_ids,
         state: promote.new_state,
+        steps_run_count: promote.script_steps_run,
+        recipe_id_used: Some(request.family_id.clone()),
+        findings,
     })
 }
 
@@ -11343,6 +11406,11 @@ pub fn handle_list_recipe_families_with_options(
                         })
                         .collect(),
                     is_session_draft: false,
+                    // Shipped native descriptors have a registered generate fn
+                    // by definition — they are only visible through this path
+                    // when their plugin is loaded, so executable is always true.
+                    executable: true,
+                    execution_path: Some("instantiate_recipe".into()),
                 })
                 .collect()
         })
@@ -11354,22 +11422,28 @@ pub fn handle_list_recipe_families_with_options(
                 registry
                     .list(element_class.as_deref(), Some(RecipeDraftStatus::Installed))
                     .into_iter()
-                    .map(|draft| RecipeFamilyInfo {
-                        id: draft.id,
-                        target_class: draft.target_class,
-                        label: draft.label,
-                        description: draft.description,
-                        supported_refinement_levels: draft.supported_refinement_levels,
-                        parameters: draft
-                            .parameters
-                            .into_iter()
-                            .map(|parameter| RecipeParameterInfo {
-                                name: parameter.name,
-                                value_schema: parameter.value_schema,
-                                default: parameter.default,
-                            })
-                            .collect(),
-                        is_session_draft: true,
+                    .map(|draft| {
+                        let executable = recipe_draft_has_materialization_path(&draft);
+                        RecipeFamilyInfo {
+                            id: draft.id,
+                            target_class: draft.target_class,
+                            label: draft.label,
+                            description: draft.description,
+                            supported_refinement_levels: draft.supported_refinement_levels,
+                            parameters: draft
+                                .parameters
+                                .into_iter()
+                                .map(|parameter| RecipeParameterInfo {
+                                    name: parameter.name,
+                                    value_schema: parameter.value_schema,
+                                    default: parameter.default,
+                                })
+                                .collect(),
+                            is_session_draft: true,
+                            executable,
+                            execution_path: executable
+                                .then(|| "materialize_learned_asset".to_string()),
+                        }
                     }),
             );
         }
@@ -12184,6 +12258,7 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                 referenced_tool_ids: vec!["lookup_source_passage".into()],
                 next_card_ids: Vec::new(),
                 json_examples: vec![serde_json::json!({ "passage_ref": passage_ref })],
+                body_markdown: None,
             });
         }
     }
@@ -12201,6 +12276,7 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                 referenced_tool_ids: vec!["get_authoring_guidance".into()],
                 next_card_ids: Vec::new(),
                 json_examples: Vec::new(),
+                body_markdown: None,
             });
             for reference in &guidance.references {
                 let referenced_tool_ids = if reference.kind == "mcp_tool" {
@@ -12221,6 +12297,25 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                     referenced_tool_ids,
                     next_card_ids: Vec::new(),
                     json_examples: Vec::new(),
+                    body_markdown: None,
+                });
+            }
+            // On-demand chapter cards. Populated by capability crates via
+            // `AuthoringGuidance.guidance_chapters`; served by `get_guidance_card`
+            // and indexed in `prompt_text`. Core stays domain-neutral: it
+            // converts the chapter definitions without inspecting their content.
+            for chapter in &guidance.guidance_chapters {
+                cards.push(GuidanceCardInfo {
+                    id: chapter.id.clone(),
+                    title: chapter.title.clone(),
+                    task_tags: chapter.task_tags.clone(),
+                    summary: chapter.summary.clone(),
+                    referenced_tool_ids: vec!["get_guidance_card".into()],
+                    next_card_ids: Vec::new(),
+                    json_examples: vec![serde_json::json!({
+                        "card_id": chapter.id
+                    })],
+                    body_markdown: Some(chapter.body_markdown.clone()),
                 });
             }
         }
@@ -12285,6 +12380,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             referenced_tool_ids: vec!["get_authoring_guidance".into()],
             next_card_ids: vec!["dkg.snapshot.start".into()],
             json_examples: vec![serde_json::json!({})],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "mcp_tool:select_recipe".into(),
@@ -12297,6 +12393,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "element_class": "roof_system",
                 "context": { "target_state": "Constructible", "include_session_drafts": true }
             })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "mcp_tool:get_capability_snapshot".into(),
@@ -12306,6 +12403,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             referenced_tool_ids: vec!["get_capability_snapshot".into()],
             next_card_ids: vec!["mcp_tool:discover_curated_paths".into()],
             json_examples: vec![serde_json::json!({ "expanded": true })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "mcp_tool:discover_curated_paths".into(),
@@ -12325,6 +12423,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                     "element_class": "window"
                 }),
             ],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "mcp_tool:request_corpus_expansion".into(),
@@ -12338,6 +12437,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "missing_artifact_kind": "executable_parametric_or_recipe",
                 "target_state": "Constructible"
             })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "mcp_tool:definition.create".into(),
@@ -12347,6 +12447,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             referenced_tool_ids: vec!["definition.create".into()],
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({ "name": "Grounded family name" })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "mcp_tool:definition.draft.derive".into(),
@@ -12356,6 +12457,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             referenced_tool_ids: vec!["definition.draft.derive".into()],
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({ "base_definition_id": "def_..." })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "parametric_substrate:roof_system".into(),
@@ -12368,6 +12470,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "path_kind": "parametric",
                 "element_class": "roof_system"
             })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "canonical_decision:decisions/ADR-042-Agentic-Knowledge-Curation-And-Construction-Expertise.md".into(),
@@ -12377,6 +12480,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             referenced_tool_ids: vec!["request_corpus_expansion".into(), "save_recipe_draft".into(), "save_assembly_pattern_draft".into()],
             next_card_ids: vec!["dkg.no_curated_path".into()],
             json_examples: Vec::new(),
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.snapshot.start".into(),
@@ -12390,6 +12494,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "dkg.visual_morphology".into(),
             ],
             json_examples: vec![serde_json::json!({ "expanded": false })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.building_skeleton".into(),
@@ -12444,6 +12549,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                     "rationale": "Roof is being promoted past schematic but no truss family with top chord, bottom chord, web members, panel points, and bearing-on-top-plate relation is available."
                 }),
             ],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.visual_morphology".into(),
@@ -12472,6 +12578,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                     "visual_morphology_required": true
                 }
             })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.no_curated_path".into(),
@@ -12488,6 +12595,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "element_class": "roof_system",
                 "context": { "target_state": "Constructible" }
             })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.close_gap".into(),
@@ -12510,6 +12618,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "target_class": "roof_system",
                 "source_passage_refs": []
             })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.executable_asset".into(),
@@ -12524,6 +12633,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             ],
             next_card_ids: Vec::new(),
             json_examples: vec![serde_json::json!({ "asset_id": "recipe_draft.v1/learned.asset", "overrides": {} })],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.local_frames".into(),
@@ -12559,6 +12669,7 @@ reports the active frame. ADR-058.".into(),
                     "pivot": [12.0, 0.0, 4.0]
                 }),
             ],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.site_from_survey".into(),
@@ -12588,6 +12699,7 @@ already contains a terrain_surface, skip this and go straight to dkg.terrain_fou
                 serde_json::json!({ "element_ids": ["<contour_polyline_ids>"] }),
                 serde_json::json!({ "command_id": "terrain.prepare_site_surface", "parameters": {} }),
             ],
+            body_markdown: None,
         },
         GuidanceCardInfo {
             id: "dkg.terrain_foundation".into(),
@@ -12613,6 +12725,7 @@ the slope.".into(),
                 "below_grade_margin": 0.4,
                 "sample_spacing": 0.8
             })],
+            body_markdown: None,
         },
     ]
 }
@@ -13280,10 +13393,17 @@ pub fn handle_request_corpus_expansion(
     }
     let id = world.resource_mut::<CorpusGapQueue>().push(gap);
 
-    // Re-borrow to read back the just-inserted gap.
-    let queue = world.resource::<CorpusGapQueue>();
-    let gap = queue.list().iter().find(|g| g.id == id).unwrap();
-    Ok(corpus_gap_to_info(gap))
+    // Re-borrow to read back the just-inserted gap, then flush to disk.
+    let (info, snapshot) = {
+        let queue = world.resource::<CorpusGapQueue>();
+        let gap = queue.list().iter().find(|g| g.id == id).unwrap();
+        let info = corpus_gap_to_info(gap);
+        let snapshot = queue.snapshot();
+        (info, snapshot)
+    };
+    let instance_id = world_instance_id(world);
+    crate::plugins::knowledge_persistence::persist_session_corpus_gaps(&instance_id, &snapshot);
+    Ok(info)
 }
 
 /// Look up a passage in the `CorpusPassageRegistry`.
@@ -13537,9 +13657,16 @@ pub fn handle_save_recipe_draft(
         let mut saved = saved;
         saved.meta = recipe_draft_meta_for(&saved, scope);
         let saved = world.resource_mut::<RecipeDraftRegistry>().save(saved);
+        let instance_id = world_instance_id(world);
+        crate::plugins::knowledge_persistence::persist_session_recipe_draft(
+            &instance_id,
+            &saved,
+        );
         return Ok(recipe_draft_to_info(&saved));
     }
 
+    let instance_id = world_instance_id(world);
+    crate::plugins::knowledge_persistence::persist_session_recipe_draft(&instance_id, &saved);
     Ok(recipe_draft_to_info(&saved))
 }
 
@@ -13553,10 +13680,14 @@ pub fn handle_set_recipe_draft_status(
 
     let status = RecipeDraftStatus::from_str(&status)
         .ok_or_else(|| format!("unknown recipe draft status '{status}'"))?;
-    let mut registry = world
-        .get_resource_mut::<RecipeDraftRegistry>()
-        .ok_or_else(|| "RecipeDraftRegistry not found in world".to_string())?;
-    let updated = registry.set_status(&recipe_draft_id, status)?;
+    let updated = {
+        let mut registry = world
+            .get_resource_mut::<RecipeDraftRegistry>()
+            .ok_or_else(|| "RecipeDraftRegistry not found in world".to_string())?;
+        registry.set_status(&recipe_draft_id, status)?
+    };
+    let instance_id = world_instance_id(world);
+    crate::plugins::knowledge_persistence::persist_session_recipe_draft(&instance_id, &updated);
     Ok(recipe_draft_to_info(&updated))
 }
 
@@ -13721,9 +13852,19 @@ pub fn handle_save_assembly_pattern_draft(
         let saved = world
             .resource_mut::<AssemblyPatternDraftRegistry>()
             .save(saved);
+        let instance_id = world_instance_id(world);
+        crate::plugins::knowledge_persistence::persist_session_assembly_pattern_draft(
+            &instance_id,
+            &saved,
+        );
         return Ok(assembly_pattern_draft_to_info(&saved));
     }
 
+    let instance_id = world_instance_id(world);
+    crate::plugins::knowledge_persistence::persist_session_assembly_pattern_draft(
+        &instance_id,
+        &saved,
+    );
     Ok(assembly_pattern_draft_to_info(&saved))
 }
 
@@ -13739,10 +13880,17 @@ pub fn handle_set_assembly_pattern_draft_status(
 
     let status = AssemblyPatternDraftStatus::from_str(&status)
         .ok_or_else(|| format!("unknown assembly pattern draft status '{status}'"))?;
-    let mut registry = world
-        .get_resource_mut::<AssemblyPatternDraftRegistry>()
-        .ok_or_else(|| "AssemblyPatternDraftRegistry not found in world".to_string())?;
-    let updated = registry.set_status(&assembly_pattern_draft_id, status)?;
+    let updated = {
+        let mut registry = world
+            .get_resource_mut::<AssemblyPatternDraftRegistry>()
+            .ok_or_else(|| "AssemblyPatternDraftRegistry not found in world".to_string())?;
+        registry.set_status(&assembly_pattern_draft_id, status)?
+    };
+    let instance_id = world_instance_id(world);
+    crate::plugins::knowledge_persistence::persist_session_assembly_pattern_draft(
+        &instance_id,
+        &updated,
+    );
     Ok(assembly_pattern_draft_to_info(&updated))
 }
 
@@ -14051,6 +14199,321 @@ fn assembly_pattern_draft_to_info(
         created_at: draft.created_at,
         updated_at: draft.updated_at,
     }
+}
+
+// -----------------------------------------------------------------------
+// Private helpers
+// -----------------------------------------------------------------------
+
+/// Startup system: recover session-scoped recipe/assembly drafts and corpus
+/// gaps persisted by a previous run of this instance. Runs chained after
+/// [`load_knowledge_on_startup`](crate::plugins::knowledge_persistence::load_knowledge_on_startup)
+/// so recovered drafts layer on top of shipped + installed knowledge.
+#[cfg(feature = "model-api")]
+fn load_session_recovery_on_startup_system(world: &mut World) {
+    let instance_id = world_instance_id(world);
+    crate::plugins::knowledge_persistence::load_session_recovery_on_startup(world, &instance_id);
+}
+
+/// Return the running instance id, used to namespace session-recovery paths.
+/// Falls back to `"default"` when the resource is absent (e.g. in tests).
+#[cfg(feature = "model-api")]
+fn world_instance_id(world: &World) -> String {
+    world
+        .get_resource::<ModelApiRuntimeInfo>()
+        .map(|info| info.instance_id.clone())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+// -----------------------------------------------------------------------
+// Geometric validators (Item C)
+// -----------------------------------------------------------------------
+
+/// Resolve an element id to its world-space AABB using the snapshot bounds.
+/// Returns `None` when the entity has no geometry.
+#[cfg(feature = "model-api")]
+fn element_world_aabb(world: &World, element_id: u64) -> Option<ElementAabb> {
+    let snapshot = capture_entity_snapshot(world, ElementId(element_id))?;
+    let bounds = snapshot.bounds()?;
+    Some(ElementAabb {
+        element_id,
+        min: [bounds.min.x as f64, bounds.min.y as f64, bounds.min.z as f64],
+        max: [bounds.max.x as f64, bounds.max.y as f64, bounds.max.z as f64],
+    })
+}
+
+/// Combine two [`ElementAabb`]s into their union.
+#[cfg(feature = "model-api")]
+fn merge_element_aabb(a: &ElementAabb, b: &ElementAabb) -> ElementAabb {
+    ElementAabb {
+        element_id: 0, // combined has no single owner
+        min: [
+            a.min[0].min(b.min[0]),
+            a.min[1].min(b.min[1]),
+            a.min[2].min(b.min[2]),
+        ],
+        max: [
+            a.max[0].max(b.max[0]),
+            a.max[1].max(b.max[1]),
+            a.max[2].max(b.max[2]),
+        ],
+    }
+}
+
+/// Collect the world AABBs for all authored entities (used when the caller
+/// passes an empty element_ids list).
+#[cfg(feature = "model-api")]
+/// Entity types that carry bounds but are not solid geometry; excluded from
+/// the default candidate set of the geometric validators (explicit
+/// `element_ids` still resolve them via `element_world_aabb`).
+#[cfg(feature = "model-api")]
+const NON_SOLID_ENTITY_TYPES: &[&str] = &["scene_light", "guide_line", "dimension_line"];
+
+#[cfg(feature = "model-api")]
+fn all_entity_aabbs(world: &World) -> Vec<ElementAabb> {
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut q = match world.try_query::<EntityRef>() {
+        Some(q) => q,
+        None => return Vec::new(),
+    };
+    q.iter(world)
+        .filter_map(|entity_ref| {
+            let eid = entity_ref.get::<ElementId>()?.0;
+            let snapshot = registry.capture_snapshot(&entity_ref, world)?;
+            if snapshot.scope() != crate::authored_entity::EntityScope::AuthoredModel {
+                return None;
+            }
+            if NON_SOLID_ENTITY_TYPES.contains(&snapshot.type_name()) {
+                return None;
+            }
+            let bounds = snapshot.bounds()?;
+            Some(ElementAabb {
+                element_id: eid,
+                min: [bounds.min.x as f64, bounds.min.y as f64, bounds.min.z as f64],
+                max: [bounds.max.x as f64, bounds.max.y as f64, bounds.max.z as f64],
+            })
+        })
+        .collect()
+}
+
+/// Check whether two AABBs intersect and, if so, return the overlap volume and extents.
+#[cfg(feature = "model-api")]
+fn aabb_intersection(a: &ElementAabb, b: &ElementAabb) -> Option<([f64; 3], f64)> {
+    let ix_min = a.min[0].max(b.min[0]);
+    let iy_min = a.min[1].max(b.min[1]);
+    let iz_min = a.min[2].max(b.min[2]);
+    let ix_max = a.max[0].min(b.max[0]);
+    let iy_max = a.max[1].min(b.max[1]);
+    let iz_max = a.max[2].min(b.max[2]);
+    let dx = ix_max - ix_min;
+    let dy = iy_max - iy_min;
+    let dz = iz_max - iz_min;
+    if dx > 0.0 && dy > 0.0 && dz > 0.0 {
+        Some(([dx, dy, dz], dx * dy * dz))
+    } else {
+        None
+    }
+}
+
+/// AABB-distance between two elements: the shortest gap between their bounding
+/// boxes in world space.  Zero means they touch or overlap.
+#[cfg(feature = "model-api")]
+fn aabb_distance(a: &ElementAabb, b: &ElementAabb) -> f64 {
+    let dx = (a.min[0].max(b.min[0]) - a.max[0].min(b.max[0])).max(0.0);
+    let dy = (a.min[1].max(b.min[1]) - a.max[1].min(b.max[1])).max(0.0);
+    let dz = (a.min[2].max(b.min[2]) - a.max[2].min(b.max[2])).max(0.0);
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Maximum number of element pairs checked by `check_overlaps` before
+/// returning a truncated result.
+#[cfg(feature = "model-api")]
+const OVERLAP_PAIR_CAP: usize = 500;
+
+#[cfg(feature = "model-api")]
+pub fn handle_get_world_aabb(
+    world: &World,
+    request: GetWorldAabbRequest,
+) -> ApiResult<GetWorldAabbResult> {
+    if request.element_ids.is_empty() {
+        return Err("element_ids must be non-empty".to_string());
+    }
+    let mut elements = Vec::with_capacity(request.element_ids.len());
+    let mut errors = Vec::new();
+    for &eid in &request.element_ids {
+        match element_world_aabb(world, eid) {
+            Some(aabb) => elements.push(aabb),
+            None => errors.push(AabbError {
+                element_id: eid,
+                reason: "no geometry / entity not found".to_string(),
+            }),
+        }
+    }
+    let combined = elements
+        .iter()
+        .cloned()
+        .reduce(|acc, b| merge_element_aabb(&acc, &b));
+    Ok(GetWorldAabbResult {
+        elements,
+        errors,
+        combined,
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_check_overlaps(
+    world: &World,
+    request: CheckOverlapsRequest,
+) -> ApiResult<CheckOverlapsResult> {
+    // Build the candidate set.
+    let aabbs: Vec<ElementAabb> = if request.element_ids.is_empty() {
+        all_entity_aabbs(world)
+    } else {
+        request
+            .element_ids
+            .iter()
+            .filter_map(|&eid| element_world_aabb(world, eid))
+            .collect()
+    };
+
+    // Build the group-membership set so we can exclude parent/child containment.
+    // We collect (group_id -> member_ids) from GroupMembers components.
+    let mut group_pairs: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    {
+        let mut q = match world.try_query::<EntityRef>() {
+            Some(q) => q,
+            None => {
+                return Ok(CheckOverlapsResult {
+                    overlaps: Vec::new(),
+                    truncated: false,
+                    pairs_checked: 0,
+                })
+            }
+        };
+        for entity_ref in q.iter(world) {
+            let Some(group_eid) = entity_ref.get::<ElementId>().map(|e| e.0) else {
+                continue;
+            };
+            let Some(members) = entity_ref.get::<GroupMembers>() else {
+                continue;
+            };
+            for member_id in members.member_ids.iter() {
+                // Both orderings so the lookup below is order-independent.
+                group_pairs.insert((group_eid, member_id.0));
+                group_pairs.insert((member_id.0, group_eid));
+            }
+        }
+    }
+
+    let n = aabbs.len();
+    let total_pairs = n.saturating_mul(n.saturating_sub(1)) / 2;
+    let truncated = total_pairs > OVERLAP_PAIR_CAP;
+
+    let mut overlaps = Vec::new();
+    let mut pairs_checked = 0usize;
+    'outer: for i in 0..n {
+        for j in (i + 1)..n {
+            if pairs_checked >= OVERLAP_PAIR_CAP {
+                break 'outer;
+            }
+            let a = &aabbs[i];
+            let b = &aabbs[j];
+            // Skip group-member containment pairs.
+            if group_pairs.contains(&(a.element_id, b.element_id)) {
+                continue;
+            }
+            pairs_checked += 1;
+            if let Some((extents, volume)) = aabb_intersection(a, b) {
+                overlaps.push(OverlapEntry {
+                    a: a.element_id,
+                    b: b.element_id,
+                    overlap_volume: volume,
+                    overlap_extents: extents,
+                });
+            }
+        }
+    }
+
+    Ok(CheckOverlapsResult {
+        overlaps,
+        truncated,
+        pairs_checked,
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_check_floating(
+    world: &World,
+    request: CheckFloatingRequest,
+) -> ApiResult<CheckFloatingResult> {
+    const DEFAULT_TOLERANCE: f64 = 0.01;
+    let tolerance = request.tolerance_m.unwrap_or(DEFAULT_TOLERANCE);
+
+    let candidates: Vec<ElementAabb> = if request.element_ids.is_empty() {
+        all_entity_aabbs(world)
+    } else {
+        request
+            .element_ids
+            .iter()
+            .filter_map(|&eid| element_world_aabb(world, eid))
+            .collect()
+    };
+
+    // Use y=0 as ground; talos3d-terrain is in a separate crate and we cannot
+    // call its elevation function from core without adding a dependency.
+    let ground_assumption = "y=0 (terrain elevation function not reachable from core)".to_string();
+
+    let mut floating = Vec::new();
+    for candidate in &candidates {
+        let bottom = candidate.min[1];
+        // Find the highest AABB top among other elements that is below `bottom`.
+        let nearest_support = candidates
+            .iter()
+            .filter(|other| other.element_id != candidate.element_id)
+            .filter(|other| {
+                // The support must spatially underlie the candidate in XZ.
+                other.max[0] > candidate.min[0]
+                    && other.min[0] < candidate.max[0]
+                    && other.max[2] > candidate.min[2]
+                    && other.min[2] < candidate.max[2]
+                    && other.max[1] <= bottom
+            })
+            .max_by(|a, b| a.max[1].partial_cmp(&b.max[1]).unwrap_or(std::cmp::Ordering::Equal));
+
+        let support_top = nearest_support.map(|s| s.max[1]).unwrap_or(0.0);
+        let gap = bottom - support_top;
+        if gap > tolerance {
+            floating.push(FloatingEntry {
+                element_id: candidate.element_id,
+                gap_m: gap,
+                nearest_support: nearest_support.map(|s| s.element_id),
+            });
+        }
+    }
+
+    Ok(CheckFloatingResult {
+        floating,
+        ground_assumption,
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_check_clearance(
+    world: &World,
+    request: CheckClearanceRequest,
+) -> ApiResult<CheckClearanceResult> {
+    let aabb_a = element_world_aabb(world, request.a)
+        .ok_or_else(|| format!("element {} has no geometry", request.a))?;
+    let aabb_b = element_world_aabb(world, request.b)
+        .ok_or_else(|| format!("element {} has no geometry", request.b))?;
+    let actual_m = aabb_distance(&aabb_a, &aabb_b);
+    Ok(CheckClearanceResult {
+        a: request.a,
+        b: request.b,
+        actual_m,
+        min_m: request.min_m,
+        pass: actual_m >= request.min_m,
+    })
 }
 
 #[cfg(test)]
