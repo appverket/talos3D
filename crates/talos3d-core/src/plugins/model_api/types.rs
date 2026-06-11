@@ -1492,3 +1492,138 @@ pub struct CreateAssemblyResult {
     pub assembly_id: u64,
     pub relation_ids: Vec<u64>,
 }
+
+// -----------------------------------------------------------------------
+// Geometric validator DTOs (Item C)
+// -----------------------------------------------------------------------
+
+/// Request for `get_world_aabb`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetWorldAabbRequest {
+    /// Element ids to query.  Must be non-empty.
+    pub element_ids: Vec<u64>,
+}
+
+/// AABB for one element in world space (f64 for precision in responses).
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ElementAabb {
+    pub element_id: u64,
+    /// World-space minimum corner [x, y, z].
+    pub min: [f64; 3],
+    /// World-space maximum corner [x, y, z].
+    pub max: [f64; 3],
+}
+
+/// Error entry for an element that has no geometry.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AabbError {
+    pub element_id: u64,
+    pub reason: String,
+}
+
+/// Response for `get_world_aabb`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GetWorldAabbResult {
+    /// Per-element results (only elements with geometry).
+    pub elements: Vec<ElementAabb>,
+    /// Elements for which no AABB could be determined.
+    pub errors: Vec<AabbError>,
+    /// Combined AABB of all elements that had geometry, or null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub combined: Option<ElementAabb>,
+}
+
+/// Request for `check_overlaps`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CheckOverlapsRequest {
+    /// Subset of element ids to check.  If empty, all entities with geometry
+    /// are used (capped at 500 pairs with a truncation notice).
+    #[serde(default)]
+    pub element_ids: Vec<u64>,
+}
+
+/// One overlapping pair.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OverlapEntry {
+    pub a: u64,
+    pub b: u64,
+    /// Volume of the AABB intersection (m³).
+    pub overlap_volume: f64,
+    /// Extents of the intersection region [dx, dy, dz] (m).
+    pub overlap_extents: [f64; 3],
+}
+
+/// Response for `check_overlaps`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CheckOverlapsResult {
+    pub overlaps: Vec<OverlapEntry>,
+    /// True when the candidate set was capped and results may be incomplete.
+    pub truncated: bool,
+    /// Number of element pairs that were checked.
+    pub pairs_checked: usize,
+}
+
+/// Request for `check_floating`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CheckFloatingRequest {
+    /// Subset of element ids to check.  If empty, all entities with geometry.
+    #[serde(default)]
+    pub element_ids: Vec<u64>,
+    /// Elements whose AABB bottom is more than this many metres above the
+    /// nearest support (or y=0 ground plane) are reported.  Default: 0.01 m.
+    #[serde(default)]
+    pub tolerance_m: Option<f64>,
+}
+
+/// One floating element.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FloatingEntry {
+    pub element_id: u64,
+    /// Gap between this element's AABB bottom and its nearest support (m).
+    pub gap_m: f64,
+    /// Element id of the nearest potential support below, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nearest_support: Option<u64>,
+}
+
+/// Response for `check_floating`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CheckFloatingResult {
+    pub floating: Vec<FloatingEntry>,
+    /// Ground-plane assumption used when no terrain elevation function is
+    /// reachable from core: "y=0" or "terrain_elevation_fn".
+    pub ground_assumption: String,
+}
+
+/// Request for `check_clearance`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckClearanceRequest {
+    pub a: u64,
+    pub b: u64,
+    /// Minimum required clearance in metres.
+    pub min_m: f64,
+}
+
+/// Response for `check_clearance`.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CheckClearanceResult {
+    pub a: u64,
+    pub b: u64,
+    /// Actual AABB-level distance between the two elements (m).
+    /// Zero means their AABBs touch or overlap.
+    pub actual_m: f64,
+    pub min_m: f64,
+    pub pass: bool,
+}

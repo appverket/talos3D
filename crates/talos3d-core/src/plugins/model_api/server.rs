@@ -2177,6 +2177,40 @@ impl ModelApiServer {
         self.round_trip(|response| ModelApiRequest::AcquireCorpusPassage { request, response })
             .await?
     }
+
+    // --- Geometric validators (Item C) ---
+
+    async fn request_get_world_aabb(
+        &self,
+        request: GetWorldAabbRequest,
+    ) -> Result<GetWorldAabbResult, String> {
+        self.round_trip(|response| ModelApiRequest::GetWorldAabb { request, response })
+            .await?
+    }
+
+    async fn request_check_overlaps(
+        &self,
+        request: CheckOverlapsRequest,
+    ) -> Result<CheckOverlapsResult, String> {
+        self.round_trip(|response| ModelApiRequest::CheckOverlaps { request, response })
+            .await?
+    }
+
+    async fn request_check_floating(
+        &self,
+        request: CheckFloatingRequest,
+    ) -> Result<CheckFloatingResult, String> {
+        self.round_trip(|response| ModelApiRequest::CheckFloating { request, response })
+            .await?
+    }
+
+    async fn request_check_clearance(
+        &self,
+        request: CheckClearanceRequest,
+    ) -> Result<CheckClearanceResult, String> {
+        self.round_trip(|response| ModelApiRequest::CheckClearance { request, response })
+            .await?
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -2444,6 +2478,10 @@ pub struct TerrainElevationAtRequest {
 
 pub(super) fn default_true() -> bool {
     true
+}
+
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 #[cfg(feature = "model-api")]
@@ -3023,6 +3061,13 @@ pub struct RecipeFamilyInfo {
     pub parameters: Vec<RecipeParameterInfo>,
     #[serde(default)]
     pub is_session_draft: bool,
+    /// True when this family can emit geometry through the named execution path.
+    /// Computed from the actual body type + whether the native fn is registered.
+    #[serde(default)]
+    pub executable: bool,
+    /// MCP tool to call to materialise this family, when executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_path: Option<String>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -3343,6 +3388,10 @@ pub struct PromoteRefinementResult {
     pub element_id: u64,
     pub previous_state: String,
     pub new_state: String,
+    /// Number of `AuthoringScript` steps executed during this promotion.
+    /// Zero when the body was a `NativeFnRef` or no recipe was supplied.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub script_steps_run: usize,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -3497,6 +3546,17 @@ pub struct InstantiateRecipeResult {
     pub created_element_ids: Vec<u64>,
     /// The refinement state the root entity now occupies.
     pub state: String,
+    /// Number of `AuthoringScript` steps executed during instantiation.
+    /// Zero for `NativeFnRef`-bodied recipes.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub steps_run_count: usize,
+    /// The recipe family id that was used for instantiation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe_id_used: Option<String>,
+    /// Validation findings on the root entity after instantiation.
+    /// Empty when no validators fire or no recipe was run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ValidationFindingInfo>,
 }
 
 #[cfg(feature = "model-api")]
@@ -3634,6 +3694,10 @@ pub struct GuidanceCardInfo {
     pub referenced_tool_ids: Vec<String>,
     pub next_card_ids: Vec<String>,
     pub json_examples: Vec<serde_json::Value>,
+    /// Full chapter markdown. Present on chapter cards; `None` on summary-only
+    /// cards. Clients that only need the summary may ignore this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_markdown: Option<String>,
 }
 
 // --- PP74 request parameter structs ---
@@ -4315,14 +4379,13 @@ gable inherits the angle, so gable ends can never be left at the wrong angle. ro
 
     #[tool(
         name = "set_entity_property",
-        description = "Set a single authored property on an entity through the command pipeline. Returns CommandResult."
+        description = "Deprecated alias of set_property. Use set_property instead."
     )]
     pub(super) async fn set_entity_property_tool(
         &self,
         Parameters(params): Parameters<SetPropertyRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.typed_command_tool(CMD_MODEL_API_SET_ENTITY_PROPERTY, params)
-            .await
+        self.set_property_tool(Parameters(params)).await
     }
 
     #[tool(
@@ -7789,6 +7852,80 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_acquire_corpus_passage(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(result)
+    }
+
+    // --- Geometric validators (Item C) ---
+
+    #[tool(
+        name = "get_world_aabb",
+        description = "Return the world-space axis-aligned bounding box (AABB) for one or more \
+            elements. Precision is AABB-level: bounds come from the authored snapshot, not \
+            from rendered mesh vertices. Elements without geometry produce error entries, not \
+            failures. Also returns a combined AABB over all resolved elements."
+    )]
+    pub(super) async fn get_world_aabb_tool(
+        &self,
+        Parameters(params): Parameters<GetWorldAabbRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_get_world_aabb(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "check_overlaps",
+        description = "Report pairwise AABB intersections among the given elements (or all \
+            authored entities when element_ids is empty). AABB-level only — false positives are \
+            possible for complex shapes. Capped at 500 pairs; sets truncated=true when the \
+            candidate set exceeds the cap. Parent/child group-containment pairs are filtered out \
+            when group membership data is available."
+    )]
+    pub(super) async fn check_overlaps_tool(
+        &self,
+        Parameters(params): Parameters<CheckOverlapsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_check_overlaps(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "check_floating",
+        description = "Identify elements whose AABB bottom face is more than tolerance_m above \
+            any supporting AABB top below them. Ground plane is y=0 when no terrain elevation \
+            function is reachable from core (stated in ground_assumption). Returns gap_m and the \
+            nearest supporting element id per floating entry. Default tolerance: 0.01 m."
+    )]
+    pub(super) async fn check_floating_tool(
+        &self,
+        Parameters(params): Parameters<CheckFloatingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_check_floating(params)
+            .await
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "check_clearance",
+        description = "Measure the AABB-level distance between two elements and check it against \
+            a required minimum (min_m). Returns actual_m, min_m, and pass. Zero means the \
+            bounding boxes touch or overlap."
+    )]
+    pub(super) async fn check_clearance_tool(
+        &self,
+        Parameters(params): Parameters<CheckClearanceRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_check_clearance(params)
             .await
             .map_err(|e| McpError::invalid_params(e, None))?;
         json_tool_result(result)

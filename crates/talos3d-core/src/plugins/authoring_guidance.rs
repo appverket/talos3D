@@ -21,6 +21,32 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// A single on-demand guidance chapter registered alongside the compact
+/// `prompt_text`. Chapters carry large reference content (element-class
+/// ladders, cookbook, gap-closing protocol) that would bloat the always-loaded
+/// prompt. They are served by `get_guidance_card` and indexed in
+/// `prompt_text`; the agent fetches only the chapters it needs.
+///
+/// Core stays domain-neutral: this struct holds only the shape; capability
+/// crates (architecture, naval …) fill in the content.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct GuidanceChapterDef {
+    /// Stable identifier used as the `get_guidance_card` key. Convention:
+    /// `arch.chapter.<slug>`.
+    pub id: String,
+    /// Human-readable card title.
+    pub title: String,
+    /// Task tags forwarded to `GuidanceCardInfo.task_tags`.
+    pub task_tags: Vec<String>,
+    /// One-line summary shown in the compact `prompt_text` chapter index.
+    pub summary: String,
+    /// When the agent should fetch this chapter (appears in the index).
+    pub when_to_fetch: String,
+    /// Full chapter markdown. Forwarded to `GuidanceCardInfo.body_markdown`.
+    pub body_markdown: String,
+}
+
 /// Canonical authoring guidance document.
 ///
 /// Consumed by the in-app assistant (when assembling its system prompt) and
@@ -42,6 +68,12 @@ pub struct AuthoringGuidance {
     /// Pointers the agent can follow up on without guessing — e.g. related
     /// MCP tools, recipe families, catalog ids.
     pub references: Vec<GuidanceReference>,
+    /// On-demand chapter cards. Each chapter carries the large reference
+    /// content that would bloat `prompt_text`; `prompt_text` contains only
+    /// a chapter index pointing at these ids. Core exposes them via
+    /// `get_guidance_card`; capability crates populate this vec.
+    #[serde(default)]
+    pub guidance_chapters: Vec<GuidanceChapterDef>,
 }
 
 impl Default for AuthoringGuidance {
@@ -54,6 +86,7 @@ impl Default for AuthoringGuidance {
             prompt_text: String::new(),
             component_structure: ComponentStructurePolicy::default(),
             references: Vec::new(),
+            guidance_chapters: Vec::new(),
         }
     }
 }
