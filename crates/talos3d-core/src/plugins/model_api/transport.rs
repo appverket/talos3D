@@ -133,20 +133,44 @@ pub(super) fn spawn_model_api_server(
                     .with_stateful_mode(false)
                     .with_json_response(true)
                     .with_cancellation_token(ct.clone());
-                let service: StreamableHttpService<ModelApiServer, LocalSessionManager> =
-                    StreamableHttpService::new(
-                        move || Ok(ModelApiServer::new(sender.clone())),
-                        Default::default(),
-                        config,
-                    );
+
+                // One MCP service per capability profile plus the default
+                // `/mcp` endpoint (profile from TALOS3D_MCP_PROFILE, default
+                // `authoring`). Each endpoint owns one shared
+                // SessionProfileState: the transport runs stateless (a fresh
+                // server per request), so connect-time profile selection is
+                // the endpoint path, and `set_session_profile` switches that
+                // endpoint's state for subsequent requests.
+                let profile_service = |profile: CapabilityProfile| {
+                    let state = SessionProfileState::new(profile);
+                    let sender = sender.clone();
+                    let service: StreamableHttpService<ModelApiServer, LocalSessionManager> =
+                        StreamableHttpService::new(
+                            move || {
+                                Ok(ModelApiServer::with_profile_state(
+                                    sender.clone(),
+                                    state.clone(),
+                                ))
+                            },
+                            Default::default(),
+                            config.clone(),
+                        );
+                    service
+                };
 
                 let guard = LocalAccessGuard::for_port(runtime_info.http_port);
-                let router = axum::Router::new()
-                    .nest_service("/mcp", service)
-                    .layer(axum::middleware::from_fn_with_state(
-                        guard,
-                        enforce_local_access,
-                    ));
+                let mut router = axum::Router::new()
+                    .route_service("/mcp", profile_service(default_profile_from_env()));
+                for profile in CapabilityProfile::ALL {
+                    router = router.route_service(
+                        format!("/mcp/{}", profile.name()).as_str(),
+                        profile_service(profile),
+                    );
+                }
+                let router = router.layer(axum::middleware::from_fn_with_state(
+                    guard,
+                    enforce_local_access,
+                ));
                 let addr = format!("{}:{}", runtime_info.http_host, runtime_info.http_port);
                 let tcp_listener = match tokio::net::TcpListener::from_std(http_listener) {
                     Ok(listener) => listener,

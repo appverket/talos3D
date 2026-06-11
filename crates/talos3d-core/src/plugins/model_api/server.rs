@@ -5,6 +5,57 @@ use super::*;
 pub(super) struct ModelApiServer {
     pub(super) sender: mpsc::Sender<ModelApiRequest>,
     pub(super) tool_router: ToolRouter<Self>,
+    /// Active capability profile gating which tools this session advertises
+    /// and accepts. Shared (`Arc`) so the stateless HTTP transport's
+    /// per-request server instances see profile switches made by earlier
+    /// requests on the same endpoint.
+    pub(super) profile_state: SessionProfileState,
+}
+
+/// Process-wide frozen tool catalog: the sanitized router plus one frozen,
+/// sorted, sanitized tool list per capability profile. Built once; server
+/// instances clone the (cheap, `Arc`-backed) router and share the lists.
+#[cfg(feature = "model-api")]
+pub(super) struct ProfileToolCatalog {
+    pub(super) router: ToolRouter<ModelApiServer>,
+    lists: [std::sync::Arc<Vec<Tool>>; CapabilityProfile::ALL.len()],
+}
+
+#[cfg(feature = "model-api")]
+impl ProfileToolCatalog {
+    /// The frozen tool list advertised under `profile`.
+    pub(super) fn tools_for(&self, profile: CapabilityProfile) -> &std::sync::Arc<Vec<Tool>> {
+        &self.lists[profile.index()]
+    }
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn profile_tool_catalog() -> &'static ProfileToolCatalog {
+    static CATALOG: std::sync::OnceLock<ProfileToolCatalog> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(|| {
+        let mut router = ModelApiServer::tool_router();
+        // Sanitize every tool's input schema so the catalog is valid for
+        // strict MCP clients (Claude Code / the Anthropic tool API). schemars
+        // renders `serde_json::Value` fields as boolean (`true`) or type-less
+        // schemas, and a single such schema makes strict clients silently drop
+        // the ENTIRE server's tool list. We ensure the top level is
+        // `type: object` and rewrite boolean JSON-Schema nodes into their
+        // object equivalents.
+        for route in router.map.values_mut() {
+            let schema = std::sync::Arc::make_mut(&mut route.attr.input_schema);
+            sanitize_tool_input_schema(schema);
+        }
+        let all = router.list_all();
+        let lists = CapabilityProfile::ALL.map(|profile| {
+            std::sync::Arc::new(
+                all.iter()
+                    .filter(|tool| profile_allows(profile, tool.name.as_ref()))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        });
+        ProfileToolCatalog { router, lists }
+    })
 }
 
 /// Ensure a tool's top-level input schema is a valid `type: object` schema and
@@ -84,21 +135,49 @@ fn sanitize_schema_node(node: &mut serde_json::Value) {
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
     pub(super) fn new(sender: mpsc::Sender<ModelApiRequest>) -> Self {
-        let mut tool_router = Self::tool_router();
-        // Sanitize every tool's input schema so the catalog is valid for strict
-        // MCP clients (Claude Code / the Anthropic tool API). schemars renders
-        // `serde_json::Value` fields as boolean (`true`) or type-less schemas,
-        // and a single such schema makes strict clients silently drop the
-        // ENTIRE server's tool list. We ensure the top level is `type: object`
-        // and rewrite boolean JSON-Schema nodes into their object equivalents.
-        for route in tool_router.map.values_mut() {
-            let schema = std::sync::Arc::make_mut(&mut route.attr.input_schema);
-            sanitize_tool_input_schema(schema);
-        }
+        Self::with_profile_state(sender, SessionProfileState::new(default_profile_from_env()))
+    }
+
+    /// Build a server bound to an existing session profile state. The HTTP
+    /// transport passes one shared state per endpoint so its per-request
+    /// (stateless-mode) instances behave as one profile session.
+    pub(super) fn with_profile_state(
+        sender: mpsc::Sender<ModelApiRequest>,
+        profile_state: SessionProfileState,
+    ) -> Self {
         Self {
             sender,
-            tool_router,
+            tool_router: profile_tool_catalog().router.clone(),
+            profile_state,
         }
+    }
+
+    /// Gate for incoming tool calls: a tool outside the active profile is
+    /// rejected with a structured error naming the profiles that contain it,
+    /// so the absence is obvious instead of silently shrunk. Unknown tools
+    /// fall through to the router's own "tool not found" error.
+    pub(super) fn tool_call_allowed(&self, tool_name: &str) -> Result<(), McpError> {
+        let profile = self.profile_state.get();
+        if profile_allows(profile, tool_name)
+            || !profile_tool_catalog().router.has_route(tool_name)
+        {
+            return Ok(());
+        }
+        let profiles = profiles_containing(tool_name);
+        let profiles = if profiles.is_empty() {
+            "full".to_string()
+        } else {
+            format!("{}, full", profiles.join(", "))
+        };
+        Err(McpError::invalid_params(
+            format!(
+                "tool '{tool_name}' exists but is outside the active capability profile \
+                 '{}'; it is available in profiles: {profiles}. Call set_session_profile \
+                 (e.g. {{\"profile\":\"full\"}}) to switch, then retry.",
+                profile.name()
+            ),
+            None,
+        ))
     }
 
     /// Single round-trip to the app world: build a request variant around a
@@ -2219,15 +2298,92 @@ fn json_tool_result<T: Serialize>(value: T) -> Result<CallToolResult, McpError> 
     Ok(CallToolResult::success(vec![content]))
 }
 
+// Hand-written (instead of `#[tool_handler]`) so tools/list and tools/call are
+// gated by the session's active capability profile.
 #[cfg(feature = "model-api")]
-#[tool_handler(router = self.tool_router)]
 impl ServerHandler for ModelApiServer {
     fn get_info(&self) -> ServerInfo {
+        let profile = self.profile_state.get();
+        let catalog = profile_tool_catalog();
         let mut info = ServerInfo::default();
-        info.instructions = Some("Read and write access to the Talos3D authored model.".into());
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.instructions = Some(format!(
+            "Read and write access to the Talos3D authored model. The tool surface is \
+             gated by a capability profile; this session advertises the '{}' profile \
+             ({} of {} tools). Call set_session_profile to switch profiles \
+             (authoring, inspection, curation, ux-automation, full).",
+            profile.name(),
+            catalog.tools_for(profile).len(),
+            catalog.tools_for(CapabilityProfile::Full).len(),
+        ));
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_tool_list_changed()
+            .build();
         info
     }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.tool_call_allowed(request.name.as_ref())?;
+        let tcc = ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: profile_tool_catalog()
+                .tools_for(self.profile_state.get())
+                .as_ref()
+                .clone(),
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_call_allowed(name).ok()?;
+        self.tool_router.get(name).cloned()
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(super) struct SetSessionProfileRequest {
+    /// Profile to activate: `authoring` (default), `inspection`, `curation`,
+    /// `ux-automation`, or `full`. Omit to report the current profile without
+    /// changing it.
+    #[serde(default)]
+    pub(super) profile: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionProfileSummary {
+    pub name: String,
+    pub description: String,
+    pub tool_count: usize,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionProfileInfo {
+    pub active_profile: String,
+    /// Whether this call changed the active profile (false when reporting or
+    /// re-selecting the already-active profile).
+    pub changed: bool,
+    /// Tools advertised under the active profile.
+    pub tool_count: usize,
+    /// Tools in the full surface (`full` profile).
+    pub total_tool_count: usize,
+    pub available_profiles: Vec<SessionProfileSummary>,
 }
 
 #[cfg(feature = "model-api")]
@@ -2912,7 +3068,7 @@ pub struct CapabilitySnapshotInfo {
 }
 
 impl CapabilitySnapshotInfo {
-    fn empty(expanded: bool) -> Self {
+    pub(super) fn empty(expanded: bool) -> Self {
         Self {
             snapshot_version: 1,
             expanded,
@@ -4192,6 +4348,59 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(info)
+    }
+
+    #[tool(
+        name = "set_session_profile",
+        description = "Switch (or report) this session's capability profile, which gates the \
+            advertised MCP tool surface. Profiles: 'authoring' (default; the standard \
+            authoring loop), 'inspection' (read-only inspection + validation + capture), \
+            'curation' (knowledge curation: drafts, libraries, specs, passages), \
+            'ux-automation' (UI/view/clip-plane/toolbar automation), 'full' (every tool). \
+            Omit 'profile' to report the current profile without changing it. On change the \
+            server emits tools/list_changed so clients refresh their tool list."
+    )]
+    pub(super) async fn set_session_profile_tool(
+        &self,
+        Parameters(params): Parameters<SetSessionProfileRequest>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut changed = false;
+        if let Some(requested) = params.profile.as_deref() {
+            let profile = CapabilityProfile::from_name(requested).ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "unknown capability profile {requested:?}; known profiles: {}",
+                        CapabilityProfile::ALL
+                            .map(CapabilityProfile::name)
+                            .join(", ")
+                    ),
+                    None,
+                )
+            })?;
+            changed = self.profile_state.set(profile);
+            if changed {
+                // Best effort: stateless HTTP transports may have no channel
+                // to deliver server-initiated notifications; the switched list
+                // still takes effect for every subsequent tools/list.
+                let _ = peer.notify_tool_list_changed().await;
+            }
+        }
+        let catalog = profile_tool_catalog();
+        let active = self.profile_state.get();
+        json_tool_result(SessionProfileInfo {
+            active_profile: active.name().to_string(),
+            changed,
+            tool_count: catalog.tools_for(active).len(),
+            total_tool_count: catalog.tools_for(CapabilityProfile::Full).len(),
+            available_profiles: CapabilityProfile::ALL
+                .map(|profile| SessionProfileSummary {
+                    name: profile.name().to_string(),
+                    description: profile.description().to_string(),
+                    tool_count: catalog.tools_for(profile).len(),
+                })
+                .to_vec(),
+        })
     }
 
     #[tool(
@@ -6319,7 +6528,14 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         &self,
         Parameters(params): Parameters<CapabilitySnapshotRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let snapshot = self.request_get_capability_snapshot(params.expanded).await;
+        let mut snapshot = self.request_get_capability_snapshot(params.expanded).await;
+        // Session-contract invariant: next_tools must only name tools the
+        // active profile actually advertises, so a gated session is never
+        // steered toward a tool it cannot call.
+        let profile = self.profile_state.get();
+        snapshot
+            .next_tools
+            .retain(|tool| profile_allows(profile, tool));
         json_tool_result(snapshot)
     }
 

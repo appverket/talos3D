@@ -187,6 +187,50 @@ instance beyond the local machine — e.g. a cloud model reaching a web-deployed
 Talos3D over a gateway/bridge — requires a real authn layer (per-instance bearer
 token) at that boundary; the loopback guard alone is insufficient there.
 
+## Capability Profiles (tool gating)
+
+The full router registers ~240 tools, whose schemas cost a connecting agent
+roughly 196 KB (~35k tokens) of cold-start context. To keep sessions lean, the
+advertised tool surface is gated by a named **capability profile**. The session
+contract — `get_instance_info`, `get_authoring_guidance`,
+`get_capability_snapshot`, `list_guidance_cards` / `get_guidance_card`,
+`discover_curated_paths`, agent-skill discovery, and `set_session_profile`
+itself — is present in **every** profile, so a fresh MCP-only agent can always
+discover guidance and curated paths regardless of gating.
+
+| Profile         | Scope                                                                                                                    |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `authoring`     | Default. The standard authoring loop: inspection, entity/geometry editing, materials, recipes/discovery and the ADR-042 corpus-gap flow, definitions/occurrences/hosted placement, parametric types, validation and structured geometric checks, refinement and obligations, camera/screenshot capture, project save/load/import, and the `list_commands`/`invoke_command` escape hatch (~102 tools, ~87 KB). |
+| `inspection`    | Read-only: model/scene/semantic reads, validation checks, camera and screenshot. No model writes.                          |
+| `curation`      | Knowledge curation: corpus passages, recipe/assembly-pattern draft management, definition libraries and workspaces, material specs, rule packs, procedural sessions, provenance/grounding, plus inspection and capture. |
+| `ux-automation` | UI automation: `ux_*` input simulation, named views, clip planes, toolbars, render/lighting look-dev, command invocation, plus inspection and capture. |
+| `full`          | The entire tool surface.                                                                                                   |
+
+Selecting a profile:
+
+- **At connect (HTTP):** each profile has its own endpoint —
+  `http://127.0.0.1:<port>/mcp/authoring`, `/mcp/inspection`, `/mcp/curation`,
+  `/mcp/ux-automation`, `/mcp/full`. Plain `/mcp` serves the default profile
+  (`authoring`, or `TALOS3D_MCP_PROFILE` when set).
+- **At runtime (any transport):** call `set_session_profile` with
+  `{"profile": "full"}` (or any profile name; omit `profile` to report the
+  current one). On change the server emits a `tools/list_changed` notification
+  and subsequent `tools/list` calls return the new frozen list. The HTTP
+  transport is stateless per request, so the switch is scoped to the endpoint
+  you are connected to — fine for a single-user local app.
+
+Gating is honest rather than silent: calling a tool outside the active profile
+returns a structured error naming the profiles that contain it and pointing at
+`set_session_profile`, and `get_capability_snapshot` filters its `next_tools`
+steering list to the active profile so a gated session is never pointed at a
+tool it cannot call. Per-profile tool lists are frozen, schema-sanitized once
+per process, and shared across sessions.
+
+Tool-to-profile membership lives in
+`crates/talos3d-core/src/plugins/model_api/profiles.rs` (one explicit
+name→category table plus prefix rules for namespaced families). A test fails if
+a new tool is left unclassified, so additions land in a profile deliberately.
+
 ## Instance Discovery
 
 Each MCP-enabled instance writes a discovery manifest to:
@@ -212,7 +256,9 @@ remain after an app process exits.
 
 ## Tool Surface
 
-Current tool categories include:
+Which of these tools a session actually sees depends on its
+[capability profile](#capability-profiles-tool-gating); the lists below
+describe the full surface. Current tool categories include:
 
 ### Model inspection
 

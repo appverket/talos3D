@@ -8621,3 +8621,345 @@ fn session_recovery_scope_separation_project_vs_session() {
     let gap_path_b = session_corpus_gaps_path(id_b);
     assert_ne!(gap_path_a, gap_path_b);
 }
+
+// --- Capability-profile tool gating (context economy) ---
+
+#[cfg(feature = "model-api")]
+mod capability_profiles {
+    use super::super::profiles::{
+        profile_allows, profiles_containing, tool_category, SessionProfileState, ToolCategory,
+        TOOL_CATEGORIES,
+    };
+    use super::super::{
+        capability_snapshot_next_tools, profile_tool_catalog, CapabilityProfile,
+        CapabilitySnapshotInfo,
+    };
+    use std::collections::BTreeSet;
+
+    fn router_tool_names() -> BTreeSet<String> {
+        profile_tool_catalog()
+            .tools_for(CapabilityProfile::Full)
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    fn profile_tool_names(profile: CapabilityProfile) -> BTreeSet<String> {
+        profile_tool_catalog()
+            .tools_for(profile)
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    /// Every tool the router registers must classify into a real category.
+    /// A new tool landing in `Unclassified` is reachable only through the
+    /// `full` profile, which silently hides it from every gated session —
+    /// classify it in `profiles::TOOL_CATEGORIES` (or a prefix rule).
+    #[test]
+    fn every_router_tool_is_classified() {
+        let unclassified: Vec<String> = router_tool_names()
+            .into_iter()
+            .filter(|name| tool_category(name) == ToolCategory::Unclassified)
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "unclassified MCP tools (assign a ToolCategory in profiles.rs): {unclassified:?}"
+        );
+    }
+
+    /// Every explicit table entry must name a tool that still exists, so the
+    /// table cannot drift as tools are renamed or removed.
+    #[test]
+    fn category_table_has_no_stale_tool_names() {
+        let names = router_tool_names();
+        let stale: Vec<&str> = TOOL_CATEGORIES
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !names.contains(*name))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "TOOL_CATEGORIES entries with no matching router tool: {stale:?}"
+        );
+    }
+
+    #[test]
+    fn full_profile_exposes_entire_router() {
+        let catalog = profile_tool_catalog();
+        assert_eq!(
+            catalog.tools_for(CapabilityProfile::Full).len(),
+            catalog.router.list_all().len(),
+        );
+    }
+
+    /// The MCP session contract: a fresh MCP-only agent must be able to
+    /// discover guidance, the capability snapshot, guidance cards, curated
+    /// paths, agent skills, and the profile switch itself in EVERY profile.
+    #[test]
+    fn session_contract_tools_present_in_every_profile() {
+        const SESSION_CONTRACT: &[&str] = &[
+            "get_instance_info",
+            "set_session_profile",
+            "get_authoring_guidance",
+            "get_capability_snapshot",
+            "list_guidance_cards",
+            "get_guidance_card",
+            "discover_curated_paths",
+            "list_agent_skills",
+            "find_agent_skills",
+            "get_agent_skill",
+        ];
+        for profile in CapabilityProfile::ALL {
+            let names = profile_tool_names(profile);
+            let missing: Vec<&str> = SESSION_CONTRACT
+                .iter()
+                .copied()
+                .filter(|tool| !names.contains(*tool))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "profile '{}' is missing session-contract tools: {missing:?}",
+                profile.name()
+            );
+        }
+    }
+
+    /// The default profile covers the standard authoring loop and the
+    /// ADR-042 anti-bluff gate, and excludes the UI-automation/look-dev/BIM
+    /// surfaces that dominate the cold-start schema cost.
+    #[test]
+    fn authoring_profile_covers_standard_loop_and_excludes_ui_surfaces() {
+        let names = profile_tool_names(CapabilityProfile::Authoring);
+        for tool in [
+            // inspect
+            "list_entities",
+            "get_entity_details",
+            "model_summary",
+            "get_world_aabb",
+            // edit + materials
+            "create_box",
+            "create_entity",
+            "transform",
+            "apply_material",
+            "create_material",
+            // recipes / discovery / gap flow
+            "select_recipe",
+            "list_recipe_families",
+            "instantiate_recipe",
+            "list_generation_priors",
+            "request_corpus_expansion",
+            "save_recipe_draft",
+            "set_recipe_draft_status",
+            "materialize_learned_asset",
+            // definitions / parametric
+            "definition.create",
+            "definition.instantiate_hosted",
+            "occurrence.place",
+            "bim_void.plan_placement",
+            "parametric.list_types",
+            "parametric.create",
+            // validation + refinement + capture
+            "check_overlaps",
+            "check_floating",
+            "check_clearance",
+            "run_validation_v2",
+            "promote_refinement",
+            "resolve_obligation",
+            "take_screenshot",
+            "set_camera",
+            // commands escape hatch
+            "invoke_command",
+            "list_commands",
+        ] {
+            assert!(names.contains(tool), "authoring profile must include {tool}");
+        }
+        for tool in [
+            "ux_click",
+            "ux_observe",
+            "view_save",
+            "view_restore",
+            "clip_plane_create",
+            "list_toolbars",
+            "set_toolbar_layout",
+            "export_drawing",
+            "place_dimension_line",
+            "bim_property_set.get",
+            "quantity.set",
+            "create_light",
+            "set_render_settings",
+            "definition.library.workspace.create",
+            "procedural_session.create",
+            "array_create_linear",
+            "mirror_create",
+        ] {
+            assert!(
+                !names.contains(tool),
+                "authoring profile must exclude {tool}"
+            );
+        }
+    }
+
+    /// Context-economy guard: the default profile must stay a fraction of the
+    /// full surface, both in tool count and in serialized schema bytes (the
+    /// actual cold-start cost). Counts are bounded loosely so adding a tool
+    /// does not break the build, but a wholesale un-gating does.
+    #[test]
+    fn authoring_profile_is_a_fraction_of_full_surface() {
+        let catalog = profile_tool_catalog();
+        let authoring = catalog.tools_for(CapabilityProfile::Authoring);
+        let full = catalog.tools_for(CapabilityProfile::Full);
+        assert!(
+            authoring.len() <= full.len() / 2,
+            "authoring advertises {} of {} tools; expected at most half",
+            authoring.len(),
+            full.len()
+        );
+        let bytes = |tools: &Vec<rmcp::model::Tool>| {
+            serde_json::to_vec(tools).expect("tool list serializes").len()
+        };
+        let authoring_bytes = bytes(authoring);
+        let full_bytes = bytes(full);
+        println!(
+            "authoring: {} tools / {} KB; full: {} tools / {} KB",
+            authoring.len(),
+            authoring_bytes / 1024,
+            full.len(),
+            full_bytes / 1024
+        );
+        assert!(
+            authoring_bytes * 2 <= full_bytes,
+            "authoring schema bytes ({authoring_bytes}) should be at most half of full ({full_bytes})"
+        );
+    }
+
+    /// Read-only contract for the inspection profile: nothing that writes the
+    /// authored model is advertised.
+    #[test]
+    fn inspection_profile_has_no_model_writes() {
+        let names = profile_tool_names(CapabilityProfile::Inspection);
+        for tool in [
+            "create_entity",
+            "create_box",
+            "delete_entities",
+            "transform",
+            "set_property",
+            "apply_material",
+            "instantiate_recipe",
+            "promote_refinement",
+            "definition.instantiate",
+            "save_project",
+            "invoke_command",
+        ] {
+            assert!(
+                !names.contains(tool),
+                "inspection profile must not advertise {tool}"
+            );
+        }
+        for tool in ["list_entities", "get_world_aabb", "take_screenshot"] {
+            assert!(names.contains(tool), "inspection profile must include {tool}");
+        }
+    }
+
+    #[test]
+    fn ux_automation_profile_carries_ui_surface() {
+        let names = profile_tool_names(CapabilityProfile::UxAutomation);
+        for tool in [
+            "ux_click",
+            "ux_press_key",
+            "view_save",
+            "clip_plane_create",
+            "set_toolbar_layout",
+            "invoke_command",
+            "take_screenshot",
+            "list_entities",
+        ] {
+            assert!(names.contains(tool), "ux-automation must include {tool}");
+        }
+        assert!(!names.contains("delete_entities"));
+        assert!(!names.contains("instantiate_recipe"));
+    }
+
+    /// Session-contract invariant: the snapshot's canonical `next_tools` must
+    /// all live inside the default profile (so default sessions are never
+    /// steered toward a gated tool), and per-profile filtering must always
+    /// yield a subset of the active profile's advertised tools.
+    #[test]
+    fn snapshot_next_tools_respect_profiles() {
+        for tool in capability_snapshot_next_tools() {
+            assert!(
+                profile_allows(CapabilityProfile::Authoring, &tool),
+                "canonical snapshot next_tool '{tool}' is outside the authoring profile"
+            );
+        }
+        for tool in CapabilitySnapshotInfo::empty(false).next_tools {
+            assert!(
+                profile_allows(CapabilityProfile::Authoring, &tool),
+                "empty-snapshot next_tool '{tool}' is outside the authoring profile"
+            );
+        }
+        for profile in CapabilityProfile::ALL {
+            let names = profile_tool_names(profile);
+            let mut filtered = capability_snapshot_next_tools();
+            filtered.retain(|tool| profile_allows(profile, tool));
+            assert!(
+                filtered.iter().all(|tool| names.contains(tool)),
+                "filtered next_tools must be advertised in profile '{}'",
+                profile.name()
+            );
+            assert!(
+                filtered.contains(&"get_guidance_card".to_string()),
+                "profile '{}' filtering must keep the guidance-card route",
+                profile.name()
+            );
+        }
+    }
+
+    #[test]
+    fn profile_names_round_trip_and_state_switches() {
+        for profile in CapabilityProfile::ALL {
+            assert_eq!(CapabilityProfile::from_name(profile.name()), Some(profile));
+        }
+        assert_eq!(
+            CapabilityProfile::from_name("ux_automation"),
+            Some(CapabilityProfile::UxAutomation)
+        );
+        assert_eq!(CapabilityProfile::from_name("FULL"), Some(CapabilityProfile::Full));
+        assert_eq!(CapabilityProfile::from_name("nope"), None);
+
+        let state = SessionProfileState::new(CapabilityProfile::Authoring);
+        assert_eq!(state.get(), CapabilityProfile::Authoring);
+        assert!(state.set(CapabilityProfile::Full));
+        assert!(!state.set(CapabilityProfile::Full), "re-set must report unchanged");
+        let shared = state.clone();
+        assert_eq!(shared.get(), CapabilityProfile::Full);
+    }
+
+    /// Calling a tool outside the active profile must fail with an error that
+    /// names the profiles containing it; unknown tools fall through to the
+    /// router's own not-found error.
+    #[test]
+    fn out_of_profile_calls_are_rejected_with_guidance() {
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        let server = super::super::ModelApiServer::with_profile_state(
+            sender,
+            SessionProfileState::new(CapabilityProfile::Authoring),
+        );
+        let error = server
+            .tool_call_allowed("ux_click")
+            .expect_err("ux_click must be gated under authoring");
+        let message = error.message.to_string();
+        assert!(message.contains("ux_click"), "message: {message}");
+        assert!(message.contains("ux-automation"), "message: {message}");
+        assert!(message.contains("set_session_profile"), "message: {message}");
+        assert_eq!(profiles_containing("ux_click"), vec!["ux-automation"]);
+
+        server.tool_call_allowed("list_entities").expect("in-profile tool");
+        server
+            .tool_call_allowed("no_such_tool")
+            .expect("unknown tools fall through to the router error");
+
+        server.profile_state.set(CapabilityProfile::Full);
+        server.tool_call_allowed("ux_click").expect("full allows everything");
+    }
+}

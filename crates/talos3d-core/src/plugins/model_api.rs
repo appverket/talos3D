@@ -90,10 +90,19 @@ use std::{
 
 #[cfg(feature = "model-api")]
 use rmcp::{
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
+    handler::server::{
+        router::tool::ToolRouter,
+        tool::ToolCallContext,
+        wrapper::Parameters,
+    },
+    model::{
+        CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
+        ServerCapabilities, ServerInfo, Tool,
+    },
     schemars::JsonSchema,
-    tool, tool_handler, tool_router, transport, ErrorData as McpError, ServerHandler, ServiceExt,
+    service::RequestContext,
+    tool, tool_router, transport, ErrorData as McpError, Peer, RoleServer, ServerHandler,
+    ServiceExt,
 };
 
 #[cfg(feature = "model-api")]
@@ -583,6 +592,15 @@ mod runtime_transport;
 use runtime_transport::{
     annotate_window_title_with_model_api_instance, resolve_model_api_runtime,
     spawn_model_api_server, ModelApiDiscoveryCleanup,
+};
+
+#[cfg(feature = "model-api")]
+mod profiles;
+#[cfg(feature = "model-api")]
+pub use profiles::CapabilityProfile;
+#[cfg(feature = "model-api")]
+use profiles::{
+    default_profile_from_env, profile_allows, profiles_containing, SessionProfileState,
 };
 
 #[cfg(feature = "model-api")]
@@ -11294,34 +11312,46 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         no_curated_paths,
         must_read_guidance_card_ids,
         must_read_agent_skill_ids,
-        next_tools: vec![
-            "list_element_classes".into(),
-            "discover_curated_paths".into(),
-            "select_recipe".into(),
-            "parametric.list_types".into(),
-            "list_corpus_gaps".into(),
-            "request_corpus_expansion".into(),
-            "save_recipe_draft".into(),
-            "save_assembly_pattern_draft".into(),
-            "materialize_learned_asset".into(),
-            "definition.create".into(),
-            "definition.instantiate".into(),
-            "definition.instantiate_hosted".into(),
-            "bim_void.declare_for_definition".into(),
-            "bim_void.plan_placement".into(),
-            "list_guidance_cards".into(),
-            "get_guidance_card".into(),
-            "list_agent_skills".into(),
-            "find_agent_skills".into(),
-            "get_agent_skill".into(),
-            "save_agent_skill_draft".into(),
-            "get_authoring_guidance".into(),
-        ],
+        next_tools: capability_snapshot_next_tools(),
     };
     snapshot.estimated_json_bytes = serde_json::to_vec(&snapshot)
         .map(|bytes| bytes.len())
         .unwrap_or_default();
     snapshot
+}
+
+/// Canonical `next_tools` steering list for the capability snapshot. The
+/// serving tool handler filters it to the session's active capability profile
+/// (see `get_capability_snapshot_tool`); every entry must stay inside the
+/// default `authoring` profile so default sessions get the full steer
+/// unfiltered (enforced by a membership test).
+#[cfg(feature = "model-api")]
+fn capability_snapshot_next_tools() -> Vec<String> {
+    [
+        "list_element_classes",
+        "discover_curated_paths",
+        "select_recipe",
+        "parametric.list_types",
+        "list_corpus_gaps",
+        "request_corpus_expansion",
+        "save_recipe_draft",
+        "save_assembly_pattern_draft",
+        "materialize_learned_asset",
+        "definition.create",
+        "definition.instantiate",
+        "definition.instantiate_hosted",
+        "bim_void.declare_for_definition",
+        "bim_void.plan_placement",
+        "list_guidance_cards",
+        "get_guidance_card",
+        "list_agent_skills",
+        "find_agent_skills",
+        "get_agent_skill",
+        "save_agent_skill_draft",
+        "get_authoring_guidance",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 #[cfg(feature = "model-api")]
