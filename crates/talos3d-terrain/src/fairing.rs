@@ -18,23 +18,28 @@
 const THIN_PLATE_RELAXATION: f32 = 0.45;
 
 /// Iteration count at `smoothing == 1.0`. The ripple wavelength is the contour
-/// spacing — a few samples — and pinned curves bound every relaxation span, so
-/// the residual decays geometrically and this budget converges visually.
+/// spacing — a few samples — and constrained curves bound every relaxation
+/// span, so the residual decays geometrically and this budget converges
+/// visually.
 const THIN_PLATE_MAX_ITERATIONS: f32 = 96.0;
 
 /// Fair `heights` toward the constrained thin-plate minimiser.
 ///
-/// `pinned` marks surveyed samples (contour vertices / grid nodes on a
-/// contour): they are hard interpolation constraints and never move — the
-/// `smoothing` strength in `0..=1` only controls how far the *unpinned*
-/// surface relaxes (`0` = no-op, keep the raw reconstruction).
+/// `attachment` weights each sample's fidelity to its input height in
+/// `0.0..=1.0`: `1.0` marks a surveyed sample (a mesh vertex lying exactly on
+/// an elevation curve) that must not move at all; intermediate weights suit
+/// samples that only lie *near* survey data (e.g. grid nodes next to a contour
+/// crossing) and act as a proportional spring back toward the input height;
+/// `0.0` lets the sample relax freely. The `smoothing` strength in `0..=1`
+/// controls how far the relaxation is run (`0` = no-op, keep the raw
+/// reconstruction).
 ///
 /// `neighbors` yields the adjacent sample indices of a sample; it is borrowed
 /// per visit so callers can adapt any topology (triangle-mesh one-rings, grid
 /// 4-neighborhoods) without materialising a shared representation.
 pub fn fair_heights_thin_plate<N, I>(
     heights: &mut [f32],
-    pinned: &[bool],
+    attachment: &[f32],
     smoothing: f32,
     neighbors: N,
 ) where
@@ -43,7 +48,7 @@ pub fn fair_heights_thin_plate<N, I>(
 {
     let n = heights.len();
     let s = smoothing.clamp(0.0, 1.0);
-    if s <= 0.0 || n < 3 || pinned.len() != n {
+    if s <= 0.0 || n < 3 || attachment.len() != n {
         return;
     }
 
@@ -58,6 +63,7 @@ pub fn fair_heights_thin_plate<N, I>(
         });
     let tolerance = (max_h - min_h).max(f32::MIN_POSITIVE) * 1.0e-4;
 
+    let original: Vec<f32> = heights.to_vec();
     let mut laplacian = vec![0.0f32; n];
     for _ in 0..iterations {
         for (index, value) in laplacian.iter_mut().enumerate() {
@@ -68,15 +74,19 @@ pub fn fair_heights_thin_plate<N, I>(
         }
         let mut max_delta = 0.0f32;
         for index in 0..n {
-            if pinned[index] {
+            let attach = attachment[index].clamp(0.0, 1.0);
+            if attach >= 1.0 {
                 continue;
             }
             let Some(mean) = neighbor_mean(index, &neighbors, |j| laplacian[j]) else {
                 continue;
             };
-            let delta = THIN_PLATE_RELAXATION * (mean - laplacian[index]);
-            heights[index] -= delta;
-            max_delta = max_delta.max(delta.abs());
+            let relaxed = heights[index] - THIN_PLATE_RELAXATION * (mean - laplacian[index]);
+            // Soft data spring: blend the relaxed height back toward the input
+            // reconstruction in proportion to the sample's survey fidelity.
+            let next = relaxed + attach * (original[index] - relaxed);
+            max_delta = max_delta.max((next - heights[index]).abs());
+            heights[index] = next;
         }
         if max_delta < tolerance {
             break;
@@ -118,35 +128,31 @@ mod tests {
 
     /// A terraced ramp: contour samples every 4th node carry the surveyed
     /// height; between them the raw reconstruction plateaus (IDW terracing).
-    fn terraced_chain(n: usize) -> (Vec<f32>, Vec<bool>) {
-        let mut heights = Vec::with_capacity(n);
-        let mut pinned = vec![false; n];
-        for i in 0..n {
-            let contour = (i / 4) as f32; // plateau at the last contour height
-            heights.push(contour);
-            if i % 4 == 0 {
-                pinned[i] = true;
-            }
-        }
-        (heights, pinned)
+    fn terraced_chain(n: usize) -> (Vec<f32>, Vec<f32>) {
+        // Plateau at the last contour height; survey samples every 4th node.
+        let heights = (0..n).map(|i| (i / 4) as f32).collect();
+        let attachment = (0..n)
+            .map(|i| if i % 4 == 0 { 1.0 } else { 0.0 })
+            .collect();
+        (heights, attachment)
     }
 
     #[test]
     fn zero_smoothing_is_a_no_op() {
-        let (mut heights, pinned) = terraced_chain(33);
+        let (mut heights, attachment) = terraced_chain(33);
         let before = heights.clone();
-        fair_heights_thin_plate(&mut heights, &pinned, 0.0, chain_neighbors(33));
+        fair_heights_thin_plate(&mut heights, &attachment, 0.0, chain_neighbors(33));
         assert_eq!(heights, before);
     }
 
     #[test]
-    fn pinned_heights_stay_exact() {
-        let (mut heights, pinned) = terraced_chain(33);
+    fn fully_attached_heights_stay_exact() {
+        let (mut heights, attachment) = terraced_chain(33);
         let before = heights.clone();
-        fair_heights_thin_plate(&mut heights, &pinned, 1.0, chain_neighbors(33));
-        for i in 0..heights.len() {
-            if pinned[i] {
-                assert_eq!(heights[i], before[i], "pinned sample {i} moved");
+        fair_heights_thin_plate(&mut heights, &attachment, 1.0, chain_neighbors(33));
+        for ((&height, &was), &attach) in heights.iter().zip(&before).zip(&attachment) {
+            if attach >= 1.0 {
+                assert_eq!(height, was, "surveyed sample moved");
             }
         }
     }
@@ -154,16 +160,15 @@ mod tests {
     #[test]
     fn terraces_relax_toward_uniform_slope() {
         let n = 41;
-        let (mut heights, pinned) = terraced_chain(n);
-        fair_heights_thin_plate(&mut heights, &pinned, 1.0, chain_neighbors(n));
+        let (mut heights, attachment) = terraced_chain(n);
+        fair_heights_thin_plate(&mut heights, &attachment, 1.0, chain_neighbors(n));
         // On an even contour ladder the thin-plate minimiser is the straight
         // ramp h = i/4. Interior nodes (away from the free ends) must be close.
-        for i in 8..n - 8 {
+        for (i, &height) in heights.iter().enumerate().take(n - 8).skip(8) {
             let ramp = i as f32 / 4.0;
             assert!(
-                (heights[i] - ramp).abs() < 0.05,
-                "node {i}: {} vs ramp {ramp}",
-                heights[i]
+                (height - ramp).abs() < 0.05,
+                "node {i}: {height} vs ramp {ramp}"
             );
         }
         // And the slope must not oscillate: strictly monotone interior.
@@ -178,18 +183,49 @@ mod tests {
     }
 
     #[test]
-    fn no_crease_at_pinned_interior_samples() {
+    fn no_crease_at_surveyed_interior_samples() {
         let n = 41;
-        let (mut heights, pinned) = terraced_chain(n);
-        fair_heights_thin_plate(&mut heights, &pinned, 1.0, chain_neighbors(n));
+        let (mut heights, attachment) = terraced_chain(n);
+        fair_heights_thin_plate(&mut heights, &attachment, 1.0, chain_neighbors(n));
         // C1 through constraints: the one-sided slopes on either side of a
-        // pinned sample agree, instead of kinking like the membrane solution.
-        for i in (12..n - 12).filter(|i| pinned[*i]) {
+        // surveyed sample agree, instead of kinking like the membrane solution.
+        for i in (12..n - 12).filter(|&i| attachment[i] >= 1.0) {
             let left = heights[i] - heights[i - 1];
             let right = heights[i + 1] - heights[i];
             assert!(
                 (left - right).abs() < 0.02,
-                "crease at pinned {i}: left {left} right {right}"
+                "crease at surveyed sample {i}: left {left} right {right}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_attachment_tracks_data_without_rigidity() {
+        // Same ladder, but the survey samples are soft (0.5): they may flex a
+        // little, yet must stay near their data while terraces still relax.
+        let n = 41;
+        let (mut heights, mut attachment) = terraced_chain(n);
+        for weight in attachment.iter_mut() {
+            if *weight >= 1.0 {
+                *weight = 0.5;
+            }
+        }
+        let before = heights.clone();
+        fair_heights_thin_plate(&mut heights, &attachment, 1.0, chain_neighbors(n));
+        for i in 8..n - 8 {
+            if attachment[i] > 0.0 {
+                assert!(
+                    (heights[i] - before[i]).abs() < 0.2,
+                    "soft sample {i} drifted: {} -> {}",
+                    before[i],
+                    heights[i]
+                );
+            }
+            let ramp = i as f32 / 4.0;
+            assert!(
+                (heights[i] - ramp).abs() < 0.15,
+                "node {i}: {} vs ramp {ramp}",
+                heights[i]
             );
         }
     }
