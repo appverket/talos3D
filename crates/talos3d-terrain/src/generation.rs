@@ -807,7 +807,12 @@ fn smooth_terrain_heights(
         return;
     }
 
-    let pinned = contour_pinned_mask(vertices, sampled_curves);
+    // Mesh vertices coincide exactly with surveyed contour samples, so they
+    // are full-fidelity constraints; everything else relaxes freely.
+    let attachment: Vec<f32> = contour_pinned_mask(vertices, sampled_curves)
+        .into_iter()
+        .map(|pinned| if pinned { 1.0 } else { 0.0 })
+        .collect();
 
     let mut neighbors: Vec<Vec<u32>> = vec![Vec::new(); vertices.len()];
     for face in faces {
@@ -824,7 +829,7 @@ fn smooth_terrain_heights(
     }
 
     let mut heights: Vec<f32> = vertices.iter().map(|v| v.y).collect();
-    fair_heights_thin_plate(&mut heights, &pinned, smoothing, |index| {
+    fair_heights_thin_plate(&mut heights, &attachment, smoothing, |index| {
         neighbors[index].iter().map(|&j| j as usize)
     });
     for (vertex, height) in vertices.iter_mut().zip(heights) {

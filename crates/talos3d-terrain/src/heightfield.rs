@@ -347,10 +347,14 @@ impl TerrainHeightfield {
 
 /// Constrained thin-plate fairing of a heightfield grid, mirroring the
 /// render-mesh smoothing so foundations drape onto the same ground the user
-/// sees. Grid nodes nearest a surveyed contour point are hard-pinned; the rest
-/// of the grid relaxes toward the curvature-minimising surface, which passes
-/// C1-smoothly through the pinned contour nodes instead of creasing at them.
-/// `smoothing` in `0..=1`; 0 = no-op.
+/// sees. Unlike mesh vertices, grid nodes do not coincide with the surveyed
+/// contour samples — the nearest node can sit most of a cell away from the
+/// curve — so nodes are attached in proportion to how close a contour sample
+/// passes (1 = a sample exactly on the node, fading to 0 one cell away)
+/// instead of being hard-pinned at a shifted position. The rest of the grid
+/// relaxes toward the curvature-minimising surface, which passes C1-smoothly
+/// through the contour data instead of creasing at it. `smoothing` in
+/// `0..=1`; 0 = no-op.
 fn smooth_grid_heights(
     heights: &mut [f32],
     nx: usize,
@@ -364,14 +368,23 @@ fn smooth_grid_heights(
         return;
     }
 
-    let mut pinned = vec![false; nx * nz];
+    let mut attachment = vec![0.0f32; nx * nz];
     for point in contour_points {
-        let i = (((point.x - origin.x) / cell).round() as isize).clamp(0, nx as isize - 1) as usize;
-        let j = (((point.z - origin.y) / cell).round() as isize).clamp(0, nz as isize - 1) as usize;
-        pinned[j * nx + i] = true;
+        let fx = (point.x - origin.x) / cell;
+        let fz = (point.z - origin.y) / cell;
+        let i0 = (fx.floor() as isize).clamp(0, nx as isize - 1) as usize;
+        let j0 = (fz.floor() as isize).clamp(0, nz as isize - 1) as usize;
+        for j in j0..=(j0 + 1).min(nz - 1) {
+            for i in i0..=(i0 + 1).min(nx - 1) {
+                let distance = Vec2::new(fx - i as f32, fz - j as f32).length();
+                let weight = (1.0 - distance).max(0.0);
+                let index = j * nx + i;
+                attachment[index] = attachment[index].max(weight);
+            }
+        }
     }
 
-    crate::fairing::fair_heights_thin_plate(heights, &pinned, smoothing, |idx| {
+    crate::fairing::fair_heights_thin_plate(heights, &attachment, smoothing, |idx| {
         let (i, j) = (idx % nx, idx / nx);
         let mut adjacent = [None; 4];
         if i > 0 {
