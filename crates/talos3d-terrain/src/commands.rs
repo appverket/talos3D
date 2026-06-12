@@ -106,7 +106,7 @@ impl Plugin for TerrainCommandPlugin {
                         "max_triangle_area": {"type": "number", "minimum": 0.1},
                         "minimum_angle": {"type": "number", "minimum": 0.1, "maximum": 89.0},
                         "contour_interval": {"type": "number", "minimum": 0.1},
-                        "smoothing": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Surface smoothing strength: 0 = raw IDW (sharp inter-contour terraces), 1 = strongest constrained-Laplacian smoothing. Contour heights stay faithful."}
+                        "smoothing": {"type": "number", "minimum": 0.0, "maximum": 1.0, "description": "Surface smoothing strength: 0 = raw IDW (sharp inter-contour terraces), 1 = strongest constrained thin-plate fairing. Surveyed contour heights stay exact."}
                     }
                 })),
                 default_shortcut: None,

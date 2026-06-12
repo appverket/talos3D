@@ -352,10 +352,12 @@ impl TerrainHeightfield {
     }
 }
 
-/// Constrained Laplacian smoothing of a heightfield grid, mirroring the render-mesh
-/// smoothing so foundations drape onto the same ground the user sees. Grid nodes
-/// nearest a surveyed contour point are kept faithful (high data-attachment); other
-/// nodes relax toward their 4-neighbour mean. `smoothing` in `0..=1`; 0 = no-op.
+/// Constrained thin-plate fairing of a heightfield grid, mirroring the
+/// render-mesh smoothing so foundations drape onto the same ground the user
+/// sees. Grid nodes nearest a surveyed contour point are hard-pinned; the rest
+/// of the grid relaxes toward the curvature-minimising surface, which passes
+/// C1-smoothly through the pinned contour nodes instead of creasing at them.
+/// `smoothing` in `0..=1`; 0 = no-op.
 fn smooth_grid_heights(
     heights: &mut [f32],
     nx: usize,
@@ -365,8 +367,7 @@ fn smooth_grid_heights(
     cell: f32,
     smoothing: f32,
 ) {
-    let s = smoothing.clamp(0.0, 1.0);
-    if s <= 0.0 || nx < 3 || nz < 3 || cell <= 0.0 || heights.len() != nx * nz {
+    if smoothing <= 0.0 || nx < 3 || nz < 3 || cell <= 0.0 || heights.len() != nx * nz {
         return;
     }
 
@@ -377,44 +378,23 @@ fn smooth_grid_heights(
         pinned[j * nx + i] = true;
     }
 
-    let original: Vec<f32> = heights.to_vec();
-    let iterations = (3.0 + 12.0 * s).round() as usize;
-    for _ in 0..iterations {
-        let current = heights.to_vec();
-        for j in 0..nz {
-            for i in 0..nx {
-                let idx = j * nx + i;
-                let mut sum = 0.0f32;
-                let mut count = 0u32;
-                if i > 0 {
-                    sum += current[idx - 1];
-                    count += 1;
-                }
-                if i + 1 < nx {
-                    sum += current[idx + 1];
-                    count += 1;
-                }
-                if j > 0 {
-                    sum += current[idx - nx];
-                    count += 1;
-                }
-                if j + 1 < nz {
-                    sum += current[idx + nx];
-                    count += 1;
-                }
-                if count == 0 {
-                    continue;
-                }
-                let mean = sum / count as f32;
-                let attach = if pinned[idx] {
-                    0.85 - 0.45 * s
-                } else {
-                    0.35 - 0.35 * s
-                };
-                heights[idx] = mean + attach * (original[idx] - mean);
-            }
+    crate::fairing::fair_heights_thin_plate(heights, &pinned, smoothing, |idx| {
+        let (i, j) = (idx % nx, idx / nx);
+        let mut adjacent = [None; 4];
+        if i > 0 {
+            adjacent[0] = Some(idx - 1);
         }
-    }
+        if i + 1 < nx {
+            adjacent[1] = Some(idx + 1);
+        }
+        if j > 0 {
+            adjacent[2] = Some(idx - nx);
+        }
+        if j + 1 < nz {
+            adjacent[3] = Some(idx + nx);
+        }
+        adjacent.into_iter().flatten()
+    });
 }
 
 #[cfg(test)]
@@ -555,6 +535,56 @@ mod tests {
         // O(1) queries: 200k must clear a 16 ms frame by a wide margin even in a
         // debug build (this is the property that makes interactive planting work).
         assert!(q_ms < 200.0, "height_at queries too slow: {q_ms} ms");
+    }
+
+    #[test]
+    fn smoothing_relaxes_idw_terraces_between_contours() {
+        // Straight parallel contours every 4 m (heights 0..=5, running along
+        // +Z): raw IDW plateaus near each contour and steps between them. The
+        // faired build must restore a near-uniform ramp between the contours
+        // without moving the contour nodes themselves.
+        let mut pts = Vec::new();
+        for c in 0..6 {
+            let x = c as f32 * 4.0;
+            for iz in 0..=40 {
+                pts.push(Vec3::new(x, c as f32, iz as f32));
+            }
+        }
+        let raw = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("raw build");
+        let faired = TerrainHeightfield::build(&pts, &[], 1.0, 0.5).expect("faired build");
+
+        let mid_row_error = |hf: &TerrainHeightfield| -> f32 {
+            (1..20)
+                .map(|i| {
+                    let x = hf.origin.x + i as f32 * hf.cell;
+                    let h = hf.node_height(i, 20).expect("inside");
+                    (h - x / 4.0).abs()
+                })
+                .fold(0.0, f32::max)
+        };
+        let raw_error = mid_row_error(&raw);
+        let faired_error = mid_row_error(&faired);
+        assert!(
+            faired_error < raw_error * 0.5 && faired_error < 0.1,
+            "fairing did not flatten the terraces: raw {raw_error} faired {faired_error}"
+        );
+
+        // Monotone across the slope: no residual terrace step reversals.
+        for i in 1..19 {
+            let a = faired.node_height(i, 20).unwrap();
+            let b = faired.node_height(i + 1, 20).unwrap();
+            assert!(b > a - 1e-3, "non-monotone at column {i}: {a} -> {b}");
+        }
+
+        // Contour nodes are surveyed data and must stay exact.
+        for c in 1..5 {
+            let i = c * 4;
+            let h = faired.node_height(i, 20).unwrap();
+            assert!(
+                (h - c as f32).abs() < 1e-4,
+                "pinned contour node moved: column {i} height {h}"
+            );
+        }
     }
 
     #[test]

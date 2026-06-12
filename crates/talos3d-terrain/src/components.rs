@@ -9,7 +9,7 @@ pub const DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE: f32 = 1.5;
 pub const DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING: f32 = 2.0;
 /// Surface smoothing strength in `0.0..=1.0`. 0 = raw IDW reconstruction (sharp
 /// terraces/creases along contours); higher relaxes the inter-contour wrinkles via
-/// constrained Laplacian smoothing while keeping surveyed contour heights faithful.
+/// constrained thin-plate fairing while keeping surveyed contour heights exact.
 pub const DEFAULT_TERRAIN_SMOOTHING: f32 = 0.5;
 
 fn default_drape_sample_spacing() -> f32 {

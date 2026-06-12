@@ -16,6 +16,7 @@ use crate::{
     components::{
         ElevationCurve, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface, TerrainSurfaceRole,
     },
+    fairing::fair_heights_thin_plate,
     heightfield::TerrainHeightfield,
     reconstruction::{
         sample_boundary_support_points, sample_curve_points, sample_interior_support_points,
@@ -795,20 +796,21 @@ fn cut_fill_delta_color(delta: f32, max_delta: f32) -> [f32; 4] {
     }
 }
 
-/// Constrained Laplacian smoothing of terrain vertex heights. Relaxes the sharp
-/// inter-contour terraces/creases that raw IDW reconstruction produces, while a
-/// per-vertex data-attachment ("tension") keeps the surface faithful — strongly for
-/// surveyed contour vertices, loosely for interpolated interior vertices. Operates on
-/// the already-triangulated mesh, so it never reopens holes (those came from the
-/// sparse contour TIN, not the dense surface). One-time at mesh (re)generation.
+/// Constrained thin-plate fairing of terrain vertex heights. Relaxes the sharp
+/// inter-contour terraces/creases that raw IDW reconstruction produces while
+/// surveyed contour vertices stay exact: the curvature-minimising surface
+/// passes C1-smoothly through the pinned curves, instead of staying "tense"
+/// over them the way a membrane (Laplacian-with-attachment) relaxation does.
+/// Operates on the already-triangulated mesh, so it never reopens holes (those
+/// came from the sparse contour TIN, not the dense surface). One-time at mesh
+/// (re)generation.
 fn smooth_terrain_heights(
     vertices: &mut [Vec3],
     faces: &[[u32; 3]],
     sampled_curves: &[Vec<Vec3>],
     smoothing: f32,
 ) {
-    let s = smoothing.clamp(0.0, 1.0);
-    if s <= 0.0 || vertices.len() < 3 || faces.is_empty() {
+    if smoothing <= 0.0 || vertices.len() < 3 || faces.is_empty() {
         return;
     }
 
@@ -821,27 +823,19 @@ fn smooth_terrain_heights(
         neighbors[b as usize].extend_from_slice(&[a, c]);
         neighbors[c as usize].extend_from_slice(&[a, b]);
     }
+    // An undirected edge is visited once per incident face; dedupe so shared
+    // edges don't double-weight the neighbor mean.
+    for adj in &mut neighbors {
+        adj.sort_unstable();
+        adj.dedup();
+    }
 
-    let original_y: Vec<f32> = vertices.iter().map(|v| v.y).collect();
-    let iterations = (3.0 + 12.0 * s).round() as usize;
-    for _ in 0..iterations {
-        let current_y: Vec<f32> = vertices.iter().map(|v| v.y).collect();
-        for index in 0..vertices.len() {
-            let adj = &neighbors[index];
-            if adj.is_empty() {
-                continue;
-            }
-            let mean = adj.iter().map(|&j| current_y[j as usize]).sum::<f32>() / adj.len() as f32;
-            // Data attachment: pull the Laplacian mean back toward the original height.
-            // Contour vertices stay near the survey; interior vertices relax fully as
-            // smoothing -> 1. (attach in [0,1]: 1 = unchanged, 0 = pure Laplacian.)
-            let attach = if pinned[index] {
-                0.85 - 0.45 * s
-            } else {
-                0.35 - 0.35 * s
-            };
-            vertices[index].y = mean + attach * (original_y[index] - mean);
-        }
+    let mut heights: Vec<f32> = vertices.iter().map(|v| v.y).collect();
+    fair_heights_thin_plate(&mut heights, &pinned, smoothing, |index| {
+        neighbors[index].iter().map(|&j| j as usize)
+    });
+    for (vertex, height) in vertices.iter_mut().zip(heights) {
+        vertex.y = height;
     }
 }
 
