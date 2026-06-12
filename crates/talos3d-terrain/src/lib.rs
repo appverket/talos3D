@@ -2,6 +2,7 @@ pub mod commands;
 pub mod components;
 pub mod conforming;
 pub mod cut_fill;
+pub mod fairing;
 pub mod generation;
 pub mod heightfield;
 pub mod planting;
