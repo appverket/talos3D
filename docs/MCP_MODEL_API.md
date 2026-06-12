@@ -446,8 +446,11 @@ Renderer control also now supports drawing-style viewport composition:
   using the `view.*` command family (`view.front`, `view.back`, `view.top`,
   `view.bottom`, `view.left`, `view.right`, `view.isometric`,
   `view.projection_perspective`, `view.projection_orthographic`,
-  `view.apply_paper_preset`, `view.toggle_grid`, `view.toggle_outline`, and
-  `view.toggle_wireframe`)
+  `view.apply_paper_preset`, `view.toggle_grid`, `view.toggle_outline`,
+  `view.toggle_wireframe`, and `view.toggle_compass` — the latter shows or
+  hides the corner compass rose, which is drawn in world orientation so it
+  indicates geographic north (site `north_axis_deg` convention) even when
+  the camera is tilted)
 
 ## Example: Box, Corner Dimension, Camera, Screenshot
 

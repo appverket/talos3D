@@ -361,6 +361,15 @@ fn draw_crosshair(c: &mut Canvas) {
     c.line(12.0, 22.0, 12.0, 18.0);
 }
 
+// Compass rose - circle with a diagonal needle
+fn draw_compass(c: &mut Canvas) {
+    c.circle(12.0, 12.0, 10.0);
+    c.line(16.5, 7.5, 13.5, 13.5);
+    c.line(13.5, 13.5, 7.5, 16.5);
+    c.line(7.5, 16.5, 10.5, 10.5);
+    c.line(10.5, 10.5, 16.5, 7.5);
+}
+
 // Zoom to extents - scan with expand arrows
 fn draw_zoom_extents(c: &mut Canvas) {
     // Corner brackets (scan)
@@ -746,6 +755,7 @@ pub fn render_icon(name: &str) -> Vec<u8> {
         "view_grid" => draw_view_grid(&mut c),
         "view_paper" => draw_view_paper(&mut c),
         "view_xray" => draw_view_xray(&mut c),
+        "compass" => draw_compass(&mut c),
         "wall" => draw_wall(&mut c),
         "opening" => draw_opening(&mut c),
         "definitions" => draw_definitions(&mut c),

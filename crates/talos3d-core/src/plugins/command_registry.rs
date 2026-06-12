@@ -655,6 +655,7 @@ fn setup_core_icons(mut images: ResMut<Assets<Image>>, mut icon_registry: ResMut
         ("icon.view_grid", "view_grid"),
         ("icon.view_paper", "view_paper"),
         ("icon.view_xray", "view_xray"),
+        ("icon.compass", "compass"),
         ("icon.definitions", "definitions"),
         ("icon.materials", "materials"),
     ];
