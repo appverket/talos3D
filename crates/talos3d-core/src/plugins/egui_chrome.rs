@@ -210,6 +210,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "view.toggle_wireframe",
             "view.toggle_guide_lines",
             "view.toggle_dimensions",
+            "view.toggle_compass",
         ],
     },
     MenuSubmenuSpec {

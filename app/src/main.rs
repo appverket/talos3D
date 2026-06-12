@@ -18,6 +18,7 @@ use talos3d_core::plugins::{
     authoring_guidance::AuthoringGuidancePlugin,
     bundled_definition_libraries::BundledDefinitionLibrariesPlugin,
     camera::CameraPlugin,
+    compass::CompassPlugin,
     clipping_planes::ClippingPlanesPlugin,
     command_registry::CommandRegistryPlugin,
     commands::CommandPlugin,
@@ -90,6 +91,7 @@ fn main() {
     .add_plugins(AssistantChatPlugin)
     .add_plugins(AuthoringGuidancePlugin)
     .add_plugins(CameraPlugin)
+    .add_plugins(CompassPlugin)
     .add_plugins(NamedViewsPlugin)
     .add_plugins(ClippingPlanesPlugin)
     .add_plugins(CommandRegistryPlugin)
