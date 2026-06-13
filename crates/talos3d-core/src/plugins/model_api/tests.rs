@@ -5619,6 +5619,62 @@ fn create_assembly_group_moves_members_as_a_unit() {
     );
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn set_selection_on_group_member_selects_group_at_root() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
+    register_house_with_member_obligations(&mut world);
+    let foundation = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.25, 0.0],
+            "half_extents": [4.0, 0.25, 3.0]
+        }),
+    )
+    .expect("foundation should be creatable");
+    let wall = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 1.75, -3.0],
+            "half_extents": [4.0, 1.5, 0.15]
+        }),
+    )
+    .expect("wall should be creatable");
+    let result = handle_create_assembly(
+        &mut world,
+        CreateAssemblyRequest {
+            assembly_type: "house".into(),
+            label: "Swedish Cottage".into(),
+            members: vec![
+                AssemblyMemberRefRequest {
+                    target: foundation,
+                    role: "foundation".into(),
+                },
+                AssemblyMemberRefRequest {
+                    target: wall,
+                    role: "exterior_wall".into(),
+                },
+            ],
+            parameters: Value::Null,
+            metadata: Value::Null,
+            relations: Vec::new(),
+        },
+    )
+    .expect("assembly should be creatable");
+    let group_id = result.group_element_id.expect("physical group id");
+
+    let selected = handle_set_selection(&mut world, vec![foundation])
+        .expect("member selection should resolve to its group");
+
+    assert_eq!(selected, vec![group_id]);
+    assert_eq!(handle_get_selection(&mut world), vec![group_id]);
+}
+
 /// A bare house (no resolved sub-structure) cannot be previewed as a clean
 /// commit when skipping straight to Detailed — every in-force member
 /// obligation surfaces as a missing input and an error finding.

@@ -72,7 +72,7 @@ use crate::plugins::{
     },
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
-    selection::Selected,
+    selection::{resolve_entity_for_selection, Selected},
     toolbar::{
         update_toolbar_layout_entry, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
         ToolbarSection,
@@ -3147,14 +3147,22 @@ fn handle_set_selection(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<
     }
 
     // Add Selected to target entities
-    let mut result_ids = Vec::new();
+    let mut target_entities = HashSet::new();
     for eid in &target_ids {
         if let Some(entity) = find_entity_by_element_id(world, *eid) {
-            world.entity_mut(entity).insert(Selected);
-            result_ids.push(eid.0);
+            if let Some(target) = resolve_entity_for_selection(world, entity) {
+                target_entities.insert(target);
+            }
         }
     }
 
+    let mut result_ids = Vec::new();
+    for entity in target_entities {
+        if let Some(element_id) = world.get::<ElementId>(entity).copied() {
+            world.entity_mut(entity).insert(Selected);
+            result_ids.push(element_id.0);
+        }
+    }
     result_ids.sort();
     Ok(result_ids)
 }

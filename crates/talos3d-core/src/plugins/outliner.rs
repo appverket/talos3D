@@ -33,7 +33,7 @@ use crate::plugins::{
         group::GroupMembers,
         occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
     },
-    selection::Selected,
+    selection::{resolve_entity_for_selection, Selected},
     ui::StatusBarData,
 };
 
@@ -59,7 +59,7 @@ pub struct OutlinerNode {
     pub node_id: u64,
     /// Entity to (de)select when this row is clicked. For a generated part this
     /// is the owning occurrence, matching viewport selection semantics.
-    pub select_entity: Entity,
+    pub select_entity: Option<Entity>,
     pub label: String,
     pub kind: OutlinerKind,
     /// Arena indices of child rows.
@@ -178,7 +178,7 @@ pub fn build_outliner_tree(world: &mut World) {
     let mut nodes: Vec<OutlinerNode> = Vec::new();
     let roots: Vec<usize> = forest
         .iter()
-        .map(|entry| flatten_entry(entry, &mut nodes))
+        .map(|entry| flatten_entry(world, entry, &mut nodes))
         .collect();
     let mut tree = world.resource_mut::<OutlinerTree>();
     tree.nodes = nodes;
@@ -187,15 +187,15 @@ pub fn build_outliner_tree(world: &mut World) {
 
 /// Flatten a nested [`OutlineEntry`] into the panel arena, returning its index.
 /// Children are pushed before the parent so arena indices stay valid.
-fn flatten_entry(entry: &OutlineEntry, nodes: &mut Vec<OutlinerNode>) -> usize {
+fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNode>) -> usize {
     let children: Vec<usize> = entry
         .children
         .iter()
-        .map(|child| flatten_entry(child, nodes))
+        .map(|child| flatten_entry(world, child, nodes))
         .collect();
     nodes.push(OutlinerNode {
         node_id: entry.node_id,
-        select_entity: entry.entity,
+        select_entity: resolve_entity_for_selection(world, entry.entity),
         label: entry.label.clone(),
         kind: entry.kind,
         children,
@@ -497,13 +497,15 @@ fn render_outliner_node(
             ui.add_space(OUTLINER_TOGGLE_WIDTH);
         }
 
-        let is_selected = selected.contains(&node.select_entity);
+        let is_selected = node
+            .select_entity
+            .is_some_and(|select_entity| selected.contains(&select_entity));
         let text = format!("{} {}", kind_glyph(node.kind), node.label);
         let response = ui.selectable_label(is_selected, text);
-        if response.clicked() {
+        if response.clicked() && node.select_entity.is_some() {
             let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
             *action = Some(OutlinerSelectAction {
-                target: node.select_entity,
+                target: node.select_entity.expect("checked selectable target"),
                 additive,
             });
         }
@@ -591,6 +593,7 @@ mod tests {
     use crate::plugins::modeling::{
         assembly::SemanticRelation,
         definition::DefinitionId,
+        group::{GroupEditContext, GroupFrame},
         occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
     };
     use serde_json::json;
@@ -681,7 +684,55 @@ mod tests {
         assert_eq!(part.kind, OutlinerKind::Part);
         assert_eq!(part.label, "glazing");
         // Clicking a generated part selects the owning occurrence.
-        assert_eq!(part.select_entity, occ);
+        assert_eq!(part.select_entity, Some(occ));
+    }
+
+    #[test]
+    fn member_row_selects_group_at_root() {
+        let mut world = World::new();
+        let group = world
+            .spawn((
+                ElementId(1),
+                GroupMembers {
+                    name: "Assembly".to_string(),
+                    member_ids: vec![ElementId(2)],
+                    frame: GroupFrame::default(),
+                },
+            ))
+            .id();
+        let child = world.spawn(ElementId(2)).id();
+
+        let tree = build(&mut world);
+
+        let group_node = node_for(&tree, 1).expect("group node");
+        let child_node = node_for(&tree, 2).expect("child node");
+        assert_eq!(group_node.select_entity, Some(group));
+        assert_eq!(child_node.select_entity, Some(group));
+        assert_ne!(child_node.select_entity, Some(child));
+    }
+
+    #[test]
+    fn member_row_selects_member_inside_own_group_edit_context() {
+        let mut world = World::new();
+        world.insert_resource({
+            let mut context = GroupEditContext::default();
+            context.enter(ElementId(1));
+            context
+        });
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "Assembly".to_string(),
+                member_ids: vec![ElementId(2)],
+                frame: GroupFrame::default(),
+            },
+        ));
+        let child = world.spawn(ElementId(2)).id();
+
+        let tree = build(&mut world);
+
+        let child_node = node_for(&tree, 2).expect("child node");
+        assert_eq!(child_node.select_entity, Some(child));
     }
 
     #[test]
