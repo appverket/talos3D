@@ -1490,6 +1490,8 @@ pub struct RelationEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateAssemblyResult {
     pub assembly_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_element_id: Option<u64>,
     pub relation_ids: Vec<u64>,
 }
 

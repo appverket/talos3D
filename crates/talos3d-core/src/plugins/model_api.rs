@@ -40,6 +40,7 @@ use crate::plugins::materials::MaterialAssignment;
 use crate::plugins::modeling::group::{
     collect_group_members_recursive, compute_group_bounds_from_world, group_frame,
     group_frame_change_snapshots, is_group, GroupEditContext, GroupFrame, GroupMembers,
+    GroupSnapshot,
 };
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
@@ -4212,6 +4213,12 @@ pub fn handle_create_assembly(
             role: m.role.clone(),
         })
         .collect();
+    let group_member_ids: Vec<ElementId> = members.iter().map(|member| member.target).collect();
+    let group_label = request.label.clone();
+    let group_id =
+        (!group_member_ids.is_empty()).then(|| world.resource::<ElementIdAllocator>().next_id());
+    let group_snapshot = group_id
+        .map(|group_id| physical_group_snapshot(world, group_id, group_label, group_member_ids));
 
     let assembly_snapshot = AssemblySnapshot {
         element_id: assembly_id,
@@ -4257,6 +4264,9 @@ pub fn handle_create_assembly(
             snapshot: assembly_snapshot.into(),
         },
     );
+    if let Some(snapshot) = group_snapshot {
+        send_event(world, CreateEntityCommand { snapshot });
+    }
 
     let mut relation_ids = Vec::new();
     for snapshot in relation_snapshots {
@@ -4271,11 +4281,48 @@ pub fn handle_create_assembly(
 
     send_event(world, EndCommandGroup);
     flush_model_api_write_pipeline(world);
+    if let Some(group_id) = group_id {
+        select_only_element(world, group_id);
+    }
 
     Ok(CreateAssemblyResult {
         assembly_id: assembly_id.0,
+        group_element_id: group_id.map(|id| id.0),
         relation_ids,
     })
+}
+
+#[cfg(feature = "model-api")]
+fn physical_group_snapshot(
+    world: &World,
+    group_id: ElementId,
+    name: String,
+    member_ids: Vec<ElementId>,
+) -> BoxedEntity {
+    let cached_bounds = compute_group_bounds_from_world(world, &member_ids);
+    GroupSnapshot {
+        element_id: group_id,
+        name,
+        member_ids,
+        frame: GroupFrame::default(),
+        composite: None,
+        cached_bounds,
+    }
+    .into()
+}
+
+#[cfg(feature = "model-api")]
+fn select_only_element(world: &mut World, element_id: ElementId) {
+    let selected_entities: Vec<Entity> = {
+        let mut query = world.query_filtered::<Entity, With<Selected>>();
+        query.iter(world).collect()
+    };
+    for entity in selected_entities {
+        world.entity_mut(entity).remove::<Selected>();
+    }
+    if let Some(entity) = find_entity_by_element_id(world, element_id) {
+        world.entity_mut(entity).insert(Selected);
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -10668,6 +10715,25 @@ fn handle_instantiate_recipe(
 
     // Surface any promotion-gate error only after geometry was recorded and the
     // placement rotation applied.
+    let group_element_id = if created_element_ids.is_empty() {
+        None
+    } else {
+        let group_id = world.resource::<ElementIdAllocator>().next_id();
+        let mut member_ids = Vec::with_capacity(created_element_ids.len() + 1);
+        member_ids.push(ElementId(root));
+        member_ids.extend(created_element_ids.iter().copied().map(ElementId));
+        let snapshot = physical_group_snapshot(
+            world,
+            group_id,
+            format!("{} assembly", request.target_class),
+            member_ids,
+        );
+        send_event(world, CreateEntityCommand { snapshot });
+        flush_model_api_write_pipeline(world);
+        select_only_element(world, group_id);
+        Some(group_id.0)
+    };
+
     let promote = promote_result?;
 
     // 5. Run validation on the root entity and collect findings. Failures here
@@ -10677,6 +10743,7 @@ fn handle_instantiate_recipe(
 
     Ok(InstantiateRecipeResult {
         root_element_id: root,
+        group_element_id,
         created_element_ids,
         state: promote.new_state,
         steps_run_count: promote.script_steps_run,
