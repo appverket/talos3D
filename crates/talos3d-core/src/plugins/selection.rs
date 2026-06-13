@@ -122,7 +122,8 @@ impl Plugin for SelectionPlugin {
                         .after(TransformVisualSystems::PreviewUpdate)
                         .before(TransformVisualSystems::PreviewDraw),
                 ),
-            );
+            )
+            .add_systems(PostUpdate, normalize_selection_boundaries);
     }
 }
 
@@ -174,6 +175,38 @@ pub fn apply_click_selection(
             }
         }
         commands.entity(target).insert(Selected);
+    }
+}
+
+fn normalize_selection_boundaries(world: &mut World) {
+    let selected_entities: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    if selected_entities.is_empty() {
+        return;
+    }
+
+    let mut target_entities = std::collections::HashSet::new();
+    for entity in &selected_entities {
+        if let Some(target) = resolve_entity_for_selection(world, *entity) {
+            target_entities.insert(target);
+        }
+    }
+
+    if selected_entities.len() == target_entities.len()
+        && selected_entities
+            .iter()
+            .all(|entity| target_entities.contains(entity))
+    {
+        return;
+    }
+
+    for entity in selected_entities {
+        world.entity_mut(entity).remove::<Selected>();
+    }
+    for entity in target_entities {
+        world.entity_mut(entity).insert(Selected);
     }
 }
 
@@ -650,10 +683,8 @@ fn draw_selected_outlines(
     let is_active_transform = !transform_state.is_idle();
 
     if let Some(active_occurrence_id) = occurrence_edit_context.current_occurrence() {
-        if let Some(active_entity) = find_entity_by_element_id_readonly(
-            world,
-            active_occurrence_id,
-        ) {
+        if let Some(active_entity) = find_entity_by_element_id_readonly(world, active_occurrence_id)
+        {
             if let Ok(active_ref) = world.get_entity(active_entity) {
                 if let Some(bounds) = occurrence_generated_part_bounds(world, active_ref) {
                     draw_bounds_wireframe(&mut gizmos, &bounds, Color::srgb(0.2, 0.85, 1.0));
@@ -748,9 +779,7 @@ fn entity_is_visible(world: &World, entity: Entity) -> bool {
 
     entity_ref
         .get::<FeatureOperand>()
-        .and_then(|operand| {
-            find_entity_by_element_id_readonly(world, operand.owner)
-        })
+        .and_then(|operand| find_entity_by_element_id_readonly(world, operand.owner))
         .and_then(|feature_entity| world.get_entity(feature_entity).ok())
         .and_then(|feature_ref| feature_ref.get::<Visibility>().copied())
         != Some(Visibility::Hidden)
@@ -951,28 +980,27 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         return;
     };
 
-    // Begin a marquee candidate on press (unless one is already in progress — a
-    // press while dragging *completes* it, below). The candidate only becomes a
-    // marquee after movement crosses the drag threshold. A release before that is
-    // a plain click and must not leave a pending start behind; otherwise the next
-    // cursor move/click is misread as drag-select.
-    if cx.mouse_buttons.just_pressed(MouseButton::Left)
-        && !cx.handle_state.captures_pointer()
-        && !cx.box_state.is_dragging
-    {
-        cx.box_state.drag_start = Some(cursor_position);
-        cx.box_state.is_dragging = false;
-        cx.box_state.pending_frames = 0;
+    let left_pressed = cx.mouse_buttons.pressed(MouseButton::Left);
+    let left_just_pressed = cx.mouse_buttons.just_pressed(MouseButton::Left);
+    let left_just_released = cx.mouse_buttons.just_released(MouseButton::Left);
+    if clear_box_select_when_button_idle(&mut cx.box_state, left_pressed, left_just_released) {
+        return;
+    }
+
+    // Begin a marquee candidate on press. The candidate only becomes a marquee
+    // while the button is still held and movement crosses the drag threshold.
+    // Release before that is a plain click; a later press must never complete a
+    // stale rectangle from an earlier interaction.
+    if left_just_pressed && !cx.handle_state.captures_pointer() {
+        start_box_select_candidate(&mut cx.box_state, cursor_position);
     }
 
     if let Some(start) = cx.box_state.drag_start {
-        if (cursor_position - start).length() > BOX_SELECT_DRAG_THRESHOLD {
+        if left_pressed && (cursor_position - start).length() > BOX_SELECT_DRAG_THRESHOLD {
             cx.box_state.is_dragging = true;
         }
 
-        let complete = cx.box_state.is_dragging
-            && (cx.mouse_buttons.just_released(MouseButton::Left)
-                || cx.mouse_buttons.just_pressed(MouseButton::Left));
+        let complete = cx.box_state.is_dragging && left_just_released;
         if !cx.box_state.is_dragging && !complete {
             // Still just a press that hasn't become a drag — count the wait, and after
             // the grace window treat it as a click (drop the pending start) so a later
@@ -1123,10 +1151,28 @@ fn handle_box_select(mut cx: BoxSelectContext) {
             cx.box_state.drag_start = None;
             cx.box_state.is_dragging = false;
             cx.box_state.just_completed = true;
-        } else if cx.mouse_buttons.just_released(MouseButton::Left) {
+        } else if left_just_released {
             clear_pending_box_select_click(&mut cx.box_state);
         }
     }
+}
+
+fn start_box_select_candidate(box_state: &mut BoxSelectState, cursor_position: Vec2) {
+    box_state.drag_start = Some(cursor_position);
+    box_state.is_dragging = false;
+    box_state.pending_frames = 0;
+}
+
+fn clear_box_select_when_button_idle(
+    box_state: &mut BoxSelectState,
+    left_pressed: bool,
+    left_just_released: bool,
+) -> bool {
+    if !left_pressed && !left_just_released {
+        clear_pending_box_select_click(box_state);
+        return true;
+    }
+    false
 }
 
 fn clear_pending_box_select_click(box_state: &mut BoxSelectState) {
@@ -1198,6 +1244,38 @@ mod tests {
     }
 
     #[test]
+    fn button_idle_clears_stale_box_select_candidate() {
+        let mut state = BoxSelectState {
+            drag_start: Some(Vec2::new(20.0, 30.0)),
+            is_dragging: false,
+            just_completed: false,
+            pending_frames: 2,
+        };
+
+        assert!(clear_box_select_when_button_idle(&mut state, false, false));
+
+        assert!(state.drag_start.is_none());
+        assert!(!state.is_dragging);
+        assert_eq!(state.pending_frames, 0);
+    }
+
+    #[test]
+    fn new_press_restarts_stale_box_select_drag() {
+        let mut state = BoxSelectState {
+            drag_start: Some(Vec2::new(20.0, 30.0)),
+            is_dragging: true,
+            just_completed: false,
+            pending_frames: 9,
+        };
+
+        start_box_select_candidate(&mut state, Vec2::new(90.0, 110.0));
+
+        assert_eq!(state.drag_start, Some(Vec2::new(90.0, 110.0)));
+        assert!(!state.is_dragging);
+        assert_eq!(state.pending_frames, 0);
+    }
+
+    #[test]
     fn root_click_on_group_member_selects_group() {
         let (mut world, child, group, _, _) = selection_world_with_group();
 
@@ -1253,6 +1331,120 @@ mod tests {
 
         assert_eq!(target.entity, Some(parent));
         assert!(target.edit_context_after_click.is_none());
+    }
+
+    #[test]
+    fn box_select_nested_group_member_selects_top_level_group_at_root() {
+        let mut world = World::new();
+        let child_id = ElementId(10);
+        let nested_id = ElementId(20);
+        let parent_id = ElementId(30);
+        let child = world.spawn(child_id).id();
+        world.spawn((
+            nested_id,
+            GroupMembers {
+                name: "Nested".to_string(),
+                member_ids: vec![child_id],
+                frame: Default::default(),
+            },
+        ));
+        let parent = world
+            .spawn((
+                parent_id,
+                GroupMembers {
+                    name: "Parent".to_string(),
+                    member_ids: vec![nested_id],
+                    frame: Default::default(),
+                },
+            ))
+            .id();
+        let edit_context = GroupEditContext::default();
+        let mut system_state: bevy::ecs::system::SystemState<Query<GroupMembershipQueryItem>> =
+            bevy::ecs::system::SystemState::new(&mut world);
+        let group_query = system_state.get(&world);
+
+        let target = redirect_to_group_query(child, child_id, &edit_context, &group_query);
+
+        assert_eq!(target, parent);
+    }
+
+    #[test]
+    fn box_select_direct_group_member_selects_member_in_group_edit_context() {
+        let (mut world, child, _, child_id, group_id) = selection_world_with_group();
+        let mut edit_context = GroupEditContext::default();
+        edit_context.enter(group_id);
+        let mut system_state: bevy::ecs::system::SystemState<Query<GroupMembershipQueryItem>> =
+            bevy::ecs::system::SystemState::new(&mut world);
+        let group_query = system_state.get(&world);
+
+        let target = redirect_to_group_query(child, child_id, &edit_context, &group_query);
+
+        assert_eq!(target, child);
+    }
+
+    #[test]
+    fn selection_normalization_remaps_group_member_to_group_at_root() {
+        let (mut world, child, group, _, _) = selection_world_with_group();
+        world.entity_mut(child).insert(Selected);
+
+        normalize_selection_boundaries(&mut world);
+
+        assert!(world.get::<Selected>(child).is_none());
+        assert!(world.get::<Selected>(group).is_some());
+    }
+
+    #[test]
+    fn selection_normalization_keeps_direct_member_inside_group_edit_context() {
+        let (mut world, child, group, _, group_id) = selection_world_with_group();
+        let mut edit_context = GroupEditContext::default();
+        edit_context.enter(group_id);
+        world.insert_resource(edit_context);
+        world.entity_mut(child).insert(Selected);
+
+        normalize_selection_boundaries(&mut world);
+
+        assert!(world.get::<Selected>(child).is_some());
+        assert!(world.get::<Selected>(group).is_none());
+    }
+
+    #[test]
+    fn selection_normalization_deduplicates_nested_members_to_top_group_at_root() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+
+        let child_a_id = ElementId(10);
+        let child_b_id = ElementId(11);
+        let nested_id = ElementId(20);
+        let parent_id = ElementId(30);
+        let child_a = world.spawn(child_a_id).id();
+        let child_b = world.spawn(child_b_id).id();
+        world.spawn((
+            nested_id,
+            GroupMembers {
+                name: "Nested".to_string(),
+                member_ids: vec![child_a_id, child_b_id],
+                frame: Default::default(),
+            },
+        ));
+        let parent = world
+            .spawn((
+                parent_id,
+                GroupMembers {
+                    name: "Parent".to_string(),
+                    member_ids: vec![nested_id],
+                    frame: Default::default(),
+                },
+            ))
+            .id();
+        world.entity_mut(child_a).insert(Selected);
+        world.entity_mut(child_b).insert(Selected);
+
+        normalize_selection_boundaries(&mut world);
+
+        assert!(world.get::<Selected>(child_a).is_none());
+        assert!(world.get::<Selected>(child_b).is_none());
+        assert!(world.get::<Selected>(parent).is_some());
     }
 }
 
@@ -1343,33 +1535,106 @@ fn redirect_to_group_query(
     edit_context: &GroupEditContext,
     group_query: &Query<(Entity, &ElementId, &GroupMembers)>,
 ) -> Entity {
-    // Find the owning group whose parent context matches the active editing context
-    for (group_entity, group_eid, members) in group_query.iter() {
-        if members.member_ids.contains(&element_id) {
-            if edit_context.is_root() {
-                // At root: redirect to the top-level group
-                if !is_member_of_any_group_query(*group_eid, group_query) {
-                    return group_entity;
-                }
-            } else if edit_context.current_group() == Some(*group_eid) {
-                // Inside a group: entity is a direct child, no redirect needed
-                return entity;
-            } else {
-                // Entity belongs to a sub-group of the active context; redirect to that sub-group
+    if edit_context.is_root() {
+        if let Some(group_id) = find_top_level_group_for_query(element_id, group_query) {
+            if let Some((group_entity, _, _)) = group_query
+                .iter()
+                .find(|(_, group_eid, _)| **group_eid == group_id)
+            {
                 return group_entity;
             }
         }
+        return entity;
     }
+
+    let Some(active_group_id) = edit_context.current_group() else {
+        return entity;
+    };
+
+    if is_direct_child_of_group_query(element_id, active_group_id, group_query) {
+        return entity;
+    }
+
+    for (group_entity, group_eid, _) in group_query.iter() {
+        if !is_direct_child_of_group_query(*group_eid, active_group_id, group_query) {
+            continue;
+        }
+        let sub_members = collect_group_members_recursive_query(*group_eid, group_query);
+        if sub_members.contains(&element_id) {
+            return group_entity;
+        }
+    }
+
     entity
 }
 
-fn is_member_of_any_group_query(
+fn is_direct_child_of_group_query(
     element_id: ElementId,
+    group_id: ElementId,
     group_query: &Query<(Entity, &ElementId, &GroupMembers)>,
 ) -> bool {
-    group_query
-        .iter()
-        .any(|(_, _, members)| members.member_ids.contains(&element_id))
+    group_query.iter().any(|(_, group_eid, members)| {
+        *group_eid == group_id && members.member_ids.contains(&element_id)
+    })
+}
+
+fn find_top_level_group_for_query(
+    element_id: ElementId,
+    group_query: &Query<(Entity, &ElementId, &GroupMembers)>,
+) -> Option<ElementId> {
+    use std::collections::HashSet;
+
+    let mut current = element_id;
+    let mut visited = HashSet::new();
+    visited.insert(current);
+    loop {
+        let parent_id = group_query.iter().find_map(|(_, group_eid, members)| {
+            members.member_ids.contains(&current).then_some(*group_eid)
+        });
+        match parent_id {
+            Some(parent_id) => {
+                if !visited.insert(parent_id) {
+                    if current == element_id {
+                        return None;
+                    }
+                    return Some(current);
+                }
+                current = parent_id;
+            }
+            None => {
+                if current == element_id {
+                    return None;
+                }
+                return Some(current);
+            }
+        }
+    }
+}
+
+fn collect_group_members_recursive_query(
+    group_id: ElementId,
+    group_query: &Query<(Entity, &ElementId, &GroupMembers)>,
+) -> Vec<ElementId> {
+    let mut result = Vec::new();
+    let mut stack = vec![group_id];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        for (_, group_eid, members) in group_query.iter() {
+            if *group_eid != current {
+                continue;
+            }
+            for member_id in &members.member_ids {
+                result.push(*member_id);
+                stack.push(*member_id);
+            }
+        }
+    }
+
+    result
 }
 
 /// Redirect a hit entity to its owning group if appropriate for the current editing context.
