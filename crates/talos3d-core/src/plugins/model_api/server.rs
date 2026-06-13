@@ -3541,6 +3541,11 @@ pub(super) struct InstantiateRecipePlacement {
 pub struct InstantiateRecipeResult {
     /// Element id of the root semantic entity that was created.
     pub root_element_id: u64,
+    /// Element id of the physical aggregate group containing the root and all
+    /// generated elements. Select or transform this id to move the instantiated
+    /// structure as a unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_element_id: Option<u64>,
     /// All element ids created by the recipe `generate` function (may be empty if
     /// the recipe generates no sub-elements, but `root_element_id` is always present).
     pub created_element_ids: Vec<u64>,
@@ -6039,7 +6044,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "create_assembly",
-        description = "Create a semantic assembly with typed members and optionally create relations. The entire operation is one undoable unit."
+        description = "Create a semantic assembly with typed members and optionally create relations. Also creates and selects a physical group for the same members so the aggregate can be selected and transformed as one unit. The entire operation is one undoable unit."
     )]
     pub(super) async fn create_assembly_tool(
         &self,

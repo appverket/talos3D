@@ -5485,6 +5485,140 @@ fn spawn_house_assembly(world: &mut World, element_id: u64, members: Vec<(&str, 
     ));
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn create_assembly_creates_selected_physical_group_for_members() {
+    use crate::plugins::modeling::group::GroupMembers;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
+    register_house_with_member_obligations(&mut world);
+    let foundation = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.25, 0.0],
+            "half_extents": [4.0, 0.25, 3.0]
+        }),
+    )
+    .expect("foundation should be creatable");
+    let wall = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 1.75, -3.0],
+            "half_extents": [4.0, 1.5, 0.15]
+        }),
+    )
+    .expect("wall should be creatable");
+
+    let result = handle_create_assembly(
+        &mut world,
+        CreateAssemblyRequest {
+            assembly_type: "house".into(),
+            label: "Swedish Cottage".into(),
+            members: vec![
+                AssemblyMemberRefRequest {
+                    target: foundation,
+                    role: "foundation".into(),
+                },
+                AssemblyMemberRefRequest {
+                    target: wall,
+                    role: "exterior_wall".into(),
+                },
+            ],
+            parameters: Value::Null,
+            metadata: Value::Null,
+            relations: Vec::new(),
+        },
+    )
+    .expect("assembly should be creatable");
+    let group_id = ElementId(result.group_element_id.expect("physical group id"));
+    let group_entity = find_entity_by_element_id_readonly(&world, group_id)
+        .expect("physical group entity should exist");
+    let members = world
+        .get::<GroupMembers>(group_entity)
+        .expect("physical group should have members");
+    assert_eq!(
+        members.member_ids,
+        vec![ElementId(foundation), ElementId(wall)]
+    );
+    assert_eq!(handle_get_selection(&mut world), vec![group_id.0]);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn create_assembly_group_moves_members_as_a_unit() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
+    register_house_with_member_obligations(&mut world);
+    let foundation = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.25, 0.0],
+            "half_extents": [4.0, 0.25, 3.0]
+        }),
+    )
+    .expect("foundation should be creatable");
+    let wall = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 1.75, -3.0],
+            "half_extents": [4.0, 1.5, 0.15]
+        }),
+    )
+    .expect("wall should be creatable");
+    let result = handle_create_assembly(
+        &mut world,
+        CreateAssemblyRequest {
+            assembly_type: "house".into(),
+            label: "Swedish Cottage".into(),
+            members: vec![
+                AssemblyMemberRefRequest {
+                    target: foundation,
+                    role: "foundation".into(),
+                },
+                AssemblyMemberRefRequest {
+                    target: wall,
+                    role: "exterior_wall".into(),
+                },
+            ],
+            parameters: Value::Null,
+            metadata: Value::Null,
+            relations: Vec::new(),
+        },
+    )
+    .expect("assembly should be creatable");
+    let group_id = result.group_element_id.expect("physical group id");
+
+    handle_transform(
+        &mut world,
+        TransformToolRequest {
+            element_ids: vec![group_id],
+            operation: "move".into(),
+            axis: None,
+            value: json!([10.0, 0.0, 2.0]),
+            pivot: None,
+        },
+    )
+    .expect("physical group should transform");
+
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(foundation)).unwrap()["centre"],
+        json!([10.0, 0.25, 2.0])
+    );
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(wall)).unwrap()["centre"],
+        json!([10.0, 1.75, -1.0])
+    );
+}
+
 /// A bare house (no resolved sub-structure) cannot be previewed as a clean
 /// commit when skipping straight to Detailed — every in-force member
 /// obligation surfaces as a missing input and an error finding.
