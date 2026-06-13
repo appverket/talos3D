@@ -344,6 +344,54 @@ fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity
         .unwrap_or(entity)
 }
 
+pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Entity> {
+    if world
+        .get_resource::<crate::plugins::layers::LayerRegistry>()
+        .is_some()
+        && crate::plugins::layers::entity_on_locked_layer(world, entity)
+    {
+        return None;
+    }
+
+    let element_id = world.get::<ElementId>(entity).copied()?;
+    let edit_context = world
+        .get_resource::<GroupEditContext>()
+        .cloned()
+        .unwrap_or_default();
+
+    if edit_context.is_root() {
+        return Some(redirect_hit_to_context_group(
+            world,
+            entity,
+            element_id,
+            &edit_context,
+        ));
+    }
+
+    let Some(active_group_id) = edit_context.current_group() else {
+        return Some(entity);
+    };
+
+    let redirected = redirect_hit_to_context_group(world, entity, element_id, &edit_context);
+    if let Some(redirected_id) = world.get::<ElementId>(redirected).copied() {
+        if is_direct_child_of_group(world, redirected_id, active_group_id) {
+            return Some(redirected);
+        }
+    }
+    if is_direct_child_of_group(world, element_id, active_group_id) {
+        return Some(entity);
+    }
+
+    let mut parent_context = edit_context;
+    parent_context.exit();
+    Some(redirect_hit_to_context_group(
+        world,
+        entity,
+        element_id,
+        &parent_context,
+    ))
+}
+
 #[derive(Default)]
 struct SelectionClickTarget {
     entity: Option<Entity>,
@@ -358,10 +406,6 @@ fn resolve_selection_click_target(
         return SelectionClickTarget::default();
     };
     let mut entity = redirect_generated_occurrence_part_to_owner(world, hit_entity);
-    if crate::plugins::layers::entity_on_locked_layer(world, entity) {
-        return SelectionClickTarget::default();
-    }
-
     let Some(element_id) = world.get::<ElementId>(entity).copied() else {
         return SelectionClickTarget::default();
     };
@@ -369,12 +413,7 @@ fn resolve_selection_click_target(
 
     if edit_context.is_root() {
         return SelectionClickTarget {
-            entity: Some(redirect_hit_to_context_group(
-                world,
-                entity,
-                element_id,
-                &edit_context,
-            )),
+            entity: resolve_entity_for_selection(world, entity),
             edit_context_after_click: None,
         };
     }
@@ -1099,6 +1138,32 @@ fn clear_pending_box_select_click(box_state: &mut BoxSelectState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::{
+        layers::LayerRegistry,
+        modeling::group::{GroupEditContext, GroupMembers},
+    };
+
+    fn selection_world_with_group() -> (World, Entity, Entity, ElementId, ElementId) {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+
+        let child_id = ElementId(10);
+        let group_id = ElementId(20);
+        let child = world.spawn(child_id).id();
+        let group = world
+            .spawn((
+                group_id,
+                GroupMembers {
+                    name: "Group".to_string(),
+                    member_ids: vec![child_id],
+                    frame: Default::default(),
+                },
+            ))
+            .id();
+
+        (world, child, group, child_id, group_id)
+    }
 
     #[test]
     fn release_before_drag_clears_pending_box_select_start() {
@@ -1130,6 +1195,64 @@ mod tests {
 
         assert!(state.drag_start.is_none());
         assert!(!state.is_dragging);
+    }
+
+    #[test]
+    fn root_click_on_group_member_selects_group() {
+        let (mut world, child, group, _, _) = selection_world_with_group();
+
+        let target = resolve_selection_click_target(&mut world, Some(child));
+
+        assert_eq!(target.entity, Some(group));
+        assert!(target.edit_context_after_click.is_none());
+    }
+
+    #[test]
+    fn edit_context_click_on_direct_group_member_selects_member() {
+        let (mut world, child, _, _, group_id) = selection_world_with_group();
+        let mut context = GroupEditContext::default();
+        context.enter(group_id);
+        world.insert_resource(context);
+
+        let target = resolve_selection_click_target(&mut world, Some(child));
+
+        assert_eq!(target.entity, Some(child));
+        assert!(target.edit_context_after_click.is_none());
+    }
+
+    #[test]
+    fn root_click_on_nested_group_member_selects_top_level_group() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+
+        let child_id = ElementId(10);
+        let nested_id = ElementId(20);
+        let parent_id = ElementId(30);
+        let child = world.spawn(child_id).id();
+        world.spawn((
+            nested_id,
+            GroupMembers {
+                name: "Nested".to_string(),
+                member_ids: vec![child_id],
+                frame: Default::default(),
+            },
+        ));
+        let parent = world
+            .spawn((
+                parent_id,
+                GroupMembers {
+                    name: "Parent".to_string(),
+                    member_ids: vec![nested_id],
+                    frame: Default::default(),
+                },
+            ))
+            .id();
+
+        let target = resolve_selection_click_target(&mut world, Some(child));
+
+        assert_eq!(target.entity, Some(parent));
+        assert!(target.edit_context_after_click.is_none());
     }
 }
 
