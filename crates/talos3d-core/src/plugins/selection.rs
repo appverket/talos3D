@@ -898,8 +898,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         || orbit_modifier_pressed(&cx.keys)
         || pan_modifier_pressed(&cx.keys)
     {
-        cx.box_state.drag_start = None;
-        cx.box_state.is_dragging = false;
+        clear_pending_box_select_click(&mut cx.box_state);
         return;
     }
 
@@ -907,14 +906,17 @@ fn handle_box_select(mut cx: BoxSelectContext) {
         return;
     };
     let Some(cursor_position) = cursor_window_position(window) else {
+        if cx.mouse_buttons.just_released(MouseButton::Left) {
+            clear_pending_box_select_click(&mut cx.box_state);
+        }
         return;
     };
 
-    // Begin a marquee on press (unless one is already in progress — a press while
-    // dragging *completes* it, below). Not gated on the button staying held: some
-    // input devices (Mac trackpads) deliver a press+release in the same frame and
-    // then move the cursor with the button up, so we drive the marquee from cursor
-    // movement, and complete it on a release OR a second press (click-move-click).
+    // Begin a marquee candidate on press (unless one is already in progress — a
+    // press while dragging *completes* it, below). The candidate only becomes a
+    // marquee after movement crosses the drag threshold. A release before that is
+    // a plain click and must not leave a pending start behind; otherwise the next
+    // cursor move/click is misread as drag-select.
     if cx.mouse_buttons.just_pressed(MouseButton::Left)
         && !cx.handle_state.captures_pointer()
         && !cx.box_state.is_dragging
@@ -951,8 +953,7 @@ fn handle_box_select(mut cx: BoxSelectContext) {
                 .find(|(camera, _)| camera.is_active)
                 .or_else(|| cx.camera_query.iter().next())
             else {
-                cx.box_state.drag_start = None;
-                cx.box_state.is_dragging = false;
+                clear_pending_box_select_click(&mut cx.box_state);
                 return;
             };
 
@@ -1083,15 +1084,52 @@ fn handle_box_select(mut cx: BoxSelectContext) {
             cx.box_state.drag_start = None;
             cx.box_state.is_dragging = false;
             cx.box_state.just_completed = true;
-        } else if cx.mouse_buttons.just_released(MouseButton::Left)
-            && !cx.mouse_buttons.just_pressed(MouseButton::Left)
-        {
-            // A held click released without dragging — drop the pending start so it
-            // doesn't linger. (A same-frame press+release tap is kept, so a trackpad
-            // tap-then-move can still begin a marquee.)
-            cx.box_state.drag_start = None;
-            cx.box_state.is_dragging = false;
+        } else if cx.mouse_buttons.just_released(MouseButton::Left) {
+            clear_pending_box_select_click(&mut cx.box_state);
         }
+    }
+}
+
+fn clear_pending_box_select_click(box_state: &mut BoxSelectState) {
+    box_state.drag_start = None;
+    box_state.is_dragging = false;
+    box_state.pending_frames = 0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_before_drag_clears_pending_box_select_start() {
+        let mut state = BoxSelectState {
+            drag_start: Some(Vec2::new(120.0, 80.0)),
+            is_dragging: false,
+            just_completed: false,
+            pending_frames: 3,
+        };
+
+        clear_pending_box_select_click(&mut state);
+
+        assert_eq!(state.drag_start, None);
+        assert!(!state.is_dragging);
+        assert_eq!(state.pending_frames, 0);
+    }
+
+    #[test]
+    fn same_frame_tap_cannot_arm_later_box_select() {
+        let mut state = BoxSelectState::default();
+
+        // This mirrors the state after `just_pressed` starts a candidate. When
+        // the same input frame also has `just_released`, the candidate must be
+        // cleared so later cursor movement/clicks are not treated as a marquee.
+        state.drag_start = Some(Vec2::new(64.0, 64.0));
+        state.pending_frames = 1;
+
+        clear_pending_box_select_click(&mut state);
+
+        assert!(state.drag_start.is_none());
+        assert!(!state.is_dragging);
     }
 }
 
