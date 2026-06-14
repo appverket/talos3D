@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 #[cfg(feature = "perf-stats")]
 use std::time::Instant;
@@ -17,7 +17,9 @@ use crate::{
     capability_registry::CapabilityRegistry,
     plugins::{
         camera::OrbitCamera,
-        commands::{ApplyEntityChangesCommand, CreateEntityCommand},
+        commands::{
+            find_entity_by_element_id_readonly, ApplyEntityChangesCommand, CreateEntityCommand,
+        },
         cursor::{cursor_viewport_position, CursorWorldPos},
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
         identity::ElementId,
@@ -28,6 +30,7 @@ use crate::{
             csg::{CsgNode, CsgParentMap, CsgSnapshot},
             generic_snapshot::PrimitiveSnapshot,
             group::GroupMembers,
+            group::GroupSnapshot,
             profile::ProfileExtrusion,
         },
         scene_ray,
@@ -889,7 +892,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                     after: state
                         .initial_snapshots
                         .iter()
-                        .map(|(_, snapshot)| snapshot.translate_by(delta))
+                        .map(|(_, snapshot)| translate_preview_snapshot(snapshot, delta))
                         .collect(),
                     display_value: numeric_value.or_else(|| Some(delta.length())),
                 })
@@ -902,14 +905,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                 after: state
                     .initial_snapshots
                     .iter()
-                    .map(|(_, snapshot)| {
-                        // Rotate geometry in place AND orbit center around the pivot.
-                        let rotated = snapshot.rotate_by(rotation);
-                        let offset = snapshot.center() - center;
-                        let orbited_offset = rotation * offset;
-                        let translation = (center + orbited_offset) - rotated.center();
-                        rotated.translate_by(translation)
-                    })
+                    .map(|(_, snapshot)| rotate_preview_snapshot(snapshot, rotation, center))
                     .collect(),
                 display_value: Some(delta_radians.to_degrees()),
             })
@@ -922,7 +918,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                 after: state
                     .initial_snapshots
                     .iter()
-                    .map(|(_, snapshot)| snapshot.scale_by(factor, center))
+                    .map(|(_, snapshot)| scale_preview_snapshot(snapshot, factor, center))
                     .collect(),
                 display_value,
             })
@@ -943,6 +939,46 @@ fn apply_transform_preview_modifiers(
     };
     for modifier in &modifiers.modifiers {
         modifier(world, state, after);
+    }
+}
+
+fn group_snapshot(snapshot: &BoxedEntity) -> Option<&GroupSnapshot> {
+    snapshot.0.as_any().downcast_ref::<GroupSnapshot>()
+}
+
+fn translate_preview_snapshot(snapshot: &BoxedEntity, delta: Vec3) -> BoxedEntity {
+    if let Some(group) = group_snapshot(snapshot) {
+        let mut updated = group.clone();
+        updated.frame.translation += delta;
+        updated.into()
+    } else {
+        snapshot.translate_by(delta)
+    }
+}
+
+fn rotate_preview_snapshot(snapshot: &BoxedEntity, rotation: Quat, pivot: Vec3) -> BoxedEntity {
+    if let Some(group) = group_snapshot(snapshot) {
+        let mut updated = group.clone();
+        updated.frame.translation = pivot + rotation * (updated.frame.translation - pivot);
+        updated.frame.rotation = rotation * updated.frame.rotation;
+        updated.into()
+    } else {
+        // Rotate geometry in place AND orbit center around the pivot.
+        let rotated = snapshot.rotate_by(rotation);
+        let offset = snapshot.center() - pivot;
+        let orbited_offset = rotation * offset;
+        let translation = (pivot + orbited_offset) - rotated.center();
+        rotated.translate_by(translation)
+    }
+}
+
+fn scale_preview_snapshot(snapshot: &BoxedEntity, factor: Vec3, center: Vec3) -> BoxedEntity {
+    if group_snapshot(snapshot).is_some() {
+        // Assembly scale repositions members but leaves group authoring frames'
+        // orientation/origin unchanged, matching the MCP transform contract.
+        snapshot.clone()
+    } else {
+        snapshot.scale_by(factor, center)
     }
 }
 
@@ -1306,24 +1342,29 @@ fn collect_selected_snapshots(world: &mut World) -> Vec<(Entity, BoxedEntity)> {
         query.iter(world).collect::<Vec<_>>()
     };
 
-    let selected_set = selected_entities
-        .iter()
-        .copied()
-        .collect::<std::collections::HashSet<_>>();
+    let selected_set = selected_entities.iter().copied().collect::<HashSet<_>>();
 
     let mut result = Vec::new();
+    let mut seen_ids = HashSet::new();
 
     for entity in selected_entities {
         if opening_parent_is_selected(world, entity, &selected_set) {
             continue;
         }
 
-        // If this is a group, expand to member snapshots instead
+        // If this is a group, expand to leaf member snapshots and include the
+        // group/nested-group frame snapshots. The frame snapshots are essential:
+        // otherwise interactive transforms move the visible members but leave the
+        // selected group's authored local frame stale, while terrain-conforming
+        // members with live preview can appear to rotate independently.
         if let Some(members) = world.get::<GroupMembers>(entity) {
+            if let Some(group_id) = world.get::<ElementId>(entity).copied() {
+                expand_group_frame_snapshots(world, group_id, &mut result, &mut seen_ids);
+            }
             let member_ids = members.member_ids.clone();
-            expand_group_member_snapshots(world, &member_ids, &mut result);
+            expand_group_member_snapshots(world, &member_ids, &mut result, &mut seen_ids);
         } else if let Some(snapshot) = capture_selected_snapshot(world, entity) {
-            result.push((entity, snapshot));
+            push_snapshot_once(entity, snapshot, &mut result, &mut seen_ids);
         }
     }
 
@@ -1334,30 +1375,78 @@ fn expand_group_member_snapshots(
     world: &World,
     member_ids: &[ElementId],
     out: &mut Vec<(Entity, BoxedEntity)>,
+    seen_ids: &mut HashSet<ElementId>,
 ) {
     let registry = world.resource::<CapabilityRegistry>();
     for member_id in member_ids {
-        let mut q = world.try_query::<EntityRef>().unwrap();
-        let Some(member_entity) = q
-            .iter(world)
-            .find(|e| e.get::<ElementId>().copied() == Some(*member_id))
-        else {
+        let Some(member_entity_id) = find_entity_by_element_id_readonly(world, *member_id) else {
+            continue;
+        };
+        let Ok(member_entity) = world.get_entity(member_entity_id) else {
             continue;
         };
         if let Some(members) = member_entity.get::<GroupMembers>() {
             // Recurse into nested groups
+            expand_group_frame_snapshots(world, *member_id, out, seen_ids);
             let nested_ids = members.member_ids.clone();
-            expand_group_member_snapshots(world, &nested_ids, out);
+            expand_group_member_snapshots(world, &nested_ids, out, seen_ids);
         } else if let Some(snapshot) = registry.capture_snapshot(&member_entity, world) {
-            out.push((member_entity.id(), snapshot));
+            push_snapshot_once(member_entity.id(), snapshot, out, seen_ids);
         }
+    }
+}
+
+fn expand_group_frame_snapshots(
+    world: &World,
+    group_id: ElementId,
+    out: &mut Vec<(Entity, BoxedEntity)>,
+    seen_ids: &mut HashSet<ElementId>,
+) {
+    let Some(entity) = find_entity_by_element_id_readonly(world, group_id) else {
+        return;
+    };
+    let Ok(entity_ref) = world.get_entity(entity) else {
+        return;
+    };
+    if let Some(snapshot) = world
+        .resource::<CapabilityRegistry>()
+        .capture_snapshot(&entity_ref, world)
+    {
+        push_snapshot_once(entity, snapshot, out, seen_ids);
+    }
+    let Some(members) = entity_ref.get::<GroupMembers>() else {
+        return;
+    };
+    let nested_ids = members
+        .member_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            find_entity_by_element_id_readonly(world, *id)
+                .and_then(|entity| world.get::<GroupMembers>(entity))
+                .is_some()
+        })
+        .collect::<Vec<_>>();
+    for nested_id in nested_ids {
+        expand_group_frame_snapshots(world, nested_id, out, seen_ids);
+    }
+}
+
+fn push_snapshot_once(
+    entity: Entity,
+    snapshot: BoxedEntity,
+    out: &mut Vec<(Entity, BoxedEntity)>,
+    seen_ids: &mut HashSet<ElementId>,
+) {
+    if seen_ids.insert(snapshot.element_id()) {
+        out.push((entity, snapshot));
     }
 }
 
 fn opening_parent_is_selected(
     world: &World,
     entity: Entity,
-    selected_set: &std::collections::HashSet<Entity>,
+    selected_set: &HashSet<Entity>,
 ) -> bool {
     let Ok(entity_ref) = world.get_entity(entity) else {
         return false;
@@ -1386,17 +1475,24 @@ fn capture_selected_snapshot(world: &World, entity: Entity) -> Option<BoxedEntit
 }
 
 fn selection_center(initial_snapshots: &[(Entity, BoxedEntity)]) -> Option<Vec3> {
-    let count = initial_snapshots.len();
-    if count == 0 {
+    let centers = initial_snapshots
+        .iter()
+        .filter_map(|(_, snapshot)| {
+            group_snapshot(snapshot)
+                .is_none()
+                .then_some(snapshot.center())
+        })
+        .collect::<Vec<_>>();
+    if centers.is_empty() {
         return None;
     }
 
     Some(
-        initial_snapshots
+        centers
             .iter()
-            .map(|(_, snapshot)| snapshot.center())
+            .copied()
             .fold(Vec3::ZERO, |sum, center| sum + center)
-            / count as f32,
+            / centers.len() as f32,
     )
 }
 
@@ -1905,7 +2001,8 @@ fn draw_scale_guides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authored_entity::{AuthoredEntity, HandleInfo, PropertyFieldDef};
+    use crate::authored_entity::{AuthoredEntity, EntityBounds, HandleInfo, PropertyFieldDef};
+    use crate::plugins::modeling::group::{GroupFrame, GroupSnapshot};
     use crate::plugins::tools::Preview;
     use serde_json::Value;
 
@@ -2221,6 +2318,61 @@ mod tests {
             numeric_scale_factor(AxisConstraint::PlaneXY, 1.5),
             Vec3::new(1.5, 1.5, 1.0),
         );
+    }
+
+    #[test]
+    fn rotating_group_preview_updates_group_frame_about_pivot() {
+        let group = GroupSnapshot {
+            element_id: ElementId(10),
+            name: "group".to_string(),
+            member_ids: vec![ElementId(1)],
+            frame: GroupFrame {
+                translation: Vec3::new(10.0, 0.0, 0.0),
+                rotation: Quat::IDENTITY,
+            },
+            composite: None,
+            cached_bounds: None,
+        };
+
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let updated = rotate_preview_snapshot(&group.into(), rotation, Vec3::ZERO);
+        let updated = updated
+            .0
+            .as_any()
+            .downcast_ref::<GroupSnapshot>()
+            .expect("group preview should remain a group snapshot");
+
+        assert_vec3_near(
+            updated.frame.translation,
+            rotation * Vec3::new(10.0, 0.0, 0.0),
+        );
+        assert!(updated.frame.rotation.abs_diff_eq(rotation, 1e-5));
+    }
+
+    #[test]
+    fn selection_center_ignores_group_frame_snapshots() {
+        let member: BoxedEntity = TestPreviewSnapshot {
+            element_id: ElementId(1),
+        }
+        .into();
+        let group: BoxedEntity = GroupSnapshot {
+            element_id: ElementId(10),
+            name: "group".to_string(),
+            member_ids: vec![ElementId(1)],
+            frame: GroupFrame::identity(),
+            composite: None,
+            cached_bounds: Some(EntityBounds {
+                min: Vec3::new(100.0, 0.0, 0.0),
+                max: Vec3::new(100.0, 0.0, 0.0),
+            }),
+        }
+        .into();
+
+        let center =
+            selection_center(&[(Entity::PLACEHOLDER, group), (Entity::PLACEHOLDER, member)])
+                .expect("member snapshot should provide a center");
+
+        assert_vec3_near(center, Vec3::ZERO);
     }
 
     #[test]

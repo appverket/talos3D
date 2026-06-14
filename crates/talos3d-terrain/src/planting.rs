@@ -31,6 +31,7 @@ use talos3d_core::{
         modeling::group::{
             collect_group_members_recursive, group_frame, group_frame_change_snapshots,
             group_membership_add_snapshots, is_group, remove_member_from_groups, GroupMembers,
+            GroupSnapshot,
         },
         modeling::primitives::{BoxPrimitive, ShapeRotation, TriangleMesh},
         modeling::snapshots::TriangleMeshSnapshot,
@@ -473,6 +474,52 @@ fn group_member_ids(world: &World, group_id: ElementId) -> Vec<ElementId> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone)]
+struct PlantedPlacement {
+    foundation_id: ElementId,
+    surface_id: ElementId,
+    base_offset_from_foundation_top: f32,
+    immediate_members: Vec<ElementId>,
+    recursive_members: Vec<ElementId>,
+    group_frames: Vec<ElementId>,
+}
+
+impl PlantedPlacement {
+    fn from_world(world: &World, group_id: ElementId, planted: PlantedStructure) -> Option<Self> {
+        let immediate_members = group_member_ids(world, group_id);
+        if immediate_members.is_empty() {
+            return None;
+        }
+        let recursive_members = collect_group_members_recursive(world, group_id);
+        let mut group_frames = Vec::with_capacity(recursive_members.len() + 1);
+        group_frames.push(group_id);
+        group_frames.extend(
+            recursive_members
+                .iter()
+                .copied()
+                .filter(|member_id| is_group(world, *member_id)),
+        );
+        Some(Self {
+            foundation_id: planted.foundation_id,
+            surface_id: planted.surface_id,
+            base_offset_from_foundation_top: planted.base_offset_from_foundation_top,
+            immediate_members,
+            recursive_members,
+            group_frames,
+        })
+    }
+
+    fn recursive_member_set(&self) -> HashSet<ElementId> {
+        self.recursive_members.iter().copied().collect()
+    }
+
+    fn contract_id_set(&self) -> HashSet<ElementId> {
+        let mut ids = self.recursive_member_set();
+        ids.extend(self.group_frames.iter().copied());
+        ids
+    }
+}
+
 fn member_bounds_excluding(
     world: &World,
     root_ids: &[ElementId],
@@ -528,6 +575,22 @@ fn translate_members_excluding(
     }
 }
 
+fn translate_group_frames(world: &mut World, group_ids: &[ElementId], delta: Vec3) {
+    for group_id in group_ids {
+        translate_group_frame(world, *group_id, delta);
+    }
+}
+
+fn translate_planted_superstructure(world: &mut World, placement: &PlantedPlacement, delta: Vec3) {
+    translate_members_excluding(
+        world,
+        &placement.immediate_members,
+        placement.foundation_id,
+        delta,
+    );
+    translate_group_frames(world, &placement.group_frames, delta);
+}
+
 fn foundation_top(
     world: &mut World,
     foundation_id: ElementId,
@@ -574,37 +637,99 @@ fn preview_member_bounds(
     any.then_some(EntityBounds { min, max })
 }
 
+fn group_snapshot(snapshot: &BoxedEntity) -> Option<&GroupSnapshot> {
+    snapshot.0.as_any().downcast_ref::<GroupSnapshot>()
+}
+
+fn translate_preview_snapshot(snapshot: &BoxedEntity, delta: Vec3) -> BoxedEntity {
+    if let Some(group) = group_snapshot(snapshot) {
+        let mut updated = group.clone();
+        updated.frame.translation += delta;
+        updated.into()
+    } else {
+        snapshot.translate_by(delta)
+    }
+}
+
+fn snapshot_delta(before: &BoxedEntity, after: &BoxedEntity) -> Vec3 {
+    match (group_snapshot(before), group_snapshot(after)) {
+        (Some(before_group), Some(after_group)) => {
+            after_group.frame.translation - before_group.frame.translation
+        }
+        _ => after.center() - before.center(),
+    }
+}
+
 fn direct_preview_delta(
     initial_by_id: &HashMap<ElementId, &BoxedEntity>,
     after: &[BoxedEntity],
-    member_ids: &HashSet<ElementId>,
+    contract_ids: &HashSet<ElementId>,
 ) -> Option<Vec3> {
     after.iter().find_map(|snapshot| {
         let id = snapshot.element_id();
         let before = initial_by_id.get(&id)?;
-        member_ids
+        contract_ids
             .contains(&id)
-            .then_some(snapshot.center() - before.center())
+            .then_some(snapshot_delta(before, snapshot))
     })
 }
 
-fn ensure_planted_members_in_preview(
+fn ensure_planted_contract_in_preview(
     world: &World,
     after: &mut Vec<BoxedEntity>,
-    member_ids: &[ElementId],
+    placement: &PlantedPlacement,
     direct_delta: Vec3,
 ) {
     let mut after_ids = after
         .iter()
         .map(BoxedEntity::element_id)
         .collect::<HashSet<_>>();
-    for member_id in member_ids {
+    for member_id in &placement.recursive_members {
         if after_ids.contains(member_id) || is_group(world, *member_id) {
             continue;
         }
         if let Some(snapshot) = capture_by_id(world, *member_id) {
             after.push(snapshot.translate_by(direct_delta));
             after_ids.insert(*member_id);
+        }
+    }
+    for group_id in &placement.group_frames {
+        if after_ids.contains(group_id) {
+            continue;
+        }
+        let Some(mut frame) = group_frame(world, *group_id) else {
+            continue;
+        };
+        frame.translation += direct_delta;
+        if let Some((_, snapshot)) = group_frame_change_snapshots(world, *group_id, frame) {
+            after.push(snapshot);
+            after_ids.insert(*group_id);
+        }
+    }
+}
+
+fn apply_preview_vertical_reseat(
+    after: &mut [BoxedEntity],
+    placement: &PlantedPlacement,
+    member_set: &HashSet<ElementId>,
+    delta_y: f32,
+) {
+    if delta_y.abs() <= 0.001 {
+        return;
+    }
+    let vertical_delta = Vec3::new(0.0, delta_y, 0.0);
+    let group_set = placement
+        .group_frames
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    for snapshot in after.iter_mut() {
+        let id = snapshot.element_id();
+        if id == placement.foundation_id {
+            continue;
+        }
+        if member_set.contains(&id) || group_set.contains(&id) {
+            *snapshot = translate_preview_snapshot(snapshot, vertical_delta);
         }
     }
 }
@@ -635,42 +760,33 @@ fn adjust_planted_structure_transform_preview(
     };
 
     for (group_id, planted) in planted {
-        let member_ids = collect_group_members_recursive(world, group_id);
-        if member_ids.is_empty() {
+        let Some(placement) = PlantedPlacement::from_world(world, group_id, planted) else {
             continue;
-        }
-        let member_set = member_ids.iter().copied().collect::<HashSet<_>>();
-        let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &member_set) else {
+        };
+        let member_set = placement.recursive_member_set();
+        let contract_ids = placement.contract_id_set();
+        let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &contract_ids) else {
             continue;
         };
 
-        ensure_planted_members_in_preview(world, after, &member_ids, direct_delta);
+        ensure_planted_contract_in_preview(world, after, &placement, direct_delta);
 
         let mut member_set_without_foundation = member_set.clone();
-        member_set_without_foundation.remove(&planted.foundation_id);
+        member_set_without_foundation.remove(&placement.foundation_id);
         let Some(bounds) = preview_member_bounds(after, &member_set_without_foundation) else {
             continue;
         };
         let Some(foundation) = after
             .iter()
-            .find(|snapshot| snapshot.element_id() == planted.foundation_id)
+            .find(|snapshot| snapshot.element_id() == placement.foundation_id)
         else {
             continue;
         };
-        let Some(top) = preview_foundation_top(world, foundation, planted.surface_id) else {
+        let Some(top) = preview_foundation_top(world, foundation, placement.surface_id) else {
             continue;
         };
-        let delta_y = top + planted.base_offset_from_foundation_top - bounds.min.y;
-        if delta_y.abs() <= 0.001 {
-            continue;
-        }
-        let vertical_delta = Vec3::new(0.0, delta_y, 0.0);
-        for snapshot in after.iter_mut() {
-            let id = snapshot.element_id();
-            if id != planted.foundation_id && member_set.contains(&id) {
-                *snapshot = snapshot.translate_by(vertical_delta);
-            }
-        }
+        let delta_y = top + placement.base_offset_from_foundation_top - bounds.min.y;
+        apply_preview_vertical_reseat(after, &placement, &member_set, delta_y);
     }
 }
 
@@ -1165,27 +1281,23 @@ fn reseat_planted_structures(world: &mut World) {
             .collect::<Vec<_>>()
     };
     for (_, group_id, planted) in planted {
-        let members = group_member_ids(world, group_id);
-        if members.is_empty() {
-            continue;
-        }
-        let Some(bounds) = member_bounds_excluding(world, &members, planted.foundation_id) else {
+        let Some(placement) = PlantedPlacement::from_world(world, group_id, planted) else {
             continue;
         };
-        let Some(top) = foundation_top(world, planted.foundation_id, planted.surface_id) else {
+        let Some(bounds) =
+            member_bounds_excluding(world, &placement.immediate_members, placement.foundation_id)
+        else {
             continue;
         };
-        let target_base = top + planted.base_offset_from_foundation_top;
+        let Some(top) = foundation_top(world, placement.foundation_id, placement.surface_id) else {
+            continue;
+        };
+        let target_base = top + placement.base_offset_from_foundation_top;
         let delta_y = target_base - bounds.min.y;
         if delta_y.abs() <= 0.001 {
             continue;
         }
-        translate_members_excluding(
-            world,
-            &members,
-            planted.foundation_id,
-            Vec3::new(0.0, delta_y, 0.0),
-        );
+        translate_planted_superstructure(world, &placement, Vec3::new(0.0, delta_y, 0.0));
     }
 }
 
@@ -2167,6 +2279,16 @@ mod tests {
             (foundation.position.x - 2.0).abs() < 0.05,
             "foundation should move horizontally with the planted group"
         );
+        let group_entity =
+            find_entity_by_element_id(&mut world, ElementId(1)).expect("group entity");
+        let group = world
+            .get::<GroupMembers>(group_entity)
+            .expect("planted group");
+        assert!(
+            (group.frame.translation.y - moved_top).abs() < 0.05,
+            "group frame should re-seat with the superstructure datum; got {}",
+            group.frame.translation.y
+        );
     }
 
     #[test]
@@ -2270,6 +2392,106 @@ mod tests {
         assert!(
             (bounds.min.y - moved_top).abs() < 0.05,
             "superstructure should preview on the moved conforming foundation top"
+        );
+    }
+
+    #[test]
+    fn planted_structure_transform_preview_reseats_group_frame_on_lower_grade() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        PrimitiveSnapshot {
+            element_id: ElementId(4),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 1.25, 0.0),
+                half_extents: Vec3::new(1.1, 0.25, 1.1),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Planted cottage".to_string(),
+            member_ids: vec![ElementId(2), ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+        let initial_top =
+            foundation_top(&mut world, foundation_id, ElementId(10)).expect("initial top");
+
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        let group_before = capture_by_id(&world, ElementId(1)).expect("group snapshot");
+        let mut after =
+            translated_target_snapshots(&world, ElementId(1), Vec3::new(-2.0, 0.0, 0.0));
+        let state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: vec![(group_entity, group_before)],
+            ..Default::default()
+        };
+
+        adjust_planted_structure_transform_preview(&world, &state, &mut after);
+
+        let foundation = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == foundation_id)
+            .expect("foundation snapshot");
+        let moved_top =
+            preview_foundation_top(&world, foundation, ElementId(10)).expect("moved top");
+        assert!(
+            moved_top < initial_top - 0.5,
+            "test move should drag foundation to lower terrain: initial {initial_top}, moved {moved_top}"
+        );
+
+        let member_set = [ElementId(2), ElementId(4)]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let bounds = preview_member_bounds(&after, &member_set).expect("member bounds");
+        assert!(
+            (bounds.min.y - moved_top).abs() < 0.05,
+            "superstructure should preview on the lower moved foundation top"
+        );
+
+        let group = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == ElementId(1))
+            .and_then(group_snapshot)
+            .expect("group frame snapshot");
+        assert!(
+            (group.frame.translation.y - moved_top).abs() < 0.05,
+            "group frame should follow the reseated superstructure datum; got {}",
+            group.frame.translation.y
         );
     }
 }

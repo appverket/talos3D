@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-06-04T19:08:23Z
-- branch: codex/wip-consolidation-20260604
-- task-id: codex-wip-consolidation-20260604
+- created: 2026-06-14T09:59:41Z
+- branch: codex/group-rotate-planted-structure
+- task-id: group-rotate-planted-structure
 - target base: main
-- summary: Consolidate stale dirty Codex core worktrees, validate, merge, and clean up.
-- status: active
+- summary: Fix interactive transforms for planted structure groups.
+- status: awaiting-merge
