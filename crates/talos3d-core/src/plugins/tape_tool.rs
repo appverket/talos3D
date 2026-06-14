@@ -11,7 +11,7 @@ use crate::plugins::{
     document_properties::DocumentProperties,
     drawing_export::ViewportExportState,
     egui_chrome::EguiWantsInput,
-    snap::SnapSystems,
+    snap::{SnapResult, SnapSystems},
     tools::ActiveTool,
     ui::StatusBarData,
 };
@@ -99,6 +99,7 @@ fn handle_tape_input(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     egui_wants_input: Res<EguiWantsInput>,
     cursor_world_pos: Res<CursorWorldPos>,
+    snap_result: Res<SnapResult>,
     doc_props: Res<DocumentProperties>,
     mut state: ResMut<TapeToolState>,
     mut status: ResMut<StatusBarData>,
@@ -119,7 +120,7 @@ fn handle_tape_input(
         return;
     }
 
-    let Some(cursor) = tape_cursor_point(&cursor_world_pos) else {
+    let Some(cursor) = tape_cursor_point(&cursor_world_pos, &snap_result) else {
         return;
     };
 
@@ -145,6 +146,7 @@ fn handle_tape_input(
 
 fn draw_tape_gizmos(
     cursor_world_pos: Res<CursorWorldPos>,
+    snap_result: Res<SnapResult>,
     state: Option<Res<TapeToolState>>,
     mut gizmos: Gizmos,
 ) {
@@ -153,7 +155,7 @@ fn draw_tape_gizmos(
     };
 
     if let Some(start) = state.start {
-        if let Some(cursor) = tape_cursor_point(&cursor_world_pos) {
+        if let Some(cursor) = tape_cursor_point(&cursor_world_pos, &snap_result) {
             draw_tape_measurement_gizmo(&mut gizmos, start, cursor, TAPE_COLOR);
         } else {
             gizmos.sphere(
@@ -185,6 +187,7 @@ fn draw_tape_overlay(
     mut contexts: EguiContexts,
     viewport_export_state: Res<ViewportExportState>,
     cursor_world_pos: Res<CursorWorldPos>,
+    snap_result: Res<SnapResult>,
     doc_props: Res<DocumentProperties>,
     state: Option<Res<TapeToolState>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
@@ -196,7 +199,8 @@ fn draw_tape_overlay(
     let Some(state) = state else {
         return;
     };
-    let Some(measurement) = current_tape_measurement(&state, &cursor_world_pos) else {
+    let Some(measurement) = current_tape_measurement(&state, &cursor_world_pos, &snap_result)
+    else {
         return;
     };
     let Ok((camera, camera_transform)) = camera_query.single() else {
@@ -248,15 +252,20 @@ fn draw_tape_overlay(
 fn current_tape_measurement(
     state: &TapeToolState,
     cursor_world_pos: &CursorWorldPos,
+    snap_result: &SnapResult,
 ) -> Option<TapeMeasurement> {
     if let Some(start) = state.start {
-        return tape_measurement(start, tape_cursor_point(cursor_world_pos)?);
+        return tape_measurement(start, tape_cursor_point(cursor_world_pos, snap_result)?);
     }
     state.last_measurement
 }
 
-fn tape_cursor_point(cursor_world_pos: &CursorWorldPos) -> Option<Vec3> {
-    cursor_world_pos.snapped.or(cursor_world_pos.raw)
+fn tape_cursor_point(cursor_world_pos: &CursorWorldPos, snap_result: &SnapResult) -> Option<Vec3> {
+    snap_result
+        .position
+        .or(snap_result.raw_position)
+        .or(cursor_world_pos.snapped)
+        .or(cursor_world_pos.raw)
 }
 
 fn tape_measurement(start: Vec3, end: Vec3) -> Option<TapeMeasurement> {
@@ -288,5 +297,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(tape_distance_label(1.25, &doc_props), "1250mm");
+    }
+
+    #[test]
+    fn tape_cursor_prefers_authored_snap_result_over_grid_cursor() {
+        let cursor_world_pos = CursorWorldPos {
+            raw: Some(Vec3::new(0.1, 0.0, 0.1)),
+            snapped: Some(Vec3::new(0.0, 0.0, 0.0)),
+            ..Default::default()
+        };
+        let snap_result = SnapResult {
+            raw_position: cursor_world_pos.raw,
+            position: Some(Vec3::new(5.0, 2.0, 3.0)),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            tape_cursor_point(&cursor_world_pos, &snap_result),
+            Some(Vec3::new(5.0, 2.0, 3.0))
+        );
     }
 }
