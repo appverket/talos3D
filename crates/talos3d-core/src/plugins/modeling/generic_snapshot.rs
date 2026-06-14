@@ -179,6 +179,10 @@ where
         self.primitive.bounds(self.rotation.0)
     }
 
+    fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {
+        self.primitive.wireframe_segments(self.rotation.0)
+    }
+
     fn drag_handle(&self, handle_id: &str, cursor: Vec3) -> Option<BoxedEntity> {
         let new_prim = self
             .primitive

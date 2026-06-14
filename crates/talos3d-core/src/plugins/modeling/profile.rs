@@ -554,6 +554,12 @@ impl Primitive for ProfileExtrusion {
     }
 
     fn draw_wireframe(&self, gizmos: &mut Gizmos, rotation: Quat, color: Color) {
+        for (start, end) in self.wireframe_segments(rotation) {
+            gizmos.line(start, end, color);
+        }
+    }
+
+    fn wireframe_segments(&self, rotation: Quat) -> Vec<(Vec3, Vec3)> {
         let pts = self.profile.tessellate(ARC_SEGMENTS_PER_CIRCLE);
         let half_h = self.height * 0.5;
 
@@ -561,17 +567,16 @@ impl Primitive for ProfileExtrusion {
             |p: Vec2, y: f32| -> Vec3 { self.centre + rotation * Vec3::new(p.x, y, p.y) };
 
         let n = pts.len();
+        let mut segments = Vec::with_capacity(n * 3);
         for i in 0..n {
             let j = (i + 1) % n;
-            // Bottom edge
-            gizmos.line(to_world(pts[i], -half_h), to_world(pts[j], -half_h), color);
-            // Top edge
-            gizmos.line(to_world(pts[i], half_h), to_world(pts[j], half_h), color);
+            segments.push((to_world(pts[i], -half_h), to_world(pts[j], -half_h)));
+            segments.push((to_world(pts[i], half_h), to_world(pts[j], half_h)));
         }
-        // Vertical edges at profile vertices
         for p in &pts {
-            gizmos.line(to_world(*p, -half_h), to_world(*p, half_h), color);
+            segments.push((to_world(*p, -half_h), to_world(*p, half_h)));
         }
+        segments
     }
 
     fn wireframe_line_count(&self) -> usize {

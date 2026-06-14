@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::{any::Any, collections::HashSet};
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -291,6 +291,14 @@ impl AuthoredEntity for PolylineSnapshot {
         (!self.primitive.points.is_empty()).then(|| bounds_from_points(&self.primitive.points))
     }
 
+    fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {
+        self.primitive
+            .points
+            .windows(2)
+            .map(|segment| (segment[0], segment[1]))
+            .collect()
+    }
+
     fn drag_handle(&self, handle_id: &str, cursor: Vec3) -> Option<BoxedEntity> {
         let index = handle_id.strip_prefix("vertex_")?.parse::<usize>().ok()?;
         let mut snapshot = self.clone();
@@ -551,6 +559,10 @@ impl AuthoredEntity for TriangleMeshSnapshot {
 
     fn bounds(&self) -> Option<EntityBounds> {
         triangle_mesh_bounds(&self.primitive).map(|(min, max)| EntityBounds { min, max })
+    }
+
+    fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {
+        triangle_mesh_edge_segments(&self.primitive)
     }
 
     fn drag_handle(&self, handle_id: &str, cursor: Vec3) -> Option<BoxedEntity> {
@@ -1061,6 +1073,27 @@ fn triangle_mesh_outline_line_count(primitive: &TriangleMesh) -> usize {
         .unwrap_or(0)
 }
 
+fn triangle_mesh_edge_segments(primitive: &TriangleMesh) -> Vec<(Vec3, Vec3)> {
+    let mut seen = HashSet::new();
+    let mut segments = Vec::new();
+    for face in &primitive.faces {
+        for (from, to) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+            let key = if from <= to { (from, to) } else { (to, from) };
+            if !seen.insert(key) {
+                continue;
+            }
+            let (Some(start), Some(end)) = (
+                primitive.vertices.get(from as usize),
+                primitive.vertices.get(to as usize),
+            ) else {
+                continue;
+            };
+            segments.push((*start, *end));
+        }
+    }
+    segments
+}
+
 fn draw_polyline_outline(gizmos: &mut Gizmos, primitive: &Polyline, color: Color) {
     for segment in primitive.points.windows(2) {
         gizmos.line(segment[0], segment[1], color);
@@ -1386,6 +1419,10 @@ impl AuthoredEntity for EditableMeshSnapshot {
     fn bounds(&self) -> Option<EntityBounds> {
         let (min, max) = self.mesh.bounds();
         Some(EntityBounds { min, max })
+    }
+
+    fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {
+        self.mesh.edge_segments()
     }
 
     fn to_json(&self) -> Value {

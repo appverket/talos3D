@@ -166,15 +166,31 @@ impl Primitive for BoxPrimitive {
     }
 
     fn draw_wireframe(&self, gizmos: &mut Gizmos, rotation: Quat, color: Color) {
-        let corners = box_primitive_corners(self, rotation);
-        let top = &corners[4..8];
-        let bottom = &corners[0..4];
-        for index in 0..4 {
-            let next_index = (index + 1) % 4;
-            gizmos.line(bottom[index], bottom[next_index], color);
-            gizmos.line(top[index], top[next_index], color);
-            gizmos.line(bottom[index], top[index], color);
+        for (start, end) in self.wireframe_segments(rotation) {
+            gizmos.line(start, end, color);
         }
+    }
+
+    fn wireframe_segments(&self, rotation: Quat) -> Vec<(Vec3, Vec3)> {
+        let corners = box_primitive_corners(self, rotation);
+        let mut segments = Vec::with_capacity(12);
+        for (a, b) in [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ] {
+            segments.push((corners[a], corners[b]));
+        }
+        segments
     }
 
     fn wireframe_line_count(&self) -> usize {
