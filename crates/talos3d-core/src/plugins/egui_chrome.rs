@@ -177,6 +177,11 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
 ];
 
+const TOOLS_MENU_GROUPS: &[MenuSubmenuSpec] = &[MenuSubmenuSpec {
+    label: "Measure",
+    command_ids: &["tools.tape"],
+}];
+
 const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "Zoom",
@@ -251,6 +256,7 @@ pub fn all_menu_command_ids() -> Vec<&'static str> {
         FILE_MENU_GROUPS,
         EDIT_MENU_GROUPS,
         CREATE_MENU_GROUPS,
+        TOOLS_MENU_GROUPS,
         VIEW_MENU_GROUPS,
     ]
     .iter()
@@ -356,6 +362,7 @@ fn category_menu_groups(
         CommandCategory::File => FILE_MENU_GROUPS,
         CommandCategory::Edit => EDIT_MENU_GROUPS,
         CommandCategory::Create => CREATE_MENU_GROUPS,
+        CommandCategory::Tools => TOOLS_MENU_GROUPS,
         CommandCategory::View => VIEW_MENU_GROUPS,
         CommandCategory::Custom(_) => &[],
     }
@@ -373,6 +380,7 @@ fn ordered_menu_categories_for_bar(
         CommandCategory::File,
         CommandCategory::Edit,
         CommandCategory::Create,
+        CommandCategory::Tools,
         CommandCategory::View,
     ] {
         if discovered.iter().any(|category| category == &preferred) {
