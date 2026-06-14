@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    authored_entity::{BoxedEntity, EntityBounds},
     capability_registry::{CapabilityRegistry, DefaultsRegistry},
     curation::{
         MaterialSpec, MaterialSpecRegistry, Nomination, NominationQueue, SourceRegistry,
@@ -13,6 +14,7 @@ use crate::{
     plugins::{
         assembly_pattern_drafts::{AssemblyPatternDraftArtifact, AssemblyPatternDraftRegistry},
         bundled_definition_libraries::apply_bundled_definition_libraries,
+        camera::focus_orbit_camera_on_bounds,
         commands::snapshot_dependency_order,
         corpus_gap::{CorpusGap, CorpusGapQueue},
         definition_preview_scene::PreviewOnly,
@@ -722,6 +724,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         snapshot.apply_to(world);
         stamp_authored_entity_dependencies(world, snapshot);
     }
+    focus_camera_on_loaded_snapshots(world, &recognized);
 
     if !opaque.is_empty() {
         warn!(
@@ -745,6 +748,23 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         .set(ActiveTool::Select);
 
     Ok(())
+}
+
+fn focus_camera_on_loaded_snapshots(world: &mut World, snapshots: &[BoxedEntity]) {
+    let Some(bounds) = combined_snapshot_bounds(snapshots) else {
+        return;
+    };
+    let _ = focus_orbit_camera_on_bounds(world, bounds);
+}
+
+fn combined_snapshot_bounds(snapshots: &[BoxedEntity]) -> Option<EntityBounds> {
+    snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.bounds())
+        .reduce(|acc, bounds| EntityBounds {
+            min: acc.min.min(bounds.min),
+            max: acc.max.max(bounds.max),
+        })
 }
 
 fn entity_record_sort_key(record: &PersistedEntityRecord) -> (u8, u64) {
@@ -874,6 +894,7 @@ mod tests {
     use super::*;
     use crate::plugins::{
         bundled_definition_libraries::apply_bundled_definition_libraries,
+        camera::OrbitCamera,
         definition_preview_scene::PreviewOnly,
         history::{History, PendingCommandQueue},
         layers::LayerRegistry,
@@ -892,7 +913,9 @@ mod tests {
                 ParameterMetadata, ParameterRef, ParameterSchema, SlotCount, SlotLayout,
                 SlotMultiplicity, TransformBinding,
             },
+            generic_factory::PrimitiveFactory,
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
+            primitives::{BoxPrimitive, ShapeRotation},
         },
         property_edit::PropertyEditState,
         refinement::{
@@ -1488,6 +1511,73 @@ mod tests {
         assert!(
             saved.entities.contains(&unknown_record),
             "unknown future entity data must be preserved for save/load portability"
+        );
+    }
+
+    #[test]
+    fn load_project_frames_camera_to_restored_model_bounds() {
+        let mut target = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        target.insert_resource(registry);
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+        target.spawn((
+            Camera::default(),
+            Projection::Perspective(PerspectiveProjection::default()),
+            Transform::default(),
+            OrbitCamera::default(),
+        ));
+
+        let model_center = Vec3::new(20.0, 5.0, -7.0);
+        let project = ProjectFile {
+            version: PROJECT_FILE_VERSION,
+            created_by: Some(current_project_created_by()),
+            next_element_id: 43,
+            document_properties: Some(DocumentProperties::default()),
+            layers: None,
+            materials: None,
+            textures: None,
+            definitions: None,
+            definition_libraries: None,
+            named_views: None,
+            lighting: Some(SceneLightingSettings::default()),
+            sources: None,
+            nominations: None,
+            material_specs: None,
+            knowledge_recipe_drafts: None,
+            knowledge_assembly_pattern_drafts: None,
+            corpus_gaps: None,
+            entities: vec![PersistedEntityRecord {
+                type_name: "box".to_string(),
+                data: serde_json::json!({
+                    "element_id": 42,
+                    "centre": model_center,
+                    "half_extents": [10.0, 20.0, 30.0],
+                    "rotation": ShapeRotation::default(),
+                }),
+            }],
+        };
+
+        load_project(&mut target, project).expect("project should load");
+
+        let orbit = target
+            .query::<&OrbitCamera>()
+            .iter(&target)
+            .next()
+            .expect("camera should remain in the world");
+        assert!(
+            orbit.focus.distance(model_center) < 0.001,
+            "loaded file contents should be centered in the viewport"
+        );
+        assert!(
+            orbit.radius > OrbitCamera::default().radius,
+            "loaded file extents should drive the framing zoom"
         );
     }
 
