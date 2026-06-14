@@ -565,8 +565,14 @@ impl AuthoredEntity for ConformingSolidSnapshot {
 
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
         let mut snapshot = self.clone();
-        let (yaw, _, _) = rotation.to_euler(EulerRot::YXZ);
-        snapshot.solid.yaw += yaw;
+        let rotated_center = rotation * self.center();
+        snapshot.solid.position = Vec2::new(rotated_center.x, rotated_center.z);
+        if snapshot.solid.floor_datum.is_some() {
+            snapshot.solid.floor_datum = Some(rotated_center.y);
+        }
+
+        let rotated_local_x = rotation * Vec3::X;
+        snapshot.solid.yaw += rotated_local_x.z.atan2(rotated_local_x.x);
         snapshot.into()
     }
 
@@ -1173,6 +1179,48 @@ mod tests {
             ..Default::default()
         };
         assert!(build_conforming_mesh(&solid, &hf).is_none());
+    }
+
+    #[test]
+    fn rotate_by_uses_bevy_y_rotation_convention_for_footprint_yaw() {
+        let snapshot = ConformingSolidSnapshot {
+            element_id: ElementId(1),
+            solid: ConformingSolid {
+                position: Vec2::new(2.0, 0.0),
+                half_extents: Vec2::new(2.0, 1.0),
+                yaw: 0.0,
+                floor_datum: Some(3.0),
+                ..Default::default()
+            },
+            derived_top: 3.0,
+        };
+
+        let rotated = snapshot.rotate_by(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let rotated = rotated
+            .0
+            .as_any()
+            .downcast_ref::<ConformingSolidSnapshot>()
+            .expect("conforming snapshot");
+
+        assert!(
+            rotated.solid.position.x.abs() < 0.001,
+            "centre x should rotate about the origin; got {}",
+            rotated.solid.position.x
+        );
+        assert!(
+            (rotated.solid.position.y + 2.0).abs() < 0.001,
+            "Bevy +Y rotation sends +X toward -Z; got z {}",
+            rotated.solid.position.y
+        );
+        assert!(
+            (rotated.solid.yaw + std::f32::consts::FRAC_PI_2).abs() < 0.001,
+            "conforming yaw must use the same world footprint orientation as rotated box/profile members; got {} rad",
+            rotated.solid.yaw
+        );
+        assert!(
+            (rotated.solid.floor_datum.expect("floor datum") - 3.0).abs() < 0.001,
+            "floor datum should rotate with the centre without drift"
+        );
     }
 
     #[test]
