@@ -245,7 +245,10 @@ impl TerrainHeightfield {
         let fx = (x - self.origin.x) / self.cell;
         let fz = (z - self.origin.y) / self.cell;
         // Reject points outside the grid (with a small tolerance for the edge).
-        if fx < -1e-3 || fz < -1e-3 || fx > (self.nx - 1) as f32 + 1e-3 || fz > (self.nz - 1) as f32 + 1e-3
+        if fx < -1e-3
+            || fz < -1e-3
+            || fx > (self.nx - 1) as f32 + 1e-3
+            || fz > (self.nz - 1) as f32 + 1e-3
         {
             return None;
         }
@@ -317,7 +320,11 @@ impl TerrainHeightfield {
     /// the given spacing. Returns `(world_xz, height)` for sample points inside
     /// the footprint; `height` is `None` where the surface mask excludes it.
     /// Used by downstream conforming-underside construction (PP-PLANT-B).
-    pub fn sample_grid(&self, footprint_world: &[Vec2], resolution: f32) -> Vec<(Vec2, Option<f32>)> {
+    pub fn sample_grid(
+        &self,
+        footprint_world: &[Vec2],
+        resolution: f32,
+    ) -> Vec<(Vec2, Option<f32>)> {
         if footprint_world.len() < 3 {
             return Vec::new();
         }
@@ -435,7 +442,10 @@ mod tests {
         let hf = TerrainHeightfield::build(&pts, &[], 1.0, 0.0).expect("build");
         for j in 0..hf.nz {
             for i in 0..hf.nx {
-                let p = Vec2::new(hf.origin.x + i as f32 * hf.cell, hf.origin.y + j as f32 * hf.cell);
+                let p = Vec2::new(
+                    hf.origin.x + i as f32 * hf.cell,
+                    hf.origin.y + j as f32 * hf.cell,
+                );
                 let expected = interpolate_height_idw(p, &pts);
                 // Spatial-grid KNN finds the same K nearest as the linear scan;
                 // ties on this perfectly regular grid can swap a neighbour, so
@@ -456,7 +466,9 @@ mod tests {
         }
         // A node query equals the node height.
         let node = hf.node_height(4, 4).unwrap();
-        let at = hf.height_at(hf.origin.x + 4.0 * hf.cell, hf.origin.y + 4.0 * hf.cell).unwrap();
+        let at = hf
+            .height_at(hf.origin.x + 4.0 * hf.cell, hf.origin.y + 4.0 * hf.cell)
+            .unwrap();
         assert!((node - at).abs() < 1e-4);
     }
 

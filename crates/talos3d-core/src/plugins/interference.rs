@@ -206,11 +206,7 @@ impl Obb {
     fn from_box(prim: &BoxPrimitive, rotation: Quat) -> Self {
         Self {
             centre: prim.centre,
-            axes: [
-                rotation * Vec3::X,
-                rotation * Vec3::Y,
-                rotation * Vec3::Z,
-            ],
+            axes: [rotation * Vec3::X, rotation * Vec3::Y, rotation * Vec3::Z],
             half: [
                 prim.half_extents.x.abs(),
                 prim.half_extents.y.abs(),
@@ -456,10 +452,7 @@ fn run_interference(subject: Entity, world: &World) -> Vec<Finding> {
                     rule.tolerance_m * 1000.0
                 ),
                 rationale: rule.rationale.clone(),
-                backlink: rule
-                    .backlink
-                    .as_ref()
-                    .map(|b| PassageRef(b.clone())),
+                backlink: rule.backlink.as_ref().map(|b| PassageRef(b.clone())),
                 emitted_at: now,
                 role: ConstraintRole::Validation,
             });

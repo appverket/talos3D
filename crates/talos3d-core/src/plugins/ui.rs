@@ -58,6 +58,7 @@ pub struct StatusBarData {
     pub selection_summary: String,
     pub property_text: Option<String>,
     pub command_hint: Option<String>,
+    command_busy: Option<String>,
     feedback: Option<StatusFeedback>,
 }
 
@@ -69,6 +70,7 @@ impl Default for StatusBarData {
             selection_summary: String::new(),
             property_text: None,
             command_hint: None,
+            command_busy: None,
             feedback: None,
         }
     }
@@ -80,6 +82,18 @@ impl StatusBarData {
             message,
             timer: Timer::from_seconds(duration_seconds, TimerMode::Once),
         });
+    }
+
+    pub fn begin_command(&mut self, label: impl Into<String>) {
+        self.command_busy = Some(format!("{}...", label.into()));
+    }
+
+    pub fn clear_command_busy(&mut self) {
+        self.command_busy = None;
+    }
+
+    pub fn command_busy(&self) -> bool {
+        self.command_busy.is_some()
     }
 }
 
@@ -105,9 +119,14 @@ pub(crate) fn coordinate_text(
 
 pub(crate) fn hint_text(status_bar_data: &StatusBarData) -> String {
     status_bar_data
-        .feedback
-        .as_ref()
-        .map(|feedback| feedback.message.clone())
+        .command_busy
+        .clone()
+        .or_else(|| {
+            status_bar_data
+                .feedback
+                .as_ref()
+                .map(|feedback| feedback.message.clone())
+        })
         .or_else(|| status_bar_data.property_text.clone())
         .or_else(|| status_bar_data.command_hint.clone())
         .or_else(|| {

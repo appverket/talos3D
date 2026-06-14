@@ -52,6 +52,7 @@ impl Plugin for TransformPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TransformState>()
             .init_resource::<ActiveTransformPreview>()
+            .init_resource::<TransformPreviewModifiers>()
             .init_resource::<PivotPoint>()
             .configure_sets(
                 Update,
@@ -107,6 +108,19 @@ impl Plugin for TransformPlugin {
 #[derive(Resource, Default, Clone)]
 pub struct ActiveTransformPreview {
     pub snapshots: Vec<BoxedEntity>,
+}
+
+pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEntity>);
+
+#[derive(Resource, Default, Clone)]
+pub struct TransformPreviewModifiers {
+    modifiers: Vec<TransformPreviewModifier>,
+}
+
+impl TransformPreviewModifiers {
+    pub fn register(&mut self, modifier: TransformPreviewModifier) {
+        self.modifiers.push(modifier);
+    }
 }
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -846,7 +860,7 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
         .as_deref()
         .and_then(|buffer| buffer.parse::<f32>().ok());
 
-    match state.mode {
+    let mut preview = match state.mode {
         TransformMode::Moving => {
             let push_pull = world.resource::<PushPullContext>().active_face.clone();
             if let Some(pp) = &push_pull {
@@ -913,7 +927,22 @@ fn compute_preview(world: &World) -> Option<TransformPreview> {
                 display_value,
             })
         }
-        TransformMode::Idle => None,
+        TransformMode::Idle => return None,
+    }?;
+    apply_transform_preview_modifiers(world, &state, &mut preview.after);
+    Some(preview)
+}
+
+fn apply_transform_preview_modifiers(
+    world: &World,
+    state: &TransformState,
+    after: &mut Vec<BoxedEntity>,
+) {
+    let Some(modifiers) = world.get_resource::<TransformPreviewModifiers>() else {
+        return;
+    };
+    for modifier in &modifiers.modifiers {
+        modifier(world, state, after);
     }
 }
 

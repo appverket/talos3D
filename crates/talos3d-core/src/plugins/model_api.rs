@@ -1426,9 +1426,8 @@ fn handle_get_material_assignment(
     world: &World,
     element_id: u64,
 ) -> Result<EntityMaterialAssignmentInfo, String> {
-    let entity =
-        find_entity_by_element_id_readonly(world, ElementId(element_id))
-            .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
     Ok(EntityMaterialAssignmentInfo {
         element_id,
         assignment: world.entity(entity).get::<MaterialAssignment>().cloned(),
@@ -1588,9 +1587,8 @@ fn element_texture_mapping_info(
     world: &World,
     element_id: u64,
 ) -> Result<TextureMappingInfo, String> {
-    let entity =
-        find_entity_by_element_id_readonly(world, ElementId(element_id))
-            .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
     let assignment = world.entity(entity).get::<MaterialAssignment>().cloned();
     let spec_registry = world.get_resource::<crate::curation::MaterialSpecRegistry>();
     let material_id = assignment
@@ -1858,11 +1856,8 @@ fn resolve_bim_material_target(
             Ok(BimMaterialTarget::Definition(id))
         }
         (None, Some(element_id)) => {
-            let entity = find_entity_by_element_id_readonly(
-                world,
-                ElementId(element_id),
-            )
-            .ok_or_else(|| format!("Entity {element_id} not found"))?;
+            let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
+                .ok_or_else(|| format!("Entity {element_id} not found"))?;
             let identity = world
                 .entity(entity)
                 .get::<OccurrenceIdentity>()
@@ -2324,11 +2319,8 @@ pub fn handle_quantity_get(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::quantity_set::QuantitySet;
 
-    let entity = find_entity_by_element_id_readonly(
-        world,
-        ElementId(request.element_id),
-    )
-    .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
     if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
     {
         return Ok(Value::Null);
@@ -2370,11 +2362,8 @@ pub fn handle_quantity_list_provenance(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::quantity_set::QuantitySet;
 
-    let entity = find_entity_by_element_id_readonly(
-        world,
-        ElementId(request.element_id),
-    )
-    .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
     if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
     {
         return Ok(Value::Array(Vec::new()));
@@ -2431,11 +2420,8 @@ pub fn handle_quantity_check_invariants(
 ) -> Result<Value, String> {
     use crate::plugins::modeling::quantity_set::QuantitySet;
 
-    let entity = find_entity_by_element_id_readonly(
-        world,
-        ElementId(request.element_id),
-    )
-    .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
     if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(request.element_id))
     {
         return Ok(serde_json::json!({
@@ -3467,9 +3453,8 @@ fn gather_spatial_entity_plans(
     for element_id in element_ids {
         let element_id = ElementId(*element_id);
         let snapshot = capture_snapshot_by_id(world, element_id)?;
-        let entity =
-            find_entity_by_element_id_readonly(world, element_id)
-                .ok_or_else(|| format!("Entity {} not found", element_id.0))?;
+        let entity = find_entity_by_element_id_readonly(world, element_id)
+            .ok_or_else(|| format!("Entity {} not found", element_id.0))?;
         let locked = crate::plugins::layers::entity_on_locked_layer(world, entity);
         plans.push(SpatialEntityPlan {
             element_id,
@@ -9743,9 +9728,7 @@ fn ensure_user_editable_entity(
     operation: &str,
 ) -> ApiResult<()> {
     ensure_entity_exists(world, element_id)?;
-    let Some(entity) =
-        find_entity_by_element_id_readonly(world, element_id)
-    else {
+    let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
         return Err(format!("Entity not found: {}", element_id.0));
     };
     if world
@@ -10372,7 +10355,10 @@ pub fn handle_promote_refinement(
             NativeUnresolvable { fn_id: String },
         }
 
-        let artifact_lookup: Option<(Vec<crate::plugins::refinement::RefinementState>, ArtifactBody)> = {
+        let artifact_lookup: Option<(
+            Vec<crate::plugins::refinement::RefinementState>,
+            ArtifactBody,
+        )> = {
             let fid = crate::capability_registry::RecipeFamilyId(recipe_id.to_string());
             world
                 .get_resource::<crate::curation::RecipeArtifactRegistry>()
@@ -12236,6 +12222,7 @@ fn guidance_card_ids_for_discovery(element_class: Option<&str>) -> Vec<String> {
     let mut ids = vec![
         "dkg.snapshot.start".into(),
         "mcp_tool:discover_curated_paths".into(),
+        "dkg.design_resources".into(),
         "dkg.no_curated_path".into(),
         "dkg.close_gap".into(),
     ];
@@ -12564,12 +12551,66 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             summary: "Call get_capability_snapshot before authoring so current registries, gaps, and must-read cards are visible.".into(),
             referenced_tool_ids: vec!["get_capability_snapshot".into()],
             next_card_ids: vec![
+                "dkg.design_resources".into(),
                 "dkg.no_curated_path".into(),
                 "dkg.building_skeleton".into(),
                 "dkg.visual_morphology".into(),
             ],
             json_examples: vec![serde_json::json!({ "expanded": false })],
             body_markdown: None,
+        },
+        GuidanceCardInfo {
+            id: "dkg.design_resources".into(),
+            title: "Start From Design Resources".into(),
+            task_tags: vec![
+                "architecture".into(),
+                "authoring".into(),
+                "discovery".into(),
+                "morphology".into(),
+                "curation".into(),
+            ],
+            summary: "Before authoring geometry, select or acquire a typology/resource and derive positive invariants; do not brute-force arbitrary primitives and wait for validators or screenshots to reject them.".into(),
+            referenced_tool_ids: vec![
+                "get_capability_snapshot".into(),
+                "discover_curated_paths".into(),
+                "acquire_corpus_passage".into(),
+                "request_corpus_expansion".into(),
+                "save_recipe_draft".into(),
+                "save_assembly_pattern_draft".into(),
+                "definition.create".into(),
+                "run_validation_v2".into(),
+                "take_screenshot".into(),
+            ],
+            next_card_ids: vec![
+                "dkg.no_curated_path".into(),
+                "dkg.close_gap".into(),
+                "dkg.executable_asset".into(),
+            ],
+            json_examples: vec![serde_json::json!({
+                "element_class": "house",
+                "path_kind": "prior",
+                "context": {
+                    "target_state": "Conceptual",
+                    "derive_positive_invariants": true
+                }
+            })],
+            body_markdown: Some(
+                "Use MCP as a progressive-disclosure design-resource harness:\n\
+                 1. Identify the element class, intended typology/system, target refinement \
+                 state, and context.\n\
+                 2. Discover resources with recipe, parametric, definition, and prior path \
+                 kinds. Prefer executable or materializable resources when they exist.\n\
+                 3. Convert resources into positive invariants: what must be true for the \
+                 design to make sense physically, visually, and semantically.\n\
+                 4. If the resource is missing, record a CorpusGap, acquire concise evidence, \
+                 and save the knowledge as a draft recipe, assembly pattern, Definition, prior, \
+                 validator, or agent skill. The agent may add to the harness; it should not bury \
+                 reusable knowledge inside one-off primitive geometry.\n\
+                 5. Author from the resource-backed invariant checklist. Validation and \
+                 screenshots are evidence that the design was realized, not a brute-force \
+                 search strategy and not a blacklist of every absurd shape to avoid."
+                    .into(),
+            ),
         },
         GuidanceCardInfo {
             id: "dkg.building_skeleton".into(),
@@ -12598,6 +12639,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "take_screenshot".into(),
             ],
             next_card_ids: vec![
+                "dkg.design_resources".into(),
                 "dkg.no_curated_path".into(),
                 "dkg.close_gap".into(),
                 "dkg.executable_asset".into(),
@@ -12636,7 +12678,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "visual".into(),
                 "morphology".into(),
             ],
-            summary: "For house/villa/dwelling authoring, acquire visual precedent, build a morphology checklist, and reject screenshots that read as shoeboxes, chocolate boxes, stepped-strip gables, bare-framing cages, or floating-stick scenes.".into(),
+            summary: "For house/villa/dwelling authoring, use visual precedent and typology resources to build a positive morphology checklist before geometry; screenshots verify the result rather than serving as a brute-force rejection loop.".into(),
             referenced_tool_ids: vec![
                 "discover_curated_paths".into(),
                 "acquire_corpus_passage".into(),
@@ -12653,7 +12695,17 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                     "visual_morphology_required": true
                 }
             })],
-            body_markdown: None,
+            body_markdown: Some(
+                "Visual morphology is a design resource, not a blacklist. For a house, villa, \
+                 dwelling, or cottage, acquire precedent or curated priors, then extract \
+                 positive invariants: overall massing, roof/wall/foundation relationships, \
+                 opening rhythm, material/trim cues, climate response, and site relationship. \
+                 Author from that checklist before taking screenshots. If the necessary \
+                 morphology knowledge is not discoverable, acquire it and save it as a prior, \
+                 assembly pattern, recipe draft, Definition, validator, or agent skill so the \
+                 next agent can find it through MCP."
+                    .into(),
+            ),
         },
         GuidanceCardInfo {
             id: "dkg.no_curated_path".into(),
@@ -12781,26 +12833,80 @@ already contains a terrain_surface, skip this and go straight to dkg.terrain_fou
             title: "Plant A Building On Terrain With A Hugging Foundation".into(),
             task_tags: vec!["site".into(), "terrain".into(), "foundation".into()],
             summary: "To seat a building on a `terrain_surface` so it FOLLOWS the ground, do NOT use \
-a flat box slab. Author a foundation entity: create_entity {type:\"foundation\", footprint, \
-floor_datum, below_grade_margin, sample_spacing}. Its top sits flat at floor_datum (the finished \
-floor level), and its UNDERSIDE drapes to the terrain sampled under the footprint minus \
-below_grade_margin — so it hugs the slope and re-meshes automatically when the terrain changes \
-(ADR-034). The footprint is either an explicit polygon (kind:\"polyline\", vertices [[x,z],...]) or \
-the building's wall loop (kind:\"wall_loop\", the perimeter wall element ids). Requirements: a \
-terrain_surface must already exist and the footprint must lie within the terrain extent; pick \
-floor_datum near the terrain height under the building. Build the wall/roof volumes above \
-floor_datum. Verify with take_screenshot from a low angle that the foundation steps down to meet \
-the slope.".into(),
-            referenced_tool_ids: vec!["create_entity".into(), "take_screenshot".into()],
+a flat box slab or split the building into different coordinate frames. First author one \
+local-coordinate building assembly/group: wall bases, openings, roof, trim, and any temporary base \
+share one floor datum. Then either create a `conforming_solid` under that footprint or call \
+`terrain.plant_structure` on the semantic structure and terrain, or `terrain.plant_on_surface` on \
+the grouped building, so the whole assembly is raised onto the foundation top and the conforming \
+foundation belongs to the planted group/assembly. A semantic `structure` plant converts the existing \
+bottom foundation body into the terrain-conforming foundation and records the planting contract. \
+The structure is the semantic prompt/refinement target and the foundation is a semantic \
+`foundation_system`. \
+`terrain.release_planted_structure` detaches terrain-following behavior without deleting geometry; \
+`terrain.demote_conforming_foundation` freezes the foundation_system body as either a snapshot mesh \
+or a max-height box. A terrain AABB is only a flat datum plane; real height comes from `elevation_at`. \
+After planting, sample terrain at the footprint and verify every visible ground-bearing child AABB \
+is at or above the planted assembly datum / sampled grade. If walls remain at world Y=0 while \
+terrain grade is metres above Y=0, the building is buried even if a separate foundation exists.".into(),
+            referenced_tool_ids: vec![
+                "create_entity".into(),
+                "invoke_command".into(),
+                "elevation_at".into(),
+                "get_world_aabb".into(),
+                "take_screenshot".into(),
+            ],
             next_card_ids: Vec::new(),
             json_examples: vec![serde_json::json!({
-                "type": "foundation",
-                "footprint": { "kind": "polyline", "vertices": [[-6.0, -5.0], [6.0, -5.0], [6.0, 5.0], [-6.0, 5.0]] },
-                "floor_datum": 9.0,
-                "below_grade_margin": 0.4,
-                "sample_spacing": 0.8
+                "type": "conforming_solid",
+                "surface_id": "<terrain_surface_id>",
+                "position": [3.4, -7.25],
+                "half_extents": [3.35, 3.75],
+                "min_thickness": 0.5,
+                "max_depth": 3.0
+            }), serde_json::json!({
+                "command_id": "terrain.plant_structure",
+                "parameters": {
+                    "structure_id": "<semantic_structure_id>",
+                    "surface_id": "<terrain_surface_id>",
+                    "min_thickness": 0.5
+                }
+            }), serde_json::json!({
+                "command_id": "terrain.plant_on_surface",
+                "parameters": {
+                    "target_id": "<grouped_building_id>",
+                    "surface_id": "<terrain_surface_id>",
+                    "min_thickness": 0.5,
+                    "hide_element_id": "<temporary_flat_base_id_if_any>"
+                }
+            }), serde_json::json!({
+                "command_id": "terrain.demote_conforming_foundation",
+                "parameters": {
+                    "target_id": "<foundation_structure_id>",
+                    "mode": "snapshot"
+                }
+            }), serde_json::json!({
+                "command_id": "terrain.release_planted_structure",
+                "parameters": {
+                    "target_id": "<planted_group_id>"
+                }
             })],
-            body_markdown: None,
+            body_markdown: Some(
+                "The terrain placement contract is assembly-wide: a foundation at terrain \
+height does not fix walls or roofs authored later at world Y=0. Author the cottage in one \
+local frame, group it, make it a semantic `structure` with a bottom foundation body, then use \
+`terrain.plant_structure` with the structure and terrain ids; from the UI, select the visible \
+structure/group and terrain surface, then run Plant Structure. Verify child AABBs against sampled \
+terrain elevations and the planted foundation top. The resulting semantic `structure` is the prompt \
+target for refinement; its nested semantic `foundation_system` is the foundation target. The \
+selected/movable planted group is the behavior target for movement; it must include both the \
+conforming foundation body and the superstructure, so later moves re-seat the house instead of \
+stranding the foundation behind. Use `terrain.demote_conforming_foundation` when the adaptive \
+foundation should become fixed geometry: `snapshot` preserves the current conforming underside, \
+while `max_height_box` uses one rectangular body whose height equals the current maximum thickness. \
+`check_floating` may use a y=0 fallback, so it is \
+not sufficient for terrain-seated buildings unless paired with `elevation_at` samples."
+                    .into(),
+            ),
         },
     ]
 }
@@ -13733,10 +13839,7 @@ pub fn handle_save_recipe_draft(
         saved.meta = recipe_draft_meta_for(&saved, scope);
         let saved = world.resource_mut::<RecipeDraftRegistry>().save(saved);
         let instance_id = world_instance_id(world);
-        crate::plugins::knowledge_persistence::persist_session_recipe_draft(
-            &instance_id,
-            &saved,
-        );
+        crate::plugins::knowledge_persistence::persist_session_recipe_draft(&instance_id, &saved);
         return Ok(recipe_draft_to_info(&saved));
     }
 
@@ -14312,8 +14415,16 @@ fn element_world_aabb(world: &World, element_id: u64) -> Option<ElementAabb> {
     let bounds = snapshot.bounds()?;
     Some(ElementAabb {
         element_id,
-        min: [bounds.min.x as f64, bounds.min.y as f64, bounds.min.z as f64],
-        max: [bounds.max.x as f64, bounds.max.y as f64, bounds.max.z as f64],
+        min: [
+            bounds.min.x as f64,
+            bounds.min.y as f64,
+            bounds.min.z as f64,
+        ],
+        max: [
+            bounds.max.x as f64,
+            bounds.max.y as f64,
+            bounds.max.z as f64,
+        ],
     })
 }
 
@@ -14364,8 +14475,16 @@ fn all_entity_aabbs(world: &World) -> Vec<ElementAabb> {
             let bounds = snapshot.bounds()?;
             Some(ElementAabb {
                 element_id: eid,
-                min: [bounds.min.x as f64, bounds.min.y as f64, bounds.min.z as f64],
-                max: [bounds.max.x as f64, bounds.max.y as f64, bounds.max.z as f64],
+                min: [
+                    bounds.min.x as f64,
+                    bounds.min.y as f64,
+                    bounds.min.z as f64,
+                ],
+                max: [
+                    bounds.max.x as f64,
+                    bounds.max.y as f64,
+                    bounds.max.z as f64,
+                ],
             })
         })
         .collect()
@@ -14462,7 +14581,7 @@ pub fn handle_check_overlaps(
                     overlaps: Vec::new(),
                     truncated: false,
                     pairs_checked: 0,
-                })
+                });
             }
         };
         for entity_ref in q.iter(world) {
@@ -14553,7 +14672,11 @@ pub fn handle_check_floating(
                     && other.min[2] < candidate.max[2]
                     && other.max[1] <= bottom
             })
-            .max_by(|a, b| a.max[1].partial_cmp(&b.max[1]).unwrap_or(std::cmp::Ordering::Equal));
+            .max_by(|a, b| {
+                a.max[1]
+                    .partial_cmp(&b.max[1])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
         let support_top = nearest_support.map(|s| s.max[1]).unwrap_or(0.0);
         let gap = bottom - support_top;

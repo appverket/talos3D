@@ -26,7 +26,10 @@ impl Plugin for LayerPlugin {
             // Default fallback runs in Update, strictly after domain plugins
             // (e.g. terrain) have claimed their entities in PreUpdate. Then
             // visibility is applied.
-            .add_systems(Update, (assign_default_layer, apply_layer_visibility).chain());
+            .add_systems(
+                Update,
+                (assign_default_layer, apply_layer_visibility).chain(),
+            );
     }
 }
 
@@ -268,7 +271,10 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<LayerRegistry>()
             .init_resource::<LayerState>()
-            .add_systems(Update, (assign_default_layer, apply_layer_visibility).chain());
+            .add_systems(
+                Update,
+                (assign_default_layer, apply_layer_visibility).chain(),
+            );
 
         let light = app
             .world_mut()

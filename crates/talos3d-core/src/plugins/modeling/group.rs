@@ -465,9 +465,7 @@ impl GroupEditContext {
     pub fn active_frame(&self, world: &World) -> GroupFrame {
         let mut frame = GroupFrame::identity();
         for id in &self.stack {
-            if let Some(entity) =
-                find_entity_by_element_id_readonly(world, *id)
-            {
+            if let Some(entity) = find_entity_by_element_id_readonly(world, *id) {
                 if let Some(members) = world.get::<GroupMembers>(entity) {
                     frame = frame.then(&members.frame);
                 }
@@ -522,9 +520,7 @@ pub fn collect_group_members_recursive(world: &World, group_id: ElementId) -> Ve
     let mut result = Vec::new();
     let mut stack = vec![group_id];
     while let Some(id) = stack.pop() {
-        if let Some(entity) =
-            find_entity_by_element_id_readonly(world, id)
-        {
+        if let Some(entity) = find_entity_by_element_id_readonly(world, id) {
             if let Some(members) = world.get::<GroupMembers>(entity) {
                 for member_id in &members.member_ids {
                     result.push(*member_id);

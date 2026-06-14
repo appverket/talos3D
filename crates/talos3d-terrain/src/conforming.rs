@@ -34,6 +34,7 @@ use talos3d_core::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
         definition_preview_scene::PreviewOnly,
         identity::{ElementId, ElementIdAllocator},
+        modeling::primitives::TriangleMesh,
     },
 };
 
@@ -115,7 +116,7 @@ pub struct ConformingMetrics {
 
 impl ConformingSolid {
     /// The four footprint corners in world XZ, in CCW order.
-    fn world_corners(&self) -> [Vec2; 4] {
+    pub(crate) fn world_corners(&self) -> [Vec2; 4] {
         let (s, c) = self.yaw.sin_cos();
         let to_world = |lx: f32, lz: f32| {
             Vec2::new(
@@ -155,7 +156,10 @@ struct ConformingSamples {
     metrics: ConformingMetrics,
 }
 
-fn sample_conforming(solid: &ConformingSolid, hf: &TerrainHeightfield) -> Option<ConformingSamples> {
+fn sample_conforming(
+    solid: &ConformingSolid,
+    hf: &TerrainHeightfield,
+) -> Option<ConformingSamples> {
     let (nx, nz) = solid.grid_dims();
     let (s, c) = solid.yaw.sin_cos();
     let hx = solid.half_extents.x.max(0.01);
@@ -236,6 +240,130 @@ pub fn conforming_metrics(
     sample_conforming(solid, hf).map(|s| s.metrics)
 }
 
+fn push_mesh_tri(
+    vertices: &mut Vec<Vec3>,
+    faces: &mut Vec<[u32; 3]>,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+    outward: Vec3,
+) {
+    let mut n = (b - a).cross(c - a);
+    if n.length_squared() < 1e-12 {
+        return;
+    }
+    n = n.normalize();
+    let (a, b, c) = if n.dot(outward) < 0.0 {
+        (a, c, b)
+    } else {
+        (a, b, c)
+    };
+    let base = vertices.len() as u32;
+    vertices.extend([a, b, c]);
+    faces.push([base, base + 1, base + 2]);
+}
+
+/// Build a static authored triangle mesh representing the conforming solid's
+/// current derived shape. This freezes the surface-derived underside at the
+/// current footprint and is used when demoting an adaptive foundation body.
+pub fn build_conforming_triangle_mesh(
+    solid: &ConformingSolid,
+    hf: &TerrainHeightfield,
+    name: Option<String>,
+) -> Option<(TriangleMesh, ConformingMetrics)> {
+    let s = sample_conforming(solid, hf)?;
+    let nx = s.nx;
+    let nz = s.nz;
+    let y_top = s.y_top;
+    let center = solid.position;
+
+    let under = |i: usize, j: usize| {
+        Vec3::new(
+            s.world[j * nx + i].x,
+            s.under_y[j * nx + i],
+            s.world[j * nx + i].y,
+        )
+    };
+    let top = |i: usize, j: usize| Vec3::new(s.world[j * nx + i].x, y_top, s.world[j * nx + i].y);
+
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+
+    for j in 0..nz - 1 {
+        for i in 0..nx - 1 {
+            push_mesh_tri(
+                &mut vertices,
+                &mut faces,
+                under(i, j),
+                under(i + 1, j),
+                under(i + 1, j + 1),
+                Vec3::NEG_Y,
+            );
+            push_mesh_tri(
+                &mut vertices,
+                &mut faces,
+                under(i, j),
+                under(i + 1, j + 1),
+                under(i, j + 1),
+                Vec3::NEG_Y,
+            );
+            push_mesh_tri(
+                &mut vertices,
+                &mut faces,
+                top(i, j),
+                top(i + 1, j),
+                top(i + 1, j + 1),
+                Vec3::Y,
+            );
+            push_mesh_tri(
+                &mut vertices,
+                &mut faces,
+                top(i, j),
+                top(i + 1, j + 1),
+                top(i, j + 1),
+                Vec3::Y,
+            );
+        }
+    }
+
+    let mut ring: Vec<(usize, usize)> = Vec::new();
+    for i in 0..nx {
+        ring.push((i, 0));
+    }
+    for j in 1..nz {
+        ring.push((nx - 1, j));
+    }
+    for i in (0..nx - 1).rev() {
+        ring.push((i, nz - 1));
+    }
+    for j in (1..nz - 1).rev() {
+        ring.push((0, j));
+    }
+    for k in 0..ring.len() {
+        let (i0, j0) = ring[k];
+        let (i1, j1) = ring[(k + 1) % ring.len()];
+        let u0 = under(i0, j0);
+        let u1 = under(i1, j1);
+        let t0 = top(i0, j0);
+        let t1 = top(i1, j1);
+        let mid = (u0 + u1) * 0.5;
+        let outward =
+            (Vec3::new(mid.x, 0.0, mid.z) - Vec3::new(center.x, 0.0, center.y)).normalize_or_zero();
+        push_mesh_tri(&mut vertices, &mut faces, u0, u1, t1, outward);
+        push_mesh_tri(&mut vertices, &mut faces, u0, t1, t0, outward);
+    }
+
+    (!vertices.is_empty()).then_some((
+        TriangleMesh {
+            vertices,
+            faces,
+            normals: None,
+            name,
+        },
+        s.metrics,
+    ))
+}
+
 fn push_tri(
     pos: &mut Vec<[f32; 3]>,
     nor: &mut Vec<[f32; 3]>,
@@ -275,7 +403,13 @@ pub fn build_conforming_mesh(
     let y_top = s.y_top;
     let center = solid.position;
 
-    let under = |i: usize, j: usize| Vec3::new(s.world[j * nx + i].x, s.under_y[j * nx + i], s.world[j * nx + i].y);
+    let under = |i: usize, j: usize| {
+        Vec3::new(
+            s.world[j * nx + i].x,
+            s.under_y[j * nx + i],
+            s.world[j * nx + i].y,
+        )
+    };
     let top = |i: usize, j: usize| Vec3::new(s.world[j * nx + i].x, y_top, s.world[j * nx + i].y);
 
     let mut pos: Vec<[f32; 3]> = Vec::new();
@@ -284,11 +418,39 @@ pub fn build_conforming_mesh(
     for j in 0..nz - 1 {
         for i in 0..nx - 1 {
             // Underside (outward = down).
-            push_tri(&mut pos, &mut nor, under(i, j), under(i + 1, j), under(i + 1, j + 1), Vec3::NEG_Y);
-            push_tri(&mut pos, &mut nor, under(i, j), under(i + 1, j + 1), under(i, j + 1), Vec3::NEG_Y);
+            push_tri(
+                &mut pos,
+                &mut nor,
+                under(i, j),
+                under(i + 1, j),
+                under(i + 1, j + 1),
+                Vec3::NEG_Y,
+            );
+            push_tri(
+                &mut pos,
+                &mut nor,
+                under(i, j),
+                under(i + 1, j + 1),
+                under(i, j + 1),
+                Vec3::NEG_Y,
+            );
             // Top (outward = up).
-            push_tri(&mut pos, &mut nor, top(i, j), top(i + 1, j), top(i + 1, j + 1), Vec3::Y);
-            push_tri(&mut pos, &mut nor, top(i, j), top(i + 1, j + 1), top(i, j + 1), Vec3::Y);
+            push_tri(
+                &mut pos,
+                &mut nor,
+                top(i, j),
+                top(i + 1, j),
+                top(i + 1, j + 1),
+                Vec3::Y,
+            );
+            push_tri(
+                &mut pos,
+                &mut nor,
+                top(i, j),
+                top(i + 1, j + 1),
+                top(i, j + 1),
+                Vec3::Y,
+            );
         }
     }
 
@@ -315,8 +477,8 @@ pub fn build_conforming_mesh(
         let t0 = top(i0, j0);
         let t1 = top(i1, j1);
         let mid = (u0 + u1) * 0.5;
-        let outward = (Vec3::new(mid.x, 0.0, mid.z) - Vec3::new(center.x, 0.0, center.y))
-            .normalize_or_zero();
+        let outward =
+            (Vec3::new(mid.x, 0.0, mid.z) - Vec3::new(center.x, 0.0, center.y)).normalize_or_zero();
         push_tri(&mut pos, &mut nor, u0, u1, t1, outward);
         push_tri(&mut pos, &mut nor, u0, t1, t0, outward);
     }
@@ -326,7 +488,10 @@ pub fn build_conforming_mesh(
     }
     let uvs: Vec<[f32; 2]> = pos.iter().map(|p| [p[0] * 0.1, p[2] * 0.1]).collect();
     let indices: Vec<u32> = (0..pos.len() as u32).collect();
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, nor);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
@@ -530,7 +695,7 @@ impl AuthoredEntity for ConformingSolidSnapshot {
                         "resolution",
                         "floor_datum",
                     ],
-                ))
+                ));
             }
         }
         Ok(snapshot.into())
@@ -766,8 +931,10 @@ impl AuthoredEntityFactory for ConformingSolidFactory {
         let mut solid = ConformingSolid::default();
         if let Some(p) = object.get("position").and_then(Value::as_array) {
             if p.len() == 2 {
-                solid.position =
-                    Vec2::new(p[0].as_f64().unwrap_or(0.0) as f32, p[1].as_f64().unwrap_or(0.0) as f32);
+                solid.position = Vec2::new(
+                    p[0].as_f64().unwrap_or(0.0) as f32,
+                    p[1].as_f64().unwrap_or(0.0) as f32,
+                );
             }
         }
         if let Some(h) = object.get("half_extents").and_then(Value::as_array) {
@@ -820,10 +987,11 @@ pub struct ConformingSolidPlugin;
 
 impl Plugin for ConformingSolidPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_conforming_material).add_systems(
-            Update,
-            (mark_conforming_dirty, regenerate_conforming_meshes).chain(),
-        );
+        app.add_systems(Startup, setup_conforming_material)
+            .add_systems(
+                Update,
+                (mark_conforming_dirty, regenerate_conforming_meshes).chain(),
+            );
     }
 }
 
@@ -900,7 +1068,9 @@ fn regenerate_conforming_meshes(
         };
         // Cache the derived top so the snapshot's handles/preview sit on the solid
         // (separate component → does not retrigger Changed<ConformingSolid>).
-        commands.entity(entity).try_insert(ConformingDerived { y_top });
+        commands
+            .entity(entity)
+            .try_insert(ConformingDerived { y_top });
         match mesh_handle {
             Some(handle) if meshes.get(handle.id()).is_some() => {
                 if let Some(existing) = meshes.get_mut(handle.id()) {
@@ -956,7 +1126,11 @@ mod tests {
         assert!((m.y_top - 13.5).abs() < 0.3, "y_top={}", m.y_top);
         // Thinnest slab == min_thickness; never thicker than max_depth.
         assert!((m.min_thickness - 0.5).abs() < 1e-4);
-        assert!(m.max_thickness <= 3.0 + 1e-3, "max_thickness={}", m.max_thickness);
+        assert!(
+            m.max_thickness <= 3.0 + 1e-3,
+            "max_thickness={}",
+            m.max_thickness
+        );
     }
 
     #[test]
@@ -982,7 +1156,11 @@ mod tests {
         };
         let m = conforming_metrics(&solid, &hf).expect("over surface");
         // Top ~10.5; cliff bottom would be ~10.5 below → benched at max_depth.
-        assert!((m.max_thickness - 3.0).abs() < 0.2, "max_thickness={}", m.max_thickness);
+        assert!(
+            (m.max_thickness - 3.0).abs() < 0.2,
+            "max_thickness={}",
+            m.max_thickness
+        );
     }
 
     #[test]
@@ -1026,7 +1204,10 @@ mod tests {
             "conforming rebuild: {frames} frames in {:.1} ms = {:.3} ms/frame (~{tris} tris)",
             ms, per_frame
         );
-        assert!(per_frame < 8.0, "rebuild too slow for live drag: {per_frame} ms/frame");
+        assert!(
+            per_frame < 8.0,
+            "rebuild too slow for live drag: {per_frame} ms/frame"
+        );
     }
 
     #[test]
@@ -1041,6 +1222,9 @@ mod tests {
         };
         let (mesh, _) = build_conforming_mesh(&solid, &hf).expect("mesh");
         let count = mesh.count_vertices();
-        assert!(count > 0 && count % 3 == 0, "non-indexed triangles, got {count}");
+        assert!(
+            count > 0 && count % 3 == 0,
+            "non-indexed triangles, got {count}"
+        );
     }
 }

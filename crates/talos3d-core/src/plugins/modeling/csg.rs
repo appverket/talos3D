@@ -603,10 +603,8 @@ pub fn csg_face_hit_test(
     let csg_node = world.get::<CsgNode>(csg_entity)?.clone();
 
     // Resolve operand entities
-    let operand_a_entity =
-        find_entity_by_element_id_readonly(world, csg_node.operand_a)?;
-    let operand_b_entity =
-        find_entity_by_element_id_readonly(world, csg_node.operand_b)?;
+    let operand_a_entity = find_entity_by_element_id_readonly(world, csg_node.operand_a)?;
+    let operand_b_entity = find_entity_by_element_id_readonly(world, csg_node.operand_b)?;
 
     // Hit test each operand — if the operand is itself a CsgNode, recurse.
     let hit_a = face_hit_test_entity(world, operand_a_entity, ray);
