@@ -381,11 +381,17 @@ pub fn persist_session_recipe_draft(
     match serde_json::to_vec_pretty(draft) {
         Ok(bytes) => {
             if let Err(err) = atomic_write(&path, &bytes) {
-                warn!("knowledge_persistence: failed to write session recipe draft {:?}: {err}", path);
+                warn!(
+                    "knowledge_persistence: failed to write session recipe draft {:?}: {err}",
+                    path
+                );
             }
         }
         Err(err) => {
-            warn!("knowledge_persistence: failed to serialize session recipe draft '{}': {err}", draft.id);
+            warn!(
+                "knowledge_persistence: failed to serialize session recipe draft '{}': {err}",
+                draft.id
+            );
         }
     }
 }
@@ -425,7 +431,10 @@ pub fn persist_session_corpus_gaps(
     match serde_json::to_vec_pretty(gaps) {
         Ok(bytes) => {
             if let Err(err) = atomic_write(&path, &bytes) {
-                warn!("knowledge_persistence: failed to write corpus gap queue {:?}: {err}", path);
+                warn!(
+                    "knowledge_persistence: failed to write corpus gap queue {:?}: {err}",
+                    path
+                );
             }
         }
         Err(err) => {
@@ -537,12 +546,14 @@ pub fn load_session_corpus_gaps(
 /// after the base `load_knowledge_on_startup` system has run.
 pub fn load_session_recovery_on_startup(world: &mut bevy::prelude::World, instance_id: &str) {
     {
-        let mut registry = world.resource_mut::<crate::plugins::recipe_drafts::RecipeDraftRegistry>();
+        let mut registry =
+            world.resource_mut::<crate::plugins::recipe_drafts::RecipeDraftRegistry>();
         load_session_recipe_drafts(instance_id, &mut registry);
     }
     {
         let mut registry = world
-            .resource_mut::<crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry>();
+            .resource_mut::<crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry>(
+        );
         load_session_assembly_pattern_drafts(instance_id, &mut registry);
     }
     {
@@ -597,8 +608,7 @@ mod diag_tests {
     #[test]
     fn real_installed_rules_parse() {
         let home = std::env::var("HOME").unwrap_or_default();
-        let dir = std::path::PathBuf::from(&home)
-            .join(".talos3d/knowledge/interference_rules");
+        let dir = std::path::PathBuf::from(&home).join(".talos3d/knowledge/interference_rules");
         if !dir.exists() {
             eprintln!("no installed interference_rules dir; skipping");
             return;

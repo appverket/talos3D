@@ -669,8 +669,7 @@ mod inner {
         if let Some(id) = config.account_id {
             return Some(id);
         }
-        read_meta_content("talos3d-catalog-account")
-            .and_then(|s| Uuid::parse_str(&s).ok())
+        read_meta_content("talos3d-catalog-account").and_then(|s| Uuid::parse_str(&s).ok())
     }
 
     /// Reads `content` attribute of `<meta name="{name}">` from the document.
@@ -682,12 +681,13 @@ mod inner {
         let document = window.document()?;
         let selector = format!("meta[name=\"{name}\"]");
         // query_selector returns Result<Option<Element>, JsValue>.
-        let element = document
-            .query_selector(&selector)
-            .ok()
-            .flatten()?;
+        let element = document.query_selector(&selector).ok().flatten()?;
         let content = element.get_attribute("content")?;
-        if content.is_empty() { None } else { Some(content) }
+        if content.is_empty() {
+            None
+        } else {
+            Some(content)
+        }
     }
 
     /// wasm32 Update system: ticks the poll timer and, when it fires and no
@@ -739,9 +739,14 @@ mod inner {
         let auto_fetch_kinds = poll_state.auto_fetch_kinds.clone();
 
         spawn_local(async move {
-            let result =
-                wasm_fetch_poll(&base_url, account_id, &cursor_cell, &change_tx, &auto_fetch_kinds)
-                    .await;
+            let result = wasm_fetch_poll(
+                &base_url,
+                account_id,
+                &cursor_cell,
+                &change_tx,
+                &auto_fetch_kinds,
+            )
+            .await;
             if let Err(err) = result {
                 bevy::log::warn!(
                     "remote_catalog (wasm): poll error: {}; will retry next tick",
@@ -779,9 +784,7 @@ mod inner {
             .collect::<Vec<_>>()
             .join(",");
 
-        let mut url = format!(
-            "{base_url}/v1/changes?since={cursor}&kinds={kinds_param}&limit=200"
-        );
+        let mut url = format!("{base_url}/v1/changes?since={cursor}&kinds={kinds_param}&limit=200");
         if let Some(acct) = account_id {
             url.push_str(&format!("&account={acct}"));
         }
@@ -811,18 +814,16 @@ mod inner {
             let body: Option<Value> = if auto_fetch_kinds.contains(&kind) {
                 let blob_url = format!("{base_url}/v1/blobs/{content_hash}");
                 match Request::get(&blob_url).send().await {
-                    Ok(resp) if resp.ok() => {
-                        match resp.json::<Value>().await {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                bevy::log::warn!(
-                                    "remote_catalog (wasm): blob JSON parse failed \
+                    Ok(resp) if resp.ok() => match resp.json::<Value>().await {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            bevy::log::warn!(
+                                "remote_catalog (wasm): blob JSON parse failed \
                                      for hash={content_hash}: {e}"
-                                );
-                                None
-                            }
+                            );
+                            None
                         }
-                    }
+                    },
                     Ok(resp) => {
                         bevy::log::warn!(
                             "remote_catalog (wasm): blob GET status {} \
@@ -1748,7 +1749,10 @@ mod inner {
                 panic!("fetcher must NOT be called for non-auto-fetch kind");
             });
 
-            assert!(msg.body.is_none(), "body must be None for non-auto-fetch kind");
+            assert!(
+                msg.body.is_none(),
+                "body must be None for non-auto-fetch kind"
+            );
             assert_eq!(msg.event.kind, "recipe.v1");
         }
 
@@ -1801,9 +1805,7 @@ mod inner {
                 "DefinitionRegistryReloaded must fire exactly once"
             );
             assert_eq!(
-                app.world()
-                    .resource::<Messages<ArtifactApplied>>()
-                    .len(),
+                app.world().resource::<Messages<ArtifactApplied>>().len(),
                 1,
                 "ArtifactApplied must fire exactly once"
             );

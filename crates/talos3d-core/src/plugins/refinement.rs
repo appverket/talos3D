@@ -1718,9 +1718,7 @@ impl AuthoredEntity for ObligationSetSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
-        let Some(entity) =
-            find_entity_by_element_id_readonly(world, self.element_id)
-        else {
+        let Some(entity) = find_entity_by_element_id_readonly(world, self.element_id) else {
             return;
         };
         if let Ok(entries) = serde_json::from_value::<Vec<Obligation>>(self.entries_json.clone()) {
@@ -1912,9 +1910,7 @@ fn tag_refinement_relation_pair(
     };
 
     for relation_id in [fwd_id, inv_id] {
-        if let Some(entity) =
-            find_entity_by_element_id_readonly(world, relation_id)
-        {
+        if let Some(entity) = find_entity_by_element_id_readonly(world, relation_id) {
             world.entity_mut(entity).insert(branch.clone());
         }
     }
@@ -2182,9 +2178,7 @@ pub fn discard_refinement_branch(
 
     let discarded: Vec<u64> = ids_to_despawn.iter().copied().collect();
     for id in &discarded {
-        if let Some(entity) =
-            find_entity_by_element_id_readonly(world, ElementId(*id))
-        {
+        if let Some(entity) = find_entity_by_element_id_readonly(world, ElementId(*id)) {
             let _ = world.despawn(entity);
         }
     }
@@ -2221,9 +2215,7 @@ fn set_refinement_subtree_visibility(
         if !visited.insert(eid.0) {
             continue;
         }
-        if let Some(entity) =
-            find_entity_by_element_id_readonly(world, eid)
-        {
+        if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
             world.entity_mut(entity).insert(visibility);
         }
         for child in query_all_refined_into(world, eid) {
@@ -2663,9 +2655,7 @@ mod tests {
             vec![ElementId(2)]
         );
         assert!(is_parked_refinement_entity(&world, ElementId(2)));
-        let child_entity =
-            find_entity_by_element_id_readonly(&world, ElementId(2))
-                .unwrap();
+        let child_entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
         assert_eq!(
             world.get::<Visibility>(child_entity).copied(),
             Some(Visibility::Hidden)
@@ -2715,9 +2705,7 @@ mod tests {
         assert_eq!(query_refined_into(&world, ElementId(1)), vec![ElementId(2)]);
         assert!(query_parked_refined_into(&world, ElementId(1)).is_empty());
         assert!(!is_parked_refinement_entity(&world, ElementId(2)));
-        let child_entity =
-            find_entity_by_element_id_readonly(&world, ElementId(2))
-                .unwrap();
+        let child_entity = find_entity_by_element_id_readonly(&world, ElementId(2)).unwrap();
         assert_eq!(
             world.get::<Visibility>(child_entity).copied(),
             Some(Visibility::Visible)
@@ -2766,18 +2754,9 @@ mod tests {
 
         assert!(discarded.contains(&2));
         assert!(discarded.contains(&3));
-        assert!(
-            find_entity_by_element_id_readonly(&world, ElementId(1))
-                .is_some()
-        );
-        assert!(
-            find_entity_by_element_id_readonly(&world, ElementId(2))
-                .is_none()
-        );
-        assert!(
-            find_entity_by_element_id_readonly(&world, ElementId(3))
-                .is_none()
-        );
+        assert!(find_entity_by_element_id_readonly(&world, ElementId(1)).is_some());
+        assert!(find_entity_by_element_id_readonly(&world, ElementId(2)).is_none());
+        assert!(find_entity_by_element_id_readonly(&world, ElementId(3)).is_none());
         assert!(query_refined_into(&world, ElementId(1)).is_empty());
         assert!(query_parked_refined_into(&world, ElementId(1)).is_empty());
     }

@@ -1575,7 +1575,10 @@ mod tests {
 
         assert_eq!(requests.len(), 4);
         assert_eq!(requests[0]["type"], "polyline");
-        assert_eq!(requests[0]["points"][0], serde_json::json!([-1.0, 3.0, 2.0]));
+        assert_eq!(
+            requests[0]["points"][0],
+            serde_json::json!([-1.0, 3.0, 2.0])
+        );
         assert_eq!(requests[3]["type"], "triangle_mesh");
         assert_eq!(
             requests[3]["faces"],
@@ -1640,7 +1643,10 @@ mod tests {
         let requests = parse_dxf_requests(&drawing).expect("polyline should import");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["type"], "polyline");
-        assert_eq!(requests[0]["points"][1], serde_json::json!([-2.0, 1.0, 0.0]));
+        assert_eq!(
+            requests[0]["points"][1],
+            serde_json::json!([-2.0, 1.0, 0.0])
+        );
     }
 
     #[test]
@@ -1790,8 +1796,14 @@ mod tests {
 
         let requests = parse_dxf_requests(&drawing).expect("model space entities should import");
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["points"][0], serde_json::json!([-1.0, 0.0, 0.0]));
-        assert_eq!(requests[0]["points"][1], serde_json::json!([-2.0, 0.0, 0.0]));
+        assert_eq!(
+            requests[0]["points"][0],
+            serde_json::json!([-1.0, 0.0, 0.0])
+        );
+        assert_eq!(
+            requests[0]["points"][1],
+            serde_json::json!([-2.0, 0.0, 0.0])
+        );
     }
 
     #[test]
@@ -1868,8 +1880,14 @@ mod tests {
 
         let requests = parse_cad_document_requests(&document).expect("native document should map");
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["points"][0], serde_json::json!([-1.0, 3.0, 2.0]));
-        assert_eq!(requests[0]["points"][1], serde_json::json!([-4.0, 6.0, 5.0]));
+        assert_eq!(
+            requests[0]["points"][0],
+            serde_json::json!([-1.0, 3.0, 2.0])
+        );
+        assert_eq!(
+            requests[0]["points"][1],
+            serde_json::json!([-4.0, 6.0, 5.0])
+        );
         assert_eq!(requests[0]["layer"], "LAYER_A");
         assert_eq!(
             requests[1]["elevation_metadata"]["elevation"],

@@ -1,10 +1,10 @@
-use crate::plugins::commands::find_entity_by_element_id_readonly;
 use super::*;
 use crate::capability_registry::CapabilityRegistry;
 #[cfg(feature = "model-api")]
 use crate::importers::obj::ObjImporter;
 #[cfg(feature = "model-api")]
 use crate::plugins::command_registry::{execute_command, CommandRegistry};
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::snapshots::TriangleMeshFactory;
 #[cfg(feature = "model-api")]
@@ -4667,6 +4667,23 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .contains(&"dkg.no_curated_path".to_string()));
     assert!(discovery
         .guidance_card_ids
+        .contains(&"dkg.design_resources".to_string()));
+    let design_card = handle_get_guidance_card(&world, "dkg.design_resources".into())
+        .expect("design resources card should fetch");
+    assert!(design_card.summary.contains("derive positive invariants"));
+    assert!(design_card
+        .summary
+        .contains("do not brute-force arbitrary primitives"));
+    let design_body = design_card
+        .body_markdown
+        .as_deref()
+        .expect("design resources card should carry the progressive-disclosure loop");
+    assert!(design_body.contains("progressive-disclosure design-resource harness"));
+    assert!(design_body.contains("positive invariants"));
+    assert!(design_body.contains("The agent may add to the harness"));
+    assert!(design_body.contains("not a brute-force"));
+    assert!(discovery
+        .guidance_card_ids
         .contains(&"dkg.building_skeleton".to_string()));
     let skeleton_card = handle_get_guidance_card(&world, "dkg.building_skeleton".into())
         .expect("card should fetch");
@@ -4677,16 +4694,67 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(skeleton_card
         .referenced_tool_ids
         .contains(&"acquire_corpus_passage".to_string()));
-    assert!(handle_list_guidance_cards(&world, Some("house".into()))
+    let visual_card = handle_list_guidance_cards(&world, Some("house".into()))
         .iter()
-        .any(|card| {
-            card.id == "dkg.visual_morphology"
-                && card.title.contains("Houses")
-                && card.summary.contains("shoeboxes")
-                && card
-                    .referenced_tool_ids
-                    .contains(&"take_screenshot".to_string())
-        }));
+        .find(|card| card.id == "dkg.visual_morphology")
+        .cloned()
+        .expect("visual morphology card should list for house tasks");
+    assert!(visual_card.title.contains("Houses"));
+    assert!(visual_card
+        .summary
+        .contains("positive morphology checklist"));
+    assert!(visual_card
+        .referenced_tool_ids
+        .contains(&"take_screenshot".to_string()));
+    let visual_body = visual_card
+        .body_markdown
+        .as_deref()
+        .expect("visual morphology card should include resource-oriented body");
+    assert!(visual_body.contains("not a blacklist"));
+    assert!(visual_body.contains("positive invariants"));
+    assert!(visual_body.contains("save it as a prior"));
+    let terrain_card = handle_get_guidance_card(&world, "dkg.terrain_foundation".into())
+        .expect("terrain foundation card should fetch");
+    assert!(terrain_card
+        .summary
+        .contains("one local-coordinate building assembly"));
+    assert!(terrain_card.summary.contains("terrain.plant_structure"));
+    assert!(terrain_card.summary.contains("terrain.plant_on_surface"));
+    assert!(terrain_card.summary.contains("semantic `structure`"));
+    assert!(terrain_card
+        .summary
+        .contains("semantic `foundation_system`"));
+    assert!(terrain_card
+        .summary
+        .contains("terrain.release_planted_structure"));
+    assert!(terrain_card
+        .summary
+        .contains("terrain.demote_conforming_foundation"));
+    assert!(terrain_card.summary.contains("world Y=0"));
+    assert!(terrain_card
+        .referenced_tool_ids
+        .contains(&"elevation_at".to_string()));
+    assert!(terrain_card
+        .referenced_tool_ids
+        .contains(&"get_world_aabb".to_string()));
+    let terrain_body = terrain_card
+        .body_markdown
+        .as_deref()
+        .expect("terrain foundation card should include behavior body");
+    assert!(terrain_body.contains("select the visible"));
+    assert!(terrain_body.contains("terrain.plant_structure"));
+    assert!(terrain_body.contains("nested semantic `foundation_system`"));
+    assert!(terrain_body.contains("snapshot"));
+    assert!(terrain_body.contains("max_height_box"));
+    let terrain_body = terrain_card
+        .body_markdown
+        .as_deref()
+        .expect("terrain card should explain assembly-wide placement");
+    assert!(terrain_body.contains("assembly-wide"));
+    assert!(terrain_body.contains("prompt target"));
+    assert!(terrain_body.contains("re-seat the house"));
+    assert!(terrain_body.contains("check_floating"));
+    assert!(terrain_body.contains("not sufficient for terrain-seated buildings"));
 
     let known_tools = std::collections::BTreeSet::from([
         "get_capability_snapshot",
@@ -4718,6 +4786,8 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "set_selection",
         "invoke_command",
         "list_commands",
+        "elevation_at",
+        "get_world_aabb",
         "definition.draft.derive",
         "occurrence.create",
     ]);
@@ -5734,9 +5804,8 @@ fn promote_refinement_rejects_bluff_assembly_to_fabrication_ready() {
     assert!(error.contains("unmet member obligation"));
 
     // The commit must not have mutated state.
-    let entity =
-        find_entity_by_element_id_readonly(&world, ElementId(510))
-            .expect("assembly entity should still exist");
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(510))
+        .expect("assembly entity should still exist");
     let state = world
         .get::<RefinementStateComponent>(entity)
         .map(|c| c.state)
@@ -5794,9 +5863,7 @@ fn promote_refinement_allows_fully_authored_assembly() {
     .expect("fully authored house promotion should succeed");
     assert_eq!(result.new_state, "Detailed");
 
-    let entity =
-        find_entity_by_element_id_readonly(&world, ElementId(600))
-            .unwrap();
+    let entity = find_entity_by_element_id_readonly(&world, ElementId(600)).unwrap();
     assert_eq!(
         world
             .get::<RefinementStateComponent>(entity)
@@ -8000,11 +8067,9 @@ fn build_two_box_recipe_script() -> crate::curation::authoring_script::Authoring
     use std::collections::{BTreeMap, BTreeSet};
 
     let mut script = AuthoringScript::stub(MutationScope::ProjectRoot);
-    script.allowed_tools = [
-        McpToolId::new("create_box"),
-    ]
-    .into_iter()
-    .collect::<BTreeSet<_>>();
+    script.allowed_tools = [McpToolId::new("create_box")]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
 
     // Step 1: create first box (wall slab A)
     let step_a = Step {
@@ -8101,13 +8166,18 @@ fn install_two_box_recipe(world: &mut World, family_id: &str, target_class: &str
         },
         parameter_schema: serde_json::json!({"type": "object", "properties": {}}),
         target_class: target_class.into(),
-        supported_refinement_states: vec![RefinementState::Schematic, RefinementState::Constructible],
+        supported_refinement_states: vec![
+            RefinementState::Schematic,
+            RefinementState::Constructible,
+        ],
         tests: Vec::new(),
     };
     let mut registry = world
         .get_resource_mut::<RecipeArtifactRegistry>()
         .unwrap_or_else(|| {
-            panic!("RecipeArtifactRegistry must be initialized before calling install_two_box_recipe")
+            panic!(
+                "RecipeArtifactRegistry must be initialized before calling install_two_box_recipe"
+            )
         });
     registry.insert(artifact);
 }
@@ -8171,8 +8241,11 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
     // Root entity was created; verify it is inspectable in the world.
     // (ElementIdAllocator starts at 0, so id 0 is a valid first id.)
     assert!(
-        get_entity_snapshot(&world, crate::plugins::identity::ElementId(result.root_element_id))
-            .is_some(),
+        get_entity_snapshot(
+            &world,
+            crate::plugins::identity::ElementId(result.root_element_id)
+        )
+        .is_some(),
         "root_element_id {} must refer to an existing entity",
         result.root_element_id
     );
@@ -8232,13 +8305,13 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
 #[cfg(feature = "model-api")]
 #[test]
 fn instantiate_recipe_with_unresolvable_native_fn_returns_structured_error() {
+    use crate::capability_registry::RecipeFamilyId;
     use crate::curation::{
         provenance::{Confidence, Lineage, Provenance},
         scope_trust::{Scope, Trust},
         AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
         RECIPE_ARTIFACT_KIND,
     };
-    use crate::capability_registry::RecipeFamilyId;
     use crate::plugins::refinement::{AgentId, RefinementState};
 
     let mut world = init_model_api_test_world();
@@ -8286,9 +8359,7 @@ fn instantiate_recipe_with_unresolvable_native_fn_returns_structured_error() {
         Some(family_id.into()),
         serde_json::json!({}),
     )
-    .expect_err(
-        "NativeFnRef with unregistered fn must return an error, not silently no-op",
-    );
+    .expect_err("NativeFnRef with unregistered fn must return an error, not silently no-op");
 
     assert!(
         error.contains("NativeFnRef") || error.contains("native"),
@@ -8329,10 +8400,7 @@ fn list_recipe_families_carries_accurate_executable_field() {
                 default: Some(serde_json::json!(3000)),
             }],
             supported_refinement_levels: vec![RefinementState::Constructible],
-            obligation_specializations: HashMap::<
-                RefinementState,
-                Vec<ObligationTemplate>,
-            >::new(),
+            obligation_specializations: HashMap::<RefinementState, Vec<ObligationTemplate>>::new(),
             promotion_critical_path_specializations: HashMap::new(),
             generate: Arc::new(
                 |_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
@@ -8365,12 +8433,8 @@ fn select_recipe_reports_authoring_script_artifacts_as_executable() {
     world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
     install_two_box_recipe(&mut world, "two_box_query_wall", "wall_assembly");
 
-    let rankings = handle_select_recipe(
-        &world,
-        "wall_assembly".into(),
-        serde_json::json!({}),
-    )
-    .expect("select_recipe must succeed");
+    let rankings = handle_select_recipe(&world, "wall_assembly".into(), serde_json::json!({}))
+        .expect("select_recipe must succeed");
 
     let ranking = rankings
         .iter()
@@ -8478,7 +8542,10 @@ fn check_overlaps_non_overlapping_boxes_returns_empty() {
     )
     .expect("check_overlaps must succeed");
 
-    assert!(result.overlaps.is_empty(), "non-overlapping boxes must not report overlap");
+    assert!(
+        result.overlaps.is_empty(),
+        "non-overlapping boxes must not report overlap"
+    );
     assert_eq!(result.pairs_checked, 1);
     assert!(!result.truncated);
 }
@@ -8517,9 +8584,16 @@ fn check_overlaps_touching_boxes_reports_overlap() {
     )
     .expect("check_overlaps must succeed");
 
-    assert_eq!(result.overlaps.len(), 1, "overlapping boxes must produce one entry");
+    assert_eq!(
+        result.overlaps.len(),
+        1,
+        "overlapping boxes must produce one entry"
+    );
     let entry = &result.overlaps[0];
-    assert!((entry.overlap_extents[0] - 0.5).abs() < 0.02, "overlap dx ~ 0.5 m");
+    assert!(
+        (entry.overlap_extents[0] - 0.5).abs() < 0.02,
+        "overlap dx ~ 0.5 m"
+    );
     assert!(entry.overlap_volume > 0.0);
 }
 
@@ -8599,7 +8673,10 @@ fn check_floating_grounded_element_not_reported() {
     )
     .expect("check_floating must succeed");
 
-    assert!(result.floating.is_empty(), "grounded element must not be reported as floating");
+    assert!(
+        result.floating.is_empty(),
+        "grounded element must not be reported as floating"
+    );
 }
 
 #[test]
@@ -8610,7 +8687,11 @@ fn check_clearance_pass_and_fail() {
 
     let pass_result = handle_check_clearance(
         &world,
-        CheckClearanceRequest { a: 10, b: 20, min_m: 0.5 },
+        CheckClearanceRequest {
+            a: 10,
+            b: 20,
+            min_m: 0.5,
+        },
     )
     .expect("check_clearance must succeed");
     assert!(pass_result.pass, "1.0 m gap should pass 0.5 m requirement");
@@ -8618,7 +8699,11 @@ fn check_clearance_pass_and_fail() {
 
     let fail_result = handle_check_clearance(
         &world,
-        CheckClearanceRequest { a: 10, b: 20, min_m: 2.0 },
+        CheckClearanceRequest {
+            a: 10,
+            b: 20,
+            min_m: 2.0,
+        },
     )
     .expect("check_clearance must succeed");
     assert!(!fail_result.pass, "1.0 m gap should fail 2.0 m requirement");
@@ -8630,7 +8715,11 @@ fn check_clearance_error_on_missing_element() {
     let world = make_two_box_world();
     let err = handle_check_clearance(
         &world,
-        CheckClearanceRequest { a: 10, b: 9999, min_m: 1.0 },
+        CheckClearanceRequest {
+            a: 10,
+            b: 9999,
+            min_m: 1.0,
+        },
     );
     assert!(err.is_err(), "missing element should return Err");
 }
@@ -8668,7 +8757,9 @@ fn session_recipe_draft_write_through_and_reload() {
     use crate::plugins::knowledge_persistence::{
         load_session_recipe_drafts, persist_session_recipe_draft,
     };
-    use crate::plugins::recipe_drafts::{RecipeDraftArtifact, RecipeDraftRegistry, RecipeDraftStatus};
+    use crate::plugins::recipe_drafts::{
+        RecipeDraftArtifact, RecipeDraftRegistry, RecipeDraftStatus,
+    };
 
     with_isolated_knowledge_dir(|instance| {
         let draft = RecipeDraftArtifact {
@@ -8699,7 +8790,10 @@ fn session_recipe_draft_write_through_and_reload() {
         load_session_recipe_drafts(instance, &mut fresh_registry);
 
         let loaded = fresh_registry.get("test-draft-1");
-        assert!(loaded.is_some(), "draft must be recoverable after persist + load");
+        assert!(
+            loaded.is_some(),
+            "draft must be recoverable after persist + load"
+        );
         assert_eq!(loaded.unwrap().label, "Test Draft");
     });
 }
@@ -8731,8 +8825,15 @@ fn session_corpus_gaps_write_through_and_reload() {
         let mut fresh_queue = CorpusGapQueue::default();
         load_session_corpus_gaps(instance, &mut fresh_queue);
 
-        assert_eq!(fresh_queue.list().len(), 1, "one gap must survive round-trip");
-        assert_eq!(fresh_queue.list()[0].element_class.as_deref(), Some("stair"));
+        assert_eq!(
+            fresh_queue.list().len(),
+            1,
+            "one gap must survive round-trip"
+        );
+        assert_eq!(
+            fresh_queue.list()[0].element_class.as_deref(),
+            Some("stair")
+        );
         assert_eq!(fresh_queue.list()[0].reported_at, 1_700_000_000);
     });
 }
@@ -8783,7 +8884,10 @@ fn session_assembly_pattern_draft_write_through_and_reload() {
         load_session_assembly_pattern_drafts(instance, &mut fresh_registry);
 
         let loaded = fresh_registry.get("ap-draft-1");
-        assert!(loaded.is_some(), "assembly pattern draft must survive round-trip");
+        assert!(
+            loaded.is_some(),
+            "assembly pattern draft must survive round-trip"
+        );
         assert_eq!(loaded.unwrap().label, "Wall Pattern");
     });
 }
@@ -8803,7 +8907,10 @@ fn session_recovery_scope_separation_project_vs_session() {
     let id_b = "inst-b";
     let dir_a = session_recipe_drafts_dir(id_a);
     let dir_b = session_recipe_drafts_dir(id_b);
-    assert_ne!(dir_a, dir_b, "different instances must use different directories");
+    assert_ne!(
+        dir_a, dir_b,
+        "different instances must use different directories"
+    );
     assert!(dir_a.ends_with("session/inst-a/recipe_drafts"));
     assert!(dir_b.ends_with("session/inst-b/recipe_drafts"));
 

@@ -141,12 +141,9 @@ pub(super) fn spawn_model_api_server(
                     );
 
                 let guard = LocalAccessGuard::for_port(runtime_info.http_port);
-                let router = axum::Router::new()
-                    .nest_service("/mcp", service)
-                    .layer(axum::middleware::from_fn_with_state(
-                        guard,
-                        enforce_local_access,
-                    ));
+                let router = axum::Router::new().nest_service("/mcp", service).layer(
+                    axum::middleware::from_fn_with_state(guard, enforce_local_access),
+                );
                 let addr = format!("{}:{}", runtime_info.http_host, runtime_info.http_port);
                 let tcp_listener = match tokio::net::TcpListener::from_std(http_listener) {
                     Ok(listener) => listener,

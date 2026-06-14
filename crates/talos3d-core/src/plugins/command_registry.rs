@@ -704,10 +704,22 @@ fn execute_pending_commands(world: &mut World) {
     );
 
     for invocation in invocations {
-        if let Err(error) = execute_command(world, &invocation.id, &invocation.parameters) {
-            if let Some(mut status_bar_data) =
-                world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
-            {
+        let label = world
+            .resource::<CommandRegistry>()
+            .get(&invocation.id)
+            .map(|descriptor| descriptor.label.clone())
+            .unwrap_or_else(|| invocation.id.clone());
+        if let Some(mut status_bar_data) =
+            world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+        {
+            status_bar_data.begin_command(label);
+        }
+        let result = execute_command(world, &invocation.id, &invocation.parameters);
+        if let Some(mut status_bar_data) =
+            world.get_resource_mut::<crate::plugins::ui::StatusBarData>()
+        {
+            status_bar_data.clear_command_busy();
+            if let Err(error) = result {
                 status_bar_data.set_feedback(error, 2.0);
             }
         }
@@ -957,11 +969,33 @@ mod tests {
                 },
                 execute_noop,
             );
+            app.register_command(
+                CommandDescriptor {
+                    id: "test.fail".to_string(),
+                    label: "Fail Test Command".to_string(),
+                    description: "Command registered to test failure feedback".to_string(),
+                    category: CommandCategory::Custom("Test".to_string()),
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: None,
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_fail,
+            );
         }
     }
 
     fn execute_noop(_: &mut World, _: &Value) -> Result<CommandResult, String> {
         Ok(CommandResult::empty())
+    }
+
+    fn execute_fail(_: &mut World, _: &Value) -> Result<CommandResult, String> {
+        Err("intentional failure".to_string())
     }
 
     #[test]
@@ -977,6 +1011,27 @@ mod tests {
 
         let categories = ordered_menu_categories(registry);
         assert!(categories.contains(&CommandCategory::Custom("Test".to_string())));
+    }
+
+    #[test]
+    fn queued_command_failure_replaces_busy_state_with_feedback() {
+        let mut app = App::new();
+        app.add_plugins(CommandRegistryPlugin)
+            .add_plugins(TestCommandPlugin)
+            .init_resource::<Assets<Image>>()
+            .init_resource::<ButtonInput<KeyCode>>()
+            .insert_resource(crate::plugins::egui_chrome::EguiWantsInput::default())
+            .insert_resource(StatusBarData::default());
+
+        queue_command_invocation(app.world_mut(), "test.fail", serde_json::json!({}));
+        app.update();
+
+        let status = app.world().resource::<StatusBarData>();
+        assert!(!status.command_busy());
+        assert_eq!(
+            crate::plugins::ui::hint_text(status),
+            "intentional failure".to_string()
+        );
     }
 
     #[test]

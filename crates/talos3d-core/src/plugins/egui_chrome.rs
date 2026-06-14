@@ -411,6 +411,7 @@ fn draw_command_menu_button(
     descriptor: &CommandDescriptor,
     selection_count: usize,
     pending_command_invocations: &mut PendingCommandInvocations,
+    status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
 ) {
     let enabled = !descriptor.requires_selection || selection_count > 0;
@@ -426,13 +427,28 @@ fn draw_command_menu_button(
         *hovered_menu_hint = descriptor.hint.clone();
     }
     if enabled && response.clicked() {
-        queue_command_invocation_resource(
+        queue_visible_command(
+            ui.ctx(),
             pending_command_invocations,
-            descriptor.id.clone(),
-            serde_json::json!({}),
+            status_bar_data,
+            descriptor,
         );
-        ui.close();
     }
+}
+
+fn queue_visible_command(
+    ctx: &egui::Context,
+    pending_command_invocations: &mut PendingCommandInvocations,
+    status_bar_data: &mut StatusBarData,
+    descriptor: &CommandDescriptor,
+) {
+    egui::Popup::close_all(ctx);
+    status_bar_data.begin_command(descriptor.label.clone());
+    queue_command_invocation_resource(
+        pending_command_invocations,
+        descriptor.id.clone(),
+        serde_json::json!({}),
+    );
 }
 
 /// Predicate: would this group render inline under the menu-collapse rule? Used
@@ -485,6 +501,7 @@ fn draw_command_submenu(
     category_commands: &[&CommandDescriptor],
     selection_count: usize,
     pending_command_invocations: &mut PendingCommandInvocations,
+    status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
     rendered_ids: &mut HashSet<String>,
 ) -> Option<MenuGroupRenderKind> {
@@ -517,6 +534,7 @@ fn draw_command_submenu(
                 descriptor,
                 selection_count,
                 pending_command_invocations,
+                status_bar_data,
                 hovered_menu_hint,
             );
         }
@@ -529,6 +547,7 @@ fn draw_command_submenu(
                     descriptor,
                     selection_count,
                     pending_command_invocations,
+                    status_bar_data,
                     hovered_menu_hint,
                 );
             }
@@ -632,6 +651,7 @@ fn draw_category_menu_contents(
     category_commands: &[&CommandDescriptor],
     selection_count: usize,
     pending_command_invocations: &mut PendingCommandInvocations,
+    status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
     assistant_window_state: &mut RightSidebarState,
     lighting_window_state: &mut LightingWindowState,
@@ -649,6 +669,7 @@ fn draw_category_menu_contents(
                 descriptor,
                 selection_count,
                 pending_command_invocations,
+                status_bar_data,
                 hovered_menu_hint,
             );
         }
@@ -679,6 +700,7 @@ fn draw_category_menu_contents(
             category_commands,
             selection_count,
             pending_command_invocations,
+            status_bar_data,
             hovered_menu_hint,
             &mut rendered_ids,
         ) {
@@ -716,6 +738,7 @@ fn draw_category_menu_contents(
                     descriptor,
                     selection_count,
                     pending_command_invocations,
+                    status_bar_data,
                     hovered_menu_hint,
                 );
             }
@@ -760,6 +783,7 @@ struct ToolbarRenderContext<'a, 'w, 's> {
     floating_states: &'a mut FloatingToolbarStates,
     doc_props: &'a mut DocumentProperties,
     pending_command_invocations: &'a mut PendingCommandInvocations,
+    status_bar_data: &'a mut StatusBarData,
     drag_state: &'a mut ToolbarDragState,
     selection_count: usize,
     current_tool: &'a str,
@@ -922,6 +946,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 &category_commands,
                                 selection_count,
                                 &mut data.pending_command_invocations,
+                                &mut data.status_bar_data,
                                 &mut hovered_menu_hint,
                                 &mut data.assistant_window_state,
                                 &mut data.lighting_window_state,
@@ -973,6 +998,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 floating_states: &mut data.floating_states,
                 doc_props: &mut data.doc_props,
                 pending_command_invocations: &mut data.pending_command_invocations,
+                status_bar_data: &mut data.status_bar_data,
                 drag_state: &mut data.drag_state,
                 selection_count,
                 current_tool: &current_tool,
@@ -1007,6 +1033,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             floating_states: &mut data.floating_states,
             doc_props: &mut data.doc_props,
             pending_command_invocations: &mut data.pending_command_invocations,
+            status_bar_data: &mut data.status_bar_data,
             drag_state: &mut data.drag_state,
             selection_count,
             current_tool: &current_tool,
@@ -1211,6 +1238,9 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                 ui.label(coordinates);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(status_hint);
+                    if data.status_bar_data.command_busy() {
+                        ui.spinner();
+                    }
                 });
             });
         });
@@ -2518,10 +2548,11 @@ fn draw_toolbar_content(
                         });
                     }
                     if ptr_over && ui.ctx().input(|i| i.pointer.primary_released()) {
-                        queue_command_invocation_resource(
+                        queue_visible_command(
+                            ui.ctx(),
                             render.pending_command_invocations,
-                            command.id.clone(),
-                            serde_json::json!({}),
+                            render.status_bar_data,
+                            command,
                         );
                     }
                 }
@@ -2814,10 +2845,11 @@ fn draw_floating_toolbar(
                                 });
                             }
                             if ptr_over && ui.ctx().input(|i| i.pointer.primary_released()) {
-                                queue_command_invocation_resource(
+                                queue_visible_command(
+                                    ui.ctx(),
                                     render.pending_command_invocations,
-                                    command.id.clone(),
-                                    serde_json::json!({}),
+                                    render.status_bar_data,
+                                    command,
                                 );
                             }
                         }

@@ -385,9 +385,7 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
             "drape_sample_spacing" => {
                 snapshot.surface.drape_sample_spacing = scalar_from_json(value)?
             }
-            "smoothing" => {
-                snapshot.surface.smoothing = scalar_from_json(value)?.clamp(0.0, 1.0)
-            }
+            "smoothing" => snapshot.surface.smoothing = scalar_from_json(value)?.clamp(0.0, 1.0),
             "offset" => snapshot.surface.offset = vec3_from_json(value)?,
             _ => {
                 return Err(invalid_property_error(
@@ -451,7 +449,9 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
         // spawn so the Default fallback never claims it. The explicit
         // `Visibility` lets the layer system (which queries
         // `(&LayerAssignment, &mut Visibility)`) show/hide it via that layer.
-        world.resource_mut::<LayerRegistry>().ensure_layer(TERRAIN_LAYER_NAME);
+        world
+            .resource_mut::<LayerRegistry>()
+            .ensure_layer(TERRAIN_LAYER_NAME);
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             world.entity_mut(entity).insert((
                 self.surface.clone(),

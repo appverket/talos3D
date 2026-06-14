@@ -311,7 +311,10 @@ pub fn generate_terrain_heightfield(
     let effective_spacing = adaptive_sampling_spacing(surface);
     let mut source_points = Vec::new();
     for source_id in &surface.source_curve_ids {
-        let Some((_, curve)) = curves.iter().find(|(element_id, _)| *element_id == source_id) else {
+        let Some((_, curve)) = curves
+            .iter()
+            .find(|(element_id, _)| *element_id == source_id)
+        else {
             continue;
         };
         source_points.extend(
@@ -465,7 +468,8 @@ impl BreaklineGrid {
             let (Some(a), Some(b)) = (vertices.get(start), vertices.get(end)) else {
                 continue;
             };
-            let (cx0, cx1, cz0, cz1) = Self::cell_range(a.x.min(b.x), a.x.max(b.x), a.z.min(b.z), a.z.max(b.z), cell);
+            let (cx0, cx1, cz0, cz1) =
+                Self::cell_range(a.x.min(b.x), a.x.max(b.x), a.z.min(b.z), a.z.max(b.z), cell);
             for cx in cx0..=cx1 {
                 for cz in cz0..=cz1 {
                     cells.entry((cx, cz)).or_default().push(index);
@@ -824,8 +828,7 @@ fn smooth_terrain_heights(
             if adj.is_empty() {
                 continue;
             }
-            let mean =
-                adj.iter().map(|&j| current_y[j as usize]).sum::<f32>() / adj.len() as f32;
+            let mean = adj.iter().map(|&j| current_y[j as usize]).sum::<f32>() / adj.len() as f32;
             // Data attachment: pull the Laplacian mean back toward the original height.
             // Contour vertices stay near the survey; interior vertices relax fully as
             // smoothing -> 1. (attach in [0,1]: 1 = unchanged, 0 = pure Laplacian.)
@@ -1015,8 +1018,7 @@ fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
         // never zero thanks to the short-circuiting `&&`).
         let crosses = ((current.y > point.y) != (previous.y > point.y))
             && (point.x
-                < (previous.x - current.x) * (point.y - current.y)
-                    / (previous.y - current.y)
+                < (previous.x - current.x) * (point.y - current.y) / (previous.y - current.y)
                     + current.x);
         if crosses {
             inside = !inside;

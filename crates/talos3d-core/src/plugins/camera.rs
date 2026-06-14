@@ -296,12 +296,8 @@ struct OrbitCameraInput<'w, 's> {
     /// view centre points at empty space.
     scene_geometry: Query<'w, 's, (&'static GlobalTransform, &'static Aabb), With<ElementId>>,
     /// Currently-selected authored geometry, preferred as the fallback pivot.
-    selected_geometry: Query<
-        'w,
-        's,
-        (&'static GlobalTransform, &'static Aabb),
-        (With<ElementId>, With<Selected>),
-    >,
+    selected_geometry:
+        Query<'w, 's, (&'static GlobalTransform, &'static Aabb), (With<ElementId>, With<Selected>)>,
 }
 
 fn orbit_camera(mut input: OrbitCameraInput) {

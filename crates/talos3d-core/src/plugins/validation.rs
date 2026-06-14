@@ -1111,10 +1111,7 @@ mod tests {
 
     #[test]
     fn flags_degenerate_occurrence() {
-        use crate::plugins::modeling::{
-            definition::DefinitionId,
-            occurrence::OccurrenceIdentity,
-        };
+        use crate::plugins::modeling::{definition::DefinitionId, occurrence::OccurrenceIdentity};
 
         let mut world = World::new();
         let registry = CapabilityRegistry::default();
@@ -1122,18 +1119,27 @@ mod tests {
         world.insert_resource(registry);
 
         // Spawn an occurrence entity with no geometry component.
-        let entity = world.spawn((
-            ElementId(99),
-            OccurrenceIdentity::new(DefinitionId("test_def".into()), 1),
-        )).id();
+        let entity = world
+            .spawn((
+                ElementId(99),
+                OccurrenceIdentity::new(DefinitionId("test_def".into()), 1),
+            ))
+            .id();
 
         let findings = run_occurrence_geometry_non_degenerate(entity, &world);
 
-        assert_eq!(findings.len(), 1, "expected exactly one degenerate-occurrence finding");
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected exactly one degenerate-occurrence finding"
+        );
         assert_eq!(findings[0].severity, Severity::Error);
         assert_eq!(findings[0].subject, 99);
         assert!(
-            findings[0].id.0.starts_with("OccurrenceGeometryNonDegenerate:"),
+            findings[0]
+                .id
+                .0
+                .starts_with("OccurrenceGeometryNonDegenerate:"),
             "finding id must carry the constraint prefix"
         );
         assert!(
@@ -1157,15 +1163,17 @@ mod tests {
         world.insert_resource(registry);
 
         // Spawn an occurrence with a real, non-degenerate BoxPrimitive.
-        let entity = world.spawn((
-            ElementId(42),
-            OccurrenceIdentity::new(DefinitionId("box_def".into()), 1),
-            BoxPrimitive {
-                centre: Vec3::new(1.0, 0.5, 0.0),
-                half_extents: Vec3::new(0.5, 0.5, 0.5),
-            },
-            ShapeRotation::default(),
-        )).id();
+        let entity = world
+            .spawn((
+                ElementId(42),
+                OccurrenceIdentity::new(DefinitionId("box_def".into()), 1),
+                BoxPrimitive {
+                    centre: Vec3::new(1.0, 0.5, 0.0),
+                    half_extents: Vec3::new(0.5, 0.5, 0.5),
+                },
+                ShapeRotation::default(),
+            ))
+            .id();
 
         let findings = run_occurrence_geometry_non_degenerate(entity, &world);
 
@@ -1188,14 +1196,16 @@ mod tests {
         world.insert_resource(registry);
 
         // Spawn a plain box entity with NO OccurrenceIdentity.
-        let entity = world.spawn((
-            ElementId(7),
-            BoxPrimitive {
-                centre: Vec3::ZERO,
-                half_extents: Vec3::new(1.0, 1.0, 1.0),
-            },
-            ShapeRotation::default(),
-        )).id();
+        let entity = world
+            .spawn((
+                ElementId(7),
+                BoxPrimitive {
+                    centre: Vec3::ZERO,
+                    half_extents: Vec3::new(1.0, 1.0, 1.0),
+                },
+                ShapeRotation::default(),
+            ))
+            .id();
 
         let findings = run_occurrence_geometry_non_degenerate(entity, &world);
 

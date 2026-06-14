@@ -51,11 +51,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::authored_entity::EntityBounds;
 use crate::capability_registry::{
-    Applicability, CapabilityRegistry, ConstraintDescriptor, ConstraintId, ConstraintRole,
-    Finding, FindingId, PassageRef, Severity,
+    Applicability, CapabilityRegistry, ConstraintDescriptor, ConstraintId, ConstraintRole, Finding,
+    FindingId, PassageRef, Severity,
 };
 use crate::plugins::identity::ElementId;
-use crate::plugins::interference::{entity_class, entity_component_role, EntitySelector, RuleSeverity};
+use crate::plugins::interference::{
+    entity_class, entity_component_role, EntitySelector, RuleSeverity,
+};
 use crate::plugins::refinement::{RefinementState, RefinementStateComponent};
 
 /// Stable identifier of the single generic declarative constraint. Individual
@@ -490,7 +492,10 @@ fn run_declarative_constraints(subject: Entity, world: &World) -> Vec<Finding> {
             spec.label.as_str()
         };
         let message = if spec.message_template.is_empty() {
-            format!("[{label}] constraint '{}' violated by entity {subject_eid}", spec.id)
+            format!(
+                "[{label}] constraint '{}' violated by entity {subject_eid}",
+                spec.id
+            )
         } else {
             spec.message_template
                 .replace("{subject}", &subject_eid.to_string())
@@ -685,7 +690,14 @@ mod tests {
             backlink: None,
             status: SpecStatus::Active,
         }]));
-        let e = spawn_box(&mut world, 1, "anything", Vec3::ZERO, Vec3::splat(0.5), None);
+        let e = spawn_box(
+            &mut world,
+            1,
+            "anything",
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            None,
+        );
         assert!(run_declarative_constraints(e, &world).is_empty());
     }
 

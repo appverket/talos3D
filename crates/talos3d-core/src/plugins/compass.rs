@@ -82,10 +82,7 @@ impl Plugin for CompassPlugin {
             .add_systems(Startup, configure_compass_gizmos)
             // Draw after transform propagation so the rose anchors to the
             // camera's final transform for this frame (no swim while orbiting).
-            .add_systems(
-                PostUpdate,
-                draw_compass.after(TransformSystems::Propagate),
-            )
+            .add_systems(PostUpdate, draw_compass.after(TransformSystems::Propagate))
             .register_command(
                 CommandDescriptor {
                     id: "view.toggle_compass".to_string(),
@@ -152,9 +149,7 @@ fn draw_compass(
         rect.min.x + inset.left + extent,
         rect.max.y - inset.bottom - extent,
     ) - rect.min;
-    if centre_px.x + COMPASS_RADIUS_PX > rect.width()
-        || centre_px.y - COMPASS_RADIUS_PX < 0.0
-    {
+    if centre_px.x + COMPASS_RADIUS_PX > rect.width() || centre_px.y - COMPASS_RADIUS_PX < 0.0 {
         // Viewport too small for the rose; skip rather than overlap the UI.
         return;
     }
@@ -196,7 +191,11 @@ fn draw_compass(
     for octant in 0..8 {
         let dir = azimuth_direction(settings.north_axis_deg + octant as f32 * 45.0);
         let inner = if octant % 2 == 0 { 0.82 } else { 0.92 };
-        gizmos.line(centre + dir * (radius * inner), centre + dir * radius, TICK_COLOR);
+        gizmos.line(
+            centre + dir * (radius * inner),
+            centre + dir * radius,
+            TICK_COLOR,
+        );
         #[cfg(feature = "perf-stats")]
         {
             line_count += 1;

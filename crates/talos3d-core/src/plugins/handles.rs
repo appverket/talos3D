@@ -695,7 +695,11 @@ fn draw_pivot_indicator(
     add_gizmo_line_count(&mut perf_stats, 4);
 }
 
-fn draw_rotate_ring(world: &World, rotate_ring: RotateRingContext, mut gizmos: Gizmos<HandleGizmos>) {
+fn draw_rotate_ring(
+    world: &World,
+    rotate_ring: RotateRingContext,
+    mut gizmos: Gizmos<HandleGizmos>,
+) {
     if !matches!(
         rotate_ring.handle_context.display_mode,
         HandleDisplayMode::Rotate | HandleDisplayMode::Combined
