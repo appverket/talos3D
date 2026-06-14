@@ -245,8 +245,20 @@ pub fn start_transform_mode_with_options(
         return Err("No selection to transform".to_string());
     }
 
+    let start_pivot = options
+        .pivot_override
+        .or_else(|| world.resource::<PivotPoint>().position)
+        .or_else(|| selection_center(&initial_snapshots));
     let Some(initial_cursor) = options
         .initial_cursor
+        .or_else(|| {
+            (mode == TransformMode::Rotating)
+                .then(|| {
+                    start_pivot
+                        .and_then(|center| rotation_cursor_on_plane(world, center, options.axis))
+                })
+                .flatten()
+        })
         .or_else(|| current_transform_cursor(world))
     else {
         return Err("Cursor is not over the modeling viewport".to_string());
@@ -2188,6 +2200,47 @@ mod tests {
         assert!(
             (delta - std::f32::consts::FRAC_PI_2).abs() < 0.001,
             "pointing from +X toward -Z should be a positive Y-rotation delta"
+        );
+    }
+
+    #[test]
+    fn rotation_start_and_drag_use_same_oblique_plane_cursor() {
+        let center = Vec3::new(0.0, 10.0, 0.0);
+        let target_on_rotation_plane = Vec3::new(2.0, 10.0, 0.0);
+        let camera = Vec3::new(0.0, 24.0, 18.0);
+        let ray = Ray3d::new(
+            camera,
+            Dir3::new(target_on_rotation_plane - camera).unwrap(),
+        );
+
+        let initial_on_plane = rotation_cursor_on_plane_from_ray(ray, center, AxisConstraint::None)
+            .expect("initial plane hit");
+        let current_on_plane = rotation_cursor_on_plane_from_ray(ray, center, AxisConstraint::None)
+            .expect("current plane hit");
+        let old_ground_initial =
+            scene_ray::project_ray_to_plane(ray, Vec3::ZERO, Vec3::Y).expect("ground hit");
+
+        let (start_2d, current_2d) = rotation_plane_project(
+            initial_on_plane - center,
+            current_on_plane - center,
+            AxisConstraint::None,
+        );
+        let no_drag_delta = current_2d.y.atan2(current_2d.x) - start_2d.y.atan2(start_2d.x);
+        assert!(
+            no_drag_delta.abs() < 0.001,
+            "starting rotation and first drag frame must use the same plane cursor"
+        );
+
+        let (old_start_2d, same_current_2d) = rotation_plane_project(
+            old_ground_initial - center,
+            current_on_plane - center,
+            AxisConstraint::None,
+        );
+        let old_delta =
+            same_current_2d.y.atan2(same_current_2d.x) - old_start_2d.y.atan2(old_start_2d.x);
+        assert!(
+            old_delta.abs() > 0.5,
+            "the old ground-plane initial cursor would jump immediately in oblique view"
         );
     }
 
