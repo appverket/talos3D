@@ -1169,7 +1169,8 @@ fn rotation_delta(
     }
 
     let initial_cursor = state.initial_cursor?;
-    let current_cursor = current_transform_cursor(world)?;
+    let current_cursor = rotation_cursor_on_plane(world, center, state.axis)
+        .or_else(|| current_transform_cursor(world))?;
 
     // Project cursor offsets onto the rotation plane determined by axis constraint.
     // Default (None/Y) = rotate around Y axis in XZ plane.
@@ -1304,6 +1305,57 @@ fn current_viewport_cursor(world: &World) -> Option<Vec2> {
         .find(|camera| camera.is_active)
         .or_else(|| camera_query.iter(world).next())?;
     cursor_viewport_position(window, camera)
+}
+
+fn rotation_cursor_on_plane(world: &World, center: Vec3, axis: AxisConstraint) -> Option<Vec3> {
+    let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
+    let window = window_query.single(world).ok()?;
+    let mut camera_query =
+        world.try_query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>()?;
+    let (camera, camera_transform) = camera_query
+        .iter(world)
+        .find(|(camera, _)| camera.is_active)
+        .or_else(|| camera_query.iter(world).next())?;
+    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let ray = camera
+        .viewport_to_world(camera_transform, viewport_cursor)
+        .ok()?;
+    rotation_cursor_on_plane_from_ray(ray, center, axis)
+}
+
+fn rotation_cursor_on_plane_from_queries(
+    window_query: &Query<&Window, With<PrimaryWindow>>,
+    camera_query: &Query<(&Camera, &GlobalTransform), With<Camera>>,
+    center: Vec3,
+    axis: AxisConstraint,
+) -> Option<Vec3> {
+    let window = window_query.single().ok()?;
+    let (camera, camera_transform) = camera_query
+        .iter()
+        .find(|(camera, _)| camera.is_active)
+        .or_else(|| camera_query.iter().next())?;
+    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let ray = camera
+        .viewport_to_world(camera_transform, viewport_cursor)
+        .ok()?;
+    rotation_cursor_on_plane_from_ray(ray, center, axis)
+}
+
+fn rotation_cursor_on_plane_from_ray(
+    ray: Ray3d,
+    center: Vec3,
+    axis: AxisConstraint,
+) -> Option<Vec3> {
+    scene_ray::project_ray_to_plane(ray, center, rotation_plane_normal(axis))
+}
+
+fn rotation_plane_normal(axis: AxisConstraint) -> Vec3 {
+    match axis {
+        AxisConstraint::X | AxisConstraint::PlaneYZ => Vec3::X,
+        AxisConstraint::Z | AxisConstraint::PlaneXY => Vec3::Z,
+        AxisConstraint::Custom(dir) => dir.normalize_or_zero(),
+        AxisConstraint::None | AxisConstraint::Y | AxisConstraint::PlaneXZ => Vec3::Y,
+    }
 }
 
 fn restore_preview_transforms(world: &mut World) {
@@ -1781,10 +1833,9 @@ const PROTRACTOR_TICK_INNER_MAJOR: f32 = 0.82;
 struct RotationProtractorContext<'w, 's> {
     transform_state: Res<'w, TransformState>,
     pivot_point: Res<'w, PivotPoint>,
-    cursor_world_pos: Res<'w, CursorWorldPos>,
-    snap_result: Res<'w, SnapResult>,
     keys: Res<'w, ButtonInput<KeyCode>>,
-    camera_query: Query<'w, 's, &'static GlobalTransform, With<Camera>>,
+    window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<Camera>>,
     gizmos: Gizmos<'w, 's>,
     #[cfg(feature = "perf-stats")]
     perf_stats: ResMut<'w, PerfStats>,
@@ -1813,7 +1864,7 @@ fn draw_rotation_protractor(mut cx: RotationProtractorContext) {
         .camera_query
         .iter()
         .next()
-        .map(|cam_tf| {
+        .map(|(_, cam_tf)| {
             let camera_distance = (cam_tf.translation() - center).length();
             (camera_distance * PROTRACTOR_SCREEN_FACTOR)
                 .clamp(PROTRACTOR_MIN_RADIUS, PROTRACTOR_MAX_RADIUS)
@@ -1878,13 +1929,12 @@ fn draw_rotation_protractor(mut cx: RotationProtractorContext) {
         line_count += 1;
     }
 
-    // Compute current angle from numeric input or cursor position
-    let current_cursor = cx
-        .snap_result
-        .position
-        .or(cx.snap_result.raw_position)
-        .or(cx.cursor_world_pos.snapped)
-        .or(cx.cursor_world_pos.raw);
+    // Compute current angle from numeric input or the cursor ray projected onto
+    // the same rotation plane used by the transform. Using ground/snap cursor
+    // points here only works in Top view; in oblique views it makes the widget
+    // sweep disagree with the object rotation.
+    let current_cursor =
+        rotation_cursor_on_plane_from_queries(&cx.window_query, &cx.camera_query, center, axis);
 
     let current_angle_opt: Option<f32> = cx
         .transform_state
@@ -2099,6 +2149,45 @@ mod tests {
         assert!(
             ground_offset > 5.0,
             "y=0 projection should be far from the elevated handle, offset={ground_offset}"
+        );
+    }
+
+    #[test]
+    fn rotation_cursor_uses_pivot_height_plane_for_oblique_y_rotation() {
+        let center = Vec3::new(0.0, 10.0, 0.0);
+        let target_on_rotation_plane = Vec3::new(0.0, 10.0, -2.0);
+        let camera = Vec3::new(0.0, 24.0, 18.0);
+        let ray = Ray3d::new(
+            camera,
+            Dir3::new(target_on_rotation_plane - camera).unwrap(),
+        );
+
+        let on_rotation_plane =
+            rotation_cursor_on_plane_from_ray(ray, center, AxisConstraint::None)
+                .expect("rotation plane hit");
+        let on_ground =
+            scene_ray::project_ray_to_plane(ray, Vec3::ZERO, Vec3::Y).expect("ground hit");
+
+        assert!(
+            on_rotation_plane.distance(target_on_rotation_plane) < 0.001,
+            "rotation cursor should stay on the pivot-height rotation plane"
+        );
+        assert!(
+            Vec2::new(
+                on_ground.x - target_on_rotation_plane.x,
+                on_ground.z - target_on_rotation_plane.z,
+            )
+            .length()
+                > 5.0,
+            "oblique ground projection should be visibly different from the rotation plane"
+        );
+
+        let (start_2d, current_2d) =
+            rotation_plane_project(Vec3::X, on_rotation_plane - center, AxisConstraint::None);
+        let delta = current_2d.y.atan2(current_2d.x) - start_2d.y.atan2(start_2d.x);
+        assert!(
+            (delta - std::f32::consts::FRAC_PI_2).abs() < 0.001,
+            "pointing from +X toward -Z should be a positive Y-rotation delta"
         );
     }
 
