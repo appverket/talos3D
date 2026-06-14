@@ -31,6 +31,8 @@ use crate::{
         },
         egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
+        input_ownership::InputPhase,
+        layers::{LayerAssignment, LayerRegistry},
         render_pipeline::RenderSettings,
         snap::{SnapKind, SnapResult, SnapSystems},
         toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
@@ -50,8 +52,10 @@ const DIMENSION_LINE_DEFAULT_OFFSET_MIN: f32 = 0.2;
 const DIMENSION_LINE_DEFAULT_OFFSET_MAX: f32 = 0.8;
 const DIMENSION_LINE_DEFAULT_OFFSET_FACTOR: f32 = 0.18;
 const DIMENSION_LINE_MIN_OFFSET: f32 = 0.001;
+const DIMENSION_LINE_OFFSET_DRAG_COMMIT_DISTANCE: f32 = 0.02;
 pub(crate) const DIMENSION_RENDER_PAPER_MM_PER_WORLD_M: f32 = 20.0;
 pub const DIMENSION_ANNOTATIONS_KEY: &str = "dimension_annotations";
+pub const DIMENSION_LAYER_NAME: &str = "Dimensions";
 
 pub struct DimensionLinePlugin;
 
@@ -95,9 +99,24 @@ impl Default for DimensionLineNode {
 
 #[derive(Resource, Default)]
 struct DimensionLineToolState {
-    start: Option<Vec3>,
-    end: Option<Vec3>,
-    host_element_id: Option<ElementId>,
+    stage: DimensionLinePlacementStage,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum DimensionLinePlacementStage {
+    #[default]
+    AwaitingStart,
+    AwaitingEnd {
+        start: Vec3,
+        host_element_id: Option<ElementId>,
+    },
+    PlacingOffset {
+        start: Vec3,
+        end: Vec3,
+        host_element_id: Option<ElementId>,
+        drag_origin: Option<Vec3>,
+        dragging: bool,
+    },
 }
 
 #[derive(Resource, Default)]
@@ -429,6 +448,7 @@ impl AuthoredEntity for DimensionLineSnapshot {
     }
 
     fn apply_to(&self, world: &mut World) {
+        ensure_dimension_layer(world);
         let node = DimensionLineNode {
             start: self.start,
             end: self.end,
@@ -440,9 +460,15 @@ impl AuthoredEntity for DimensionLineSnapshot {
             precision: self.precision,
         };
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            world.entity_mut(entity).insert(node);
+            world
+                .entity_mut(entity)
+                .insert((node, LayerAssignment::new(DIMENSION_LAYER_NAME)));
         } else {
-            world.spawn((self.element_id, node));
+            world.spawn((
+                self.element_id,
+                node,
+                LayerAssignment::new(DIMENSION_LAYER_NAME),
+            ));
         }
     }
 
@@ -792,85 +818,179 @@ fn handle_dimension_line_clicks(
     mut status_bar_data: ResMut<StatusBarData>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
 ) {
-    if egui_wants_input.pointer || !mouse_buttons.just_pressed(MouseButton::Left) {
+    if egui_wants_input.pointer {
         return;
     }
 
-    let Some(cursor_position) = dimension_tool_cursor_position(&cursor_world_pos, &snap_result)
-    else {
-        return;
-    };
-
-    match tool_state.start {
-        None => {
-            tool_state.start = Some(cursor_position);
-            tool_state.end = None;
-            tool_state.host_element_id = cursor_world_pos.hovered_element_id;
+    if mouse_buttons.just_released(MouseButton::Left) {
+        let DimensionLinePlacementStage::PlacingOffset {
+            start,
+            end,
+            host_element_id,
+            drag_origin: Some(drag_origin),
+            dragging: true,
+        } = tool_state.stage
+        else {
+            return;
+        };
+        let Some(offset_position) =
+            dimension_tool_offset_cursor_position(&cursor_world_pos, &snap_result)
+        else {
+            return;
+        };
+        if offset_position.distance(drag_origin) < DIMENSION_LINE_OFFSET_DRAG_COMMIT_DISTANCE {
+            tool_state.stage = DimensionLinePlacementStage::PlacingOffset {
+                start,
+                end,
+                host_element_id,
+                drag_origin: None,
+                dragging: false,
+            };
             status_bar_data.hint =
-                "Click the end point, then drag away from the edge to place the dimension line"
+                "Drag away from the measured line, or click to place the dimension line"
+                    .to_string();
+            return;
+        }
+        commit_dimension_line(
+            start,
+            end,
+            offset_position,
+            host_element_id,
+            &allocator,
+            &drawing_plane,
+            &camera_query,
+            &host_bounds_query,
+            &mut create_entity,
+        );
+        tool_state.stage = DimensionLinePlacementStage::AwaitingStart;
+        next_active_tool.set(ActiveTool::PlaceDimensionLine);
+        status_bar_data.hint =
+            "Click a start anchor, then click an end anchor and drag out the dimension line"
+                .to_string();
+        return;
+    }
+
+    if !mouse_buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    match tool_state.stage {
+        DimensionLinePlacementStage::AwaitingStart => {
+            let Some(cursor_position) =
+                dimension_tool_anchor_position(&cursor_world_pos, &snap_result)
+            else {
+                return;
+            };
+            tool_state.stage = DimensionLinePlacementStage::AwaitingEnd {
+                start: cursor_position,
+                host_element_id: cursor_world_pos.hovered_element_id,
+            };
+            status_bar_data.hint =
+                "Click the end anchor, then drag perpendicular to place the dimension line"
                     .to_string();
         }
-        Some(start) if tool_state.end.is_none() => {
+        DimensionLinePlacementStage::AwaitingEnd {
+            start,
+            host_element_id,
+        } => {
+            let Some(cursor_position) =
+                dimension_tool_anchor_position(&cursor_world_pos, &snap_result)
+            else {
+                return;
+            };
             if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
                 return;
             }
 
-            tool_state.end = Some(cursor_position);
-            tool_state.host_element_id = match (
-                tool_state.host_element_id,
-                cursor_world_pos.hovered_element_id,
-            ) {
+            let host_element_id = match (host_element_id, cursor_world_pos.hovered_element_id) {
                 (Some(left), Some(right)) if left == right => Some(left),
                 _ => None,
             };
+            tool_state.stage = DimensionLinePlacementStage::PlacingOffset {
+                start,
+                end: cursor_position,
+                host_element_id,
+                drag_origin: Some(cursor_position),
+                dragging: true,
+            };
             status_bar_data.hint =
-                "Click to place the offset dimension line outside the geometry".to_string();
+                "Drag perpendicular from the measured line and release to place".to_string();
         }
-        Some(start) => {
-            let end = tool_state
-                .end
-                .expect("dimension tool end point should exist in offset placement stage");
-            let active_plane = camera_query
-                .single()
-                .ok()
-                .map(|(camera_transform, orbit)| {
-                    dimension_annotation_plane(&drawing_plane, Some(orbit), Some(camera_transform))
-                })
-                .unwrap_or_else(|| drawing_plane.clone());
-            let host_bounds = host_entity_projected_bounds(
-                tool_state.host_element_id,
-                &active_plane,
-                &host_bounds_query,
-            );
-            let snapshot = DimensionLineSnapshot {
-                element_id: allocator.next_id(),
+        DimensionLinePlacementStage::PlacingOffset {
+            start,
+            end,
+            host_element_id,
+            ..
+        } => {
+            let Some(offset_position) =
+                dimension_tool_offset_cursor_position(&cursor_world_pos, &snap_result)
+            else {
+                return;
+            };
+            commit_dimension_line(
                 start,
                 end,
-                line_point: resolved_dimension_line_point(
-                    start,
-                    end,
-                    cursor_position,
-                    &active_plane,
-                    host_bounds,
-                ),
-                extension: default_dimension_extension(start, end),
-                visible: true,
-                label: None,
-                display_unit: None,
-                precision: None,
-            };
-            create_entity.write(CreateEntityCommand {
-                snapshot: snapshot.into(),
-            });
-            tool_state.start = None;
-            tool_state.end = None;
-            tool_state.host_element_id = None;
+                offset_position,
+                host_element_id,
+                &allocator,
+                &drawing_plane,
+                &camera_query,
+                &host_bounds_query,
+                &mut create_entity,
+            );
+            tool_state.stage = DimensionLinePlacementStage::AwaitingStart;
             next_active_tool.set(ActiveTool::PlaceDimensionLine);
             status_bar_data.hint =
-                "Click a start point, then click an end point, then click to place the offset"
+                "Click a start anchor, then click an end anchor and drag out the dimension line"
                     .to_string();
         }
     }
+}
+
+fn commit_dimension_line(
+    start: Vec3,
+    end: Vec3,
+    offset_position: Vec3,
+    host_element_id: Option<ElementId>,
+    allocator: &ElementIdAllocator,
+    drawing_plane: &DrawingPlane,
+    camera_query: &Query<(&GlobalTransform, &OrbitCamera), With<Camera3d>>,
+    host_bounds_query: &Query<(
+        &ElementId,
+        Option<&bevy::camera::primitives::Aabb>,
+        Option<&GlobalTransform>,
+    )>,
+    create_entity: &mut MessageWriter<CreateEntityCommand>,
+) {
+    let active_plane = camera_query
+        .single()
+        .ok()
+        .map(|(camera_transform, orbit)| {
+            dimension_annotation_plane(drawing_plane, Some(orbit), Some(camera_transform))
+        })
+        .unwrap_or_else(|| drawing_plane.clone());
+    let host_bounds =
+        host_entity_projected_bounds(host_element_id, &active_plane, host_bounds_query);
+    let snapshot = DimensionLineSnapshot {
+        element_id: allocator.next_id(),
+        start,
+        end,
+        line_point: resolved_dimension_line_point(
+            start,
+            end,
+            offset_position,
+            &active_plane,
+            host_bounds,
+        ),
+        extension: default_dimension_extension(start, end),
+        visible: true,
+        label: None,
+        display_unit: None,
+        precision: None,
+    };
+    create_entity.write(CreateEntityCommand {
+        snapshot: snapshot.into(),
+    });
 }
 
 fn draw_dimension_line_tool_preview(
@@ -895,15 +1015,16 @@ fn draw_dimension_line_tool_preview(
     let Some(tool_state) = tool_state else {
         return;
     };
-    let Some(cursor_position) = dimension_tool_cursor_position(&cursor_world_pos, &snap_result)
-    else {
-        return;
-    };
     let Ok(ctx_ref) = contexts.ctx_mut() else {
         return;
     };
     let ctx = ctx_ref.clone();
     let Ok((camera, camera_transform, orbit)) = camera_query.single() else {
+        return;
+    };
+    let Some(cursor_position) =
+        dimension_tool_preview_cursor_position(&tool_state, &cursor_world_pos, &snap_result)
+    else {
         return;
     };
     let Some(preview_node) = preview_dimension_line_node(
@@ -1028,6 +1149,7 @@ fn deserialize_dimension_annotations(value: &Value) -> Option<Vec<DimensionLineS
 }
 
 fn apply_dimension_annotations_to_world(world: &mut World, snapshots: &[DimensionLineSnapshot]) {
+    ensure_dimension_layer(world);
     let mut existing_query = world.query::<(Entity, &ElementId, &DimensionLineNode)>();
     let mut existing = existing_query
         .iter(world)
@@ -1049,13 +1171,26 @@ fn apply_dimension_annotations_to_world(world: &mut World, snapshots: &[Dimensio
             if existing_node != node {
                 world.entity_mut(entity).insert(node);
             }
+            world
+                .entity_mut(entity)
+                .insert(LayerAssignment::new(DIMENSION_LAYER_NAME));
         } else {
-            world.spawn((snapshot.element_id, node));
+            world.spawn((
+                snapshot.element_id,
+                node,
+                LayerAssignment::new(DIMENSION_LAYER_NAME),
+            ));
         }
     }
 
     for (_, (entity, _)) in existing {
         let _ = world.despawn(entity);
+    }
+}
+
+fn ensure_dimension_layer(world: &mut World) {
+    if let Some(mut registry) = world.get_resource_mut::<LayerRegistry>() {
+        registry.ensure_layer(DIMENSION_LAYER_NAME);
     }
 }
 
@@ -1091,7 +1226,7 @@ impl Plugin for DimensionLinePlugin {
                     default_shortcut: Some("D".to_string()),
                     icon: Some("icon.dimension".to_string()),
                     hint: Some(
-                        "Click a start point, click an end point, then click to place the offset dimension line."
+                        "Click a start anchor, then click an end anchor and drag perpendicular to place the dimension line."
                             .to_string(),
                     ),
                     requires_selection: false,
@@ -1153,6 +1288,7 @@ impl Plugin for DimensionLinePlugin {
                     draw_dimension_line_overlay,
                     draw_dimension_line_tool_preview,
                 )
+                    .in_set(InputPhase::ToolInput)
                     .after(SnapSystems::Resolve)
                     .run_if(in_state(ActiveTool::PlaceDimensionLine)),
             )
@@ -1923,7 +2059,7 @@ fn paint_dimension_primitive(
     }
 }
 
-fn dimension_tool_cursor_position(
+fn dimension_tool_anchor_position(
     cursor_world_pos: &CursorWorldPos,
     snap_result: &SnapResult,
 ) -> Option<Vec3> {
@@ -1931,6 +2067,33 @@ fn dimension_tool_cursor_position(
         .position
         .or(cursor_world_pos.snapped)
         .or(cursor_world_pos.raw)
+}
+
+fn dimension_tool_offset_cursor_position(
+    cursor_world_pos: &CursorWorldPos,
+    snap_result: &SnapResult,
+) -> Option<Vec3> {
+    snap_result
+        .raw_position
+        .or(cursor_world_pos.raw)
+        .or(cursor_world_pos.snapped)
+        .or(snap_result.position)
+}
+
+fn dimension_tool_preview_cursor_position(
+    tool_state: &DimensionLineToolState,
+    cursor_world_pos: &CursorWorldPos,
+    snap_result: &SnapResult,
+) -> Option<Vec3> {
+    match tool_state.stage {
+        DimensionLinePlacementStage::AwaitingStart
+        | DimensionLinePlacementStage::AwaitingEnd { .. } => {
+            dimension_tool_anchor_position(cursor_world_pos, snap_result)
+        }
+        DimensionLinePlacementStage::PlacingOffset { .. } => {
+            dimension_tool_offset_cursor_position(cursor_world_pos, snap_result)
+        }
+    }
 }
 
 fn preview_dimension_line_node(
@@ -1945,10 +2108,10 @@ fn preview_dimension_line_node(
         Option<&GlobalTransform>,
     )>,
 ) -> Option<DimensionLineNode> {
-    let start = tool_state.start?;
     let active_plane = dimension_annotation_plane(drawing_plane, orbit, Some(camera_transform));
-    match tool_state.end {
-        None => {
+    match tool_state.stage {
+        DimensionLinePlacementStage::AwaitingStart => None,
+        DimensionLinePlacementStage::AwaitingEnd { start, .. } => {
             if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
                 return None;
             }
@@ -1964,12 +2127,14 @@ fn preview_dimension_line_node(
                 precision: None,
             })
         }
-        Some(end) => {
-            let host_bounds = host_entity_projected_bounds(
-                tool_state.host_element_id,
-                &active_plane,
-                host_bounds_query,
-            );
+        DimensionLinePlacementStage::PlacingOffset {
+            start,
+            end,
+            host_element_id,
+            ..
+        } => {
+            let host_bounds =
+                host_entity_projected_bounds(host_element_id, &active_plane, host_bounds_query);
             Some(DimensionLineNode {
                 start,
                 end,
@@ -2100,6 +2265,52 @@ mod tests {
     }
 
     #[test]
+    fn resolved_dimension_line_point_projects_drag_perpendicular_to_baseline() {
+        let plane = DrawingPlane::ground();
+        let start = Vec3::ZERO;
+        let end = Vec3::new(2.0, 0.0, 0.0);
+        let requested = Vec3::new(1.7, 0.0, -0.5);
+
+        let resolved = resolved_dimension_line_point(start, end, requested, &plane, None);
+        let offset = resolved - (start + end) * 0.5;
+
+        assert!(
+            offset.dot((end - start).normalize()).abs() < 1e-5,
+            "offset should be perpendicular to baseline: {offset:?}"
+        );
+        assert!((resolved.z + 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dimension_offset_preview_uses_raw_cursor_instead_of_snapped_anchor() {
+        let tool_state = DimensionLineToolState {
+            stage: DimensionLinePlacementStage::PlacingOffset {
+                start: Vec3::ZERO,
+                end: Vec3::X,
+                host_element_id: None,
+                drag_origin: Some(Vec3::X),
+                dragging: true,
+            },
+        };
+        let cursor_world_pos = CursorWorldPos {
+            raw: Some(Vec3::new(0.5, 0.0, -0.8)),
+            snapped: Some(Vec3::new(10.0, 0.0, 10.0)),
+            hovered_element_id: None,
+        };
+        let snap_result = SnapResult {
+            raw_position: Some(Vec3::new(0.5, 0.0, -0.8)),
+            position: Some(Vec3::new(10.0, 0.0, 10.0)),
+            target: Some(Vec3::new(10.0, 0.0, 10.0)),
+            kind: SnapKind::Endpoint,
+        };
+
+        assert_eq!(
+            dimension_tool_preview_cursor_position(&tool_state, &cursor_world_pos, &snap_result),
+            Some(Vec3::new(0.5, 0.0, -0.8))
+        );
+    }
+
+    #[test]
     fn dimension_annotations_restore_from_document_metadata() {
         let snapshot = DimensionLineSnapshot {
             element_id: ElementId(42),
@@ -2121,12 +2332,13 @@ mod tests {
             .insert(DIMENSION_ANNOTATIONS_KEY.to_string(), serialized);
         app.insert_resource(doc_props)
             .init_resource::<DimensionAnnotationSyncState>()
+            .init_resource::<LayerRegistry>()
             .add_systems(Update, sync_dimension_annotations);
 
         app.update();
 
         let world = app.world_mut();
-        let mut query = world.query::<(&ElementId, &DimensionLineNode)>();
+        let mut query = world.query::<(&ElementId, &DimensionLineNode, &LayerAssignment)>();
         let restored = query
             .iter(world)
             .next()
@@ -2135,6 +2347,41 @@ mod tests {
         assert_eq!(restored.1.label.as_deref(), Some("Width"));
         assert_eq!(restored.1.display_unit, Some(DisplayUnit::Centimetres));
         assert_eq!(restored.1.precision, Some(1));
+        assert_eq!(restored.2.layer, DIMENSION_LAYER_NAME);
+        assert!(world
+            .resource::<LayerRegistry>()
+            .layers
+            .contains_key(DIMENSION_LAYER_NAME));
+    }
+
+    #[test]
+    fn dimension_snapshot_apply_assigns_dimensions_layer() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        let snapshot = DimensionLineSnapshot {
+            element_id: ElementId(61),
+            start: Vec3::ZERO,
+            end: Vec3::new(2.0, 0.0, 0.0),
+            line_point: Vec3::new(1.0, 0.0, -0.5),
+            extension: 0.24,
+            visible: true,
+            label: None,
+            display_unit: None,
+            precision: None,
+        };
+
+        snapshot.apply_to(&mut world);
+
+        let mut query = world.query::<(&ElementId, &LayerAssignment)>();
+        let (_, assignment) = query
+            .iter(&world)
+            .find(|(element_id, _)| **element_id == ElementId(61))
+            .expect("dimension entity should exist");
+        assert_eq!(assignment.layer, DIMENSION_LAYER_NAME);
+        assert!(world
+            .resource::<LayerRegistry>()
+            .layers
+            .contains_key(DIMENSION_LAYER_NAME));
     }
 
     #[test]
