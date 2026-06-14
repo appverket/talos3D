@@ -249,18 +249,17 @@ pub fn start_transform_mode_with_options(
         .pivot_override
         .or_else(|| world.resource::<PivotPoint>().position)
         .or_else(|| selection_center(&initial_snapshots));
-    let Some(initial_cursor) = options
-        .initial_cursor
-        .or_else(|| {
-            (mode == TransformMode::Rotating)
-                .then(|| {
-                    start_pivot
-                        .and_then(|center| rotation_cursor_on_plane(world, center, options.axis))
-                })
-                .flatten()
+    let rotation_plane_cursor = (mode == TransformMode::Rotating)
+        .then(|| {
+            start_pivot.and_then(|center| rotation_cursor_on_plane(world, center, options.axis))
         })
-        .or_else(|| current_transform_cursor(world))
-    else {
+        .flatten();
+    let Some(initial_cursor) = initial_transform_cursor_for_mode(
+        mode,
+        options.initial_cursor,
+        rotation_plane_cursor,
+        current_transform_cursor(world),
+    ) else {
         return Err("Cursor is not over the modeling viewport".to_string());
     };
 
@@ -278,6 +277,25 @@ pub fn start_transform_mode_with_options(
     *world.resource_mut::<InputOwnership>() = InputOwnership::Modal(ModalKind::Transform);
 
     Ok(())
+}
+
+fn initial_transform_cursor_for_mode(
+    mode: TransformMode,
+    explicit_cursor: Option<Vec3>,
+    rotation_plane_cursor: Option<Vec3>,
+    fallback_cursor: Option<Vec3>,
+) -> Option<Vec3> {
+    match mode {
+        TransformMode::Rotating => {
+            // Rotation is defined by the cursor ray projected onto the active
+            // plane through the pivot. Widget handles are presentation, so an
+            // explicit handle cursor must not override that semantic cursor.
+            rotation_plane_cursor
+                .or(explicit_cursor)
+                .or(fallback_cursor)
+        }
+        _ => explicit_cursor.or(fallback_cursor),
+    }
 }
 
 fn activate_pending_transform(world: &mut World) {
@@ -2241,6 +2259,50 @@ mod tests {
         assert!(
             old_delta.abs() > 0.5,
             "the old ground-plane initial cursor would jump immediately in oblique view"
+        );
+    }
+
+    #[test]
+    fn rotation_start_prefers_plane_cursor_over_explicit_widget_cursor() {
+        let center = Vec3::new(0.0, 10.0, 0.0);
+        let current_on_plane = Vec3::new(2.0, 10.0, 0.0);
+        let explicit_widget_cursor = Vec3::new(0.0, 0.0, 2.0);
+        let fallback_cursor = Vec3::new(-3.0, 0.0, 4.0);
+
+        let chosen = initial_transform_cursor_for_mode(
+            TransformMode::Rotating,
+            Some(explicit_widget_cursor),
+            Some(current_on_plane),
+            Some(fallback_cursor),
+        )
+        .expect("rotation start cursor");
+
+        assert!(
+            chosen.abs_diff_eq(current_on_plane, 1e-6),
+            "rotation startup must use the shared pivot-plane cursor, not a presentation handle cursor"
+        );
+
+        let (start_2d, current_2d) = rotation_plane_project(
+            chosen - center,
+            current_on_plane - center,
+            AxisConstraint::None,
+        );
+        let fixed_delta = current_2d.y.atan2(current_2d.x) - start_2d.y.atan2(start_2d.x);
+        assert!(
+            fixed_delta.abs() < 0.001,
+            "first drag frame should not rotate when the cursor has not moved"
+        );
+
+        let (old_start_2d, same_current_2d) = rotation_plane_project(
+            explicit_widget_cursor - center,
+            current_on_plane - center,
+            AxisConstraint::None,
+        );
+        let stale_explicit_delta =
+            same_current_2d.y.atan2(same_current_2d.x) - old_start_2d.y.atan2(old_start_2d.x);
+        assert!(
+            stale_explicit_delta.abs() > 0.5,
+            "a stale explicit widget cursor would still cause the oblique first-frame jump"
         );
     }
 
