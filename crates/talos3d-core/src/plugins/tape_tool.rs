@@ -217,9 +217,7 @@ enum TapeMeasureMode {
 struct TapeCameraContext {
     camera: Camera,
     camera_transform: GlobalTransform,
-    viewport_offset: Vec2,
     camera_position: Vec3,
-    camera_forward: Vec3,
 }
 
 #[derive(Debug, Clone)]
@@ -717,7 +715,19 @@ fn resolve_tape_hover(world: &mut World) -> Option<TapeHoverTarget> {
                 );
             }
 
-            add_bounds_edge_candidates(&mut best, cursor_screen, &camera_context, bounds);
+            let snap_segments = snapshot.0.snap_segments();
+            if snap_segments.is_empty() {
+                add_bounds_edge_candidates(&mut best, cursor_screen, &camera_context, bounds);
+            } else {
+                add_edge_segment_candidates(
+                    &mut best,
+                    cursor_screen,
+                    &camera_context,
+                    bounds,
+                    snap_segments.iter().copied(),
+                    2.0,
+                );
+            }
         }
     }
 
@@ -733,16 +743,10 @@ fn current_cursor_screen_position(world: &mut World) -> Option<Vec2> {
 fn current_camera_context(world: &mut World) -> Option<TapeCameraContext> {
     let mut camera_query = world.query_filtered::<(&Camera, &GlobalTransform), With<Camera3d>>();
     let (camera, camera_transform) = camera_query.iter(world).next()?;
-    let viewport_offset = camera
-        .logical_viewport_rect()
-        .map(|rect| rect.min)
-        .unwrap_or(Vec2::ZERO);
     Some(TapeCameraContext {
         camera: camera.clone(),
         camera_transform: *camera_transform,
-        viewport_offset,
         camera_position: camera_transform.translation(),
-        camera_forward: camera_transform.forward().as_vec3(),
     })
 }
 
@@ -781,9 +785,21 @@ fn add_bounds_edge_candidates(
     bounds: EntityBounds,
 ) {
     let corners = bounds.corners();
-    for (a_index, b_index) in TAPE_BOUND_EDGE_INDICES {
-        let start = corners[a_index];
-        let end = corners[b_index];
+    let segments = TAPE_BOUND_EDGE_INDICES
+        .into_iter()
+        .map(|(a_index, b_index)| (corners[a_index], corners[b_index]));
+    add_edge_segment_candidates(best, cursor_screen, camera_context, bounds, segments, 4.0);
+}
+
+fn add_edge_segment_candidates(
+    best: &mut Option<TapeHoverCandidate>,
+    cursor_screen: Vec2,
+    camera_context: &TapeCameraContext,
+    bounds: EntityBounds,
+    segments: impl IntoIterator<Item = (Vec3, Vec3)>,
+    screen_score_offset: f32,
+) {
+    for (start, end) in segments {
         let Some(screen_start) = project_world_to_screen(camera_context, start) else {
             continue;
         };
@@ -809,7 +825,7 @@ fn add_bounds_edge_candidates(
         replace_best(
             best,
             TapeHoverCandidate {
-                screen_score: distance + 4.0,
+                screen_score: distance + screen_score_offset,
                 depth,
                 target: TapeHoverTarget::Edge(TapeEdgeTarget {
                     start,
@@ -827,15 +843,14 @@ fn project_world_to_screen(camera_context: &TapeCameraContext, point: Vec3) -> O
         .camera
         .world_to_viewport(&camera_context.camera_transform, point)
         .ok()
-        .map(|position| position + camera_context.viewport_offset)
 }
 
 fn camera_depth(camera_context: &TapeCameraContext, point: Vec3) -> Option<f32> {
-    let depth = (point - camera_context.camera_position).dot(camera_context.camera_forward);
+    let depth = point.distance(camera_context.camera_position);
     depth
         .is_finite()
         .then_some(depth)
-        .filter(|depth| *depth >= 0.0)
+        .filter(|depth| *depth > f32::EPSILON)
 }
 
 fn screen_distance_to_segment(cursor: Vec2, start: Vec2, end: Vec2) -> Option<(f32, f32)> {
@@ -1101,5 +1116,17 @@ mod tests {
 
         assert!(hover_candidate_is_better(&closer_screen, &farther_screen));
         assert!(!hover_candidate_is_better(&farther_screen, &closer_screen));
+    }
+
+    #[test]
+    fn camera_depth_does_not_depend_on_signed_forward_convention() {
+        let context = TapeCameraContext {
+            camera: Camera::default(),
+            camera_transform: GlobalTransform::IDENTITY,
+            camera_position: Vec3::ZERO,
+        };
+
+        assert_eq!(camera_depth(&context, Vec3::Z), Some(1.0));
+        assert_eq!(camera_depth(&context, -Vec3::Z), Some(1.0));
     }
 }

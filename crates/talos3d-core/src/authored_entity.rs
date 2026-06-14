@@ -330,6 +330,9 @@ pub trait AuthoredEntity: Send + Sync + 'static {
     fn bounds(&self) -> Option<EntityBounds> {
         None
     }
+    fn snap_segments(&self) -> Vec<(Vec3, Vec3)> {
+        Vec::new()
+    }
     fn to_json(&self) -> Value;
     fn to_persisted_json(&self) -> Value {
         self.to_json()

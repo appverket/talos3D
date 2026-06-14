@@ -84,6 +84,11 @@ pub trait Primitive: Component + Clone + Send + Sync + 'static {
     /// Draw a wireframe outline via gizmos.
     fn draw_wireframe(&self, gizmos: &mut Gizmos, rotation: Quat, color: Color);
 
+    /// World-space line segments that match the primitive's visible wireframe.
+    fn wireframe_segments(&self, _rotation: Quat) -> Vec<(Vec3, Vec3)> {
+        Vec::new()
+    }
+
     /// Number of line segments the wireframe draws (for line-count budgets).
     fn wireframe_line_count(&self) -> usize;
 
