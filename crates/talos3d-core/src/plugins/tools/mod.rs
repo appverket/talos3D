@@ -86,6 +86,7 @@ impl Plugin for ToolPlugin {
 pub enum ActiveTool {
     #[default]
     Select,
+    Tape,
     PlaceDimensionLine,
     PlaceGuideLine,
     PlaceWall,

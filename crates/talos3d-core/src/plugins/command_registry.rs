@@ -38,6 +38,7 @@ impl Plugin for CommandRegistryPlugin {
 pub enum CommandCategory {
     File,
     Create,
+    Tools,
     Edit,
     View,
     Custom(String),
@@ -48,6 +49,7 @@ impl CommandCategory {
         match self {
             Self::File => "File",
             Self::Create => "Create",
+            Self::Tools => "Tools",
             Self::Edit => "Edit",
             Self::View => "View",
             Self::Custom(label) => label.as_str(),

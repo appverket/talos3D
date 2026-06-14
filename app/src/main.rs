@@ -53,6 +53,7 @@ use talos3d_core::plugins::{
     shading::ShadingPlugin,
     snap::SnapPlugin,
     storage::{LocalFileBackend, Storage},
+    tape_tool::TapeToolPlugin,
     toolbar::ToolbarPlugin,
     tools::ToolPlugin,
     transform::TransformPlugin,
@@ -154,6 +155,7 @@ fn main() {
         .add_plugins(ToolbarPlugin)
         .add_plugins(PalettePlugin)
         .add_plugins(ToolPlugin)
+        .add_plugins(TapeToolPlugin)
         .add_systems(Startup, init_document_properties)
         .add_systems(Update, exit_on_close_request);
 

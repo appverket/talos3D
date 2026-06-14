@@ -77,6 +77,7 @@ pub mod shading;
 pub mod snap;
 pub mod storage;
 pub mod support_graph;
+pub mod tape_tool;
 pub mod toolbar;
 pub mod tools;
 pub mod transform;
