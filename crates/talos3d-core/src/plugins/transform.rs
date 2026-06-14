@@ -111,6 +111,7 @@ impl Plugin for TransformPlugin {
 #[derive(Resource, Default, Clone)]
 pub struct ActiveTransformPreview {
     pub snapshots: Vec<BoxedEntity>,
+    pub live_snapshot_application: bool,
 }
 
 pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEntity>);
@@ -403,7 +404,12 @@ fn update_transform_preview(world: &mut World) {
         return;
     };
 
-    world.resource_mut::<ActiveTransformPreview>().snapshots = preview.after.clone();
+    let live_snapshot_application = preview_requires_snapshot_application(&preview.after);
+    {
+        let mut active_preview = world.resource_mut::<ActiveTransformPreview>();
+        active_preview.snapshots = preview.after.clone();
+        active_preview.live_snapshot_application = live_snapshot_application;
+    }
 
     let push_pull_face = world.resource::<PushPullContext>().active_face.clone();
     let is_push_pull = push_pull_face.is_some();
@@ -424,6 +430,18 @@ fn update_transform_preview(world: &mut World) {
         }
         if let Some(pp) = push_pull_face {
             sync_feature_push_pull_preview(world, &pp, preview.display_value.unwrap_or(0.0));
+        }
+        return;
+    }
+
+    if live_snapshot_application {
+        restore_preview_transforms(world);
+        apply_live_snapshot_preview(world, &preview.after);
+        #[cfg(feature = "perf-stats")]
+        {
+            let elapsed = start.elapsed();
+            let mut perf_stats = world.resource_mut::<PerfStats>();
+            add_transform_preview_time(&mut perf_stats, elapsed);
         }
         return;
     }
@@ -458,13 +476,10 @@ fn update_transform_preview(world: &mut World) {
             }
         }
 
-        // Members that can't be represented by a rigid Transform (preview_transform
-        // == None) — e.g. terrain-conforming foundations — are previewed by applying
-        // their moved/rotated snapshot live, so their geometry rebuilds at the new
-        // pose each frame. For a conforming solid this re-drapes the underside onto
-        // the terrain under the previewed footprint (its rebuild is O(footprint) with
-        // O(1) height-field lookups, cheap enough per frame). Restored from the
-        // initial snapshot on confirm/cancel like the push/pull live preview.
+        // Members that can't be represented by a rigid Transform are handled by
+        // `live_snapshot_application` above. Keeping this path transform-only is
+        // important: a selected semantic aggregate must not be split between
+        // transient `Transform` previews and authored snapshot mutations.
         let live_preview: Vec<BoxedEntity> = world
             .resource::<TransformState>()
             .initial_snapshots
@@ -483,6 +498,26 @@ fn update_transform_preview(world: &mut World) {
         let elapsed = start.elapsed();
         let mut perf_stats = world.resource_mut::<PerfStats>();
         add_transform_preview_time(&mut perf_stats, elapsed);
+    }
+}
+
+fn preview_requires_snapshot_application(after: &[BoxedEntity]) -> bool {
+    after
+        .iter()
+        .any(|snapshot| snapshot.type_name() != "group" && snapshot.preview_transform().is_none())
+}
+
+fn apply_live_snapshot_preview(world: &mut World, after: &[BoxedEntity]) {
+    let before_by_id = world
+        .resource::<TransformState>()
+        .initial_snapshots
+        .iter()
+        .map(|(_, snapshot)| (snapshot.element_id(), snapshot.clone()))
+        .collect::<HashMap<_, _>>();
+
+    for snapshot in after {
+        let previous = before_by_id.get(&snapshot.element_id());
+        snapshot.apply_with_previous(world, previous);
     }
 }
 
@@ -615,11 +650,16 @@ fn confirm_transform(world: &mut World) {
 /// from a clean base, restore rigid Transform previews, and clear all transform
 /// session state.
 fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
+    let live_snapshot_application = world
+        .resource::<ActiveTransformPreview>()
+        .live_snapshot_application;
     let originals: Vec<_> = world
         .resource::<TransformState>()
         .initial_snapshots
         .iter()
-        .filter(|(_, s)| was_push_pull || s.preview_transform().is_none())
+        .filter(|(_, s)| {
+            was_push_pull || live_snapshot_application || s.preview_transform().is_none()
+        })
         .map(|(_, s)| s.clone())
         .collect();
     for snapshot in &originals {
@@ -634,6 +674,9 @@ fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
         .resource_mut::<ActiveTransformPreview>()
         .snapshots
         .clear();
+    world
+        .resource_mut::<ActiveTransformPreview>()
+        .live_snapshot_application = false;
     world.resource_mut::<TransformState>().clear();
     world.resource_mut::<PushPullContext>().active_face = None;
     world.resource_mut::<StatusBarData>().hint.clear();
@@ -2059,6 +2102,9 @@ mod tests {
         );
     }
 
+    #[derive(Resource, Default)]
+    struct AppliedSnapshotIds(Vec<ElementId>);
+
     #[derive(Clone)]
     struct TestPreviewSnapshot {
         element_id: ElementId,
@@ -2117,7 +2163,11 @@ mod tests {
             Value::Null
         }
 
-        fn apply_to(&self, _world: &mut World) {}
+        fn apply_to(&self, world: &mut World) {
+            if let Some(mut applied) = world.get_resource_mut::<AppliedSnapshotIds>() {
+                applied.0.push(self.element_id);
+            }
+        }
 
         fn remove_from(&self, _world: &mut World) {}
 
@@ -2153,6 +2203,98 @@ mod tests {
 
     impl From<TestPreviewSnapshot> for BoxedEntity {
         fn from(snapshot: TestPreviewSnapshot) -> Self {
+            BoxedEntity(Box::new(snapshot))
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestRigidSnapshot {
+        element_id: ElementId,
+    }
+
+    impl AuthoredEntity for TestRigidSnapshot {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn type_name(&self) -> &'static str {
+            "test_rigid"
+        }
+
+        fn element_id(&self) -> ElementId {
+            self.element_id
+        }
+
+        fn label(&self) -> String {
+            "Test Rigid".to_string()
+        }
+
+        fn center(&self) -> Vec3 {
+            Vec3::ZERO
+        }
+
+        fn translate_by(&self, _delta: Vec3) -> BoxedEntity {
+            self.clone().into()
+        }
+
+        fn rotate_by(&self, _rotation: Quat) -> BoxedEntity {
+            self.clone().into()
+        }
+
+        fn scale_by(&self, _factor: Vec3, _center: Vec3) -> BoxedEntity {
+            self.clone().into()
+        }
+
+        fn property_fields(&self) -> Vec<PropertyFieldDef> {
+            Vec::new()
+        }
+
+        fn set_property_json(
+            &self,
+            _property_name: &str,
+            _value: &Value,
+        ) -> Result<BoxedEntity, String> {
+            Ok(self.clone().into())
+        }
+
+        fn handles(&self) -> Vec<HandleInfo> {
+            Vec::new()
+        }
+
+        fn to_json(&self) -> Value {
+            Value::Null
+        }
+
+        fn apply_to(&self, world: &mut World) {
+            world
+                .resource_mut::<AppliedSnapshotIds>()
+                .0
+                .push(self.element_id);
+        }
+
+        fn remove_from(&self, _world: &mut World) {}
+
+        fn preview_transform(&self) -> Option<Transform> {
+            Some(Transform::IDENTITY)
+        }
+
+        fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {}
+
+        fn box_clone(&self) -> BoxedEntity {
+            self.clone().into()
+        }
+
+        fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .map(|snapshot| snapshot.element_id == self.element_id)
+                .unwrap_or(false)
+        }
+    }
+
+    impl From<TestRigidSnapshot> for BoxedEntity {
+        fn from(snapshot: TestRigidSnapshot) -> Self {
             BoxedEntity(Box::new(snapshot))
         }
     }
@@ -2373,6 +2515,73 @@ mod tests {
                 .expect("member snapshot should provide a center");
 
         assert_vec3_near(center, Vec3::ZERO);
+    }
+
+    #[test]
+    fn non_rigid_preview_member_forces_single_snapshot_application_path() {
+        let rigid_before: BoxedEntity = TestRigidSnapshot {
+            element_id: ElementId(1),
+        }
+        .into();
+        let non_rigid_before: BoxedEntity = TestPreviewSnapshot {
+            element_id: ElementId(2),
+        }
+        .into();
+        let rigid_after: BoxedEntity = TestRigidSnapshot {
+            element_id: ElementId(1),
+        }
+        .into();
+        let non_rigid_after: BoxedEntity = TestPreviewSnapshot {
+            element_id: ElementId(2),
+        }
+        .into();
+
+        let mut world = World::new();
+        world.insert_resource(AppliedSnapshotIds::default());
+        world.insert_resource(TransformState {
+            initial_snapshots: vec![
+                (Entity::PLACEHOLDER, rigid_before),
+                (Entity::PLACEHOLDER, non_rigid_before),
+            ],
+            ..Default::default()
+        });
+
+        let after = vec![rigid_after, non_rigid_after];
+        assert!(
+            preview_requires_snapshot_application(&after),
+            "a non-group authored snapshot without preview_transform must switch the whole preview to authored snapshot application"
+        );
+
+        apply_live_snapshot_preview(&mut world, &after);
+
+        let applied = &world.resource::<AppliedSnapshotIds>().0;
+        assert_eq!(
+            applied,
+            &vec![ElementId(1), ElementId(2)],
+            "rigid and non-rigid members must be applied through the same preview path"
+        );
+    }
+
+    #[test]
+    fn group_frame_snapshots_do_not_force_full_snapshot_preview_by_themselves() {
+        let group: BoxedEntity = GroupSnapshot {
+            element_id: ElementId(10),
+            name: "group".to_string(),
+            member_ids: vec![ElementId(1)],
+            frame: GroupFrame::identity(),
+            composite: None,
+            cached_bounds: None,
+        }
+        .into();
+        let rigid: BoxedEntity = TestRigidSnapshot {
+            element_id: ElementId(1),
+        }
+        .into();
+
+        assert!(
+            !preview_requires_snapshot_application(&[group, rigid]),
+            "invisible group frame snapshots may be applied live without forcing all visible members off the transform preview path"
+        );
     }
 
     #[test]
