@@ -25,6 +25,10 @@ workspace root `AGENTS.md` before this file.
 - The authored model is the source of truth.
 - Meshes, previews, highlights, and caches are derived artifacts.
 - User-facing edits must flow through commands and history.
+- Interactive tools, live previews, commands, and model-api edits must share one
+  semantic edit plan. Different presentation strategies are allowed, but they
+  must not reimplement domain behavior or maintain independent movement,
+  placement, hosting, dependency, or reseating rules.
 - Capabilities are the primary extension unit.
 - Domain packs should compose on top of the same public platform contracts.
 - AI tooling should prefer the MCP model API over ad hoc internal hooks.
@@ -46,6 +50,10 @@ workspace root `AGENTS.md` before this file.
   immediate-mode implementation for overlays, outlines, selection, snapping, or
   navigation feedback. If it cannot be made acceptably fast with Bevy-supported
   mechanisms, keep it offline/export-only or do not implement it.
+- Live interaction tests must cover the presentation path, not just the
+  eventual command/API result, whenever the presentation path has distinct
+  runtime machinery such as transient `Transform`s, preview entities, derived
+  meshes, or live authored-snapshot application.
 
 ## MCP Guidance
 
