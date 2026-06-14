@@ -35,25 +35,41 @@ definition DAGs and parameterized geometry paradigms such as MultiSurf.
 Interactive tools collect intent. Commands commit authored changes. History owns
 undo/redo. This keeps human interaction, automation, and AI invocation aligned.
 
-## 7. Interaction Affordances Come From Semantics
+## 7. Interaction And Commands Share One Edit Plan
+
+Interactive drag, live preview, command execution, and model-api editing are
+not separate behavior implementations. They must consume the same semantic edit
+plan: the same authored before/after snapshots, operation graph, or shared
+domain operation. Presentation may differ for performance or UX, but movement,
+placement, hosting, dependency propagation, terrain reseating, and aggregate
+invariants must be resolved once and reused.
+
+If a live interaction needs special presentation machinery such as transient
+`Transform`s, preview entities, derived meshes, or live authored-snapshot
+application, that machinery is only a rendering/presentation strategy. It must
+not introduce independent domain rules. Regression coverage must exercise the
+interactive presentation path whenever it can diverge from command/API
+execution.
+
+## 8. Interaction Affordances Come From Semantics
 
 Editing affordances should be derived from authored meaning, not guessed from
 rendered topology. The current work on Semantic Affordance Surfaces follows this
 rule.
 
-## 8. Evaluated Facts Are Distinct From Authored Intent
+## 9. Evaluated Facts Are Distinct From Authored Intent
 
 Volume, connectedness, manifold status, and bounding boxes are evaluated body
 facts. They should be exposed clearly, but they should not be confused with the
 authored definition itself.
 
-## 9. Architecture Is A Reference Extension, Not A Special Exception
+## 10. Architecture Is A Reference Extension, Not A Special Exception
 
 The architectural functionality in this repository demonstrates how a domain
 package composes on top of the platform. It should be understandable as a public
 example of the extension model.
 
-## 10. Public Documentation Must Track The Code
+## 11. Public Documentation Must Track The Code
 
 The public website, repository README, onboarding material, and architecture
 docs should all stay consistent with the current terminology and implementation
