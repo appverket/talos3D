@@ -242,7 +242,15 @@ impl Plugin for PlantingPlugin {
             },
             execute_unplant_on_surface,
         )
-        .add_systems(Update, reseat_planted_structures.after(HistorySet::Apply));
+        .add_systems(
+            Update,
+            (
+                rehydrate_planted_structure_components,
+                reseat_planted_structures,
+            )
+                .chain()
+                .after(HistorySet::Apply),
+        );
     }
 }
 
@@ -915,6 +923,16 @@ fn foundation_body_from_system(
         .map(|member| member.target)
 }
 
+fn conforming_foundation_surface_id(
+    world: &mut World,
+    foundation_id: ElementId,
+) -> Option<ElementId> {
+    let entity = find_entity_by_element_id(world, foundation_id)?;
+    world
+        .get::<ConformingSolid>(entity)
+        .map(|solid| solid.surface_id)
+}
+
 fn direct_foundation_body_from_structure(
     world: &mut World,
     structure: &SemanticAssembly,
@@ -1143,6 +1161,158 @@ fn find_foundation_structure_for_body(world: &mut World, body_id: ElementId) -> 
         .map(|(id, _)| *id)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PersistedPlantedStructure {
+    group_id: ElementId,
+    planted: PlantedStructure,
+}
+
+fn is_persisted_planted_structure(assembly: &SemanticAssembly) -> bool {
+    if assembly.assembly_type != "structure" {
+        return false;
+    }
+    if let Some(placement_kind) = assembly
+        .metadata
+        .get("placement_kind")
+        .and_then(Value::as_str)
+    {
+        return placement_kind == "planted_structure";
+    }
+    assembly.parameters.get("placement").and_then(Value::as_str) == Some("planted_on_surface")
+}
+
+fn id_from_value(value: &Value, key: &str) -> Option<ElementId> {
+    value.get(key).and_then(Value::as_u64).map(ElementId)
+}
+
+fn persisted_foundation_structure_id(
+    world: &mut World,
+    structure: &SemanticAssembly,
+    foundation_id: ElementId,
+) -> Option<ElementId> {
+    id_from_value(&structure.metadata, "foundation_structure_id")
+        .filter(|id| semantic_assembly_by_id(world, *id).is_some())
+        .or_else(|| foundation_system_from_structure(world, structure))
+        .or_else(|| find_foundation_structure_for_body(world, foundation_id))
+}
+
+fn persisted_conforming_foundation_id(
+    world: &mut World,
+    structure: &SemanticAssembly,
+    foundation_structure_id: Option<ElementId>,
+) -> Option<ElementId> {
+    structure
+        .members
+        .iter()
+        .find(|member| {
+            member.role == "terrain_conforming_foundation"
+                && conforming_foundation_surface_id(world, member.target).is_some()
+        })
+        .map(|member| member.target)
+        .or_else(|| {
+            foundation_structure_id
+                .and_then(|foundation_structure_id| {
+                    foundation_body_from_system(world, foundation_structure_id)
+                })
+                .filter(|foundation_id| {
+                    conforming_foundation_surface_id(world, *foundation_id).is_some()
+                })
+        })
+}
+
+fn persisted_surface_id(
+    world: &mut World,
+    structure: &SemanticAssembly,
+    foundation_structure_id: Option<ElementId>,
+    foundation_id: ElementId,
+) -> Option<ElementId> {
+    id_from_value(&structure.parameters, "surface_id")
+        .or_else(|| {
+            foundation_structure_id
+                .and_then(|id| semantic_assembly_by_id(world, id))
+                .and_then(|assembly| id_from_value(&assembly.parameters, "surface_id"))
+        })
+        .or_else(|| conforming_foundation_surface_id(world, foundation_id))
+}
+
+fn persisted_base_offset_from_foundation_top(structure: &SemanticAssembly) -> f32 {
+    structure
+        .parameters
+        .get("base_offset_from_foundation_top")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32
+}
+
+fn persisted_planted_structures(world: &mut World) -> Vec<PersistedPlantedStructure> {
+    let structures = {
+        let mut query = world.query::<(&ElementId, &SemanticAssembly)>();
+        query
+            .iter(world)
+            .filter(|(_, assembly)| is_persisted_planted_structure(assembly))
+            .map(|(id, assembly)| (*id, assembly.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let mut planted = Vec::new();
+    for (structure_id, structure) in structures {
+        let Some(group_id) = movable_group_from_structure(world, &structure) else {
+            continue;
+        };
+        let foundation_structure_id = id_from_value(&structure.metadata, "foundation_structure_id")
+            .filter(|id| semantic_assembly_by_id(world, *id).is_some())
+            .or_else(|| foundation_system_from_structure(world, &structure));
+        let Some(foundation_id) =
+            persisted_conforming_foundation_id(world, &structure, foundation_structure_id)
+        else {
+            continue;
+        };
+        let foundation_structure_id =
+            persisted_foundation_structure_id(world, &structure, foundation_id);
+        let Some(surface_id) =
+            persisted_surface_id(world, &structure, foundation_structure_id, foundation_id)
+        else {
+            continue;
+        };
+        planted.push(PersistedPlantedStructure {
+            group_id,
+            planted: PlantedStructure {
+                structure_id,
+                foundation_structure_id,
+                foundation_id,
+                surface_id,
+                base_offset_from_foundation_top: persisted_base_offset_from_foundation_top(
+                    &structure,
+                ),
+            },
+        });
+    }
+    planted
+}
+
+fn same_planted_structure(left: PlantedStructure, right: PlantedStructure) -> bool {
+    left.structure_id == right.structure_id
+        && left.foundation_structure_id == right.foundation_structure_id
+        && left.foundation_id == right.foundation_id
+        && left.surface_id == right.surface_id
+        && (left.base_offset_from_foundation_top - right.base_offset_from_foundation_top).abs()
+            <= 0.001
+}
+
+fn rehydrate_planted_structure_components(world: &mut World) {
+    let planted = persisted_planted_structures(world);
+    for contract in planted {
+        let Some(group_entity) = find_entity_by_element_id(world, contract.group_id) else {
+            continue;
+        };
+        if !world
+            .get::<PlantedStructure>(group_entity)
+            .is_some_and(|current| same_planted_structure(*current, contract.planted))
+        {
+            world.entity_mut(group_entity).insert(contract.planted);
+        }
+    }
+}
+
 fn resolve_conforming_foundation_target(
     world: &mut World,
     target_id: ElementId,
@@ -1247,6 +1417,23 @@ fn mark_structure_demoted(world: &mut World, structure_id: ElementId, representa
     assembly.label = label;
     assembly.members = members;
     assembly.parameters = parameters;
+}
+
+fn mark_structure_released(world: &mut World, structure_id: ElementId) {
+    let Some(entity) = find_entity_by_element_id(world, structure_id) else {
+        return;
+    };
+    let Some(mut assembly) = world.get_mut::<SemanticAssembly>(entity) else {
+        return;
+    };
+    if let Some(parameters) = assembly.parameters.as_object_mut() {
+        parameters.insert("placement".to_string(), json!("released_from_surface"));
+    }
+    assembly.metadata = json!({
+        "kind": "structure",
+        "placement_kind": "released_planted_structure",
+        "previous_placement_kind": "planted_structure",
+    });
 }
 
 fn release_planted_links_for_foundation(
@@ -1558,6 +1745,12 @@ fn execute_release_planted_structure(
     let target_id = required_id(params, "target_id")?;
     let target_entity = find_entity_by_element_id(world, target_id)
         .ok_or_else(|| "target not found".to_string())?;
+    let structure_id = world
+        .get::<PlantedStructure>(target_entity)
+        .map(|planted| planted.structure_id);
+    if let Some(structure_id) = structure_id {
+        mark_structure_released(world, structure_id);
+    }
     world.entity_mut(target_entity).remove::<PlantedStructure>();
     world.entity_mut(target_entity).remove::<PlantedOnSurface>();
     Ok(CommandResult::empty())
@@ -2288,6 +2481,267 @@ mod tests {
             (group.frame.translation.y - moved_top).abs() < 0.05,
             "group frame should re-seat with the superstructure datum; got {}",
             group.frame.translation.y
+        );
+    }
+
+    #[test]
+    fn planted_structure_rehydrates_from_semantic_assembly_after_reload() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Reloaded planted cottage".to_string(),
+            member_ids: vec![ElementId(2)],
+            frame: GroupFrame::default(),
+            composite: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+        let initial_top =
+            foundation_top(&mut world, foundation_id, ElementId(10)).expect("initial top");
+
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        world.entity_mut(group_entity).remove::<PlantedStructure>();
+        world.entity_mut(group_entity).remove::<PlantedOnSurface>();
+        assert!(world.get::<PlantedStructure>(group_entity).is_none());
+
+        translate_target(&mut world, ElementId(1), Vec3::new(-2.0, 0.0, 0.0));
+        let moved_top =
+            foundation_top(&mut world, foundation_id, ElementId(10)).expect("moved top");
+        assert!(
+            moved_top < initial_top - 0.5,
+            "test move should drag foundation to lower terrain: initial {initial_top}, moved {moved_top}"
+        );
+
+        let box_entity = find_entity_by_element_id(&mut world, ElementId(2)).expect("box entity");
+        let before_reseat = world
+            .get::<BoxPrimitive>(box_entity)
+            .expect("moved box primitive");
+        assert!(
+            before_reseat.centre.y > moved_top + 1.0,
+            "without the runtime contract the superstructure should still be at the stale height"
+        );
+
+        rehydrate_planted_structure_components(&mut world);
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        let planted = world
+            .get::<PlantedStructure>(group_entity)
+            .expect("semantic planted contract should be rehydrated");
+        assert_eq!(planted.foundation_id, foundation_id);
+        assert_eq!(planted.surface_id, ElementId(10));
+
+        reseat_planted_structures(&mut world);
+        let box_entity = find_entity_by_element_id(&mut world, ElementId(2)).expect("box entity");
+        let primitive = world
+            .get::<BoxPrimitive>(box_entity)
+            .expect("reseated box primitive");
+        assert!(
+            (primitive.centre.y - (moved_top + 0.5)).abs() < 0.05,
+            "rehydrated contract should re-seat the superstructure to the moved foundation top; got {}",
+            primitive.centre.y
+        );
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        let group = world
+            .get::<GroupMembers>(group_entity)
+            .expect("planted group");
+        assert!(
+            (group.frame.translation.y - moved_top).abs() < 0.05,
+            "rehydrated contract should re-seat the group frame; got {}",
+            group.frame.translation.y
+        );
+    }
+
+    #[test]
+    fn planted_structure_rehydration_restores_live_preview_contract() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        PrimitiveSnapshot {
+            element_id: ElementId(4),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 1.25, 0.0),
+                half_extents: Vec3::new(1.1, 0.25, 1.1),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Reloaded preview cottage".to_string(),
+            member_ids: vec![ElementId(2), ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+        let initial_top =
+            foundation_top(&mut world, foundation_id, ElementId(10)).expect("initial top");
+
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        world.entity_mut(group_entity).remove::<PlantedStructure>();
+        world.entity_mut(group_entity).remove::<PlantedOnSurface>();
+        rehydrate_planted_structure_components(&mut world);
+
+        let group_before = capture_by_id(&world, ElementId(1)).expect("group snapshot");
+        let mut after =
+            translated_target_snapshots(&world, ElementId(1), Vec3::new(-2.0, 0.0, 0.0));
+        let state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: vec![(group_entity, group_before)],
+            ..Default::default()
+        };
+
+        adjust_planted_structure_transform_preview(&world, &state, &mut after);
+
+        let foundation = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == foundation_id)
+            .expect("foundation snapshot");
+        let moved_top =
+            preview_foundation_top(&world, foundation, ElementId(10)).expect("moved top");
+        assert!(
+            moved_top < initial_top - 0.5,
+            "test preview should drag foundation to lower terrain: initial {initial_top}, moved {moved_top}"
+        );
+
+        let member_set = [ElementId(2), ElementId(4)]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let bounds = preview_member_bounds(&after, &member_set).expect("member bounds");
+        assert!(
+            (bounds.min.y - moved_top).abs() < 0.05,
+            "rehydrated preview should keep the superstructure on the conforming foundation top"
+        );
+    }
+
+    #[test]
+    fn release_planted_structure_prevents_rehydration_from_stale_parameters() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Released planted cottage".to_string(),
+            member_ids: vec![ElementId(2)],
+            frame: GroupFrame::default(),
+            composite: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let structure_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("structure_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("structure_id");
+
+        execute_release_planted_structure(
+            &mut world,
+            &json!({
+                "target_id": 1,
+            }),
+        )
+        .expect("release planted structure");
+        rehydrate_planted_structure_components(&mut world);
+
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        assert!(
+            world.get::<PlantedStructure>(group_entity).is_none(),
+            "released structures should not be rehydrated from stale placement parameters"
+        );
+        let structure_entity =
+            find_entity_by_element_id(&mut world, structure_id).expect("structure entity");
+        let structure = world
+            .get::<SemanticAssembly>(structure_entity)
+            .expect("structure assembly");
+        assert_eq!(
+            structure.metadata["placement_kind"],
+            json!("released_planted_structure")
+        );
+        assert_eq!(
+            structure.parameters["placement"],
+            json!("released_from_surface")
         );
     }
 
