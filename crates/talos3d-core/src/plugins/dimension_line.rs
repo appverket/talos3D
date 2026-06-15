@@ -54,6 +54,8 @@ const DIMENSION_LINE_DEFAULT_OFFSET_FACTOR: f32 = 0.18;
 const DIMENSION_LINE_MIN_OFFSET: f32 = 0.001;
 const DIMENSION_LINE_OFFSET_DRAG_COMMIT_DISTANCE: f32 = 0.02;
 pub(crate) const DIMENSION_RENDER_PAPER_MM_PER_WORLD_M: f32 = 20.0;
+const DIMENSION_VIEWPORT_MIN_TEXT_PX: f32 = 13.0;
+const DIMENSION_VIEWPORT_MAX_TEXT_PX: f32 = 28.0;
 pub const DIMENSION_ANNOTATIONS_KEY: &str = "dimension_annotations";
 pub const DIMENSION_LAYER_NAME: &str = "Dimensions";
 
@@ -722,7 +724,7 @@ fn draw_dimension_line_overlay(
     visibility: Res<DimensionLineVisibility>,
     viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
     render_settings: Res<RenderSettings>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
     dimensions: Query<(
         &DimensionLineNode,
         Option<&crate::plugins::selection::Selected>,
@@ -735,7 +737,7 @@ fn draw_dimension_line_overlay(
         return;
     };
     let ctx = ctx_ref.clone();
-    let Ok((camera, camera_transform)) = camera_query.single() else {
+    let Some((camera, camera_transform)) = active_dimension_camera(camera_query.iter()) else {
         return;
     };
     let paper_style = drawing_annotation_paper_style(&render_settings);
@@ -1001,7 +1003,7 @@ fn draw_dimension_line_tool_preview(
     snap_result: Res<SnapResult>,
     tool_state: Option<Res<DimensionLineToolState>>,
     drawing_plane: Res<DrawingPlane>,
-    camera_query: Query<(&Camera, &GlobalTransform, Option<&OrbitCamera>), With<Camera3d>>,
+    camera_query: Query<(&Camera, &GlobalTransform, &OrbitCamera)>,
     host_bounds_query: Query<(
         &ElementId,
         Option<&bevy::camera::primitives::Aabb>,
@@ -1019,7 +1021,8 @@ fn draw_dimension_line_tool_preview(
         return;
     };
     let ctx = ctx_ref.clone();
-    let Ok((camera, camera_transform, orbit)) = camera_query.single() else {
+    let Some((camera, camera_transform, orbit)) = active_dimension_tool_camera(camera_query.iter())
+    else {
         return;
     };
     let Some(cursor_position) =
@@ -1031,7 +1034,7 @@ fn draw_dimension_line_tool_preview(
         &tool_state,
         cursor_position,
         &drawing_plane,
-        orbit,
+        Some(orbit),
         camera_transform,
         &host_bounds_query,
     ) else {
@@ -1745,6 +1748,13 @@ fn scale_dimension_style_in_place(style: &mut DimensionStyle, factor: f32) {
     };
 }
 
+fn viewport_dimension_style_scale(display_unit: DisplayUnit, scale: f32) -> f32 {
+    let text_height = legacy_dimension_style(display_unit).text_height_mm;
+    let min_scale = DIMENSION_VIEWPORT_MIN_TEXT_PX / text_height;
+    let max_scale = DIMENSION_VIEWPORT_MAX_TEXT_PX / text_height;
+    scale.clamp(min_scale, max_scale)
+}
+
 fn project_dimension_line_primitives(
     node: &DimensionLineNode,
     doc_props: &DocumentProperties,
@@ -1773,7 +1783,10 @@ fn project_dimension_line_primitives(
     let p_tick_end_b = project(geometry.dimension_end + tick_world)?;
     let pixels_per_world_m =
         viewport_pixels_per_world_m(camera, camera_transform, snapshot.midpoint())?;
-    let units_per_paper_mm = pixels_per_world_m / DIMENSION_RENDER_PAPER_MM_PER_WORLD_M;
+    let units_per_paper_mm = viewport_dimension_style_scale(
+        snapshot.effective_display_unit(doc_props),
+        pixels_per_world_m / DIMENSION_RENDER_PAPER_MM_PER_WORLD_M,
+    );
     let line_midpoint = (p_dim_start + p_dim_end) * 0.5;
     let projected_segments = [
         (p_visible_start, p_visible_end),
@@ -1964,12 +1977,34 @@ fn viewport_pixels_per_world_m(
         .filter(|length| *length > 0.0)
 }
 
+fn active_dimension_camera<'a>(
+    mut cameras: impl Iterator<Item = (&'a Camera, &'a GlobalTransform)>,
+) -> Option<(&'a Camera, &'a GlobalTransform)> {
+    let first = cameras.next()?;
+    if first.0.is_active {
+        return Some(first);
+    }
+    cameras.find(|(camera, _)| camera.is_active).or(Some(first))
+}
+
+fn active_dimension_tool_camera<'a>(
+    mut cameras: impl Iterator<Item = (&'a Camera, &'a GlobalTransform, &'a OrbitCamera)>,
+) -> Option<(&'a Camera, &'a GlobalTransform, &'a OrbitCamera)> {
+    let first = cameras.next()?;
+    if first.0.is_active {
+        return Some(first);
+    }
+    cameras
+        .find(|(camera, _, _)| camera.is_active)
+        .or(Some(first))
+}
+
 fn dimension_overlay_color(selected: bool, paper_style: bool) -> egui::Color32 {
     match (paper_style, selected) {
         (true, true) => egui::Color32::from_rgb(32, 78, 173),
         (true, false) => egui::Color32::from_rgb(72, 72, 78),
         (false, true) => egui::Color32::from_rgb(106, 152, 255),
-        (false, false) => egui::Color32::from_rgb(190, 190, 198),
+        (false, false) => egui::Color32::from_rgb(238, 245, 252),
     }
 }
 
@@ -2050,6 +2085,23 @@ fn paint_dimension_primitive(
                 crate::plugins::drafting::TextAnchor::CenterBaseline
                 | crate::plugins::drafting::TextAnchor::Center => egui::Align2::CENTER_CENTER,
             };
+            let shadow_color = egui::Color32::from_black_alpha(190);
+            for offset in [
+                egui::vec2(-1.0, 0.0),
+                egui::vec2(1.0, 0.0),
+                egui::vec2(0.0, -1.0),
+                egui::vec2(0.0, 1.0),
+            ] {
+                painter.add(egui::Shape::Text(
+                    egui::epaint::TextShape::new(
+                        egui::pos2(anchor.x + offset.x, anchor.y + offset.y),
+                        galley.clone(),
+                        shadow_color,
+                    )
+                    .with_override_text_color(shadow_color)
+                    .with_angle_and_anchor(*rotation_rad, anchor_align),
+                ));
+            }
             painter.add(egui::Shape::Text(
                 egui::epaint::TextShape::new(egui::pos2(anchor.x, anchor.y), galley, text_color)
                     .with_override_text_color(text_color)
@@ -2307,6 +2359,51 @@ mod tests {
         assert_eq!(
             dimension_tool_preview_cursor_position(&tool_state, &cursor_world_pos, &snap_result),
             Some(Vec3::new(0.5, 0.0, -0.8))
+        );
+    }
+
+    #[test]
+    fn dimension_overlay_camera_selection_ignores_inactive_auxiliary_cameras() {
+        let inactive = Camera {
+            is_active: false,
+            ..default()
+        };
+        let active = Camera {
+            is_active: true,
+            ..default()
+        };
+        let inactive_transform = GlobalTransform::from_xyz(1.0, 0.0, 0.0);
+        let active_transform = GlobalTransform::from_xyz(2.0, 0.0, 0.0);
+
+        let (_, selected_transform) = active_dimension_camera(
+            vec![
+                (&inactive, &inactive_transform),
+                (&active, &active_transform),
+            ]
+            .into_iter(),
+        )
+        .expect("an active camera should be selected");
+
+        assert_eq!(selected_transform.translation(), Vec3::new(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn viewport_dimension_style_scale_keeps_labels_readable() {
+        let style = legacy_dimension_style(DisplayUnit::Metres);
+        let min_scale = DIMENSION_VIEWPORT_MIN_TEXT_PX / style.text_height_mm;
+        let max_scale = DIMENSION_VIEWPORT_MAX_TEXT_PX / style.text_height_mm;
+
+        assert_eq!(
+            viewport_dimension_style_scale(DisplayUnit::Metres, 0.1),
+            min_scale
+        );
+        assert_eq!(
+            viewport_dimension_style_scale(DisplayUnit::Metres, 10_000.0),
+            max_scale
+        );
+        assert_eq!(
+            viewport_dimension_style_scale(DisplayUnit::Metres, (min_scale + max_scale) * 0.5),
+            (min_scale + max_scale) * 0.5
         );
     }
 
