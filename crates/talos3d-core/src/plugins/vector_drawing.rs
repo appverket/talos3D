@@ -1872,11 +1872,7 @@ fn dimension_display_text(node: &DimensionLineNode, doc_props: &DocumentProperti
     let unit = node.display_unit.unwrap_or(doc_props.display_unit);
     let precision = node.precision.unwrap_or(doc_props.precision);
     let length = (node.end - node.start).length();
-    let value = unit.format_value(length, precision);
-    match node.label.as_deref() {
-        Some(label) if !label.is_empty() => format!("{label}: {value}"),
-        _ => value,
-    }
+    unit.format_value(length, precision)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -2063,5 +2059,22 @@ mod tests {
         };
         let text = dimension_display_text(&node, &doc_props);
         assert_eq!(text, "2.50m");
+    }
+
+    #[test]
+    fn dimension_display_text_ignores_annotation_label() {
+        use crate::plugins::units::DisplayUnit;
+        let node = DimensionLineNode {
+            start: Vec3::ZERO,
+            end: Vec3::new(7.2277, 0.0, 0.0),
+            line_point: Vec3::new(3.6, -0.5, 0.0),
+            extension: 0.15,
+            visible: true,
+            label: Some("Foundation length".to_string()),
+            display_unit: Some(DisplayUnit::Metres),
+            precision: Some(2),
+        };
+        let text = dimension_display_text(&node, &DocumentProperties::default());
+        assert_eq!(text, "7.23m");
     }
 }

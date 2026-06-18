@@ -36,6 +36,7 @@ const CONTOUR_OVERLAY_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 1.0);
 const VISIBLE_EDGE_OVERLAY_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 1.0);
 const EDGE_QUANTIZATION_SCALE: f32 = 10_000.0;
 const DEFAULT_BACKGROUND_RGB: [f32; 3] = [0.17, 0.18, 0.20];
+#[cfg(test)]
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 const PAPER_BACKGROUND_RGB: [f32; 3] = [1.0, 1.0, 1.0];
@@ -207,9 +208,15 @@ struct SurfaceMaterialOverride {
     xray_alpha: f32,
 }
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WireframeSurfaceVisibilityOverride {
+    pub(crate) original: Visibility,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SurfaceMaterialMode {
     PaperFill,
+    WireframeOnly,
     Xray,
 }
 
@@ -358,13 +365,14 @@ impl Plugin for RenderPipelinePlugin {
                 (
                     sync_render_settings,
                     sync_clear_color,
+                    sync_wireframe_surface_visibility.after(MeshGenerationSet::Generate),
                     sync_surface_display_materials,
                 ),
             )
             .add_systems(
                 Update,
                 (
-                    draw_model_edge_overlays.after(MeshGenerationSet::Generate),
+                    draw_model_edge_overlays.after(sync_wireframe_surface_visibility),
                     draw_section_fill_overlays.after(MeshGenerationSet::Generate),
                 ),
             );
@@ -650,6 +658,61 @@ fn sync_surface_display_materials(
     }
 }
 
+fn sync_wireframe_surface_visibility(
+    settings: Res<RenderSettings>,
+    mut commands: Commands,
+    mesh_query: Query<
+        (
+            Entity,
+            Option<&Visibility>,
+            Option<&WireframeSurfaceVisibilityOverride>,
+        ),
+        With<Mesh3d>,
+    >,
+) {
+    let wireframe_only =
+        active_surface_material_mode(&settings) == Some(SurfaceMaterialMode::WireframeOnly);
+    for (entity, visibility, override_state) in &mesh_query {
+        apply_wireframe_surface_visibility(
+            &mut commands,
+            entity,
+            wireframe_only,
+            visibility.copied(),
+            override_state.copied(),
+        );
+    }
+}
+
+fn apply_wireframe_surface_visibility(
+    commands: &mut Commands,
+    entity: Entity,
+    wireframe_only: bool,
+    visibility: Option<Visibility>,
+    override_state: Option<WireframeSurfaceVisibilityOverride>,
+) {
+    match (wireframe_only, visibility, override_state) {
+        (true, Some(Visibility::Hidden), Some(_)) => {}
+        (true, current, None) => {
+            commands.entity(entity).insert((
+                WireframeSurfaceVisibilityOverride {
+                    original: current.unwrap_or(Visibility::Inherited),
+                },
+                Visibility::Hidden,
+            ));
+        }
+        (true, _, Some(_)) => {
+            commands.entity(entity).insert(Visibility::Hidden);
+        }
+        (false, _, Some(state)) => {
+            commands
+                .entity(entity)
+                .insert(state.original)
+                .remove::<WireframeSurfaceVisibilityOverride>();
+        }
+        (false, _, None) => {}
+    }
+}
+
 fn surface_material_override_is_current(
     state: &SurfaceMaterialOverride,
     mode: SurfaceMaterialMode,
@@ -658,6 +721,7 @@ fn surface_material_override_is_current(
     state.mode == mode
         && match mode {
             SurfaceMaterialMode::PaperFill => true,
+            SurfaceMaterialMode::WireframeOnly => true,
             SurfaceMaterialMode::Xray => {
                 (state.xray_alpha - xray_alpha_for_mode(mode, settings)).abs() < f32::EPSILON
             }
@@ -667,6 +731,7 @@ fn surface_material_override_is_current(
 fn xray_alpha_for_mode(mode: SurfaceMaterialMode, settings: &RenderSettings) -> f32 {
     match mode {
         SurfaceMaterialMode::PaperFill => 1.0,
+        SurfaceMaterialMode::WireframeOnly => 0.0,
         SurfaceMaterialMode::Xray => settings.xray_surface_alpha.clamp(0.02, 0.95),
     }
 }
@@ -674,6 +739,8 @@ fn xray_alpha_for_mode(mode: SurfaceMaterialMode, settings: &RenderSettings) -> 
 fn active_surface_material_mode(settings: &RenderSettings) -> Option<SurfaceMaterialMode> {
     if settings.paper_fill_enabled {
         Some(SurfaceMaterialMode::PaperFill)
+    } else if settings.wireframe_overlay_enabled {
+        Some(SurfaceMaterialMode::WireframeOnly)
     } else if settings.xray_enabled {
         Some(SurfaceMaterialMode::Xray)
     } else {
@@ -688,6 +755,7 @@ fn display_override_material(
 ) -> StandardMaterial {
     match mode {
         SurfaceMaterialMode::PaperFill => paper_fill_material_from(source),
+        SurfaceMaterialMode::WireframeOnly => wireframe_only_material_from(source),
         SurfaceMaterialMode::Xray => xray_material_from(source, xray_alpha),
     }
 }
@@ -710,6 +778,16 @@ fn xray_material_from(source: &StandardMaterial, xray_alpha: f32) -> StandardMat
         .base_color
         .set_alpha(xray_alpha.clamp(0.02, 0.95));
     override_material.alpha_mode = AlphaMode::Blend;
+    override_material.cull_mode = None;
+    override_material
+}
+
+fn wireframe_only_material_from(source: &StandardMaterial) -> StandardMaterial {
+    let mut override_material = source.clone();
+    override_material.base_color = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    override_material.emissive = LinearRgba::BLACK;
+    override_material.unlit = true;
+    override_material.alpha_mode = AlphaMode::Mask(0.5);
     override_material.cull_mode = None;
     override_material
 }
@@ -807,13 +885,18 @@ fn draw_model_edge_overlays(
         &Mesh3d,
         &GlobalTransform,
         Option<&Visibility>,
+        Option<&WireframeSurfaceVisibilityOverride>,
     )>() else {
         return;
     };
 
     let mut subjects = Vec::new();
-    for (entity, _element_id, mesh_handle, mesh_transform, visibility) in query.iter(world) {
-        if visibility.is_some_and(|visibility| *visibility == Visibility::Hidden) {
+    for (entity, _element_id, mesh_handle, mesh_transform, visibility, wireframe_surface_hidden) in
+        query.iter(world)
+    {
+        if visibility.is_some_and(|visibility| *visibility == Visibility::Hidden)
+            && wireframe_surface_hidden.is_none()
+        {
             continue;
         }
         let Ok(entity_ref) = world.get_entity(entity) else {
@@ -835,13 +918,17 @@ fn draw_model_edge_overlays(
     }
 
     for subject in subjects {
-        if settings.wireframe_overlay_enabled {
+        if settings.wireframe_overlay_enabled || live_depth_tested_outline_active(&settings) {
             if let Some(factory) = registry.factory_for(subject.type_name) {
                 factory.draw_selection(
                     world,
                     subject.entity,
                     &mut gizmos,
-                    wireframe_overlay_color(&settings),
+                    if settings.wireframe_overlay_enabled {
+                        wireframe_overlay_color(&settings)
+                    } else {
+                        VISIBLE_EDGE_OVERLAY_COLOR
+                    },
                 );
             }
         }
@@ -862,14 +949,9 @@ fn draw_model_edge_overlays(
             );
         }
 
-        if live_depth_tested_outline_active(&settings) {
-            draw_depth_tested_feature_edges(
-                mesh,
-                &subject.mesh_transform,
-                &mut gizmos,
-                VISIBLE_EDGE_OVERLAY_COLOR,
-            );
-        }
+        // Live outline uses the fast authored linework path above. The older
+        // mesh feature-edge classifier remains for tests/offline use, but not
+        // as a per-frame viewport path.
     }
 }
 
@@ -956,17 +1038,7 @@ fn draw_mesh_contours(
     }
 }
 
-fn draw_depth_tested_feature_edges(
-    mesh: &Mesh,
-    mesh_transform: &GlobalTransform,
-    gizmos: &mut Gizmos,
-    color: Color,
-) {
-    for edge in collect_feature_edges(mesh, mesh_transform) {
-        gizmos.line(edge.start_world, edge.end_world, color);
-    }
-}
-
+#[cfg(test)]
 fn collect_feature_edges(mesh: &Mesh, mesh_transform: &GlobalTransform) -> Vec<FeatureEdgeState> {
     let Some(positions) = mesh_positions(mesh) else {
         return Vec::new();
@@ -1009,6 +1081,7 @@ fn collect_feature_edges(mesh: &Mesh, mesh_transform: &GlobalTransform) -> Vec<F
         .collect()
 }
 
+#[cfg(test)]
 fn register_feature_edge(
     edges: &mut HashMap<EdgeKey, FeatureEdgeState>,
     local_start: [f32; 3],
@@ -1166,6 +1239,7 @@ impl EdgeContourState {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 struct FeatureEdgeState {
     start_world: Vec3,
     end_world: Vec3,
@@ -1173,6 +1247,7 @@ struct FeatureEdgeState {
     total_faces: u8,
 }
 
+#[cfg(test)]
 impl FeatureEdgeState {
     fn is_visible_candidate(&self) -> bool {
         match self.total_faces {
@@ -1407,6 +1482,31 @@ mod tests {
     }
 
     #[test]
+    fn wireframe_overlay_uses_line_only_surface_mode() {
+        let settings = RenderSettings {
+            wireframe_overlay_enabled: true,
+            xray_enabled: false,
+            paper_fill_enabled: false,
+            ..RenderSettings::default()
+        };
+
+        assert_eq!(
+            active_surface_material_mode(&settings),
+            Some(SurfaceMaterialMode::WireframeOnly)
+        );
+
+        let source = StandardMaterial {
+            base_color: Color::srgb(0.8, 0.2, 0.1),
+            alpha_mode: AlphaMode::Opaque,
+            ..Default::default()
+        };
+        let material = display_override_material(&source, SurfaceMaterialMode::WireframeOnly, 0.0);
+
+        assert_eq!(material.alpha_mode, AlphaMode::Mask(0.5));
+        assert_eq!(material.base_color.to_srgba().alpha, 0.0);
+    }
+
+    #[test]
     fn paper_preset_command_restores_previous_render_state() {
         let previous = RenderSettings {
             grid_enabled: false,
@@ -1485,5 +1585,9 @@ mod tests {
         let edges = collect_feature_edges(&mesh, &GlobalTransform::IDENTITY);
 
         assert_eq!(edges.len(), 12);
+        assert!(edges.iter().any(|edge| {
+            edge.start_world == Vec3::new(-1.0, -1.0, -1.0)
+                && edge.end_world == Vec3::new(1.0, -1.0, -1.0)
+        }));
     }
 }

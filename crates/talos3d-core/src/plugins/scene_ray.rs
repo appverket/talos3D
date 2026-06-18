@@ -8,7 +8,11 @@ use bevy::{prelude::*, window::PrimaryWindow};
 
 use crate::capability_registry::{CapabilityRegistry, FaceHitCandidate, HitCandidate};
 use crate::plugins::camera::OrbitCamera;
+use crate::plugins::commands::find_entity_by_element_id_readonly;
 use crate::plugins::cursor::cursor_window_position;
+use crate::plugins::layers::entity_on_visible_layer;
+use crate::plugins::modeling::occurrence::GeneratedOccurrencePart;
+use crate::plugins::render_pipeline::WireframeSurfaceVisibilityOverride;
 
 /// Build a camera ray from the current cursor position.
 ///
@@ -35,12 +39,34 @@ pub fn ray_cast_nearest_entity(world: &World, ray: Ray3d) -> Option<HitCandidate
     let mut best: Option<HitCandidate> = None;
     for factory in &factories {
         if let Some(hit) = factory.hit_test(world, ray) {
+            if !entity_is_pick_visible(world, hit.entity) {
+                continue;
+            }
             if best.is_none() || hit.distance < best.as_ref().unwrap().distance {
                 best = Some(hit);
             }
         }
     }
     best
+}
+
+fn entity_is_pick_visible(world: &World, entity: Entity) -> bool {
+    if !entity_on_visible_layer(world, entity) {
+        return false;
+    }
+    if let Some(generated) = world.get::<GeneratedOccurrencePart>(entity) {
+        if let Some(owner_entity) = find_entity_by_element_id_readonly(world, generated.owner) {
+            if !entity_on_visible_layer(world, owner_entity) {
+                return false;
+            }
+        }
+    }
+    world
+        .get::<Visibility>(entity)
+        .is_none_or(|visibility| *visibility != Visibility::Hidden)
+        || world
+            .get::<WireframeSurfaceVisibilityOverride>(entity)
+            .is_some()
 }
 
 /// Find the nearest face hit by a ray, across all registered factories.

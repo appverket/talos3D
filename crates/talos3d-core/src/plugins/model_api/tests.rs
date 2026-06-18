@@ -4,6 +4,7 @@ use crate::capability_registry::CapabilityRegistry;
 use crate::importers::obj::ObjImporter;
 #[cfg(feature = "model-api")]
 use crate::plugins::command_registry::{execute_command, CommandRegistry};
+#[cfg(feature = "model-api")]
 use crate::plugins::commands::find_entity_by_element_id_readonly;
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::snapshots::TriangleMeshFactory;
@@ -1125,6 +1126,58 @@ fn temp_json_path(stem: &str) -> std::path::PathBuf {
         .expect("clock should be after epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("{stem}-{unique}.json"))
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn handle_dimension_between_box_corners_constrains_line_point_to_adjacent_edge_direction() {
+    let mut world = init_model_api_test_world();
+
+    let box_id = handle_create_box(
+        &mut world,
+        CreateBoxRequest {
+            center: Some([0.0, 1.0, 0.0]),
+            half_extents: None,
+            size: Some([4.0, 2.0, 1.0]),
+            rotation: None,
+            semantic: None,
+        },
+    )
+    .expect("create_box should create a primitive");
+
+    let dimension_id = handle_place_dimension_between_handles(
+        &mut world,
+        PlaceDimensionBetweenHandlesRequest {
+            start_element_id: box_id,
+            start_handle_id: "corner_0".to_string(),
+            end_element_id: box_id,
+            end_handle_id: "corner_3".to_string(),
+            line_point: Some([0.0, 0.4, -0.2]),
+            offset: None,
+            extension: Some(0.25),
+            visible: Some(true),
+            label: None,
+            display_unit: None,
+            precision: None,
+        },
+    )
+    .expect("handle-based dimension should be created");
+
+    let dimension_snapshot = get_entity_snapshot(&world, ElementId(dimension_id))
+        .expect("dimension snapshot should exist");
+    assert_eq!(dimension_snapshot["start"], json!([-2.0, 0.0, -0.5]));
+    assert_eq!(dimension_snapshot["end"], json!([2.0, 0.0, -0.5]));
+    let line_point = dimension_snapshot["line_point"]
+        .as_array()
+        .expect("line_point should serialize as a coordinate array");
+    let coordinates: Vec<f64> = line_point
+        .iter()
+        .map(|value| value.as_f64().expect("coordinate should be numeric"))
+        .collect();
+    assert_eq!(coordinates.len(), 3);
+    assert!((coordinates[0] - 0.0).abs() < 1e-6);
+    assert!((coordinates[1] - 2.72).abs() < 1e-5);
+    assert!((coordinates[2] + 0.5).abs() < 1e-6);
 }
 
 #[cfg(feature = "model-api")]

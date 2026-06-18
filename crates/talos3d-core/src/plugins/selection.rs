@@ -20,7 +20,7 @@ use crate::{
         handles::HandleInteractionState,
         identity::ElementId,
         input_ownership::{InputOwnership, InputPhase},
-        layers::{LayerAssignment, LayerRegistry, DEFAULT_LAYER_NAME},
+        layers::{entity_on_visible_layer, LayerAssignment, LayerRegistry, DEFAULT_LAYER_NAME},
         lighting::{SceneLightNode, SceneLightObjectVisibility},
         modeling::{
             csg::CsgNode,
@@ -35,6 +35,7 @@ use crate::{
             profile_feature::{FaceProfileFeature, FeatureOperand},
             void_declaration::OpeningContext,
         },
+        render_pipeline::WireframeSurfaceVisibilityOverride,
         tools::ActiveTool,
         transform::{PivotPoint, TransformMode, TransformState, TransformVisualSystems},
         ui::StatusBarData,
@@ -226,6 +227,12 @@ struct SelectionHitTest<'w, 's> {
     ray_cast: MeshRayCast<'w, 's>,
     mesh_selectable_query: Query<'w, 's, (), MeshSelectableQueryFilter>,
     visibility_query: Query<'w, 's, &'static Visibility>,
+    wireframe_surface_visibility_query:
+        Query<'w, 's, Option<&'static WireframeSurfaceVisibilityOverride>>,
+    layer_assignment_query: Query<'w, 's, Option<&'static LayerAssignment>>,
+    generated_part_query: Query<'w, 's, Option<&'static GeneratedOccurrencePart>>,
+    element_layer_query: Query<'w, 's, (&'static ElementId, Option<&'static LayerAssignment>)>,
+    layer_registry: Res<'w, LayerRegistry>,
     face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
 
@@ -773,16 +780,62 @@ fn entity_is_visible(world: &World, entity: Entity) -> bool {
     let Ok(entity_ref) = world.get_entity(entity) else {
         return false;
     };
+    if !entity_on_visible_layer(world, entity) {
+        return false;
+    }
+    if let Some(generated) = entity_ref.get::<GeneratedOccurrencePart>() {
+        if let Some(owner_entity) = find_entity_by_element_id_readonly(world, generated.owner) {
+            if !entity_on_visible_layer(world, owner_entity) {
+                return false;
+            }
+        }
+    }
     if entity_ref.get::<Visibility>().copied() != Some(Visibility::Hidden) {
+        return true;
+    }
+    if entity_ref
+        .get::<WireframeSurfaceVisibilityOverride>()
+        .is_some()
+    {
         return true;
     }
 
     entity_ref
         .get::<FeatureOperand>()
         .and_then(|operand| find_entity_by_element_id_readonly(world, operand.owner))
+        .filter(|feature_entity| entity_on_visible_layer(world, *feature_entity))
         .and_then(|feature_entity| world.get_entity(feature_entity).ok())
         .and_then(|feature_ref| feature_ref.get::<Visibility>().copied())
         != Some(Visibility::Hidden)
+}
+
+fn mesh_entity_layer_visible_for_pick(
+    entity: Entity,
+    layer_assignment_query: &Query<Option<&LayerAssignment>>,
+    generated_part_query: &Query<Option<&GeneratedOccurrencePart>>,
+    element_layer_query: &Query<(&ElementId, Option<&LayerAssignment>)>,
+    layer_registry: &LayerRegistry,
+) -> bool {
+    if !layer_assignment_query
+        .get(entity)
+        .ok()
+        .flatten()
+        .map(|assignment| layer_registry.is_visible(&assignment.layer))
+        .unwrap_or(true)
+    {
+        return false;
+    }
+
+    let Ok(Some(generated)) = generated_part_query.get(entity) else {
+        return true;
+    };
+
+    element_layer_query
+        .iter()
+        .find(|(element_id, _)| **element_id == generated.owner)
+        .and_then(|(_, assignment)| assignment)
+        .map(|assignment| layer_registry.is_visible(&assignment.layer))
+        .unwrap_or(true)
 }
 
 fn choose_selection_hit(
@@ -810,17 +863,38 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
     let mut system_state: bevy::ecs::system::SystemState<SelectionHitTest> =
         bevy::ecs::system::SystemState::new(world);
     let mut hit_test = system_state.get_mut(world);
-    let mesh_hit = hit_test
-        .ray_cast
+    let SelectionHitTest {
+        ray_cast,
+        mesh_selectable_query,
+        visibility_query,
+        wireframe_surface_visibility_query,
+        layer_assignment_query,
+        generated_part_query,
+        element_layer_query,
+        layer_registry,
+        face_profile_feature_query,
+    } = &mut hit_test;
+    let mesh_hit = ray_cast
         .cast_ray(
             ray,
             &MeshRayCastSettings::default().with_filter(&|entity| {
-                hit_test.mesh_selectable_query.contains(entity)
-                    && !hit_test.face_profile_feature_query.contains(entity)
-                    && hit_test
-                        .visibility_query
+                mesh_selectable_query.contains(entity)
+                    && !face_profile_feature_query.contains(entity)
+                    && (visibility_query
                         .get(entity)
                         .map_or(true, |visibility| *visibility != Visibility::Hidden)
+                        || wireframe_surface_visibility_query
+                            .get(entity)
+                            .ok()
+                            .flatten()
+                            .is_some())
+                    && mesh_entity_layer_visible_for_pick(
+                        entity,
+                        layer_assignment_query,
+                        generated_part_query,
+                        element_layer_query,
+                        layer_registry,
+                    )
             }),
         )
         .first()
@@ -1185,8 +1259,12 @@ fn clear_pending_box_select_click(box_state: &mut BoxSelectState) {
 mod tests {
     use super::*;
     use crate::plugins::{
-        layers::LayerRegistry,
-        modeling::group::{GroupEditContext, GroupMembers},
+        layers::{LayerAssignment, LayerRegistry},
+        modeling::{
+            definition::DefinitionId,
+            group::{GroupEditContext, GroupMembers},
+            occurrence::GeneratedOccurrencePart,
+        },
     };
 
     fn selection_world_with_group() -> (World, Entity, Entity, ElementId, ElementId) {
@@ -1257,6 +1335,51 @@ mod tests {
         assert!(state.drag_start.is_none());
         assert!(!state.is_dragging);
         assert_eq!(state.pending_frames, 0);
+    }
+
+    #[test]
+    fn generated_part_on_hidden_owner_layer_is_not_pick_visible() {
+        let mut world = World::new();
+        let mut registry = LayerRegistry::default();
+        registry.create_layer("Hidden geometry".to_string());
+        registry.layers.get_mut("Hidden geometry").unwrap().visible = false;
+        world.insert_resource(registry);
+
+        let owner_id = ElementId(42);
+        world.spawn((
+            owner_id,
+            LayerAssignment::new("Hidden geometry"),
+            Visibility::Inherited,
+        ));
+        let generated = world
+            .spawn((
+                GeneratedOccurrencePart {
+                    owner: owner_id,
+                    slot_path: "wall".to_string(),
+                    definition_id: DefinitionId("test_definition".to_string()),
+                },
+                Visibility::Inherited,
+            ))
+            .id();
+
+        assert!(!entity_is_visible(&world, generated));
+    }
+
+    #[test]
+    fn wireframe_presentation_hidden_surface_remains_pick_visible() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        let entity = world
+            .spawn((
+                ElementId(7),
+                Visibility::Hidden,
+                WireframeSurfaceVisibilityOverride {
+                    original: Visibility::Inherited,
+                },
+            ))
+            .id();
+
+        assert!(entity_is_visible(&world, entity));
     }
 
     #[test]

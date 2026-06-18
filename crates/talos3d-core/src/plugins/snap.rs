@@ -33,6 +33,7 @@ pub enum SnapSystems {
 impl Plugin for SnapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SnapResult>()
+            .init_resource::<SnapDisambiguationState>()
             .configure_sets(
                 Update,
                 (
@@ -52,6 +53,22 @@ pub struct SnapResult {
     pub position: Option<Vec3>,
     pub target: Option<Vec3>,
     pub kind: SnapKind,
+    pub candidates: Vec<SnapCandidate>,
+    pub active_candidate: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapCandidate {
+    pub position: Vec3,
+    pub kind: SnapKind,
+    pub element_id: Option<crate::plugins::identity::ElementId>,
+    pub label: Option<String>,
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+struct SnapDisambiguationState {
+    anchor: Option<Vec3>,
+    index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -74,6 +91,7 @@ fn update_snap_result(world: &mut World) {
 
     let keys = world.resource::<ButtonInput<KeyCode>>();
     let snapping_disabled = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let cycle_requested = keys.just_pressed(KeyCode::Tab);
     let cursor_world_pos = world.resource::<CursorWorldPos>();
     let mut result = SnapResult {
         raw_position: Some(raw_position),
@@ -88,6 +106,8 @@ fn update_snap_result(world: &mut World) {
         } else {
             SnapKind::Grid
         },
+        candidates: Vec::new(),
+        active_candidate: 0,
     };
 
     if snapping_disabled {
@@ -95,7 +115,7 @@ fn update_snap_result(world: &mut World) {
         return;
     }
 
-    let mut best_candidate: Option<(f32, Vec3, SnapKind)> = None;
+    let mut candidates: Vec<(f32, SnapCandidate)> = Vec::new();
     let mut snap_points = Vec::new();
     let registry = world.resource::<CapabilityRegistry>();
     for factory in registry.factories() {
@@ -108,19 +128,39 @@ fn update_snap_result(world: &mut World) {
         if distance_squared > ELEMENT_SNAP_RADIUS_METRES * ELEMENT_SNAP_RADIUS_METRES {
             continue;
         }
-
-        let replace_candidate = best_candidate
-            .map(|(best_distance, _, _)| distance_squared < best_distance)
-            .unwrap_or(true);
-        if replace_candidate {
-            best_candidate = Some((distance_squared, snap_point.position, snap_point.kind));
-        }
+        candidates.push((
+            distance_squared,
+            SnapCandidate {
+                position: snap_point.position,
+                kind: snap_point.kind,
+                element_id: snap_point.element_id,
+                label: snap_point.label,
+            },
+        ));
     }
 
-    if let Some((_, target, kind)) = best_candidate {
-        result.position = Some(target);
-        result.target = Some(target);
-        result.kind = kind;
+    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+
+    if let Some((best_distance, best)) = candidates.first().cloned() {
+        let coincident = candidates
+            .into_iter()
+            .filter(|(distance, candidate)| {
+                (distance - best_distance).abs() <= 1e-6
+                    || candidate.position.distance_squared(best.position) <= 1e-6
+            })
+            .map(|(_, candidate)| candidate)
+            .collect::<Vec<_>>();
+        let selected_index =
+            update_snap_disambiguation(world, best.position, coincident.len(), cycle_requested);
+        let selected = coincident
+            .get(selected_index)
+            .cloned()
+            .unwrap_or_else(|| best.clone());
+        result.position = Some(selected.position);
+        result.target = Some(selected.position);
+        result.kind = selected.kind;
+        result.active_candidate = selected_index;
+        result.candidates = coincident;
     }
 
     *world.resource_mut::<SnapResult>() = result;
@@ -143,6 +183,9 @@ fn collect_authored_handle_snap_points(world: &World, out: &mut Vec<SnapPoint>) 
         let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
             continue;
         };
+        let owner = entity_ref
+            .get::<crate::plugins::identity::ElementId>()
+            .copied();
         for handle in snapshot.handles() {
             let Some(kind) = authored_handle_snap_kind(handle.kind) else {
                 continue;
@@ -150,19 +193,46 @@ fn collect_authored_handle_snap_points(world: &World, out: &mut Vec<SnapPoint>) 
             out.push(SnapPoint {
                 position: handle.position,
                 kind,
+                element_id: owner,
+                label: Some(handle.id),
             });
         }
         if let Some(bounds) = snapshot.bounds() {
-            collect_bounds_corner_snap_points(bounds, out);
+            collect_bounds_corner_snap_points(bounds, owner, out);
         }
     }
 }
 
-fn collect_bounds_corner_snap_points(bounds: EntityBounds, out: &mut Vec<SnapPoint>) {
-    for position in bounds.corners() {
+fn update_snap_disambiguation(
+    world: &mut World,
+    anchor: Vec3,
+    candidate_count: usize,
+    cycle_requested: bool,
+) -> usize {
+    let mut state = world.resource_mut::<SnapDisambiguationState>();
+    let same_anchor = state
+        .anchor
+        .is_some_and(|previous| previous.distance_squared(anchor) <= 1e-6);
+    if !same_anchor {
+        state.anchor = Some(anchor);
+        state.index = 0;
+    } else if cycle_requested && candidate_count > 1 {
+        state.index = (state.index + 1) % candidate_count;
+    }
+    state.index.min(candidate_count.saturating_sub(1))
+}
+
+fn collect_bounds_corner_snap_points(
+    bounds: EntityBounds,
+    owner: Option<crate::plugins::identity::ElementId>,
+    out: &mut Vec<SnapPoint>,
+) {
+    for (index, position) in bounds.corners().into_iter().enumerate() {
         out.push(SnapPoint {
             position,
             kind: SnapKind::Endpoint,
+            element_id: owner,
+            label: Some(format!("bounds_corner_{index}")),
         });
     }
 }
@@ -188,6 +258,17 @@ fn draw_snap_indicator(
         gizmos.line(raw_position, target, SNAP_TRAIL_COLOR);
     }
     draw_snap_target(&mut gizmos, target, snap_result.kind);
+    for (index, candidate) in snap_result.candidates.iter().enumerate() {
+        if index == snap_result.active_candidate {
+            continue;
+        }
+        draw_diamond_marker(
+            &mut gizmos,
+            candidate.position,
+            SNAP_HALO_RADIUS * 0.75,
+            Color::srgba(1.0, 1.0, 1.0, 0.55),
+        );
+    }
     #[cfg(feature = "perf-stats")]
     add_gizmo_line_count(&mut perf_stats, snap_indicator_line_count(snap_result.kind));
 }
@@ -313,7 +394,11 @@ mod tests {
         };
         let mut snap_points = Vec::new();
 
-        collect_bounds_corner_snap_points(bounds, &mut snap_points);
+        collect_bounds_corner_snap_points(
+            bounds,
+            Some(crate::plugins::identity::ElementId(1)),
+            &mut snap_points,
+        );
 
         assert_eq!(snap_points.len(), 8);
         assert!(snap_points
@@ -325,5 +410,27 @@ mod tests {
         assert!(snap_points
             .iter()
             .any(|snap_point| snap_point.position == Vec3::new(3.0, 4.0, 5.0)));
+        assert!(snap_points.iter().all(
+            |snap_point| snap_point.element_id == Some(crate::plugins::identity::ElementId(1))
+        ));
+        assert!(snap_points.iter().all(|snap_point| snap_point
+            .label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("bounds_corner_"))));
+    }
+
+    #[test]
+    fn snap_disambiguation_cycles_coincident_candidates() {
+        let mut world = World::new();
+        world.init_resource::<SnapDisambiguationState>();
+        let anchor = Vec3::new(1.0, 2.0, 3.0);
+
+        assert_eq!(update_snap_disambiguation(&mut world, anchor, 2, false), 0);
+        assert_eq!(update_snap_disambiguation(&mut world, anchor, 2, true), 1);
+        assert_eq!(update_snap_disambiguation(&mut world, anchor, 2, true), 0);
+        assert_eq!(
+            update_snap_disambiguation(&mut world, anchor + Vec3::X, 2, false),
+            0
+        );
     }
 }

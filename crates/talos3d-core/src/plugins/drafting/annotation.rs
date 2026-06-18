@@ -544,14 +544,20 @@ impl AuthoredEntityFactory for DimensionAnnotationFactory {
             out.push(SnapPoint {
                 position: node.a,
                 kind: SnapKind::Endpoint,
+                element_id: None,
+                label: None,
             });
             out.push(SnapPoint {
                 position: node.b,
                 kind: SnapKind::Endpoint,
+                element_id: None,
+                label: None,
             });
             out.push(SnapPoint {
                 position: (node.a + node.b) * 0.5 + node.offset,
                 kind: SnapKind::Control,
+                element_id: None,
+                label: None,
             });
         }
     }

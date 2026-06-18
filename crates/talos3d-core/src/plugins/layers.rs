@@ -242,6 +242,12 @@ pub fn entity_on_locked_layer(world: &World, entity: Entity) -> bool {
     registry.is_locked(layer_name)
 }
 
+pub fn entity_on_visible_layer(world: &World, entity: Entity) -> bool {
+    let registry = world.resource::<LayerRegistry>();
+    let layer_name = entity_layer_name(world, entity);
+    registry.is_visible(layer_name)
+}
+
 pub fn count_entities_per_layer(world: &World) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     let mut q = world.try_query::<EntityRef>().unwrap();

@@ -43,10 +43,11 @@ the same lighting contract is available to both UI workflows and MCP clients.
 Talos3D includes a structured Model Context Protocol surface for AI agents and
 automation clients.
 
-- Run it with `cargo run --features model-api`
+- Run the public core app with
+  `cargo run --manifest-path app-core/Cargo.toml --features model-api`
 - Connect over HTTP at `http://127.0.0.1:<port>/mcp`
 - For parallel agent sessions, launch with a unique instance id and port:
-  `cargo run --features model-api -- --instance-id codex --model-api-port 24842`
+  `cargo run --manifest-path app-core/Cargo.toml --features model-api -- --instance-id codex --model-api-port 24842`
 - Use the same command surface the UI uses for inspection and edits
 - Discover capability vocabulary and inspect or create semantic assemblies and
   relations through the same public interface
@@ -120,16 +121,34 @@ platform.
 
 ## Quick Start
 
-Run the desktop app:
+Run the open-source core desktop app from the repository root:
 
 ```bash
-cargo run
+cargo run --manifest-path app-core/Cargo.toml
 ```
 
 Run with the model API / MCP server enabled:
 
 ```bash
-cargo run --features model-api
+cargo run --manifest-path app-core/Cargo.toml --features model-api
+```
+
+Run with an explicit MCP instance id and port:
+
+```bash
+cargo run --manifest-path app-core/Cargo.toml --features model-api -- --instance-id core --model-api-port 24842
+```
+
+The `app-core/` target is the public base application: it uses the platform
+plugins from `crates/talos3d-core` and the optional open-source terrain crate.
+It does not depend on private domain packs.
+
+This repository also contains `app/`, a multi-repo product composition used by
+the Appverket workspace. That target intentionally depends on sibling
+architecture crates and is not the public core-only app:
+
+```bash
+cargo run --manifest-path app/Cargo.toml --features model-api
 ```
 
 ## Documentation

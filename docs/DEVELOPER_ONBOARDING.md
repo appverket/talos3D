@@ -84,9 +84,13 @@ primitive/profile/feature workflows.
 cargo check
 cargo clippy -- -W clippy::all
 cargo test
-cargo run
-cargo run --features model-api
+cargo run --manifest-path app-core/Cargo.toml
+cargo run --manifest-path app-core/Cargo.toml --features model-api
 ```
+
+`app-core/` is the public core-only desktop app. The separate `app/` manifest
+is a product composition for the full Appverket workspace and may depend on
+sibling domain-pack repositories.
 
 ## Engine Dependency Work
 

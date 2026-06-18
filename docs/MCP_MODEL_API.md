@@ -129,19 +129,23 @@ is not aligned with the platform direction.
 
 ## Running Talos3D With MCP Enabled
 
-Start the app with the `model-api` feature:
+Start the public core app with the `model-api` feature:
 
 ```bash
-cargo run --features model-api
+cargo run --manifest-path app-core/Cargo.toml --features model-api
 ```
 
 To run multiple MCP-enabled instances without collisions, provide a unique
 instance id and port:
 
 ```bash
-cargo run --features model-api -- --instance-id codex --model-api-port 24842
-cargo run --features model-api -- --instance-id claude --model-api-port 24901
+cargo run --manifest-path app-core/Cargo.toml --features model-api -- --instance-id codex --model-api-port 24842
+cargo run --manifest-path app-core/Cargo.toml --features model-api -- --instance-id claude --model-api-port 24901
 ```
+
+The core app target is `app-core/`. The sibling `app/` target is a product
+composition used in the full Appverket workspace and may depend on private
+domain packs such as architecture extensions.
 
 If no port is provided, Talos3D prefers `24842` and automatically falls back to
 an available port when that default is already in use.

@@ -575,16 +575,22 @@ impl AuthoredEntityFactory for GuideLineFactory {
             out.push(SnapPoint {
                 position: node.anchor,
                 kind: SnapKind::GuideAnchor,
+                element_id: None,
+                label: None,
             });
             if let Some(length) = node.finite_length {
                 let dir = node.direction.normalize_or_zero();
                 out.push(SnapPoint {
                     position: node.anchor - dir * length,
                     kind: SnapKind::Endpoint,
+                    element_id: None,
+                    label: None,
                 });
                 out.push(SnapPoint {
                     position: node.anchor + dir * length,
                     kind: SnapKind::Endpoint,
+                    element_id: None,
+                    label: None,
                 });
             }
         }

@@ -111,6 +111,8 @@ pub struct FaceHitCandidate {
 pub struct SnapPoint {
     pub position: Vec3,
     pub kind: crate::plugins::snap::SnapKind,
+    pub element_id: Option<ElementId>,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone)]

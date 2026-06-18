@@ -14,6 +14,7 @@ use crate::plugins::scene_ray;
 use crate::plugins::{
     camera::{CameraProjectionMode, OrbitCamera},
     identity::ElementId,
+    layers::{LayerAssignment, LayerRegistry},
     modeling::profile_feature::FaceProfileFeature,
     tools::ActiveTool,
 };
@@ -79,6 +80,8 @@ struct ToolCursorRayCast<'w, 's> {
     mesh_selectable_query: Query<'w, 's, (), With<ElementId>>,
     element_id_query: Query<'w, 's, &'static ElementId>,
     visibility_query: Query<'w, 's, &'static Visibility>,
+    layer_assignment_query: Query<'w, 's, Option<&'static LayerAssignment>>,
+    layer_registry: Res<'w, LayerRegistry>,
     face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
 
@@ -451,6 +454,13 @@ fn ray_cast_scene_surface(ray: Ray3d, ray_cast: &mut ToolCursorRayCast) -> Optio
                         .visibility_query
                         .get(entity)
                         .map_or(true, |visibility| *visibility != Visibility::Hidden)
+                    && ray_cast
+                        .layer_assignment_query
+                        .get(entity)
+                        .ok()
+                        .flatten()
+                        .map(|assignment| ray_cast.layer_registry.is_visible(&assignment.layer))
+                        .unwrap_or(true)
             }),
         )
         .first()

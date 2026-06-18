@@ -69,6 +69,7 @@ use crate::plugins::{
     tools::ActiveTool,
     transform::TransformState,
     ui::{coordinate_text, hint_text, StatusBarData},
+    units::DisplayUnit,
 };
 
 const CHROME_BG: egui::Color32 = egui::Color32::from_rgb(20, 23, 28);
@@ -296,6 +297,7 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<MaterialsWindowState>()
         .init_resource::<LightingWindowState>()
         .init_resource::<RenderSettingsWindowState>()
+        .init_resource::<ProjectSettingsWindowState>()
         .init_resource::<ExtensionsWindowState>()
         .add_systems(
             Update,
@@ -323,6 +325,11 @@ struct ViewportContextMenu {
 
 #[derive(Resource, Default, Debug, Clone)]
 pub struct RenderSettingsWindowState {
+    pub visible: bool,
+}
+
+#[derive(Resource, Default, Debug, Clone)]
+pub struct ProjectSettingsWindowState {
     pub visible: bool,
 }
 
@@ -628,6 +635,24 @@ fn draw_view_workspace_submenu(
     });
 }
 
+fn draw_project_settings_menu_button(
+    ui: &mut egui::Ui,
+    hovered_menu_hint: &mut Option<String>,
+    project_settings_window_state: &mut ProjectSettingsWindowState,
+) {
+    let project_settings = ui
+        .button("Project Settings...")
+        .on_hover_text("Set model-level units, precision, snapping, and grid defaults");
+    if project_settings.contains_pointer() {
+        *hovered_menu_hint =
+            Some("Set model-level units, precision, snapping, and grid defaults".to_string());
+    }
+    if project_settings.clicked() {
+        project_settings_window_state.visible = true;
+        ui.close();
+    }
+}
+
 fn draw_about_menu(ui: &mut egui::Ui) {
     ui.set_min_width(260.0);
     ui.label(egui::RichText::new("Talos3D").strong());
@@ -664,6 +689,7 @@ fn draw_category_menu_contents(
     assistant_window_state: &mut RightSidebarState,
     lighting_window_state: &mut LightingWindowState,
     render_settings_window_state: &mut RenderSettingsWindowState,
+    project_settings_window_state: &mut ProjectSettingsWindowState,
     extensions_window_state: &mut ExtensionsWindowState,
     toolbar_registry: &ToolbarRegistry,
     toolbar_layout_state: &mut ToolbarLayoutState,
@@ -714,6 +740,14 @@ fn draw_category_menu_contents(
         ) {
             previous_kind = Some(kind);
         }
+    }
+
+    if matches!(
+        category,
+        crate::plugins::command_registry::CommandCategory::File
+    ) {
+        ui.separator();
+        draw_project_settings_menu_button(ui, hovered_menu_hint, project_settings_window_state);
     }
 
     if matches!(
@@ -845,6 +879,7 @@ struct ChromeData<'w, 's> {
     render_settings: ResMut<'w, RenderSettings>,
     paper_drawing_state: ResMut<'w, PaperDrawingState>,
     render_settings_window_state: ResMut<'w, RenderSettingsWindowState>,
+    project_settings_window_state: ResMut<'w, ProjectSettingsWindowState>,
     element_id_allocator: Res<'w, ElementIdAllocator>,
     create_entity_commands: ResMut<'w, Messages<CreateEntityCommand>>,
     delete_entities_commands: ResMut<'w, Messages<DeleteEntitiesCommand>>,
@@ -959,6 +994,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                                 &mut data.assistant_window_state,
                                 &mut data.lighting_window_state,
                                 &mut data.render_settings_window_state,
+                                &mut data.project_settings_window_state,
                                 &mut data.extensions_window_state,
                                 &data.toolbar_registry,
                                 &mut data.toolbar_layout_state,
@@ -1183,6 +1219,10 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.render_settings_window_state,
         &mut data.render_settings,
         &mut data.paper_drawing_state,
+    );
+    draw_project_settings_window(
+        &ctx,
+        &mut data.project_settings_window_state,
         &mut data.doc_props,
     );
     draw_extensions_window(
@@ -3056,12 +3096,152 @@ fn draw_extensions_window(
         });
 }
 
+fn draw_project_settings_window(
+    ctx: &egui::Context,
+    state: &mut ProjectSettingsWindowState,
+    doc_props: &mut DocumentProperties,
+) {
+    if !state.visible {
+        return;
+    }
+
+    egui::Window::new("Project Settings")
+        .open(&mut state.visible)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new(
+                    "These settings belong to the model and are saved with the project. Dimensions, tape measurements, coordinates, and drafting exports use these defaults unless an annotation explicitly overrides them.",
+                )
+                .small()
+                .color(CHROME_MUTED),
+            );
+            ui.add_space(8.0);
+
+            ui.collapsing("Project", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut doc_props.name);
+                });
+                ui.label("Description");
+                ui.text_edit_multiline(&mut doc_props.description);
+            });
+
+            ui.collapsing("Units", |ui| {
+                draw_project_unit_controls(ui, doc_props);
+            });
+
+            ui.collapsing("Modeling Grid", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Snap");
+                    ui.add(
+                        egui::DragValue::new(&mut doc_props.snap_increment)
+                            .speed(0.01)
+                            .range(0.0001..=1000.0)
+                            .suffix(" m"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Minor grid");
+                    ui.add(
+                        egui::DragValue::new(&mut doc_props.grid_minor_spacing)
+                            .speed(0.1)
+                            .range(0.0001..=1000.0)
+                            .suffix(" m"),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Major grid");
+                    ui.add(
+                        egui::DragValue::new(&mut doc_props.grid_major_spacing)
+                            .speed(0.1)
+                            .range(0.0001..=1000.0)
+                            .suffix(" m"),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "Grid and snap distances are stored in model metres. Displayed coordinates and measurements use the selected project unit.",
+                    )
+                    .small()
+                    .color(CHROME_MUTED),
+                );
+            });
+        });
+}
+
+fn draw_project_unit_controls(ui: &mut egui::Ui, doc_props: &mut DocumentProperties) {
+    ui.label(egui::RichText::new("Metric").small().color(CHROME_MUTED));
+    egui::Grid::new("project_metric_units")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            for unit in [
+                DisplayUnit::Millimetres,
+                DisplayUnit::Centimetres,
+                DisplayUnit::Metres,
+            ] {
+                ui.radio_value(&mut doc_props.display_unit, unit, display_unit_label(unit));
+                ui.label(egui::RichText::new(display_unit_description(unit)).small());
+                ui.end_row();
+            }
+        });
+
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Imperial").small().color(CHROME_MUTED));
+    egui::Grid::new("project_imperial_units")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            for unit in [DisplayUnit::Feet, DisplayUnit::Inches] {
+                ui.radio_value(&mut doc_props.display_unit, unit, display_unit_label(unit));
+                ui.label(egui::RichText::new(display_unit_description(unit)).small());
+                ui.end_row();
+            }
+        });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("Decimal places");
+        ui.add(egui::Slider::new(&mut doc_props.precision, 0..=6));
+    });
+    ui.label(
+        egui::RichText::new(format!(
+            "Preview: {}",
+            doc_props
+                .display_unit
+                .format_value(7.2277, doc_props.precision)
+        ))
+        .small()
+        .color(CHROME_MUTED),
+    );
+}
+
+fn display_unit_label(unit: DisplayUnit) -> &'static str {
+    match unit {
+        DisplayUnit::Millimetres => "Millimetres (mm)",
+        DisplayUnit::Centimetres => "Centimetres (cm)",
+        DisplayUnit::Metres => "Metres (m)",
+        DisplayUnit::Feet => "Feet (ft)",
+        DisplayUnit::Inches => "Inches (in)",
+    }
+}
+
+fn display_unit_description(unit: DisplayUnit) -> &'static str {
+    match unit {
+        DisplayUnit::Millimetres => "Metric detail drawings",
+        DisplayUnit::Centimetres => "Metric room-scale sketches",
+        DisplayUnit::Metres => "Metric site and building scale",
+        DisplayUnit::Feet => "Imperial architectural/site scale",
+        DisplayUnit::Inches => "Imperial detail drawings",
+    }
+}
+
 fn draw_render_settings_window(
     ctx: &egui::Context,
     state: &mut RenderSettingsWindowState,
     settings: &mut RenderSettings,
     paper_state: &mut PaperDrawingState,
-    doc_props: &mut DocumentProperties,
 ) {
     if !state.visible {
         return;
@@ -3265,43 +3445,6 @@ fn draw_render_settings_window(
                 );
             });
 
-            ui.collapsing("Drawing Metadata", |ui| {
-                ui.label(
-                    egui::RichText::new(
-                        "Dimensions and similar drawing annotations use these document defaults unless a specific annotation overrides them.",
-                    )
-                    .small()
-                    .color(CHROME_MUTED),
-                );
-                egui::ComboBox::from_id_salt("drawing_display_unit")
-                    .selected_text(doc_props.display_unit.identifier())
-                    .show_ui(ui, |ui| {
-                        for unit in [
-                            crate::plugins::units::DisplayUnit::Millimetres,
-                            crate::plugins::units::DisplayUnit::Centimetres,
-                            crate::plugins::units::DisplayUnit::Metres,
-                            crate::plugins::units::DisplayUnit::Feet,
-                            crate::plugins::units::DisplayUnit::Inches,
-                        ] {
-                            ui.selectable_value(
-                                &mut doc_props.display_unit,
-                                unit,
-                                unit.identifier(),
-                            );
-                        }
-                    });
-                ui.add(
-                    egui::Slider::new(&mut doc_props.precision, 0..=6)
-                        .text("Decimal Places"),
-                );
-                ui.label(
-                    egui::RichText::new(
-                        "Paper-mode exports use these same unit and precision defaults for dimension labels.",
-                    )
-                    .small()
-                    .color(CHROME_MUTED),
-                );
-            });
         });
 }
 

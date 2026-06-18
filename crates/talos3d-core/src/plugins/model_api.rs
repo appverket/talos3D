@@ -1,4 +1,3 @@
-use crate::plugins::commands::find_entity_by_element_id_readonly;
 use std::collections::HashMap;
 
 #[cfg(feature = "model-api")]
@@ -28,6 +27,8 @@ use crate::plugins::command_registry::{
     CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
 };
 #[cfg(feature = "model-api")]
+use crate::plugins::commands::find_entity_by_element_id_readonly;
+#[cfg(feature = "model-api")]
 use crate::plugins::hosting_contracts::{
     HostAffectedRegion, HostingCheckId, HostingCheckStatus, HostingContractKindId,
     HostingValidationCheck, HostingValidationRequest, HostingValidationResult,
@@ -37,11 +38,12 @@ use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
 use crate::plugins::identity::ElementIdAllocator;
 use crate::plugins::materials::MaterialAssignment;
+#[cfg(feature = "model-api")]
 use crate::plugins::modeling::group::{
     collect_group_members_recursive, compute_group_bounds_from_world, group_frame,
-    group_frame_change_snapshots, is_group, GroupEditContext, GroupFrame, GroupMembers,
-    GroupSnapshot,
+    group_frame_change_snapshots, is_group, GroupFrame, GroupSnapshot,
 };
+use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
@@ -60,6 +62,7 @@ use crate::plugins::{
         BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand, EndCommandGroup,
         ResolvedDeleteEntitiesCommand,
     },
+    dimension_line::constrained_box_edge_dimension_line_point,
     document_properties::DocumentProperties,
     history::{apply_pending_history_commands, HistorySet},
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
@@ -3814,10 +3817,12 @@ fn handle_place_dimension_between_handles(
 ) -> Result<u64, String> {
     let start = resolve_handle_position(world, request.start_element_id, &request.start_handle_id)?;
     let end = resolve_handle_position(world, request.end_element_id, &request.end_handle_id)?;
+    let line_point = constrained_handle_dimension_line_point(world, start, end, &request)
+        .unwrap_or(request.line_point);
     let params = PlaceDimensionLineRequest {
         start: start.into(),
         end: end.into(),
-        line_point: request.line_point,
+        line_point,
         offset: request.offset,
         extension: request.extension,
         visible: request.visible,
@@ -3826,6 +3831,29 @@ fn handle_place_dimension_between_handles(
         precision: request.precision,
     };
     handle_create_entity(world, create_dimension_line_request_json(&params))
+}
+
+#[cfg(feature = "model-api")]
+fn constrained_handle_dimension_line_point(
+    world: &World,
+    start: Vec3,
+    end: Vec3,
+    request: &PlaceDimensionBetweenHandlesRequest,
+) -> Option<Option<[f32; 3]>> {
+    if request.start_element_id != request.end_element_id {
+        return None;
+    }
+    let requested_line_point = request.line_point?;
+    let bounds = capture_snapshot_by_id(world, ElementId(request.start_element_id))
+        .ok()
+        .and_then(|snapshot| snapshot.bounds())?;
+    constrained_box_edge_dimension_line_point(
+        start,
+        end,
+        Vec3::from_array(requested_line_point),
+        bounds,
+    )
+    .map(|line_point| Some(line_point.into()))
 }
 
 #[cfg(feature = "model-api")]

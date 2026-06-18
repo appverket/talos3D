@@ -18,6 +18,7 @@ use crate::plugins::{
     egui_chrome::EguiWantsInput,
     identity::ElementId,
     input_ownership::InputPhase,
+    layers::{LayerAssignment, LayerRegistry},
     selection::Selected,
     toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
 };
@@ -292,6 +293,8 @@ struct OrbitCameraInput<'w, 's> {
     ray_cast: MeshRayCast<'w, 's>,
     /// Visibility lookup so the orbit pivot raycast ignores hidden meshes.
     mesh_visibility: Query<'w, 's, &'static Visibility>,
+    layer_assignment_query: Query<'w, 's, Option<&'static LayerAssignment>>,
+    layer_registry: Res<'w, LayerRegistry>,
     /// All authored geometry with render bounds — fallback orbit pivot when the
     /// view centre points at empty space.
     scene_geometry: Query<'w, 's, (&'static GlobalTransform, &'static Aabb), With<ElementId>>,
@@ -374,6 +377,13 @@ fn orbit_camera(mut input: OrbitCameraInput) {
                         .mesh_visibility
                         .get(entity)
                         .map_or(true, |visibility| *visibility != Visibility::Hidden)
+                        && input
+                            .layer_assignment_query
+                            .get(entity)
+                            .ok()
+                            .flatten()
+                            .map(|assignment| input.layer_registry.is_visible(&assignment.layer))
+                            .unwrap_or(true)
                 }),
             )
             .first()

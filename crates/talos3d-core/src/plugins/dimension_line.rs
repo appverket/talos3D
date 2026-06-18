@@ -56,6 +56,8 @@ const DIMENSION_LINE_OFFSET_DRAG_COMMIT_DISTANCE: f32 = 0.02;
 pub(crate) const DIMENSION_RENDER_PAPER_MM_PER_WORLD_M: f32 = 20.0;
 const DIMENSION_VIEWPORT_MIN_TEXT_PX: f32 = 13.0;
 const DIMENSION_VIEWPORT_MAX_TEXT_PX: f32 = 28.0;
+const DIMENSION_WORLD_TEXT_GAP_FACTOR: f32 = 0.35;
+const DRAFTING_TEXT_CHAR_SPACING: f32 = 0.18;
 pub const DIMENSION_ANNOTATIONS_KEY: &str = "dimension_annotations";
 pub const DIMENSION_LAYER_NAME: &str = "Dimensions";
 
@@ -187,11 +189,7 @@ impl DimensionLineSnapshot {
     fn display_text(&self, doc_props: &DocumentProperties) -> String {
         let unit = self.effective_display_unit(doc_props);
         let precision = self.effective_precision(doc_props);
-        let value = unit.format_value(self.measured_length(), precision);
-        match self.label.as_deref() {
-            Some(label) if !label.is_empty() => format!("{label}: {value}"),
-            _ => value,
-        }
+        unit.format_value(self.measured_length(), precision)
     }
 
     fn display_label(&self) -> String {
@@ -607,10 +605,17 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             .map(vec3_from_json)
             .transpose()?
             .ok_or_else(|| "dimension_line requires end".to_string())?;
+        let explicit_line_point = object
+            .get("line_point")
+            .is_some_and(|value| !value.is_null());
         let line_point = parse_dimension_line_point_json(request, start, end)?;
-        let line_point = current_dimension_plane(world)
-            .map(|plane| resolved_dimension_line_point(start, end, line_point, &plane, None))
-            .unwrap_or(line_point);
+        let line_point = if explicit_line_point {
+            line_point
+        } else {
+            current_dimension_plane(world)
+                .map(|plane| resolved_dimension_line_point(start, end, line_point, &plane, None))
+                .unwrap_or(line_point)
+        };
         let extension = object
             .get("extension")
             .map(scalar_from_json)
@@ -700,15 +705,21 @@ impl AuthoredEntityFactory for DimensionLineFactory {
             out.push(SnapPoint {
                 position: node.start,
                 kind: SnapKind::Endpoint,
+                element_id: None,
+                label: None,
             });
             out.push(SnapPoint {
                 position: node.end,
                 kind: SnapKind::Endpoint,
+                element_id: None,
+                label: None,
             });
             out.push(SnapPoint {
                 position: dimension_geometry(node.start, node.end, node.line_point, node.extension)
                     .line_midpoint(),
                 kind: SnapKind::Control,
+                element_id: None,
+                label: None,
             });
         }
     }
@@ -720,6 +731,7 @@ impl AuthoredEntityFactory for DimensionLineFactory {
 
 fn draw_dimension_line_overlay(
     mut contexts: EguiContexts,
+    mut gizmos: Gizmos,
     doc_props: Res<DocumentProperties>,
     visibility: Res<DimensionLineVisibility>,
     viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
@@ -758,6 +770,14 @@ fn draw_dimension_line_overlay(
         for primitive in &primitives {
             paint_dimension_primitive(&painter, primitive, color);
         }
+        draw_dimension_world_text(
+            &mut gizmos,
+            node,
+            &doc_props,
+            camera,
+            camera_transform,
+            color,
+        );
     }
 }
 
@@ -971,8 +991,8 @@ fn commit_dimension_line(
             dimension_annotation_plane(drawing_plane, Some(orbit), Some(camera_transform))
         })
         .unwrap_or_else(|| drawing_plane.clone());
-    let host_bounds =
-        host_entity_projected_bounds(host_element_id, &active_plane, host_bounds_query);
+    let host_reference =
+        host_entity_dimension_reference(host_element_id, &active_plane, host_bounds_query);
     let snapshot = DimensionLineSnapshot {
         element_id: allocator.next_id(),
         start,
@@ -982,7 +1002,7 @@ fn commit_dimension_line(
             end,
             offset_position,
             &active_plane,
-            host_bounds,
+            host_reference,
         ),
         extension: default_dimension_extension(start, end),
         visible: true,
@@ -997,6 +1017,7 @@ fn commit_dimension_line(
 
 fn draw_dimension_line_tool_preview(
     mut contexts: EguiContexts,
+    mut gizmos: Gizmos,
     doc_props: Res<DocumentProperties>,
     viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
     cursor_world_pos: Res<CursorWorldPos>,
@@ -1053,6 +1074,14 @@ fn draw_dimension_line_tool_preview(
     for primitive in &primitives {
         paint_dimension_primitive(&painter, primitive, color);
     }
+    draw_dimension_world_text(
+        &mut gizmos,
+        &preview_node,
+        &doc_props,
+        camera,
+        camera_transform,
+        color,
+    );
 }
 
 fn current_dimension_plane(world: &World) -> Option<DrawingPlane> {
@@ -1479,6 +1508,12 @@ impl ProjectedBounds2d {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HostDimensionReference {
+    world_bounds: EntityBounds,
+    projected_bounds: ProjectedBounds2d,
+}
+
 fn dimension_geometry(
     start: Vec3,
     end: Vec3,
@@ -1523,8 +1558,19 @@ fn resolved_dimension_line_point(
     end: Vec3,
     requested_line_point: Vec3,
     plane: &DrawingPlane,
-    host_bounds: Option<ProjectedBounds2d>,
+    host_reference: Option<HostDimensionReference>,
 ) -> Vec3 {
+    if let Some(line_point) = host_reference.and_then(|reference| {
+        constrained_box_edge_dimension_line_point(
+            start,
+            end,
+            requested_line_point,
+            reference.world_bounds,
+        )
+    }) {
+        return line_point;
+    }
+
     let start_2d = plane.project_to_2d(start);
     let end_2d = plane.project_to_2d(end);
     let request_2d = plane.project_to_2d(requested_line_point);
@@ -1541,8 +1587,8 @@ fn resolved_dimension_line_point(
 
     let midpoint_projection = midpoint_2d.dot(offset_axis);
     let requested_projection = request_2d.dot(offset_axis);
-    let minimum_projection = host_bounds
-        .map(|bounds| bounds.max_along(offset_axis))
+    let minimum_projection = host_reference
+        .map(|reference| reference.projected_bounds.max_along(offset_axis))
         .unwrap_or(midpoint_projection)
         + default_dimension_offset(start, end);
     let final_projection = requested_projection.max(minimum_projection);
@@ -1550,7 +1596,107 @@ fn resolved_dimension_line_point(
     plane.to_world(resolved_midpoint)
 }
 
-fn host_entity_projected_bounds(
+pub(crate) fn constrained_box_edge_dimension_line_point(
+    start: Vec3,
+    end: Vec3,
+    requested_line_point: Vec3,
+    bounds: EntityBounds,
+) -> Option<Vec3> {
+    let edge = box_edge_reference(start, end, bounds)?;
+    let midpoint = (start + end) * 0.5;
+    let requested_offset = requested_line_point - midpoint;
+    let first_score = requested_offset.dot(edge.candidate_dirs[0]);
+    let second_score = requested_offset.dot(edge.candidate_dirs[1]);
+    let selected_dir = if first_score >= second_score {
+        edge.candidate_dirs[0]
+    } else {
+        edge.candidate_dirs[1]
+    };
+    let requested_distance = requested_offset.dot(selected_dir);
+    let selected_extent = bounds_max_along(bounds, selected_dir);
+    let midpoint_projection = midpoint.dot(selected_dir);
+    let minimum_distance =
+        selected_extent - midpoint_projection + default_dimension_offset(start, end);
+    Some(midpoint + selected_dir * requested_distance.max(minimum_distance))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BoxEdgeReference {
+    candidate_dirs: [Vec3; 2],
+}
+
+fn box_edge_reference(start: Vec3, end: Vec3, bounds: EntityBounds) -> Option<BoxEdgeReference> {
+    let start_coords = [start.x, start.y, start.z];
+    let end_coords = [end.x, end.y, end.z];
+    let min_coords = [bounds.min.x, bounds.min.y, bounds.min.z];
+    let max_coords = [bounds.max.x, bounds.max.y, bounds.max.z];
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    let tolerance = box_edge_tolerance(bounds);
+
+    let mut measured_axis = None;
+    let mut candidate_dirs = Vec::new();
+    for axis in 0..3 {
+        let start_side = box_bound_side(
+            start_coords[axis],
+            min_coords[axis],
+            max_coords[axis],
+            tolerance,
+        )?;
+        let end_side = box_bound_side(
+            end_coords[axis],
+            min_coords[axis],
+            max_coords[axis],
+            tolerance,
+        )?;
+        if start_side == end_side {
+            let dir = match start_side {
+                BoundSide::Min => axes[axis],
+                BoundSide::Max => -axes[axis],
+            };
+            candidate_dirs.push(dir);
+        } else if measured_axis.replace(axis).is_some() {
+            return None;
+        }
+    }
+
+    measured_axis?;
+    if candidate_dirs.len() != 2 {
+        return None;
+    }
+    Some(BoxEdgeReference {
+        candidate_dirs: [candidate_dirs[0], candidate_dirs[1]],
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundSide {
+    Min,
+    Max,
+}
+
+fn box_bound_side(value: f32, min: f32, max: f32, tolerance: f32) -> Option<BoundSide> {
+    if (value - min).abs() <= tolerance {
+        Some(BoundSide::Min)
+    } else if (value - max).abs() <= tolerance {
+        Some(BoundSide::Max)
+    } else {
+        None
+    }
+}
+
+fn box_edge_tolerance(bounds: EntityBounds) -> f32 {
+    ((bounds.max - bounds.min).length() * 1e-4).max(1e-3)
+}
+
+fn bounds_max_along(bounds: EntityBounds, axis: Vec3) -> f32 {
+    bounds
+        .corners()
+        .into_iter()
+        .map(|corner| corner.dot(axis))
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+fn host_entity_dimension_reference(
     host_element_id: Option<ElementId>,
     plane: &DrawingPlane,
     query: &Query<(
@@ -1558,13 +1704,16 @@ fn host_entity_projected_bounds(
         Option<&bevy::camera::primitives::Aabb>,
         Option<&GlobalTransform>,
     )>,
-) -> Option<ProjectedBounds2d> {
+) -> Option<HostDimensionReference> {
     let host_element_id = host_element_id?;
     let (_, aabb, transform) = query
         .iter()
         .find(|(element_id, _, _)| **element_id == host_element_id)?;
     let bounds = aabb_to_world_bounds(aabb?, transform?);
-    Some(projected_bounds_from_world_bounds(bounds, plane))
+    Some(HostDimensionReference {
+        world_bounds: bounds,
+        projected_bounds: projected_bounds_from_world_bounds(bounds, plane),
+    })
 }
 
 fn projected_bounds_from_world_bounds(
@@ -1977,6 +2126,111 @@ fn viewport_pixels_per_world_m(
         .filter(|length| *length > 0.0)
 }
 
+fn draw_dimension_world_text(
+    gizmos: &mut Gizmos,
+    node: &DimensionLineNode,
+    doc_props: &DocumentProperties,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    egui_color: egui::Color32,
+) {
+    let snapshot = snapshot_from_node(node);
+    if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
+        return;
+    }
+    let geometry = snapshot.geometry();
+    let Some(pixels_per_world_m) =
+        viewport_pixels_per_world_m(camera, camera_transform, geometry.line_midpoint())
+    else {
+        return;
+    };
+    let display_unit = snapshot.effective_display_unit(doc_props);
+    let text_height_px = (legacy_dimension_style(display_unit).text_height_mm
+        * viewport_dimension_style_scale(
+            display_unit,
+            pixels_per_world_m / DIMENSION_RENDER_PAPER_MM_PER_WORLD_M,
+        ))
+    .clamp(
+        DIMENSION_VIEWPORT_MIN_TEXT_PX,
+        DIMENSION_VIEWPORT_MAX_TEXT_PX,
+    );
+    let text_height_world = text_height_px / pixels_per_world_m;
+    let text = snapshot.display_text(doc_props);
+    let anchor = geometry.line_midpoint();
+    let mut right = geometry.axis_dir;
+    let mut glyph_up =
+        if projected_world_delta_px(camera, camera_transform, anchor, geometry.offset_dir)
+            .is_some_and(|length| length > 1.0)
+        {
+            geometry.offset_dir
+        } else {
+            camera_readable_text_up(camera_transform, right).unwrap_or(geometry.offset_dir)
+        };
+    if let (Ok(anchor_px), Ok(right_px)) = (
+        camera.world_to_viewport(camera_transform, anchor),
+        camera.world_to_viewport(camera_transform, anchor + right),
+    ) {
+        let projected_right = right_px - anchor_px;
+        if projected_right.x < -1.0 || (projected_right.x.abs() <= 1.0 && projected_right.y > 0.0) {
+            right = -right;
+            glyph_up = -glyph_up;
+        }
+    }
+    if let (Ok(anchor_px), Ok(up_px)) = (
+        camera.world_to_viewport(camera_transform, anchor),
+        camera.world_to_viewport(camera_transform, anchor + glyph_up),
+    ) {
+        if (up_px - anchor_px).y > 0.0 {
+            glyph_up = -glyph_up;
+        }
+    }
+    let text_width_world = drafting_text_width(&text) * text_height_world;
+    let text_center =
+        anchor + glyph_up * (text_height_world * (DIMENSION_WORLD_TEXT_GAP_FACTOR + 0.5));
+    let origin =
+        text_center - right * (text_width_world * 0.5) - glyph_up * (text_height_world * 0.5);
+    draw_drafting_text_glyphs(
+        gizmos,
+        &text,
+        origin,
+        right,
+        glyph_up,
+        text_height_world,
+        color32_to_color(egui_color),
+    );
+}
+
+fn color32_to_color(color: egui::Color32) -> Color {
+    Color::srgba_u8(color.r(), color.g(), color.b(), color.a())
+}
+
+fn projected_world_delta_px(
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    anchor: Vec3,
+    delta: Vec3,
+) -> Option<f32> {
+    let anchor_px = camera.world_to_viewport(camera_transform, anchor).ok()?;
+    let delta_px = camera
+        .world_to_viewport(camera_transform, anchor + delta)
+        .ok()?;
+    Some((delta_px - anchor_px).length())
+}
+
+fn camera_readable_text_up(camera_transform: &GlobalTransform, text_right: Vec3) -> Option<Vec3> {
+    let right = text_right.normalize_or_zero();
+    for candidate in [
+        camera_transform.up().as_vec3(),
+        camera_transform.right().as_vec3(),
+    ] {
+        let rejected = candidate - right * candidate.dot(right);
+        if rejected.length_squared() > 1e-6 {
+            return Some(rejected.normalize());
+        }
+    }
+    None
+}
+
 fn active_dimension_camera<'a>(
     mut cameras: impl Iterator<Item = (&'a Camera, &'a GlobalTransform)>,
 ) -> Option<(&'a Camera, &'a GlobalTransform)> {
@@ -2068,48 +2322,257 @@ fn paint_dimension_primitive(
             painter.circle_filled(egui::pos2(pos.x, pos.y), *radius_mm, default_color);
         }
         DimPrimitive::Text {
-            anchor,
-            content,
-            height_mm,
-            rotation_rad,
-            anchor_mode,
+            anchor: _,
+            content: _,
+            height_mm: _,
+            rotation_rad: _,
+            anchor_mode: _,
             ..
-        } => {
-            let text_color = default_color;
-            let galley = painter.layout_no_wrap(
-                content.clone(),
-                egui::FontId::proportional(*height_mm),
-                text_color,
-            );
-            let anchor_align = match anchor_mode {
-                crate::plugins::drafting::TextAnchor::CenterBaseline
-                | crate::plugins::drafting::TextAnchor::Center => egui::Align2::CENTER_CENTER,
-            };
-            let shadow_color = egui::Color32::from_black_alpha(190);
-            for offset in [
-                egui::vec2(-1.0, 0.0),
-                egui::vec2(1.0, 0.0),
-                egui::vec2(0.0, -1.0),
-                egui::vec2(0.0, 1.0),
-            ] {
-                painter.add(egui::Shape::Text(
-                    egui::epaint::TextShape::new(
-                        egui::pos2(anchor.x + offset.x, anchor.y + offset.y),
-                        galley.clone(),
-                        shadow_color,
-                    )
-                    .with_override_text_color(shadow_color)
-                    .with_angle_and_anchor(*rotation_rad, anchor_align),
-                ));
-            }
-            painter.add(egui::Shape::Text(
-                egui::epaint::TextShape::new(egui::pos2(anchor.x, anchor.y), galley, text_color)
-                    .with_override_text_color(text_color)
-                    .with_angle_and_anchor(*rotation_rad, anchor_align),
-            ));
-        }
+        } => {}
     }
 }
+
+#[derive(Clone, Copy)]
+struct DraftingGlyph {
+    advance: f32,
+    segments: &'static [(Vec2, Vec2)],
+}
+
+fn draw_drafting_text_glyphs(
+    gizmos: &mut Gizmos,
+    text: &str,
+    origin: Vec3,
+    right: Vec3,
+    up: Vec3,
+    height: f32,
+    color: Color,
+) {
+    let mut cursor = 0.0;
+    for ch in text.chars() {
+        let glyph = drafting_glyph(ch);
+        for (from, to) in glyph.segments {
+            gizmos.line(
+                origin + right * ((cursor + from.x) * height) + up * (from.y * height),
+                origin + right * ((cursor + to.x) * height) + up * (to.y * height),
+                color,
+            );
+        }
+        cursor += glyph.advance + DRAFTING_TEXT_CHAR_SPACING;
+    }
+}
+
+fn drafting_text_width(text: &str) -> f32 {
+    text.chars()
+        .map(|ch| drafting_glyph(ch).advance + DRAFTING_TEXT_CHAR_SPACING)
+        .sum::<f32>()
+        .saturating_sub(DRAFTING_TEXT_CHAR_SPACING)
+}
+
+trait SaturatingSubF32 {
+    fn saturating_sub(self, rhs: f32) -> f32;
+}
+
+impl SaturatingSubF32 for f32 {
+    fn saturating_sub(self, rhs: f32) -> f32 {
+        (self - rhs).max(0.0)
+    }
+}
+
+fn drafting_glyph(ch: char) -> DraftingGlyph {
+    match ch.to_ascii_lowercase() {
+        '0' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_0,
+        },
+        '1' => DraftingGlyph {
+            advance: 0.48,
+            segments: GLYPH_1,
+        },
+        '2' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_2,
+        },
+        '3' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_3,
+        },
+        '4' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_4,
+        },
+        '5' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_5,
+        },
+        '6' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_6,
+        },
+        '7' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_7,
+        },
+        '8' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_8,
+        },
+        '9' => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_9,
+        },
+        '.' | ',' => DraftingGlyph {
+            advance: 0.22,
+            segments: GLYPH_DOT,
+        },
+        '-' => DraftingGlyph {
+            advance: 0.5,
+            segments: GLYPH_DASH,
+        },
+        'm' => DraftingGlyph {
+            advance: 0.76,
+            segments: GLYPH_M,
+        },
+        'c' => DraftingGlyph {
+            advance: 0.7,
+            segments: GLYPH_C,
+        },
+        'f' => DraftingGlyph {
+            advance: 0.62,
+            segments: GLYPH_F,
+        },
+        't' => DraftingGlyph {
+            advance: 0.64,
+            segments: GLYPH_T,
+        },
+        'i' => DraftingGlyph {
+            advance: 0.22,
+            segments: GLYPH_I,
+        },
+        'n' => DraftingGlyph {
+            advance: 0.78,
+            segments: GLYPH_N,
+        },
+        '\'' => DraftingGlyph {
+            advance: 0.22,
+            segments: GLYPH_APOSTROPHE,
+        },
+        '"' => DraftingGlyph {
+            advance: 0.45,
+            segments: GLYPH_QUOTE,
+        },
+        ' ' => DraftingGlyph {
+            advance: 0.45,
+            segments: &[],
+        },
+        _ => DraftingGlyph {
+            advance: 0.72,
+            segments: GLYPH_BOX,
+        },
+    }
+}
+
+const GLYPH_0: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 0.0), Vec2::new(0.64, 0.0)),
+    (Vec2::new(0.64, 0.0), Vec2::new(0.64, 1.0)),
+    (Vec2::new(0.64, 1.0), Vec2::new(0.08, 1.0)),
+    (Vec2::new(0.08, 1.0), Vec2::new(0.08, 0.0)),
+    (Vec2::new(0.12, 0.08), Vec2::new(0.6, 0.92)),
+];
+const GLYPH_1: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.24, 0.0), Vec2::new(0.24, 1.0)),
+    (Vec2::new(0.08, 0.82), Vec2::new(0.24, 1.0)),
+    (Vec2::new(0.08, 0.0), Vec2::new(0.42, 0.0)),
+];
+const GLYPH_2: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 0.82), Vec2::new(0.22, 1.0)),
+    (Vec2::new(0.22, 1.0), Vec2::new(0.64, 1.0)),
+    (Vec2::new(0.64, 1.0), Vec2::new(0.64, 0.58)),
+    (Vec2::new(0.64, 0.58), Vec2::new(0.08, 0.0)),
+    (Vec2::new(0.08, 0.0), Vec2::new(0.66, 0.0)),
+];
+const GLYPH_3: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 1.0), Vec2::new(0.64, 1.0)),
+    (Vec2::new(0.64, 1.0), Vec2::new(0.64, 0.0)),
+    (Vec2::new(0.08, 0.5), Vec2::new(0.64, 0.5)),
+    (Vec2::new(0.08, 0.0), Vec2::new(0.64, 0.0)),
+];
+const GLYPH_4: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.1, 1.0), Vec2::new(0.1, 0.5)),
+    (Vec2::new(0.1, 0.5), Vec2::new(0.66, 0.5)),
+    (Vec2::new(0.66, 1.0), Vec2::new(0.66, 0.0)),
+];
+const GLYPH_5: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.64, 1.0), Vec2::new(0.08, 1.0)),
+    (Vec2::new(0.08, 1.0), Vec2::new(0.08, 0.5)),
+    (Vec2::new(0.08, 0.5), Vec2::new(0.62, 0.5)),
+    (Vec2::new(0.62, 0.5), Vec2::new(0.62, 0.0)),
+    (Vec2::new(0.62, 0.0), Vec2::new(0.08, 0.0)),
+];
+const GLYPH_6: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.62, 1.0), Vec2::new(0.08, 0.5)),
+    (Vec2::new(0.08, 0.5), Vec2::new(0.08, 0.0)),
+    (Vec2::new(0.08, 0.0), Vec2::new(0.62, 0.0)),
+    (Vec2::new(0.62, 0.0), Vec2::new(0.62, 0.5)),
+    (Vec2::new(0.62, 0.5), Vec2::new(0.08, 0.5)),
+];
+const GLYPH_7: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 1.0), Vec2::new(0.66, 1.0)),
+    (Vec2::new(0.66, 1.0), Vec2::new(0.2, 0.0)),
+];
+const GLYPH_8: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 0.0), Vec2::new(0.64, 0.0)),
+    (Vec2::new(0.64, 0.0), Vec2::new(0.64, 1.0)),
+    (Vec2::new(0.64, 1.0), Vec2::new(0.08, 1.0)),
+    (Vec2::new(0.08, 1.0), Vec2::new(0.08, 0.0)),
+    (Vec2::new(0.08, 0.5), Vec2::new(0.64, 0.5)),
+];
+const GLYPH_9: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.62, 0.5), Vec2::new(0.08, 0.5)),
+    (Vec2::new(0.08, 0.5), Vec2::new(0.08, 1.0)),
+    (Vec2::new(0.08, 1.0), Vec2::new(0.62, 1.0)),
+    (Vec2::new(0.62, 1.0), Vec2::new(0.62, 0.0)),
+    (Vec2::new(0.62, 0.0), Vec2::new(0.08, 0.0)),
+];
+const GLYPH_DOT: &[(Vec2, Vec2)] = &[(Vec2::new(0.1, 0.0), Vec2::new(0.1, 0.08))];
+const GLYPH_DASH: &[(Vec2, Vec2)] = &[(Vec2::new(0.05, 0.5), Vec2::new(0.45, 0.5))];
+const GLYPH_M: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 0.0), Vec2::new(0.08, 0.68)),
+    (Vec2::new(0.08, 0.68), Vec2::new(0.32, 0.68)),
+    (Vec2::new(0.32, 0.68), Vec2::new(0.32, 0.0)),
+    (Vec2::new(0.32, 0.68), Vec2::new(0.56, 0.68)),
+    (Vec2::new(0.56, 0.68), Vec2::new(0.56, 0.0)),
+];
+const GLYPH_C: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.62, 0.7), Vec2::new(0.12, 0.7)),
+    (Vec2::new(0.12, 0.7), Vec2::new(0.12, 0.0)),
+    (Vec2::new(0.12, 0.0), Vec2::new(0.62, 0.0)),
+];
+const GLYPH_F: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.12, 0.0), Vec2::new(0.12, 1.0)),
+    (Vec2::new(0.12, 1.0), Vec2::new(0.58, 1.0)),
+    (Vec2::new(0.12, 0.52), Vec2::new(0.48, 0.52)),
+];
+const GLYPH_T: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.32, 1.0), Vec2::new(0.32, 0.0)),
+    (Vec2::new(0.08, 0.7), Vec2::new(0.58, 0.7)),
+];
+const GLYPH_I: &[(Vec2, Vec2)] = &[(Vec2::new(0.11, 0.0), Vec2::new(0.11, 0.72))];
+const GLYPH_N: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 0.0), Vec2::new(0.08, 0.7)),
+    (Vec2::new(0.08, 0.7), Vec2::new(0.68, 0.0)),
+    (Vec2::new(0.68, 0.0), Vec2::new(0.68, 0.7)),
+];
+const GLYPH_APOSTROPHE: &[(Vec2, Vec2)] = &[(Vec2::new(0.1, 1.0), Vec2::new(0.04, 0.72))];
+const GLYPH_QUOTE: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 1.0), Vec2::new(0.04, 0.72)),
+    (Vec2::new(0.32, 1.0), Vec2::new(0.28, 0.72)),
+];
+const GLYPH_BOX: &[(Vec2, Vec2)] = &[
+    (Vec2::new(0.08, 0.0), Vec2::new(0.64, 0.0)),
+    (Vec2::new(0.64, 0.0), Vec2::new(0.64, 1.0)),
+    (Vec2::new(0.64, 1.0), Vec2::new(0.08, 1.0)),
+    (Vec2::new(0.08, 1.0), Vec2::new(0.08, 0.0)),
+];
 
 fn dimension_tool_anchor_position(
     cursor_world_pos: &CursorWorldPos,
@@ -2185,8 +2648,8 @@ fn preview_dimension_line_node(
             host_element_id,
             ..
         } => {
-            let host_bounds =
-                host_entity_projected_bounds(host_element_id, &active_plane, host_bounds_query);
+            let host_reference =
+                host_entity_dimension_reference(host_element_id, &active_plane, host_bounds_query);
             Some(DimensionLineNode {
                 start,
                 end,
@@ -2195,7 +2658,7 @@ fn preview_dimension_line_node(
                     end,
                     cursor_position,
                     &active_plane,
-                    host_bounds,
+                    host_reference,
                 ),
                 extension: default_dimension_extension(start, end),
                 visible: true,
@@ -2256,7 +2719,27 @@ mod tests {
         };
         let doc_props = DocumentProperties::default();
 
-        assert_eq!(snapshot.display_text(&doc_props), "Overall: 8.20ft");
+        assert_eq!(snapshot.display_text(&doc_props), "8.20ft");
+    }
+
+    #[test]
+    fn dimension_display_text_treats_label_as_metadata_only() {
+        let snapshot = DimensionLineSnapshot {
+            element_id: ElementId(8),
+            start: Vec3::ZERO,
+            end: Vec3::new(7.2277, 0.0, 0.0),
+            line_point: Vec3::new(3.6, -0.5, 0.0),
+            extension: 0.25,
+            visible: true,
+            label: Some("Foundation length".to_string()),
+            display_unit: Some(DisplayUnit::Metres),
+            precision: Some(2),
+        };
+
+        assert_eq!(
+            snapshot.display_text(&DocumentProperties::default()),
+            "7.23m"
+        );
     }
 
     #[test]
@@ -2304,9 +2787,15 @@ mod tests {
             Vec3::new(2.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, -0.05),
             &plane,
-            Some(ProjectedBounds2d {
-                min: Vec2::new(0.0, -0.4),
-                max: Vec2::new(2.0, 0.4),
+            Some(HostDimensionReference {
+                world_bounds: EntityBounds {
+                    min: Vec3::new(-1.0, 0.0, -0.4),
+                    max: Vec3::new(3.0, 1.0, 0.4),
+                },
+                projected_bounds: ProjectedBounds2d {
+                    min: Vec2::new(0.0, -0.4),
+                    max: Vec2::new(2.0, 0.4),
+                },
             }),
         );
 
@@ -2334,6 +2823,52 @@ mod tests {
     }
 
     #[test]
+    fn box_edge_dimension_line_point_uses_only_adjacent_edge_directions() {
+        let bounds = EntityBounds {
+            min: Vec3::ZERO,
+            max: Vec3::new(4.0, 3.0, 2.0),
+        };
+        let start = Vec3::ZERO;
+        let end = Vec3::new(4.0, 0.0, 0.0);
+
+        let toward_y =
+            constrained_box_edge_dimension_line_point(start, end, Vec3::new(2.0, 1.2, 0.2), bounds)
+                .expect("box edge should constrain");
+        let toward_z =
+            constrained_box_edge_dimension_line_point(start, end, Vec3::new(2.0, 0.2, 1.2), bounds)
+                .expect("box edge should constrain");
+
+        assert!(
+            (toward_y.z - 0.0).abs() < 1e-5,
+            "Y-side dimension must not drift diagonally: {toward_y:?}"
+        );
+        assert!(
+            (toward_z.y - 0.0).abs() < 1e-5,
+            "Z-side dimension must not drift diagonally: {toward_z:?}"
+        );
+        assert!(
+            toward_y.y > bounds.max.y && toward_z.z > bounds.max.z,
+            "dimension line should be pushed outside the chosen box side"
+        );
+    }
+
+    #[test]
+    fn non_box_edge_dimension_line_point_keeps_general_aligned_behavior() {
+        let bounds = EntityBounds {
+            min: Vec3::ZERO,
+            max: Vec3::new(4.0, 3.0, 2.0),
+        };
+
+        assert!(constrained_box_edge_dimension_line_point(
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::new(2.0, 1.0, 1.0),
+            bounds,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn dimension_offset_preview_uses_raw_cursor_instead_of_snapped_anchor() {
         let tool_state = DimensionLineToolState {
             stage: DimensionLinePlacementStage::PlacingOffset {
@@ -2354,6 +2889,8 @@ mod tests {
             position: Some(Vec3::new(10.0, 0.0, 10.0)),
             target: Some(Vec3::new(10.0, 0.0, 10.0)),
             kind: SnapKind::Endpoint,
+            candidates: Vec::new(),
+            active_candidate: 0,
         };
 
         assert_eq!(

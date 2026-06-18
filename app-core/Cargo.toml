@@ -1,0 +1,55 @@
+[workspace]
+
+[package]
+name = "talos3d-core-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["native", "terrain"]
+native = ["bevy/x11"]
+model-api = ["talos3d-core/model-api"]
+perf-stats = ["talos3d-core/perf-stats"]
+terrain = ["dep:talos3d-terrain"]
+
+[dependencies]
+bevy = { version = "0.18", default-features = false, features = [
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+    "mesh_picking",
+    "bevy_pbr",
+    "bevy_picking",
+    "bevy_post_process",
+    "bevy_render",
+    "bevy_scene",
+    "bevy_state",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_text",
+    "bevy_ui",
+    "tonemapping_luts",
+    "webgpu",
+    "default_font",
+    "png",
+    "jpeg",
+] }
+talos3d-core = { path = "../crates/talos3d-core" }
+talos3d-terrain = { path = "../crates/talos3d-terrain", optional = true }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+
+[profile.release.package."*"]
+opt-level = 3
+
+[patch.crates-io]
+bevy_egui = { path = "../vendor/bevy_egui" }
+egui = { path = "../vendor/egui-0.33.3/egui" }
+epaint = { path = "../vendor/egui-0.33.3/epaint" }
+emath = { path = "../vendor/egui-0.33.3/emath" }
+ecolor = { path = "../vendor/egui-0.33.3/ecolor" }
