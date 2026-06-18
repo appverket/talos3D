@@ -13,7 +13,7 @@ perf-stats = ["talos3d-core/perf-stats", "talos3d-architecture-elements/perf-sta
 terrain = ["dep:talos3d-terrain"]
 
 [dependencies]
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19.0-rc.3", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_gizmos",
@@ -55,24 +55,3 @@ codegen-units = 1
 
 [profile.release.package."*"]
 opt-level = 3
-
-[patch.crates-io]
-# Fix bevy_egui scissor-rect crash on macOS first frame:
-# clamp scissor to physical_target_size, not just viewport size.
-bevy_egui = { path = "../vendor/bevy_egui" }
-egui = { path = "../vendor/egui-0.33.3/egui" }
-epaint = { path = "../vendor/egui-0.33.3/epaint" }
-emath = { path = "../vendor/egui-0.33.3/emath" }
-ecolor = { path = "../vendor/egui-0.33.3/ecolor" }
-
-# Local engine workflow notes:
-# - Keep this vendored bevy_egui patch unless the bridge has been migrated.
-# - Talos currently vendors the egui 0.33.3 line because bevy_egui still targets it.
-# - When the bridge is upgraded, replace these vendored overrides with the newer bridge stack.
-#
-# - If you need local Bevy main, do that only on a dedicated Talos branch and
-#   replace versioned `bevy = "0.18"` dependencies with path dependencies to:
-#   /path/to/your/local/bevy
-#
-# Full workflow:
-# docs/ENGINE_FORK_WORKFLOW.md

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19.0-rc.3", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_gizmos",
@@ -26,6 +26,6 @@ bevy = { version = "0.18", default-features = false, features = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 delaunator = "1"
-bevy_egui = "0.39"
+bevy_egui = "0.40.0-rc.1"
 talos3d-capability-api = { path = "../talos3d-capability-api" }
 talos3d-core = { path = "../talos3d-core" }
