@@ -332,7 +332,7 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
             DirectionalLight {
                 color: Color::srgb(1.0, 0.97, 0.92),
                 illuminance: 8_000.0,
-                shadows_enabled: false,
+                shadow_maps_enabled: false,
                 ..default()
             },
             Transform::from_rotation(Quat::from_euler(
@@ -369,7 +369,7 @@ fn resize_preview_render_target(
         return;
     }
 
-    if let Some(image) = images.get_mut(&scene.render_target) {
+    if let Some(mut image) = images.get_mut(&scene.render_target) {
         image.resize(Extent3d {
             width: requested.x,
             height: requested.y,

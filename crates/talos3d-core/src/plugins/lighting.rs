@@ -944,7 +944,7 @@ fn insert_bevy_light_direct(entity_mut: &mut EntityWorldMut, node: &SceneLightNo
             entity_mut.insert(DirectionalLight {
                 color,
                 illuminance: node.intensity.max(0.0),
-                shadows_enabled: node.shadows_enabled,
+                shadow_maps_enabled: node.shadows_enabled,
                 ..default()
             });
         }
@@ -952,7 +952,7 @@ fn insert_bevy_light_direct(entity_mut: &mut EntityWorldMut, node: &SceneLightNo
             entity_mut.insert(PointLight {
                 color,
                 intensity: node.intensity.max(0.0),
-                shadows_enabled: node.shadows_enabled,
+                shadow_maps_enabled: node.shadows_enabled,
                 range: node.range.max(0.01),
                 radius: node.radius.max(0.0),
                 ..default()
@@ -962,7 +962,7 @@ fn insert_bevy_light_direct(entity_mut: &mut EntityWorldMut, node: &SceneLightNo
             entity_mut.insert(SpotLight {
                 color,
                 intensity: node.intensity.max(0.0),
-                shadows_enabled: node.shadows_enabled,
+                shadow_maps_enabled: node.shadows_enabled,
                 range: node.range.max(0.01),
                 radius: node.radius.max(0.0),
                 inner_angle: node.inner_angle_deg.to_radians(),
@@ -990,7 +990,7 @@ fn apply_scene_light_components(commands: &mut Commands, entity: Entity, node: &
             entity_commands.insert(DirectionalLight {
                 color,
                 illuminance: node.intensity.max(0.0),
-                shadows_enabled: node.shadows_enabled,
+                shadow_maps_enabled: node.shadows_enabled,
                 ..default()
             });
         }
@@ -998,7 +998,7 @@ fn apply_scene_light_components(commands: &mut Commands, entity: Entity, node: &
             entity_commands.insert(PointLight {
                 color,
                 intensity: node.intensity.max(0.0),
-                shadows_enabled: node.shadows_enabled,
+                shadow_maps_enabled: node.shadows_enabled,
                 range: node.range.max(0.01),
                 radius: node.radius.max(0.0),
                 ..default()
@@ -1008,7 +1008,7 @@ fn apply_scene_light_components(commands: &mut Commands, entity: Entity, node: &
             entity_commands.insert(SpotLight {
                 color,
                 intensity: node.intensity.max(0.0),
-                shadows_enabled: node.shadows_enabled,
+                shadow_maps_enabled: node.shadows_enabled,
                 range: node.range.max(0.01),
                 radius: node.radius.max(0.0),
                 inner_angle: node.inner_angle_deg.to_radians(),

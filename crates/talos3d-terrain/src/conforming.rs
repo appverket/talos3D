@@ -1079,7 +1079,7 @@ fn regenerate_conforming_meshes(
             .try_insert(ConformingDerived { y_top });
         match mesh_handle {
             Some(handle) if meshes.get(handle.id()).is_some() => {
-                if let Some(existing) = meshes.get_mut(handle.id()) {
+                if let Some(mut existing) = meshes.get_mut(handle.id()) {
                     *existing = mesh;
                 }
             }

@@ -646,8 +646,11 @@ fn upsert_mesh_entity(
     let mut entity_commands = commands.entity(entity);
 
     let handle = if let Some(mesh_handle) = mesh_handle {
-        if let Some(existing_mesh) = meshes.get_mut(mesh_handle.id()) {
-            *existing_mesh = mesh;
+        let mesh_id = mesh_handle.id();
+        if meshes.contains(mesh_id) {
+            *meshes
+                .get_mut(mesh_id)
+                .expect("mesh handle existence was checked") = mesh;
             mesh_handle.0.clone()
         } else {
             let handle = meshes.add(mesh);

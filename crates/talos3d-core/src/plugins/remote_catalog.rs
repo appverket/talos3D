@@ -1192,7 +1192,9 @@ mod inner {
     ) {
         let state = reader_state.get_or_insert_with(|| SystemState::new(world));
         let changes: Vec<RemoteCatalogChange> = {
-            let mut reader = state.get_mut(world);
+            let mut reader = state
+                .get_mut(world)
+                .expect("remote catalog change reader should validate");
             reader.read().cloned().collect()
         };
 
@@ -1246,7 +1248,9 @@ mod inner {
 
         let state = reader_state.get_or_insert_with(|| SystemState::new(world));
         let requests: Vec<PublishArtifactRequested> = {
-            let mut reader = state.get_mut(world);
+            let mut reader = state
+                .get_mut(world)
+                .expect("publish artifact request reader should validate");
             reader.read().cloned().collect()
         };
 

@@ -612,8 +612,11 @@ fn upsert_terrain_mesh_entity(
     let mut entity_commands = commands.entity(entity);
     let mesh = terrain_mesh_asset(primitive, visualization_state, cut_fill_visualization);
     if let Some(mesh_handle) = mesh_handle {
-        if let Some(existing_mesh) = meshes.get_mut(mesh_handle.id()) {
-            *existing_mesh = mesh;
+        let mesh_id = mesh_handle.id();
+        if meshes.contains(mesh_id) {
+            *meshes
+                .get_mut(mesh_id)
+                .expect("mesh handle existence was checked") = mesh;
         } else {
             entity_commands.try_insert(Mesh3d(meshes.add(mesh)));
         }

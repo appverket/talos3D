@@ -862,7 +862,9 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
         .min_by(|left, right| left.distance.total_cmp(&right.distance));
     let mut system_state: bevy::ecs::system::SystemState<SelectionHitTest> =
         bevy::ecs::system::SystemState::new(world);
-    let mut hit_test = system_state.get_mut(world);
+    let mut hit_test = system_state
+        .get_mut(world)
+        .expect("selection hit-test system state should validate");
     let SelectionHitTest {
         ray_cast,
         mesh_selectable_query,

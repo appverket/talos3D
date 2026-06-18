@@ -837,8 +837,11 @@ fn sync_bloom_component(commands: &mut Commands, camera: Entity, settings: &Rend
 
 fn sync_ssr_component(commands: &mut Commands, camera: Entity, settings: &RenderSettings) {
     if settings.ssr_enabled {
+        let max_roughness = settings.ssr_perceptual_roughness_threshold.clamp(0.0, 1.0);
         commands.entity(camera).insert(ScreenSpaceReflections {
-            perceptual_roughness_threshold: settings.ssr_perceptual_roughness_threshold,
+            min_perceptual_roughness: 0.0..0.0,
+            max_perceptual_roughness: max_roughness..max_roughness,
+            edge_fadeout: ScreenSpaceReflections::default().edge_fadeout,
             thickness: settings.ssr_thickness,
             linear_steps: settings.ssr_linear_steps.max(1),
             linear_march_exponent: settings.ssr_linear_march_exponent,

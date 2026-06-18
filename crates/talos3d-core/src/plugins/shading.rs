@@ -47,7 +47,7 @@ fn apply_shading_to_new_materials(
 ) {
     if matches!(mode.get(), ShadingMode::Flat) {
         for handle in &query {
-            if let Some(mat) = materials.get_mut(handle) {
+            if let Some(mut mat) = materials.get_mut(handle) {
                 mat.unlit = true;
             }
         }
@@ -60,7 +60,7 @@ fn set_all_unlit<const UNLIT: bool>(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for handle in &query {
-        if let Some(mat) = materials.get_mut(handle) {
+        if let Some(mut mat) = materials.get_mut(handle) {
             mat.unlit = UNLIT;
         }
     }
