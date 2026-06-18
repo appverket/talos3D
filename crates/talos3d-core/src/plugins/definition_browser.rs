@@ -203,10 +203,6 @@ impl DefinitionListCache {
         Arc::clone(&self.entries)
     }
 
-    /// Whether the cached entry list contains a definition with this id.
-    fn contains_id(&self, id: &str) -> bool {
-        self.entry_ids.contains(id)
-    }
 }
 
 /// Build the browser entry list: all definitions of the selected source
