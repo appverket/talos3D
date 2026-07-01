@@ -72,6 +72,13 @@ pub struct MemberRow {
     pub label: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct LayerMemberSelect {
+    pub entity: Entity,
+    pub layer: String,
+    pub additive: bool,
+}
+
 /// Flattened, owned snapshot of layers + membership, rebuilt each frame while
 /// the panel is visible.
 #[derive(Resource, Debug, Clone, Default)]
@@ -91,7 +98,7 @@ impl LayersPanelData {
 /// drains this against the registry / state / ECS.
 #[derive(Debug, Default)]
 pub struct LayersPanelActions {
-    pub select: Option<(Entity, bool)>,
+    pub select: Option<LayerMemberSelect>,
     pub set_active: Option<String>,
     pub set_visible: Option<(String, bool)>,
     pub set_locked: Option<(String, bool)>,
@@ -380,7 +387,7 @@ fn render_layer(
     if expanded {
         if let Some(members) = data.members_by_layer.get(&layer.name) {
             for member in members {
-                render_member(ui, member, selected, actions);
+                render_member(ui, &layer.name, member, selected, actions);
             }
         }
     }
@@ -388,6 +395,7 @@ fn render_layer(
 
 fn render_member(
     ui: &mut egui::Ui,
+    layer_name: &str,
     member: &MemberRow,
     selected: &HashSet<Entity>,
     actions: &mut LayersPanelActions,
@@ -408,7 +416,11 @@ fn render_member(
             .inner;
         if inner.clicked() {
             let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
-            actions.select = Some((member.entity, additive));
+            actions.select = Some(LayerMemberSelect {
+                entity: member.entity,
+                layer: layer_name.to_string(),
+                additive,
+            });
         }
     });
 }
@@ -456,8 +468,14 @@ pub fn apply_layers_actions(
     commands: &mut Commands,
     status: &mut StatusBarData,
 ) {
-    if let Some((entity, additive)) = actions.select {
-        apply_click_selection(commands, current_selection, entity, additive);
+    if let Some(selection) = &actions.select {
+        layer_state.set_active(selection.layer.clone(), registry);
+        apply_click_selection(
+            commands,
+            current_selection,
+            selection.entity,
+            selection.additive,
+        );
     }
     if let Some(name) = &actions.set_active {
         layer_state.set_active(name.clone(), registry);
@@ -528,6 +546,7 @@ pub fn apply_layers_actions(
 mod tests {
     use super::*;
     use crate::capability_registry::CapabilityRegistry;
+    use crate::plugins::selection::Selected;
 
     fn boot(world: &mut World) {
         world.init_resource::<LayerRegistry>();
@@ -625,5 +644,48 @@ mod tests {
                 .map(|a| a.layer.clone()),
             Some("Roof".to_string())
         );
+    }
+
+    #[test]
+    fn selecting_member_row_also_activates_that_layer() {
+        let mut world = World::new();
+        boot(&mut world);
+        world
+            .resource_mut::<LayerRegistry>()
+            .create_layer("Walls".to_string());
+        let entity = world
+            .spawn((ElementId(1), LayerAssignment::new("Walls")))
+            .id();
+        let members: HashMap<String, Vec<MemberRow>> = HashMap::new();
+        let actions = LayersPanelActions {
+            select: Some(LayerMemberSelect {
+                entity,
+                layer: "Walls".to_string(),
+                additive: false,
+            }),
+            ..Default::default()
+        };
+
+        world.resource_scope(|world, mut registry: Mut<LayerRegistry>| {
+            world.resource_scope(|world, mut layer_state: Mut<LayerState>| {
+                let mut status = StatusBarData::default();
+                let mut commands_queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut commands_queue, world);
+                let selection = HashSet::new();
+                apply_layers_actions(
+                    &actions,
+                    &mut registry,
+                    &mut layer_state,
+                    &members,
+                    &selection,
+                    &mut commands,
+                    &mut status,
+                );
+                commands_queue.apply(world);
+            });
+        });
+
+        assert_eq!(world.resource::<LayerState>().active_layer, "Walls");
+        assert!(world.get::<Selected>(entity).is_some());
     }
 }
