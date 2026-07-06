@@ -18,22 +18,30 @@
 //! without the outliner knowing about concrete entity kinds.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "perf-stats")]
+use std::time::Instant;
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use bevy_egui::egui;
 use serde_json::Value;
 
 use crate::capability_registry::CapabilityRegistry;
+#[cfg(feature = "perf-stats")]
+use crate::plugins::perf_stats::add_outliner_build_time;
 use crate::plugins::{
-    command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
+    command_registry::{
+        queue_command_invocation_resource, CommandCategory, CommandDescriptor, CommandRegistry,
+        CommandRegistryAppExt, CommandResult, PendingCommandInvocations,
+    },
     egui_chrome::EguiChromeSystems,
     identity::ElementId,
+    layers::entity_on_locked_layer,
     modeling::{
         assembly::SemanticRelation,
         group::GroupMembers,
         occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
     },
-    selection::{resolve_entity_for_selection, Selected},
+    selection::Selected,
     ui::StatusBarData,
 };
 
@@ -41,6 +49,7 @@ const OUTLINER_DEFAULT_WIDTH: f32 = 280.0;
 const OUTLINER_DEFAULT_HEIGHT: f32 = 420.0;
 const OUTLINER_INDENT_PER_DEPTH: f32 = 14.0;
 const OUTLINER_TOGGLE_WIDTH: f32 = 16.0;
+const OUTLINER_ROW_HEIGHT: f32 = 22.0;
 
 /// What kind of model element a tree row represents. Used only for the row
 /// glyph/styling — selection and traversal do not depend on it.
@@ -57,11 +66,13 @@ pub enum OutlinerKind {
 pub struct OutlinerNode {
     /// Stable id used to key the per-row collapse state across frames.
     pub node_id: u64,
-    /// Entity to (de)select when this row is clicked. For a generated part this
-    /// is the owning occurrence, matching viewport selection semantics.
+    /// Entity to (de)select when this row is clicked. Group members select their
+    /// own row entity instead of redirecting to the parent group; generated part
+    /// rows still select the owning occurrence because they are transient rows.
     pub select_entity: Option<Entity>,
     pub label: String,
     pub kind: OutlinerKind,
+    pub is_linked_model: bool,
     /// Arena indices of child rows.
     pub children: Vec<usize>,
 }
@@ -173,6 +184,8 @@ pub fn build_outliner_tree(world: &mut World) {
         }
         return;
     }
+    #[cfg(feature = "perf-stats")]
+    let perf_start = Instant::now();
 
     let forest = collect_outline_forest(world);
     let mut nodes: Vec<OutlinerNode> = Vec::new();
@@ -183,6 +196,12 @@ pub fn build_outliner_tree(world: &mut World) {
     let mut tree = world.resource_mut::<OutlinerTree>();
     tree.nodes = nodes;
     tree.roots = roots;
+
+    #[cfg(feature = "perf-stats")]
+    if let Some(mut perf_stats) = world.get_resource_mut::<crate::plugins::perf_stats::PerfStats>()
+    {
+        add_outliner_build_time(&mut perf_stats, perf_start.elapsed());
+    }
 }
 
 /// Flatten a nested [`OutlineEntry`] into the panel arena, returning its index.
@@ -195,9 +214,17 @@ fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNo
         .collect();
     nodes.push(OutlinerNode {
         node_id: entry.node_id,
-        select_entity: resolve_entity_for_selection(world, entry.entity),
+        select_entity: (!world
+            .get_resource::<crate::plugins::layers::LayerRegistry>()
+            .is_some_and(|_| entity_on_locked_layer(world, entry.entity)))
+        .then_some(entry.entity),
         label: entry.label.clone(),
         kind: entry.kind,
+        is_linked_model: matches!(entry.kind, OutlinerKind::Group)
+            && world
+                .get::<GroupMembers>(entry.entity)
+                .and_then(|members| members.linked_model.as_ref())
+                .is_some(),
         children,
     });
     nodes.len() - 1
@@ -437,6 +464,8 @@ pub fn draw_outliner_window(
     state: &mut OutlinerWindowState,
     tree: &OutlinerTree,
     selected: &HashSet<Entity>,
+    pending_commands: &mut PendingCommandInvocations,
+    command_registry: &CommandRegistry,
 ) -> Option<OutlinerSelectAction> {
     if !state.visible {
         return None;
@@ -455,25 +484,73 @@ pub fn draw_outliner_window(
                 ui.weak("The model is empty.");
                 return;
             }
+            let visible_rows = collect_visible_outliner_rows(tree, state);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let roots = tree.roots.clone();
-                    for root in roots {
-                        render_outliner_node(ui, root, tree, state, selected, &mut action, 0);
-                    }
-                });
+                .show_rows(
+                    ui,
+                    OUTLINER_ROW_HEIGHT,
+                    visible_rows.len(),
+                    |ui, row_range| {
+                        for row_index in row_range {
+                            let (node_index, depth) = visible_rows[row_index];
+                            render_outliner_row(
+                                ui,
+                                node_index,
+                                tree,
+                                state,
+                                selected,
+                                pending_commands,
+                                command_registry,
+                                &mut action,
+                                depth,
+                            );
+                        }
+                    },
+                );
         });
     state.visible = open;
     action
 }
 
-fn render_outliner_node(
+fn collect_visible_outliner_rows(
+    tree: &OutlinerTree,
+    state: &OutlinerWindowState,
+) -> Vec<(usize, usize)> {
+    let mut rows = Vec::with_capacity(tree.nodes.len().min(256));
+    for &root in &tree.roots {
+        push_visible_outliner_row(tree, state, root, 0, &mut rows);
+    }
+    rows
+}
+
+fn push_visible_outliner_row(
+    tree: &OutlinerTree,
+    state: &OutlinerWindowState,
+    idx: usize,
+    depth: usize,
+    rows: &mut Vec<(usize, usize)>,
+) {
+    let Some(node) = tree.nodes.get(idx) else {
+        return;
+    };
+    rows.push((idx, depth));
+    if node.children.is_empty() || state.collapsed.contains(&node.node_id) {
+        return;
+    }
+    for &child in &node.children {
+        push_visible_outliner_row(tree, state, child, depth + 1, rows);
+    }
+}
+
+fn render_outliner_row(
     ui: &mut egui::Ui,
     idx: usize,
     tree: &OutlinerTree,
     state: &mut OutlinerWindowState,
     selected: &HashSet<Entity>,
+    pending_commands: &mut PendingCommandInvocations,
+    command_registry: &CommandRegistry,
     action: &mut Option<OutlinerSelectAction>,
     depth: usize,
 ) {
@@ -509,14 +586,52 @@ fn render_outliner_node(
                 additive,
             });
         }
-    });
-
-    if has_children && expanded {
-        let children = node.children.clone();
-        for child in children {
-            render_outliner_node(ui, child, tree, state, selected, action, depth + 1);
+        if response.clicked_by(egui::PointerButton::Secondary) && node.select_entity.is_some() {
+            *action = Some(OutlinerSelectAction {
+                target: node.select_entity.expect("checked selectable target"),
+                additive: false,
+            });
         }
-    }
+        if matches!(node.kind, OutlinerKind::Group) {
+            response.context_menu(|ui| {
+                let (command_id, fallback_label) = if node.is_linked_model {
+                    ("modeling.open_linked_model", "Open Linked Model")
+                } else {
+                    (
+                        "modeling.create_linked_model_from_selection",
+                        "Create Linked Model",
+                    )
+                };
+                let label = command_registry
+                    .get(command_id)
+                    .map(|descriptor| descriptor.label.as_str())
+                    .unwrap_or(fallback_label);
+                if ui.button(label).clicked() {
+                    queue_command_invocation_resource(
+                        pending_commands,
+                        command_id.to_string(),
+                        serde_json::json!({ "group_id": node.node_id }),
+                    );
+                    ui.close();
+                }
+                if node.is_linked_model {
+                    let command_id = "modeling.refresh_linked_models";
+                    let label = command_registry
+                        .get(command_id)
+                        .map(|descriptor| descriptor.label.as_str())
+                        .unwrap_or("Refresh Linked Model");
+                    if ui.button(label).clicked() {
+                        queue_command_invocation_resource(
+                            pending_commands,
+                            command_id.to_string(),
+                            serde_json::json!({ "group_ids": [node.node_id], "force": true }),
+                        );
+                        ui.close();
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// Paint a small disclosure triangle as a frameless clickable widget. Painted
@@ -623,6 +738,7 @@ mod tests {
                 name: "Assembly".to_string(),
                 member_ids: vec![ElementId(2), ElementId(3)],
                 frame: crate::plugins::modeling::group::GroupFrame::default(),
+                linked_model: None,
             },
         ));
         world.spawn(ElementId(2));
@@ -688,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn member_row_selects_group_at_root() {
+    fn member_row_selects_member_at_root() {
         let mut world = World::new();
         let group = world
             .spawn((
@@ -697,6 +813,7 @@ mod tests {
                     name: "Assembly".to_string(),
                     member_ids: vec![ElementId(2)],
                     frame: GroupFrame::default(),
+                    linked_model: None,
                 },
             ))
             .id();
@@ -707,8 +824,8 @@ mod tests {
         let group_node = node_for(&tree, 1).expect("group node");
         let child_node = node_for(&tree, 2).expect("child node");
         assert_eq!(group_node.select_entity, Some(group));
-        assert_eq!(child_node.select_entity, Some(group));
-        assert_ne!(child_node.select_entity, Some(child));
+        assert_eq!(child_node.select_entity, Some(child));
+        assert_ne!(child_node.select_entity, Some(group));
     }
 
     #[test]
@@ -725,6 +842,7 @@ mod tests {
                 name: "Assembly".to_string(),
                 member_ids: vec![ElementId(2)],
                 frame: GroupFrame::default(),
+                linked_model: None,
             },
         ));
         let child = world.spawn(ElementId(2)).id();
@@ -766,6 +884,7 @@ mod tests {
                 name: "Assembly".to_string(),
                 member_ids: vec![ElementId(2), ElementId(3)],
                 frame: crate::plugins::modeling::group::GroupFrame::default(),
+                linked_model: None,
             },
         ));
         world.spawn(ElementId(2));

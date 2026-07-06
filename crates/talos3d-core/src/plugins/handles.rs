@@ -13,7 +13,6 @@ use crate::{
         camera::OrbitCamera,
         commands::ApplyEntityChangesCommand,
         cursor::{cursor_window_position, CursorWorldPos},
-        egui_chrome::EguiWantsInput,
         face_edit::FaceEditContext,
         input_ownership::{InputOwnership, InputPhase},
         selection::Selected,
@@ -279,7 +278,6 @@ struct HoverHandleContext<'w, 's> {
     handle_context: Res<'w, HandleContext>,
     pivot_point: Res<'w, PivotPoint>,
     ownership: Res<'w, InputOwnership>,
-    egui_wants_input: Res<'w, EguiWantsInput>,
     face_edit_context: Res<'w, FaceEditContext>,
     viewport: HandleViewportQuery<'w, 's>,
     handle_state: Res<'w, HandleInteractionState>,
@@ -362,7 +360,6 @@ fn update_hovered_handle(world: &World, mut commands: Commands, hover_handles: H
     // (separately scheduled) press handler sets — so a pending press never survived
     // to the next frame and a handle drag could never start.
     let new_hovered: Option<ResolvedHandle> = if !hover_handles.ownership.is_idle()
-        || hover_handles.egui_wants_input.pointer
         || hover_handles.face_edit_context.is_active()
         || hover_handles.handle_state.property_drag.is_some()
     {

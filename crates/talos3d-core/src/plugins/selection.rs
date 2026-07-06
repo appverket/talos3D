@@ -15,7 +15,6 @@ use crate::{
         commands::DeleteEntitiesCommand,
         cursor::cursor_window_position,
         definition_preview_scene::PreviewOnly,
-        egui_chrome::EguiWantsInput,
         face_edit::FaceEditContext,
         handles::HandleInteractionState,
         identity::ElementId,
@@ -238,7 +237,6 @@ struct SelectionHitTest<'w, 's> {
 
 fn handle_selection_click(world: &mut World) {
     let ownership = world.resource::<InputOwnership>().clone();
-    let egui_ptr = world.resource::<EguiWantsInput>().pointer;
     let handle_is_busy = world.resource::<HandleInteractionState>().is_busy();
     let box_dragging = world.resource::<BoxSelectState>().is_dragging;
     let box_just_completed = world.resource::<BoxSelectState>().just_completed;
@@ -255,7 +253,6 @@ fn handle_selection_click(world: &mut World) {
     let nav_held = orbit_modifier_pressed(keys) || pan_modifier_pressed(keys);
 
     if !ownership.is_idle()
-        || egui_ptr
         || handle_is_busy
         || box_dragging
         || box_just_completed
@@ -507,14 +504,13 @@ struct GroupDoubleClickContext<'w, 's> {
     tracker: ResMut<'w, DoubleClickTracker>,
     selected_query: Query<'w, 's, SelectedCompositeClickQueryItem, With<Selected>>,
     ownership: Res<'w, InputOwnership>,
-    egui_wants_input: Res<'w, EguiWantsInput>,
     edit_context: Res<'w, GroupEditContext>,
     occurrence_edit_context: Res<'w, OccurrenceEditContext>,
     face_edit_context: ResMut<'w, FaceEditContext>,
 }
 
 fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
-    if !cx.ownership.is_idle() || cx.egui_wants_input.pointer || orbit_modifier_pressed(&cx.keys) {
+    if !cx.ownership.is_idle() || orbit_modifier_pressed(&cx.keys) {
         return;
     }
 
@@ -906,11 +902,9 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
         });
     system_state.apply(world);
 
-    let screen_hit = screen_bounds_hit(world, cursor_position);
-    let bounds_hit = snapshot_bounds_hit(world, ray);
     choose_selection_hit(custom_hit, mesh_hit, None)
-        .or(screen_hit)
-        .or(bounds_hit)
+        .or_else(|| screen_bounds_hit(world, cursor_position))
+        .or_else(|| snapshot_bounds_hit(world, ray))
         .map(|hit| hit.entity)
 }
 
@@ -1020,7 +1014,6 @@ struct BoxSelectContext<'w, 's> {
     box_state: ResMut<'w, BoxSelectState>,
     selected_query: Query<'w, 's, Entity, With<Selected>>,
     ownership: Res<'w, InputOwnership>,
-    egui_wants_input: Res<'w, EguiWantsInput>,
     handle_state: Res<'w, HandleInteractionState>,
     face_edit_context: Res<'w, FaceEditContext>,
     layer_registry: Res<'w, LayerRegistry>,
@@ -1037,7 +1030,6 @@ fn handle_box_select(mut cx: BoxSelectContext) {
     cx.box_state.just_completed = false;
 
     if !cx.ownership.is_idle()
-        || cx.egui_wants_input.pointer
         || cx.face_edit_context.is_active()
         || orbit_modifier_pressed(&cx.keys)
         || pan_modifier_pressed(&cx.keys)
@@ -1284,6 +1276,7 @@ mod tests {
                     name: "Group".to_string(),
                     member_ids: vec![child_id],
                     frame: Default::default(),
+                    linked_model: None,
                 },
             ))
             .id();
@@ -1439,6 +1432,7 @@ mod tests {
                 name: "Nested".to_string(),
                 member_ids: vec![child_id],
                 frame: Default::default(),
+                linked_model: None,
             },
         ));
         let parent = world
@@ -1448,6 +1442,7 @@ mod tests {
                     name: "Parent".to_string(),
                     member_ids: vec![nested_id],
                     frame: Default::default(),
+                    linked_model: None,
                 },
             ))
             .id();
@@ -1471,6 +1466,7 @@ mod tests {
                 name: "Nested".to_string(),
                 member_ids: vec![child_id],
                 frame: Default::default(),
+                linked_model: None,
             },
         ));
         let parent = world
@@ -1480,13 +1476,16 @@ mod tests {
                     name: "Parent".to_string(),
                     member_ids: vec![nested_id],
                     frame: Default::default(),
+                    linked_model: None,
                 },
             ))
             .id();
         let edit_context = GroupEditContext::default();
         let mut system_state: bevy::ecs::system::SystemState<Query<GroupMembershipQueryItem>> =
             bevy::ecs::system::SystemState::new(&mut world);
-        let group_query = system_state.get(&world);
+        let group_query = system_state
+            .get(&world)
+            .expect("group membership query should initialize in test world");
 
         let target = redirect_to_group_query(child, child_id, &edit_context, &group_query);
 
@@ -1500,7 +1499,9 @@ mod tests {
         edit_context.enter(group_id);
         let mut system_state: bevy::ecs::system::SystemState<Query<GroupMembershipQueryItem>> =
             bevy::ecs::system::SystemState::new(&mut world);
-        let group_query = system_state.get(&world);
+        let group_query = system_state
+            .get(&world)
+            .expect("group membership query should initialize in test world");
 
         let target = redirect_to_group_query(child, child_id, &edit_context, &group_query);
 
@@ -1550,6 +1551,7 @@ mod tests {
                 name: "Nested".to_string(),
                 member_ids: vec![child_a_id, child_b_id],
                 frame: Default::default(),
+                linked_model: None,
             },
         ));
         let parent = world
@@ -1559,6 +1561,7 @@ mod tests {
                     name: "Parent".to_string(),
                     member_ids: vec![nested_id],
                     frame: Default::default(),
+                    linked_model: None,
                 },
             ))
             .id();

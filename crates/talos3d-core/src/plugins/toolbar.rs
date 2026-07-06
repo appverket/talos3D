@@ -404,7 +404,9 @@ fn floating_states_from_document(
         .unwrap_or_default()
 }
 
-fn serialize_floating_states(entries: &HashMap<String, FloatingToolbarEntry>) -> serde_json::Value {
+pub(crate) fn serialize_floating_states(
+    entries: &HashMap<String, FloatingToolbarEntry>,
+) -> serde_json::Value {
     serde_json::to_value(entries).unwrap_or_else(|_| serde_json::json!({}))
 }
 

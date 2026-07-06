@@ -7,15 +7,15 @@ use bevy::{ecs::system::SystemParam, picking::prelude::*, prelude::*};
 use wasm_bindgen::{closure::Closure, JsCast};
 
 use super::document_properties::DocumentProperties;
-use crate::plugins::egui_chrome::{EguiChromeSystems, EguiWantsInput};
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::plugins::scene_ray;
 use crate::plugins::{
     camera::{CameraProjectionMode, OrbitCamera},
     identity::ElementId,
+    input_ownership::{InputOwnership, InputPhase},
     layers::{LayerAssignment, LayerRegistry},
-    modeling::profile_feature::FaceProfileFeature,
+    modeling::{occurrence::GeneratedOccurrencePart, profile_feature::FaceProfileFeature},
     tools::ActiveTool,
 };
 
@@ -41,7 +41,7 @@ impl Plugin for CursorPlugin {
                 Update,
                 update_cursor_world_pos
                     .in_set(CursorSystems::UpdateWorldPosition)
-                    .after(EguiChromeSystems),
+                    .after(InputPhase::SyncOwnership),
             )
             .add_systems(
                 Update,
@@ -64,6 +64,8 @@ pub struct CursorWorldPos {
     pub raw: Option<Vec3>,
     pub snapped: Option<Vec3>,
     pub hovered_element_id: Option<ElementId>,
+    pub surface_point: Option<Vec3>,
+    pub surface_normal: Option<Vec3>,
 }
 
 #[derive(Resource, Default)]
@@ -79,8 +81,10 @@ struct ToolCursorRayCast<'w, 's> {
     ray_cast: MeshRayCast<'w, 's>,
     mesh_selectable_query: Query<'w, 's, (), With<ElementId>>,
     element_id_query: Query<'w, 's, &'static ElementId>,
+    generated_part_query: Query<'w, 's, &'static GeneratedOccurrencePart>,
     visibility_query: Query<'w, 's, &'static Visibility>,
     layer_assignment_query: Query<'w, 's, Option<&'static LayerAssignment>>,
+    element_layer_query: Query<'w, 's, (&'static ElementId, Option<&'static LayerAssignment>)>,
     layer_registry: Res<'w, LayerRegistry>,
     face_profile_feature_query: Query<'w, 's, (), With<FaceProfileFeature>>,
 }
@@ -357,12 +361,12 @@ fn update_cursor_world_pos(
     drawing_plane: Res<DrawingPlane>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform, Option<&OrbitCamera>)>,
-    egui_wants_input: Res<EguiWantsInput>,
+    ownership: Res<InputOwnership>,
     doc_props: Res<DocumentProperties>,
     active_tool: Res<State<ActiveTool>>,
     mut tool_cursor_ray_cast: ToolCursorRayCast,
 ) {
-    if egui_wants_input.pointer {
+    if ownership.is_ui_capture() {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
     }
@@ -407,7 +411,7 @@ fn update_cursor_world_pos(
         None
     };
     let raw_position = surface_hit
-        .map(|(position, _)| position)
+        .map(|(position, _, _)| position)
         .or_else(|| cursor_plane.intersect_ray(ray));
     let Some(raw_position) = raw_position else {
         clear_cursor_world_pos(&mut cursor_world_pos);
@@ -425,13 +429,10 @@ fn update_cursor_world_pos(
 
     cursor_world_pos.raw = Some(raw_position);
     cursor_world_pos.snapped = Some(snapped_position);
-    cursor_world_pos.hovered_element_id = surface_hit.and_then(|(_, entity)| {
-        tool_cursor_ray_cast
-            .element_id_query
-            .get(entity)
-            .ok()
-            .copied()
-    });
+    cursor_world_pos.hovered_element_id = surface_hit
+        .and_then(|(_, entity, _)| resolve_surface_owner_element_id(entity, &tool_cursor_ray_cast));
+    cursor_world_pos.surface_point = surface_hit.map(|(point, _, _)| point);
+    cursor_world_pos.surface_normal = surface_hit.and_then(|(_, _, normal)| normal.try_normalize());
 }
 
 fn active_orbit_camera<'a>(
@@ -442,29 +443,97 @@ fn active_orbit_camera<'a>(
         .find(|(camera, _, orbit)| camera.is_active && orbit.is_some())
 }
 
-fn ray_cast_scene_surface(ray: Ray3d, ray_cast: &mut ToolCursorRayCast) -> Option<(Vec3, Entity)> {
+fn ray_cast_scene_surface(
+    ray: Ray3d,
+    ray_cast: &mut ToolCursorRayCast,
+) -> Option<(Vec3, Entity, Vec3)> {
+    let ToolCursorRayCast {
+        ray_cast,
+        mesh_selectable_query,
+        element_id_query: _,
+        generated_part_query,
+        visibility_query,
+        layer_assignment_query,
+        element_layer_query,
+        layer_registry,
+        face_profile_feature_query,
+    } = ray_cast;
+
     ray_cast
-        .ray_cast
         .cast_ray(
             ray,
             &MeshRayCastSettings::default().with_filter(&|entity| {
-                ray_cast.mesh_selectable_query.contains(entity)
-                    && !ray_cast.face_profile_feature_query.contains(entity)
-                    && ray_cast
-                        .visibility_query
+                scene_surface_selectable(entity, mesh_selectable_query, generated_part_query)
+                    && !face_profile_feature_query.contains(entity)
+                    && visibility_query
                         .get(entity)
                         .map_or(true, |visibility| *visibility != Visibility::Hidden)
-                    && ray_cast
-                        .layer_assignment_query
-                        .get(entity)
-                        .ok()
-                        .flatten()
-                        .map(|assignment| ray_cast.layer_registry.is_visible(&assignment.layer))
-                        .unwrap_or(true)
+                    && scene_surface_layer_visible(
+                        entity,
+                        layer_assignment_query,
+                        generated_part_query,
+                        element_layer_query,
+                        layer_registry,
+                    )
             }),
         )
         .first()
-        .map(|(entity, hit)| (ray.origin + *ray.direction * hit.distance, *entity))
+        .map(|(entity, hit)| (hit.point, *entity, hit.normal))
+}
+
+fn scene_surface_selectable(
+    entity: Entity,
+    mesh_selectable_query: &Query<(), With<ElementId>>,
+    generated_part_query: &Query<&GeneratedOccurrencePart>,
+) -> bool {
+    mesh_selectable_query.contains(entity) || generated_part_query.contains(entity)
+}
+
+fn resolve_surface_owner_element_id(
+    entity: Entity,
+    ray_cast: &ToolCursorRayCast,
+) -> Option<ElementId> {
+    ray_cast
+        .element_id_query
+        .get(entity)
+        .ok()
+        .copied()
+        .or_else(|| {
+            ray_cast
+                .generated_part_query
+                .get(entity)
+                .ok()
+                .map(|part| part.owner)
+        })
+}
+
+fn scene_surface_layer_visible(
+    entity: Entity,
+    layer_assignment_query: &Query<Option<&LayerAssignment>>,
+    generated_part_query: &Query<&GeneratedOccurrencePart>,
+    element_layer_query: &Query<(&ElementId, Option<&LayerAssignment>)>,
+    layer_registry: &LayerRegistry,
+) -> bool {
+    if !layer_assignment_query
+        .get(entity)
+        .ok()
+        .flatten()
+        .map(|assignment| layer_registry.is_visible(&assignment.layer))
+        .unwrap_or(true)
+    {
+        return false;
+    }
+
+    let Ok(generated) = generated_part_query.get(entity) else {
+        return true;
+    };
+
+    element_layer_query
+        .iter()
+        .find(|(element_id, _)| **element_id == generated.owner)
+        .and_then(|(_, assignment)| assignment)
+        .map(|assignment| layer_registry.is_visible(&assignment.layer))
+        .unwrap_or(true)
 }
 
 fn draw_cursor_crosshair(
@@ -496,6 +565,8 @@ fn clear_cursor_world_pos(cursor_world_pos: &mut CursorWorldPos) {
     cursor_world_pos.raw = None;
     cursor_world_pos.snapped = None;
     cursor_world_pos.hovered_element_id = None;
+    cursor_world_pos.surface_point = None;
+    cursor_world_pos.surface_normal = None;
 }
 
 fn snap_to_increment(value: f32, increment: f32) -> f32 {

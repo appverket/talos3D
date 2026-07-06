@@ -788,18 +788,20 @@ pub fn draw_assistant_window(
     let max_panel_width = assistant_panel_max_width(ctx);
     let requested_width = clamp_assistant_panel_width(sidebar_state.width, max_panel_width);
     seed_assistant_panel_state(ctx, requested_width);
-    egui::SidePanel::right(assistant_panel_id())
-        .resizable(true)
-        .frame(
-            egui::Frame::new()
-                .fill(ASSISTANT_PANEL_SURFACE)
-                .stroke(egui::Stroke::new(1.0, ASSISTANT_PANEL_BORDER))
-                .inner_margin(egui::Margin::same(8)),
-        )
-        .default_width(requested_width)
-        .min_width(ASSISTANT_PANEL_MIN_WIDTH)
-        .max_width(max_panel_width)
-        .show(ctx, |ui| {
+    show_top_level_panel(
+        egui::Panel::right(assistant_panel_id())
+            .resizable(true)
+            .frame(
+                egui::Frame::new()
+                    .fill(ASSISTANT_PANEL_SURFACE)
+                    .stroke(egui::Stroke::new(1.0, ASSISTANT_PANEL_BORDER))
+                    .inner_margin(egui::Margin::same(8)),
+            )
+            .default_size(requested_width)
+            .min_size(ASSISTANT_PANEL_MIN_WIDTH)
+            .max_size(max_panel_width),
+        ctx,
+        |ui| {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
@@ -870,7 +872,8 @@ pub fn draw_assistant_window(
                     }
                 },
             }
-        });
+        },
+    );
     sidebar_state.width = assistant_panel_width_from_ctx(ctx)
         .map(|width| clamp_assistant_panel_width(width, max_panel_width))
         .unwrap_or(requested_width);
@@ -1305,6 +1308,15 @@ pub(crate) fn assistant_panel_max_width(ctx: &egui::Context) -> f32 {
 
 fn assistant_panel_id() -> egui::Id {
     egui::Id::new(ASSISTANT_PANEL_ID)
+}
+
+fn show_top_level_panel<R>(
+    panel: egui::Panel,
+    ctx: &egui::Context,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    #[allow(deprecated)]
+    panel.show(ctx, add_contents)
 }
 
 fn assistant_panel_rect(ctx: &egui::Context, width: f32) -> egui::Rect {

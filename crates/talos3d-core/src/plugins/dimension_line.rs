@@ -1,7 +1,6 @@
 use std::{any::Any, collections::HashMap};
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -9,7 +8,7 @@ use crate::{
     authored_entity::{
         invalid_property_error, property_field, property_field_with, read_only_property_field,
         scalar_from_json, vec3_from_json, AuthoredEntity, BoxedEntity, EntityBounds, EntityScope,
-        HandleInfo, HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
+        HandleInfo, PropertyFieldDef, PropertyValue, PropertyValueKind,
     },
     capability_registry::{
         AuthoredEntityFactory, CapabilityDescriptor, CapabilityDistribution, CapabilityMaturity,
@@ -29,9 +28,8 @@ use crate::{
             style::{DimensionStyle, TextPlacement},
             DimPrimitive, DimensionInput,
         },
-        egui_chrome::EguiWantsInput,
         identity::{ElementId, ElementIdAllocator},
-        input_ownership::InputPhase,
+        input_ownership::{InputOwnership, InputPhase},
         layers::{LayerAssignment, LayerRegistry},
         render_pipeline::RenderSettings,
         snap::{SnapKind, SnapResult, SnapSystems},
@@ -53,6 +51,8 @@ const DIMENSION_LINE_DEFAULT_OFFSET_MAX: f32 = 0.8;
 const DIMENSION_LINE_DEFAULT_OFFSET_FACTOR: f32 = 0.18;
 const DIMENSION_LINE_MIN_OFFSET: f32 = 0.001;
 const DIMENSION_LINE_OFFSET_DRAG_COMMIT_DISTANCE: f32 = 0.02;
+const DIMENSION_FACE_PLANE_TOLERANCE: f32 = 0.03;
+const DIMENSION_FACE_NORMAL_ALIGNMENT: f32 = 0.98;
 pub(crate) const DIMENSION_RENDER_PAPER_MM_PER_WORLD_M: f32 = 20.0;
 const DIMENSION_VIEWPORT_MIN_TEXT_PX: f32 = 13.0;
 const DIMENSION_VIEWPORT_MAX_TEXT_PX: f32 = 28.0;
@@ -112,12 +112,15 @@ enum DimensionLinePlacementStage {
     AwaitingStart,
     AwaitingEnd {
         start: Vec3,
-        host_element_id: Option<ElementId>,
+        host_element_id: ElementId,
+        face: DimensionFacePick,
     },
     PlacingOffset {
         start: Vec3,
         end: Vec3,
-        host_element_id: Option<ElementId>,
+        host_element_id: ElementId,
+        face: DimensionFacePick,
+        preferred_offset_dir: Vec3,
         drag_origin: Option<Vec3>,
         dragging: bool,
     },
@@ -144,10 +147,6 @@ pub struct DimensionLineSnapshot {
 impl DimensionLineSnapshot {
     fn axis(&self) -> Vec3 {
         self.end - self.start
-    }
-
-    fn axis_direction(&self) -> Vec3 {
-        self.axis().try_normalize().unwrap_or(Vec3::X)
     }
 
     fn measured_length(&self) -> f32 {
@@ -250,40 +249,28 @@ impl AuthoredEntity for DimensionLineSnapshot {
         EntityScope::DrawingMetadata
     }
 
-    fn translate_by(&self, delta: Vec3) -> BoxedEntity {
-        let mut snapshot = self.clone();
-        snapshot.start += delta;
-        snapshot.end += delta;
-        snapshot.line_point += delta;
-        snapshot.into()
+    fn translate_by(&self, _delta: Vec3) -> BoxedEntity {
+        self.clone().into()
     }
 
-    fn rotate_by(&self, rotation: Quat) -> BoxedEntity {
-        let mut snapshot = self.clone();
-        snapshot.start = rotation * snapshot.start;
-        snapshot.end = rotation * snapshot.end;
-        snapshot.line_point = rotation * snapshot.line_point;
-        snapshot.into()
+    fn rotate_by(&self, _rotation: Quat) -> BoxedEntity {
+        self.clone().into()
     }
 
-    fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity {
-        let mut snapshot = self.clone();
-        let axis_dir = snapshot.axis_direction();
-        snapshot.start = center + (snapshot.start - center) * factor;
-        snapshot.end = center + (snapshot.end - center) * factor;
-        snapshot.line_point = center + (snapshot.line_point - center) * factor;
-        snapshot.extension *= directional_scale(axis_dir, factor);
-        snapshot.into()
+    fn scale_by(&self, _factor: Vec3, _center: Vec3) -> BoxedEntity {
+        self.clone().into()
     }
 
     fn property_fields(&self) -> Vec<PropertyFieldDef> {
         vec![
-            property_field(
+            read_only_property_field(
+                "start",
                 "start",
                 PropertyValueKind::Vec3,
                 Some(PropertyValue::Vec3(self.start)),
             ),
-            property_field(
+            read_only_property_field(
+                "end",
                 "end",
                 PropertyValueKind::Vec3,
                 Some(PropertyValue::Vec3(self.end)),
@@ -293,21 +280,21 @@ impl AuthoredEntity for DimensionLineSnapshot {
                 "Line Point",
                 PropertyValueKind::Vec3,
                 Some(PropertyValue::Vec3(self.line_point)),
-                true,
+                false,
             ),
             property_field_with(
                 "offset",
                 "Offset",
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.offset_distance())),
-                true,
+                false,
             ),
             property_field_with(
                 "extension",
                 "Extension",
                 PropertyValueKind::Scalar,
                 Some(PropertyValue::Scalar(self.extension)),
-                true,
+                false,
             ),
             property_field(
                 "visible",
@@ -393,42 +380,11 @@ impl AuthoredEntity for DimensionLineSnapshot {
     }
 
     fn handles(&self) -> Vec<HandleInfo> {
-        vec![
-            HandleInfo {
-                id: "start".to_string(),
-                position: self.start,
-                kind: HandleKind::Vertex,
-                label: "Start".to_string(),
-            },
-            HandleInfo {
-                id: "end".to_string(),
-                position: self.end,
-                kind: HandleKind::Vertex,
-                label: "End".to_string(),
-            },
-            HandleInfo {
-                id: "line_point".to_string(),
-                position: self.line_midpoint(),
-                kind: HandleKind::Control,
-                label: "Offset".to_string(),
-            },
-        ]
+        Vec::new()
     }
 
     fn bounds(&self) -> Option<EntityBounds> {
         Some(self.entity_bounds())
-    }
-
-    fn drag_handle(&self, handle_id: &str, cursor: Vec3) -> Option<BoxedEntity> {
-        let mut snapshot = self.clone();
-        match handle_id {
-            "start" => snapshot.start = cursor,
-            "end" => snapshot.end = cursor,
-            "line_point" => snapshot.line_point = cursor,
-            _ => return None,
-        }
-        validate_dimension_geometry(snapshot.start, snapshot.end, snapshot.extension).ok()?;
-        Some(snapshot.into())
     }
 
     fn to_json(&self) -> Value {
@@ -730,7 +686,6 @@ impl AuthoredEntityFactory for DimensionLineFactory {
 }
 
 fn draw_dimension_line_overlay(
-    mut contexts: EguiContexts,
     mut gizmos: Gizmos,
     doc_props: Res<DocumentProperties>,
     visibility: Res<DimensionLineVisibility>,
@@ -745,31 +700,16 @@ fn draw_dimension_line_overlay(
     if viewport_export_state.annotation_overlays_suppressed() || !visibility.show_all {
         return;
     }
-    let Ok(ctx_ref) = contexts.ctx_mut() else {
-        return;
-    };
-    let ctx = ctx_ref.clone();
     let Some((camera, camera_transform)) = active_dimension_camera(camera_query.iter()) else {
         return;
     };
     let paper_style = drawing_annotation_paper_style(&render_settings);
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("dimension_line_overlay"),
-    ));
     for (node, selected) in &dimensions {
         if !node.visible {
             continue;
         }
-        let Some(primitives) =
-            project_dimension_line_primitives(node, &doc_props, camera, camera_transform)
-        else {
-            continue;
-        };
         let color = dimension_overlay_color(selected.is_some(), paper_style);
-        for primitive in &primitives {
-            paint_dimension_primitive(&painter, primitive, color);
-        }
+        draw_dimension_world_lines(&mut gizmos, node, color);
         draw_dimension_world_text(
             &mut gizmos,
             node,
@@ -810,11 +750,11 @@ fn cleanup_dimension_line_tool(mut commands: Commands) {
 
 fn cancel_dimension_line_tool(
     keys: Res<ButtonInput<KeyCode>>,
-    egui_wants_input: Res<EguiWantsInput>,
+    ownership: Res<InputOwnership>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
-    if egui_wants_input.keyboard || !keys.just_pressed(KeyCode::Escape) {
+    if !ownership.is_idle() || !keys.just_pressed(KeyCode::Escape) {
         return;
     }
 
@@ -824,7 +764,7 @@ fn cancel_dimension_line_tool(
 
 fn handle_dimension_line_clicks(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
-    egui_wants_input: Res<EguiWantsInput>,
+    ownership: Res<InputOwnership>,
     cursor_world_pos: Res<CursorWorldPos>,
     snap_result: Res<SnapResult>,
     mut tool_state: ResMut<DimensionLineToolState>,
@@ -840,7 +780,7 @@ fn handle_dimension_line_clicks(
     mut status_bar_data: ResMut<StatusBarData>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
 ) {
-    if egui_wants_input.pointer {
+    if !ownership.is_idle() {
         return;
     }
 
@@ -849,6 +789,8 @@ fn handle_dimension_line_clicks(
             start,
             end,
             host_element_id,
+            face,
+            preferred_offset_dir,
             drag_origin: Some(drag_origin),
             dragging: true,
         } = tool_state.stage
@@ -865,6 +807,8 @@ fn handle_dimension_line_clicks(
                 start,
                 end,
                 host_element_id,
+                face,
+                preferred_offset_dir,
                 drag_origin: None,
                 dragging: false,
             };
@@ -876,8 +820,15 @@ fn handle_dimension_line_clicks(
         commit_dimension_line(
             start,
             end,
-            offset_position,
-            host_element_id,
+            guided_face_dimension_line_request(
+                start,
+                end,
+                offset_position,
+                face,
+                preferred_offset_dir,
+            ),
+            Some(host_element_id),
+            Some(face),
             &allocator,
             &drawing_plane,
             &camera_query,
@@ -898,40 +849,70 @@ fn handle_dimension_line_clicks(
 
     match tool_state.stage {
         DimensionLinePlacementStage::AwaitingStart => {
-            let Some(cursor_position) =
-                dimension_tool_anchor_position(&cursor_world_pos, &snap_result)
-            else {
+            let Some(anchor) = dimension_tool_anchor_pick(
+                &cursor_world_pos,
+                &snap_result,
+                Some(&host_bounds_query),
+            ) else {
+                status_bar_data.hint =
+                    "Click a visible face edge endpoint to start a dimension".to_string();
                 return;
             };
             tool_state.stage = DimensionLinePlacementStage::AwaitingEnd {
-                start: cursor_position,
-                host_element_id: cursor_world_pos.hovered_element_id,
+                start: anchor.position,
+                host_element_id: anchor.host_element_id,
+                face: anchor.face,
             };
-            status_bar_data.hint =
-                "Click the end anchor, then drag perpendicular to place the dimension line"
-                    .to_string();
+            status_bar_data.hint = "Click another endpoint on the same face edge".to_string();
         }
         DimensionLinePlacementStage::AwaitingEnd {
             start,
             host_element_id,
+            face,
         } => {
-            let Some(cursor_position) =
-                dimension_tool_anchor_position(&cursor_world_pos, &snap_result)
-            else {
+            let Some(anchor) = dimension_tool_anchor_pick_on_face(
+                &cursor_world_pos,
+                &snap_result,
+                host_element_id,
+                face,
+                Some(&host_bounds_query),
+            ) else {
+                status_bar_data.hint =
+                    "Dimension endpoints must be visible face edge endpoints".to_string();
                 return;
             };
+            let cursor_position = anchor.position;
             if start.distance(cursor_position) < DIMENSION_LINE_MIN_MEASURE_LENGTH {
                 return;
             }
 
-            let host_element_id = match (host_element_id, cursor_world_pos.hovered_element_id) {
-                (Some(left), Some(right)) if left == right => Some(left),
-                _ => None,
+            let Some(edge_constraint) = dimension_face_edge_constraint(
+                start,
+                anchor,
+                host_element_id,
+                face,
+                &host_bounds_query,
+            ) else {
+                status_bar_data.hint =
+                    "Pick two endpoints of the same visible face edge".to_string();
+                return;
             };
+            let camera_position = active_dimension_tool_transform(camera_query.iter())
+                .map(|transform| transform.translation());
+            let preferred_offset_dir = preferred_face_dimension_offset_dir(
+                start,
+                cursor_position,
+                edge_constraint.face,
+                edge_constraint.host_bounds,
+                camera_position,
+            )
+            .unwrap_or(edge_constraint.preferred_offset_dir);
             tool_state.stage = DimensionLinePlacementStage::PlacingOffset {
                 start,
                 end: cursor_position,
-                host_element_id,
+                host_element_id: edge_constraint.host_element_id,
+                face: edge_constraint.face,
+                preferred_offset_dir,
                 drag_origin: Some(cursor_position),
                 dragging: true,
             };
@@ -942,6 +923,8 @@ fn handle_dimension_line_clicks(
             start,
             end,
             host_element_id,
+            face,
+            preferred_offset_dir,
             ..
         } => {
             let Some(offset_position) =
@@ -952,8 +935,15 @@ fn handle_dimension_line_clicks(
             commit_dimension_line(
                 start,
                 end,
-                offset_position,
-                host_element_id,
+                guided_face_dimension_line_request(
+                    start,
+                    end,
+                    offset_position,
+                    face,
+                    preferred_offset_dir,
+                ),
+                Some(host_element_id),
+                Some(face),
                 &allocator,
                 &drawing_plane,
                 &camera_query,
@@ -974,6 +964,7 @@ fn commit_dimension_line(
     end: Vec3,
     offset_position: Vec3,
     host_element_id: Option<ElementId>,
+    face: Option<DimensionFacePick>,
     allocator: &ElementIdAllocator,
     drawing_plane: &DrawingPlane,
     camera_query: &Query<(&GlobalTransform, &OrbitCamera), With<Camera3d>>,
@@ -991,6 +982,7 @@ fn commit_dimension_line(
             dimension_annotation_plane(drawing_plane, Some(orbit), Some(camera_transform))
         })
         .unwrap_or_else(|| drawing_plane.clone());
+    let active_plane = face.map(face_dimension_plane).unwrap_or(active_plane);
     let host_reference =
         host_entity_dimension_reference(host_element_id, &active_plane, host_bounds_query);
     let snapshot = DimensionLineSnapshot {
@@ -1016,7 +1008,6 @@ fn commit_dimension_line(
 }
 
 fn draw_dimension_line_tool_preview(
-    mut contexts: EguiContexts,
     mut gizmos: Gizmos,
     doc_props: Res<DocumentProperties>,
     viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
@@ -1038,17 +1029,16 @@ fn draw_dimension_line_tool_preview(
     let Some(tool_state) = tool_state else {
         return;
     };
-    let Ok(ctx_ref) = contexts.ctx_mut() else {
-        return;
-    };
-    let ctx = ctx_ref.clone();
     let Some((camera, camera_transform, orbit)) = active_dimension_tool_camera(camera_query.iter())
     else {
         return;
     };
-    let Some(cursor_position) =
-        dimension_tool_preview_cursor_position(&tool_state, &cursor_world_pos, &snap_result)
-    else {
+    let Some(cursor_position) = dimension_tool_preview_cursor_position(
+        &tool_state,
+        &cursor_world_pos,
+        &snap_result,
+        Some(&host_bounds_query),
+    ) else {
         return;
     };
     let Some(preview_node) = preview_dimension_line_node(
@@ -1061,19 +1051,8 @@ fn draw_dimension_line_tool_preview(
     ) else {
         return;
     };
-    let Some(primitives) =
-        project_dimension_line_primitives(&preview_node, &doc_props, camera, camera_transform)
-    else {
-        return;
-    };
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("dimension_line_tool_preview"),
-    ));
     let color = dimension_overlay_color(true, drawing_annotation_paper_style(&render_settings));
-    for primitive in &primitives {
-        paint_dimension_primitive(&painter, primitive, color);
-    }
+    draw_dimension_world_lines(&mut gizmos, &preview_node, color);
     draw_dimension_world_text(
         &mut gizmos,
         &preview_node,
@@ -1082,6 +1061,14 @@ fn draw_dimension_line_tool_preview(
         camera_transform,
         color,
     );
+}
+
+fn draw_dimension_world_lines(gizmos: &mut Gizmos, node: &DimensionLineNode, color: Color) {
+    for (segment_start, segment_end) in
+        dimension_segments(node.start, node.end, node.line_point, node.extension)
+    {
+        gizmos.line(segment_start, segment_end, color);
+    }
 }
 
 fn current_dimension_plane(world: &World) -> Option<DrawingPlane> {
@@ -1375,16 +1362,6 @@ fn default_dimension_line_point(start: Vec3, end: Vec3) -> Vec3 {
             * default_dimension_offset(start, end)
 }
 
-fn directional_scale(axis_dir: Vec3, factor: Vec3) -> f32 {
-    Vec3::new(
-        axis_dir.x * factor.x.abs(),
-        axis_dir.y * factor.y.abs(),
-        axis_dir.z * factor.z.abs(),
-    )
-    .length()
-    .max(1e-4)
-}
-
 fn tick_direction(axis_dir: Vec3) -> Vec3 {
     let perpendicular = perpendicular_pair(axis_dir).0;
     (axis_dir + perpendicular)
@@ -1650,8 +1627,8 @@ fn box_edge_reference(start: Vec3, end: Vec3, bounds: EntityBounds) -> Option<Bo
         )?;
         if start_side == end_side {
             let dir = match start_side {
-                BoundSide::Min => axes[axis],
-                BoundSide::Max => -axes[axis],
+                BoundSide::Min => -axes[axis],
+                BoundSide::Max => axes[axis],
             };
             candidate_dirs.push(dir);
         } else if measured_axis.replace(axis).is_some() {
@@ -1705,15 +1682,26 @@ fn host_entity_dimension_reference(
         Option<&GlobalTransform>,
     )>,
 ) -> Option<HostDimensionReference> {
-    let host_element_id = host_element_id?;
-    let (_, aabb, transform) = query
-        .iter()
-        .find(|(element_id, _, _)| **element_id == host_element_id)?;
-    let bounds = aabb_to_world_bounds(aabb?, transform?);
+    let bounds = host_entity_world_bounds(host_element_id, query)?;
     Some(HostDimensionReference {
         world_bounds: bounds,
         projected_bounds: projected_bounds_from_world_bounds(bounds, plane),
     })
+}
+
+fn host_entity_world_bounds(
+    host_element_id: Option<ElementId>,
+    query: &Query<(
+        &ElementId,
+        Option<&bevy::camera::primitives::Aabb>,
+        Option<&GlobalTransform>,
+    )>,
+) -> Option<EntityBounds> {
+    let host_element_id = host_element_id?;
+    let (_, aabb, transform) = query
+        .iter()
+        .find(|(element_id, _, _)| **element_id == host_element_id)?;
+    Some(aabb_to_world_bounds(aabb?, transform?))
 }
 
 fn projected_bounds_from_world_bounds(
@@ -1904,204 +1892,6 @@ fn viewport_dimension_style_scale(display_unit: DisplayUnit, scale: f32) -> f32 
     scale.clamp(min_scale, max_scale)
 }
 
-fn project_dimension_line_primitives(
-    node: &DimensionLineNode,
-    doc_props: &DocumentProperties,
-    camera: &Camera,
-    camera_transform: &GlobalTransform,
-) -> Option<Vec<DimPrimitive>> {
-    let snapshot = snapshot_from_node(node);
-    if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
-        return None;
-    }
-    let geometry = dimension_geometry(node.start, node.end, node.line_point, node.extension);
-    let project = |point: Vec3| camera.world_to_viewport(camera_transform, point).ok();
-    let p_start = project(node.start)?;
-    let p_end = project(node.end)?;
-    let p_dim_start = project(geometry.dimension_start)?;
-    let p_dim_end = project(geometry.dimension_end)?;
-    let p_visible_start = project(geometry.visible_start)?;
-    let p_visible_end = project(geometry.visible_end)?;
-    let tick_world = (geometry.axis_dir + geometry.offset_dir)
-        .try_normalize()
-        .unwrap_or(geometry.offset_dir)
-        * DIMENSION_LINE_TICK_HALF;
-    let p_tick_start_a = project(geometry.dimension_start - tick_world)?;
-    let p_tick_start_b = project(geometry.dimension_start + tick_world)?;
-    let p_tick_end_a = project(geometry.dimension_end - tick_world)?;
-    let p_tick_end_b = project(geometry.dimension_end + tick_world)?;
-    let pixels_per_world_m =
-        viewport_pixels_per_world_m(camera, camera_transform, snapshot.midpoint())?;
-    let units_per_paper_mm = viewport_dimension_style_scale(
-        snapshot.effective_display_unit(doc_props),
-        pixels_per_world_m / DIMENSION_RENDER_PAPER_MM_PER_WORLD_M,
-    );
-    let line_midpoint = (p_dim_start + p_dim_end) * 0.5;
-    let projected_segments = [
-        (p_visible_start, p_visible_end),
-        (p_start, p_dim_start),
-        (p_end, p_dim_end),
-        (p_tick_start_a, p_tick_start_b),
-        (p_tick_end_a, p_tick_end_b),
-    ];
-    Some(render_dimension_line_viewport_primitives(
-        node,
-        doc_props,
-        projected_segments,
-        line_midpoint,
-        units_per_paper_mm,
-    ))
-}
-
-fn render_dimension_line_viewport_primitives(
-    node: &DimensionLineNode,
-    doc_props: &DocumentProperties,
-    projected_segments: [(Vec2, Vec2); 5],
-    line_midpoint: Vec2,
-    units_per_paper_mm: f32,
-) -> Vec<DimPrimitive> {
-    let snapshot = snapshot_from_node(node);
-    if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
-        return Vec::new();
-    }
-
-    let mut style = legacy_dimension_style(snapshot.effective_display_unit(doc_props));
-    scale_dimension_style_in_place(&mut style, units_per_paper_mm);
-
-    let dim_axis = (projected_segments[0].1 - projected_segments[0].0)
-        .try_normalize()
-        .unwrap_or(Vec2::X);
-    let dim_line_angle = dim_axis.y.atan2(dim_axis.x);
-    let feature_midpoint = (projected_segments[1].0 + projected_segments[2].0) * 0.5;
-    let toward_line = (line_midpoint - feature_midpoint)
-        .try_normalize()
-        .unwrap_or(Vec2::new(-dim_axis.y, dim_axis.x));
-    let text = snapshot.display_text(doc_props);
-
-    let mut out = Vec::with_capacity(6);
-    let dim_stroke = style.dim_line_stroke_mm;
-    let ext_stroke = style.extension_stroke_mm;
-
-    match style.text_placement {
-        TextPlacement::Centered {
-            break_line: true,
-            gap_mm,
-        } => {
-            let half_text = dimension_text_half_width(&text, style.text_height_mm);
-            let break_half = half_text + gap_mm;
-            let break_start = line_midpoint - dim_axis * break_half;
-            let break_end = line_midpoint + dim_axis * break_half;
-            out.push(DimPrimitive::LineSegment {
-                a: projected_segments[0].0,
-                b: break_start,
-                stroke_mm: dim_stroke,
-            });
-            out.push(DimPrimitive::LineSegment {
-                a: break_end,
-                b: projected_segments[0].1,
-                stroke_mm: dim_stroke,
-            });
-            out.push(DimPrimitive::Text {
-                anchor: line_midpoint,
-                content: text,
-                height_mm: style.text_height_mm,
-                rotation_rad: upright_dimension_text_angle(dim_line_angle),
-                anchor_mode: crate::plugins::drafting::TextAnchor::Center,
-                font_family: style.text_font,
-                color_hex: style.text_color_hex,
-            });
-        }
-        TextPlacement::Centered {
-            break_line: false, ..
-        } => {
-            out.push(DimPrimitive::LineSegment {
-                a: projected_segments[0].0,
-                b: projected_segments[0].1,
-                stroke_mm: dim_stroke,
-            });
-            out.push(DimPrimitive::Text {
-                anchor: line_midpoint,
-                content: text,
-                height_mm: style.text_height_mm,
-                rotation_rad: upright_dimension_text_angle(dim_line_angle),
-                anchor_mode: crate::plugins::drafting::TextAnchor::Center,
-                font_family: style.text_font,
-                color_hex: style.text_color_hex,
-            });
-        }
-        TextPlacement::Above { gap_mm } => {
-            out.push(DimPrimitive::LineSegment {
-                a: projected_segments[0].0,
-                b: projected_segments[0].1,
-                stroke_mm: dim_stroke,
-            });
-            out.push(DimPrimitive::Text {
-                anchor: line_midpoint - toward_line * gap_mm,
-                content: text,
-                height_mm: style.text_height_mm,
-                rotation_rad: upright_dimension_text_angle(dim_line_angle),
-                anchor_mode: crate::plugins::drafting::TextAnchor::CenterBaseline,
-                font_family: style.text_font,
-                color_hex: style.text_color_hex,
-            });
-        }
-        TextPlacement::Horizontal { gap_mm } => {
-            out.push(DimPrimitive::LineSegment {
-                a: projected_segments[0].0,
-                b: projected_segments[0].1,
-                stroke_mm: dim_stroke,
-            });
-            out.push(DimPrimitive::Text {
-                anchor: line_midpoint - toward_line * gap_mm,
-                content: text,
-                height_mm: style.text_height_mm,
-                rotation_rad: 0.0,
-                anchor_mode: crate::plugins::drafting::TextAnchor::CenterBaseline,
-                font_family: style.text_font,
-                color_hex: style.text_color_hex,
-            });
-        }
-    }
-
-    out.push(DimPrimitive::LineSegment {
-        a: projected_segments[1].0,
-        b: projected_segments[1].1,
-        stroke_mm: ext_stroke,
-    });
-    out.push(DimPrimitive::LineSegment {
-        a: projected_segments[2].0,
-        b: projected_segments[2].1,
-        stroke_mm: ext_stroke,
-    });
-    out.push(DimPrimitive::LineSegment {
-        a: projected_segments[3].0,
-        b: projected_segments[3].1,
-        stroke_mm: dim_stroke,
-    });
-    out.push(DimPrimitive::LineSegment {
-        a: projected_segments[4].0,
-        b: projected_segments[4].1,
-        stroke_mm: dim_stroke,
-    });
-    out
-}
-
-fn upright_dimension_text_angle(angle_rad: f32) -> f32 {
-    let pi = std::f32::consts::PI;
-    let half = pi * 0.5;
-    if angle_rad > half {
-        angle_rad - pi
-    } else if angle_rad < -half {
-        angle_rad + pi
-    } else {
-        angle_rad
-    }
-}
-
-fn dimension_text_half_width(text: &str, height_mm: f32) -> f32 {
-    0.55 * height_mm * text.chars().count() as f32 * 0.5
-}
-
 fn viewport_pixels_per_world_m(
     camera: &Camera,
     camera_transform: &GlobalTransform,
@@ -2132,7 +1922,7 @@ fn draw_dimension_world_text(
     doc_props: &DocumentProperties,
     camera: &Camera,
     camera_transform: &GlobalTransform,
-    egui_color: egui::Color32,
+    color: Color,
 ) {
     let snapshot = snapshot_from_node(node);
     if snapshot.measured_length() < DIMENSION_LINE_MIN_MEASURE_LENGTH {
@@ -2196,12 +1986,8 @@ fn draw_dimension_world_text(
         right,
         glyph_up,
         text_height_world,
-        color32_to_color(egui_color),
+        color,
     );
-}
-
-fn color32_to_color(color: egui::Color32) -> Color {
-    Color::srgba_u8(color.r(), color.g(), color.b(), color.a())
 }
 
 fn projected_world_delta_px(
@@ -2253,82 +2039,18 @@ fn active_dimension_tool_camera<'a>(
         .or(Some(first))
 }
 
-fn dimension_overlay_color(selected: bool, paper_style: bool) -> egui::Color32 {
-    match (paper_style, selected) {
-        (true, true) => egui::Color32::from_rgb(32, 78, 173),
-        (true, false) => egui::Color32::from_rgb(72, 72, 78),
-        (false, true) => egui::Color32::from_rgb(106, 152, 255),
-        (false, false) => egui::Color32::from_rgb(238, 245, 252),
-    }
+fn active_dimension_tool_transform<'a>(
+    cameras: impl Iterator<Item = (&'a GlobalTransform, &'a OrbitCamera)>,
+) -> Option<&'a GlobalTransform> {
+    cameras.into_iter().next().map(|(transform, _)| transform)
 }
 
-fn paint_dimension_primitive(
-    painter: &egui::Painter,
-    primitive: &DimPrimitive,
-    default_color: egui::Color32,
-) {
-    match primitive {
-        DimPrimitive::LineSegment { a, b, stroke_mm } => {
-            painter.line_segment(
-                [egui::pos2(a.x, a.y), egui::pos2(b.x, b.y)],
-                egui::Stroke::new(*stroke_mm, default_color),
-            );
-        }
-        DimPrimitive::Tick {
-            pos,
-            rotation_rad,
-            length_mm,
-            stroke_mm,
-        } => {
-            let half = length_mm * 0.5;
-            let c = rotation_rad.cos();
-            let s = rotation_rad.sin();
-            painter.line_segment(
-                [
-                    egui::pos2(pos.x - half * c, pos.y - half * s),
-                    egui::pos2(pos.x + half * c, pos.y + half * s),
-                ],
-                egui::Stroke::new(*stroke_mm, default_color),
-            );
-        }
-        DimPrimitive::Arrow {
-            tip,
-            tail,
-            width_mm,
-            filled,
-            stroke_mm,
-        } => {
-            let axis = *tail - *tip;
-            let len = axis.length().max(1e-5);
-            let axis_u = axis / len;
-            let perp = Vec2::new(-axis_u.y, axis_u.x);
-            let half_w = width_mm * 0.5;
-            let points = vec![
-                egui::pos2(tip.x, tip.y),
-                egui::pos2(tail.x + perp.x * half_w, tail.y + perp.y * half_w),
-                egui::pos2(tail.x - perp.x * half_w, tail.y - perp.y * half_w),
-            ];
-            painter.add(egui::Shape::convex_polygon(
-                points,
-                if *filled {
-                    default_color
-                } else {
-                    egui::Color32::TRANSPARENT
-                },
-                egui::Stroke::new(*stroke_mm, default_color),
-            ));
-        }
-        DimPrimitive::Dot { pos, radius_mm } => {
-            painter.circle_filled(egui::pos2(pos.x, pos.y), *radius_mm, default_color);
-        }
-        DimPrimitive::Text {
-            anchor: _,
-            content: _,
-            height_mm: _,
-            rotation_rad: _,
-            anchor_mode: _,
-            ..
-        } => {}
+fn dimension_overlay_color(selected: bool, paper_style: bool) -> Color {
+    match (paper_style, selected) {
+        (true, true) => Color::srgb_u8(32, 78, 173),
+        (true, false) => Color::srgb_u8(72, 72, 78),
+        (false, true) => Color::srgb_u8(106, 152, 255),
+        (false, false) => Color::srgb_u8(238, 245, 252),
     }
 }
 
@@ -2574,14 +2296,114 @@ const GLYPH_BOX: &[(Vec2, Vec2)] = &[
     (Vec2::new(0.08, 1.0), Vec2::new(0.08, 0.0)),
 ];
 
+#[derive(Debug, Clone, Copy)]
+struct DimensionFacePick {
+    point: Vec3,
+    normal: Vec3,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DimensionAnchorPick {
+    position: Vec3,
+    host_element_id: ElementId,
+    face: DimensionFacePick,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DimensionFaceEdgeConstraint {
+    host_element_id: ElementId,
+    face: DimensionFacePick,
+    host_bounds: EntityBounds,
+    preferred_offset_dir: Vec3,
+}
+
+fn dimension_tool_anchor_pick_on_face(
+    cursor_world_pos: &CursorWorldPos,
+    snap_result: &SnapResult,
+    host_element_id: ElementId,
+    required_face: DimensionFacePick,
+    host_bounds_query: Option<
+        &Query<(
+            &ElementId,
+            Option<&bevy::camera::primitives::Aabb>,
+            Option<&GlobalTransform>,
+        )>,
+    >,
+) -> Option<DimensionAnchorPick> {
+    if snap_result.kind != SnapKind::Endpoint {
+        return None;
+    }
+    let visible_face = DimensionFacePick {
+        point: cursor_world_pos.surface_point.or(cursor_world_pos.raw)?,
+        normal: cursor_world_pos.surface_normal?.try_normalize()?,
+    };
+    let host_bounds =
+        host_bounds_query.and_then(|query| host_entity_world_bounds(Some(host_element_id), query));
+    for candidate in &snap_result.candidates {
+        if candidate.kind != SnapKind::Endpoint || candidate.element_id != Some(host_element_id) {
+            continue;
+        }
+        if let Some(face) =
+            dimension_anchor_face_pick(candidate.position, visible_face, host_bounds)
+        {
+            if same_dimension_face(required_face, face) {
+                return Some(DimensionAnchorPick {
+                    position: candidate.position,
+                    host_element_id,
+                    face,
+                });
+            }
+        }
+    }
+
+    let anchor = dimension_tool_anchor_pick(cursor_world_pos, snap_result, host_bounds_query)?;
+    (anchor.host_element_id == host_element_id && same_dimension_face(required_face, anchor.face))
+        .then_some(anchor)
+}
+
+fn dimension_tool_anchor_pick(
+    cursor_world_pos: &CursorWorldPos,
+    snap_result: &SnapResult,
+    host_bounds_query: Option<
+        &Query<(
+            &ElementId,
+            Option<&bevy::camera::primitives::Aabb>,
+            Option<&GlobalTransform>,
+        )>,
+    >,
+) -> Option<DimensionAnchorPick> {
+    if snap_result.kind != SnapKind::Endpoint {
+        return None;
+    }
+    let position = snap_result.position?;
+    let host_element_id = cursor_world_pos.hovered_element_id?;
+    let visible_face = DimensionFacePick {
+        point: cursor_world_pos.surface_point.or(cursor_world_pos.raw)?,
+        normal: cursor_world_pos.surface_normal?.try_normalize()?,
+    };
+    let host_bounds =
+        host_bounds_query.and_then(|query| host_entity_world_bounds(Some(host_element_id), query));
+    let face = dimension_anchor_face_pick(position, visible_face, host_bounds)?;
+    Some(DimensionAnchorPick {
+        position,
+        host_element_id,
+        face,
+    })
+}
+
 fn dimension_tool_anchor_position(
     cursor_world_pos: &CursorWorldPos,
     snap_result: &SnapResult,
+    host_bounds_query: Option<
+        &Query<(
+            &ElementId,
+            Option<&bevy::camera::primitives::Aabb>,
+            Option<&GlobalTransform>,
+        )>,
+    >,
 ) -> Option<Vec3> {
-    snap_result
-        .position
-        .or(cursor_world_pos.snapped)
-        .or(cursor_world_pos.raw)
+    dimension_tool_anchor_pick(cursor_world_pos, snap_result, host_bounds_query)
+        .map(|pick| pick.position)
 }
 
 fn dimension_tool_offset_cursor_position(
@@ -2599,11 +2421,18 @@ fn dimension_tool_preview_cursor_position(
     tool_state: &DimensionLineToolState,
     cursor_world_pos: &CursorWorldPos,
     snap_result: &SnapResult,
+    host_bounds_query: Option<
+        &Query<(
+            &ElementId,
+            Option<&bevy::camera::primitives::Aabb>,
+            Option<&GlobalTransform>,
+        )>,
+    >,
 ) -> Option<Vec3> {
     match tool_state.stage {
         DimensionLinePlacementStage::AwaitingStart
         | DimensionLinePlacementStage::AwaitingEnd { .. } => {
-            dimension_tool_anchor_position(cursor_world_pos, snap_result)
+            dimension_tool_anchor_position(cursor_world_pos, snap_result, host_bounds_query)
         }
         DimensionLinePlacementStage::PlacingOffset { .. } => {
             dimension_tool_offset_cursor_position(cursor_world_pos, snap_result)
@@ -2611,19 +2440,190 @@ fn dimension_tool_preview_cursor_position(
     }
 }
 
+fn dimension_anchor_face_pick(
+    position: Vec3,
+    visible_face: DimensionFacePick,
+    host_bounds: Option<EntityBounds>,
+) -> Option<DimensionFacePick> {
+    if point_lies_on_face_plane(position, visible_face) {
+        return Some(visible_face);
+    }
+    host_bounds.and_then(|bounds| bounds_face_pick_for_corner(position, visible_face, bounds))
+}
+
+fn bounds_face_pick_for_corner(
+    position: Vec3,
+    visible_face: DimensionFacePick,
+    bounds: EntityBounds,
+) -> Option<DimensionFacePick> {
+    let visible_normal = visible_face.normal.try_normalize()?;
+    let tolerance = DIMENSION_FACE_PLANE_TOLERANCE.max(box_edge_tolerance(bounds) * 4.0);
+    let coords = [position.x, position.y, position.z];
+    let face_coords = [
+        visible_face.point.x,
+        visible_face.point.y,
+        visible_face.point.z,
+    ];
+    let min_coords = [bounds.min.x, bounds.min.y, bounds.min.z];
+    let max_coords = [bounds.max.x, bounds.max.y, bounds.max.z];
+    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
+
+    let mut best: Option<(f32, DimensionFacePick)> = None;
+    for axis in 0..3 {
+        let Some(side) =
+            box_bound_side(coords[axis], min_coords[axis], max_coords[axis], tolerance)
+        else {
+            continue;
+        };
+        let plane_coord = match side {
+            BoundSide::Min => min_coords[axis],
+            BoundSide::Max => max_coords[axis],
+        };
+        let face_distance = (face_coords[axis] - plane_coord).abs();
+        if face_distance > tolerance && visible_normal.dot(axes[axis]).abs() < 0.7 {
+            continue;
+        }
+        let normal = match side {
+            BoundSide::Min => -axes[axis],
+            BoundSide::Max => axes[axis],
+        };
+        let score = visible_normal.dot(normal).abs() - face_distance * 0.01;
+        let point = match axis {
+            0 => Vec3::new(plane_coord, visible_face.point.y, visible_face.point.z),
+            1 => Vec3::new(visible_face.point.x, plane_coord, visible_face.point.z),
+            _ => Vec3::new(visible_face.point.x, visible_face.point.y, plane_coord),
+        };
+        let pick = DimensionFacePick { point, normal };
+        if best.is_none_or(|(best_score, _)| score > best_score) {
+            best = Some((score, pick));
+        }
+    }
+    best.map(|(_, pick)| pick)
+}
+
+fn dimension_face_edge_constraint(
+    start: Vec3,
+    end: DimensionAnchorPick,
+    host_element_id: ElementId,
+    start_face: DimensionFacePick,
+    host_bounds_query: &Query<(
+        &ElementId,
+        Option<&bevy::camera::primitives::Aabb>,
+        Option<&GlobalTransform>,
+    )>,
+) -> Option<DimensionFaceEdgeConstraint> {
+    if end.host_element_id != host_element_id || !same_dimension_face(start_face, end.face) {
+        return None;
+    }
+    let host_bounds = host_entity_world_bounds(Some(host_element_id), host_bounds_query)?;
+    box_edge_reference(start, end.position, host_bounds)?;
+    let preferred_offset_dir =
+        inward_face_edge_offset_dir(start, end.position, start_face, host_bounds)?;
+    Some(DimensionFaceEdgeConstraint {
+        host_element_id,
+        face: start_face,
+        host_bounds,
+        preferred_offset_dir,
+    })
+}
+
+fn point_lies_on_face_plane(point: Vec3, face: DimensionFacePick) -> bool {
+    (point - face.point).dot(face.normal).abs() <= DIMENSION_FACE_PLANE_TOLERANCE
+}
+
+fn same_dimension_face(left: DimensionFacePick, right: DimensionFacePick) -> bool {
+    left.normal.dot(right.normal).abs() >= DIMENSION_FACE_NORMAL_ALIGNMENT
+        && point_lies_on_face_plane(right.point, left)
+}
+
+fn face_dimension_plane(face: DimensionFacePick) -> DrawingPlane {
+    DrawingPlane::from_face(face.point, face.normal)
+}
+
+fn project_point_to_face_plane(point: Vec3, face: DimensionFacePick) -> Vec3 {
+    point - face.normal * (point - face.point).dot(face.normal)
+}
+
+fn inward_face_edge_offset_dir(
+    start: Vec3,
+    end: Vec3,
+    face: DimensionFacePick,
+    bounds: EntityBounds,
+) -> Option<Vec3> {
+    let axis_dir = (end - start).try_normalize()?;
+    let midpoint = (start + end) * 0.5;
+    let toward_center = bounds.center() - midpoint;
+    let in_face = toward_center - face.normal * toward_center.dot(face.normal);
+    let perpendicular = in_face - axis_dir * in_face.dot(axis_dir);
+    perpendicular.try_normalize().or_else(|| {
+        face.normal
+            .cross(axis_dir)
+            .try_normalize()
+            .or_else(|| axis_dir.cross(face.normal).try_normalize())
+    })
+}
+
+fn preferred_face_dimension_offset_dir(
+    start: Vec3,
+    end: Vec3,
+    face: DimensionFacePick,
+    bounds: EntityBounds,
+    camera_position: Option<Vec3>,
+) -> Option<Vec3> {
+    let fallback = inward_face_edge_offset_dir(start, end, face, bounds)?;
+    let axis_dir = (end - start).try_normalize()?;
+    let midpoint = (start + end) * 0.5;
+    let camera_side = camera_position.and_then(|position| {
+        let projected = position - midpoint;
+        let in_face = projected - face.normal * projected.dot(face.normal);
+        (in_face - axis_dir * in_face.dot(axis_dir)).try_normalize()
+    });
+    Some(match camera_side {
+        Some(camera_side) if fallback.dot(camera_side) < 0.0 => -fallback,
+        _ => fallback,
+    })
+}
+
+fn guided_face_dimension_line_request(
+    start: Vec3,
+    end: Vec3,
+    requested_line_point: Vec3,
+    face: DimensionFacePick,
+    preferred_offset_dir: Vec3,
+) -> Vec3 {
+    let Some(preferred_offset_dir) = preferred_offset_dir.try_normalize() else {
+        return project_point_to_face_plane(requested_line_point, face);
+    };
+    let Some(axis_dir) = (end - start).try_normalize() else {
+        return project_point_to_face_plane(requested_line_point, face);
+    };
+    let midpoint = (start + end) * 0.5;
+    let requested_on_face = project_point_to_face_plane(requested_line_point, face);
+    let requested_offset = requested_on_face - midpoint;
+    let perpendicular_offset = requested_offset - axis_dir * requested_offset.dot(axis_dir);
+    let offset_dir = if perpendicular_offset.dot(preferred_offset_dir) < 0.0 {
+        -preferred_offset_dir
+    } else {
+        preferred_offset_dir
+    };
+    let distance = perpendicular_offset
+        .length()
+        .max(default_dimension_offset(start, end));
+    project_point_to_face_plane(midpoint + offset_dir * distance, face)
+}
+
 fn preview_dimension_line_node(
     tool_state: &DimensionLineToolState,
     cursor_position: Vec3,
-    drawing_plane: &DrawingPlane,
-    orbit: Option<&OrbitCamera>,
-    camera_transform: &GlobalTransform,
+    _drawing_plane: &DrawingPlane,
+    _orbit: Option<&OrbitCamera>,
+    _camera_transform: &GlobalTransform,
     host_bounds_query: &Query<(
         &ElementId,
         Option<&bevy::camera::primitives::Aabb>,
         Option<&GlobalTransform>,
     )>,
 ) -> Option<DimensionLineNode> {
-    let active_plane = dimension_annotation_plane(drawing_plane, orbit, Some(camera_transform));
     match tool_state.stage {
         DimensionLinePlacementStage::AwaitingStart => None,
         DimensionLinePlacementStage::AwaitingEnd { start, .. } => {
@@ -2646,17 +2646,30 @@ fn preview_dimension_line_node(
             start,
             end,
             host_element_id,
+            face,
+            preferred_offset_dir,
             ..
         } => {
-            let host_reference =
-                host_entity_dimension_reference(host_element_id, &active_plane, host_bounds_query);
+            let active_plane = face_dimension_plane(face);
+            let host_reference = host_entity_dimension_reference(
+                Some(host_element_id),
+                &active_plane,
+                host_bounds_query,
+            );
+            let requested_line_point = guided_face_dimension_line_request(
+                start,
+                end,
+                cursor_position,
+                face,
+                preferred_offset_dir,
+            );
             Some(DimensionLineNode {
                 start,
                 end,
                 line_point: resolved_dimension_line_point(
                     start,
                     end,
-                    cursor_position,
+                    requested_line_point,
                     &active_plane,
                     host_reference,
                 ),
@@ -2823,6 +2836,190 @@ mod tests {
     }
 
     #[test]
+    fn face_edge_dimension_request_stays_on_face_plane_and_defaults_toward_face_interior() {
+        let bounds = EntityBounds {
+            min: Vec3::new(0.0, 0.0, -0.2),
+            max: Vec3::new(10.0, 3.0, 0.2),
+        };
+        let face = DimensionFacePick {
+            point: Vec3::new(0.0, 1.0, -0.2),
+            normal: Vec3::NEG_Z,
+        };
+        let start = Vec3::new(0.0, 3.0, -0.2);
+        let end = Vec3::new(10.0, 3.0, -0.2);
+
+        let offset_dir =
+            inward_face_edge_offset_dir(start, end, face, bounds).expect("face edge should guide");
+        let requested = guided_face_dimension_line_request(
+            start,
+            end,
+            Vec3::new(5.0, 3.0, 8.0),
+            face,
+            offset_dir,
+        );
+
+        assert!(
+            offset_dir.dot(Vec3::NEG_Y) > 0.99,
+            "top wall edge should offset toward the face interior: {offset_dir:?}"
+        );
+        assert!(
+            (requested.z - face.point.z).abs() < 1e-5,
+            "dimension request must stay on the picked face plane: {requested:?}"
+        );
+        assert!(
+            requested.y < start.y,
+            "dimension should extend along the face, not away from it: {requested:?}"
+        );
+    }
+
+    #[test]
+    fn dimension_anchor_requires_visible_face_endpoint_snap() {
+        let cursor_world_pos = CursorWorldPos {
+            raw: Some(Vec3::new(0.0, 3.0, -0.2)),
+            snapped: Some(Vec3::new(0.0, 3.0, -0.2)),
+            hovered_element_id: Some(ElementId(42)),
+            surface_point: Some(Vec3::new(0.0, 1.5, -0.2)),
+            surface_normal: Some(Vec3::NEG_Z),
+        };
+        let grid_snap = SnapResult {
+            raw_position: Some(Vec3::new(0.0, 3.0, -0.2)),
+            position: Some(Vec3::new(0.0, 3.0, -0.2)),
+            target: Some(Vec3::new(0.0, 3.0, -0.2)),
+            kind: SnapKind::Grid,
+            candidates: Vec::new(),
+            active_candidate: 0,
+        };
+        let endpoint_snap = SnapResult {
+            kind: SnapKind::Endpoint,
+            ..grid_snap.clone()
+        };
+
+        assert!(
+            dimension_tool_anchor_pick(&cursor_world_pos, &grid_snap, None).is_none(),
+            "dimensions must not start from raw/grid cursor hits"
+        );
+        assert!(
+            dimension_tool_anchor_pick(&cursor_world_pos, &endpoint_snap, None).is_some(),
+            "visible endpoint on the hovered face should be accepted"
+        );
+    }
+
+    #[test]
+    fn dimension_anchor_accepts_bounds_corner_when_surface_hit_is_slightly_offset() {
+        let visible_face = DimensionFacePick {
+            point: Vec3::new(5.0, 1.5, -0.12),
+            normal: Vec3::NEG_Z,
+        };
+        let bounds = EntityBounds {
+            min: Vec3::new(0.0, 0.0, -0.2),
+            max: Vec3::new(10.0, 3.0, 0.2),
+        };
+        let position = Vec3::new(0.0, 3.0, -0.2);
+
+        let face = dimension_anchor_face_pick(position, visible_face, Some(bounds))
+            .expect("bounds corner should infer the visible bounds face");
+
+        assert!(
+            (face.point.z - bounds.min.z).abs() < 1e-5,
+            "face should be corrected onto the measured bounds plane: {face:?}"
+        );
+        assert!(face.normal.dot(Vec3::NEG_Z) > 0.99);
+    }
+
+    #[test]
+    fn second_dimension_anchor_prefers_candidate_on_first_selected_face() {
+        let host = ElementId(42);
+        let required_face = DimensionFacePick {
+            point: Vec3::new(0.0, 0.0, -0.2),
+            normal: Vec3::NEG_Z,
+        };
+        let cursor_world_pos = CursorWorldPos {
+            raw: Some(Vec3::new(5.0, 1.5, -0.2)),
+            snapped: Some(Vec3::new(0.0, 3.0, 0.2)),
+            hovered_element_id: Some(host),
+            surface_point: Some(Vec3::new(5.0, 1.5, -0.2)),
+            surface_normal: Some(Vec3::NEG_Z),
+        };
+        let snap_result = SnapResult {
+            raw_position: cursor_world_pos.raw,
+            position: Some(Vec3::new(0.0, 3.0, 0.2)),
+            target: Some(Vec3::new(0.0, 3.0, 0.2)),
+            kind: SnapKind::Endpoint,
+            candidates: vec![
+                crate::plugins::snap::SnapCandidate {
+                    position: Vec3::new(0.0, 3.0, 0.2),
+                    kind: SnapKind::Endpoint,
+                    element_id: Some(host),
+                    label: Some("wrong_face".to_string()),
+                },
+                crate::plugins::snap::SnapCandidate {
+                    position: Vec3::new(10.0, 3.0, -0.2),
+                    kind: SnapKind::Endpoint,
+                    element_id: Some(host),
+                    label: Some("same_face".to_string()),
+                },
+            ],
+            active_candidate: 0,
+        };
+
+        let anchor = dimension_tool_anchor_pick_on_face(
+            &cursor_world_pos,
+            &snap_result,
+            host,
+            required_face,
+            None,
+        )
+        .expect("same-face candidate should be inferred from overlapping corners");
+
+        assert_eq!(anchor.position, Vec3::new(10.0, 3.0, -0.2));
+    }
+
+    #[test]
+    fn diagonal_face_points_are_not_valid_dimension_edges() {
+        let bounds = EntityBounds {
+            min: Vec3::new(0.0, 0.0, -0.2),
+            max: Vec3::new(10.0, 3.0, 0.2),
+        };
+
+        assert!(
+            box_edge_reference(
+                Vec3::new(0.0, 3.0, -0.2),
+                Vec3::new(10.0, 0.0, -0.2),
+                bounds,
+            )
+            .is_none(),
+            "diagonal points across a face must not produce a free-space dimension"
+        );
+    }
+
+    #[test]
+    fn box_edge_dimension_line_point_offsets_from_nearest_box_side() {
+        let bounds = EntityBounds {
+            min: Vec3::new(0.0, 0.0, -0.2),
+            max: Vec3::new(10.0, 3.0, 0.2),
+        };
+        let start = Vec3::new(0.0, 3.0, -0.2);
+        let end = Vec3::new(10.0, 3.0, -0.2);
+
+        let outside = constrained_box_edge_dimension_line_point(
+            start,
+            end,
+            Vec3::new(5.0, 3.0, -0.8),
+            bounds,
+        )
+        .expect("wall top exterior edge should constrain");
+
+        assert!(
+            outside.z < bounds.min.z,
+            "dimension should extend outward from the picked exterior wall side: {outside:?}"
+        );
+        assert!(
+            (outside.y - bounds.max.y).abs() < 1e-5,
+            "dimension should stay straight off the measured wall edge: {outside:?}"
+        );
+    }
+
+    #[test]
     fn box_edge_dimension_line_point_uses_only_adjacent_edge_directions() {
         let bounds = EntityBounds {
             min: Vec3::ZERO,
@@ -2831,12 +3028,20 @@ mod tests {
         let start = Vec3::ZERO;
         let end = Vec3::new(4.0, 0.0, 0.0);
 
-        let toward_y =
-            constrained_box_edge_dimension_line_point(start, end, Vec3::new(2.0, 1.2, 0.2), bounds)
-                .expect("box edge should constrain");
-        let toward_z =
-            constrained_box_edge_dimension_line_point(start, end, Vec3::new(2.0, 0.2, 1.2), bounds)
-                .expect("box edge should constrain");
+        let toward_y = constrained_box_edge_dimension_line_point(
+            start,
+            end,
+            Vec3::new(2.0, -1.2, 0.2),
+            bounds,
+        )
+        .expect("box edge should constrain");
+        let toward_z = constrained_box_edge_dimension_line_point(
+            start,
+            end,
+            Vec3::new(2.0, 0.2, -1.2),
+            bounds,
+        )
+        .expect("box edge should constrain");
 
         assert!(
             (toward_y.z - 0.0).abs() < 1e-5,
@@ -2847,7 +3052,7 @@ mod tests {
             "Z-side dimension must not drift diagonally: {toward_z:?}"
         );
         assert!(
-            toward_y.y > bounds.max.y && toward_z.z > bounds.max.z,
+            toward_y.y < bounds.min.y && toward_z.z < bounds.min.z,
             "dimension line should be pushed outside the chosen box side"
         );
     }
@@ -2874,7 +3079,12 @@ mod tests {
             stage: DimensionLinePlacementStage::PlacingOffset {
                 start: Vec3::ZERO,
                 end: Vec3::X,
-                host_element_id: None,
+                host_element_id: ElementId(1),
+                face: DimensionFacePick {
+                    point: Vec3::ZERO,
+                    normal: Vec3::Y,
+                },
+                preferred_offset_dir: Vec3::Z,
                 drag_origin: Some(Vec3::X),
                 dragging: true,
             },
@@ -2883,6 +3093,8 @@ mod tests {
             raw: Some(Vec3::new(0.5, 0.0, -0.8)),
             snapped: Some(Vec3::new(10.0, 0.0, 10.0)),
             hovered_element_id: None,
+            surface_point: None,
+            surface_normal: None,
         };
         let snap_result = SnapResult {
             raw_position: Some(Vec3::new(0.5, 0.0, -0.8)),
@@ -2894,7 +3106,12 @@ mod tests {
         };
 
         assert_eq!(
-            dimension_tool_preview_cursor_position(&tool_state, &cursor_world_pos, &snap_result),
+            dimension_tool_preview_cursor_position(
+                &tool_state,
+                &cursor_world_pos,
+                &snap_result,
+                None
+            ),
             Some(Vec3::new(0.5, 0.0, -0.8))
         );
     }
@@ -3040,5 +3257,65 @@ mod tests {
         DimensionLineFactory.collect_snap_points(&world, &mut snap_points);
 
         assert!(snap_points.is_empty());
+    }
+
+    #[test]
+    fn placed_dimension_geometry_is_not_transformable() {
+        let snapshot = DimensionLineSnapshot {
+            element_id: ElementId(72),
+            start: Vec3::ZERO,
+            end: Vec3::new(2.0, 0.0, 0.0),
+            line_point: Vec3::new(1.0, 0.0, 0.5),
+            extension: 0.2,
+            visible: true,
+            label: None,
+            display_unit: None,
+            precision: None,
+        };
+
+        assert_eq!(
+            snapshot.translate_by(Vec3::new(10.0, 0.0, 0.0)).0.to_json(),
+            snapshot.to_json()
+        );
+        assert_eq!(
+            snapshot.rotate_by(Quat::from_rotation_y(1.0)).0.to_json(),
+            snapshot.to_json()
+        );
+        assert_eq!(
+            snapshot
+                .scale_by(Vec3::splat(2.0), Vec3::new(1.0, 0.0, 0.0))
+                .0
+                .to_json(),
+            snapshot.to_json()
+        );
+        assert!(snapshot.handles().is_empty());
+        assert!(snapshot.drag_handle("line_point", Vec3::Y).is_none());
+    }
+
+    #[test]
+    fn dimension_geometry_properties_are_read_only_after_placement() {
+        let snapshot = DimensionLineSnapshot {
+            element_id: ElementId(73),
+            start: Vec3::ZERO,
+            end: Vec3::new(2.0, 0.0, 0.0),
+            line_point: Vec3::new(1.0, 0.0, 0.5),
+            extension: 0.2,
+            visible: true,
+            label: None,
+            display_unit: None,
+            precision: None,
+        };
+        let fields = snapshot.property_fields();
+        for name in ["start", "end", "line_point", "offset", "extension"] {
+            let field = fields
+                .iter()
+                .find(|field| field.name == name)
+                .expect("dimension geometry field should be exposed");
+            assert!(!field.editable, "{name} should be read-only");
+        }
+        assert!(fields
+            .iter()
+            .find(|field| field.name == "label")
+            .is_some_and(|field| field.editable));
     }
 }

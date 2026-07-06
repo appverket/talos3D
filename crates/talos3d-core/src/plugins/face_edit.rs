@@ -13,7 +13,7 @@ use crate::{
             cursor_viewport_position as mapped_cursor_viewport_position, CursorWorldPos,
             DrawingPlane,
         },
-        egui_chrome::EguiWantsInput,
+        egui_chrome::{ChromeInputCapture, EguiWantsInput},
         identity::{ElementId, ElementIdAllocator},
         input_ownership::{InputOwnership, InputPhase},
         modeling::{
@@ -237,7 +237,11 @@ struct PressCapture {
 }
 
 fn update_hovered_face(world: &mut World) {
-    if world.resource::<EguiWantsInput>().pointer {
+    if world
+        .resource::<ChromeInputCapture>()
+        .wants_any_pointer_input()
+        || world.resource::<EguiWantsInput>().wants_any_pointer_input()
+    {
         world.resource_mut::<HoveredFace>().hit = None;
         return;
     }
@@ -1028,19 +1032,22 @@ fn handle_face_drawing_start(
 
 /// Handle clicks and key presses while in face drawing mode.
 fn handle_face_drawing_input(world: &mut World) {
-    let egui = *world.resource::<EguiWantsInput>();
+    let chrome_capture = world.resource::<ChromeInputCapture>();
+    let egui = world.resource::<EguiWantsInput>();
+    let chrome_keyboard = chrome_capture.wants_any_keyboard_input();
+    let chrome_pointer = chrome_capture.wants_any_pointer_input();
     let keys = world.resource::<ButtonInput<KeyCode>>().clone();
     let mouse = world.resource::<ButtonInput<MouseButton>>().clone();
 
     // A key toggles arc mode
-    if !egui.keyboard && keys.just_pressed(KeyCode::KeyA) {
+    if !chrome_keyboard && !egui.wants_any_keyboard_input() && keys.just_pressed(KeyCode::KeyA) {
         let mut drawing = world.resource_mut::<FaceDrawingContext>();
         drawing.arc_mode = !drawing.arc_mode;
         return;
     }
 
     // Escape cancels drawing
-    if !egui.keyboard && keys.just_pressed(KeyCode::Escape) {
+    if !chrome_keyboard && !egui.wants_any_keyboard_input() && keys.just_pressed(KeyCode::Escape) {
         let mut drawing = world.resource_mut::<FaceDrawingContext>();
         drawing.active = false;
         drawing.points.clear();
@@ -1050,7 +1057,8 @@ fn handle_face_drawing_input(world: &mut World) {
     }
 
     // Enter closes and finishes
-    if !egui.keyboard
+    if !chrome_keyboard
+        && !egui.wants_any_keyboard_input()
         && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter))
     {
         let n = world.resource::<FaceDrawingContext>().points.len();
@@ -1061,7 +1069,7 @@ fn handle_face_drawing_input(world: &mut World) {
     }
 
     // Left click adds a point
-    if !egui.pointer && mouse.just_pressed(MouseButton::Left) {
+    if !chrome_pointer && !egui.wants_any_pointer_input() && mouse.just_pressed(MouseButton::Left) {
         let cursor_pos = world.resource::<CursorWorldPos>().snapped;
         let Some(cursor_pos) = cursor_pos else {
             return;

@@ -16,11 +16,15 @@
 //! Outliner rather than auto-appearing.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "perf-stats")]
+use std::time::Instant;
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 use serde_json::Value;
 
+#[cfg(feature = "perf-stats")]
+use crate::plugins::perf_stats::add_layers_build_time;
 use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     egui_chrome::EguiChromeSystems,
@@ -34,6 +38,7 @@ use crate::plugins::{
 const PANEL_DEFAULT_WIDTH: f32 = 300.0;
 const PANEL_DEFAULT_HEIGHT: f32 = 440.0;
 const INDENT: f32 = 16.0;
+const BROWSE_ROW_HEIGHT: f32 = 24.0;
 
 /// Drag payload carried from a member row to a layer drop-zone.
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +75,15 @@ pub struct MemberRow {
     pub entity: Entity,
     pub element_id: u64,
     pub label: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LayerVisibleRow<'a> {
+    Header(&'a LayerRow),
+    Member {
+        layer_name: &'a str,
+        member: &'a MemberRow,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +198,8 @@ pub fn build_layers_panel_data(world: &mut World) {
         }
         return;
     }
+    #[cfg(feature = "perf-stats")]
+    let perf_start = Instant::now();
 
     // Members: every authored entity, grouped by its assigned layer.
     let raw: Vec<(Entity, u64, String)> = {
@@ -229,6 +245,12 @@ pub fn build_layers_panel_data(world: &mut World) {
     let mut data = world.resource_mut::<LayersPanelData>();
     data.layers = layers;
     data.members_by_layer = members_by_layer;
+
+    #[cfg(feature = "perf-stats")]
+    if let Some(mut perf_stats) = world.get_resource_mut::<crate::plugins::perf_stats::PerfStats>()
+    {
+        add_layers_build_time(&mut perf_stats, perf_start.elapsed());
+    }
 }
 
 /// Render the Layers window, returning the batch of edits to apply this frame.
@@ -268,14 +290,27 @@ pub fn draw_layers_window(
             // and give the scroll area the rest so it actually scrolls.
             let footer_height = ui.spacing().interact_size.y + 18.0;
             let scroll_height = (ui.available_height() - footer_height).max(0.0);
+            let visible_rows = layer_visible_rows(state, data);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .max_height(scroll_height)
-                .show(ui, |ui| {
-                    for layer in &data.layers {
-                        render_layer(ui, layer, state, data, selected, &mut actions);
-                    }
-                });
+                .show_rows(
+                    ui,
+                    BROWSE_ROW_HEIGHT,
+                    visible_rows.len(),
+                    |ui, row_range| {
+                        for row_index in row_range {
+                            match visible_rows[row_index] {
+                                LayerVisibleRow::Header(layer) => {
+                                    render_layer_header(ui, layer, state, &mut actions);
+                                }
+                                LayerVisibleRow::Member { layer_name, member } => {
+                                    render_member(ui, layer_name, member, selected, &mut actions);
+                                }
+                            }
+                        }
+                    },
+                );
             ui.separator();
             if ui.button("+ Add Layer").clicked() {
                 actions.create = true;
@@ -285,12 +320,36 @@ pub fn draw_layers_window(
     actions
 }
 
-fn render_layer(
+fn layer_visible_rows<'a>(
+    state: &LayersPanelState,
+    data: &'a LayersPanelData,
+) -> Vec<LayerVisibleRow<'a>> {
+    let expanded_member_count = data
+        .layers
+        .iter()
+        .filter(|layer| !state.collapsed.contains(&layer.name))
+        .map(|layer| layer.member_count)
+        .sum::<usize>();
+    let mut rows = Vec::with_capacity(data.layers.len() + expanded_member_count);
+    for layer in &data.layers {
+        rows.push(LayerVisibleRow::Header(layer));
+        if state.collapsed.contains(&layer.name) {
+            continue;
+        }
+        if let Some(members) = data.members_by_layer.get(&layer.name) {
+            rows.extend(members.iter().map(|member| LayerVisibleRow::Member {
+                layer_name: layer.name.as_str(),
+                member,
+            }));
+        }
+    }
+    rows
+}
+
+fn render_layer_header(
     ui: &mut egui::Ui,
     layer: &LayerRow,
     state: &mut LayersPanelState,
-    data: &LayersPanelData,
-    selected: &HashSet<Entity>,
     actions: &mut LayersPanelActions,
 ) {
     let expanded = !state.collapsed.contains(&layer.name);
@@ -381,15 +440,6 @@ fn render_layer(
     });
     if let Some(payload) = dropped {
         actions.reassign.push((payload.entity, layer.name.clone()));
-    }
-
-    // Members.
-    if expanded {
-        if let Some(members) = data.members_by_layer.get(&layer.name) {
-            for member in members {
-                render_member(ui, &layer.name, member, selected, actions);
-            }
-        }
     }
 }
 

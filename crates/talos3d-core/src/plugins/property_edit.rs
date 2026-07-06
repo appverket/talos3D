@@ -5,6 +5,7 @@ use crate::{
     capability_registry::CapabilityRegistry,
     plugins::{
         commands::ApplyEntityChangesCommand,
+        identity::ElementId,
         modeling::{
             definition::{DefinitionId, DefinitionRegistry},
             occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
@@ -59,6 +60,7 @@ pub struct PropertyPanelState {
     pub interacting: bool,
     pub active_field: Option<String>,
     pub buffer: String,
+    pub hidden_for_selection: Option<Vec<ElementId>>,
 }
 
 /// Semantic kind of the current property-panel selection.
@@ -128,15 +130,31 @@ fn sync_property_panel_data(world: &mut World) {
         panel_data.semantic_kind = semantic_kind;
     }
 
-    let visible = !world.resource::<PropertyPanelData>().snapshots.is_empty()
-        && !world.resource::<PropertyEditState>().is_active();
+    let data = world.resource::<PropertyPanelData>();
+    let selection_signature = property_panel_selection_signature(data);
+    let visible = !data.snapshots.is_empty() && !world.resource::<PropertyEditState>().is_active();
     let mut panel_state = world.resource_mut::<PropertyPanelState>();
-    panel_state.visible = visible;
+    let hidden_for_current_selection =
+        panel_state.hidden_for_selection.as_ref() == Some(&selection_signature);
+    panel_state.visible = visible && !hidden_for_current_selection;
     if !visible {
+        panel_state.hidden_for_selection = None;
         panel_state.interacting = false;
         panel_state.active_field = None;
         panel_state.buffer.clear();
+    } else if !hidden_for_current_selection {
+        panel_state.hidden_for_selection = None;
     }
+}
+
+pub(crate) fn property_panel_selection_signature(data: &PropertyPanelData) -> Vec<ElementId> {
+    let mut signature: Vec<ElementId> = data
+        .snapshots
+        .iter()
+        .map(|snapshot| snapshot.element_id())
+        .collect();
+    signature.sort_unstable_by_key(|element_id| element_id.0);
+    signature
 }
 
 /// Resolve the semantic kind of the currently-selected single entity.
@@ -675,5 +693,22 @@ mod tests {
 
         assert!(!world.resource::<PropertyPanelState>().visible);
         assert!(world.resource::<PropertyPanelData>().snapshots.len() == 1);
+    }
+
+    #[test]
+    fn sync_property_panel_data_respects_close_for_current_selection() {
+        let mut world = property_world();
+        let mut panel_state = world.resource_mut::<PropertyPanelState>();
+        panel_state.visible = false;
+        panel_state.hidden_for_selection = Some(vec![ElementId(1)]);
+
+        sync_property_panel_data(&mut world);
+
+        let panel_state = world.resource::<PropertyPanelState>();
+        assert!(
+            !panel_state.visible,
+            "closed property panel should stay hidden while the same entity is selected",
+        );
+        assert_eq!(panel_state.hidden_for_selection, Some(vec![ElementId(1)]));
     }
 }

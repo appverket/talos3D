@@ -200,6 +200,52 @@ impl Default for RenderSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeDisplayMode {
+    Shaded,
+    Outline,
+    Wireframe,
+}
+
+impl EdgeDisplayMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shaded => "shaded",
+            Self::Outline => "outline",
+            Self::Wireframe => "wireframe",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "shaded" | "solid" | "none" => Some(Self::Shaded),
+            "outline" | "visible_edges" | "visible-edge" => Some(Self::Outline),
+            "wireframe" | "wire" => Some(Self::Wireframe),
+            _ => None,
+        }
+    }
+}
+
+impl RenderSettings {
+    pub fn edge_display_mode(&self) -> EdgeDisplayMode {
+        if self.wireframe_overlay_enabled {
+            EdgeDisplayMode::Wireframe
+        } else if self.visible_edge_overlay_enabled {
+            EdgeDisplayMode::Outline
+        } else {
+            EdgeDisplayMode::Shaded
+        }
+    }
+
+    pub fn set_edge_display_mode(&mut self, mode: EdgeDisplayMode) {
+        self.wireframe_overlay_enabled = mode == EdgeDisplayMode::Wireframe;
+        self.visible_edge_overlay_enabled = mode == EdgeDisplayMode::Outline;
+        if mode != EdgeDisplayMode::Shaded {
+            self.contour_overlay_enabled = false;
+        }
+    }
+}
+
 #[derive(Component, Debug, Clone)]
 struct SurfaceMaterialOverride {
     original: Handle<StandardMaterial>,
@@ -225,6 +271,12 @@ pub(crate) struct PaperDrawingState {
     baseline: Option<RenderSettings>,
 }
 
+#[derive(Resource, Debug, Clone, Default)]
+struct RenderPipelineSetupState {
+    configured: bool,
+    warned_missing_camera: bool,
+}
+
 // ─── Plugin ──────────────────────────────────────────────────────────────────
 
 /// Registers [`RenderSettings`] and wires up the camera post-processing stack.
@@ -233,6 +285,7 @@ pub struct RenderPipelinePlugin;
 impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RenderSettings>()
+            .init_resource::<RenderPipelineSetupState>()
             .init_resource::<PaperDrawingState>()
             .register_toolbar(ToolbarDescriptor {
                 id: VIEW_RENDER_TOOLBAR_ID.to_string(),
@@ -325,13 +378,13 @@ impl Plugin for RenderPipelinePlugin {
             .register_command(
                 CommandDescriptor {
                     id: "view.toggle_outline".to_string(),
-                    label: "Toggle Outline".to_string(),
-                    description: "Toggle visible-edge outline rendering.".to_string(),
+                    label: "Outline".to_string(),
+                    description: "Use visible-edge outline display mode.".to_string(),
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: None,
                     icon: Some("icon.view_outline".to_string()),
-                    hint: Some("Toggle hidden-line-friendly outline rendering".to_string()),
+                    hint: Some("Use hidden-line-friendly outline rendering".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
@@ -343,13 +396,13 @@ impl Plugin for RenderPipelinePlugin {
             .register_command(
                 CommandDescriptor {
                     id: "view.toggle_wireframe".to_string(),
-                    label: "Toggle Wireframe".to_string(),
-                    description: "Toggle full wireframe overlay rendering.".to_string(),
+                    label: "Wireframe".to_string(),
+                    description: "Use full wireframe display mode.".to_string(),
                     category: CommandCategory::View,
                     parameters: None,
                     default_shortcut: None,
                     icon: Some("icon.view_wireframe".to_string()),
-                    hint: Some("Toggle full wireframe overlay rendering".to_string()),
+                    hint: Some("Use full wireframe rendering".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
@@ -358,11 +411,10 @@ impl Plugin for RenderPipelinePlugin {
                 },
                 execute_toggle_wireframe,
             )
-            // PostStartup ensures the camera plugin has already run Startup.
-            .add_systems(PostStartup, setup_render_pipeline)
             .add_systems(
                 Update,
                 (
+                    setup_render_pipeline_once,
                     sync_render_settings,
                     sync_clear_color,
                     sync_wireframe_surface_visibility.after(MeshGenerationSet::Generate),
@@ -427,16 +479,21 @@ fn execute_toggle_xray(world: &mut World, parameters: &Value) -> Result<CommandR
 
 fn execute_toggle_outline(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     update_render_settings(world, "", |settings| {
-        settings.visible_edge_overlay_enabled = !settings.visible_edge_overlay_enabled;
-        if settings.visible_edge_overlay_enabled {
-            settings.contour_overlay_enabled = false;
+        if settings.edge_display_mode() == EdgeDisplayMode::Outline {
+            settings.set_edge_display_mode(EdgeDisplayMode::Shaded);
+        } else {
+            settings.set_edge_display_mode(EdgeDisplayMode::Outline);
         }
     })
 }
 
 fn execute_toggle_wireframe(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     update_render_settings(world, "", |settings| {
-        settings.wireframe_overlay_enabled = !settings.wireframe_overlay_enabled;
+        if settings.edge_display_mode() == EdgeDisplayMode::Wireframe {
+            settings.set_edge_display_mode(EdgeDisplayMode::Shaded);
+        } else {
+            settings.set_edge_display_mode(EdgeDisplayMode::Wireframe);
+        }
     })
 }
 
@@ -453,11 +510,10 @@ fn update_render_settings(
 
         if feedback.is_empty() {
             format!(
-                "Grid {} · X-Ray {} · Outline {} · Wireframe {}",
+                "Grid {} · X-Ray {} · Display {}",
                 on_off(settings.grid_enabled),
                 on_off(settings.xray_enabled),
-                on_off(settings.visible_edge_overlay_enabled),
-                on_off(settings.wireframe_overlay_enabled)
+                settings.edge_display_mode().as_str()
             )
         } else {
             feedback.to_string()
@@ -524,16 +580,24 @@ pub(crate) fn toggle_paper_drawing_mode(
     true
 }
 
-// ─── Startup system ──────────────────────────────────────────────────────────
+// ─── Camera render setup ─────────────────────────────────────────────────────
 
-fn setup_render_pipeline(
+fn setup_render_pipeline_once(
     mut commands: Commands,
     settings: Res<RenderSettings>,
     camera_query: Query<Entity, With<Camera3d>>,
     mut clear_color: ResMut<ClearColor>,
+    mut setup_state: ResMut<RenderPipelineSetupState>,
 ) {
+    if setup_state.configured {
+        return;
+    }
+
     let Ok(camera) = camera_query.single() else {
-        warn!("RenderPipelinePlugin: no Camera3d found at startup");
+        if !setup_state.warned_missing_camera {
+            warn!("RenderPipelinePlugin: no Camera3d found; will retry render setup");
+            setup_state.warned_missing_camera = true;
+        }
         return;
     };
 
@@ -556,6 +620,7 @@ fn setup_render_pipeline(
     sync_ssao_component(&mut commands, camera, &settings);
     sync_bloom_component(&mut commands, camera, &settings);
     sync_ssr_component(&mut commands, camera, &settings);
+    setup_state.configured = true;
 }
 
 // ─── Hot-reload system ───────────────────────────────────────────────────────
@@ -777,6 +842,7 @@ fn xray_material_from(source: &StandardMaterial, xray_alpha: f32) -> StandardMat
     override_material
         .base_color
         .set_alpha(xray_alpha.clamp(0.02, 0.95));
+    override_material.base_color_texture = None;
     override_material.alpha_mode = AlphaMode::Blend;
     override_material.cull_mode = None;
     override_material
@@ -1424,6 +1490,22 @@ mod tests {
             xray.base_color.to_srgba().blue,
             source.base_color.to_srgba().blue
         );
+    }
+
+    #[test]
+    fn xray_material_drops_base_color_texture_so_alpha_controls_opacity() {
+        let source = StandardMaterial {
+            base_color: Color::srgba(0.2, 0.4, 0.6, 1.0),
+            base_color_texture: Some(Handle::<Image>::default()),
+            alpha_mode: AlphaMode::Opaque,
+            ..Default::default()
+        };
+
+        let xray = xray_material_from(&source, 0.33);
+
+        assert!(xray.base_color_texture.is_none());
+        assert_eq!(xray.alpha_mode, AlphaMode::Blend);
+        assert_eq!(xray.base_color.alpha(), 0.33);
     }
 
     #[test]

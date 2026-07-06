@@ -134,6 +134,28 @@ impl LayerRegistry {
         layers
     }
 
+    pub fn subset_for_names<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> LayerRegistry {
+        let mut subset = LayerRegistry::default();
+        for name in names {
+            if name == DEFAULT_LAYER_NAME {
+                continue;
+            }
+            if let Some(def) = self.layers.get(name) {
+                subset.layers.insert(name.to_string(), def.clone());
+            } else {
+                subset.ensure_layer(name);
+            }
+        }
+        subset.next_order = subset
+            .layers
+            .values()
+            .map(|layer| layer.order)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        subset
+    }
+
     pub fn is_visible(&self, name: &str) -> bool {
         self.layers.get(name).is_none_or(|l| l.visible)
     }

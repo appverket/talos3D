@@ -21,9 +21,10 @@ use crate::{
     plugins::{
         camera::OrbitCamera,
         cursor::cursor_window_position,
-        egui_chrome::EguiWantsInput,
+        egui_chrome::{ChromeInputCapture, EguiWantsInput, ViewportContextMenu},
         identity::ElementId,
         input_ownership::{InputOwnership, InputPhase},
+        material_browser::MaterialsWindowState,
         tools::ActiveTool,
     },
 };
@@ -118,8 +119,12 @@ pub struct UxHarnessSnapshot {
     pub completed_sequence: u64,
     pub last_error: Option<String>,
     pub input_ownership: String,
+    pub chrome_pointer: bool,
+    pub chrome_keyboard: bool,
     pub egui_pointer: bool,
     pub egui_keyboard: bool,
+    pub viewport_context_menu_open: bool,
+    pub materials_window_visible: bool,
     pub window: Option<UxWindowSnapshot>,
     pub cursor: Option<UxCursorSnapshot>,
     pub active_tool: Option<String>,
@@ -267,13 +272,29 @@ pub fn observe_ux(world: &mut World) -> Result<UxHarnessSnapshot, String> {
             .get_resource::<InputOwnership>()
             .map(|ownership| format!("{ownership:?}"))
             .unwrap_or_else(|| "Unavailable".to_string()),
+        chrome_pointer: world
+            .get_resource::<ChromeInputCapture>()
+            .map(|capture| capture.wants_any_pointer_input())
+            .unwrap_or(false),
+        chrome_keyboard: world
+            .get_resource::<ChromeInputCapture>()
+            .map(|capture| capture.wants_any_keyboard_input())
+            .unwrap_or(false),
         egui_pointer: world
             .get_resource::<EguiWantsInput>()
-            .map(|wants| wants.pointer)
+            .map(|wants| wants.wants_any_pointer_input())
             .unwrap_or(false),
         egui_keyboard: world
             .get_resource::<EguiWantsInput>()
-            .map(|wants| wants.keyboard)
+            .map(|wants| wants.wants_any_keyboard_input())
+            .unwrap_or(false),
+        viewport_context_menu_open: world
+            .get_resource::<ViewportContextMenu>()
+            .map(|menu| menu.is_open())
+            .unwrap_or(false),
+        materials_window_visible: world
+            .get_resource::<MaterialsWindowState>()
+            .map(|state| state.visible)
             .unwrap_or(false),
         window,
         cursor,

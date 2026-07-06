@@ -1,14 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::{ecs::system::SystemParam, prelude::*, window::PrimaryWindow};
-use bevy_egui::{egui, EguiContexts, EguiGlobalSettings, EguiPlugin};
+use bevy_egui::{
+    egui, input::WindowToEguiContextMap, EguiContexts, EguiGlobalSettings, EguiPlugin,
+    EguiPreUpdateSet, PrimaryEguiContext,
+};
+
+pub use bevy_egui::input::EguiWantsInput;
 
 use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 use crate::curation::{NominationQueue, SourceRegistry};
 #[cfg(feature = "model-api")]
 use crate::plugins::model_api::ModelApiRuntimeInfo;
 #[cfg(feature = "perf-stats")]
-use crate::plugins::perf_stats::{overlay_text as perf_overlay_text, PerfStats};
+use crate::plugins::perf_stats::{
+    add_layers_draw_time, add_outliner_draw_time, overlay_text as perf_overlay_text, PerfStats,
+};
 use crate::plugins::{
     assistant_chat::{
         assistant_panel_max_width, clamp_assistant_panel_width, draw_assistant_window,
@@ -50,21 +57,23 @@ use crate::plugins::{
     menu_bar::MenuBarState,
     modeling::{
         definition::{DefinitionLibraryRegistry, DefinitionRegistry},
+        group::GroupMembers,
         occurrence::OccurrenceIdentity,
     },
     palette::{draw_command_palette, PaletteState},
     property_edit::{
-        parse_property_value, shared_property_value, PropertyEditState, PropertyPanelData,
-        PropertyPanelState, SelectionSemanticKind,
+        parse_property_value, property_panel_selection_signature, shared_property_value,
+        PropertyEditState, PropertyPanelData, PropertyPanelState, SelectionSemanticKind,
     },
     render_pipeline::{
         paper_drawing_active, paper_drawing_toggle_active, toggle_paper_drawing_mode,
-        PaperDrawingState, RenderSettings, RenderTonemapping,
+        EdgeDisplayMode, PaperDrawingState, RenderSettings, RenderTonemapping,
     },
     selection::Selected,
     toolbar::{
-        apply_toolbar_float, redock_toolbar, set_toolbar_visibility, FloatingToolbarStates,
-        RedockTarget, ToolbarDescriptor, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
+        apply_toolbar_float, redock_toolbar, serialize_floating_states, set_toolbar_visibility,
+        FloatingToolbarStates, RedockTarget, ToolbarDescriptor, ToolbarDock, ToolbarLayoutState,
+        ToolbarRegistry,
     },
     tools::ActiveTool,
     transform::TransformState,
@@ -87,7 +96,21 @@ const PROPERTY_PANEL_WIDTH: f32 = 240.0;
 const CAMERA_LENS_SLIDER_WIDTH: f32 = 140.0;
 const CAMERA_VERTICAL_SLIDER_HEIGHT: f32 = 120.0;
 #[cfg(feature = "perf-stats")]
-const PERF_OVERLAY_WIDTH: f32 = 168.0;
+const PERF_OVERLAY_WIDTH: f32 = 260.0;
+
+fn remaining_available_rect(ctx: &egui::Context) -> egui::Rect {
+    #[allow(deprecated)]
+    ctx.available_rect()
+}
+
+fn show_top_level_panel<R>(
+    panel: egui::Panel,
+    ctx: &egui::Context,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    #[allow(deprecated)]
+    panel.show(ctx, add_contents)
+}
 
 struct MenuSubmenuSpec {
     label: &'static str,
@@ -157,6 +180,7 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "modeling.create_polyline",
             "guide_lines.place",
             "dimensions.place",
+            "modeling.place_linked_model",
         ],
     },
     MenuSubmenuSpec {
@@ -285,13 +309,15 @@ impl Plugin for EguiChromePlugin {
         })
         .insert_resource(EguiGlobalSettings {
             auto_create_primary_context: false,
+            enable_absorb_bevy_input_system: false,
+            enable_ime: false,
             ..default()
         })
         .add_plugins(crate::plugins::outliner::OutlinerPlugin)
         .add_plugins(crate::plugins::dependency_panel::DependencyPanelPlugin)
         .add_plugins(crate::plugins::layers_panel::LayersPanelPlugin)
         .init_resource::<MenuBarState>()
-        .init_resource::<EguiWantsInput>()
+        .init_resource::<ChromeInputCapture>()
         .init_resource::<ToolbarDragState>()
         .init_resource::<ViewportContextMenu>()
         .init_resource::<MaterialsWindowState>()
@@ -299,6 +325,10 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<RenderSettingsWindowState>()
         .init_resource::<ProjectSettingsWindowState>()
         .init_resource::<ExtensionsWindowState>()
+        .add_systems(
+            PreUpdate,
+            restrict_egui_context_map_to_primary_window.after(EguiPreUpdateSet::InitContexts),
+        )
         .add_systems(
             Update,
             (
@@ -310,17 +340,205 @@ impl Plugin for EguiChromePlugin {
     }
 }
 
-#[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct EguiWantsInput {
-    pub pointer: bool,
-    pub keyboard: bool,
-}
-
 #[derive(Resource, Default, Debug, Clone)]
-struct ViewportContextMenu {
+pub(crate) struct ViewportContextMenu {
     open: bool,
     position: egui::Pos2,
     just_opened: bool,
+}
+
+impl ViewportContextMenu {
+    #[allow(dead_code)]
+    pub(crate) fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
+/// Stable input claim published by the chrome pass for viewport consumers.
+///
+/// `bevy_egui::EguiWantsInput` is useful, but it is a reactive egui integration
+/// detail. Viewport tools need a semantic contract that survives scheduling
+/// changes and includes Talos3D chrome state such as an open viewport context
+/// menu. This resource is intentionally consumed by `InputOwnership` and UX
+/// tests rather than by individual menu widgets.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct ChromeInputCapture {
+    pointer: bool,
+    keyboard: bool,
+    pointer_grab_active: bool,
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+struct ChromeInputFrameClaim {
+    pointer_claimed: bool,
+    keyboard_claimed: bool,
+    pointer_pressed: bool,
+    pointer_down: bool,
+    pointer_released: bool,
+}
+
+impl ChromeInputCapture {
+    pub fn wants_any_pointer_input(&self) -> bool {
+        self.pointer
+    }
+
+    pub fn wants_any_keyboard_input(&self) -> bool {
+        self.keyboard
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn update_from_frame(&mut self, claim: ChromeInputFrameClaim) {
+        if claim.pointer_pressed && claim.pointer_claimed {
+            self.pointer_grab_active = true;
+        }
+
+        let active_grab_this_frame = self.pointer_grab_active;
+        self.pointer = claim.pointer_claimed || active_grab_this_frame;
+        self.keyboard = claim.keyboard_claimed;
+
+        if claim.pointer_released && !claim.pointer_down {
+            self.pointer_grab_active = false;
+        }
+        if !claim.pointer_down && !claim.pointer_released {
+            self.pointer_grab_active = false;
+        }
+    }
+}
+
+fn restrict_egui_context_map_to_primary_window(
+    mut map: ResMut<WindowToEguiContextMap>,
+    primary_window: Query<Entity, With<PrimaryWindow>>,
+    primary_context: Query<Entity, With<PrimaryEguiContext>>,
+) {
+    let Ok(window_entity) = primary_window.single() else {
+        return;
+    };
+    let Some(context_entity) = primary_context.iter().next() else {
+        return;
+    };
+
+    let map_is_exact = map.context_to_window.len() == 1
+        && map.context_to_window.get(&context_entity) == Some(&window_entity)
+        && map.window_to_contexts.len() == 1
+        && map
+            .window_to_contexts
+            .get(&window_entity)
+            .is_some_and(|contexts| contexts.len() == 1 && contexts.contains(&context_entity));
+    if map_is_exact {
+        return;
+    }
+
+    map.context_to_window.clear();
+    map.window_to_contexts.clear();
+    map.context_to_window.insert(context_entity, window_entity);
+    map.window_to_contexts
+        .entry(window_entity)
+        .or_default()
+        .insert(context_entity);
+}
+
+#[cfg(test)]
+mod chrome_input_capture_tests {
+    use super::{
+        restrict_egui_context_map_to_primary_window, ChromeInputCapture, ChromeInputFrameClaim,
+    };
+    use bevy::{prelude::*, window::PrimaryWindow};
+    use bevy_egui::{input::WindowToEguiContextMap, PrimaryEguiContext};
+
+    #[test]
+    fn open_context_menu_claims_pointer_and_keyboard() {
+        let mut capture = ChromeInputCapture::default();
+
+        capture.update_from_frame(ChromeInputFrameClaim {
+            pointer_claimed: true,
+            keyboard_claimed: true,
+            ..Default::default()
+        });
+
+        assert!(capture.wants_any_pointer_input());
+        assert!(capture.wants_any_keyboard_input());
+    }
+
+    #[test]
+    fn pointer_press_started_in_chrome_captures_release_frame() {
+        let mut capture = ChromeInputCapture::default();
+
+        capture.update_from_frame(ChromeInputFrameClaim {
+            pointer_claimed: true,
+            pointer_pressed: true,
+            pointer_down: true,
+            ..Default::default()
+        });
+        assert!(capture.wants_any_pointer_input());
+
+        capture.update_from_frame(ChromeInputFrameClaim {
+            pointer_released: true,
+            ..Default::default()
+        });
+        assert!(capture.wants_any_pointer_input());
+
+        capture.update_from_frame(ChromeInputFrameClaim::default());
+        assert!(!capture.wants_any_pointer_input());
+    }
+
+    #[test]
+    fn pointer_press_started_in_viewport_does_not_create_chrome_grab() {
+        let mut capture = ChromeInputCapture::default();
+
+        capture.update_from_frame(ChromeInputFrameClaim {
+            pointer_pressed: true,
+            pointer_down: true,
+            ..Default::default()
+        });
+
+        assert!(!capture.wants_any_pointer_input());
+    }
+
+    #[test]
+    fn egui_context_map_is_restricted_to_primary_window() {
+        let mut app = App::new();
+        app.init_resource::<WindowToEguiContextMap>();
+        let primary_window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+        let stale_window = app.world_mut().spawn(Window::default()).id();
+        let primary_context = app.world_mut().spawn(PrimaryEguiContext).id();
+        let stale_context = app.world_mut().spawn_empty().id();
+
+        {
+            let mut map = app.world_mut().resource_mut::<WindowToEguiContextMap>();
+            map.context_to_window
+                .insert(primary_context, primary_window);
+            map.context_to_window.insert(stale_context, stale_window);
+            map.window_to_contexts
+                .entry(primary_window)
+                .or_default()
+                .insert(primary_context);
+            map.window_to_contexts
+                .entry(stale_window)
+                .or_default()
+                .insert(stale_context);
+        }
+
+        app.add_systems(Update, restrict_egui_context_map_to_primary_window);
+        app.update();
+
+        let map = app.world().resource::<WindowToEguiContextMap>();
+        assert_eq!(map.context_to_window.len(), 1);
+        assert_eq!(
+            map.context_to_window.get(&primary_context),
+            Some(&primary_window)
+        );
+        assert_eq!(map.window_to_contexts.len(), 1);
+        assert!(map
+            .window_to_contexts
+            .get(&primary_window)
+            .is_some_and(|contexts| contexts.len() == 1 && contexts.contains(&primary_context)));
+    }
 }
 
 #[derive(Resource, Default, Debug, Clone)]
@@ -358,6 +576,16 @@ fn command_capability_enabled(
         Some(id) => activation.is_enabled(id),
         None => true,
     }
+}
+
+fn command_context_available(
+    descriptor: &CommandDescriptor,
+    render_settings: &RenderSettings,
+) -> bool {
+    if descriptor.id == "core.export_drawing_pdf" {
+        return crate::plugins::drawing_export::pdf_export_available_for_settings(render_settings);
+    }
+    true
 }
 
 fn category_menu_groups(
@@ -410,6 +638,7 @@ fn visible_menu_commands_for_category<'a>(
     registry: &'a CommandRegistry,
     category: &crate::plugins::command_registry::CommandCategory,
     activation: &CapabilityActivation,
+    render_settings: &RenderSettings,
 ) -> Vec<&'a CommandDescriptor> {
     registry
         .commands()
@@ -417,6 +646,7 @@ fn visible_menu_commands_for_category<'a>(
             descriptor.show_in_menu
                 && descriptor.category == *category
                 && command_capability_enabled(descriptor, activation)
+                && command_context_available(descriptor, render_settings)
         })
         .collect()
 }
@@ -435,9 +665,8 @@ fn draw_command_menu_button(
     } else {
         descriptor.label.clone()
     };
-    let response = ui
-        .add_enabled(enabled, egui::Button::new(label))
-        .on_hover_text(command_tooltip_text(descriptor));
+    let response =
+        menu_row_button_enabled(ui, enabled, label).on_hover_text(command_tooltip_text(descriptor));
     if enabled && response.contains_pointer() {
         *hovered_menu_hint = descriptor.hint.clone();
     }
@@ -449,6 +678,51 @@ fn draw_command_menu_button(
             descriptor,
         );
     }
+}
+
+fn menu_row_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
+    menu_row_button_enabled(ui, true, label)
+}
+
+fn menu_row_button_enabled(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: impl Into<String>,
+) -> egui::Response {
+    let label = label.into();
+    let row_height = ui.spacing().interact_size.y;
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(label.clone(), font_id.clone(), egui::Color32::WHITE)
+        .size()
+        .x;
+    let row_width = (text_width + ui.spacing().button_padding.x * 2.0).clamp(160.0, 320.0);
+    let desired_size = egui::vec2(row_width, row_height);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(desired_size, sense);
+
+    if ui.is_rect_visible(rect) {
+        let text_color = if enabled {
+            ui.visuals().widgets.inactive.text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let text_pos = egui::pos2(rect.left() + ui.spacing().button_padding.x, rect.center().y);
+        ui.painter().text(
+            text_pos,
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::TextStyle::Button.resolve(ui.style()),
+            text_color,
+        );
+    }
+
+    response
 }
 
 fn queue_visible_command(
@@ -472,6 +746,7 @@ fn queue_visible_command(
 /// Same filter logic as `draw_command_submenu` so the prediction agrees with
 /// the actual draw call.
 fn group_will_render_inline(
+    label: &str,
     command_ids: &[&str],
     category_commands: &[&CommandDescriptor],
 ) -> bool {
@@ -483,7 +758,7 @@ fn group_will_render_inline(
                 .any(|descriptor| descriptor.id == **id)
         })
         .count();
-    count > 0 && count <= INLINE_GROUP_THRESHOLD
+    count > 0 && should_render_inline_menu_group(label, count)
 }
 
 /// Threshold for the menu-collapse rule (DEFINITION_BROWSER_UX_AGREEMENT.md):
@@ -492,6 +767,10 @@ fn group_will_render_inline(
 /// cascading submenu. Filtering is applied first so capability-hidden commands
 /// do not force tiny cascades.
 const INLINE_GROUP_THRESHOLD: usize = 2;
+
+fn should_render_inline_menu_group(label: &str, visible_command_count: usize) -> bool {
+    visible_command_count <= INLINE_GROUP_THRESHOLD || label == "Document"
+}
 
 /// Result of rendering one menu group; used by the parent to decide whether to
 /// emit a visual separator between adjacent sections.
@@ -504,8 +783,7 @@ enum MenuGroupRenderKind {
 /// Render one menu group. Returns `Some(kind)` if any commands were drawn,
 /// `None` if the group was empty after filtering.
 ///
-/// Inline rendering applies the menu-collapse rule from
-/// `private/proposals/DEFINITION_BROWSER_UX_AGREEMENT.md` — a group with 1 or 2
+/// Inline rendering applies the menu-collapse rule: a group with 1 or 2
 /// visible commands is rendered as a small dim heading followed by its
 /// commands, instead of a `ui.menu_button` cascade. Above that threshold the
 /// classic cascading submenu is preserved.
@@ -536,7 +814,7 @@ fn draw_command_submenu(
 
     rendered_ids.extend(descriptors.iter().map(|descriptor| descriptor.id.clone()));
 
-    if descriptors.len() <= INLINE_GROUP_THRESHOLD {
+    if should_render_inline_menu_group(label, descriptors.len()) {
         ui.label(
             egui::RichText::new(label)
                 .small()
@@ -583,9 +861,8 @@ fn draw_view_workspace_submenu(
     doc_props: &mut DocumentProperties,
 ) {
     ui.menu_button("Workspace", |ui| {
-        let assistant = ui
-            .button("Assistant...")
-            .on_hover_text("Open the assistant side panel");
+        let assistant =
+            menu_row_button(ui, "Assistant...").on_hover_text("Open the assistant side panel");
         if assistant.contains_pointer() {
             *hovered_menu_hint = Some("Open the assistant side panel".to_string());
         }
@@ -594,9 +871,8 @@ fn draw_view_workspace_submenu(
             ui.close();
         }
 
-        let lights = ui
-            .button("Lights...")
-            .on_hover_text("Open the scene lighting panel");
+        let lights =
+            menu_row_button(ui, "Lights...").on_hover_text("Open the scene lighting panel");
         if lights.contains_pointer() {
             *hovered_menu_hint = Some("Open the scene lighting panel".to_string());
         }
@@ -605,8 +881,7 @@ fn draw_view_workspace_submenu(
             ui.close();
         }
 
-        let renderer = ui
-            .button("Renderer...")
+        let renderer = menu_row_button(ui, "Renderer...")
             .on_hover_text("Adjust renderer, tonemapping, and paper drawing settings");
         if renderer.contains_pointer() {
             *hovered_menu_hint =
@@ -617,8 +892,7 @@ fn draw_view_workspace_submenu(
             ui.close();
         }
 
-        let extensions = ui
-            .button("Extensions...")
+        let extensions = menu_row_button(ui, "Extensions...")
             .on_hover_text("Enable or disable optional extensions");
         if extensions.contains_pointer() {
             *hovered_menu_hint = Some("Enable or disable optional extensions".to_string());
@@ -640,8 +914,7 @@ fn draw_project_settings_menu_button(
     hovered_menu_hint: &mut Option<String>,
     project_settings_window_state: &mut ProjectSettingsWindowState,
 ) {
-    let project_settings = ui
-        .button("Project Settings...")
+    let project_settings = menu_row_button(ui, "Project Settings...")
         .on_hover_text("Set model-level units, precision, snapping, and grid defaults");
     if project_settings.contains_pointer() {
         *hovered_menu_hint =
@@ -720,7 +993,7 @@ fn draw_category_menu_contents(
         let needs_separator_now = match previous_kind {
             Some(MenuGroupRenderKind::Inline) => true,
             Some(MenuGroupRenderKind::Submenu) => {
-                group_will_render_inline(group.command_ids, category_commands)
+                group_will_render_inline(group.label, group.command_ids, category_commands)
             }
             None => false,
         };
@@ -896,6 +1169,7 @@ struct ChromeData<'w, 's> {
     pending_preview_click: ResMut<'w, PendingPreviewClick>,
     active_tool: Res<'w, State<ActiveTool>>,
     selected_query: Query<'w, 's, (), With<Selected>>,
+    selected_groups: Query<'w, 's, &'static GroupMembers, With<Selected>>,
     selected_entities: Query<'w, 's, Entity, With<Selected>>,
     selected_with_occurrence: Query<'w, 's, (Entity, &'static OccurrenceIdentity), With<Selected>>,
     all_occurrences: Query<'w, 's, &'static OccurrenceIdentity>,
@@ -917,21 +1191,23 @@ struct ChromeData<'w, 's> {
     palette_state: ResMut<'w, PaletteState>,
     transform_state: Res<'w, TransformState>,
     keys: Res<'w, ButtonInput<KeyCode>>,
+    mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     window_query: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     menu_bar_state: ResMut<'w, MenuBarState>,
     viewport_export_state: Res<'w, ViewportExportState>,
     viewport_ui_inset: ResMut<'w, ViewportUiInset>,
-    egui_wants_input: ResMut<'w, EguiWantsInput>,
+    chrome_input_capture: ResMut<'w, ChromeInputCapture>,
     drag_state: ResMut<'w, ToolbarDragState>,
     viewport_context_menu: ResMut<'w, ViewportContextMenu>,
     #[cfg(feature = "model-api")]
     model_api_runtime_info: Option<Res<'w, ModelApiRuntimeInfo>>,
     #[cfg(feature = "perf-stats")]
-    perf_stats: Res<'w, PerfStats>,
+    perf_stats: ResMut<'w, PerfStats>,
 }
 
 fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     let Ok(ctx_ref) = contexts.ctx_mut() else {
+        data.chrome_input_capture.clear();
         warn!("draw_egui_chrome: ctx_mut() failed");
         return;
     };
@@ -949,11 +1225,10 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
 
     if data.viewport_export_state.ui_suppressed() {
         egui::Popup::close_all(&ctx);
+        data.chrome_input_capture.clear();
         data.drag_state.toolbar_rects.clear();
         data.viewport_context_menu.open = false;
         data.viewport_context_menu.just_opened = false;
-        data.egui_wants_input.pointer = false;
-        data.egui_wants_input.keyboard = false;
         if let Ok(_window) = data.window_query.single() {
             data.viewport_ui_inset.top = 0.0;
             data.viewport_ui_inset.bottom = 0.0;
@@ -964,6 +1239,12 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     }
 
     let selection_count = data.selected_query.iter().count();
+    let selected_group_count = data.selected_groups.iter().count();
+    let selected_linked_group_count = data
+        .selected_groups
+        .iter()
+        .filter(|members| members.linked_model.is_some())
+        .count();
     let current_tool = format!("{:?}", data.active_tool.get());
     let mut hovered_menu_hint = None;
 
@@ -972,39 +1253,38 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     }
 
     if data.menu_bar_state.visible {
-        egui::TopBottomPanel::top("menu_bar")
-            .resizable(false)
-            .show(&ctx, |ui| {
-                egui::MenuBar::new().ui(ui, |ui| {
-                    for category in ordered_menu_categories_for_bar(&data.command_registry) {
-                        let category_commands = visible_menu_commands_for_category(
-                            &data.command_registry,
+        show_top_level_panel(egui::Panel::top("menu_bar").resizable(false), &ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                for category in ordered_menu_categories_for_bar(&data.command_registry) {
+                    let category_commands = visible_menu_commands_for_category(
+                        &data.command_registry,
+                        &category,
+                        &data.capability_activation,
+                        &data.render_settings,
+                    );
+                    ui.menu_button(category.label(), |ui| {
+                        draw_category_menu_contents(
+                            ui,
                             &category,
-                            &data.capability_activation,
+                            &category_commands,
+                            selection_count,
+                            &mut data.pending_command_invocations,
+                            &mut data.status_bar_data,
+                            &mut hovered_menu_hint,
+                            &mut data.assistant_window_state,
+                            &mut data.lighting_window_state,
+                            &mut data.render_settings_window_state,
+                            &mut data.project_settings_window_state,
+                            &mut data.extensions_window_state,
+                            &data.toolbar_registry,
+                            &mut data.toolbar_layout_state,
+                            &mut data.doc_props,
                         );
-                        ui.menu_button(category.label(), |ui| {
-                            draw_category_menu_contents(
-                                ui,
-                                &category,
-                                &category_commands,
-                                selection_count,
-                                &mut data.pending_command_invocations,
-                                &mut data.status_bar_data,
-                                &mut hovered_menu_hint,
-                                &mut data.assistant_window_state,
-                                &mut data.lighting_window_state,
-                                &mut data.render_settings_window_state,
-                                &mut data.project_settings_window_state,
-                                &mut data.extensions_window_state,
-                                &data.toolbar_registry,
-                                &mut data.toolbar_layout_state,
-                                &mut data.doc_props,
-                            );
-                        });
-                    }
-                    ui.menu_button("About", draw_about_menu);
-                });
+                    });
+                }
+                ui.menu_button("About", draw_about_menu);
             });
+        });
     }
 
     // Clear stale frame rects before the toolbar render pass populates them.
@@ -1145,12 +1425,19 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     {
         let selected_now: std::collections::HashSet<Entity> =
             data.selected_entities.iter().collect();
-        if let Some(action) = crate::plugins::outliner::draw_outliner_window(
+        #[cfg(feature = "perf-stats")]
+        let perf_start = std::time::Instant::now();
+        let outliner_action = crate::plugins::outliner::draw_outliner_window(
             &ctx,
             &mut data.outliner_window_state,
             &data.outliner_tree,
             &selected_now,
-        ) {
+            &mut data.pending_command_invocations,
+            &data.command_registry,
+        );
+        #[cfg(feature = "perf-stats")]
+        add_outliner_draw_time(&mut data.perf_stats, perf_start.elapsed());
+        if let Some(action) = outliner_action {
             crate::plugins::outliner::apply_outliner_selection(
                 &mut data.commands,
                 &selected_now,
@@ -1177,12 +1464,16 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     {
         let selected_now: std::collections::HashSet<Entity> =
             data.selected_entities.iter().collect();
+        #[cfg(feature = "perf-stats")]
+        let perf_start = std::time::Instant::now();
         let actions = crate::plugins::layers_panel::draw_layers_window(
             &ctx,
             &mut data.layers_panel_state,
             &data.layers_panel_data,
             &selected_now,
         );
+        #[cfg(feature = "perf-stats")]
+        add_layers_draw_time(&mut data.perf_stats, perf_start.elapsed());
         if !actions.is_empty() {
             crate::plugins::layers_panel::apply_layers_actions(
                 &actions,
@@ -1274,9 +1565,10 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     data.status_bar_data.command_hint = hovered_menu_hint;
     let status_hint = hint_text(&data.status_bar_data);
     let coordinates = coordinate_text(&data.cursor_world_pos, &data.doc_props);
-    egui::TopBottomPanel::bottom("status_bar")
-        .resizable(false)
-        .show(&ctx, |ui| {
+    show_top_level_panel(
+        egui::Panel::bottom("status_bar").resizable(false),
+        &ctx,
+        |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(format!(
                     "[{}]",
@@ -1291,7 +1583,8 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                     }
                 });
             });
-        });
+        },
+    );
 
     let assistant_mcp_url = default_assistant_mcp_url(&data).map(str::to_string);
     draw_assistant_window(
@@ -1304,9 +1597,10 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     );
 
     let Ok(window) = data.window_query.single() else {
+        publish_chrome_input_capture(&ctx, &mut data.chrome_input_capture, false);
         return;
     };
-    let available = ctx.available_rect();
+    let available = remaining_available_rect(&ctx);
     #[cfg(feature = "perf-stats")]
     draw_perf_overlay(&ctx, available, &data.perf_stats);
 
@@ -1317,15 +1611,32 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     data.viewport_ui_inset.left = available.min.x;
     data.viewport_ui_inset.right = (window.width() - available.max.x).max(0.0);
 
-    // Viewport right-click context menu.
-    // Detect right-click release without drag, outside any egui area.
-    let right_released_in_viewport = ctx.input(|i| {
-        i.pointer.button_released(egui::PointerButton::Secondary)
-            && !i.pointer.is_decidedly_dragging()
-    }) && !data.egui_wants_input.pointer
-        && !crate::plugins::camera::orbit_modifier_pressed(&data.keys);
-    if right_released_in_viewport {
-        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+    // Viewport right-click context menu. Trackpads and mice do not always
+    // deliver the same secondary-button edge, so accept press, click, or
+    // release as long as the pointer is still in the viewport.
+    let secondary_clicked_in_viewport = ctx
+        .input(|i| {
+            let secondary_event = i.pointer.button_pressed(egui::PointerButton::Secondary)
+                || i.pointer.button_clicked(egui::PointerButton::Secondary)
+                || i.pointer.button_released(egui::PointerButton::Secondary);
+            secondary_event
+                .then(|| i.pointer.interact_pos().or(i.pointer.latest_pos()))
+                .flatten()
+        })
+        .or_else(|| {
+            (data.mouse_buttons.just_pressed(MouseButton::Right)
+                || data.mouse_buttons.just_released(MouseButton::Right))
+            .then(|| window.cursor_position())
+            .flatten()
+            .map(|pos| egui::pos2(pos.x, pos.y))
+        });
+    if let Some(pos) = secondary_clicked_in_viewport {
+        let chrome_owns_pointer =
+            ctx.is_pointer_over_egui() || ctx.egui_wants_pointer_input() || ctx.any_popup_open();
+        if available.contains(pos)
+            && !chrome_owns_pointer
+            && !crate::plugins::camera::orbit_modifier_pressed(&data.keys)
+        {
             data.viewport_context_menu.open = true;
             data.viewport_context_menu.position = pos;
             data.viewport_context_menu.just_opened = true;
@@ -1335,14 +1646,37 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &ctx,
         &mut data.viewport_context_menu,
         selection_count,
+        selected_group_count,
+        selected_linked_group_count,
         &mut data.pending_command_invocations,
         &data.command_registry,
     );
+    publish_chrome_input_capture(
+        &ctx,
+        &mut data.chrome_input_capture,
+        data.viewport_context_menu.open,
+    );
+}
 
-    let wants_ptr = ctx.wants_pointer_input();
-    let over_area = ctx.is_pointer_over_area();
-    data.egui_wants_input.pointer = wants_ptr || over_area;
-    data.egui_wants_input.keyboard = ctx.wants_keyboard_input();
+fn publish_chrome_input_capture(
+    ctx: &egui::Context,
+    capture: &mut ChromeInputCapture,
+    viewport_context_menu_open: bool,
+) {
+    let pointer_claimed = ctx.is_pointer_over_egui()
+        || ctx.egui_wants_pointer_input()
+        || ctx.any_popup_open()
+        || viewport_context_menu_open;
+    let keyboard_claimed =
+        ctx.egui_wants_keyboard_input() || ctx.any_popup_open() || viewport_context_menu_open;
+    let claim = ctx.input(|input| ChromeInputFrameClaim {
+        pointer_claimed,
+        keyboard_claimed,
+        pointer_pressed: input.pointer.any_pressed(),
+        pointer_down: input.pointer.any_down(),
+        pointer_released: input.pointer.any_released(),
+    });
+    capture.update_from_frame(claim);
 }
 
 fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
@@ -1358,7 +1692,7 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         || data.property_edit_state.is_active();
 
     // Position in top-right of the available area
-    let available = ctx.available_rect();
+    let available = remaining_available_rect(ctx);
     let assistant_offset = if data.assistant_window_state.visible {
         clamp_assistant_panel_width(
             data.assistant_window_state
@@ -1374,7 +1708,7 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
         available.min.y + 8.0,
     );
 
-    let mut open = true;
+    let mut open = data.property_panel_state.visible;
     let response = egui::Window::new(property_panel_title(
         data.property_panel_data.entity_type,
         data.property_panel_data.snapshots.len(),
@@ -1621,10 +1955,19 @@ fn draw_property_panel(ctx: &egui::Context, data: &mut ChromeData) {
     });
 
     data.property_panel_state.visible = open;
-    data.property_panel_state.interacting = response
-        .map(|r| r.response.contains_pointer())
-        .unwrap_or(false)
-        || ctx.wants_keyboard_input();
+    if !open {
+        data.property_panel_state.hidden_for_selection = Some(property_panel_selection_signature(
+            &data.property_panel_data,
+        ));
+        data.property_panel_state.interacting = false;
+        data.property_panel_state.active_field = None;
+        data.property_panel_state.buffer.clear();
+    } else {
+        data.property_panel_state.interacting = response
+            .map(|r| r.response.contains_pointer())
+            .unwrap_or(false)
+            || ctx.egui_wants_keyboard_input();
+    }
 }
 
 fn default_assistant_mcp_url<'a>(_data: &'a ChromeData) -> Option<&'a str> {
@@ -2467,28 +2810,34 @@ fn draw_toolbar_row(
 
     match dock {
         ToolbarDock::Top => {
-            egui::TopBottomPanel::top(panel_id)
-                .resizable(false)
-                .show(ctx, render_row);
+            show_top_level_panel(egui::Panel::top(panel_id).resizable(false), ctx, render_row);
         }
         ToolbarDock::Bottom => {
-            egui::TopBottomPanel::bottom(panel_id)
-                .resizable(false)
-                .show(ctx, render_row);
+            show_top_level_panel(
+                egui::Panel::bottom(panel_id).resizable(false),
+                ctx,
+                render_row,
+            );
         }
         ToolbarDock::Left => {
-            egui::SidePanel::left(panel_id)
-                .resizable(false)
-                .default_width(TOOLBAR_SIDE_WIDTH)
-                .width_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH)
-                .show(ctx, render_row);
+            show_top_level_panel(
+                egui::Panel::left(panel_id)
+                    .resizable(false)
+                    .default_size(TOOLBAR_SIDE_WIDTH)
+                    .size_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH),
+                ctx,
+                render_row,
+            );
         }
         ToolbarDock::Right => {
-            egui::SidePanel::right(panel_id)
-                .resizable(false)
-                .default_width(TOOLBAR_SIDE_WIDTH)
-                .width_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH)
-                .show(ctx, render_row);
+            show_top_level_panel(
+                egui::Panel::right(panel_id)
+                    .resizable(false)
+                    .default_size(TOOLBAR_SIDE_WIDTH)
+                    .size_range(TOOLBAR_SIDE_WIDTH..=TOOLBAR_SIDE_WIDTH),
+                ctx,
+                render_row,
+            );
         }
         ToolbarDock::Floating => {
             // Floating toolbars are rendered by draw_floating_toolbar, not here.
@@ -2815,6 +3164,7 @@ fn draw_floating_toolbar(
                 if grip.double_clicked() {
                     if let Some(entry) = render.floating_states.entries.get_mut(&descriptor.id) {
                         entry.minimized = !entry.minimized;
+                        persist_floating_toolbar_states(render);
                     }
                 }
 
@@ -2824,6 +3174,7 @@ fn draw_floating_toolbar(
                     if let Some(entry) = render.floating_states.entries.get_mut(&descriptor.id) {
                         entry.position[0] += delta.x;
                         entry.position[1] += delta.y;
+                        persist_floating_toolbar_states(render);
                     }
                     // Check if we're near a dock edge — if so, start a re-dock drag.
                     if let Some(cursor) = ctx.pointer_hover_pos() {
@@ -2907,10 +3258,19 @@ fn draw_floating_toolbar(
         });
 }
 
+fn persist_floating_toolbar_states(render: &mut ToolbarRenderContext<'_, '_, '_>) {
+    render.doc_props.domain_defaults.insert(
+        "floating_toolbar_states".to_string(),
+        serialize_floating_states(&render.floating_states.entries),
+    );
+}
+
 fn draw_viewport_context_menu(
     ctx: &egui::Context,
     menu: &mut ViewportContextMenu,
     selection_count: usize,
+    selected_group_count: usize,
+    selected_linked_group_count: usize,
     pending: &mut PendingCommandInvocations,
     registry: &CommandRegistry,
 ) {
@@ -2932,19 +3292,18 @@ fn draw_viewport_context_menu(
                 // with what the keyboard actually does.
                 macro_rules! item {
                     ($label:expr, $id:expr) => {{
+                        item!($label, $id, serde_json::json!({}));
+                    }};
+                    ($label:expr, $id:expr, $params:expr) => {{
                         let full = append_command_shortcut(registry, $label, $id);
-                        if ui.button(full).clicked() {
-                            queue_command_invocation_resource(
-                                pending,
-                                $id.to_string(),
-                                serde_json::json!({}),
-                            );
+                        if menu_row_button(ui, full).clicked() {
+                            queue_command_invocation_resource(pending, $id.to_string(), $params);
                             menu.open = false;
                         }
                     }};
                     (enabled: $enabled:expr, $label:expr, $id:expr) => {{
                         let full = append_command_shortcut(registry, $label, $id);
-                        if ui.add_enabled($enabled, egui::Button::new(full)).clicked() {
+                        if menu_row_button_enabled(ui, $enabled, full).clicked() {
                             queue_command_invocation_resource(
                                 pending,
                                 $id.to_string(),
@@ -2964,20 +3323,45 @@ fn draw_viewport_context_menu(
                         "Open Definition",
                         "modeling.open_selected_occurrence_definition"
                     );
-                    item!("Materials\u{2026}", "materials.toggle_browser");
+                    item!(
+                        "Materials\u{2026}",
+                        "materials.toggle_browser",
+                        serde_json::json!({ "visible": true })
+                    );
                     item!("Definitions\u{2026}", "modeling.toggle_definitions_browser");
                     ui.separator();
                     item!("Zoom to Selection", "core.zoom_to_selection");
                     ui.separator();
                     item!("Group", "modeling.group");
-                    item!("Ungroup", "modeling.ungroup");
+                    if selected_group_count == 1 {
+                        if selected_linked_group_count == 1 {
+                            menu_row_button_enabled(ui, false, "Ungroup")
+                                .on_hover_text(
+                                    "Linked models cannot be ungrouped directly because that would break the live link and leave ordinary scene objects behind.",
+                                );
+                            item!("Open Linked Model", "modeling.open_linked_model");
+                            item!("Refresh Linked Model", "modeling.refresh_linked_models");
+                        } else {
+                            item!("Ungroup", "modeling.ungroup");
+                            item!(
+                                "Create Linked Model",
+                                "modeling.create_linked_model_from_selection"
+                            );
+                        }
+                    } else {
+                        item!("Ungroup", "modeling.ungroup");
+                    }
                     ui.separator();
                     item!("Deselect", "core.deselect");
                     item!("Delete", "core.delete");
                 } else {
                     item!("Select All", "core.select_all");
                     ui.separator();
-                    item!("Materials\u{2026}", "materials.toggle_browser");
+                    item!(
+                        "Materials\u{2026}",
+                        "materials.toggle_browser",
+                        serde_json::json!({ "visible": true })
+                    );
                     item!("Definitions\u{2026}", "modeling.toggle_definitions_browser");
                     ui.separator();
                     item!("Zoom to Extents", "core.zoom_to_extents");
@@ -3420,25 +3804,21 @@ fn draw_render_settings_window(
                 {
                     settings.xray_enabled = false;
                 }
-                ui.checkbox(
-                    &mut settings.visible_edge_overlay_enabled,
-                    "Visible Edge Overlay",
-                );
-                ui.checkbox(
-                    &mut settings.wireframe_overlay_enabled,
-                    "Enable Wireframe Overlay",
-                );
-                ui.checkbox(
-                    &mut settings.contour_overlay_enabled,
-                    "Enable Contour Overlay",
-                );
+                ui.label("Edge Display");
+                let mut edge_mode = settings.edge_display_mode();
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut edge_mode, EdgeDisplayMode::Shaded, "Shaded");
+                    ui.radio_value(&mut edge_mode, EdgeDisplayMode::Outline, "Outline");
+                    ui.radio_value(&mut edge_mode, EdgeDisplayMode::Wireframe, "Wireframe");
+                });
+                settings.set_edge_display_mode(edge_mode);
                 ui.horizontal(|ui| {
                     ui.label("Background");
                     ui.color_edit_button_rgb(&mut settings.background_rgb);
                 });
                 ui.label(
                     egui::RichText::new(
-                        "X-Ray swaps scene materials to 50% transparent surfaces by default. Paper fill swaps scene materials to white unlit surfaces. Visible edges keep sharp and silhouette edges while hiding occluded edges. Wireframe remains a full construction overlay.",
+                        "X-Ray swaps scene materials to 50% transparent surfaces by default. Paper fill swaps scene materials to white unlit surfaces. Outline and Wireframe are mutually exclusive display modes.",
                     )
                     .small()
                     .color(CHROME_MUTED),
@@ -4661,11 +5041,11 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
     visuals.widgets.noninteractive.bg_stroke.color = CHROME_MUTED;
     ctx.set_visuals(visuals);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     if let Some(button_font) = style.text_styles.get(&egui::TextStyle::Button).cloned() {
         style
             .text_styles
             .insert(egui::TextStyle::Heading, button_font);
     }
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }

@@ -1,8 +1,12 @@
 use bevy::prelude::*;
 
 use super::{
-    egui_chrome::EguiWantsInput, face_edit::PushPullContext, handles::HandleInteractionState,
-    palette::PaletteState, property_edit::PropertyEditState, transform::TransformState,
+    egui_chrome::{ChromeInputCapture, EguiChromeSystems, EguiWantsInput},
+    face_edit::PushPullContext,
+    handles::HandleInteractionState,
+    palette::PaletteState,
+    property_edit::PropertyEditState,
+    transform::TransformState,
 };
 
 /// Central authority for who currently owns viewport input.
@@ -11,6 +15,23 @@ use super::{
 /// guard combinations.  When a modal operation is active (transform,
 /// push/pull, handle drag), only the modal's own systems process input;
 /// all other systems (selection, tools, handles) are locked out.
+///
+/// GUI integration contract for new systems:
+///
+/// - Egui/chrome producers publish aggregate claims only. Use
+///   `bevy_egui::EguiWantsInput` for ordinary egui state and
+///   `ChromeInputCapture` only for Talos3D chrome semantics that egui does not
+///   model, such as the viewport context menu and same-drag release ownership.
+/// - Viewport consumers must read `InputOwnership`, not rescan egui layers,
+///   widget rects, command menus, or raw pointer state. That keeps ownership
+///   checks O(1) regardless of model size or UI complexity.
+/// - Register viewport systems in `InputPhase`. Tool/selection systems should
+///   require `is_idle()`, modal systems should require their `ModalKind`, and
+///   camera/cursor-style systems that remain usable during modals should only
+///   stop on `is_ui_capture()`.
+/// - Do not enable `bevy_egui`'s global input absorption for Talos3D viewport
+///   logic. It clears shared Bevy input buffers and can starve non-egui systems;
+///   this resource is the explicit arbitration boundary.
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub enum InputOwnership {
     /// No modal operation — selection, tool activation, handle hover, and
@@ -45,6 +66,10 @@ impl InputOwnership {
     pub fn is_modal(&self) -> bool {
         matches!(self, Self::Modal(_))
     }
+
+    pub fn is_ui_capture(&self) -> bool {
+        matches!(self, Self::UiCapture)
+    }
 }
 
 /// Ordered phases for input processing each frame.
@@ -74,7 +99,8 @@ pub struct InputOwnershipPlugin;
 
 impl Plugin for InputOwnershipPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<InputOwnership>()
+        app.init_resource::<ChromeInputCapture>()
+            .init_resource::<InputOwnership>()
             .configure_sets(
                 Update,
                 (
@@ -88,7 +114,9 @@ impl Plugin for InputOwnershipPlugin {
             )
             .add_systems(
                 Update,
-                sync_input_ownership.in_set(InputPhase::SyncOwnership),
+                sync_input_ownership
+                    .in_set(InputPhase::SyncOwnership)
+                    .after(EguiChromeSystems),
             );
     }
 }
@@ -101,6 +129,7 @@ impl Plugin for InputOwnershipPlugin {
 /// resource that new code checks.
 fn sync_input_ownership(
     mut ownership: ResMut<InputOwnership>,
+    chrome_capture: Res<ChromeInputCapture>,
     egui_wants: Res<EguiWantsInput>,
     palette: Res<PaletteState>,
     property_edit: Res<PropertyEditState>,
@@ -108,7 +137,13 @@ fn sync_input_ownership(
     push_pull: Res<PushPullContext>,
     handle_state: Res<HandleInteractionState>,
 ) {
-    let new_ownership = if palette.is_open() || property_edit.is_active() || egui_wants.keyboard {
+    let new_ownership = if palette.is_open()
+        || property_edit.is_active()
+        || chrome_capture.wants_any_keyboard_input()
+        || chrome_capture.wants_any_pointer_input()
+        || egui_wants.wants_any_keyboard_input()
+        || egui_wants.wants_any_pointer_input()
+    {
         InputOwnership::UiCapture
     } else if handle_state.property_drag_active() {
         InputOwnership::Modal(ModalKind::HandleDrag)

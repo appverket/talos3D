@@ -21,7 +21,7 @@ use crate::{
         },
         commands::{despawn_by_element_id, find_entity_by_element_id, CreateEntityCommand},
         cursor::{CursorWorldPos, DrawingPlane},
-        egui_chrome::EguiWantsInput,
+        egui_chrome::{ChromeInputCapture, EguiWantsInput},
         face_edit::{face_vertices_for_entity, FaceEditContext},
         identity::{ElementId, ElementIdAllocator},
         inference::{InferenceEngine, ReferenceEdge},
@@ -1128,7 +1128,15 @@ fn cleanup_guide_line_tool(mut commands: Commands) {
 }
 
 fn handle_guide_line_tool(world: &mut World) {
-    let egui_wants_input = *world.resource::<EguiWantsInput>();
+    let (egui_wants_pointer, egui_wants_keyboard) = {
+        let chrome_capture = world.resource::<ChromeInputCapture>();
+        let egui_wants_input = world.resource::<EguiWantsInput>();
+        (
+            chrome_capture.wants_any_pointer_input() || egui_wants_input.wants_any_pointer_input(),
+            chrome_capture.wants_any_keyboard_input()
+                || egui_wants_input.wants_any_keyboard_input(),
+        )
+    };
     let just_pressed_keys: Vec<KeyCode> = world
         .resource::<ButtonInput<KeyCode>>()
         .get_just_pressed()
@@ -1142,7 +1150,7 @@ fn handle_guide_line_tool(world: &mut World) {
         keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
     };
 
-    if !egui_wants_input.keyboard {
+    if !egui_wants_keyboard {
         let escape_pressed = just_pressed_keys.contains(&KeyCode::Escape);
         if escape_pressed {
             world
@@ -1153,7 +1161,7 @@ fn handle_guide_line_tool(world: &mut World) {
         }
     }
 
-    let hover_state = if egui_wants_input.pointer {
+    let hover_state = if egui_wants_pointer {
         let drawing_plane = world.resource::<DrawingPlane>().clone();
         let face_context = world.resource::<FaceEditContext>().clone();
         HoverGuideState {
@@ -1173,7 +1181,7 @@ fn handle_guide_line_tool(world: &mut World) {
         tool_state.hover_reference_label = hover_state.reference_label.clone();
     }
 
-    if !egui_wants_input.keyboard {
+    if !egui_wants_keyboard {
         let mut tool_state = world.resource_mut::<GuideLineToolState>();
         for key in just_pressed_keys {
             match key {
@@ -1237,7 +1245,7 @@ fn handle_guide_line_tool(world: &mut World) {
         }
     }
 
-    let commit_with_enter = !egui_wants_input.keyboard
+    let commit_with_enter = !egui_wants_keyboard
         && (world
             .resource::<ButtonInput<KeyCode>>()
             .just_pressed(KeyCode::Enter)
@@ -1250,7 +1258,7 @@ fn handle_guide_line_tool(world: &mut World) {
         resolve_preview_state(&tool_state, &drawing_plane, control_pressed)
     };
 
-    if !egui_wants_input.pointer && (mouse_left_pressed || commit_with_enter) {
+    if !egui_wants_pointer && (mouse_left_pressed || commit_with_enter) {
         let next_element_id = world.resource::<ElementIdAllocator>().next_id();
         let mut pending_snapshot = None;
         {

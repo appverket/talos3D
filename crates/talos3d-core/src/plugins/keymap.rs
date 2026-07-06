@@ -28,7 +28,7 @@ use crate::plugins::{
         queue_command_invocation_resource, CommandDescriptor, CommandRegistry,
         PendingCommandInvocations,
     },
-    egui_chrome::{all_menu_command_ids, EguiWantsInput},
+    egui_chrome::{all_menu_command_ids, ChromeInputCapture, EguiWantsInput},
     face_edit::FaceEditContext,
     input_ownership::InputOwnership,
     toolbar::ToolbarRegistry,
@@ -386,6 +386,7 @@ fn primary_pressed(keys: &ButtonInput<KeyCode>) -> bool {
 pub fn dispatch_command_shortcuts(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     keymap: Res<Keymap>,
+    chrome_capture: Option<Res<ChromeInputCapture>>,
     egui_wants_input: Option<Res<EguiWantsInput>>,
     ownership: Option<Res<InputOwnership>>,
     active_tool: Option<Res<State<ActiveTool>>>,
@@ -396,7 +397,13 @@ pub fn dispatch_command_shortcuts(
     let Some(keys) = keys else {
         return;
     };
-    if egui_wants_input.map(|e| e.keyboard).unwrap_or(false) {
+    if chrome_capture
+        .map(|capture| capture.wants_any_keyboard_input())
+        .unwrap_or(false)
+        || egui_wants_input
+            .map(|e| e.wants_any_keyboard_input())
+            .unwrap_or(false)
+    {
         return;
     }
     if !ownership.map(|o| o.is_idle()).unwrap_or(true) {

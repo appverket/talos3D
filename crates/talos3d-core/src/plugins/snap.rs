@@ -1,4 +1,4 @@
-use bevy::{ecs::world::EntityRef, prelude::*};
+use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
 
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
@@ -6,13 +6,17 @@ use crate::{
     authored_entity::{EntityBounds, HandleKind},
     capability_registry::{CapabilityRegistry, SnapPoint},
     plugins::{
-        cursor::{CursorSystems, CursorWorldPos},
+        commands::find_entity_by_element_id_readonly,
+        cursor::{cursor_window_position, CursorSystems, CursorWorldPos},
+        layers::entity_on_visible_layer,
+        render_pipeline::RenderSettings,
         selection::Selected,
         transform::TransformState,
     },
 };
 
 const ELEMENT_SNAP_RADIUS_METRES: f32 = 0.35;
+const ELEMENT_SNAP_RADIUS_SCREEN_PX: f32 = 18.0;
 const SNAP_TRAIL_COLOR: Color = Color::srgb(0.4, 1.0, 0.75);
 const SNAP_ENDPOINT_COLOR: Color = Color::srgb(0.38, 0.92, 1.0);
 const SNAP_MIDPOINT_COLOR: Color = Color::srgb(0.55, 1.0, 0.72);
@@ -20,6 +24,7 @@ const SNAP_CONTROL_COLOR: Color = Color::srgb(1.0, 0.82, 0.28);
 const SNAP_GUIDE_ANCHOR_COLOR: Color = Color::srgb(0.0, 0.86, 0.86);
 const SNAP_GRID_COLOR: Color = Color::srgb(0.4, 1.0, 0.75);
 const SNAP_INDICATOR_RADIUS: f32 = 0.08;
+const SNAP_ENDPOINT_RING_RADIUS: f32 = 0.045;
 const SNAP_HALO_RADIUS: f32 = 0.11;
 
 pub struct SnapPlugin;
@@ -115,21 +120,34 @@ fn update_snap_result(world: &mut World) {
         return;
     }
 
-    let mut candidates: Vec<(f32, SnapCandidate)> = Vec::new();
+    let hovered_element_id = cursor_world_pos.hovered_element_id;
+    let screen_pick = snap_screen_pick_context(world);
+    let xray_enabled = world
+        .get_resource::<RenderSettings>()
+        .is_some_and(|settings| settings.xray_enabled);
+    let mut candidates: Vec<(SnapCandidateRank, SnapCandidate)> = Vec::new();
     let mut snap_points = Vec::new();
     let registry = world.resource::<CapabilityRegistry>();
     for factory in registry.factories() {
         factory.collect_snap_points(world, &mut snap_points);
     }
-    collect_authored_handle_snap_points(world, &mut snap_points);
+    collect_authored_handle_snap_points(world, &mut snap_points, hovered_element_id, xray_enabled);
 
     for snap_point in snap_points {
-        let distance_squared = raw_position.distance_squared(snap_point.position);
-        if distance_squared > ELEMENT_SNAP_RADIUS_METRES * ELEMENT_SNAP_RADIUS_METRES {
+        if !snap_point_is_selectable(
+            world,
+            snap_point.element_id,
+            hovered_element_id,
+            xray_enabled,
+        ) {
             continue;
         }
+        let Some(rank) = snap_candidate_rank(&screen_pick, raw_position, snap_point.position)
+        else {
+            continue;
+        };
         candidates.push((
-            distance_squared,
+            rank,
             SnapCandidate {
                 position: snap_point.position,
                 kind: snap_point.kind,
@@ -139,20 +157,28 @@ fn update_snap_result(world: &mut World) {
         ));
     }
 
-    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    candidates.sort_by(|left, right| {
+        if xray_enabled {
+            left.0.cmp_screen_first(&right.0)
+        } else {
+            left.0.cmp_front_first(&right.0)
+        }
+    });
 
-    if let Some((best_distance, best)) = candidates.first().cloned() {
-        let coincident = candidates
+    if let Some((best_rank, best)) = candidates.first().cloned() {
+        let under_cursor = candidates
             .into_iter()
-            .filter(|(distance, candidate)| {
-                (distance - best_distance).abs() <= 1e-6
+            .filter(|(rank, candidate)| {
+                rank.is_coincident_with(&best_rank)
                     || candidate.position.distance_squared(best.position) <= 1e-6
+                    || rank.screen_distance_squared
+                        <= ELEMENT_SNAP_RADIUS_SCREEN_PX * ELEMENT_SNAP_RADIUS_SCREEN_PX
             })
             .map(|(_, candidate)| candidate)
             .collect::<Vec<_>>();
         let selected_index =
-            update_snap_disambiguation(world, best.position, coincident.len(), cycle_requested);
-        let selected = coincident
+            update_snap_disambiguation(world, best.position, under_cursor.len(), cycle_requested);
+        let selected = under_cursor
             .get(selected_index)
             .cloned()
             .unwrap_or_else(|| best.clone());
@@ -160,47 +186,219 @@ fn update_snap_result(world: &mut World) {
         result.target = Some(selected.position);
         result.kind = selected.kind;
         result.active_candidate = selected_index;
-        result.candidates = coincident;
+        result.candidates = under_cursor;
     }
 
     *world.resource_mut::<SnapResult>() = result;
 }
 
-fn collect_authored_handle_snap_points(world: &World, out: &mut Vec<SnapPoint>) {
+fn collect_authored_handle_snap_points(
+    world: &World,
+    out: &mut Vec<SnapPoint>,
+    hovered_element_id: Option<crate::plugins::identity::ElementId>,
+    xray_enabled: bool,
+) {
     let transform_active = !world.resource::<TransformState>().is_idle();
     let registry = world.resource::<CapabilityRegistry>();
+
+    if !xray_enabled {
+        let Some(owner) = hovered_element_id else {
+            return;
+        };
+        let Some(entity) = find_entity_by_element_id_readonly(world, owner) else {
+            return;
+        };
+        let Some(entity_ref) = world.get_entity(entity).ok() else {
+            return;
+        };
+        collect_entity_snap_points(world, registry, entity_ref, transform_active, out);
+        return;
+    }
+
     let mut query = world
         .try_query::<EntityRef>()
         .expect("EntityRef query should always be constructible");
 
     for entity_ref in query.iter(world) {
-        if !entity_ref.contains::<crate::plugins::identity::ElementId>() {
-            continue;
-        }
-        if transform_active && entity_ref.contains::<Selected>() {
-            continue;
-        }
-        let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
+        collect_entity_snap_points(world, registry, entity_ref, transform_active, out);
+    }
+}
+
+fn collect_entity_snap_points(
+    world: &World,
+    registry: &CapabilityRegistry,
+    entity_ref: EntityRef<'_>,
+    transform_active: bool,
+    out: &mut Vec<SnapPoint>,
+) {
+    if !entity_ref.contains::<crate::plugins::identity::ElementId>() {
+        return;
+    }
+    if transform_active && entity_ref.contains::<Selected>() {
+        return;
+    }
+    if !entity_ref_is_visible_snap_owner(world, entity_ref) {
+        return;
+    }
+    let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
+        return;
+    };
+    if snapshot.scope() != crate::authored_entity::EntityScope::AuthoredModel {
+        return;
+    }
+    let owner = entity_ref
+        .get::<crate::plugins::identity::ElementId>()
+        .copied();
+    for handle in snapshot.handles() {
+        let Some(kind) = authored_handle_snap_kind(handle.kind) else {
             continue;
         };
-        let owner = entity_ref
-            .get::<crate::plugins::identity::ElementId>()
-            .copied();
-        for handle in snapshot.handles() {
-            let Some(kind) = authored_handle_snap_kind(handle.kind) else {
-                continue;
-            };
-            out.push(SnapPoint {
-                position: handle.position,
-                kind,
-                element_id: owner,
-                label: Some(handle.id),
-            });
-        }
-        if let Some(bounds) = snapshot.bounds() {
-            collect_bounds_corner_snap_points(bounds, owner, out);
-        }
+        out.push(SnapPoint {
+            position: handle.position,
+            kind,
+            element_id: owner,
+            label: Some(handle.id),
+        });
     }
+    if let Some(bounds) = snapshot.bounds() {
+        collect_bounds_corner_snap_points(bounds, owner, out);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SnapScreenPickContext {
+    camera: Camera,
+    camera_transform: GlobalTransform,
+    cursor_position: Vec2,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SnapCandidateRank {
+    screen_distance_squared: f32,
+    depth: f32,
+    world_distance_squared: f32,
+}
+
+impl SnapCandidateRank {
+    fn cmp_screen_first(&self, other: &Self) -> std::cmp::Ordering {
+        self.screen_distance_squared
+            .total_cmp(&other.screen_distance_squared)
+            .then_with(|| self.depth.total_cmp(&other.depth))
+            .then_with(|| {
+                self.world_distance_squared
+                    .total_cmp(&other.world_distance_squared)
+            })
+    }
+
+    fn cmp_front_first(&self, other: &Self) -> std::cmp::Ordering {
+        self.depth
+            .total_cmp(&other.depth)
+            .then_with(|| {
+                self.screen_distance_squared
+                    .total_cmp(&other.screen_distance_squared)
+            })
+            .then_with(|| {
+                self.world_distance_squared
+                    .total_cmp(&other.world_distance_squared)
+            })
+    }
+
+    fn is_coincident_with(&self, other: &Self) -> bool {
+        (self.screen_distance_squared - other.screen_distance_squared).abs() <= 1e-3
+            && (self.depth - other.depth).abs() <= 1e-3
+    }
+}
+
+fn snap_screen_pick_context(world: &mut World) -> Option<SnapScreenPickContext> {
+    let cursor_position = {
+        let mut window_query = world.query_filtered::<&Window, With<PrimaryWindow>>();
+        cursor_window_position(window_query.single(world).ok()?)?
+    };
+    let (camera, camera_transform) = {
+        let mut camera_query =
+            world.query_filtered::<(&Camera, &GlobalTransform), With<crate::plugins::camera::OrbitCamera>>();
+        camera_query
+            .iter(world)
+            .find(|(camera, _)| camera.is_active)
+            .or_else(|| camera_query.iter(world).next())
+            .map(|(camera, transform)| (camera.clone(), *transform))?
+    };
+    Some(SnapScreenPickContext {
+        camera,
+        camera_transform,
+        cursor_position,
+    })
+}
+
+fn snap_candidate_rank(
+    screen_pick: &Option<SnapScreenPickContext>,
+    raw_position: Vec3,
+    position: Vec3,
+) -> Option<SnapCandidateRank> {
+    let world_distance_squared = raw_position.distance_squared(position);
+    if let Some(screen_pick) = screen_pick {
+        let Ok(screen_position) = screen_pick
+            .camera
+            .world_to_viewport(&screen_pick.camera_transform, position)
+        else {
+            return None;
+        };
+        let screen_distance_squared = screen_pick
+            .cursor_position
+            .distance_squared(screen_position);
+        if screen_distance_squared > ELEMENT_SNAP_RADIUS_SCREEN_PX * ELEMENT_SNAP_RADIUS_SCREEN_PX {
+            return None;
+        }
+        let depth = screen_pick
+            .camera_transform
+            .translation()
+            .distance(position);
+        return Some(SnapCandidateRank {
+            screen_distance_squared,
+            depth,
+            world_distance_squared,
+        });
+    }
+
+    if world_distance_squared > ELEMENT_SNAP_RADIUS_METRES * ELEMENT_SNAP_RADIUS_METRES {
+        return None;
+    }
+    Some(SnapCandidateRank {
+        screen_distance_squared: world_distance_squared,
+        depth: 0.0,
+        world_distance_squared,
+    })
+}
+
+fn snap_point_is_selectable(
+    world: &World,
+    element_id: Option<crate::plugins::identity::ElementId>,
+    hovered_element_id: Option<crate::plugins::identity::ElementId>,
+    xray_enabled: bool,
+) -> bool {
+    let Some(element_id) = element_id else {
+        return true;
+    };
+    if !xray_enabled && hovered_element_id != Some(element_id) {
+        return false;
+    }
+    let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
+        return true;
+    };
+    entity_is_visible_snap_owner(world, entity)
+}
+
+fn entity_ref_is_visible_snap_owner(world: &World, entity_ref: EntityRef<'_>) -> bool {
+    entity_is_visible_snap_owner(world, entity_ref.id())
+}
+
+fn entity_is_visible_snap_owner(world: &World, entity: Entity) -> bool {
+    if !entity_on_visible_layer(world, entity) {
+        return false;
+    }
+    world
+        .get::<Visibility>(entity)
+        .is_none_or(|visibility| *visibility != Visibility::Hidden)
 }
 
 fn update_snap_disambiguation(
@@ -247,6 +445,7 @@ fn authored_handle_snap_kind(kind: HandleKind) -> Option<SnapKind> {
 
 fn draw_snap_indicator(
     snap_result: Res<SnapResult>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
     mut gizmos: Gizmos,
     #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
 ) {
@@ -257,7 +456,12 @@ fn draw_snap_indicator(
     if raw_position.distance_squared(target) > f32::EPSILON {
         gizmos.line(raw_position, target, SNAP_TRAIL_COLOR);
     }
-    draw_snap_target(&mut gizmos, target, snap_result.kind);
+    draw_snap_target(
+        &mut gizmos,
+        target,
+        snap_result.kind,
+        active_snap_camera(camera_query.iter()).map(|(_, transform)| transform),
+    );
     for (index, candidate) in snap_result.candidates.iter().enumerate() {
         if index == snap_result.active_candidate {
             continue;
@@ -273,11 +477,15 @@ fn draw_snap_indicator(
     add_gizmo_line_count(&mut perf_stats, snap_indicator_line_count(snap_result.kind));
 }
 
-fn draw_snap_target(gizmos: &mut Gizmos, target: Vec3, kind: SnapKind) {
+fn draw_snap_target(
+    gizmos: &mut Gizmos,
+    target: Vec3,
+    kind: SnapKind,
+    camera_transform: Option<&GlobalTransform>,
+) {
     match kind {
         SnapKind::Endpoint => {
-            draw_cube_marker(gizmos, target, SNAP_INDICATOR_RADIUS, SNAP_ENDPOINT_COLOR);
-            draw_diamond_marker(gizmos, target, SNAP_HALO_RADIUS, SNAP_ENDPOINT_COLOR);
+            draw_endpoint_marker(gizmos, target, camera_transform, SNAP_ENDPOINT_COLOR);
         }
         SnapKind::Midpoint => {
             draw_sphere_marker(gizmos, target, SNAP_INDICATOR_RADIUS, SNAP_MIDPOINT_COLOR);
@@ -305,7 +513,7 @@ fn draw_snap_target(gizmos: &mut Gizmos, target: Vec3, kind: SnapKind) {
 #[cfg(feature = "perf-stats")]
 fn snap_indicator_line_count(kind: SnapKind) -> usize {
     match kind {
-        SnapKind::Endpoint => 5,
+        SnapKind::Endpoint => 20,
         SnapKind::Midpoint => 5,
         SnapKind::Control => 8,
         SnapKind::GuideAnchor => 7,
@@ -313,11 +521,33 @@ fn snap_indicator_line_count(kind: SnapKind) -> usize {
     }
 }
 
-fn draw_cube_marker(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
-    gizmos.cube(
-        Transform::from_translation(center).with_scale(Vec3::splat(radius * 2.0)),
-        color,
-    );
+fn active_snap_camera<'a>(
+    mut cameras: impl Iterator<Item = (&'a Camera, &'a GlobalTransform)>,
+) -> Option<(&'a Camera, &'a GlobalTransform)> {
+    let first = cameras.next()?;
+    if first.0.is_active {
+        return Some(first);
+    }
+    cameras.find(|(camera, _)| camera.is_active).or(Some(first))
+}
+
+fn draw_endpoint_marker(
+    gizmos: &mut Gizmos,
+    center: Vec3,
+    camera_transform: Option<&GlobalTransform>,
+    color: Color,
+) {
+    let rotation = camera_transform
+        .and_then(|transform| (transform.translation() - center).try_normalize())
+        .map(|normal| Quat::from_rotation_arc(Vec3::Z, normal))
+        .unwrap_or(Quat::IDENTITY);
+    gizmos
+        .circle(
+            Isometry3d::new(center, rotation),
+            SNAP_ENDPOINT_RING_RADIUS,
+            color,
+        )
+        .resolution(20);
 }
 
 fn draw_sphere_marker(gizmos: &mut Gizmos, center: Vec3, radius: f32, color: Color) {
@@ -432,5 +662,45 @@ mod tests {
             update_snap_disambiguation(&mut world, anchor + Vec3::X, 2, false),
             0
         );
+    }
+
+    #[test]
+    fn snap_ranking_uses_screen_first_in_xray_and_front_first_outside_xray() {
+        let front = SnapCandidateRank {
+            screen_distance_squared: 4.0,
+            depth: 3.0,
+            world_distance_squared: 10.0,
+        };
+        let hidden = SnapCandidateRank {
+            screen_distance_squared: 4.0,
+            depth: 7.0,
+            world_distance_squared: 1.0,
+        };
+        let off_cursor = SnapCandidateRank {
+            screen_distance_squared: 9.0,
+            depth: 1.0,
+            world_distance_squared: 1.0,
+        };
+
+        assert_eq!(front.cmp_screen_first(&hidden), std::cmp::Ordering::Less);
+        assert_eq!(front.cmp_front_first(&hidden), std::cmp::Ordering::Less);
+        assert_eq!(
+            off_cursor.cmp_screen_first(&front),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(off_cursor.cmp_front_first(&front), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn owned_snap_points_require_hovered_owner_unless_xray_is_enabled() {
+        let world = World::new();
+        let owner = Some(crate::plugins::identity::ElementId(1));
+        let other = Some(crate::plugins::identity::ElementId(2));
+
+        assert!(snap_point_is_selectable(&world, None, None, false));
+        assert!(snap_point_is_selectable(&world, owner, owner, false));
+        assert!(!snap_point_is_selectable(&world, owner, None, false));
+        assert!(!snap_point_is_selectable(&world, owner, other, false));
+        assert!(snap_point_is_selectable(&world, owner, None, true));
     }
 }

@@ -13,7 +13,7 @@ use crate::{
         cursor::{cursor_window_position, CursorWorldPos},
         document_properties::DocumentProperties,
         drawing_export::ViewportExportState,
-        egui_chrome::EguiWantsInput,
+        egui_chrome::{ChromeInputCapture, EguiWantsInput},
         scene_ray,
         snap::{SnapResult, SnapSystems},
         tools::ActiveTool,
@@ -286,6 +286,7 @@ fn update_tape_preview(world: &mut World) {
 fn handle_tape_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
+    chrome_capture: Res<ChromeInputCapture>,
     egui_wants_input: Res<EguiWantsInput>,
     preview: Res<TapePreview>,
     doc_props: Res<DocumentProperties>,
@@ -293,7 +294,10 @@ fn handle_tape_input(
     mut status: ResMut<StatusBarData>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
 ) {
-    if !egui_wants_input.keyboard && keys.just_pressed(KeyCode::Escape) {
+    if !chrome_capture.wants_any_keyboard_input()
+        && !egui_wants_input.wants_any_keyboard_input()
+        && keys.just_pressed(KeyCode::Escape)
+    {
         if state.start.is_some() || state.last_measurement.is_some() {
             state.start = None;
             state.last_measurement = None;
@@ -304,7 +308,10 @@ fn handle_tape_input(
         return;
     }
 
-    if egui_wants_input.pointer || !mouse_buttons.just_pressed(MouseButton::Left) {
+    if chrome_capture.wants_any_pointer_input()
+        || egui_wants_input.wants_any_pointer_input()
+        || !mouse_buttons.just_pressed(MouseButton::Left)
+    {
         return;
     }
 
