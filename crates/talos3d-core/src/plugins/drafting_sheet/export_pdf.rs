@@ -15,7 +15,7 @@ use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern};
 use super::sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke};
 
 const MM_TO_PT: f32 = 72.0 / 25.4;
-const DIMENSION_STROKE_GRAY: f32 = 0.29;
+const BLACK: f32 = 0.0;
 
 #[must_use]
 pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
@@ -74,16 +74,8 @@ pub fn sheet_to_pdf(sheet: &DraftingSheet) -> Vec<u8> {
     }
 
     // Annotations: rich drafting primitives, coordinates in paper-mm.
-    let _ = writeln!(
-        content,
-        "{g:.3} {g:.3} {g:.3} RG",
-        g = DIMENSION_STROKE_GRAY
-    );
-    let _ = writeln!(
-        content,
-        "{g:.3} {g:.3} {g:.3} rg",
-        g = DIMENSION_STROKE_GRAY
-    );
+    let _ = writeln!(content, "{g:.3} {g:.3} {g:.3} RG", g = BLACK);
+    let _ = writeln!(content, "{g:.3} {g:.3} {g:.3} rg", g = BLACK);
     for dim in &sheet.annotations {
         for prim in dim {
             write_dim_primitive(&mut content, prim, &to_pt);
@@ -344,5 +336,39 @@ mod tests {
             text.contains("0.992 w"),
             "expected silhouette 0.992 pt, got:\n{text}"
         );
+    }
+
+    #[test]
+    fn pdf_annotations_are_black_for_blueprint_export() {
+        use crate::plugins::drafting::{DimPrimitive, TextAnchor};
+
+        let mut s = DraftingSheet::new(50.0);
+        s.annotations.push(vec![
+            DimPrimitive::LineSegment {
+                a: Vec2::ZERO,
+                b: Vec2::new(20.0, 0.0),
+                stroke_mm: 0.18,
+            },
+            DimPrimitive::Text {
+                anchor: Vec2::new(10.0, 2.0),
+                content: "1000".to_string(),
+                height_mm: 2.5,
+                rotation_rad: 0.0,
+                anchor_mode: TextAnchor::Center,
+                font_family: "Helvetica".to_string(),
+                color_hex: "#444444".to_string(),
+            },
+        ]);
+        s.bounds = SheetBounds {
+            min: Vec2::ZERO,
+            max: Vec2::new(100.0, 50.0),
+        };
+
+        let bytes = sheet_to_pdf(&s);
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(text.contains("0.000 0.000 0.000 RG"));
+        assert!(text.contains("0.000 0.000 0.000 rg"));
+        assert!(!text.contains("0.290 0.290 0.290"));
     }
 }

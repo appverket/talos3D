@@ -18,6 +18,7 @@ use crate::capability_registry::{
 use crate::plugins::document_state::DocumentState;
 use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
+    render_pipeline::{paper_drawing_active, RenderSettings},
     ui::StatusBarData,
 };
 
@@ -61,15 +62,17 @@ impl Plugin for DrawingExportPlugin {
                 CommandDescriptor {
                     id: "core.export_drawing".to_string(),
                     label: "Export Drawing...".to_string(),
-                    description: "Export the current drawing viewport as PNG, PDF, or SVG."
-                        .to_string(),
+                    description:
+                        "Export the current drawing viewport as PNG, or as PDF/SVG/DXF in drafting mode."
+                            .to_string(),
                     category: CommandCategory::File,
                     parameters: None,
                     version: 1,
                     default_shortcut: Some("Ctrl/Cmd+Shift+E".to_string()),
                     icon: Some("icon.export".to_string()),
                     hint: Some(
-                        "Export the cropped drawing viewport as PNG, PDF, or SVG".to_string(),
+                        "Export the cropped drawing viewport as PNG, or a drafting sheet in Paper Drawing mode"
+                            .to_string(),
                     ),
                     requires_selection: false,
                     show_in_menu: true,
@@ -101,15 +104,18 @@ impl Plugin for DrawingExportPlugin {
             .register_command(
                 CommandDescriptor {
                     id: "core.export_drawing_pdf".to_string(),
-                    label: "Export Drawing as PDF...".to_string(),
-                    description: "Export the current drawing viewport as a PDF document."
-                        .to_string(),
+                    label: "Export Blueprint PDF...".to_string(),
+                    description:
+                        "Export a black-and-white architectural drafting sheet as a PDF document."
+                            .to_string(),
                     category: CommandCategory::File,
                     parameters: None,
                     version: 1,
                     default_shortcut: None,
                     icon: Some("icon.export".to_string()),
-                    hint: Some("Export the cropped drawing viewport as PDF".to_string()),
+                    hint: Some(
+                        "Export a black-and-white Paper Drawing sheet as PDF".to_string(),
+                    ),
                     requires_selection: false,
                     show_in_menu: true,
                     activates_tool: None,
@@ -164,6 +170,28 @@ pub(crate) enum ViewportExportFormat {
     Pdf,
     Svg,
     Dxf,
+}
+
+pub(crate) fn pdf_export_available_for_settings(settings: &RenderSettings) -> bool {
+    paper_drawing_active(settings)
+}
+
+pub(crate) fn pdf_export_available(world: &World) -> bool {
+    world
+        .get_resource::<RenderSettings>()
+        .map(pdf_export_available_for_settings)
+        .unwrap_or(false)
+}
+
+fn require_pdf_export_available(world: &World) -> Result<(), String> {
+    if pdf_export_available(world) {
+        Ok(())
+    } else {
+        Err(
+            "PDF blueprint export is only available in Paper Drawing mode. Enable View > Paper Drawing, then export again."
+                .to_string(),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +376,10 @@ pub(crate) fn export_drawing_now_with_format(
     world: &mut World,
     preferred_format: Option<ViewportExportFormat>,
 ) -> Result<Option<PathBuf>, String> {
+    if matches!(preferred_format, Some(ViewportExportFormat::Pdf)) {
+        require_pdf_export_available(world)?;
+    }
+
     let current_path = world.resource::<DocumentState>().current_path.clone();
     let mut dialog = rfd::FileDialog::new();
     dialog = match preferred_format {
@@ -381,13 +413,20 @@ pub(crate) fn export_drawing_now_with_format(
                 current_path.as_deref(),
                 Some(ViewportExportFormat::Raster(other)),
             )),
-        None => dialog
-            .add_filter("Drawing Export", &["png", "pdf", "svg", "dxf"])
-            .add_filter("PNG Image", &["png"])
-            .add_filter("PDF Document", &["pdf"])
-            .add_filter("SVG Drawing", &["svg"])
-            .add_filter("DXF Drawing", &["dxf"])
-            .set_file_name(default_export_file_name(current_path.as_deref(), None)),
+        None => {
+            let dialog = if pdf_export_available(world) {
+                dialog
+                    .add_filter("Drawing Export", &["png", "pdf", "svg", "dxf"])
+                    .add_filter("PDF Document", &["pdf"])
+            } else {
+                dialog.add_filter("Drawing Export", &["png", "svg", "dxf"])
+            };
+            dialog
+                .add_filter("PNG Image", &["png"])
+                .add_filter("SVG Drawing", &["svg"])
+                .add_filter("DXF Drawing", &["dxf"])
+                .set_file_name(default_export_file_name(current_path.as_deref(), None))
+        }
     };
     if let Some(ref path) = current_path {
         if let Some(parent) = path.parent() {
@@ -407,6 +446,9 @@ pub(crate) fn export_drawing_now_with_format(
 pub fn export_drawing_to_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
     let path = normalize_export_path(path);
     let format = viewport_export_format_from_path(&path)?;
+    if matches!(format, ViewportExportFormat::Pdf) {
+        require_pdf_export_available(world)?;
+    }
     // Vector formats go through the PP69 paper-mm DraftingSheet
     // pipeline so that output is unit-consistent and free of viewport
     // chrome. PNG also goes through the sheet when an orthographic
@@ -766,6 +808,7 @@ fn execute_export_drawing_png(world: &mut World, _: &Value) -> Result<CommandRes
 }
 
 fn execute_export_drawing_pdf(world: &mut World, _: &Value) -> Result<CommandResult, String> {
+    require_pdf_export_available(world)?;
     let Some(path) = export_drawing_now_with_format(world, Some(ViewportExportFormat::Pdf))? else {
         return Ok(CommandResult::empty());
     };
@@ -880,6 +923,32 @@ mod tests {
             ),
             "model-drawing.png"
         );
+    }
+
+    #[test]
+    fn pdf_export_requires_paper_drawing_mode() {
+        let mut settings = RenderSettings::default();
+        assert!(!pdf_export_available_for_settings(&settings));
+
+        crate::plugins::render_pipeline::apply_paper_drawing_preset(&mut settings);
+        assert!(pdf_export_available_for_settings(&settings));
+    }
+
+    #[test]
+    fn direct_pdf_path_export_rejects_non_paper_mode() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings::default())
+            .init_resource::<ViewportExportState>();
+
+        let err = export_drawing_to_path(app.world_mut(), PathBuf::from("/tmp/drawing.pdf"))
+            .expect_err("pdf export should require paper drawing mode");
+
+        assert!(err.contains("Paper Drawing mode"));
+        assert!(app
+            .world()
+            .resource::<ViewportExportState>()
+            .pending
+            .is_none());
     }
 
     #[test]
