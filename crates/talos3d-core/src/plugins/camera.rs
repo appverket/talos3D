@@ -182,6 +182,7 @@ impl Plugin for CameraPlugin {
             .add_systems(
                 Update,
                 (
+                    ensure_orbit_camera_exists,
                     apply_pending_camera_frame.before(apply_camera_controls),
                     apply_camera_controls,
                     orbit_camera.in_set(InputPhase::CameraInput),
@@ -263,6 +264,10 @@ impl Default for OrbitCamera {
 }
 
 fn spawn_camera(mut commands: Commands) {
+    spawn_orbit_camera(&mut commands);
+}
+
+fn spawn_orbit_camera(commands: &mut Commands) {
     let orbit = OrbitCamera::default();
     let mut transform = orbit_transform(&orbit);
     let mut projection = Projection::Perspective(PerspectiveProjection::default());
@@ -276,6 +281,16 @@ fn spawn_camera(mut commands: Commands) {
         GlobalTransform::default(),
         orbit,
     ));
+}
+
+fn ensure_orbit_camera_exists(
+    mut commands: Commands,
+    camera_query: Query<(), (With<Camera3d>, With<OrbitCamera>)>,
+) {
+    if camera_query.is_empty() {
+        spawn_orbit_camera(&mut commands);
+        info!("Recreated Talos3D orbit camera after runtime camera loss");
+    }
 }
 
 #[derive(SystemParam)]

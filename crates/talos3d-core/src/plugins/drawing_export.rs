@@ -555,6 +555,12 @@ pub(crate) fn save_viewport_export_to_disk(
                 if is_linear_texture_format(source_format) {
                     encode_linear_to_srgb(&mut rgb);
                 }
+                if let Some(warning) = screenshot_quality_warning(&rgb) {
+                    error!(
+                        "Viewport export '{}' produced invalid visual evidence: {warning}",
+                        path.display()
+                    );
+                }
                 if let Err(error) = write_rgb_to_path(&path, &rgb) {
                     error!("Cannot save drawing export '{}': {error}", path.display());
                 }
@@ -647,6 +653,68 @@ fn write_rgb_to_path(path: &Path, rgb: &RgbImage) -> Result<(), String> {
             std::fs::write(path, stub).map_err(|error| error.to_string())
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScreenshotQuality {
+    min_luma: u8,
+    max_luma: u8,
+    mean_luma: f32,
+    variance_luma: f32,
+}
+
+fn screenshot_quality(rgb: &RgbImage) -> Option<ScreenshotQuality> {
+    if rgb.width() == 0 || rgb.height() == 0 {
+        return None;
+    }
+
+    let mut min_luma = u8::MAX;
+    let mut max_luma = u8::MIN;
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let mut count = 0.0_f64;
+
+    for pixel in rgb.pixels() {
+        let luma = (0.2126 * f32::from(pixel[0])
+            + 0.7152 * f32::from(pixel[1])
+            + 0.0722 * f32::from(pixel[2]))
+        .round()
+        .clamp(0.0, 255.0) as u8;
+        min_luma = min_luma.min(luma);
+        max_luma = max_luma.max(luma);
+        let luma_f64 = f64::from(luma);
+        sum += luma_f64;
+        sum_sq += luma_f64 * luma_f64;
+        count += 1.0;
+    }
+
+    let mean = sum / count;
+    let variance = (sum_sq / count) - (mean * mean);
+    Some(ScreenshotQuality {
+        min_luma,
+        max_luma,
+        mean_luma: mean as f32,
+        variance_luma: variance.max(0.0) as f32,
+    })
+}
+
+fn screenshot_quality_warning(rgb: &RgbImage) -> Option<String> {
+    let quality = screenshot_quality(rgb)?;
+    let dynamic_range = quality.max_luma.saturating_sub(quality.min_luma);
+    if quality.max_luma <= 2 {
+        return Some(
+            "capture is all-black/near-black; do not treat this screenshot as visual evidence"
+                .to_string(),
+        );
+    }
+    if dynamic_range <= 2 || quality.variance_luma < 1.0 {
+        return Some(format!(
+            "capture is near-uniform (luma range {dynamic_range}, variance {:.2}); \
+             reframe or diagnose rendering before claiming visual success",
+            quality.variance_luma
+        ));
+    }
+    None
 }
 
 fn svg_document(rgb: &RgbImage) -> Result<Vec<u8>, String> {
@@ -1010,6 +1078,27 @@ mod tests {
         assert!(is_linear_texture_format(TextureFormat::Bgra8Unorm));
         assert!(!is_linear_texture_format(TextureFormat::Rgba8UnormSrgb));
         assert!(!is_linear_texture_format(TextureFormat::Bgra8UnormSrgb));
+    }
+
+    #[test]
+    fn screenshot_quality_flags_all_black_capture() {
+        let rgb = RgbImage::from_pixel(128, 72, Rgb([0, 0, 0]));
+        let warning = screenshot_quality_warning(&rgb).expect("black capture must warn");
+        assert!(warning.contains("all-black"));
+    }
+
+    #[test]
+    fn screenshot_quality_flags_near_uniform_capture() {
+        let rgb = RgbImage::from_pixel(128, 72, Rgb([120, 120, 120]));
+        let warning = screenshot_quality_warning(&rgb).expect("uniform capture must warn");
+        assert!(warning.contains("near-uniform"));
+    }
+
+    #[test]
+    fn screenshot_quality_accepts_varied_capture() {
+        let mut rgb = RgbImage::from_pixel(2, 1, Rgb([20, 20, 20]));
+        rgb.put_pixel(1, 0, Rgb([230, 230, 230]));
+        assert_eq!(screenshot_quality_warning(&rgb), None);
     }
 
     #[test]
