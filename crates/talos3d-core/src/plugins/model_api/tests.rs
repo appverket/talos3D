@@ -4794,9 +4794,35 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .iter()
         .any(|criterion| criterion.contains("Final response")));
     assert!(run_contract_card
+        .success_criteria
+        .iter()
+        .any(|criterion| criterion.contains("actually show the authored target")));
+    assert!(run_contract_card
+        .success_criteria
+        .iter()
+        .any(|criterion| criterion.contains("exact schema enums/scopes")));
+    assert!(run_contract_card
         .stop_conditions
         .iter()
         .any(|condition| condition.contains("skipped must-read guidance")));
+    assert!(run_contract_card
+        .stop_conditions
+        .iter()
+        .any(|condition| condition.contains("requested material/finish cues")));
+    assert!(run_contract_card
+        .stop_conditions
+        .iter()
+        .any(|condition| condition.contains("blank/all-black/near-uniform")));
+    let run_contract_body = run_contract_card
+        .body_markdown
+        .as_deref()
+        .expect("authoring run card should explain schema and screenshot requirements");
+    assert!(run_contract_body.contains("Read live tool schemas"));
+    assert!(run_contract_body.contains("required fields such as element_ids"));
+    assert!(run_contract_body.contains("registered element classes"));
+    assert!(run_contract_body.contains("blank"));
+    assert!(run_contract_body.contains("all-black"));
+    assert!(run_contract_body.contains("near-uniform"));
     assert_eq!(run_contract_card.phase.as_deref(), Some("review"));
     let trajectory_card = handle_get_guidance_card(&world, "dkg.trajectory_eval".into())
         .expect("trajectory eval card should fetch");
@@ -4806,7 +4832,16 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(trajectory_card
         .observability_events
         .iter()
-        .any(|event| event.contains("validation/screenshot")));
+        .any(|event| event.contains("target-framed screenshot")));
+    let trajectory_body = trajectory_card
+        .body_markdown
+        .as_deref()
+        .expect("trajectory eval card should include QA body");
+    assert!(trajectory_body.contains("blank/all-black/near-uniform"));
+    assert!(trajectory_card
+        .stop_conditions
+        .iter()
+        .any(|condition| condition.contains("blank/all-black/near-uniform")));
     let design_card = handle_get_guidance_card(&world, "dkg.design_resources".into())
         .expect("design resources card should fetch");
     assert!(design_card.summary.contains("derive positive invariants"));
@@ -4852,6 +4887,8 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(visual_body.contains("not a blacklist"));
     assert!(visual_body.contains("positive invariants"));
     assert!(visual_body.contains("save it as a prior"));
+    assert!(visual_body.contains("color alone"));
+    assert!(visual_body.contains("mostly shows terrain"));
     let terrain_card = handle_get_guidance_card(&world, "dkg.terrain_foundation".into())
         .expect("terrain foundation card should fetch");
     assert!(terrain_card
@@ -5316,6 +5353,7 @@ fn recipe_draft_rejects_unknown_passage_ref() {
     .expect_err("unknown source passage ref must fail");
 
     assert!(error.contains("unknown source passage ref"));
+    assert!(error.contains("not raw URLs"));
 }
 
 #[cfg(feature = "model-api")]
@@ -6914,6 +6952,7 @@ fn assembly_pattern_draft_rejects_unknown_passage_ref() {
     .expect_err("unknown source passage ref must fail");
 
     assert!(error.contains("unknown source passage ref"));
+    assert!(error.contains("not raw URLs"));
 }
 
 #[cfg(feature = "model-api")]

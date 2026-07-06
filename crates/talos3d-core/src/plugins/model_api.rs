@@ -12782,7 +12782,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "eval".into(),
                 "closeout".into(),
             ],
-            summary: "Before claiming completion, produce an auditable contract: intent, resources discovered, selected path, executed tools, validations, screenshots, unresolved gaps, and final claim.".into(),
+            summary: "Before claiming completion, produce an auditable contract: intent, resources discovered, selected path, executed tools, validations, target-framed screenshots, unresolved gaps, and final claim.".into(),
             referenced_tool_ids: vec![
                 "get_instance_info".into(),
                 "get_authoring_guidance".into(),
@@ -12808,7 +12808,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                     "resources_discovered": ["<recipe/parametric/definition/prior/gap ids>"],
                     "selected_path": "<executable recipe | parametric | definition | corpus gap>",
                     "executed_tool_summary": ["<important tool calls>"],
-                    "validation": ["run_validation_v2", "AABB checks", "screenshot review"],
+                    "validation": ["run_validation_v2", "AABB checks", "target-framed screenshot review"],
                     "unresolved_gaps": [],
                     "final_claim": "<what can safely be trusted>"
                 }
@@ -12817,10 +12817,19 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "Treat every non-trivial MCP authoring episode as a small SDLC run, not \
                  as a single prompt-response. The agent must be able to summarize: \
                  requirements/intent, architecture or typology decision, discovered resources, \
-                 implementation path, validation evidence, screenshot evidence, unresolved gaps, \
-                 and final claim. A green entity count is not evidence. A missing curated path is \
-                 not permission to improvise. If any required evidence is unavailable, close with \
-                 a gap or a blocked claim instead of promoting the model."
+                 implementation path, validation evidence, target-framed screenshot evidence, \
+                 unresolved gaps, and final claim. Read live tool schemas before calling write, \
+                 validation, or curation tools: required fields such as element_ids, registered \
+                 element classes, enum/status values, and scope strings are contract data, not \
+                 guesses. If a call fails schema validation, repair the next call from the error \
+                 instead of retrying the same payload. A green entity count is not evidence. A \
+                 screenshot path is not evidence unless the image visibly frames the target \
+                 assembly and exposes the requested visible cues; images that are blank, \
+                 all-black, near-uniform, or mostly show terrain, shadows, clipped geometry, or \
+                 unrelated objects are failed verification and must be retaken after reframing, \
+                 rendering diagnosis, or repairing. A missing curated path is not permission \
+                 to improvise. If any required evidence is unavailable, close with a gap or a \
+                 blocked claim instead of promoting the model."
                     .into(),
             ),
             phase: Some("review".into()),
@@ -12834,19 +12843,21 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "take_screenshot".into(),
             ],
             success_criteria: vec![
-                "Final response or saved trace lists intent, resources, selected path, validations, screenshots, unresolved gaps, and final claim.".into(),
+                "Final response or saved trace lists intent, resources, selected path, validations, target-framed screenshots, unresolved gaps, and final claim.".into(),
                 "Every Schematic+ construction claim is backed by an executable/materializable path, hosted Definition, explicit assembly pattern, or open CorpusGap.".into(),
-                "Validation and visual inspection are both reported.".into(),
+                "Validation and visual inspection are both reported, and screenshots actually show the authored target rather than mostly terrain, shadow, or cropped context.".into(),
+                "Tool calls use required ids, registered element classes, and exact schema enums/scopes rather than repeated malformed guesses.".into(),
             ],
             stop_conditions: vec![
                 "The final claim would require knowledge that is neither discoverable nor acquired.".into(),
                 "The agent skipped must-read guidance or cannot reconstruct the selected path.".into(),
                 "Validation is green only because the model avoided relevant element classes or obligations.".into(),
+                "Screenshots are blank/all-black/near-uniform or do not visibly frame the target assembly or requested material/finish cues.".into(),
             ],
             observability_events: vec![
                 "guidance ids and versions read".into(),
                 "curated path discovery results captured".into(),
-                "validation findings and screenshot paths captured".into(),
+                "validation findings and target-framed screenshot paths captured".into(),
                 "unresolved CorpusGap ids captured".into(),
             ],
             recommended_profile: Some("authoring for model writes; inspection for audit-only work".into()),
@@ -12861,7 +12872,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "qa".into(),
                 "observability".into(),
             ],
-            summary: "Evaluate not only what the agent produced, but whether it followed the required MCP trajectory: bootstrap, progressive disclosure, curated-path choice, validation, screenshots, and gap closeout.".into(),
+            summary: "Evaluate not only what the agent produced, but whether it followed the required MCP trajectory: bootstrap, progressive disclosure, curated-path choice, validation, target-visible screenshots, and gap closeout.".into(),
             referenced_tool_ids: vec![
                 "get_instance_info".into(),
                 "get_authoring_guidance".into(),
@@ -12893,7 +12904,9 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                  deep context; (3) each element class probed curated paths before geometry; \
                  (4) unsupported claims became CorpusGaps rather than primitive stand-ins; \
                  (5) validation, AABB checks where relevant, terrain samples where relevant, \
-                 and screenshots were performed; (6) the final claim matches the evidence."
+                 and screenshots that visibly frame the target assembly were performed and are \
+                 not blank/all-black/near-uniform; (6) the final claim matches the evidence, \
+                 including requested visible material/finish cues or explicit unresolved gaps."
                     .into(),
             ),
             phase: Some("qa".into()),
@@ -12909,17 +12922,17 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             success_criteria: vec![
                 "The authoring path can be reviewed from tool-call evidence, not inferred from the final geometry.".into(),
                 "Unsupported or missing knowledge is visible as CorpusGap state or an explicit blocked claim.".into(),
-                "Verification covers both deterministic validators and visual/geometric inspection.".into(),
+                "Verification covers both deterministic validators and visual/geometric inspection of nonblank, target-framed images.".into(),
             ],
             stop_conditions: vec![
                 "The agent cannot identify which curated path or gap justified a promoted element.".into(),
                 "A higher refinement state is claimed without strictly more resolved content.".into(),
-                "Screenshots or validators contradict the final claim.".into(),
+                "Screenshots or validators contradict the final claim, are blank/all-black/near-uniform, crop the target, or mostly show terrain/shadow/unrelated context.".into(),
             ],
             observability_events: vec![
                 "required trajectory tool ids seen".into(),
                 "selected execution path and executable flags captured".into(),
-                "validation/screenshot evidence captured".into(),
+                "validation/target-framed screenshot evidence captured".into(),
             ],
             recommended_profile: Some("inspection for trajectory audit; authoring for repair".into()),
             ..GuidanceCardInfo::default()
@@ -13045,7 +13058,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "visual".into(),
                 "morphology".into(),
             ],
-            summary: "For house/villa/dwelling authoring, use visual precedent and typology resources to build a positive morphology checklist before geometry; screenshots verify the result rather than serving as a brute-force rejection loop.".into(),
+            summary: "For house/villa/dwelling authoring, use visual precedent and typology resources to build a positive morphology checklist before geometry; target-framed screenshots verify the result rather than serving as a brute-force rejection loop.".into(),
             referenced_tool_ids: vec![
                 "discover_curated_paths".into(),
                 "acquire_corpus_passage".into(),
@@ -13066,8 +13079,14 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "Visual morphology is a design resource, not a blacklist. For a house, villa, \
                  dwelling, or cottage, acquire precedent or curated priors, then extract \
                  positive invariants: overall massing, roof/wall/foundation relationships, \
-                 opening rhythm, material/trim cues, climate response, and site relationship. \
-                 Author from that checklist before taking screenshots. If the necessary \
+                 opening rhythm or intentional absence of openings, material/trim cues, climate \
+                 response, and site relationship. Prompt-specified visible finish cues must be \
+                 represented in the model or left as explicit unresolved gaps; color alone does \
+                 not satisfy a requested pattern such as boards, seams, battens, courses, or \
+                 trim. Author from that checklist before taking screenshots. Frame the authored \
+                 target so it occupies the image and the requested cues are inspectable; if the \
+                 screenshot mostly shows terrain, shadow, cropped roof, or unrelated context, \
+                 reframe/repair and retake before claiming success. If the necessary \
                  morphology knowledge is not discoverable, acquire it and save it as a prior, \
                  assembly pattern, recipe draft, Definition, validator, or agent skill so the \
                  next agent can find it through MCP."
@@ -14154,7 +14173,10 @@ pub fn handle_save_recipe_draft(
                 .iter()
                 .any(|(registered_ref, _)| registered_ref == passage_ref.as_str());
             if !found {
-                return Err(format!("unknown source passage ref '{passage_ref}'"));
+                return Err(format!(
+                    "unknown source passage ref '{passage_ref}'; source_passage_refs must use \
+                     refs returned by acquire_corpus_passage, not raw URLs"
+                ));
             }
         }
     }
@@ -14323,7 +14345,10 @@ pub fn handle_save_assembly_pattern_draft(
                 .iter()
                 .any(|(registered_ref, _)| registered_ref == passage_ref.as_str());
             if !found {
-                return Err(format!("unknown source passage ref '{passage_ref}'"));
+                return Err(format!(
+                    "unknown source passage ref '{passage_ref}'; source_passage_refs must use \
+                     refs returned by acquire_corpus_passage, not raw URLs"
+                ));
             }
         }
     }
