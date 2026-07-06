@@ -15,9 +15,8 @@ use crate::authored_entity::EntityBounds;
 use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
     cursor::ViewportUiInset,
-    egui_chrome::EguiWantsInput,
     identity::ElementId,
-    input_ownership::InputPhase,
+    input_ownership::{InputOwnership, InputPhase},
     layers::{LayerAssignment, LayerRegistry},
     selection::Selected,
     toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
@@ -43,6 +42,7 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TrackpadState>()
             .init_resource::<CameraControlsState>()
+            .init_resource::<PendingCameraFrame>()
             .register_toolbar(ToolbarDescriptor {
                 id: CAMERA_TOOLBAR_ID.to_string(),
                 label: "Camera".to_string(),
@@ -182,6 +182,7 @@ impl Plugin for CameraPlugin {
             .add_systems(
                 Update,
                 (
+                    apply_pending_camera_frame.before(apply_camera_controls),
                     apply_camera_controls,
                     orbit_camera.in_set(InputPhase::CameraInput),
                     update_camera_viewport,
@@ -194,6 +195,11 @@ impl Plugin for CameraPlugin {
 #[derive(Resource, Default)]
 struct TrackpadState {
     prev_centroid: Option<Vec2>,
+}
+
+#[derive(Resource, Debug, Default, Clone, Copy)]
+struct PendingCameraFrame {
+    bounds: Option<EntityBounds>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -263,9 +269,11 @@ fn spawn_camera(mut commands: Commands) {
     apply_orbit_state(&orbit, &mut transform, &mut projection);
     commands.spawn((
         PrimaryEguiContext,
+        Camera::default(),
         Camera3d::default(),
         projection,
         transform,
+        GlobalTransform::default(),
         orbit,
     ));
 }
@@ -274,7 +282,7 @@ fn spawn_camera(mut commands: Commands) {
 struct OrbitCameraInput<'w, 's> {
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
-    egui_wants_input: Res<'w, EguiWantsInput>,
+    ownership: Res<'w, InputOwnership>,
     motion: MessageReader<'w, 's, MouseMotion>,
     scroll: MessageReader<'w, 's, MouseWheel>,
     touch_events: MessageReader<'w, 's, TouchInput>,
@@ -304,7 +312,7 @@ struct OrbitCameraInput<'w, 's> {
 }
 
 fn orbit_camera(mut input: OrbitCameraInput) {
-    if input.egui_wants_input.pointer {
+    if input.ownership.is_ui_capture() {
         input.motion.clear();
         input.scroll.clear();
         input.touch_events.clear();
@@ -513,6 +521,10 @@ pub fn focus_orbit_camera_on_bounds(world: &mut World, bounds: EntityBounds) -> 
     let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection, &Camera)>();
     let Some((mut orbit, mut transform, mut projection, camera)) = query.iter_mut(world).next()
     else {
+        if let Some(mut pending) = world.get_resource_mut::<PendingCameraFrame>() {
+            pending.bounds = Some(bounds);
+            return true;
+        }
         return false;
     };
     let aspect_ratio = camera_aspect_ratio(camera, &projection);
@@ -524,6 +536,34 @@ pub fn focus_orbit_camera_on_bounds(world: &mut World, bounds: EntityBounds) -> 
         aspect_ratio,
     );
     true
+}
+
+fn apply_pending_camera_frame(world: &mut World) {
+    let Some(bounds) = world
+        .get_resource::<PendingCameraFrame>()
+        .and_then(|pending| pending.bounds)
+    else {
+        return;
+    };
+
+    let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection, &Camera)>();
+    let Some((mut orbit, mut transform, mut projection, camera)) = query.iter_mut(world).next()
+    else {
+        return;
+    };
+
+    let aspect_ratio = camera_aspect_ratio(camera, &projection);
+    frame_orbit_camera(
+        &mut orbit,
+        &mut transform,
+        &mut projection,
+        bounds,
+        aspect_ratio,
+    );
+
+    if let Some(mut pending) = world.get_resource_mut::<PendingCameraFrame>() {
+        pending.bounds = None;
+    }
 }
 
 pub fn orbit_frame_radius(bounds: EntityBounds) -> f32 {
@@ -927,6 +967,38 @@ mod tests {
             }
             _ => panic!("expected perspective projection"),
         }
+    }
+
+    #[test]
+    fn frame_request_survives_until_camera_exists() {
+        let mut world = World::new();
+        world.insert_resource(PendingCameraFrame::default());
+        let bounds = EntityBounds {
+            min: Vec3::new(10.0, 0.0, -4.0),
+            max: Vec3::new(14.0, 6.0, 2.0),
+        };
+
+        assert!(focus_orbit_camera_on_bounds(&mut world, bounds));
+        assert_eq!(world.resource::<PendingCameraFrame>().bounds, Some(bounds));
+
+        let orbit = OrbitCamera::default();
+        let mut transform = orbit_transform(&orbit);
+        let mut projection = Projection::Perspective(PerspectiveProjection::default());
+        apply_orbit_state(&orbit, &mut transform, &mut projection);
+        world.spawn((
+            Camera::default(),
+            Camera3d::default(),
+            projection,
+            transform,
+            orbit,
+        ));
+
+        apply_pending_camera_frame(&mut world);
+
+        let mut query = world.query::<&OrbitCamera>();
+        let orbit = query.single(&world).expect("one camera should exist");
+        assert_eq!(orbit.focus, bounds.center());
+        assert!(world.resource::<PendingCameraFrame>().bounds.is_none());
     }
 
     #[test]

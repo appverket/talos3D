@@ -616,6 +616,7 @@ fn queue_import_group(
             member_ids,
             frame: crate::plugins::modeling::group::GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         };
         create_events = world.resource_mut::<Messages<CreateEntityCommand>>();
@@ -913,6 +914,11 @@ fn set_import_feedback(world: &mut World, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::{
+        camera::OrbitCamera,
+        identity::ElementIdAllocator,
+        modeling::{generic_factory::PrimitiveFactory, primitives::BoxPrimitive},
+    };
 
     struct TestImporter;
 
@@ -1112,6 +1118,42 @@ mod tests {
         assert_eq!(
             requests_b[0]["points"][1],
             serde_json::json!([11.0, 0.0, 12.0])
+        );
+    }
+
+    #[test]
+    fn import_snapshots_frame_existing_camera_to_imported_bounds() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+        world.insert_resource(ElementIdAllocator::default());
+        world.spawn((
+            Camera::default(),
+            Camera3d::default(),
+            Projection::Perspective(PerspectiveProjection::default()),
+            Transform::default(),
+            OrbitCamera::default(),
+        ));
+
+        let snapshots = import_requests_to_snapshots(
+            &mut world,
+            vec![serde_json::json!({
+                "type": "box",
+                "centre": [20.0, 3.0, -5.0],
+                "half_extents": [2.0, 4.0, 6.0]
+            })],
+        )
+        .expect("box import request should become an authored snapshot");
+
+        focus_camera_on_imported_snapshots(&mut world, &snapshots);
+
+        let mut query = world.query::<&OrbitCamera>();
+        let orbit = query.single(&world).expect("one camera should exist");
+        assert_eq!(orbit.focus, Vec3::new(20.0, 3.0, -5.0));
+        assert!(
+            orbit.radius > OrbitCamera::default().radius,
+            "imported file extents should drive the framing zoom"
         );
     }
 
