@@ -120,7 +120,12 @@ pub fn default_parametric_draft_meta() -> CurationMeta {
 }
 
 pub fn parse_scope(value: Option<&str>) -> Result<Scope, String> {
-    match value.unwrap_or("project") {
+    let normalized = value
+        .unwrap_or("project")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    match normalized.as_str() {
         "session" => Ok(Scope::Session),
         "project" => Ok(Scope::Project),
         "org" => Ok(Scope::Org),
@@ -152,5 +157,18 @@ pub fn validation_as_str(validation: &ValidationStatus) -> &'static str {
         ValidationStatus::Unchecked => "unchecked",
         ValidationStatus::Passing => "passing",
         ValidationStatus::Failing { .. } => "failing",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_scope_accepts_common_client_casing() {
+        assert_eq!(parse_scope(Some("Project")), Ok(Scope::Project));
+        assert_eq!(parse_scope(Some(" SESSION ")), Ok(Scope::Session));
+        assert_eq!(parse_scope(Some("org")), Ok(Scope::Org));
+        assert_eq!(parse_scope(Some("shipped")), Ok(Scope::Shipped));
     }
 }

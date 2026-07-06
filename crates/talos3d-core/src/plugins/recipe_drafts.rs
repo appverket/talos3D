@@ -40,14 +40,37 @@ impl RecipeDraftStatus {
 
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
-        match value {
+        let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
             "gap_detected" => Some(Self::GapDetected),
             "sourced" => Some(Self::Sourced),
-            "drafted" => Some(Self::Drafted),
+            "draft" | "drafted" => Some(Self::Drafted),
             "validated" => Some(Self::Validated),
             "installed" => Some(Self::Installed),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_parser_accepts_draft_alias_and_common_casing() {
+        assert_eq!(
+            RecipeDraftStatus::from_str("draft"),
+            Some(RecipeDraftStatus::Drafted)
+        );
+        assert_eq!(
+            RecipeDraftStatus::from_str("Drafted"),
+            Some(RecipeDraftStatus::Drafted)
+        );
+        assert_eq!(
+            RecipeDraftStatus::from_str("gap-detected"),
+            Some(RecipeDraftStatus::GapDetected)
+        );
+        assert_eq!(RecipeDraftStatus::Drafted.as_str(), "drafted");
     }
 }
 

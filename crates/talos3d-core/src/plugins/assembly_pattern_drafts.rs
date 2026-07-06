@@ -41,14 +41,37 @@ impl AssemblyPatternDraftStatus {
 
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
-        match value {
+        let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
             "gap_detected" => Some(Self::GapDetected),
             "sourced" => Some(Self::Sourced),
-            "drafted" => Some(Self::Drafted),
+            "draft" | "drafted" => Some(Self::Drafted),
             "validated" => Some(Self::Validated),
             "installed" => Some(Self::Installed),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_parser_accepts_draft_alias_and_common_casing() {
+        assert_eq!(
+            AssemblyPatternDraftStatus::from_str("draft"),
+            Some(AssemblyPatternDraftStatus::Drafted)
+        );
+        assert_eq!(
+            AssemblyPatternDraftStatus::from_str("Drafted"),
+            Some(AssemblyPatternDraftStatus::Drafted)
+        );
+        assert_eq!(
+            AssemblyPatternDraftStatus::from_str("gap-detected"),
+            Some(AssemblyPatternDraftStatus::GapDetected)
+        );
+        assert_eq!(AssemblyPatternDraftStatus::Drafted.as_str(), "drafted");
     }
 }
 
