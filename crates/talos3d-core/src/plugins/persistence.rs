@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::{
     authored_entity::{BoxedEntity, EntityBounds},
-    capability_registry::{CapabilityRegistry, DefaultsRegistry},
+    capability_registry::{CapabilityRegistry, DefaultsRegistry, ElementClassAssignment},
     curation::{
         MaterialSpec, MaterialSpecRegistry, Nomination, NominationQueue, SourceRegistry,
         SourceRegistryEntry,
@@ -38,6 +38,7 @@ use crate::{
         named_views::NamedViewRegistry,
         property_edit::PropertyEditState,
         recipe_drafts::{RecipeDraftArtifact, RecipeDraftRegistry},
+        refinement::{AuthoringProvenance, RefinementStateComponent, SemanticIntent},
         selection::Selected,
         storage::Storage,
         tools::{ActiveTool, Preview},
@@ -74,6 +75,20 @@ pub struct PersistedEntityRecord {
     #[serde(rename = "type")]
     pub type_name: String,
     pub data: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<PersistedSemanticSidecars>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PersistedSemanticSidecars {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_class: Option<ElementClassAssignment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement_state: Option<RefinementStateComponent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_intent: Option<SemanticIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_provenance: Option<AuthoringProvenance>,
 }
 
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
@@ -143,6 +158,54 @@ fn current_project_created_by() -> ProjectCreatedBy {
         project_format_version: PROJECT_FILE_VERSION,
         format_tag: PROJECT_FORMAT_TAG.to_string(),
     }
+}
+
+fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSemanticSidecars> {
+    let sidecars = PersistedSemanticSidecars {
+        element_class: entity_ref.get::<ElementClassAssignment>().cloned(),
+        refinement_state: entity_ref.get::<RefinementStateComponent>().cloned(),
+        semantic_intent: entity_ref.get::<SemanticIntent>().cloned(),
+        authoring_provenance: entity_ref.get::<AuthoringProvenance>().cloned(),
+    };
+    (sidecars.element_class.is_some()
+        || sidecars.refinement_state.is_some()
+        || sidecars.semantic_intent.is_some()
+        || sidecars.authoring_provenance.is_some())
+    .then_some(sidecars)
+}
+
+fn apply_semantic_sidecars(
+    world: &mut World,
+    element_id: ElementId,
+    sidecars: &PersistedSemanticSidecars,
+) {
+    let Some(entity) = entity_for_element_id(world, element_id) else {
+        return;
+    };
+    let mut entity_mut = world.entity_mut(entity);
+    if let Some(component) = &sidecars.element_class {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.refinement_state {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.semantic_intent {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.authoring_provenance {
+        entity_mut.insert(component.clone());
+    }
+}
+
+fn entity_for_element_id(world: &World, element_id: ElementId) -> Option<Entity> {
+    let mut query = world.try_query::<(Entity, &ElementId)>()?;
+    query.iter(world).find_map(|(entity, id)| {
+        if *id == element_id {
+            Some(entity)
+        } else {
+            None
+        }
+    })
 }
 
 // --- Shortcut handlers ---
@@ -383,11 +446,18 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     let mut entities = entity_ids
         .into_iter()
         .filter_map(|entity| world.get_entity(entity).ok())
-        .filter_map(|entity_ref| registry.capture_snapshot(&entity_ref, world))
-        .filter(|snapshot| snapshot.scope() == crate::authored_entity::EntityScope::AuthoredModel)
-        .map(|snapshot| PersistedEntityRecord {
+        .filter_map(|entity_ref| {
+            let snapshot = registry.capture_snapshot(&entity_ref, world)?;
+            let semantic = capture_semantic_sidecars(&entity_ref);
+            Some((snapshot, semantic))
+        })
+        .filter(|(snapshot, _)| {
+            snapshot.scope() == crate::authored_entity::EntityScope::AuthoredModel
+        })
+        .map(|(snapshot, semantic)| PersistedEntityRecord {
             type_name: snapshot.type_name().to_string(),
             data: snapshot.to_persisted_json(),
+            semantic,
         })
         .collect::<Vec<_>>();
     entities.sort_by_key(entity_record_sort_key);
@@ -747,7 +817,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         }
         if let Some(factory) = registry.factory_for(&record.type_name) {
             let snapshot = factory.from_persisted_json(&record.data)?;
-            recognized.push(snapshot);
+            recognized.push((snapshot, record.semantic));
         } else {
             opaque.push(record);
         }
@@ -880,10 +950,15 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         );
     }
     world.resource_mut::<OpaquePersistedEntities>().0 = opaque;
-    recognized.sort_by_key(snapshot_dependency_order);
-    for snapshot in &recognized {
+    recognized.sort_by_key(|(snapshot, _)| snapshot_dependency_order(snapshot));
+    let mut restored_snapshots = Vec::with_capacity(recognized.len());
+    for (snapshot, semantic) in &recognized {
         snapshot.apply_to(world);
+        if let Some(semantic) = semantic {
+            apply_semantic_sidecars(world, snapshot.element_id(), semantic);
+        }
         stamp_authored_entity_dependencies(world, snapshot);
+        restored_snapshots.push(snapshot.clone());
     }
     world
         .resource_mut::<ElementIdAllocator>()
@@ -895,7 +970,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world
         .resource_mut::<NextState<ActiveTool>>()
         .set(ActiveTool::Select);
-    focus_camera_on_loaded_snapshots(world, &recognized);
+    focus_camera_on_loaded_snapshots(world, &restored_snapshots);
     Ok(())
 }
 
@@ -1070,6 +1145,7 @@ fn set_feedback(world: &mut World, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability_registry::ElementClassId;
     use crate::plugins::{
         bundled_definition_libraries::apply_bundled_definition_libraries,
         camera::OrbitCamera,
@@ -1099,7 +1175,7 @@ mod tests {
         refinement::{
             AgentId, AuthoringMode, AuthoringProvenance, ClaimGrounding, ClaimPath, ClaimRecord,
             Grounding, Obligation, ObligationId, ObligationSet, ObligationStatus, RefinementState,
-            RefinementStateComponent, RuleId, SemanticRole,
+            RefinementStateComponent, RuleId, SemanticIntent, SemanticRole,
         },
         tools::ActiveTool,
         transform::TransformState,
@@ -1658,6 +1734,7 @@ mod tests {
                     "confidence": 0.87
                 }
             }),
+            semantic: None,
         };
         let project = ProjectFile {
             version: PROJECT_FILE_VERSION,
@@ -1739,6 +1816,7 @@ mod tests {
                     "half_extents": [10.0, 20.0, 30.0],
                     "rotation": ShapeRotation::default(),
                 }),
+                semantic: None,
             }],
         };
 
@@ -2051,6 +2129,99 @@ mod tests {
     }
 
     #[test]
+    fn primitive_semantic_sidecars_round_trip_through_project() {
+        let mut source = World::new();
+        let mut source_factories = CapabilityRegistry::default();
+        source_factories.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        source.insert_resource(source_factories);
+        source.insert_resource(DocumentProperties::default());
+        source.insert_resource(LayerRegistry::default());
+        source.insert_resource(MaterialRegistry::default());
+        source.insert_resource(TextureRegistry::default());
+        source.insert_resource(DefinitionRegistry::default());
+        source.insert_resource(DefinitionLibraryRegistry::default());
+        source.insert_resource(NamedViewRegistry::default());
+        source.insert_resource(ElementIdAllocator::default());
+        source.insert_resource(OpaquePersistedEntities::default());
+
+        let element_class = ElementClassAssignment {
+            element_class: ElementClassId("roof_system".into()),
+            active_recipe: None,
+        };
+        let refinement_state = RefinementStateComponent {
+            state: RefinementState::Schematic,
+        };
+        let semantic_intent = SemanticIntent {
+            parameters: serde_json::json!({ "pitch_deg": 38.0 }),
+            ..Default::default()
+        };
+        let authoring_provenance = AuthoringProvenance {
+            mode: AuthoringMode::Freeform,
+            rationale: Some("semantic primitive persistence fixture".into()),
+        };
+
+        source.spawn((
+            ElementId(42),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                half_extents: Vec3::splat(0.01),
+            },
+            ShapeRotation::default(),
+            element_class.clone(),
+            refinement_state.clone(),
+            semantic_intent.clone(),
+            authoring_provenance.clone(),
+        ));
+
+        let project = build_project_file(&mut source).expect("project should serialize");
+        let box_record = project
+            .entities
+            .iter()
+            .find(|record| record.type_name == "box")
+            .expect("box should persist");
+        assert!(
+            box_record.semantic.is_some(),
+            "primitive semantic sidecars must persist with the geometry snapshot"
+        );
+
+        let mut target = World::new();
+        let mut target_factories = CapabilityRegistry::default();
+        target_factories.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        target.insert_resource(target_factories);
+        target.insert_resource(bevy::prelude::Assets::<bevy::prelude::Mesh>::default());
+        target.insert_resource(MaterialRegistry::default());
+        target.insert_resource(DefinitionRegistry::default());
+        target.insert_resource(DefinitionLibraryRegistry::default());
+        target.insert_resource(NamedViewRegistry::default());
+        target.insert_resource(ElementIdAllocator::default());
+        target.insert_resource(OpaquePersistedEntities::default());
+        target.insert_resource(History::default());
+        target.insert_resource(PendingCommandQueue::default());
+        target.insert_resource(PropertyEditState::default());
+        target.insert_resource(TransformState::default());
+        target.insert_resource(State::new(ActiveTool::Select));
+        target.insert_resource(NextState::<ActiveTool>::default());
+
+        load_project(&mut target, project).expect("project should load");
+
+        let mut query = target.query::<(
+            &ElementId,
+            &ElementClassAssignment,
+            &RefinementStateComponent,
+            &SemanticIntent,
+            &AuthoringProvenance,
+        )>();
+        let restored = query
+            .iter(&target)
+            .find(|(element_id, _, _, _, _)| **element_id == ElementId(42))
+            .expect("primitive semantic sidecars should reload");
+        assert_eq!(restored.1, &element_class);
+        assert_eq!(restored.2, &refinement_state);
+        assert_eq!(restored.3, &semantic_intent);
+        assert_eq!(restored.4, &authoring_provenance);
+    }
+
+    #[test]
     fn build_project_file_omits_bundled_materials() {
         let mut world = World::new();
         world.insert_resource(CapabilityRegistry::default());
@@ -2169,6 +2340,7 @@ mod tests {
                     "render": "material_def.v1/mat-linked-wall"
                 }
             }),
+            semantic: None,
         }];
 
         let bytes =
@@ -2203,6 +2375,7 @@ mod tests {
                 "element_id": 1,
                 "layer": "Default"
             }),
+            semantic: None,
         }];
         let bytes = serialize_entity_records_as_project(&world, 2, default_only)
             .expect("linked project saves");
@@ -2219,6 +2392,7 @@ mod tests {
                 "element_id": 1,
                 "layer": "House"
             }),
+            semantic: None,
         }];
         let bytes = serialize_entity_records_as_project(&world, 2, house_layer)
             .expect("linked project saves");
@@ -2278,6 +2452,7 @@ mod tests {
                         "line_point": [1.0, 0.0, -0.5],
                         "visible": true
                     }),
+                    semantic: None,
                 },
                 PersistedEntityRecord {
                     type_name: "clip_plane".to_string(),
@@ -2287,6 +2462,7 @@ mod tests {
                         "normal": [0.0, 1.0, 0.0],
                         "active": true
                     }),
+                    semantic: None,
                 },
             ],
         };

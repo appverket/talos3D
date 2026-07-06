@@ -405,6 +405,7 @@ fn build_linked_model_file(
         records.push(PersistedEntityRecord {
             type_name: normalized.type_name().to_string(),
             data: normalized.to_persisted_json(),
+            semantic: None,
         });
     }
     records.sort_by_key(|record| {
@@ -1453,6 +1454,7 @@ mod tests {
                     cached_bounds: None,
                 }
                 .to_persisted_json(),
+                semantic: None,
             },
         ];
         std::fs::write(
@@ -1553,6 +1555,7 @@ mod tests {
                     cached_bounds: None,
                 }
                 .to_persisted_json(),
+                semantic: None,
             },
             PersistedEntityRecord {
                 type_name: "semantic_assembly".to_string(),
@@ -1580,6 +1583,7 @@ mod tests {
                     authoring_provenance: None,
                 }
                 .to_persisted_json(),
+                semantic: None,
             },
         ];
         std::fs::write(
@@ -1681,6 +1685,7 @@ mod tests {
                     cached_bounds: None,
                 }
                 .to_persisted_json(),
+                semantic: None,
             },
         ];
         std::fs::write(
@@ -1726,6 +1731,7 @@ mod tests {
                 opening_context: None,
             }
             .to_persisted_json(),
+            semantic: None,
         }
     }
 }
