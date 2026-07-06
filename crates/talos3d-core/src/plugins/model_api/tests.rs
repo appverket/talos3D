@@ -9328,6 +9328,55 @@ fn session_recovery_scope_separation_project_vs_session() {
     assert_ne!(gap_path_a, gap_path_b);
 }
 
+#[test]
+#[cfg(feature = "model-api")]
+fn run_validation_v2_computes_current_findings_when_cache_is_empty() {
+    use crate::capability_registry::{
+        Applicability, ConstraintDescriptor, ConstraintId, ConstraintRole, Finding, FindingId,
+        Severity,
+    };
+
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_constraint(ConstraintDescriptor {
+        id: ConstraintId("test.current_validation".into()),
+        label: "Current validation".into(),
+        description: "Emits a finding for the current entity".into(),
+        applicability: Applicability::any(),
+        default_severity: Severity::Error,
+        rationale: "MCP validation must compute current findings, not only read a cache.".into(),
+        source_backlink: None,
+        role: ConstraintRole::Validation,
+        validator: std::sync::Arc::new(|entity, world| {
+            let Some(element_id) = world.get::<ElementId>(entity) else {
+                return Vec::new();
+            };
+            vec![Finding {
+                id: FindingId(format!("test.current_validation:{}", element_id.0)),
+                constraint_id: ConstraintId("test.current_validation".into()),
+                subject: element_id.0,
+                severity: Severity::Error,
+                message: "current finding".into(),
+                rationale: "computed directly".into(),
+                backlink: None,
+                emitted_at: 0,
+                role: ConstraintRole::Validation,
+            }]
+        }),
+    });
+    world.insert_resource(registry);
+    world.insert_resource(crate::plugins::validation::Findings::default());
+    world.spawn((ElementId(42),));
+
+    let targeted = handle_run_validation_v2(&world, Some(42));
+    assert_eq!(targeted.len(), 1);
+    assert_eq!(targeted[0].finding_id, "test.current_validation:42");
+
+    let whole_model = handle_run_validation_v2(&world, None);
+    assert_eq!(whole_model.len(), 1);
+    assert_eq!(whole_model[0].finding_id, "test.current_validation:42");
+}
+
 // --- Capability-profile tool gating (context economy) ---
 
 #[cfg(feature = "model-api")]

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "model-api")]
 use bevy::window::PrimaryWindow;
@@ -13341,37 +13341,84 @@ fn handle_list_constraints(world: &World, _scope: Option<String>) -> Vec<Constra
         .collect()
 }
 
-/// Read findings from the `Findings` resource (populated by the last sweep).
+/// Return current validation findings for the requested scope.
 ///
-/// Called after `validation_sweep_system` runs in the dispatch path.
+/// The scheduled `Findings` cache is useful for `explain_finding_v2`, but the
+/// MCP-facing validation tool must not report success merely because that cache
+/// is missing or stale. Compute direct findings first, then merge any cached
+/// sweep findings that are not already represented.
 #[cfg(feature = "model-api")]
 fn handle_run_validation_v2(world: &World, element_id: Option<u64>) -> Vec<ValidationFindingInfo> {
     use crate::plugins::validation::Findings;
 
+    let mut current = Vec::new();
     if let Some(eid) = element_id {
         if crate::plugins::refinement::is_parked_refinement_entity(world, ElementId(eid)) {
             return Vec::new();
         }
+        if let Ok(findings) = handle_run_validation(world, eid) {
+            current.extend(findings);
+        }
+    } else {
+        for eid in validation_element_ids(world) {
+            if let Ok(findings) = handle_run_validation(world, eid) {
+                merge_unique_validation_findings(&mut current, findings);
+            }
+        }
     }
 
-    let Some(findings) = world.get_resource::<Findings>() else {
-        return Vec::new();
-    };
-
-    let iter: Box<dyn Iterator<Item = &crate::capability_registry::Finding>> =
-        if let Some(eid) = element_id {
-            Box::new(
-                findings
-                    .cache
-                    .iter()
-                    .filter(move |((_, e), _)| *e == eid)
-                    .flat_map(|(_, v)| v.iter()),
-            )
+    if let Some(findings) = world.get_resource::<Findings>() {
+        let cached: Vec<ValidationFindingInfo> = if let Some(eid) = element_id {
+            findings
+                .cache
+                .iter()
+                .filter(move |((_, e), _)| *e == eid)
+                .flat_map(|(_, v)| v.iter())
+                .map(finding_to_info)
+                .collect()
         } else {
-            Box::new(findings.all())
+            findings.all().map(finding_to_info).collect()
         };
+        merge_unique_validation_findings(&mut current, cached);
+    }
 
-    iter.map(finding_to_info).collect()
+    current.sort_by(|a, b| {
+        a.entity_element_id
+            .cmp(&b.entity_element_id)
+            .then_with(|| a.finding_id.cmp(&b.finding_id))
+    });
+    current
+}
+
+#[cfg(feature = "model-api")]
+fn validation_element_ids(world: &World) -> Vec<u64> {
+    let mut ids = Vec::new();
+    let mut q = world.try_query::<&ElementId>().unwrap();
+    for id in q.iter(world) {
+        if crate::plugins::refinement::is_parked_refinement_entity(world, *id) {
+            continue;
+        }
+        ids.push(id.0);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+#[cfg(feature = "model-api")]
+fn merge_unique_validation_findings(
+    target: &mut Vec<ValidationFindingInfo>,
+    findings: impl IntoIterator<Item = ValidationFindingInfo>,
+) {
+    let mut seen: HashSet<String> = target
+        .iter()
+        .map(|finding| finding.finding_id.clone())
+        .collect();
+    for finding in findings {
+        if seen.insert(finding.finding_id.clone()) {
+            target.push(finding);
+        }
+    }
 }
 
 /// Convert a `Finding` to the MCP-facing `ValidationFindingInfo`.
