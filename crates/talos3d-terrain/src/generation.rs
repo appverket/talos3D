@@ -3,7 +3,7 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
 };
-use delaunator::{triangulate, Point};
+use delaunator::{Point, triangulate};
 use talos3d_core::plugins::{
     identity::ElementId, layers::LayerRegistry, modeling::primitives::TriangleMesh,
 };
@@ -22,8 +22,8 @@ use crate::{
         sample_boundary_support_points, sample_curve_points, sample_interior_support_points,
     },
     visualization::{
-        visualization_for_mode, CutFillVisualizationState, CutFillVisualizationTarget,
-        TerrainVisualizationMode, TerrainVisualizationState, TriangleVisualization,
+        CutFillVisualizationState, CutFillVisualizationTarget, TerrainVisualizationMode,
+        TerrainVisualizationState, TriangleVisualization, visualization_for_mode,
     },
 };
 
@@ -1332,10 +1332,11 @@ mod tests {
             .elevation = 2.0;
         app.update();
 
-        assert!(app
-            .world()
-            .entity(surface_entity)
-            .contains::<NeedsTerrainMesh>());
+        assert!(
+            app.world()
+                .entity(surface_entity)
+                .contains::<NeedsTerrainMesh>()
+        );
     }
 
     #[test]

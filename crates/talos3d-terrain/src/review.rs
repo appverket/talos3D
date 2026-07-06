@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 use talos3d_core::{
     authored_entity::AuthoredEntity,
     plugins::{

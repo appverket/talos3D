@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use talos3d_capability_api::commands::{
     CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
 };
@@ -29,9 +29,10 @@ use talos3d_core::{
         modeling::assembly::{AssemblyMemberRef, AssemblySnapshot, SemanticAssembly},
         modeling::generic_snapshot::PrimitiveSnapshot,
         modeling::group::{
-            collect_group_members_recursive, group_frame, group_frame_change_snapshots,
-            group_membership_add_snapshots, is_group, remove_member_from_groups, GroupMembers,
-            GroupSnapshot,
+            GroupFrame, GroupMembers, GroupSnapshot, collect_group_members_recursive,
+            compute_group_bounds_in_frame_from_world, find_group_for_member, group_frame,
+            group_frame_change_snapshots, group_membership_add_snapshots, is_group,
+            remove_member_from_groups,
         },
         modeling::primitives::{BoxPrimitive, ShapeRotation, TriangleMesh},
         modeling::snapshots::TriangleMeshSnapshot,
@@ -43,8 +44,8 @@ use talos3d_core::{
 
 use crate::{
     conforming::{
-        build_conforming_triangle_mesh, conforming_metrics, ConformingSolid,
-        ConformingSolidSnapshot, DEFAULT_MAX_DEPTH, DEFAULT_MIN_THICKNESS,
+        ConformingSolid, ConformingSolidSnapshot, DEFAULT_MAX_DEPTH, DEFAULT_MIN_THICKNESS,
+        build_conforming_triangle_mesh, conforming_metrics,
     },
     heightfield::TerrainHeightfield,
 };
@@ -132,7 +133,9 @@ impl Plugin for PlantingPlugin {
                 description:
                     "Place a terrain-conforming foundation under an object and seat it on \
                               the surface at minimum clearance; optionally hide its original \
-                              foundation (reversible)."
+                              foundation (reversible). When an original foundation is supplied, \
+                              its footprint drives the conforming foundation instead of roof/eave \
+                              or trim overhangs in the target bounds."
                         .to_string(),
                 category: CommandCategory::Create,
                 parameters: Some(json!({
@@ -815,6 +818,26 @@ fn foundation_footprint_from_body(
             return Ok((solid.position, solid.half_extents, solid.yaw));
         }
     }
+    if let Some(group_id) = find_group_for_member(world, foundation_body_id) {
+        if let Some(frame) = group_frame(world, group_id) {
+            if !frame.is_identity() {
+                if let Some(bounds) =
+                    compute_group_bounds_in_frame_from_world(world, &[foundation_body_id], &frame)
+                {
+                    let local_center = bounds.center();
+                    let world_center = frame.point_to_world(local_center);
+                    return Ok((
+                        Vec2::new(world_center.x, world_center.z),
+                        Vec2::new(
+                            ((bounds.max.x - bounds.min.x) * 0.5).max(0.05),
+                            ((bounds.max.z - bounds.min.z) * 0.5).max(0.05),
+                        ),
+                        yaw_from_group_frame(frame),
+                    ));
+                }
+            }
+        }
+    }
     let bounds = capture_by_id(world, foundation_body_id)
         .and_then(|snapshot| snapshot.0.bounds())
         .ok_or_else(|| {
@@ -834,6 +857,11 @@ fn foundation_footprint_from_body(
         ),
         0.0,
     ))
+}
+
+fn yaw_from_group_frame(frame: GroupFrame) -> f32 {
+    let x_axis = frame.rotation * Vec3::X;
+    x_axis.z.atan2(x_axis.x)
 }
 
 fn replace_foundation_with_conforming_body(
@@ -931,6 +959,64 @@ fn conforming_foundation_surface_id(
     world
         .get::<ConformingSolid>(entity)
         .map(|solid| solid.surface_id)
+}
+
+fn foundation_system_surface_id(
+    world: &mut World,
+    foundation_structure_id: ElementId,
+) -> Option<ElementId> {
+    semantic_assembly_by_id(world, foundation_structure_id)
+        .and_then(|assembly| id_from_value(&assembly.parameters, "surface_id"))
+}
+
+fn rehydrate_demoted_foundation_as_conforming(
+    world: &mut World,
+    foundation_id: ElementId,
+    foundation_structure_id: Option<ElementId>,
+    surface_id: ElementId,
+) -> bool {
+    let Some(entity) = find_entity_by_element_id(world, foundation_id) else {
+        return false;
+    };
+    if world.get::<ConformingSolid>(entity).is_some() {
+        return true;
+    }
+    if !is_foundation_body(world, foundation_id) {
+        return false;
+    }
+
+    let (min_thickness, max_depth, resolution) = foundation_structure_id
+        .and_then(|id| semantic_assembly_by_id(world, id))
+        .map(|assembly| {
+            let min = assembly
+                .parameters
+                .get("min_thickness")
+                .and_then(Value::as_f64)
+                .unwrap_or(DEFAULT_MIN_THICKNESS as f64) as f32;
+            let max = assembly
+                .parameters
+                .get("max_thickness")
+                .or_else(|| assembly.parameters.get("max_depth"))
+                .and_then(Value::as_f64)
+                .unwrap_or(DEFAULT_MAX_DEPTH as f64) as f32;
+            let resolution = assembly
+                .parameters
+                .get("resolution")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.5) as f32;
+            (min, max.max(min.max(0.01)), resolution.max(0.05))
+        })
+        .unwrap_or((DEFAULT_MIN_THICKNESS, DEFAULT_MAX_DEPTH, 0.5));
+
+    replace_foundation_with_conforming_body(
+        world,
+        foundation_id,
+        surface_id,
+        min_thickness.max(0.0),
+        max_depth,
+        resolution,
+    )
+    .is_ok()
 }
 
 fn direct_foundation_body_from_structure(
@@ -1176,7 +1262,22 @@ fn is_persisted_planted_structure(assembly: &SemanticAssembly) -> bool {
         .get("placement_kind")
         .and_then(Value::as_str)
     {
-        return placement_kind == "planted_structure";
+        if placement_kind == "released_planted_structure" {
+            return false;
+        }
+        if placement_kind == "planted_structure" {
+            return true;
+        }
+        if placement_kind == "foundation_demoted"
+            && assembly
+                .metadata
+                .get("previous_placement_kind")
+                .and_then(Value::as_str)
+                == Some("planted_structure")
+        {
+            return assembly.parameters.get("placement").and_then(Value::as_str)
+                == Some("planted_on_surface");
+        }
     }
     assembly.parameters.get("placement").and_then(Value::as_str) == Some("planted_on_surface")
 }
@@ -1210,13 +1311,21 @@ fn persisted_conforming_foundation_id(
         })
         .map(|member| member.target)
         .or_else(|| {
+            structure
+                .members
+                .iter()
+                .find(|member| {
+                    member.role == "terrain_conforming_foundation"
+                        && is_foundation_body(world, member.target)
+                })
+                .map(|member| member.target)
+        })
+        .or_else(|| {
             foundation_structure_id
                 .and_then(|foundation_structure_id| {
                     foundation_body_from_system(world, foundation_structure_id)
                 })
-                .filter(|foundation_id| {
-                    conforming_foundation_surface_id(world, *foundation_id).is_some()
-                })
+                .filter(|foundation_id| is_foundation_body(world, *foundation_id))
         })
 }
 
@@ -1227,11 +1336,7 @@ fn persisted_surface_id(
     foundation_id: ElementId,
 ) -> Option<ElementId> {
     id_from_value(&structure.parameters, "surface_id")
-        .or_else(|| {
-            foundation_structure_id
-                .and_then(|id| semantic_assembly_by_id(world, id))
-                .and_then(|assembly| id_from_value(&assembly.parameters, "surface_id"))
-        })
+        .or_else(|| foundation_structure_id.and_then(|id| foundation_system_surface_id(world, id)))
         .or_else(|| conforming_foundation_surface_id(world, foundation_id))
 }
 
@@ -1301,6 +1406,14 @@ fn same_planted_structure(left: PlantedStructure, right: PlantedStructure) -> bo
 fn rehydrate_planted_structure_components(world: &mut World) {
     let planted = persisted_planted_structures(world);
     for contract in planted {
+        if !rehydrate_demoted_foundation_as_conforming(
+            world,
+            contract.planted.foundation_id,
+            contract.planted.foundation_structure_id,
+            contract.planted.surface_id,
+        ) {
+            continue;
+        }
         let Some(group_entity) = find_entity_by_element_id(world, contract.group_id) else {
             continue;
         };
@@ -1378,6 +1491,7 @@ fn update_foundation_structure_after_demote(
         if member.target == body_id {
             member.role = match representation {
                 "max_height_box" => "max_height_box_body".to_string(),
+                "min_height_box" => "min_height_box_body".to_string(),
                 _ => "frozen_conforming_snapshot".to_string(),
             };
         }
@@ -1396,6 +1510,43 @@ fn update_foundation_structure_after_demote(
         "body_id": body_id.0,
         "demoted_representation": representation,
     });
+}
+
+fn replace_conforming_foundation_with_min_height_box(
+    world: &mut World,
+    foundation_id: ElementId,
+) -> Option<crate::conforming::ConformingMetrics> {
+    let foundation_entity = find_entity_by_element_id(world, foundation_id)?;
+    let solid = world.get::<ConformingSolid>(foundation_entity)?.clone();
+    let heightfield = find_heightfield(world, solid.surface_id)?;
+    let metrics = conforming_metrics(&solid, &heightfield)?;
+    let height = solid.min_thickness.max(0.01);
+    remove_mesh_asset_for_id(world, foundation_id);
+    despawn_by_element_id(world, foundation_id);
+    PrimitiveSnapshot {
+        element_id: foundation_id,
+        primitive: BoxPrimitive {
+            centre: Vec3::new(
+                solid.position.x,
+                metrics.y_top - height * 0.5,
+                solid.position.y,
+            ),
+            half_extents: Vec3::new(
+                solid.half_extents.x.max(0.01),
+                height * 0.5,
+                solid.half_extents.y.max(0.01),
+            ),
+        },
+        rotation: ShapeRotation(Quat::from_rotation_y(solid.yaw)),
+        material_assignment: None,
+        opening_context: None,
+    }
+    .apply_to(world);
+    Some(crate::conforming::ConformingMetrics {
+        y_top: metrics.y_top,
+        min_thickness: height,
+        max_thickness: height,
+    })
 }
 
 fn mark_structure_demoted(world: &mut World, structure_id: ElementId, representation: &str) {
@@ -1642,13 +1793,16 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         .0
         .bounds()
         .ok_or_else(|| "target has no bounds".to_string())?;
+    let footprint_bounds = hide_id
+        .and_then(|id| capture_by_id(world, id).and_then(|snapshot| snapshot.bounds()))
+        .unwrap_or(bounds);
     let center = Vec2::new(
-        (bounds.min.x + bounds.max.x) * 0.5,
-        (bounds.min.z + bounds.max.z) * 0.5,
+        (footprint_bounds.min.x + footprint_bounds.max.x) * 0.5,
+        (footprint_bounds.min.z + footprint_bounds.max.z) * 0.5,
     );
     let half_extents = Vec2::new(
-        ((bounds.max.x - bounds.min.x) * 0.5).max(0.05),
-        ((bounds.max.z - bounds.min.z) * 0.5).max(0.05),
+        ((footprint_bounds.max.x - footprint_bounds.min.x) * 0.5).max(0.05),
+        ((footprint_bounds.max.z - footprint_bounds.min.z) * 0.5).max(0.05),
     );
     let base_y = bounds.min.y;
 
@@ -1748,8 +1902,25 @@ fn execute_release_planted_structure(
     let structure_id = world
         .get::<PlantedStructure>(target_entity)
         .map(|planted| planted.structure_id);
+    let planted = world.get::<PlantedStructure>(target_entity).copied();
     if let Some(structure_id) = structure_id {
         mark_structure_released(world, structure_id);
+    }
+    if let Some(planted) = planted {
+        if let Some(metrics) =
+            replace_conforming_foundation_with_min_height_box(world, planted.foundation_id)
+        {
+            if let Some(foundation_structure_id) = planted.foundation_structure_id {
+                update_foundation_structure_after_demote(
+                    world,
+                    foundation_structure_id,
+                    planted.foundation_id,
+                    planted.surface_id,
+                    "min_height_box",
+                    metrics,
+                );
+            }
+        }
     }
     world.entity_mut(target_entity).remove::<PlantedStructure>();
     world.entity_mut(target_entity).remove::<PlantedOnSurface>();
@@ -1910,6 +2081,7 @@ mod tests {
             generic_snapshot::PrimitiveSnapshot,
             group::{GroupFactory, GroupFrame, GroupMembers, GroupSnapshot},
             primitives::{BoxPrimitive, ShapeRotation},
+            snapshots::TriangleMeshFactory,
         },
     };
 
@@ -1938,6 +2110,7 @@ mod tests {
         let mut registry = CapabilityRegistry::default();
         registry.register_factory(GroupFactory);
         registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        registry.register_factory(TriangleMeshFactory);
         registry.register_factory(ConformingSolidFactory);
         world.insert_resource(registry);
 
@@ -1969,6 +2142,7 @@ mod tests {
             member_ids: vec![ElementId(2)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2062,15 +2236,95 @@ mod tests {
             .get::<SemanticAssembly>(structure_entity)
             .expect("semantic structure assembly");
         assert_eq!(structure.assembly_type, "structure");
-        assert!(structure
-            .members
-            .iter()
-            .any(|member| member.target == foundation_structure_id && member.role == "foundation"));
-        assert!(structure
-            .members
-            .iter()
-            .any(|member| member.target == foundation_id
-                && member.role == "terrain_conforming_foundation"));
+        assert!(
+            structure
+                .members
+                .iter()
+                .any(|member| member.target == foundation_structure_id
+                    && member.role == "foundation")
+        );
+        assert!(
+            structure
+                .members
+                .iter()
+                .any(|member| member.target == foundation_id
+                    && member.role == "terrain_conforming_foundation")
+        );
+    }
+
+    #[test]
+    fn plant_on_surface_uses_hidden_foundation_footprint_not_roof_overhang_bounds() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), flat_heightfield(2.0)));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                // Existing 5 m x 6 m foundation/base footprint.
+                centre: Vec3::new(0.0, 0.1, 0.0),
+                half_extents: Vec3::new(2.5, 0.1, 3.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        PrimitiveSnapshot {
+            element_id: ElementId(3),
+            primitive: BoxPrimitive {
+                // Deliberately wider/deeper roof/eave bounds. Planting must
+                // not inflate the foundation to this visual overhang.
+                centre: Vec3::new(0.0, 3.0, 0.0),
+                half_extents: Vec3::new(3.8, 0.2, 3.45),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Cottage with eaves".to_string(),
+            member_ids: vec![ElementId(2), ElementId(3)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+                "hide_element_id": 2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+
+        let foundation_entity =
+            find_entity_by_element_id(&mut world, foundation_id).expect("foundation entity");
+        let foundation = world
+            .get::<ConformingSolid>(foundation_entity)
+            .expect("conforming solid");
+
+        assert!(
+            (foundation.half_extents.x - 2.5).abs() < 0.01,
+            "foundation width should come from the original 5 m base, not the roof overhang"
+        );
+        assert!(
+            (foundation.half_extents.y - 3.0).abs() < 0.01,
+            "foundation depth should come from the original 6 m base, not the roof overhang"
+        );
     }
 
     #[test]
@@ -2106,6 +2360,7 @@ mod tests {
             member_ids: vec![ElementId(2), ElementId(3)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2209,10 +2464,13 @@ mod tests {
         let structure = world
             .get::<SemanticAssembly>(structure_entity)
             .expect("semantic structure");
-        assert!(structure
-            .members
-            .iter()
-            .any(|member| member.target == foundation_structure_id && member.role == "foundation"));
+        assert!(
+            structure
+                .members
+                .iter()
+                .any(|member| member.target == foundation_structure_id
+                    && member.role == "foundation")
+        );
     }
 
     #[test]
@@ -2246,6 +2504,7 @@ mod tests {
             member_ids: vec![ElementId(2)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2342,6 +2601,7 @@ mod tests {
             member_ids: vec![ElementId(2)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2417,6 +2677,7 @@ mod tests {
             member_ids: vec![ElementId(2)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2506,6 +2767,7 @@ mod tests {
             member_ids: vec![ElementId(2)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2613,6 +2875,7 @@ mod tests {
             member_ids: vec![ElementId(2), ElementId(4)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2695,6 +2958,7 @@ mod tests {
             member_ids: vec![ElementId(2)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2746,6 +3010,158 @@ mod tests {
     }
 
     #[test]
+    fn demoted_planted_foundation_rehydrates_as_adaptive_contract() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Demoted planted cottage".to_string(),
+            member_ids: vec![ElementId(2)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+
+        execute_demote_conforming_foundation(
+            &mut world,
+            &json!({
+                "target_id": foundation_id.0,
+                "mode": "snapshot",
+            }),
+        )
+        .expect("demote foundation");
+
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        assert!(
+            world.get::<PlantedStructure>(group_entity).is_none(),
+            "demotion removes the runtime component"
+        );
+        let foundation_entity =
+            find_entity_by_element_id(&mut world, foundation_id).expect("foundation");
+        assert!(
+            world.get::<ConformingSolid>(foundation_entity).is_none(),
+            "demotion leaves a frozen representation"
+        );
+        assert_eq!(
+            persisted_planted_structures(&mut world).len(),
+            1,
+            "foundation_demoted structure should still be discoverable as a planted contract"
+        );
+
+        rehydrate_planted_structure_components(&mut world);
+
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        assert!(
+            world.get::<PlantedStructure>(group_entity).is_some(),
+            "foundation_demoted semantic placement should still rehydrate the planted contract"
+        );
+        let foundation_entity =
+            find_entity_by_element_id(&mut world, foundation_id).expect("foundation");
+        let solid = world
+            .get::<ConformingSolid>(foundation_entity)
+            .expect("frozen foundation should be reactivated as conforming");
+        assert_eq!(solid.surface_id, ElementId(10));
+        assert!((solid.min_thickness - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn release_planted_structure_reverts_foundation_to_min_height_box() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Released min-height cottage".to_string(),
+            member_ids: vec![ElementId(2)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+
+        execute_release_planted_structure(
+            &mut world,
+            &json!({
+                "target_id": 1,
+            }),
+        )
+        .expect("release planted structure");
+
+        let group_entity = find_entity_by_element_id(&mut world, ElementId(1)).expect("group");
+        assert!(world.get::<PlantedStructure>(group_entity).is_none());
+        let foundation_entity =
+            find_entity_by_element_id(&mut world, foundation_id).expect("foundation");
+        assert!(world.get::<ConformingSolid>(foundation_entity).is_none());
+        let foundation = world
+            .get::<BoxPrimitive>(foundation_entity)
+            .expect("released foundation should be a box");
+        assert!(
+            (foundation.half_extents.y * 2.0 - 0.2).abs() < 0.001,
+            "released foundation should use the minimum foundation height"
+        );
+    }
+
+    #[test]
     fn planted_structure_transform_preview_moves_roof_and_reseats_group_from_child_drag() {
         let mut world = test_world();
         world.spawn((ElementId(10), ramp_heightfield()));
@@ -2778,6 +3194,7 @@ mod tests {
             member_ids: vec![ElementId(2), ElementId(4)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);
@@ -2882,6 +3299,7 @@ mod tests {
             member_ids: vec![ElementId(2), ElementId(4)],
             frame: GroupFrame::default(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .apply_to(&mut world);

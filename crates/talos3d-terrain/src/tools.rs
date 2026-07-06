@@ -89,7 +89,7 @@ fn cancel_elevation_curve_tool(
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
-    if egui_wants_input.keyboard || !keys.just_pressed(KeyCode::Escape) {
+    if egui_wants_input.wants_any_keyboard_input() || !keys.just_pressed(KeyCode::Escape) {
         return;
     }
 
@@ -113,7 +113,8 @@ fn handle_elevation_curve_click(
     surfaces: Query<(&ElementId, &TerrainSurface, Option<&Selected>)>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
-    if egui_wants_input.pointer || !mouse_buttons.just_pressed(MouseButton::Left) {
+    if egui_wants_input.wants_any_pointer_input() || !mouse_buttons.just_pressed(MouseButton::Left)
+    {
         return;
     }
 
@@ -166,7 +167,7 @@ fn finish_elevation_curve_on_enter(
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
-    if egui_wants_input.keyboard || !keys.just_pressed(KeyCode::Enter) {
+    if egui_wants_input.wants_any_keyboard_input() || !keys.just_pressed(KeyCode::Enter) {
         return;
     }
     if state.points.len() < 2 {
@@ -244,7 +245,8 @@ fn place_spot_elevation_on_click(
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
-    if egui_wants_input.pointer || !mouse_buttons.just_pressed(MouseButton::Left) {
+    if egui_wants_input.wants_any_pointer_input() || !mouse_buttons.just_pressed(MouseButton::Left)
+    {
         return;
     }
 
@@ -326,16 +328,20 @@ fn queue_elevation_curve(
     });
     queue.apply_changes.write(ApplyEntityChangesCommand {
         label: "Update terrain surface sources",
-        before: vec![TerrainSurfaceSnapshot {
-            element_id: surface_id,
-            surface: surface.clone(),
-        }
-        .into()],
-        after: vec![TerrainSurfaceSnapshot {
-            element_id: surface_id,
-            surface: updated_surface,
-        }
-        .into()],
+        before: vec![
+            TerrainSurfaceSnapshot {
+                element_id: surface_id,
+                surface: surface.clone(),
+            }
+            .into(),
+        ],
+        after: vec![
+            TerrainSurfaceSnapshot {
+                element_id: surface_id,
+                surface: updated_surface,
+            }
+            .into(),
+        ],
     });
     queue.end_groups.write(EndCommandGroup);
 
@@ -364,6 +370,8 @@ mod tests {
             raw: None,
             snapped: None,
             hovered_element_id: Some(ElementId(2)),
+            surface_point: None,
+            surface_normal: None,
         };
 
         assert_eq!(

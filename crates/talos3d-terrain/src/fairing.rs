@@ -131,9 +131,7 @@ mod tests {
     fn terraced_chain(n: usize) -> (Vec<f32>, Vec<f32>) {
         // Plateau at the last contour height; survey samples every 4th node.
         let heights = (0..n).map(|i| (i / 4) as f32).collect();
-        let attachment = (0..n)
-            .map(|i| if i % 4 == 0 { 1.0 } else { 0.0 })
-            .collect();
+        let attachment = (0..n).map(|i| if i % 4 == 0 { 1.0 } else { 0.0 }).collect();
         (heights, attachment)
     }
 

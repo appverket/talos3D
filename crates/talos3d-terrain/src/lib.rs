@@ -66,6 +66,51 @@ fn terrain_conforming_foundation_skill() -> AgentSkill {
             "terrain.unplant_on_surface".to_string(),
             "set_property".to_string(),
         ],
+        required_tool_ids: vec![
+            "get_capability_snapshot".to_string(),
+            "get_agent_skill".to_string(),
+            "elevation_at".to_string(),
+            "take_screenshot".to_string(),
+        ],
+        forbidden_tool_ids: vec![
+            "create_box for a terrain-conforming foundation".to_string(),
+            "get_world_aabb as terrain grade source".to_string(),
+        ],
+        validation_tool_ids: vec![
+            "elevation_at".to_string(),
+            "get_world_aabb".to_string(),
+            "take_screenshot".to_string(),
+        ],
+        success_criteria: vec![
+            "Foundation top is derived from sampled terrain grade, not terrain AABB height."
+                .to_string(),
+            "Superstructure and conforming foundation move as one planted assembly.".to_string(),
+            "When hide_element_id is supplied, the hidden base footprint drives foundation plan size."
+                .to_string(),
+        ],
+        stop_conditions: vec![
+            "No terrain_surface can be identified.".to_string(),
+            "The building assembly cannot be resolved as one movable group or semantic structure."
+                .to_string(),
+        ],
+        screenshot_requirements: vec![
+            "Low side view showing the superstructure seated on the conforming foundation."
+                .to_string(),
+            "Plan/quarter view confirming roof eaves do not inflate the foundation footprint."
+                .to_string(),
+        ],
+        common_failure_modes: vec![
+            "Foundation is placed at the terrain datum while the real grade is higher or lower."
+                .to_string(),
+            "Walls or roof remain at world Y=0 after the foundation is planted on terrain."
+                .to_string(),
+            "Foundation footprint is sized from roof/eave/group bounds instead of the base footprint."
+                .to_string(),
+        ],
+        regression_prompt_ids: vec![
+            "terrain-plant-structure-hugging-foundation".to_string(),
+            "terrain-plant-hidden-base-footprint".to_string(),
+        ],
         next_skill_ids: vec![],
         body_markdown: "A *conforming solid* hugs a terrain surface: flat horizontal top at \
             `Y_top = max(grade under footprint) + min_thickness`, underside `= max(grade, Y_top - \
@@ -83,11 +128,14 @@ fn terrain_conforming_foundation_skill() -> AgentSkill {
             `planted_group_id` for later prompt/refinement/move targeting.\n\n\
             **Plant an existing building (reversible):** `terrain.plant_on_surface \
             {\"target_id\":<object>, \"surface_id\":<id>, \"min_thickness\":0.5, \
-            \"hide_element_id\":<old foundation, optional>}` creates the hugging foundation under \
-            the object, seats the object on its top, creates a semantic `structure` assembly plus \
-            a nested semantic `foundation_system` assembly, and marks the group as a planted \
-            structure so later horizontal moves re-seat the superstructure to the foundation's \
-            newly sampled terrain top. \
+            \"hide_element_id\":<old foundation/base, optional>}` creates the hugging foundation \
+            under the object, seats the object on its top, creates a semantic `structure` \
+            assembly plus a nested semantic `foundation_system` assembly, and marks the group as \
+            a planted structure so later horizontal moves re-seat the superstructure to the \
+            foundation's newly sampled terrain top. When `hide_element_id` is supplied, that \
+            foundation/base footprint drives the new conforming foundation in plan; roof eaves, \
+            gable closure panels, trim, and other visual overhangs must not inflate the \
+            foundation footprint. \
             `terrain.release_planted_structure {\"target_id\":<object>}` keeps the current \
             geometry but removes that terrain-following behavior. \
             `terrain.demote_conforming_foundation {\"target_id\":<foundation_system_id>, \

@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use talos3d_core::{
     authored_entity::{
-        invalid_property_error, property_field, property_field_with, read_only_property_field,
-        scalar_from_json, vec2_from_json, vec3_from_json, AuthoredEntity, BoxedEntity,
-        EntityBounds, HandleInfo, HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
+        AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, HandleKind, PropertyFieldDef,
+        PropertyValue, PropertyValueKind, invalid_property_error, property_field,
+        property_field_with, read_only_property_field, scalar_from_json, vec2_from_json,
+        vec3_from_json,
     },
     capability_registry::{AuthoredEntityFactory, HitCandidate, ModelSummaryAccumulator},
     plugins::{
@@ -173,7 +174,7 @@ impl AuthoredEntity for ElevationCurveSnapshot {
                 return Err(invalid_property_error(
                     "elevation_curve",
                     &["elevation", "source_layer", "curve_type"],
-                ))
+                ));
             }
         }
         Ok(snapshot.into())
@@ -398,7 +399,7 @@ impl AuthoredEntity for TerrainSurfaceSnapshot {
                         "smoothing",
                         "offset",
                     ],
-                ))
+                ));
             }
         }
         Ok(snapshot.into())
