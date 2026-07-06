@@ -76,6 +76,20 @@ const DEFINITION_EDITOR_WINDOW: AssetBrowserWindow = AssetBrowserWindow {
     constrain_with_margin: true,
 };
 
+fn remaining_available_rect(ctx: &egui::Context) -> egui::Rect {
+    #[allow(deprecated)]
+    ctx.available_rect()
+}
+
+fn show_top_level_panel<R>(
+    panel: egui::Panel,
+    ctx: &egui::Context,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    #[allow(deprecated)]
+    panel.show(ctx, add_contents)
+}
+
 #[derive(Debug, Clone)]
 struct DefinitionListEntry {
     id: String,
@@ -189,11 +203,7 @@ impl DefinitionListCache {
                 show_internal,
                 search,
             ));
-            self.entry_ids = self
-                .entries
-                .iter()
-                .map(|entry| entry.id.clone())
-                .collect();
+            self.entry_ids = self.entries.iter().map(|entry| entry.id.clone()).collect();
             self.definitions_generation = Some(definitions.generation());
             self.libraries_generation = Some(libraries.generation());
             self.selected_library_id = selected_library_id.map(str::to_string);
@@ -202,7 +212,10 @@ impl DefinitionListCache {
         }
         Arc::clone(&self.entries)
     }
-
+    #[cfg(test)]
+    fn contains_id(&self, id: &str) -> bool {
+        self.entry_ids.contains(id)
+    }
 }
 
 /// Build the browser entry list: all definitions of the selected source
@@ -1104,7 +1117,7 @@ pub fn draw_definition_lens(
     let is_hovered = ctx
         .pointer_hover_pos()
         .map(|pos| {
-            let available = ctx.available_rect();
+            let available = remaining_available_rect(ctx);
             let lens_rect = egui::Rect::from_min_size(
                 available.min,
                 egui::vec2(available.width(), DEFINITION_LENS_HEIGHT),
@@ -1119,10 +1132,12 @@ pub fn draw_definition_lens(
         LENS_FILL
     };
 
-    egui::TopBottomPanel::top("definition_lens")
-        .exact_height(DEFINITION_LENS_HEIGHT)
-        .frame(egui::Frame::NONE.fill(fill))
-        .show(ctx, |ui| {
+    show_top_level_panel(
+        egui::Panel::top("definition_lens")
+            .exact_size(DEFINITION_LENS_HEIGHT)
+            .frame(egui::Frame::NONE.fill(fill)),
+        ctx,
+        |ui| {
             ui.horizontal_centered(|ui| {
                 ui.add_space(8.0);
                 // Left-aligned status text — non-interactive.
@@ -1198,7 +1213,8 @@ pub fn draw_definition_lens(
                     }
                 });
             });
-        });
+        },
+    );
 }
 
 pub fn capture_definition_selection_context(world: &mut World) -> DefinitionSelectionContext {
@@ -1456,8 +1472,7 @@ pub fn draw_definitions_window(
         if asset_browser::ensure_selected_id(
             &mut state.selected_definition_id,
             definition_entries.as_slice(),
-        )
-        {
+        ) {
             state.selected_preview_slot_path = None;
             state.selected_occurrence_overrides = OverrideMap::default();
         }
@@ -5611,12 +5626,22 @@ mod tests {
             .unwrap();
 
         let mut cache = DefinitionListCache::default();
-        assert!(cache.entries(&registry, &libraries, None, false, "").is_empty());
+        assert!(cache
+            .entries(&registry, &libraries, None, false, "")
+            .is_empty());
 
-        let from_library =
-            cache.entries(&registry, &libraries, Some(library_id.0.as_str()), false, "");
+        let from_library = cache.entries(
+            &registry,
+            &libraries,
+            Some(library_id.0.as_str()),
+            false,
+            "",
+        );
         assert_eq!(
-            from_library.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            from_library
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["win"]
         );
 
@@ -5624,8 +5649,13 @@ mod tests {
         libraries
             .add_definition(&library_id, test_definition("door", "Door", Vec::new()))
             .unwrap();
-        let updated =
-            cache.entries(&registry, &libraries, Some(library_id.0.as_str()), false, "");
+        let updated = cache.entries(
+            &registry,
+            &libraries,
+            Some(library_id.0.as_str()),
+            false,
+            "",
+        );
         assert_eq!(updated.len(), 2);
     }
 

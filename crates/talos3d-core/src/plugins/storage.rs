@@ -19,6 +19,11 @@ pub struct LocalFileBackend;
 
 impl StorageBackend for LocalFileBackend {
     fn save(&self, data: &[u8], key: &str) -> Result<(), String> {
+        if let Some(parent) = std::path::Path::new(key).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+        }
         std::fs::write(key, data).map_err(|e| e.to_string())
     }
 

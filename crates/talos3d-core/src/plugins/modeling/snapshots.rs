@@ -12,7 +12,7 @@ use crate::{
     },
     capability_registry::{
         AuthoredEntityFactory, CapabilityRegistry, FaceHitCandidate, FaceId, HitCandidate,
-        ModelSummaryAccumulator,
+        ModelSummaryAccumulator, SnapshotCaptureRole,
     },
     plugins::{
         commands::{despawn_by_element_id, find_entity_by_element_id},
@@ -25,7 +25,7 @@ use crate::{
         math::scale_point_around_center,
         modeling::{
             editable_mesh::{EditableMesh, OperationLog, OperationOrigin},
-            mesh_generation::NeedsMesh,
+            mesh_generation::{DerivedGeometry, NeedsMesh},
             primitives::{
                 BoxPrimitive, CylinderPrimitive, ElevationMetadata, PlanePrimitive, Polyline,
                 ShapeRotation, SpherePrimitive, TriangleMesh,
@@ -782,6 +782,14 @@ impl AuthoredEntityFactory for PolylineFactory {
 impl AuthoredEntityFactory for TriangleMeshFactory {
     fn type_name(&self) -> &'static str {
         "triangle_mesh"
+    }
+
+    fn capture_role(&self, entity_ref: &EntityRef, _world: &World) -> SnapshotCaptureRole {
+        if entity_ref.contains::<DerivedGeometry>() {
+            SnapshotCaptureRole::DerivedGeometry
+        } else {
+            SnapshotCaptureRole::PrimaryAuthored
+        }
     }
 
     fn capture_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {

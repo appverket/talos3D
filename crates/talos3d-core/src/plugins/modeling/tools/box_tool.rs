@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::plugins::{
-    commands::CreateBoxCommand, cursor::CursorWorldPos, egui_chrome::EguiWantsInput,
+    commands::CreateBoxCommand, cursor::CursorWorldPos, input_ownership::InputOwnership,
     tools::ActiveTool, ui::StatusBarData,
 };
 
@@ -47,11 +47,11 @@ fn cleanup_box_tool(mut commands: Commands) {
 
 fn cancel_box_tool(
     keys: Res<ButtonInput<KeyCode>>,
-    egui_wants_input: Res<EguiWantsInput>,
+    ownership: Res<InputOwnership>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
-    if egui_wants_input.keyboard || !keys.just_pressed(KeyCode::Escape) {
+    if !ownership.is_idle() || !keys.just_pressed(KeyCode::Escape) {
         return;
     }
 
@@ -61,14 +61,14 @@ fn cancel_box_tool(
 
 fn handle_box_clicks(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
-    egui_wants_input: Res<EguiWantsInput>,
+    ownership: Res<InputOwnership>,
     cursor_world_pos: Res<CursorWorldPos>,
     mut box_tool_state: ResMut<BoxToolState>,
     mut create_box_commands: MessageWriter<CreateBoxCommand>,
     mut status_bar_data: ResMut<StatusBarData>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
 ) {
-    if egui_wants_input.pointer || !mouse_buttons.just_pressed(MouseButton::Left) {
+    if !ownership.is_idle() || !mouse_buttons.just_pressed(MouseButton::Left) {
         return;
     }
 

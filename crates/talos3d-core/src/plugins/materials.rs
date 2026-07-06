@@ -214,6 +214,7 @@ pub struct TextureAsset {
 #[derive(Resource, Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TextureRegistry {
     entries: BTreeMap<TextureAssetId, TextureAsset>,
+    #[serde(skip)]
     by_fingerprint:
         BTreeMap<(ContentHash, TextureColorSpace, TextureChannelIntent), TextureAssetId>,
 }
@@ -221,6 +222,10 @@ pub struct TextureRegistry {
 impl TextureRegistry {
     pub fn get(&self, id: &TextureAssetId) -> Option<&TextureAsset> {
         self.entries.get(id)
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &TextureAsset> {
+        self.entries.values()
     }
 
     pub fn insert(&mut self, asset: TextureAsset) -> TextureAssetId {
@@ -245,6 +250,20 @@ impl TextureRegistry {
             }
         }
         subset
+    }
+
+    pub fn rebuild_fingerprint_index(&mut self) {
+        self.by_fingerprint.clear();
+        for asset in self.entries.values() {
+            self.by_fingerprint.insert(
+                (
+                    asset.content_hash.clone(),
+                    asset.color_space,
+                    asset.channel_intent,
+                ),
+                asset.id.clone(),
+            );
+        }
     }
 
     pub fn intern_embedded(
@@ -1809,14 +1828,23 @@ pub fn validate_texture_mapping(mapping: TextureMapping) -> Result<(), String> {
 
 fn execute_toggle_materials_browser(
     world: &mut World,
-    _params: &Value,
+    params: &Value,
 ) -> Result<crate::plugins::command_registry::CommandResult, String> {
+    let mut visible = None;
     if let Some(mut state) =
         world.get_resource_mut::<crate::plugins::material_browser::MaterialsWindowState>()
     {
-        state.visible = !state.visible;
+        if let Some(visible) = params.get("visible").and_then(Value::as_bool) {
+            state.visible = visible;
+        } else {
+            state.visible = !state.visible;
+        }
+        visible = Some(state.visible);
     }
-    Ok(crate::plugins::command_registry::CommandResult::empty())
+    Ok(crate::plugins::command_registry::CommandResult {
+        output: Some(serde_json::json!({ "visible": visible })),
+        ..crate::plugins::command_registry::CommandResult::default()
+    })
 }
 
 // ─── Systems ─────────────────────────────────────────────────────────────────

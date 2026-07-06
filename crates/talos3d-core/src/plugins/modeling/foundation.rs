@@ -53,7 +53,7 @@ use crate::authored_entity::{
 use crate::capability_registry::{AuthoredEntityFactory, TerrainProviderRegistry};
 use crate::plugins::commands::{despawn_by_element_id, find_entity_by_element_id};
 use crate::plugins::identity::{ElementId, ElementIdAllocator};
-use crate::plugins::modeling::mesh_generation::{NeedsEvaluation, NeedsMesh};
+use crate::plugins::modeling::mesh_generation::{DerivedGeometry, NeedsEvaluation, NeedsMesh};
 use crate::plugins::modeling::primitives::TriangleMesh;
 use crate::plugins::modeling::triangulate::ear_clip_triangulate;
 
@@ -604,6 +604,7 @@ pub fn evaluate_foundations_system(
             .entity(entity)
             .insert(mesh)
             .insert(NeedsMesh)
+            .insert(DerivedGeometry)
             .insert(LastEvaluatedTerrainVersion(terrain_version.0))
             .remove::<NeedsEvaluation>();
     }

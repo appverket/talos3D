@@ -112,6 +112,7 @@ impl Plugin for TransformPlugin {
 pub struct ActiveTransformPreview {
     pub snapshots: Vec<BoxedEntity>,
     pub live_snapshot_application: bool,
+    pub extra_originals: Vec<BoxedEntity>,
 }
 
 pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEntity>);
@@ -435,6 +436,7 @@ fn update_transform_preview(world: &mut World) {
     };
 
     let live_snapshot_application = preview_requires_snapshot_application(&preview.after);
+    remember_preview_extra_originals(world, &preview.after);
     {
         let mut active_preview = world.resource_mut::<ActiveTransformPreview>();
         active_preview.snapshots = preview.after.clone();
@@ -551,6 +553,49 @@ fn apply_live_snapshot_preview(world: &mut World, after: &[BoxedEntity]) {
     }
 }
 
+fn remember_preview_extra_originals(world: &mut World, after: &[BoxedEntity]) {
+    let initial_ids = world
+        .resource::<TransformState>()
+        .initial_snapshots
+        .iter()
+        .map(|(_, snapshot)| snapshot.element_id())
+        .collect::<HashSet<_>>();
+    let remembered_ids = world
+        .resource::<ActiveTransformPreview>()
+        .extra_originals
+        .iter()
+        .map(BoxedEntity::element_id)
+        .collect::<HashSet<_>>();
+    let to_capture = after
+        .iter()
+        .map(BoxedEntity::element_id)
+        .filter(|id| !initial_ids.contains(id) && !remembered_ids.contains(id))
+        .collect::<Vec<_>>();
+    if to_capture.is_empty() {
+        return;
+    }
+
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut captured = Vec::new();
+    for element_id in to_capture {
+        let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
+            continue;
+        };
+        let Ok(entity_ref) = world.get_entity(entity) else {
+            continue;
+        };
+        if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
+            captured.push(snapshot);
+        }
+    }
+    if !captured.is_empty() {
+        world
+            .resource_mut::<ActiveTransformPreview>()
+            .extra_originals
+            .extend(captured);
+    }
+}
+
 fn arm_scale_drag_on_mouse_press(world: &mut World) {
     if !world.resource::<InputOwnership>().is_modal() {
         return;
@@ -591,12 +636,19 @@ fn confirm_transform(world: &mut World) {
         return;
     };
 
-    let before = world
+    let mut before = world
         .resource::<TransformState>()
         .initial_snapshots
         .iter()
         .map(|(_, snapshot)| snapshot.clone())
         .collect::<Vec<_>>();
+    before.extend(
+        world
+            .resource::<ActiveTransformPreview>()
+            .extra_originals
+            .iter()
+            .cloned(),
+    );
     let label = if world.resource::<PushPullContext>().active_face.is_some() {
         "Push/Pull face"
     } else {
@@ -695,6 +747,13 @@ fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
     for snapshot in &originals {
         snapshot.apply_to(world);
     }
+    let extra_originals = world
+        .resource::<ActiveTransformPreview>()
+        .extra_originals
+        .clone();
+    for snapshot in &extra_originals {
+        snapshot.apply_to(world);
+    }
 
     // Move/Rotate/Scale only modify the entity's Transform — restore it.
     restore_preview_transforms(world);
@@ -707,6 +766,10 @@ fn restore_previews_and_clear_session(world: &mut World, was_push_pull: bool) {
     world
         .resource_mut::<ActiveTransformPreview>()
         .live_snapshot_application = false;
+    world
+        .resource_mut::<ActiveTransformPreview>()
+        .extra_originals
+        .clear();
     world.resource_mut::<TransformState>().clear();
     world.resource_mut::<PushPullContext>().active_face = None;
     world.resource_mut::<StatusBarData>().hint.clear();
@@ -2676,6 +2739,7 @@ mod tests {
                 translation: Vec3::new(10.0, 0.0, 0.0),
                 rotation: Quat::IDENTITY,
             },
+            linked_model: None,
             composite: None,
             cached_bounds: None,
         };
@@ -2707,6 +2771,7 @@ mod tests {
             member_ids: vec![ElementId(1)],
             frame: GroupFrame::identity(),
             composite: None,
+            linked_model: None,
             cached_bounds: Some(EntityBounds {
                 min: Vec3::new(100.0, 0.0, 0.0),
                 max: Vec3::new(100.0, 0.0, 0.0),
@@ -2774,6 +2839,7 @@ mod tests {
             member_ids: vec![ElementId(1)],
             frame: GroupFrame::identity(),
             composite: None,
+            linked_model: None,
             cached_bounds: None,
         }
         .into();

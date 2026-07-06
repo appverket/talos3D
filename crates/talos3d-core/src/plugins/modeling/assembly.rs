@@ -103,6 +103,26 @@ enum AssemblySnapshotJson {
     Assembly(AssemblySnapshot),
 }
 
+impl AssemblySnapshot {
+    fn spawn_fresh(&self, world: &mut World) {
+        let mut entity = world.spawn((self.element_id, self.assembly.clone()));
+        if let Some(refinement_state) = self.refinement_state {
+            entity.insert(RefinementStateComponent {
+                state: refinement_state,
+            });
+        }
+        if let Some(obligations) = &self.obligations {
+            entity.insert(obligations.clone());
+        }
+        if let Some(claim_grounding) = &self.claim_grounding {
+            entity.insert(claim_grounding.clone());
+        }
+        if let Some(authoring_provenance) = &self.authoring_provenance {
+            entity.insert(authoring_provenance.clone());
+        }
+    }
+}
+
 impl AuthoredEntity for AssemblySnapshot {
     fn as_any(&self) -> &dyn Any {
         self
@@ -186,9 +206,14 @@ impl AuthoredEntity for AssemblySnapshot {
 
     fn apply_to(&self, world: &mut World) {
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
-            if let Some(mut assembly) = world.get_mut::<SemanticAssembly>(entity) {
-                *assembly = self.assembly.clone();
+            if world.get::<SemanticAssembly>(entity).is_none() {
+                let _ = world.despawn(entity);
+                self.spawn_fresh(world);
+                return;
             }
+
+            let mut assembly = world.get_mut::<SemanticAssembly>(entity).expect("checked");
+            *assembly = self.assembly.clone();
             if let Some(refinement_state) = self.refinement_state {
                 world.entity_mut(entity).insert(RefinementStateComponent {
                     state: refinement_state,
@@ -206,21 +231,7 @@ impl AuthoredEntity for AssemblySnapshot {
                     .insert(authoring_provenance.clone());
             }
         } else {
-            let mut entity = world.spawn((self.element_id, self.assembly.clone()));
-            if let Some(refinement_state) = self.refinement_state {
-                entity.insert(RefinementStateComponent {
-                    state: refinement_state,
-                });
-            }
-            if let Some(obligations) = &self.obligations {
-                entity.insert(obligations.clone());
-            }
-            if let Some(claim_grounding) = &self.claim_grounding {
-                entity.insert(claim_grounding.clone());
-            }
-            if let Some(authoring_provenance) = &self.authoring_provenance {
-                entity.insert(authoring_provenance.clone());
-            }
+            self.spawn_fresh(world);
         }
     }
 
@@ -357,6 +368,9 @@ impl AuthoredEntity for RelationSnapshot {
         if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
             if let Some(mut relation) = world.get_mut::<SemanticRelation>(entity) {
                 *relation = self.relation.clone();
+            } else {
+                let _ = world.despawn(entity);
+                world.spawn((self.element_id, self.relation.clone()));
             }
         } else {
             world.spawn((self.element_id, self.relation.clone()));

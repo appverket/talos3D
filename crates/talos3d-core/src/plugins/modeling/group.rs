@@ -104,6 +104,33 @@ pub struct GroupMembers {
     /// Identity for a plain (flat) group. See ADR-058.
     #[serde(default)]
     pub frame: GroupFrame,
+    /// External model file backing this group, when the group is a linked model
+    /// instance. The group's frame is the linked model's local-to-scene
+    /// transform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_model: Option<LinkedModelRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkedModelRef {
+    pub path: String,
+    pub source_root_id: ElementId,
+    /// Mapping from element ids in the linked model document to element ids in
+    /// this scene instance. The initial conversion preserves ids, but the link
+    /// contract is explicit so later placement paths can allocate independent
+    /// scene ids without changing the linked document format.
+    #[serde(default)]
+    pub source_to_scene_ids: Vec<LinkedModelIdMapping>,
+    /// Content hash from the last successful load/write. Used by the live
+    /// refresh system to skip unchanged files.
+    #[serde(default)]
+    pub content_hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkedModelIdMapping {
+    pub source_id: ElementId,
+    pub scene_id: ElementId,
 }
 
 // --- Snapshot ---
@@ -120,6 +147,10 @@ pub struct GroupSnapshot {
     /// When present, this group represents a single composite solid shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composite: Option<CompositeSolid>,
+    /// External model file backing this group, when the group is a linked model
+    /// instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_model: Option<LinkedModelRef>,
     /// Cached aggregate bounding box, computed during snapshot capture.
     #[serde(skip)]
     pub cached_bounds: Option<EntityBounds>,
@@ -214,6 +245,7 @@ impl AuthoredEntity for GroupSnapshot {
                 members.name = self.name.clone();
                 members.member_ids = self.member_ids.clone();
                 members.frame = self.frame;
+                members.linked_model = self.linked_model.clone();
             }
             let mut entity_mut = world.entity_mut(entity);
             if let Some(composite) = &self.composite {
@@ -229,6 +261,7 @@ impl AuthoredEntity for GroupSnapshot {
                     name: self.name.clone(),
                     member_ids: self.member_ids.clone(),
                     frame: self.frame,
+                    linked_model: self.linked_model.clone(),
                 },
             ));
             if let Some(composite) = &self.composite {
@@ -285,6 +318,7 @@ impl AuthoredEntityFactory for GroupFactory {
                 member_ids: members.member_ids.clone(),
                 frame: members.frame,
                 composite,
+                linked_model: members.linked_model.clone(),
                 cached_bounds,
             }
             .into(),
@@ -331,6 +365,7 @@ impl AuthoredEntityFactory for GroupFactory {
             member_ids,
             frame,
             composite,
+            linked_model: None,
             cached_bounds,
         }
         .into())
@@ -344,9 +379,17 @@ impl AuthoredEntityFactory for GroupFactory {
             return;
         };
 
-        // Compute aggregate bounding box across all members (recursively)
+        if !members.frame.is_identity() {
+            if let Some(bounds) =
+                compute_group_bounds_in_frame_from_world(world, &members.member_ids, &members.frame)
+            {
+                draw_oriented_bounds_wireframe(gizmos, &bounds, &members.frame, color);
+                return;
+            }
+        }
+
         if let Some(bounds) = compute_group_bounds_from_world(world, &members.member_ids) {
-            draw_bounds_wireframe(gizmos, &bounds, color);
+            draw_axis_aligned_bounds_wireframe(gizmos, &bounds, color);
         }
     }
 
@@ -576,9 +619,91 @@ pub fn compute_group_bounds_from_world(
     any.then_some(EntityBounds { min, max })
 }
 
-/// Draw a wireframe box from an EntityBounds.
-fn draw_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Color) {
-    let corners = bounds.corners();
+/// Compute aggregate member bounds in a group's local frame from world-authored
+/// member geometry. Prefer snap/wireframe points where entities expose them so
+/// a rotated linked model gets an object-aligned box instead of an inflated
+/// inverse-transform of each member's world AABB.
+pub fn compute_group_bounds_in_frame_from_world(
+    world: &World,
+    member_ids: &[ElementId],
+    frame: &GroupFrame,
+) -> Option<EntityBounds> {
+    let registry = world.resource::<CapabilityRegistry>();
+    let inverse_rotation = frame.rotation.inverse();
+    let to_local = |point: Vec3| inverse_rotation * (point - frame.translation);
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+
+    let mut stack: Vec<ElementId> = member_ids.to_vec();
+    while let Some(id) = stack.pop() {
+        let mut q = world.try_query::<EntityRef>().unwrap();
+        let Some(entity_ref) = q
+            .iter(world)
+            .find(|e| e.get::<ElementId>().copied() == Some(id))
+        else {
+            continue;
+        };
+        if let Some(members) = entity_ref.get::<GroupMembers>() {
+            stack.extend_from_slice(&members.member_ids);
+            continue;
+        }
+
+        if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
+            let segments = snapshot.0.snap_segments();
+            if segments.is_empty() {
+                if let Some(bounds) = snapshot.bounds() {
+                    for corner in bounds.corners() {
+                        let local = to_local(corner);
+                        min = min.min(local);
+                        max = max.max(local);
+                        any = true;
+                    }
+                }
+            } else {
+                for (start, end) in segments {
+                    for point in [start, end] {
+                        let local = to_local(point);
+                        min = min.min(local);
+                        max = max.max(local);
+                        any = true;
+                    }
+                }
+            }
+        } else if let Some(aabb) = entity_ref.get::<bevy::camera::primitives::Aabb>() {
+            let center = Vec3::from(aabb.center);
+            let half = Vec3::from(aabb.half_extents);
+            let bounds = EntityBounds {
+                min: center - half,
+                max: center + half,
+            };
+            for corner in bounds.corners() {
+                let local = to_local(corner);
+                min = min.min(local);
+                max = max.max(local);
+                any = true;
+            }
+        }
+    }
+
+    any.then_some(EntityBounds { min, max })
+}
+
+fn draw_axis_aligned_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Color) {
+    draw_bounds_corners_wireframe(gizmos, &bounds.corners(), color);
+}
+
+fn draw_oriented_bounds_wireframe(
+    gizmos: &mut Gizmos,
+    bounds: &EntityBounds,
+    frame: &GroupFrame,
+    color: Color,
+) {
+    let corners = bounds.corners().map(|corner| frame.point_to_world(corner));
+    draw_bounds_corners_wireframe(gizmos, &corners, color);
+}
+
+fn draw_bounds_corners_wireframe(gizmos: &mut Gizmos, corners: &[Vec3; 8], color: Color) {
     // Bottom face edges (0-1-2-3)
     for i in 0..4 {
         gizmos.line(corners[i], corners[(i + 1) % 4], color);
@@ -623,6 +748,7 @@ pub fn group_frame_change_snapshots(
             member_ids: members.member_ids.clone(),
             frame,
             composite: composite.clone(),
+            linked_model: members.linked_model.clone(),
             cached_bounds: None,
         }
         .into()
@@ -652,6 +778,7 @@ pub fn group_membership_add_snapshots(
             member_ids: ids,
             frame: members.frame,
             composite: composite.clone(),
+            linked_model: members.linked_model.clone(),
             cached_bounds: None,
         }
         .into()

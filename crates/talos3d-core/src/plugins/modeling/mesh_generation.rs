@@ -149,6 +149,14 @@ pub struct NeedsEvaluation;
 #[derive(Component)]
 pub struct NeedsMesh;
 
+/// Marks geometry components that are generated from another authored entity.
+///
+/// A generated `TriangleMesh` may live on the same ECS entity as its authored
+/// source for rendering efficiency, but it must not win persistence or linked
+/// model capture over the source component.
+#[derive(Component)]
+pub struct DerivedGeometry;
+
 #[derive(Resource, Clone)]
 pub struct PrimitiveMaterial(pub Handle<StandardMaterial>);
 

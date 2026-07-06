@@ -16,6 +16,7 @@ pub mod geometry_health;
 pub mod ghost_geometry;
 pub mod group;
 pub mod host_chart;
+pub mod linked_model;
 pub mod mesh_generation;
 pub mod mirror;
 pub mod occurrence;
@@ -103,6 +104,8 @@ impl Plugin for ModelingPlugin {
             .init_resource::<DefinitionLibraryRegistry>()
             .init_resource::<ChangedDefinitions>()
             .init_resource::<RepresentationCache>()
+            .init_resource::<linked_model::LinkedModelReloadState>()
+            .add_systems(Update, linked_model::reload_linked_models_system)
             .register_workbench(
                 WorkbenchDescriptor::new("modeling", "Modeling")
                     .with_description("Foundational geometric modeling capabilities")
@@ -348,6 +351,106 @@ impl Plugin for ModelingPlugin {
                     capability_id: Some("modeling".to_string()),
                 },
                 execute_group,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.place_linked_model".to_string(),
+                    label: "Place Linked Model".to_string(),
+                    description: "Choose a Talos3D project file and place it into the current model as a live linked model".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "name": { "type": "string" }
+                        }
+                    })),
+                    default_shortcut: None,
+                    icon: Some("icon.link".to_string()),
+                    hint: Some("Place an external model file into this scene as a live link".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                linked_model::execute_place_linked_model,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.create_linked_model_from_selection".to_string(),
+                    label: "Create Linked Model".to_string(),
+                    description: "Save the selected group as an external linked model and keep this group connected to that file".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" },
+                            "group_id": { "type": "integer" },
+                            "name": { "type": "string" }
+                        }
+                    })),
+                    default_shortcut: None,
+                    icon: Some("icon.link".to_string()),
+                    hint: Some("Create an editable external file from the selected house or group".to_string()),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                linked_model::execute_create_linked_model,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.open_linked_model".to_string(),
+                    label: "Open Linked Model".to_string(),
+                    description: "Open the selected linked model as its own Talos3D project file"
+                        .to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "group_id": { "type": "integer" }
+                        }
+                    })),
+                    default_shortcut: None,
+                    icon: Some("icon.open".to_string()),
+                    hint: Some("Edit the external model file behind this linked group".to_string()),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                linked_model::execute_open_linked_model,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.refresh_linked_models".to_string(),
+                    label: "Refresh Linked Models".to_string(),
+                    description: "Reload linked model instances from their external files".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "group_ids": {
+                                "type": "array",
+                                "items": { "type": "integer" }
+                            },
+                            "force": { "type": "boolean" }
+                        }
+                    })),
+                    default_shortcut: None,
+                    icon: Some("icon.refresh".to_string()),
+                    hint: Some("Pull changes from linked model files into this scene".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                linked_model::execute_refresh_linked_models,
             )
             .register_command(
                 CommandDescriptor {
@@ -890,6 +993,7 @@ fn execute_group(world: &mut World, _: &Value) -> Result<CommandResult, String> 
         member_ids: selected_ids,
         frame: group::GroupFrame::default(),
         composite: None,
+        linked_model: None,
         cached_bounds,
     };
 
@@ -932,7 +1036,21 @@ fn execute_ungroup(world: &mut World, _: &Value) -> Result<CommandResult, String
     let group_ids: Vec<ElementId> = {
         let mut query =
             world.query_filtered::<(&ElementId, &group::GroupMembers), With<Selected>>();
-        query.iter(world).map(|(id, _)| *id).collect()
+        let selected = query
+            .iter(world)
+            .map(|(id, members)| (*id, members.linked_model.is_some()))
+            .collect::<Vec<_>>();
+        let linked = selected
+            .iter()
+            .filter_map(|(id, is_linked)| is_linked.then_some(id.0))
+            .collect::<Vec<_>>();
+        if !linked.is_empty() {
+            return Err(format!(
+                "Cannot ungroup linked model group(s) {:?}. This would break the live link and leave ordinary objects in the parent model; open the linked model to edit it, or use an explicit break-link workflow.",
+                linked
+            ));
+        }
+        selected.into_iter().map(|(id, _)| id).collect()
     };
 
     if group_ids.is_empty() {

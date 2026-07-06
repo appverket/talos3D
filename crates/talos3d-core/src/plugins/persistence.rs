@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -9,7 +12,7 @@ use crate::{
     capability_registry::{CapabilityRegistry, DefaultsRegistry},
     curation::{
         MaterialSpec, MaterialSpecRegistry, Nomination, NominationQueue, SourceRegistry,
-        SourceRegistryEntry, SourceTier,
+        SourceRegistryEntry,
     },
     plugins::{
         assembly_pattern_drafts::{AssemblyPatternDraftArtifact, AssemblyPatternDraftRegistry},
@@ -22,7 +25,7 @@ use crate::{
         document_state::DocumentState,
         history::{History, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
-        layers::LayerRegistry,
+        layers::{LayerRegistry, DEFAULT_LAYER_NAME},
         lighting::{ensure_default_lighting_scene, SceneLightingSettings},
         materials::{
             ensure_builtin_materials, is_builtin_material_id, material_texture_asset_ids,
@@ -48,6 +51,7 @@ const PROJECT_FILE_MIN_SUPPORTED_VERSION: u32 = PROJECT_FILE_VERSION;
 const PROJECT_FORMAT_TAG: &str = "adr049-opening-feature";
 const FEEDBACK_DURATION_SECONDS: f32 = 2.0;
 const FILE_EXTENSION: &str = "talos3d";
+const MATERIAL_REF_PREFIX: &str = "material_def.v1/";
 
 pub struct PersistencePlugin;
 
@@ -520,6 +524,183 @@ fn build_project_file(world: &mut World) -> Result<ProjectFile, String> {
     })
 }
 
+pub(crate) fn serialize_entity_records_as_project(
+    world: &World,
+    next_element_id: u64,
+    entities: Vec<PersistedEntityRecord>,
+) -> Result<Vec<u8>, String> {
+    let doc_props = world.get_resource::<DocumentProperties>().cloned();
+    let layers = referenced_project_layers(world, &entities);
+    let definitions = world
+        .get_resource::<DefinitionRegistry>()
+        .filter(|registry| !registry.list().is_empty())
+        .cloned();
+    let named_views = world
+        .get_resource::<NamedViewRegistry>()
+        .filter(|registry| !registry.views.is_empty())
+        .cloned();
+    let lighting = world.get_resource::<SceneLightingSettings>().cloned();
+    let (materials, textures) = referenced_project_materials(world, &entities);
+
+    let project = ProjectFile {
+        version: PROJECT_FILE_VERSION,
+        created_by: Some(current_project_created_by()),
+        next_element_id,
+        document_properties: doc_props,
+        layers,
+        materials,
+        textures,
+        definitions,
+        definition_libraries: None,
+        named_views,
+        lighting,
+        sources: None,
+        nominations: None,
+        material_specs: None,
+        knowledge_recipe_drafts: None,
+        knowledge_assembly_pattern_drafts: None,
+        corpus_gaps: None,
+        entities,
+    };
+    serde_json::to_vec_pretty(&project).map_err(|error| error.to_string())
+}
+
+fn referenced_project_layers(
+    world: &World,
+    entities: &[PersistedEntityRecord],
+) -> Option<LayerRegistry> {
+    let source_layers = world.get_resource::<LayerRegistry>()?;
+    let mut layer_names = BTreeSet::new();
+    for record in entities {
+        collect_layer_refs(&record.data, &mut layer_names);
+    }
+    layer_names.remove(DEFAULT_LAYER_NAME);
+    if layer_names.is_empty() {
+        return None;
+    }
+    Some(source_layers.subset_for_names(layer_names.iter().map(String::as_str)))
+}
+
+fn referenced_project_materials(
+    world: &World,
+    entities: &[PersistedEntityRecord],
+) -> (Option<MaterialRegistry>, Option<TextureRegistry>) {
+    let Some(source_materials) = world.get_resource::<MaterialRegistry>() else {
+        return (None, None);
+    };
+
+    let mut material_ids = std::collections::BTreeSet::new();
+    for record in entities {
+        collect_material_refs(&record.data, &mut material_ids);
+    }
+
+    let mut materials = MaterialRegistry::default();
+    let mut texture_ids = std::collections::BTreeSet::new();
+    for material_id in material_ids {
+        if is_builtin_material_id(&material_id) {
+            continue;
+        }
+        let Some(material) = source_materials.get(&material_id) else {
+            continue;
+        };
+        texture_ids.extend(material_texture_asset_ids(material));
+        materials.upsert(material.clone());
+    }
+
+    let materials = if materials.count() > 0 {
+        Some(materials)
+    } else {
+        None
+    };
+    let textures = if texture_ids.is_empty() {
+        None
+    } else {
+        world
+            .get_resource::<TextureRegistry>()
+            .map(|registry| registry.referenced_subset(&texture_ids))
+    };
+
+    (materials, textures)
+}
+
+fn collect_material_refs(value: &Value, material_ids: &mut std::collections::BTreeSet<String>) {
+    match value {
+        Value::String(value) => {
+            if let Some(material_id) = value.strip_prefix(MATERIAL_REF_PREFIX) {
+                material_ids.insert(material_id.to_string());
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_material_refs(value, material_ids);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_material_refs(value, material_ids);
+            }
+        }
+        Value::Bool(_) | Value::Number(_) | Value::Null => {}
+    }
+}
+
+fn collect_layer_refs(value: &Value, layer_names: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                if key == "layer" {
+                    if let Some(layer) = value.as_str() {
+                        layer_names.insert(layer.to_string());
+                    }
+                } else {
+                    collect_layer_refs(value, layer_names);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_layer_refs(value, layer_names);
+            }
+        }
+        Value::String(_) | Value::Bool(_) | Value::Number(_) | Value::Null => {}
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn deserialize_project_entity_records(
+    bytes: &[u8],
+) -> Result<(u64, Vec<PersistedEntityRecord>), String> {
+    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    validate_project_header(
+        project.version,
+        project.created_by.as_ref(),
+        "linked model project",
+    )?;
+    Ok((project.next_element_id, project.entities))
+}
+
+pub(crate) struct ProjectEntityRecords {
+    pub entities: Vec<PersistedEntityRecord>,
+    pub materials: Option<MaterialRegistry>,
+    pub textures: Option<TextureRegistry>,
+}
+
+pub(crate) fn deserialize_project_entity_records_with_assets(
+    bytes: &[u8],
+) -> Result<ProjectEntityRecords, String> {
+    let project: ProjectFile = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    validate_project_header(
+        project.version,
+        project.created_by.as_ref(),
+        "linked model project",
+    )?;
+    Ok(ProjectEntityRecords {
+        entities: project.entities,
+        materials: project.materials,
+        textures: project.textures,
+    })
+}
+
 fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     let ProjectFile {
         version,
@@ -542,27 +723,7 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         entities,
     } = project;
 
-    if !(PROJECT_FILE_MIN_SUPPORTED_VERSION..=PROJECT_FILE_VERSION).contains(&version) {
-        return Err(format!(
-            "Unsupported project version {} (supported {}..={})",
-            version, PROJECT_FILE_MIN_SUPPORTED_VERSION, PROJECT_FILE_VERSION
-        ));
-    }
-    let created_by = created_by.ok_or_else(|| {
-        format!("Project version {version} is missing the created_by project format tag")
-    })?;
-    if created_by.project_format_version != version {
-        return Err(format!(
-            "Project created_by format version {} does not match file version {}",
-            created_by.project_format_version, version
-        ));
-    }
-    if created_by.format_tag != PROJECT_FORMAT_TAG {
-        return Err(format!(
-            "Unsupported project format tag '{}' (expected '{}')",
-            created_by.format_tag, PROJECT_FORMAT_TAG
-        ));
-    }
+    validate_project_header(version, created_by.as_ref(), "project")?;
 
     let had_lighting = lighting.is_some();
     let registry = world.resource::<CapabilityRegistry>();
@@ -627,7 +788,9 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     }
     world.insert_resource(doc_props);
     world.insert_resource(layers.unwrap_or_default());
-    world.insert_resource(textures.unwrap_or_default());
+    let mut textures = textures.unwrap_or_default();
+    textures.rebuild_fingerprint_index();
+    world.insert_resource(textures);
     world.insert_resource(materials.unwrap_or_default());
     if let Some(mut materials) = world.get_resource_mut::<MaterialRegistry>() {
         ensure_builtin_materials(&mut materials);
@@ -648,23 +811,19 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
             }
         }
     }
-    let mut definitions = definitions.unwrap_or_default();
-    let migrated_def_ids = definitions.migrate_legacy_material_assignments();
-    if !migrated_def_ids.is_empty() {
-        info!(
-            "PP-099: migrated {} project definition(s) from legacy domain_data \
-             material_assignment to Definition.material_assignment: {}",
-            migrated_def_ids.len(),
-            migrated_def_ids
-                .iter()
-                .map(|id| id.0.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
+    let mut definition_registry = definitions.unwrap_or_default();
+    let migrated_definition_materials = definition_registry.migrate_legacy_material_assignments();
+    world.insert_resource(definition_registry);
+    if !migrated_definition_materials.is_empty() {
+        let mut changed =
+            world.resource_mut::<crate::plugins::modeling::occurrence::ChangedDefinitions>();
+        for definition_id in migrated_definition_materials {
+            changed.mark_changed(definition_id);
+        }
     }
-    world.insert_resource(definitions);
-    let mut definition_libraries = definition_libraries.unwrap_or_default();
-    for (library_id, migrated) in definition_libraries.migrate_legacy_material_assignments() {
+    let mut definition_library_registry = definition_libraries.unwrap_or_default();
+    for (library_id, migrated) in definition_library_registry.migrate_legacy_material_assignments()
+    {
         info!(
             "PP-099: migrated {} definition(s) in project library '{}' \
              from legacy domain_data material_assignment: {}",
@@ -677,64 +836,54 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
                 .join(", "),
         );
     }
-    world.insert_resource(definition_libraries);
+    world.insert_resource(definition_library_registry);
     if let Some(mut libraries) = world.get_resource_mut::<DefinitionLibraryRegistry>() {
         if let Err(error) = apply_bundled_definition_libraries(&mut libraries) {
             error!("Failed to restore bundled definition libraries after project load: {error}");
         }
     }
     world.insert_resource(named_views.unwrap_or_default());
-    world.insert_resource(lighting.unwrap_or_default());
-
-    // Curation substrate (ADR-040 / PP80): reload Project-tier sources
-    // into the registry. The registry itself is installed by
-    // `CurationPlugin` and already holds Canonical seeds; here we only
-    // restore the project-persisted tier. Jurisdictional/Organizational
-    // entries live in packs and aren't part of the project file.
+    if let Some(lighting) = lighting {
+        world.insert_resource(lighting);
+    } else if !had_lighting {
+        ensure_default_lighting_scene(world);
+    }
+    world.init_resource::<OpaquePersistedEntities>();
+    world.init_resource::<SourceRegistry>();
+    world.init_resource::<NominationQueue>();
+    world.init_resource::<MaterialSpecRegistry>();
+    world.init_resource::<CorpusGapQueue>();
+    world.init_resource::<RecipeDraftRegistry>();
+    world.init_resource::<AssemblyPatternDraftRegistry>();
     if let Some(mut registry) = world.get_resource_mut::<SourceRegistry>() {
-        let project_entries: Vec<SourceRegistryEntry> = sources
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|e| e.tier == SourceTier::Project)
-            .collect();
-        registry.replace_project_scope(project_entries);
+        registry.replace_project_scope(sources.unwrap_or_default());
     }
     if let Some(mut queue) = world.get_resource_mut::<NominationQueue>() {
         queue.restore(nominations.unwrap_or_default());
     }
-    world.init_resource::<MaterialSpecRegistry>();
-    world
-        .resource_mut::<MaterialSpecRegistry>()
-        .replace_project_scope(material_specs.unwrap_or_default());
-    world.init_resource::<CorpusGapQueue>();
-    world
-        .resource_mut::<CorpusGapQueue>()
-        .restore(corpus_gaps.unwrap_or_default());
-    world.init_resource::<RecipeDraftRegistry>();
-    world
-        .resource_mut::<RecipeDraftRegistry>()
-        .restore(knowledge_recipe_drafts.unwrap_or_default());
-    world.init_resource::<AssemblyPatternDraftRegistry>();
-    world
-        .resource_mut::<AssemblyPatternDraftRegistry>()
-        .restore(knowledge_assembly_pattern_drafts.unwrap_or_default());
-
-    recognized.sort_by_key(snapshot_dependency_order);
-    for snapshot in &recognized {
-        snapshot.apply_to(world);
-        stamp_authored_entity_dependencies(world, snapshot);
+    if let Some(mut registry) = world.get_resource_mut::<MaterialSpecRegistry>() {
+        registry.replace_project_scope(material_specs.unwrap_or_default());
     }
-    focus_camera_on_loaded_snapshots(world, &recognized);
-
+    if let Some(mut queue) = world.get_resource_mut::<CorpusGapQueue>() {
+        queue.restore(corpus_gaps.unwrap_or_default());
+    }
+    if let Some(mut registry) = world.get_resource_mut::<RecipeDraftRegistry>() {
+        registry.restore(knowledge_recipe_drafts.unwrap_or_default());
+    }
+    if let Some(mut registry) = world.get_resource_mut::<AssemblyPatternDraftRegistry>() {
+        registry.restore(knowledge_assembly_pattern_drafts.unwrap_or_default());
+    }
     if !opaque.is_empty() {
         warn!(
             "Loaded {} opaque persisted entity record(s); they will be preserved on save but are not editable until a matching authored-entity factory is registered",
             opaque.len()
         );
     }
-    world.insert_resource(OpaquePersistedEntities(opaque));
-    if !had_lighting {
-        ensure_default_lighting_scene(world);
+    world.resource_mut::<OpaquePersistedEntities>().0 = opaque;
+    recognized.sort_by_key(snapshot_dependency_order);
+    for snapshot in &recognized {
+        snapshot.apply_to(world);
+        stamp_authored_entity_dependencies(world, snapshot);
     }
     world
         .resource_mut::<ElementIdAllocator>()
@@ -746,7 +895,36 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world
         .resource_mut::<NextState<ActiveTool>>()
         .set(ActiveTool::Select);
+    focus_camera_on_loaded_snapshots(world, &recognized);
+    Ok(())
+}
 
+fn validate_project_header(
+    version: u32,
+    created_by: Option<&ProjectCreatedBy>,
+    label: &str,
+) -> Result<(), String> {
+    if !(PROJECT_FILE_MIN_SUPPORTED_VERSION..=PROJECT_FILE_VERSION).contains(&version) {
+        return Err(format!(
+            "Unsupported project version {} (supported {}..={})",
+            version, PROJECT_FILE_MIN_SUPPORTED_VERSION, PROJECT_FILE_VERSION
+        ));
+    }
+    let created_by = created_by.ok_or_else(|| {
+        format!("{label} version {version} is missing the created_by project format tag")
+    })?;
+    if created_by.project_format_version != version {
+        return Err(format!(
+            "Project created_by format version {} does not match file version {}",
+            created_by.project_format_version, version
+        ));
+    }
+    if created_by.format_tag != PROJECT_FORMAT_TAG {
+        return Err(format!(
+            "Unsupported project format tag '{}' (expected '{}')",
+            created_by.format_tag, PROJECT_FORMAT_TAG
+        ));
+    }
     Ok(())
 }
 
@@ -1951,6 +2129,111 @@ mod tests {
     }
 
     #[test]
+    fn serialize_entity_records_as_project_persists_referenced_materials_and_textures() {
+        let mut world = World::new();
+        let mut materials = MaterialRegistry::default();
+        let mut textures = TextureRegistry::default();
+
+        let mut wall_material = MaterialDef::new("Linked Wall");
+        wall_material.id = "mat-linked-wall".to_string();
+        wall_material.base_color = [0.8, 0.1, 0.05, 1.0];
+        wall_material.base_color_texture = Some(TextureRef::Embedded {
+            data: "referenced-bytes".to_string(),
+            mime: "image/png".to_string(),
+        });
+        normalize_material_textures(&mut wall_material, &mut textures);
+        let referenced_texture_id = match wall_material.base_color_texture.as_ref() {
+            Some(TextureRef::TextureAsset { id }) => id.clone(),
+            other => panic!("expected normalized texture asset, got {other:?}"),
+        };
+        let unreferenced_texture_id = textures.intern_embedded(
+            "unreferenced-bytes".to_string(),
+            "image/png".to_string(),
+            TextureColorSpace::Srgb,
+            TextureChannelIntent::BaseColor,
+        );
+
+        let mut unused_material = MaterialDef::new("Unused");
+        unused_material.id = "mat-unused".to_string();
+        materials.upsert(wall_material);
+        materials.upsert(unused_material);
+        world.insert_resource(materials);
+        world.insert_resource(textures);
+
+        let entities = vec![PersistedEntityRecord {
+            type_name: "box".to_string(),
+            data: serde_json::json!({
+                "element_id": 1,
+                "material_assignment": {
+                    "type": "single",
+                    "render": "material_def.v1/mat-linked-wall"
+                }
+            }),
+        }];
+
+        let bytes =
+            serialize_entity_records_as_project(&world, 2, entities).expect("linked project saves");
+        let project: ProjectFile =
+            serde_json::from_slice(&bytes).expect("linked project should deserialize");
+        let saved_materials = project
+            .materials
+            .expect("referenced project material should persist");
+        assert!(saved_materials.get("mat-linked-wall").is_some());
+        assert!(saved_materials.get("mat-unused").is_none());
+
+        let saved_textures = project
+            .textures
+            .expect("referenced material texture should persist");
+        assert!(saved_textures.get(&referenced_texture_id).is_some());
+        assert!(saved_textures.get(&unreferenced_texture_id).is_none());
+    }
+
+    #[test]
+    fn serialize_entity_records_as_project_prunes_unreferenced_layers() {
+        let mut world = World::new();
+        let mut layers = LayerRegistry::default();
+        layers.ensure_layer("HOJDKURVA");
+        layers.ensure_layer("VAG_KANT");
+        layers.ensure_layer("House");
+        world.insert_resource(layers);
+
+        let default_only = vec![PersistedEntityRecord {
+            type_name: "box".to_string(),
+            data: serde_json::json!({
+                "element_id": 1,
+                "layer": "Default"
+            }),
+        }];
+        let bytes = serialize_entity_records_as_project(&world, 2, default_only)
+            .expect("linked project saves");
+        let project: ProjectFile =
+            serde_json::from_slice(&bytes).expect("linked project should deserialize");
+        assert!(
+            project.layers.is_none(),
+            "default-only linked projects should not carry site layer metadata"
+        );
+
+        let house_layer = vec![PersistedEntityRecord {
+            type_name: "box".to_string(),
+            data: serde_json::json!({
+                "element_id": 1,
+                "layer": "House"
+            }),
+        }];
+        let bytes = serialize_entity_records_as_project(&world, 2, house_layer)
+            .expect("linked project saves");
+        let project: ProjectFile =
+            serde_json::from_slice(&bytes).expect("linked project should deserialize");
+        let saved_layers = project
+            .layers
+            .expect("referenced non-default layer should persist");
+        assert!(saved_layers.layers.contains_key("Default"));
+        assert!(saved_layers.layers.contains_key("House"));
+        assert!(!saved_layers.layers.contains_key("HOJDKURVA"));
+        assert!(!saved_layers.layers.contains_key("VAG_KANT"));
+    }
+
+    #[test]
     fn load_project_promotes_legacy_drawing_metadata_entities() {
         let mut world = World::new();
         world.insert_resource(CapabilityRegistry::default());
@@ -2144,6 +2427,17 @@ mod tests {
 
         // === Save and reload =================================================
         let project = build_project_file(&mut source).expect("project should serialize");
+        assert!(
+            project.entities.iter().any(|record| {
+                record.type_name == "semantic_assembly"
+                    && record.data.as_object().and_then(|object| {
+                        object
+                            .values()
+                            .find_map(|value| value.get("element_id").and_then(Value::as_u64))
+                    }) == Some(assembly_id.0)
+            }),
+            "source assembly should be serialized before reload"
+        );
         let json = serde_json::to_string(&project).expect("project should serialize to JSON");
         let project: ProjectFile =
             serde_json::from_str(&json).expect("project should deserialize from JSON");
@@ -2172,10 +2466,31 @@ mod tests {
 
         // === Verify the surviving SemanticAssembly ===========================
         let mut q = target.query::<(&ElementId, &SemanticAssembly)>();
+        let loaded_entities = {
+            let mut entity_query = target.query::<(
+                &ElementId,
+                Option<&SemanticAssembly>,
+                Option<&OccurrenceIdentity>,
+            )>();
+            entity_query
+                .iter(&target)
+                .map(|(element_id, assembly, occurrence)| {
+                    format!(
+                        "{}:assembly={},occurrence={}",
+                        element_id.0,
+                        assembly.is_some(),
+                        occurrence.is_some()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let (_, survivor) = q
             .iter(&target)
             .find(|(eid, _)| **eid == assembly_id)
-            .expect("source assembly survives reload");
+            .unwrap_or_else(|| {
+                panic!("source assembly survives reload; loaded: {loaded_entities}")
+            });
         assert_eq!(survivor.members.len(), 1);
         assert_eq!(survivor.members[0].target, wall_a);
         assert_eq!(survivor.members[0].role, "realization");
@@ -2452,6 +2767,17 @@ mod tests {
 
         // === Save and reload =================================================
         let project = build_project_file(&mut source).expect("project should serialize");
+        assert!(
+            project.entities.iter().any(|record| {
+                record.type_name == "semantic_assembly"
+                    && record.data.as_object().and_then(|object| {
+                        object
+                            .values()
+                            .find_map(|value| value.get("element_id").and_then(Value::as_u64))
+                    }) == Some(assembly_id.0)
+            }),
+            "source assembly should be serialized before reload"
+        );
         let json = serde_json::to_string(&project).expect("project should serialize to JSON");
         let project: ProjectFile =
             serde_json::from_str(&json).expect("project should deserialize from JSON");

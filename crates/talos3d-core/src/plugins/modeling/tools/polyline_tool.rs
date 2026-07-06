@@ -3,9 +3,9 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 use crate::plugins::{
     commands::{CreateEntityCommand, CreatePolylineCommand},
     cursor::{CursorWorldPos, DrawingPlane},
-    egui_chrome::EguiWantsInput,
     face_edit::FaceEditContext,
     identity::ElementIdAllocator,
+    input_ownership::InputOwnership,
     modeling::{
         generic_snapshot::PrimitiveSnapshot,
         primitives::ShapeRotation,
@@ -25,7 +25,7 @@ const CLOSE_THRESHOLD_PIXELS: f32 = 15.0;
 #[derive(SystemParam)]
 struct PolylineClickContext<'w, 's> {
     mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
-    egui_wants_input: Res<'w, EguiWantsInput>,
+    ownership: Res<'w, InputOwnership>,
     cursor_world_pos: Res<'w, CursorWorldPos>,
     drawing_plane: Res<'w, DrawingPlane>,
     camera_query: Query<'w, 's, (&'static Camera, &'static GlobalTransform)>,
@@ -40,7 +40,7 @@ struct PolylineClickContext<'w, 's> {
 #[derive(SystemParam)]
 struct PolylineFinishContext<'w> {
     keys: Res<'w, ButtonInput<KeyCode>>,
-    egui_wants_input: Res<'w, EguiWantsInput>,
+    ownership: Res<'w, InputOwnership>,
     drawing_plane: Res<'w, DrawingPlane>,
     face_context: ResMut<'w, FaceEditContext>,
     create_polyline: MessageWriter<'w, CreatePolylineCommand>,
@@ -84,12 +84,12 @@ fn cleanup_polyline_tool(mut commands: Commands) {
 
 fn cancel_polyline_tool(
     keys: Res<ButtonInput<KeyCode>>,
-    egui_wants_input: Res<EguiWantsInput>,
+    ownership: Res<InputOwnership>,
     mut state: ResMut<PolylineToolState>,
     mut next_active_tool: ResMut<NextState<ActiveTool>>,
     mut status_bar_data: ResMut<StatusBarData>,
 ) {
-    if egui_wants_input.keyboard || !keys.just_pressed(KeyCode::Escape) {
+    if !ownership.is_idle() || !keys.just_pressed(KeyCode::Escape) {
         return;
     }
 
@@ -117,7 +117,7 @@ fn close_threshold_world(camera_query: &Query<(&Camera, &GlobalTransform)>, star
 }
 
 fn handle_polyline_clicks(mut cx: PolylineClickContext, mut state: ResMut<PolylineToolState>) {
-    if cx.egui_wants_input.pointer || !cx.mouse_buttons.just_pressed(MouseButton::Left) {
+    if !cx.ownership.is_idle() || !cx.mouse_buttons.just_pressed(MouseButton::Left) {
         return;
     }
 
@@ -171,10 +171,7 @@ fn handle_polyline_clicks(mut cx: PolylineClickContext, mut state: ResMut<Polyli
 }
 
 fn finish_polyline_on_enter(mut cx: PolylineFinishContext, mut state: ResMut<PolylineToolState>) {
-    if cx.egui_wants_input.keyboard
-        || !cx.keys.just_pressed(KeyCode::Enter)
-        || state.points.len() < 2
-    {
+    if !cx.ownership.is_idle() || !cx.keys.just_pressed(KeyCode::Enter) || state.points.len() < 2 {
         return;
     }
 
