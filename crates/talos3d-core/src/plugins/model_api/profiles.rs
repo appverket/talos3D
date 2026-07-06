@@ -293,7 +293,10 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("definition.list", ToolCategory::Definitions),
     ("definition.update", ToolCategory::Definitions),
     ("definition.validate", ToolCategory::Definitions),
-    ("definition.validate_host_contract", ToolCategory::Definitions),
+    (
+        "definition.validate_host_contract",
+        ToolCategory::Definitions,
+    ),
     ("occurrence.place", ToolCategory::Definitions),
     ("occurrence.resolve", ToolCategory::Definitions),
     ("occurrence.explain", ToolCategory::Definitions),
@@ -376,7 +379,10 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
         "occurrence.clear_material_override",
         ToolCategory::ModelingExtended,
     ),
-    ("occurrence.update_overrides", ToolCategory::ModelingExtended),
+    (
+        "occurrence.update_overrides",
+        ToolCategory::ModelingExtended,
+    ),
     ("occurrence.make_unique", ToolCategory::ModelingExtended),
     (
         "semantic_shadow.accept_candidate",
@@ -398,10 +404,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("get_render_settings", ToolCategory::Presentation),
     ("set_render_settings", ToolCategory::Presentation),
     // --- Drafting / 2D ---
-    (
-        "place_dimension_between_handles",
-        ToolCategory::Drafting2d,
-    ),
+    ("place_dimension_between_handles", ToolCategory::Drafting2d),
     ("place_dimension_line", ToolCategory::Drafting2d),
     ("place_guide_line", ToolCategory::Drafting2d),
     ("place_sheet_dimension", ToolCategory::Drafting2d),
@@ -488,17 +491,18 @@ impl SessionProfileState {
 /// rather than failing startup.
 pub(super) fn default_profile_from_env() -> CapabilityProfile {
     match std::env::var("TALOS3D_MCP_PROFILE") {
-        Ok(value) if !value.trim().is_empty() => {
-            CapabilityProfile::from_name(&value).unwrap_or_else(|| {
+        Ok(value) if !value.trim().is_empty() => CapabilityProfile::from_name(&value)
+            .unwrap_or_else(|| {
                 eprintln!(
                     "invalid TALOS3D_MCP_PROFILE value {value:?}; using '{}' \
                      (known profiles: {})",
                     CapabilityProfile::DEFAULT.name(),
-                    CapabilityProfile::ALL.map(CapabilityProfile::name).join(", ")
+                    CapabilityProfile::ALL
+                        .map(CapabilityProfile::name)
+                        .join(", ")
                 );
                 CapabilityProfile::DEFAULT
-            })
-        }
+            }),
         _ => CapabilityProfile::DEFAULT,
     }
 }

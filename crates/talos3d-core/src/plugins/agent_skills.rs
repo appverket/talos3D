@@ -56,6 +56,22 @@ pub struct AgentSkill {
     #[serde(default)]
     pub referenced_tool_ids: Vec<String>,
     #[serde(default)]
+    pub required_tool_ids: Vec<String>,
+    #[serde(default)]
+    pub forbidden_tool_ids: Vec<String>,
+    #[serde(default)]
+    pub validation_tool_ids: Vec<String>,
+    #[serde(default)]
+    pub success_criteria: Vec<String>,
+    #[serde(default)]
+    pub stop_conditions: Vec<String>,
+    #[serde(default)]
+    pub screenshot_requirements: Vec<String>,
+    #[serde(default)]
+    pub common_failure_modes: Vec<String>,
+    #[serde(default)]
+    pub regression_prompt_ids: Vec<String>,
+    #[serde(default)]
     pub next_skill_ids: Vec<AgentSkillId>,
     pub body_markdown: String,
     #[serde(default)]
@@ -72,6 +88,11 @@ impl AgentSkill {
             summary: self.summary.clone(),
             task_tags: self.task_tags.clone(),
             referenced_tool_ids: self.referenced_tool_ids.clone(),
+            required_tool_ids: self.required_tool_ids.clone(),
+            forbidden_tool_ids: self.forbidden_tool_ids.clone(),
+            validation_tool_ids: self.validation_tool_ids.clone(),
+            success_criteria: self.success_criteria.clone(),
+            stop_conditions: self.stop_conditions.clone(),
             trust_level: self.trust_level.as_str().to_string(),
             source_path: self.source_path.clone(),
         }
@@ -107,6 +128,11 @@ pub struct AgentSkillSummary {
     pub summary: String,
     pub task_tags: Vec<String>,
     pub referenced_tool_ids: Vec<String>,
+    pub required_tool_ids: Vec<String>,
+    pub forbidden_tool_ids: Vec<String>,
+    pub validation_tool_ids: Vec<String>,
+    pub success_criteria: Vec<String>,
+    pub stop_conditions: Vec<String>,
     pub trust_level: String,
     pub source_path: Option<String>,
 }
@@ -132,6 +158,22 @@ pub struct AgentSkillDraftRequest {
     #[serde(default)]
     pub referenced_tool_ids: Vec<String>,
     #[serde(default)]
+    pub required_tool_ids: Vec<String>,
+    #[serde(default)]
+    pub forbidden_tool_ids: Vec<String>,
+    #[serde(default)]
+    pub validation_tool_ids: Vec<String>,
+    #[serde(default)]
+    pub success_criteria: Vec<String>,
+    #[serde(default)]
+    pub stop_conditions: Vec<String>,
+    #[serde(default)]
+    pub screenshot_requirements: Vec<String>,
+    #[serde(default)]
+    pub common_failure_modes: Vec<String>,
+    #[serde(default)]
+    pub regression_prompt_ids: Vec<String>,
+    #[serde(default)]
     pub next_skill_ids: Vec<String>,
     pub body_markdown: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,6 +189,14 @@ impl AgentSkillDraftRequest {
             summary: self.summary,
             task_tags: self.task_tags,
             referenced_tool_ids: self.referenced_tool_ids,
+            required_tool_ids: self.required_tool_ids,
+            forbidden_tool_ids: self.forbidden_tool_ids,
+            validation_tool_ids: self.validation_tool_ids,
+            success_criteria: self.success_criteria,
+            stop_conditions: self.stop_conditions,
+            screenshot_requirements: self.screenshot_requirements,
+            common_failure_modes: self.common_failure_modes,
+            regression_prompt_ids: self.regression_prompt_ids,
             next_skill_ids: self.next_skill_ids.into_iter().map(AgentSkillId).collect(),
             body_markdown: self.body_markdown,
             trust_level: AgentSkillTrustLevel::SessionDraft,
@@ -229,6 +279,14 @@ mod tests {
             summary: "Hosted window workflow".into(),
             task_tags: vec!["window".into(), "hosted_component".into()],
             referenced_tool_ids: vec!["definition.instantiate_hosted".into()],
+            required_tool_ids: Vec::new(),
+            forbidden_tool_ids: Vec::new(),
+            validation_tool_ids: Vec::new(),
+            success_criteria: Vec::new(),
+            stop_conditions: Vec::new(),
+            screenshot_requirements: Vec::new(),
+            common_failure_modes: Vec::new(),
+            regression_prompt_ids: Vec::new(),
             next_skill_ids: vec![],
             body_markdown: "Use Definitions.".into(),
             trust_level: AgentSkillTrustLevel::Shipped,
@@ -251,6 +309,14 @@ mod tests {
             summary: "Example".into(),
             task_tags: vec![],
             referenced_tool_ids: vec![],
+            required_tool_ids: vec![],
+            forbidden_tool_ids: vec![],
+            validation_tool_ids: vec![],
+            success_criteria: vec![],
+            stop_conditions: vec![],
+            screenshot_requirements: vec![],
+            common_failure_modes: vec![],
+            regression_prompt_ids: vec![],
             next_skill_ids: vec![],
             body_markdown: "Body".into(),
             source_path: None,

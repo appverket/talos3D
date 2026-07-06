@@ -16,7 +16,8 @@ use serde_json::{Map, Value};
 
 use talos3d_core::curation::{
     authoring_script::{
-        ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, Postcondition, Step, StepId,
+        ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, Postcondition,
+        ScriptInstruction, Step, StepId,
     },
     identity::AssetKindId,
     replay::{
@@ -103,7 +104,7 @@ impl PostconditionOracle for AlwaysFailOracle {
 fn one_step_script() -> AuthoringScript {
     let mut s = AuthoringScript::stub(MutationScope::None);
     s.allowed_tools.insert(McpToolId::new("my_tool"));
-    s.steps.push(Step {
+    s.steps.push(ScriptInstruction::Call(Step {
         id: StepId::new("step1"),
         tool: McpToolId::new("my_tool"),
         args: BTreeMap::new(),
@@ -114,7 +115,7 @@ fn one_step_script() -> AuthoringScript {
         },
         essential: true,
         precondition: None,
-    });
+    }));
     s
 }
 

@@ -986,6 +986,10 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
 
     fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity>;
 
+    fn capture_role(&self, _entity_ref: &EntityRef, _world: &World) -> SnapshotCaptureRole {
+        SnapshotCaptureRole::PrimaryAuthored
+    }
+
     fn from_persisted_json(&self, data: &Value) -> Result<BoxedEntity, String>;
 
     fn from_create_request(&self, world: &World, request: &Value) -> Result<BoxedEntity, String>;
@@ -1047,6 +1051,12 @@ pub trait AuthoredEntityFactory: Send + Sync + 'static {
     fn dependency_edges(&self, _world: &World, _entity: Entity) -> EntityDependencies {
         EntityDependencies::empty()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotCaptureRole {
+    PrimaryAuthored,
+    DerivedGeometry,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1360,9 +1370,19 @@ impl CapabilityRegistry {
     }
 
     pub fn capture_snapshot(&self, entity_ref: &EntityRef, world: &World) -> Option<BoxedEntity> {
-        self.ordered_factories
-            .iter()
-            .find_map(|factory| factory.capture_snapshot(entity_ref, world))
+        let mut derived = None;
+        for factory in &self.ordered_factories {
+            let Some(snapshot) = factory.capture_snapshot(entity_ref, world) else {
+                continue;
+            };
+            match factory.capture_role(entity_ref, world) {
+                SnapshotCaptureRole::PrimaryAuthored => return Some(snapshot),
+                SnapshotCaptureRole::DerivedGeometry => {
+                    derived.get_or_insert(snapshot);
+                }
+            }
+        }
+        derived
     }
 
     pub fn capture_user_facing_snapshot(

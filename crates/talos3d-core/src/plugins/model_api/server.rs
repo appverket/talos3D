@@ -158,8 +158,7 @@ impl ModelApiServer {
     /// fall through to the router's own "tool not found" error.
     pub(super) fn tool_call_allowed(&self, tool_name: &str) -> Result<(), McpError> {
         let profile = self.profile_state.get();
-        if profile_allows(profile, tool_name)
-            || !profile_tool_catalog().router.has_route(tool_name)
+        if profile_allows(profile, tool_name) || !profile_tool_catalog().router.has_route(tool_name)
         {
             return Ok(());
         }
@@ -3893,6 +3892,49 @@ pub struct GuidanceCardInfo {
     /// cards. Clients that only need the summary may ignore this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_markdown: Option<String>,
+    /// SDLC phase this card primarily supports (`requirements`, `design`,
+    /// `implementation`, `qa`, `review`, `maintenance`) when useful.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Tool calls that should appear in a well-formed agent trajectory before
+    /// the card's claim is considered satisfied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_trajectory_tool_ids: Vec<String>,
+    /// Output/evidence rubric for this card. These are agent-facing eval
+    /// criteria, not deterministic validators by themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub success_criteria: Vec<String>,
+    /// Conditions where the agent should stop, record a gap, or ask the user
+    /// instead of improvising.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_conditions: Vec<String>,
+    /// Evidence that should be visible in the agent run trace or final report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observability_events: Vec<String>,
+    /// Recommended capability profile for the card's task shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_profile: Option<String>,
+}
+
+impl Default for GuidanceCardInfo {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            title: String::new(),
+            task_tags: Vec::new(),
+            summary: String::new(),
+            referenced_tool_ids: Vec::new(),
+            next_card_ids: Vec::new(),
+            json_examples: Vec::new(),
+            body_markdown: None,
+            phase: None,
+            required_trajectory_tool_ids: Vec::new(),
+            success_criteria: Vec::new(),
+            stop_conditions: Vec::new(),
+            observability_events: Vec::new(),
+            recommended_profile: None,
+        }
+    }
 }
 
 // --- PP74 request parameter structs ---
@@ -6573,7 +6615,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         name = "get_capability_snapshot",
         description = "Return a bounded dynamic-knowledge capability index for progressive MCP discovery. \
             The default response is compact: counts, short id lists, first-class no-curated-path summaries, \
-            and up to five must-read guidance card ids. Pass expanded=true for diagnostics."
+            must-read guidance card ids, and agentic run-contract pointers. Pass expanded=true for diagnostics."
     )]
     pub(super) async fn get_capability_snapshot_tool(
         &self,
@@ -7046,7 +7088,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     #[tool(
         name = "get_guidance_card",
         description = "Fetch one progressive guidance card by id, including referenced tool ids \
-            and schema-shaped JSON examples."
+            schema-shaped JSON examples, and optional trajectory/success/stop-condition rubric fields."
     )]
     pub(super) async fn get_guidance_card_tool(
         &self,

@@ -48,9 +48,7 @@ use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
 #[cfg(feature = "model-api")]
-use crate::plugins::render_pipeline::RenderSettings;
-#[cfg(feature = "model-api")]
-use crate::plugins::render_pipeline::RenderTonemapping;
+use crate::plugins::render_pipeline::{EdgeDisplayMode, RenderSettings, RenderTonemapping};
 #[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
@@ -94,11 +92,7 @@ use std::{
 
 #[cfg(feature = "model-api")]
 use rmcp::{
-    handler::server::{
-        router::tool::ToolRouter,
-        tool::ToolCallContext,
-        wrapper::Parameters,
-    },
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
         CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
         ServerCapabilities, ServerInfo, Tool,
@@ -2978,14 +2972,30 @@ fn handle_set_render_settings(
     if let Some(value) = request.ssr_use_secant {
         settings.ssr_use_secant = value;
     }
+    if let Some(mode) = request.edge_display_mode {
+        let mode = EdgeDisplayMode::from_str(&mode)
+            .ok_or_else(|| format!("Unknown edge display mode '{mode}'"))?;
+        settings.set_edge_display_mode(mode);
+    }
     if let Some(value) = request.wireframe_overlay_enabled {
-        settings.wireframe_overlay_enabled = value;
+        if value {
+            settings.set_edge_display_mode(EdgeDisplayMode::Wireframe);
+        } else if settings.edge_display_mode() == EdgeDisplayMode::Wireframe {
+            settings.set_edge_display_mode(EdgeDisplayMode::Shaded);
+        }
     }
     if let Some(value) = request.contour_overlay_enabled {
         settings.contour_overlay_enabled = value;
+        if value {
+            settings.set_edge_display_mode(EdgeDisplayMode::Shaded);
+        }
     }
     if let Some(value) = request.visible_edge_overlay_enabled {
-        settings.visible_edge_overlay_enabled = value;
+        if value {
+            settings.set_edge_display_mode(EdgeDisplayMode::Outline);
+        } else if settings.edge_display_mode() == EdgeDisplayMode::Outline {
+            settings.set_edge_display_mode(EdgeDisplayMode::Shaded);
+        }
     }
     if let Some(value) = request.grid_enabled {
         settings.grid_enabled = value;
@@ -3113,7 +3123,18 @@ fn parse_alpha_mode(s: &str) -> crate::plugins::materials::MaterialAlphaMode {
 
 #[cfg(feature = "model-api")]
 fn handle_get_instance_info(world: &World) -> InstanceInfo {
-    InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>())
+    let mut info = InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>());
+    if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
+        if !guidance.is_empty() {
+            info.authoring_guidance_id = Some(guidance.guidance_id.clone());
+            info.authoring_guidance_version = Some(guidance.version);
+            info.harness_drift_note = Some(format!(
+                "This running app serves authoring guidance {} version {}. Treat this live MCP value as authoritative; if checkout docs/source claim a newer version, rebuild/restart before authoring.",
+                guidance.guidance_id, guidance.version
+            ));
+        }
+    }
+    info
 }
 
 #[cfg(feature = "model-api")]
@@ -3665,6 +3686,7 @@ fn handle_split_box_face(
                 face_b,
             }],
         }),
+        linked_model: None,
         cached_bounds: None,
     };
 
@@ -4344,6 +4366,7 @@ fn physical_group_snapshot(
         member_ids,
         frame: GroupFrame::default(),
         composite: None,
+        linked_model: None,
         cached_bounds,
     }
     .into()
@@ -10373,6 +10396,7 @@ pub fn handle_promote_refinement(
 
 /// Every `ElementId` currently present in the world. Snapshotted before and
 /// after recipe execution to attribute created elements to the call.
+#[cfg(feature = "model-api")]
 fn collect_element_ids(world: &mut World) -> std::collections::HashSet<u64> {
     // Register the component so the query can be built even on a world where
     // no ElementId entity has been spawned yet.
@@ -10391,6 +10415,7 @@ fn collect_element_ids(world: &mut World) -> std::collections::HashSet<u64> {
 /// refinement claim failed. A bare error here read as "nothing happened" and a
 /// blind retry duplicated geometry. A gate block with no side effects remains
 /// an error, preserving plain promote semantics.
+#[cfg(feature = "model-api")]
 fn promote_refinement_structured(
     world: &mut World,
     element_id: u64,
@@ -11182,7 +11207,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
 
     let id_limit = if expanded { usize::MAX } else { 12 };
     let gap_limit = if expanded { usize::MAX } else { 8 };
-    let guidance_limit: usize = 9;
+    let guidance_limit: usize = 12;
 
     let take_ids = |mut ids: Vec<String>| {
         ids.sort();
@@ -11355,6 +11380,8 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     let mut must_read_guidance_card_ids = Vec::new();
     let mut guidance_overrides = Vec::new();
     must_read_guidance_card_ids.push("dkg.snapshot.start".into());
+    must_read_guidance_card_ids.push("dkg.authoring_run_contract".into());
+    must_read_guidance_card_ids.push("dkg.trajectory_eval".into());
     must_read_guidance_card_ids.push("dkg.no_curated_path".into());
     // Data-driven proactive "skill" cards come next, before the authoring
     // override + references, so a passage that encodes generative authoring
@@ -12371,6 +12398,8 @@ fn normalize_curated_path_text(value: &str) -> String {
 fn guidance_card_ids_for_discovery(element_class: Option<&str>) -> Vec<String> {
     let mut ids = vec![
         "dkg.snapshot.start".into(),
+        "dkg.authoring_run_contract".into(),
+        "dkg.trajectory_eval".into(),
         "mcp_tool:discover_curated_paths".into(),
         "dkg.design_resources".into(),
         "dkg.no_curated_path".into(),
@@ -12471,6 +12500,7 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                 next_card_ids: Vec::new(),
                 json_examples: vec![serde_json::json!({ "passage_ref": passage_ref })],
                 body_markdown: None,
+                ..GuidanceCardInfo::default()
             });
         }
     }
@@ -12489,6 +12519,7 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                 next_card_ids: Vec::new(),
                 json_examples: Vec::new(),
                 body_markdown: None,
+                ..GuidanceCardInfo::default()
             });
             for reference in &guidance.references {
                 let referenced_tool_ids = if reference.kind == "mcp_tool" {
@@ -12510,6 +12541,7 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                     next_card_ids: Vec::new(),
                     json_examples: Vec::new(),
                     body_markdown: None,
+                    ..GuidanceCardInfo::default()
                 });
             }
             // On-demand chapter cards. Populated by capability crates via
@@ -12528,6 +12560,7 @@ fn guidance_cards(world: &World) -> Vec<GuidanceCardInfo> {
                         "card_id": chapter.id
                     })],
                     body_markdown: Some(chapter.body_markdown.clone()),
+                    ..GuidanceCardInfo::default()
                 });
             }
         }
@@ -12593,6 +12626,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.snapshot.start".into()],
             json_examples: vec![serde_json::json!({})],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "mcp_tool:select_recipe".into(),
@@ -12606,6 +12640,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "context": { "target_state": "Constructible", "include_session_drafts": true }
             })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "mcp_tool:get_capability_snapshot".into(),
@@ -12616,6 +12651,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["mcp_tool:discover_curated_paths".into()],
             json_examples: vec![serde_json::json!({ "expanded": true })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "mcp_tool:discover_curated_paths".into(),
@@ -12636,6 +12672,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 }),
             ],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "mcp_tool:request_corpus_expansion".into(),
@@ -12650,6 +12687,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "target_state": "Constructible"
             })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "mcp_tool:definition.create".into(),
@@ -12660,6 +12698,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({ "name": "Grounded family name" })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "mcp_tool:definition.draft.derive".into(),
@@ -12670,6 +12709,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.close_gap".into()],
             json_examples: vec![serde_json::json!({ "base_definition_id": "def_..." })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "parametric_substrate:roof_system".into(),
@@ -12683,6 +12723,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "element_class": "roof_system"
             })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "canonical_decision:decisions/ADR-042-Agentic-Knowledge-Curation-And-Construction-Expertise.md".into(),
@@ -12693,6 +12734,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: vec!["dkg.no_curated_path".into()],
             json_examples: Vec::new(),
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.snapshot.start".into(),
@@ -12701,6 +12743,8 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             summary: "Call get_capability_snapshot before authoring so current registries, gaps, and must-read cards are visible.".into(),
             referenced_tool_ids: vec!["get_capability_snapshot".into()],
             next_card_ids: vec![
+                "dkg.authoring_run_contract".into(),
+                "dkg.trajectory_eval".into(),
                 "dkg.design_resources".into(),
                 "dkg.no_curated_path".into(),
                 "dkg.building_skeleton".into(),
@@ -12708,6 +12752,177 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             ],
             json_examples: vec![serde_json::json!({ "expanded": false })],
             body_markdown: None,
+            phase: Some("requirements".into()),
+            required_trajectory_tool_ids: vec![
+                "get_instance_info".into(),
+                "get_authoring_guidance".into(),
+                "get_capability_snapshot".into(),
+            ],
+            success_criteria: vec![
+                "The agent knows the active instance, guidance version, capability profile, known gaps, and must-read cards before editing.".into(),
+                "The final report names any required guidance card or skill that could not be fetched.".into(),
+            ],
+            stop_conditions: vec![
+                "The connected instance is not the intended Talos3D app.".into(),
+                "A must-read guidance card or skill id returned by the snapshot cannot be resolved.".into(),
+            ],
+            observability_events: vec![
+                "instance_id and guidance version read".into(),
+                "capability profile and must-read cards captured".into(),
+            ],
+            recommended_profile: Some("inspection before edits; authoring only when writing".into()),
+            ..GuidanceCardInfo::default()
+        },
+        GuidanceCardInfo {
+            id: "dkg.authoring_run_contract".into(),
+            title: "Authoring Run Contract".into(),
+            task_tags: vec![
+                "authoring".into(),
+                "contract".into(),
+                "eval".into(),
+                "closeout".into(),
+            ],
+            summary: "Before claiming completion, produce an auditable contract: intent, resources discovered, selected path, executed tools, validations, screenshots, unresolved gaps, and final claim.".into(),
+            referenced_tool_ids: vec![
+                "get_instance_info".into(),
+                "get_authoring_guidance".into(),
+                "get_capability_snapshot".into(),
+                "get_guidance_card".into(),
+                "get_agent_skill".into(),
+                "discover_curated_paths".into(),
+                "run_validation_v2".into(),
+                "get_world_aabb".into(),
+                "check_overlaps".into(),
+                "check_floating".into(),
+                "check_clearance".into(),
+                "take_screenshot".into(),
+            ],
+            next_card_ids: vec![
+                "dkg.trajectory_eval".into(),
+                "dkg.design_resources".into(),
+                "dkg.no_curated_path".into(),
+            ],
+            json_examples: vec![serde_json::json!({
+                "authoring_run_contract": {
+                    "intent": "<user goal and target refinement>",
+                    "resources_discovered": ["<recipe/parametric/definition/prior/gap ids>"],
+                    "selected_path": "<executable recipe | parametric | definition | corpus gap>",
+                    "executed_tool_summary": ["<important tool calls>"],
+                    "validation": ["run_validation_v2", "AABB checks", "screenshot review"],
+                    "unresolved_gaps": [],
+                    "final_claim": "<what can safely be trusted>"
+                }
+            })],
+            body_markdown: Some(
+                "Treat every non-trivial MCP authoring episode as a small SDLC run, not \
+                 as a single prompt-response. The agent must be able to summarize: \
+                 requirements/intent, architecture or typology decision, discovered resources, \
+                 implementation path, validation evidence, screenshot evidence, unresolved gaps, \
+                 and final claim. A green entity count is not evidence. A missing curated path is \
+                 not permission to improvise. If any required evidence is unavailable, close with \
+                 a gap or a blocked claim instead of promoting the model."
+                    .into(),
+            ),
+            phase: Some("review".into()),
+            required_trajectory_tool_ids: vec![
+                "get_instance_info".into(),
+                "get_authoring_guidance".into(),
+                "get_capability_snapshot".into(),
+                "get_guidance_card".into(),
+                "discover_curated_paths".into(),
+                "run_validation_v2".into(),
+                "take_screenshot".into(),
+            ],
+            success_criteria: vec![
+                "Final response or saved trace lists intent, resources, selected path, validations, screenshots, unresolved gaps, and final claim.".into(),
+                "Every Schematic+ construction claim is backed by an executable/materializable path, hosted Definition, explicit assembly pattern, or open CorpusGap.".into(),
+                "Validation and visual inspection are both reported.".into(),
+            ],
+            stop_conditions: vec![
+                "The final claim would require knowledge that is neither discoverable nor acquired.".into(),
+                "The agent skipped must-read guidance or cannot reconstruct the selected path.".into(),
+                "Validation is green only because the model avoided relevant element classes or obligations.".into(),
+            ],
+            observability_events: vec![
+                "guidance ids and versions read".into(),
+                "curated path discovery results captured".into(),
+                "validation findings and screenshot paths captured".into(),
+                "unresolved CorpusGap ids captured".into(),
+            ],
+            recommended_profile: Some("authoring for model writes; inspection for audit-only work".into()),
+            ..GuidanceCardInfo::default()
+        },
+        GuidanceCardInfo {
+            id: "dkg.trajectory_eval".into(),
+            title: "Trajectory Eval Rubric".into(),
+            task_tags: vec![
+                "trajectory".into(),
+                "eval".into(),
+                "qa".into(),
+                "observability".into(),
+            ],
+            summary: "Evaluate not only what the agent produced, but whether it followed the required MCP trajectory: bootstrap, progressive disclosure, curated-path choice, validation, screenshots, and gap closeout.".into(),
+            referenced_tool_ids: vec![
+                "get_instance_info".into(),
+                "get_authoring_guidance".into(),
+                "get_capability_snapshot".into(),
+                "get_guidance_card".into(),
+                "get_agent_skill".into(),
+                "discover_curated_paths".into(),
+                "request_corpus_expansion".into(),
+                "run_validation_v2".into(),
+                "take_screenshot".into(),
+            ],
+            next_card_ids: vec![
+                "dkg.authoring_run_contract".into(),
+                "dkg.close_gap".into(),
+            ],
+            json_examples: vec![serde_json::json!({
+                "trajectory_scores": {
+                    "bootstrap": "pass",
+                    "progressive_disclosure": "pass",
+                    "curated_path_selection": "pass|gap",
+                    "verification": "pass",
+                    "hallucination_or_bluffing": "fail_if_any"
+                }
+            })],
+            body_markdown: Some(
+                "A fluent final model can still fail if the agent skipped the trajectory. \
+                 Score the run on: (1) bootstrap read the instance, guidance, snapshot, and \
+                 must-read cards/skills; (2) progressive disclosure fetched only task-relevant \
+                 deep context; (3) each element class probed curated paths before geometry; \
+                 (4) unsupported claims became CorpusGaps rather than primitive stand-ins; \
+                 (5) validation, AABB checks where relevant, terrain samples where relevant, \
+                 and screenshots were performed; (6) the final claim matches the evidence."
+                    .into(),
+            ),
+            phase: Some("qa".into()),
+            required_trajectory_tool_ids: vec![
+                "get_instance_info".into(),
+                "get_authoring_guidance".into(),
+                "get_capability_snapshot".into(),
+                "get_guidance_card".into(),
+                "discover_curated_paths".into(),
+                "run_validation_v2".into(),
+                "take_screenshot".into(),
+            ],
+            success_criteria: vec![
+                "The authoring path can be reviewed from tool-call evidence, not inferred from the final geometry.".into(),
+                "Unsupported or missing knowledge is visible as CorpusGap state or an explicit blocked claim.".into(),
+                "Verification covers both deterministic validators and visual/geometric inspection.".into(),
+            ],
+            stop_conditions: vec![
+                "The agent cannot identify which curated path or gap justified a promoted element.".into(),
+                "A higher refinement state is claimed without strictly more resolved content.".into(),
+                "Screenshots or validators contradict the final claim.".into(),
+            ],
+            observability_events: vec![
+                "required trajectory tool ids seen".into(),
+                "selected execution path and executable flags captured".into(),
+                "validation/screenshot evidence captured".into(),
+            ],
+            recommended_profile: Some("inspection for trajectory audit; authoring for repair".into()),
+            ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.design_resources".into(),
@@ -12761,6 +12976,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                  search strategy and not a blacklist of every absurd shape to avoid."
                     .into(),
             ),
+            ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.building_skeleton".into(),
@@ -12817,6 +13033,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 }),
             ],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.visual_morphology".into(),
@@ -12856,6 +13073,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                  next agent can find it through MCP."
                     .into(),
             ),
+            ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.no_curated_path".into(),
@@ -12873,13 +13091,17 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "context": { "target_state": "Constructible" }
             })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.close_gap".into(),
             title: "Close The Gap As Knowledge".into(),
             task_tags: vec!["curation".into(), "draft".into()],
-            summary: "After recording a gap, acquire and install a recipe, assembly pattern, or Definition; consultable-only drafts do not close authoring gaps.".into(),
+            summary: "After recording a gap, acquire evidence, normalize the vocabulary into reusable aliases, install the right corpus asset, and prove rediscovery; consultable-only drafts and one-off geometry do not close authoring gaps.".into(),
             referenced_tool_ids: vec![
+                "discover_curated_paths".into(),
+                "select_recipe".into(),
+                "acquire_corpus_passage".into(),
                 "save_recipe_draft".into(),
                 "save_assembly_pattern_draft".into(),
                 "definition.create".into(),
@@ -12896,6 +13118,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "source_passage_refs": []
             })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.executable_asset".into(),
@@ -12911,6 +13134,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             next_card_ids: Vec::new(),
             json_examples: vec![serde_json::json!({ "asset_id": "recipe_draft.v1/learned.asset", "overrides": {} })],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.local_frames".into(),
@@ -12947,6 +13171,7 @@ reports the active frame. ADR-058.".into(),
                 }),
             ],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.site_from_survey".into(),
@@ -12977,6 +13202,7 @@ already contains a terrain_surface, skip this and go straight to dkg.terrain_fou
                 serde_json::json!({ "command_id": "terrain.prepare_site_surface", "parameters": {} }),
             ],
             body_markdown: None,
+        ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {
             id: "dkg.terrain_foundation".into(),
@@ -13057,6 +13283,7 @@ while `max_height_box` uses one rectangular body whose height equals the current
 not sufficient for terrain-seated buildings unless paired with `elevation_at` samples."
                     .into(),
             ),
+            ..GuidanceCardInfo::default()
         },
     ]
 }

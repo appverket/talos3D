@@ -255,6 +255,12 @@ The manifest includes:
 After connecting, clients should call `get_instance_info` to confirm they are
 attached to the intended instance.
 
+`get_instance_info` also reports the live `authoring_guidance_id` and
+`authoring_guidance_version` when an authoring guidance resource is installed.
+Treat the live MCP value as authoritative for the running app. If local docs or
+source files claim a newer guidance version, rebuild/restart the app before
+authoring; otherwise the agent is operating against a stale harness.
+
 If MCP tool discovery is empty in a fresh agent session, that only means the
 client did not load a Talos3D server yet. Check `.mcp.json` first, then fall
 back to the instance registry above. Prefer manifests whose `pid` is still
@@ -327,6 +333,24 @@ cheap first verification pass before `take_screenshot`):
 - `check_floating` — elements whose underside hangs above the nearest support
   (falls back to the y=0 plane when no terrain elevation is available)
 - `check_clearance` — AABB distance between two elements against a minimum
+
+### Agentic authoring run contract
+
+The guidance-card surface carries an eval-style harness contract in addition to
+plain prose. Bootstrap cards such as `dkg.authoring_run_contract` and
+`dkg.trajectory_eval` expose:
+
+- `required_trajectory_tool_ids` — tools expected in a well-formed run
+- `success_criteria` — output/evidence rubric
+- `stop_conditions` — when to record a gap or stop instead of improvising
+- `observability_events` — facts the agent should be able to report or audit
+- `recommended_profile` — suggested capability profile for the task shape
+
+For non-trivial authoring, a final claim should be backed by intent, discovered
+resources, selected execution path, validation findings, structured geometric
+checks where relevant, screenshot review, unresolved CorpusGap ids, and the
+active guidance version. This evaluates both the final model and the tool
+trajectory that produced it.
 
 ### Editing and authored changes
 

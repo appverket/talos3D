@@ -114,6 +114,16 @@ pub struct InstanceInfo {
     pub world_length_unit: String,
     /// One-line units rule for authoring (geometry in metres; `*_mm` drivers in mm).
     pub units_note: String,
+    /// Authoring guidance id served by this running app, if one is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_guidance_id: Option<String>,
+    /// Authoring guidance version served by this running app, if one is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_guidance_version: Option<u32>,
+    /// Drift/audit note for MCP-only agents. The running value is authoritative;
+    /// if local docs/source claim a newer version, rebuild/restart the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_drift_note: Option<String>,
 }
 
 #[cfg(feature = "model-api")]
@@ -131,6 +141,9 @@ impl From<&ModelApiRuntimeInfo> for InstanceInfo {
             requested_port: value.requested_port,
             world_length_unit: "m".to_string(),
             units_note: "World/scene geometry is in METRES (create_box, occurrence offsets, frame bboxes). Recipe/parametric drivers named *_mm are MILLIMETRES, converted internally.".to_string(),
+            authoring_guidance_id: None,
+            authoring_guidance_version: None,
+            harness_drift_note: None,
         }
     }
 }
@@ -1086,6 +1099,7 @@ pub struct RenderSettingsInfo {
     pub ssr_linear_march_exponent: f32,
     pub ssr_bisection_steps: u32,
     pub ssr_use_secant: bool,
+    pub edge_display_mode: String,
     pub wireframe_overlay_enabled: bool,
     pub contour_overlay_enabled: bool,
     pub visible_edge_overlay_enabled: bool,
@@ -1120,6 +1134,7 @@ impl RenderSettingsInfo {
             ssr_linear_march_exponent: settings.ssr_linear_march_exponent,
             ssr_bisection_steps: settings.ssr_bisection_steps,
             ssr_use_secant: settings.ssr_use_secant,
+            edge_display_mode: settings.edge_display_mode().as_str().to_string(),
             wireframe_overlay_enabled: settings.wireframe_overlay_enabled,
             contour_overlay_enabled: settings.contour_overlay_enabled,
             visible_edge_overlay_enabled: settings.visible_edge_overlay_enabled,
@@ -1156,6 +1171,7 @@ pub struct RenderSettingsUpdateRequest {
     pub ssr_linear_march_exponent: Option<f32>,
     pub ssr_bisection_steps: Option<u32>,
     pub ssr_use_secant: Option<bool>,
+    pub edge_display_mode: Option<String>,
     pub wireframe_overlay_enabled: Option<bool>,
     pub contour_overlay_enabled: Option<bool>,
     pub visible_edge_overlay_enabled: Option<bool>,

@@ -274,6 +274,12 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
     assert!(snapshot
         .must_read_guidance_card_ids
         .contains(&"dkg.building_skeleton".to_string()));
+    assert!(snapshot
+        .must_read_guidance_card_ids
+        .contains(&"dkg.authoring_run_contract".to_string()));
+    assert!(snapshot
+        .must_read_guidance_card_ids
+        .contains(&"dkg.trajectory_eval".to_string()));
     assert!(snapshot.estimated_json_bytes <= snapshot.size_budget_bytes);
 }
 
@@ -1176,8 +1182,11 @@ fn handle_dimension_between_box_corners_constrains_line_point_to_adjacent_edge_d
         .collect();
     assert_eq!(coordinates.len(), 3);
     assert!((coordinates[0] - 0.0).abs() < 1e-6);
-    assert!((coordinates[1] - 2.72).abs() < 1e-5);
-    assert!((coordinates[2] + 0.5).abs() < 1e-6);
+    assert!((coordinates[1] - 0.0).abs() < 1e-6);
+    assert!(
+        (coordinates[2] + 1.22).abs() < 1e-5,
+        "expected constrained line_point to project outside the nearest adjacent box side, got {coordinates:?}"
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -4253,6 +4262,7 @@ fn render_settings_round_trip_and_validate() {
 
     let initial = handle_get_render_settings(&world);
     assert_eq!(initial.tonemapping, "agx");
+    assert_eq!(initial.edge_display_mode, "shaded");
 
     let updated = handle_set_render_settings(
         &mut world,
@@ -4281,14 +4291,27 @@ fn render_settings_round_trip_and_validate() {
     assert!(!updated.ssao_enabled);
     assert!(updated.ssr_enabled);
     assert_eq!(updated.ssr_linear_steps, 24);
-    assert!(updated.wireframe_overlay_enabled);
-    assert!(updated.contour_overlay_enabled);
+    assert_eq!(updated.edge_display_mode, "outline");
+    assert!(!updated.wireframe_overlay_enabled);
+    assert!(!updated.contour_overlay_enabled);
     assert!(updated.visible_edge_overlay_enabled);
     assert!(!updated.grid_enabled);
     assert_eq!(updated.background_rgb, [1.0, 1.0, 1.0]);
     assert!(updated.xray_enabled);
     assert_eq!(updated.xray_surface_alpha, 0.25);
     assert!(!updated.paper_fill_enabled);
+
+    let wireframe = handle_set_render_settings(
+        &mut world,
+        RenderSettingsUpdateRequest {
+            edge_display_mode: Some("wireframe".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("edge display mode should accept wireframe");
+    assert_eq!(wireframe.edge_display_mode, "wireframe");
+    assert!(wireframe.wireframe_overlay_enabled);
+    assert!(!wireframe.visible_edge_overlay_enabled);
 
     let paper = handle_set_render_settings(
         &mut world,
@@ -4691,6 +4714,43 @@ fn curation_shaped_draft_cache_rebuilds_the_same_asset_view() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn instance_info_reports_live_authoring_guidance_version() {
+    use crate::plugins::authoring_guidance::{AuthoringGuidance, ComponentStructurePolicy};
+    use crate::plugins::model_api::types::ModelApiRuntimeInfo;
+
+    let mut world = World::new();
+    world.insert_resource(ModelApiRuntimeInfo {
+        instance_id: "test-instance".into(),
+        app_name: "Talos3D Test".into(),
+        pid: 42,
+        http_host: "127.0.0.1".into(),
+        http_port: 24901,
+        http_url: "http://127.0.0.1:24901/mcp".into(),
+        registry_path: "/tmp/talos3d-instances/test-instance.json".into(),
+        started_at_unix_ms: 123,
+        requested_port: Some(24901),
+    });
+    world.insert_resource(AuthoringGuidance {
+        guidance_id: "test.guidance".into(),
+        version: 7,
+        prompt_text: "Read the live guidance.".into(),
+        component_structure: ComponentStructurePolicy::default(),
+        references: Vec::new(),
+        guidance_chapters: Vec::new(),
+    });
+
+    let info = handle_get_instance_info(&world);
+
+    assert_eq!(info.authoring_guidance_id.as_deref(), Some("test.guidance"));
+    assert_eq!(info.authoring_guidance_version, Some(7));
+    assert!(info
+        .harness_drift_note
+        .as_deref()
+        .is_some_and(|note| note.contains("rebuild/restart")));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     let world = init_model_api_test_world();
     let discovery = handle_discover_curated_paths(
@@ -4721,6 +4781,32 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(discovery
         .guidance_card_ids
         .contains(&"dkg.design_resources".to_string()));
+    assert!(discovery
+        .guidance_card_ids
+        .contains(&"dkg.authoring_run_contract".to_string()));
+    let run_contract_card = handle_get_guidance_card(&world, "dkg.authoring_run_contract".into())
+        .expect("authoring run contract card should fetch");
+    assert!(run_contract_card
+        .required_trajectory_tool_ids
+        .contains(&"get_capability_snapshot".to_string()));
+    assert!(run_contract_card
+        .success_criteria
+        .iter()
+        .any(|criterion| criterion.contains("Final response")));
+    assert!(run_contract_card
+        .stop_conditions
+        .iter()
+        .any(|condition| condition.contains("skipped must-read guidance")));
+    assert_eq!(run_contract_card.phase.as_deref(), Some("review"));
+    let trajectory_card = handle_get_guidance_card(&world, "dkg.trajectory_eval".into())
+        .expect("trajectory eval card should fetch");
+    assert!(trajectory_card
+        .summary
+        .contains("whether it followed the required MCP trajectory"));
+    assert!(trajectory_card
+        .observability_events
+        .iter()
+        .any(|event| event.contains("validation/screenshot")));
     let design_card = handle_get_guidance_card(&world, "dkg.design_resources".into())
         .expect("design resources card should fetch");
     assert!(design_card.summary.contains("derive positive invariants"));
@@ -4810,8 +4896,11 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(terrain_body.contains("not sufficient for terrain-seated buildings"));
 
     let known_tools = std::collections::BTreeSet::from([
+        "get_instance_info",
         "get_capability_snapshot",
         "get_authoring_guidance",
+        "get_guidance_card",
+        "get_agent_skill",
         "discover_curated_paths",
         "select_recipe",
         "acquire_corpus_passage",
@@ -4826,6 +4915,9 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "create_assembly",
         "create_relation",
         "run_validation_v2",
+        "check_overlaps",
+        "check_floating",
+        "check_clearance",
         "take_screenshot",
         // ADR-058 local-frame card (dkg.local_frames)
         "create_entity",
@@ -4864,7 +4956,14 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .contains(&"save_recipe_draft".to_string()));
     assert!(card
         .referenced_tool_ids
+        .contains(&"discover_curated_paths".to_string()));
+    assert!(card
+        .referenced_tool_ids
         .contains(&"materialize_learned_asset".to_string()));
+    assert!(
+        card.summary.contains("normalize") && card.summary.contains("rediscovery"),
+        "close-gap guidance must require vocabulary normalization and rediscovery proof"
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -4971,6 +5070,14 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
         summary: "Hosted window workflow".into(),
         task_tags: vec!["window".into(), "hosted_component".into()],
         referenced_tool_ids: vec!["definition.instantiate_hosted".into()],
+        required_tool_ids: vec!["get_capability_snapshot".into()],
+        forbidden_tool_ids: vec!["create_box".into()],
+        validation_tool_ids: vec!["run_validation_v2".into(), "take_screenshot".into()],
+        success_criteria: vec!["Hosted opening validates and renders.".into()],
+        stop_conditions: vec!["No host wall is selected.".into()],
+        screenshot_requirements: vec!["Exterior face view after placement.".into()],
+        common_failure_modes: vec!["Free-floating window occurrence.".into()],
+        regression_prompt_ids: vec!["window-hosted-opening-basic".into()],
         next_skill_ids: vec![],
         body_markdown: "Use Definition occurrences for hosted windows.".into(),
         trust_level: AgentSkillTrustLevel::Shipped,
@@ -4987,6 +5094,9 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
     );
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].id, "architecture.skill.window_authoring");
+    assert!(found[0]
+        .success_criteria
+        .contains(&"Hosted opening validates and renders.".to_string()));
 
     let skill = handle_get_agent_skill(&world, "architecture.skill.window_authoring".into())
         .expect("skill should fetch by id");
@@ -5002,6 +5112,14 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
             summary: "Review hosted openings before promotion.".into(),
             task_tags: vec!["opening".into()],
             referenced_tool_ids: vec!["run_validation_v2".into()],
+            required_tool_ids: vec!["get_capability_snapshot".into()],
+            forbidden_tool_ids: vec!["create_box".into()],
+            validation_tool_ids: vec!["run_validation_v2".into()],
+            success_criteria: vec!["Validation findings are resolved.".into()],
+            stop_conditions: vec!["Opening host cannot be resolved.".into()],
+            screenshot_requirements: vec!["Opening close-up.".into()],
+            common_failure_modes: vec!["Bare void without hosted product.".into()],
+            regression_prompt_ids: vec!["opening-review-basic".into()],
             next_skill_ids: vec!["architecture.skill.window_authoring".into()],
             body_markdown: "Run validation and inspect rendered geometry.".into(),
             source_path: None,
@@ -5010,6 +5128,7 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
     .expect("draft should save");
     assert_eq!(draft.id.0, "project.skill.opening_review");
     assert_eq!(draft.trust_level, AgentSkillTrustLevel::SessionDraft);
+    assert!(draft.forbidden_tool_ids.contains(&"create_box".to_string()));
 }
 
 #[cfg(feature = "model-api")]
@@ -8506,7 +8625,10 @@ fn promote_refinement_gate_block_after_script_reports_partial_state() {
     let blocked = result
         .promotion_blocked
         .expect("promotion_blocked must be set when the gate fired");
-    assert_eq!(blocked.unsatisfied_obligations, vec!["structure".to_string()]);
+    assert_eq!(
+        blocked.unsatisfied_obligations,
+        vec!["structure".to_string()]
+    );
 }
 
 /// A gate block with NO recipe side effects (no script ran, nothing created)
@@ -9317,7 +9439,10 @@ mod capability_profiles {
             "invoke_command",
             "list_commands",
         ] {
-            assert!(names.contains(tool), "authoring profile must include {tool}");
+            assert!(
+                names.contains(tool),
+                "authoring profile must include {tool}"
+            );
         }
         for tool in [
             "ux_click",
@@ -9361,7 +9486,9 @@ mod capability_profiles {
             full.len()
         );
         let bytes = |tools: &Vec<rmcp::model::Tool>| {
-            serde_json::to_vec(tools).expect("tool list serializes").len()
+            serde_json::to_vec(tools)
+                .expect("tool list serializes")
+                .len()
         };
         let authoring_bytes = bytes(authoring);
         let full_bytes = bytes(full);
@@ -9402,7 +9529,10 @@ mod capability_profiles {
             );
         }
         for tool in ["list_entities", "get_world_aabb", "take_screenshot"] {
-            assert!(names.contains(tool), "inspection profile must include {tool}");
+            assert!(
+                names.contains(tool),
+                "inspection profile must include {tool}"
+            );
         }
     }
 
@@ -9469,13 +9599,19 @@ mod capability_profiles {
             CapabilityProfile::from_name("ux_automation"),
             Some(CapabilityProfile::UxAutomation)
         );
-        assert_eq!(CapabilityProfile::from_name("FULL"), Some(CapabilityProfile::Full));
+        assert_eq!(
+            CapabilityProfile::from_name("FULL"),
+            Some(CapabilityProfile::Full)
+        );
         assert_eq!(CapabilityProfile::from_name("nope"), None);
 
         let state = SessionProfileState::new(CapabilityProfile::Authoring);
         assert_eq!(state.get(), CapabilityProfile::Authoring);
         assert!(state.set(CapabilityProfile::Full));
-        assert!(!state.set(CapabilityProfile::Full), "re-set must report unchanged");
+        assert!(
+            !state.set(CapabilityProfile::Full),
+            "re-set must report unchanged"
+        );
         let shared = state.clone();
         assert_eq!(shared.get(), CapabilityProfile::Full);
     }
@@ -9496,15 +9632,22 @@ mod capability_profiles {
         let message = error.message.to_string();
         assert!(message.contains("ux_click"), "message: {message}");
         assert!(message.contains("ux-automation"), "message: {message}");
-        assert!(message.contains("set_session_profile"), "message: {message}");
+        assert!(
+            message.contains("set_session_profile"),
+            "message: {message}"
+        );
         assert_eq!(profiles_containing("ux_click"), vec!["ux-automation"]);
 
-        server.tool_call_allowed("list_entities").expect("in-profile tool");
+        server
+            .tool_call_allowed("list_entities")
+            .expect("in-profile tool");
         server
             .tool_call_allowed("no_such_tool")
             .expect("unknown tools fall through to the router error");
 
         server.profile_state.set(CapabilityProfile::Full);
-        server.tool_call_allowed("ux_click").expect("full allows everything");
+        server
+            .tool_call_allowed("ux_click")
+            .expect("full allows everything");
     }
 }

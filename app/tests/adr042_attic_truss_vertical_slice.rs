@@ -32,9 +32,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Map, Value};
 
+use bevy::prelude::*;
+use talos3d_core::authored_entity::EntityBounds;
+use talos3d_core::capability_registry::RecipeFamilyId;
 use talos3d_core::curation::authoring_script::{
-    ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, Postcondition, Predicate, Step,
-    StepId,
+    ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, Postcondition, Predicate,
+    ScriptInstruction, Step, StepId,
 };
 use talos3d_core::curation::replay::{
     replay, PostconditionOracle, PostconditionVerdict, ResolvedPostcondition, ToolCall,
@@ -45,14 +48,11 @@ use talos3d_core::curation::{
     GroundingKind, Lineage, ManifestKindDescriptor, ManifestKindId, ManifestKindRegistry,
     Provenance, RecipeArtifact, RecipeBody, RefField, Scope, Trust, RECIPE_ARTIFACT_KIND,
 };
-use talos3d_core::capability_registry::RecipeFamilyId;
 use talos3d_core::plugins::identity::ElementId;
 use talos3d_core::plugins::modeling::ghost_geometry::{
     check_clearance_envelope, ClearanceEnvelope, ClearanceShape, GhostObstacle,
 };
 use talos3d_core::plugins::refinement::{AgentId, ClaimPath, RefinementState, RuleId};
-use talos3d_core::authored_entity::EntityBounds;
-use bevy::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Architecture-owned (post-merge) — ConstructionSystemManifest kind
@@ -129,10 +129,7 @@ fn roof_truss_attic_manifest() -> CuratedManifest {
             author: AgentId("shipped".into()),
             confidence: Confidence::High,
             lineage: Lineage::Freeform,
-            rationale: Some(
-                "Shipped attic-truss manifest authored as data per ADR-042 §7."
-                    .into(),
-            ),
+            rationale: Some("Shipped attic-truss manifest authored as data per ADR-042 §7.".into()),
             jurisdiction: None,
             catalog_dependencies: Vec::new(),
             evidence: Vec::new(),
@@ -230,9 +227,15 @@ fn attic_truss_authoring_script() -> AuthoringScript {
     script
         .parameter_defaults
         .insert("variant".into(), Value::String("storage".into()));
-    script.parameter_defaults.insert("span_mm".into(), 7000.into());
-    script.parameter_defaults.insert("pitch_deg".into(), 27.into());
-    script.parameter_defaults.insert("spacing_mm".into(), 1200.into());
+    script
+        .parameter_defaults
+        .insert("span_mm".into(), 7000.into());
+    script
+        .parameter_defaults
+        .insert("pitch_deg".into(), 27.into());
+    script
+        .parameter_defaults
+        .insert("spacing_mm".into(), 1200.into());
     script
         .parameter_defaults
         .insert("top_chord_size".into(), Value::String("2x4".into()));
@@ -282,32 +285,46 @@ fn attic_truss_authoring_script() -> AuthoringScript {
             }),
         },
     );
-    create_def
-        .args
-        .insert("variant".into(), ArgExpr::Param { name: "variant".into() });
-    create_def
-        .args
-        .insert("span_mm".into(), ArgExpr::Param { name: "span_mm".into() });
+    create_def.args.insert(
+        "variant".into(),
+        ArgExpr::Param {
+            name: "variant".into(),
+        },
+    );
+    create_def.args.insert(
+        "span_mm".into(),
+        ArgExpr::Param {
+            name: "span_mm".into(),
+        },
+    );
     create_def.args.insert(
         "spacing_mm".into(),
-        ArgExpr::Param { name: "spacing_mm".into() },
+        ArgExpr::Param {
+            name: "spacing_mm".into(),
+        },
     );
     create_def.args.insert(
         "pitch_deg".into(),
-        ArgExpr::Param { name: "pitch_deg".into() },
+        ArgExpr::Param {
+            name: "pitch_deg".into(),
+        },
     );
     create_def.args.insert(
         "top_chord_size".into(),
-        ArgExpr::Param { name: "top_chord_size".into() },
+        ArgExpr::Param {
+            name: "top_chord_size".into(),
+        },
     );
     create_def.args.insert(
         "bottom_chord_size".into(),
-        ArgExpr::Param { name: "bottom_chord_size".into() },
+        ArgExpr::Param {
+            name: "bottom_chord_size".into(),
+        },
     );
     create_def
         .bindings
         .insert("definition_id".into(), OutputPath::new("$.definition_id"));
-    script.steps.push(create_def);
+    script.steps.push(ScriptInstruction::Call(create_def));
 
     // Step 2 — place_first_truss
     let mut place = Step {
@@ -334,7 +351,7 @@ fn attic_truss_authoring_script() -> AuthoringScript {
     place
         .bindings
         .insert("occurrence_id".into(), OutputPath::new("$.occurrence_id"));
-    script.steps.push(place);
+    script.steps.push(ScriptInstruction::Call(place));
 
     // Step 3 — room-variant only: lock the clear-height marker.
     let mut room_lock = Step {
@@ -376,7 +393,7 @@ fn attic_truss_authoring_script() -> AuthoringScript {
             name: "heel_height_mm".into(),
         },
     );
-    script.steps.push(room_lock);
+    script.steps.push(ScriptInstruction::Call(room_lock));
 
     // Postconditions — ClaimGrounding on every storage promotion-
     // critical path, plus one relation.
@@ -520,8 +537,9 @@ fn manifest_kind_registers_and_walks_outbound_refs() {
 
     let pattern_kind = AssetKindId::new("assembly_pattern.v2");
     let patterns = refs.get(&pattern_kind).expect("pattern refs");
-    assert!(patterns
-        .contains(&AssetId::new("assembly_pattern.v2/hybrid_attic_cathedral_roof")));
+    assert!(patterns.contains(&AssetId::new(
+        "assembly_pattern.v2/hybrid_attic_cathedral_roof"
+    )));
 
     let concept_kind = AssetKindId::new("vocabulary_concept.v1");
     let concepts = refs.get(&concept_kind).expect("concept refs");
@@ -535,7 +553,9 @@ fn manifest_walker_reports_no_missing_required_refs() {
     let mut manifests = CuratedManifestRegistry::default();
     let id = manifests.insert(roof_truss_attic_manifest());
 
-    let report = manifests.walk_manifest(&id, &kinds).expect("manifest exists");
+    let report = manifests
+        .walk_manifest(&id, &kinds)
+        .expect("manifest exists");
     assert!(
         report.missing_required.is_empty(),
         "no required ref should be missing; got: {:?}",
@@ -597,7 +617,10 @@ fn replay_storage_variant_executes_two_steps_and_passes() {
             StepId::new("place_first_truss")
         ]
     );
-    assert_eq!(report.steps_skipped, vec![StepId::new("lock_room_clear_height")]);
+    assert_eq!(
+        report.steps_skipped,
+        vec![StepId::new("lock_room_clear_height")]
+    );
 
     // First call carried the manifest_ref tag in domain_data.
     let domain_data = &dispatcher.calls[0].1["domain_data"];
@@ -607,7 +630,10 @@ fn replay_storage_variant_executes_two_steps_and_passes() {
             "curated_manifest.v1/construction_system_manifest.v1/roof.truss.attic".into()
         )
     );
-    assert_eq!(domain_data["framing_family"], Value::String("attic_truss".into()));
+    assert_eq!(
+        domain_data["framing_family"],
+        Value::String("attic_truss".into())
+    );
 
     // Second call hosted on the right element and used the binding from step 1.
     assert_eq!(dispatcher.calls[1].1["host_element"], Value::from(42));
@@ -644,7 +670,10 @@ fn replay_storage_variant_executes_two_steps_and_passes() {
             _ => {}
         }
     }
-    assert!(saw_variant_claim, "must emit truss/variant Claim postcondition");
+    assert!(
+        saw_variant_claim,
+        "must emit truss/variant Claim postcondition"
+    );
     assert!(
         saw_relation,
         "must emit has_attic_truss_occurrence Relation postcondition"
@@ -677,7 +706,10 @@ fn replay_room_variant_executes_three_steps() {
     // The room marker step received the room_clear_height_mm param.
     let marker_call = &dispatcher.calls[2].1;
     assert_eq!(marker_call["room_clear_height_mm"], Value::from(2400));
-    assert_eq!(marker_call["name"], Value::String("attic_truss_room_marker".into()));
+    assert_eq!(
+        marker_call["name"],
+        Value::String("attic_truss_room_marker".into())
+    );
 }
 
 #[test]

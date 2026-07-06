@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value};
 
 use talos3d_core::curation::authoring_script::{
-    ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, Postcondition, Step, StepId,
+    ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, Postcondition,
+    ScriptInstruction, Step, StepId,
 };
 use talos3d_core::curation::replay::{
     replay, InvocationError, PostconditionOracle, PostconditionVerdict, ResolvedPostcondition,
@@ -113,7 +114,7 @@ fn echo_wall_script() -> AuthoringScript {
     step_create
         .bindings
         .insert("def_id".into(), OutputPath::new("$.definition_id"));
-    script.steps.push(step_create);
+    script.steps.push(ScriptInstruction::Call(step_create));
 
     // Step 2 — instantiate_occurrence referencing the newly-created
     // definition + the element_id param.
@@ -141,7 +142,7 @@ fn echo_wall_script() -> AuthoringScript {
     step_inst
         .bindings
         .insert("occ_id".into(), OutputPath::new("$.occurrence_id"));
-    script.steps.push(step_inst);
+    script.steps.push(ScriptInstruction::Call(step_inst));
 
     // Postcondition: occurrence-count claim on the host.
     script.postconditions.push(Postcondition::Relation {
@@ -264,14 +265,14 @@ fn script_with_out_of_set_tool_rejected_by_structure_check() {
 
     let mut script = AuthoringScript::stub(MutationScope::None);
     script.allowed_tools = BTreeSet::new(); // empty
-    script.steps.push(Step {
+    script.steps.push(ScriptInstruction::Call(Step {
         id: StepId::new("rogue"),
         tool: McpToolId::new("forbidden_tool"),
         args: BTreeMap::new(),
         bindings: BTreeMap::new(),
         essential: true,
         precondition: None,
-    });
+    }));
 
     let mut dispatcher = FixtureDispatcher::new(Vec::new());
     let oracle = AlwaysPassOracle;
@@ -323,7 +324,7 @@ fn non_essential_step_skipped_when_precondition_fails() {
     let mut script = AuthoringScript::stub(MutationScope::None);
     script.allowed_tools.insert(McpToolId::new("maybe_tool"));
 
-    script.steps.push(Step {
+    script.steps.push(ScriptInstruction::Call(Step {
         id: StepId::new("guarded"),
         tool: McpToolId::new("maybe_tool"),
         args: BTreeMap::new(),
@@ -334,7 +335,7 @@ fn non_essential_step_skipped_when_precondition_fails() {
                 name: "optional".into(),
             },
         }),
-    });
+    }));
 
     let mut dispatcher = FixtureDispatcher::new(Vec::new());
     let oracle = AlwaysPassOracle;
@@ -353,7 +354,7 @@ fn essential_step_precondition_failure_is_hard_error() {
 
     let mut script = AuthoringScript::stub(MutationScope::None);
     script.allowed_tools.insert(McpToolId::new("t"));
-    script.steps.push(Step {
+    script.steps.push(ScriptInstruction::Call(Step {
         id: StepId::new("required_step"),
         tool: McpToolId::new("t"),
         args: BTreeMap::new(),
@@ -367,7 +368,7 @@ fn essential_step_precondition_failure_is_hard_error() {
                 value: Value::from(2),
             },
         }),
-    });
+    }));
 
     let mut dispatcher = FixtureDispatcher::new(Vec::new());
     let oracle = AlwaysPassOracle;

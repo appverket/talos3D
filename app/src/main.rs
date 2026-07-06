@@ -1,7 +1,11 @@
 use bevy::{
     app::AppExit,
     prelude::*,
-    window::{ExitCondition, WindowCloseRequested},
+    render::{
+        settings::{Backends, PowerPreference, WgpuSettings},
+        RenderPlugin,
+    },
+    window::{ExitCondition, WindowCloseRequested, WindowClosed},
 };
 #[cfg(feature = "model-api")]
 use std::env;
@@ -18,10 +22,10 @@ use talos3d_core::plugins::{
     authoring_guidance::AuthoringGuidancePlugin,
     bundled_definition_libraries::BundledDefinitionLibrariesPlugin,
     camera::CameraPlugin,
-    compass::CompassPlugin,
     clipping_planes::ClippingPlanesPlugin,
     command_registry::CommandRegistryPlugin,
     commands::CommandPlugin,
+    compass::CompassPlugin,
     cursor::CursorPlugin,
     definition_preview_scene::DefinitionPreviewPlugin,
     dimension_line::DimensionLinePlugin,
@@ -75,18 +79,31 @@ fn main() {
     configure_model_api_launch_from_args();
 
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "Talos3D".into(),
-            canvas: Some("#bevy".into()),
-            fit_canvas_to_parent: true,
-            prevent_default_event_handling: false,
-            ..default()
-        }),
-        exit_condition: ExitCondition::DontExit,
-        close_when_requested: false,
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(RenderPlugin {
+                render_creation: WgpuSettings {
+                    backends: Some(Backends::PRIMARY),
+                    power_preference: PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    ..default()
+                }
+                .into(),
+                ..default()
+            })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Talos3D".into(),
+                    canvas: Some("#bevy".into()),
+                    fit_canvas_to_parent: true,
+                    prevent_default_event_handling: false,
+                    ..default()
+                }),
+                exit_condition: ExitCondition::OnPrimaryClosed,
+                close_when_requested: true,
+                ..default()
+            }),
+    )
     .insert_resource(Storage(Box::new(LocalFileBackend)))
     .init_state::<AppMode>()
     .add_plugins(AssistantChatPlugin)
@@ -157,7 +174,7 @@ fn main() {
         .add_plugins(ToolPlugin)
         .add_plugins(TapeToolPlugin)
         .add_systems(Startup, init_document_properties)
-        .add_systems(Update, exit_on_close_request);
+        .add_systems(Update, exit_on_window_close_events);
 
     #[cfg(feature = "perf-stats")]
     app.add_plugins(PerfStatsPlugin);
@@ -198,11 +215,12 @@ fn init_document_properties(world: &mut World) {
     world.insert_resource(props);
 }
 
-fn exit_on_close_request(
+fn exit_on_window_close_events(
     mut close_requests: MessageReader<WindowCloseRequested>,
+    mut closed_windows: MessageReader<WindowClosed>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
-    if close_requests.read().next().is_some() {
+    if close_requests.read().next().is_some() || closed_windows.read().next().is_some() {
         app_exit.write(AppExit::Success);
     }
 }
