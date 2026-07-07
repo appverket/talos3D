@@ -40,7 +40,7 @@ const DEFAULT_BACKGROUND_RGB: [f32; 3] = [0.17, 0.18, 0.20];
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 const PAPER_BACKGROUND_RGB: [f32; 3] = [1.0, 1.0, 1.0];
-const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.5;
+const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.28;
 
 // ─── Settings resource ───────────────────────────────────────────────────────
 
@@ -259,11 +259,23 @@ pub(crate) struct WireframeSurfaceVisibilityOverride {
     pub(crate) original: Visibility,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SurfaceMaterialMode {
     PaperFill,
     WireframeOnly,
     Xray,
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+struct SurfaceMaterialOverrideCache {
+    handles: HashMap<SurfaceMaterialOverrideCacheKey, Handle<StandardMaterial>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SurfaceMaterialOverrideCacheKey {
+    original: String,
+    mode: SurfaceMaterialMode,
+    xray_alpha_milli: u16,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -287,6 +299,7 @@ impl Plugin for RenderPipelinePlugin {
         app.init_resource::<RenderSettings>()
             .init_resource::<RenderPipelineSetupState>()
             .init_resource::<PaperDrawingState>()
+            .init_resource::<SurfaceMaterialOverrideCache>()
             .register_toolbar(ToolbarDescriptor {
                 id: VIEW_RENDER_TOOLBAR_ID.to_string(),
                 label: "Render".to_string(),
@@ -346,7 +359,7 @@ impl Plugin for RenderPipelinePlugin {
                 CommandDescriptor {
                     id: "view.toggle_xray".to_string(),
                     label: "X-Ray".to_string(),
-                    description: "Toggle X-Ray view, rendering scene faces 50% transparent."
+                    description: "Toggle X-Ray view, rendering scene faces translucent."
                         .to_string(),
                     category: CommandCategory::View,
                     parameters: Some(serde_json::json!({
@@ -366,7 +379,7 @@ impl Plugin for RenderPipelinePlugin {
                     })),
                     default_shortcut: None,
                     icon: Some("icon.view_xray".to_string()),
-                    hint: Some("Make faces 50% transparent to inspect hidden geometry".to_string()),
+                    hint: Some("Make faces translucent to inspect hidden geometry".to_string()),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
@@ -666,59 +679,180 @@ fn sync_clear_color(settings: Res<RenderSettings>, mut clear_color: ResMut<Clear
 fn sync_surface_display_materials(
     settings: Res<RenderSettings>,
     mut commands: Commands,
-    mut mesh_query: Query<(
-        Entity,
-        &mut MeshMaterial3d<StandardMaterial>,
-        Option<&SurfaceMaterialOverride>,
+    mut mesh_queries: ParamSet<(
+        Query<(
+            Entity,
+            &mut MeshMaterial3d<StandardMaterial>,
+            Option<&SurfaceMaterialOverride>,
+        )>,
+        Query<
+            (
+                Entity,
+                &mut MeshMaterial3d<StandardMaterial>,
+                Option<&SurfaceMaterialOverride>,
+            ),
+            Or<(
+                Added<MeshMaterial3d<StandardMaterial>>,
+                Changed<MeshMaterial3d<StandardMaterial>>,
+            )>,
+        >,
     )>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut override_cache: ResMut<SurfaceMaterialOverrideCache>,
 ) {
     let target_mode = active_surface_material_mode(&settings);
-    for (entity, mut material_handle, override_state) in &mut mesh_query {
-        match (target_mode, override_state) {
-            (Some(mode), Some(state))
-                if surface_material_override_is_current(state, mode, &settings) => {}
-            (Some(mode), Some(state)) => {
-                let original = state.original.clone();
-                material_handle.0 = original.clone();
-                materials.remove(state.override_handle.id());
-                if let Some(source) = materials.get(&original).cloned() {
-                    let xray_alpha = xray_alpha_for_mode(mode, &settings);
-                    let override_material = display_override_material(&source, mode, xray_alpha);
-                    let override_handle = materials.add(override_material);
-                    material_handle.0 = override_handle.clone();
-                    commands.entity(entity).insert(SurfaceMaterialOverride {
-                        original,
-                        override_handle,
-                        mode,
-                        xray_alpha,
-                    });
-                } else {
-                    commands.entity(entity).remove::<SurfaceMaterialOverride>();
-                }
-            }
-            (Some(mode), None) => {
-                let original = material_handle.0.clone();
-                let Some(source) = materials.get(&original).cloned() else {
-                    continue;
-                };
-                let xray_alpha = xray_alpha_for_mode(mode, &settings);
-                let override_material = display_override_material(&source, mode, xray_alpha);
-                let override_handle = materials.add(override_material);
-                material_handle.0 = override_handle.clone();
-                commands.entity(entity).insert(SurfaceMaterialOverride {
-                    original,
-                    override_handle,
-                    mode,
-                    xray_alpha,
-                });
-            }
-            (None, Some(state)) => {
+    if !settings.is_changed() && target_mode.is_none() {
+        return;
+    }
+
+    if settings.is_changed() {
+        for (entity, mut material_handle, override_state) in &mut mesh_queries.p0() {
+            sync_surface_display_material(
+                &mut commands,
+                &mut materials,
+                &mut override_cache,
+                &settings,
+                target_mode,
+                entity,
+                &mut material_handle,
+                override_state,
+            );
+        }
+    } else {
+        // While a display override is active, only newly spawned or explicitly
+        // re-materialised meshes need work. Unchanged frames avoid a full scene
+        // scan, keeping pointer hover/selection responsive.
+        for (entity, mut material_handle, override_state) in &mut mesh_queries.p1() {
+            sync_surface_display_material(
+                &mut commands,
+                &mut materials,
+                &mut override_cache,
+                &settings,
+                target_mode,
+                entity,
+                &mut material_handle,
+                override_state,
+            );
+        }
+    }
+}
+
+fn sync_surface_display_material(
+    commands: &mut Commands,
+    materials: &mut Assets<StandardMaterial>,
+    override_cache: &mut SurfaceMaterialOverrideCache,
+    settings: &RenderSettings,
+    target_mode: Option<SurfaceMaterialMode>,
+    entity: Entity,
+    material_handle: &mut MeshMaterial3d<StandardMaterial>,
+    override_state: Option<&SurfaceMaterialOverride>,
+) {
+    match (target_mode, override_state) {
+        (Some(mode), Some(state))
+            if surface_material_override_is_current(state, mode, settings)
+                && material_handle.0 == state.override_handle => {}
+        (Some(mode), Some(state)) => {
+            let original = if material_handle.0 == state.override_handle {
+                state.original.clone()
+            } else {
+                material_handle.0.clone()
+            };
+            apply_surface_material_override(
+                commands,
+                materials,
+                override_cache,
+                settings,
+                entity,
+                material_handle,
+                original,
+                mode,
+            );
+        }
+        (Some(mode), None) => {
+            apply_surface_material_override(
+                commands,
+                materials,
+                override_cache,
+                settings,
+                entity,
+                material_handle,
+                material_handle.0.clone(),
+                mode,
+            );
+        }
+        (None, Some(state)) => {
+            if material_handle.0 == state.override_handle {
                 material_handle.0 = state.original.clone();
-                materials.remove(state.override_handle.id());
-                commands.entity(entity).remove::<SurfaceMaterialOverride>();
             }
-            _ => {}
+            commands.entity(entity).remove::<SurfaceMaterialOverride>();
+        }
+        _ => {}
+    }
+}
+
+fn apply_surface_material_override(
+    commands: &mut Commands,
+    materials: &mut Assets<StandardMaterial>,
+    override_cache: &mut SurfaceMaterialOverrideCache,
+    settings: &RenderSettings,
+    entity: Entity,
+    material_handle: &mut MeshMaterial3d<StandardMaterial>,
+    original: Handle<StandardMaterial>,
+    mode: SurfaceMaterialMode,
+) {
+    let Some(source) = materials.get(&original).cloned() else {
+        commands.entity(entity).remove::<SurfaceMaterialOverride>();
+        return;
+    };
+    let xray_alpha = xray_alpha_for_mode(mode, settings);
+    let override_handle = cached_display_override_material(
+        override_cache,
+        materials,
+        &original,
+        &source,
+        mode,
+        xray_alpha,
+    );
+    material_handle.0 = override_handle.clone();
+    commands.entity(entity).insert(SurfaceMaterialOverride {
+        original,
+        override_handle,
+        mode,
+        xray_alpha,
+    });
+}
+
+fn cached_display_override_material(
+    override_cache: &mut SurfaceMaterialOverrideCache,
+    materials: &mut Assets<StandardMaterial>,
+    original: &Handle<StandardMaterial>,
+    source: &StandardMaterial,
+    mode: SurfaceMaterialMode,
+    xray_alpha: f32,
+) -> Handle<StandardMaterial> {
+    let key = SurfaceMaterialOverrideCacheKey::new(original, mode, xray_alpha);
+    if let Some(handle) = override_cache.handles.get(&key) {
+        if materials.contains(handle) {
+            return handle.clone();
+        }
+    }
+
+    let override_material = display_override_material(source, mode, xray_alpha);
+    let handle = materials.add(override_material);
+    override_cache.handles.insert(key, handle.clone());
+    handle
+}
+
+impl SurfaceMaterialOverrideCacheKey {
+    fn new(
+        original: &Handle<StandardMaterial>,
+        mode: SurfaceMaterialMode,
+        xray_alpha: f32,
+    ) -> Self {
+        Self {
+            original: format!("{:?}", original.id()),
+            mode,
+            xray_alpha_milli: (xray_alpha.clamp(0.0, 1.0) * 1000.0).round() as u16,
         }
     }
 }
@@ -1476,7 +1610,7 @@ mod tests {
         let xray = xray_material_from(&source, DEFAULT_XRAY_SURFACE_ALPHA);
 
         assert_eq!(xray.alpha_mode, AlphaMode::Blend);
-        assert_eq!(xray.base_color.alpha(), 0.5);
+        assert_eq!(xray.base_color.alpha(), DEFAULT_XRAY_SURFACE_ALPHA);
         assert_eq!(xray.cull_mode, None);
         assert_eq!(
             xray.base_color.to_srgba().red,
@@ -1514,6 +1648,65 @@ mod tests {
 
         assert_eq!(xray_material_from(&source, -1.0).base_color.alpha(), 0.02);
         assert_eq!(xray_material_from(&source, 2.0).base_color.alpha(), 0.95);
+    }
+
+    #[test]
+    fn display_override_cache_reuses_xray_material_for_same_source_and_alpha() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let source_material = StandardMaterial {
+            base_color: Color::srgba(0.2, 0.4, 0.6, 1.0),
+            ..Default::default()
+        };
+        let source_handle = materials.add(source_material.clone());
+        let mut cache = SurfaceMaterialOverrideCache::default();
+
+        let first = cached_display_override_material(
+            &mut cache,
+            &mut materials,
+            &source_handle,
+            &source_material,
+            SurfaceMaterialMode::Xray,
+            0.28,
+        );
+        let second = cached_display_override_material(
+            &mut cache,
+            &mut materials,
+            &source_handle,
+            &source_material,
+            SurfaceMaterialMode::Xray,
+            0.28,
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(cache.handles.len(), 1);
+    }
+
+    #[test]
+    fn display_override_cache_separates_xray_alpha_levels() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let source_material = StandardMaterial::default();
+        let source_handle = materials.add(source_material.clone());
+        let mut cache = SurfaceMaterialOverrideCache::default();
+
+        let low_alpha = cached_display_override_material(
+            &mut cache,
+            &mut materials,
+            &source_handle,
+            &source_material,
+            SurfaceMaterialMode::Xray,
+            0.28,
+        );
+        let high_alpha = cached_display_override_material(
+            &mut cache,
+            &mut materials,
+            &source_handle,
+            &source_material,
+            SurfaceMaterialMode::Xray,
+            0.6,
+        );
+
+        assert_ne!(low_alpha, high_alpha);
+        assert_eq!(cache.handles.len(), 2);
     }
 
     #[test]
