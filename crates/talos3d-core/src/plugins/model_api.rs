@@ -4500,6 +4500,41 @@ fn preferred_recipe_target_state(
 }
 
 #[cfg(feature = "model-api")]
+fn recipe_supports_requested_or_lower_state(
+    supported: &[crate::plugins::refinement::RefinementState],
+    requested: Option<crate::plugins::refinement::RefinementState>,
+) -> bool {
+    let Some(requested) = requested else {
+        return true;
+    };
+    supported.is_empty()
+        || supported.contains(&requested)
+        || supported.iter().any(|state| *state < requested)
+}
+
+#[cfg(feature = "model-api")]
+fn recipe_exact_target_state_match(
+    supported: &[crate::plugins::refinement::RefinementState],
+    requested: Option<crate::plugins::refinement::RefinementState>,
+) -> bool {
+    requested.is_none_or(|requested| supported.is_empty() || supported.contains(&requested))
+}
+
+#[cfg(feature = "model-api")]
+fn instantiate_hint_target_state(
+    requested: Option<crate::plugins::refinement::RefinementState>,
+    supported: &[crate::plugins::refinement::RefinementState],
+) -> crate::plugins::refinement::RefinementState {
+    if let Some(requested) = requested {
+        if supported.is_empty() || supported.contains(&requested) {
+            return requested;
+        }
+    }
+    preferred_recipe_target_state(supported)
+        .unwrap_or(crate::plugins::refinement::RefinementState::Constructible)
+}
+
+#[cfg(feature = "model-api")]
 fn default_instantiate_recipe_target_state(world: &World, family_id: &str) -> String {
     use crate::capability_registry::{CapabilityRegistry, RecipeFamilyId};
     use crate::plugins::refinement::RefinementState;
@@ -12028,8 +12063,10 @@ pub fn handle_select_recipe(
                 .recipe_family_descriptors(Some(&class_id))
                 .into_iter()
                 .filter(|d| {
-                    // Viable = supports the requested state (or all states if no filter).
-                    target_state.is_none_or(|ts| d.supported_refinement_levels.contains(&ts))
+                    recipe_supports_requested_or_lower_state(
+                        &d.supported_refinement_levels,
+                        target_state,
+                    )
                 })
                 .filter_map(|d| {
                     // Evaluate all applicable priors for this recipe family.  A prior
@@ -12047,8 +12084,15 @@ pub fn handle_select_recipe(
                         })
                         .map(|p| (p.prior_fn)(&prior_context).weight)
                         .fold(1.0_f32, |acc, w| acc * w);
-                    let weight =
+                    let mut weight =
                         weight + recipe_query_relevance_boost(&d.id.0, &d.label, &query_terms);
+                    let exact_target_state = recipe_exact_target_state_match(
+                        &d.supported_refinement_levels,
+                        target_state,
+                    );
+                    if !exact_target_state {
+                        weight *= 0.45;
+                    }
                     if weight <= 0.0 {
                         return None;
                     }
@@ -12061,9 +12105,8 @@ pub fn handle_select_recipe(
                             default: p.default.clone(),
                         })
                         .collect();
-                    let hint_target_state = target_state
-                        .or_else(|| preferred_recipe_target_state(&d.supported_refinement_levels))
-                        .unwrap_or(RefinementState::Constructible);
+                    let hint_target_state =
+                        instantiate_hint_target_state(target_state, &d.supported_refinement_levels);
                     Some(RecipeRankingInfo {
                         how_to_instantiate: instantiate_hint(
                             &d.id.0,
@@ -12092,14 +12135,19 @@ pub fn handle_select_recipe(
                     .installed_for_class(&element_class)
                     .into_iter()
                     .filter(|draft| {
-                        target_state.is_none_or(|ts| {
-                            draft
-                                .supported_refinement_levels
-                                .iter()
-                                .any(|state| state == ts.as_str())
-                        })
+                        let supported: Vec<RefinementState> = draft
+                            .supported_refinement_levels
+                            .iter()
+                            .filter_map(|state| RefinementState::from_str(state))
+                            .collect();
+                        recipe_supports_requested_or_lower_state(&supported, target_state)
                     })
                     .map(|draft| {
+                        let supported: Vec<RefinementState> = draft
+                            .supported_refinement_levels
+                            .iter()
+                            .filter_map(|state| RefinementState::from_str(state))
+                            .collect();
                         let executable = recipe_draft_has_materialization_path(&draft);
                         let execution_path =
                             executable.then(|| "materialize_learned_asset".to_string());
@@ -12116,6 +12164,12 @@ pub fn handle_select_recipe(
                         };
                         let relevance_boost =
                             recipe_query_relevance_boost(&draft.id, &draft.label, &query_terms);
+                        let exact_target_state =
+                            recipe_exact_target_state_match(&supported, target_state);
+                        let mut weight = if executable { 0.75 } else { 0.25 } + relevance_boost;
+                        if !exact_target_state {
+                            weight *= 0.45;
+                        }
                         RecipeRankingInfo {
                             how_to_instantiate,
                             id: draft.id,
@@ -12123,7 +12177,7 @@ pub fn handle_select_recipe(
                             label: draft.label,
                             // Executable learned assets still rank below shipped recipes;
                             // non-executable drafts are consultable only.
-                            weight: if executable { 0.75 } else { 0.25 } + relevance_boost,
+                            weight,
                             is_session_draft: true,
                             executable,
                             execution_path,
@@ -12162,9 +12216,11 @@ pub fn handle_select_recipe(
             world.get_resource::<crate::curation::RecipeArtifactRegistry>()
         {
             for (asset_id, artifact) in artifact_registry.artifacts_for_class(&element_class) {
-                // Apply the same target_state filter as for native families.
                 if let Some(ts) = target_state {
-                    if !artifact.supported_refinement_states.contains(&ts) {
+                    if !recipe_supports_requested_or_lower_state(
+                        &artifact.supported_refinement_states,
+                        Some(ts),
+                    ) {
                         continue;
                     }
                 }
@@ -12196,11 +12252,14 @@ pub fn handle_select_recipe(
                     ),
                     None => params_from_schema(&artifact.parameter_schema, None),
                 };
-                let hint_target_state = target_state
-                    .or_else(|| {
-                        preferred_recipe_target_state(&artifact.supported_refinement_states)
-                    })
-                    .unwrap_or(RefinementState::Constructible);
+                let hint_target_state = instantiate_hint_target_state(
+                    target_state,
+                    &artifact.supported_refinement_states,
+                );
+                let exact_target_state = recipe_exact_target_state_match(
+                    &artifact.supported_refinement_states,
+                    target_state,
+                );
 
                 viable.push(RecipeRankingInfo {
                     how_to_instantiate: instantiate_hint(
@@ -12218,17 +12277,23 @@ pub fn handle_select_recipe(
                         .clone()
                         .unwrap_or_else(|| artifact.target_class.clone()),
                     // Installed/learned recipes rank slightly below shipped ones.
-                    weight: 0.9
-                        + recipe_query_relevance_boost(
-                            &family_id,
-                            artifact
-                                .meta
-                                .provenance
-                                .rationale
-                                .as_deref()
-                                .unwrap_or(&artifact.target_class),
-                            &query_terms,
-                        ),
+                    weight: {
+                        let mut weight = 0.9
+                            + recipe_query_relevance_boost(
+                                &family_id,
+                                artifact
+                                    .meta
+                                    .provenance
+                                    .rationale
+                                    .as_deref()
+                                    .unwrap_or(&artifact.target_class),
+                                &query_terms,
+                            );
+                        if !exact_target_state {
+                            weight *= 0.45;
+                        }
+                        weight
+                    },
                     is_session_draft: false,
                     executable: true,
                     execution_path: Some("instantiate_recipe".into()),

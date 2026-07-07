@@ -8284,6 +8284,84 @@ fn select_recipe_hint_names_supported_target_state_for_capped_recipe() {
     );
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn discover_curated_paths_surfaces_lower_state_recipe_instead_of_false_gap() {
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::model_api::server::CuratedPathDiscoveryRequest;
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+
+    let asset_id = AssetId("installed_recipe/schematic_trim".into());
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id,
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("schematic-only trim recipe for test".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(MutationScope::None),
+        },
+        parameter_schema: serde_json::Value::Null,
+        target_class: "trim".into(),
+        supported_refinement_states: vec![RefinementState::Schematic],
+        tests: Vec::new(),
+    };
+
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact);
+    world.insert_resource(registry);
+
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("trim".into()),
+            query: Some("white exterior trim boards".into()),
+            context: serde_json::json!({ "target_state": "Constructible" }),
+        },
+    )
+    .expect("discovery should succeed");
+
+    assert!(
+        discovery.no_curated_path.is_none(),
+        "a lower-supported executable recipe is still a curated path; got false gap: {:?}",
+        discovery.no_curated_path
+    );
+    assert_eq!(
+        discovery
+            .recipe_rankings
+            .first()
+            .map(|ranking| ranking.id.as_str()),
+        Some("schematic_trim")
+    );
+    assert!(
+        discovery.recipe_rankings[0]
+            .how_to_instantiate
+            .contains("target_state: \"Schematic\""),
+        "hint must instruct the supported target_state, got: {}",
+        discovery.recipe_rankings[0].how_to_instantiate
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Change 2 — resolve_obligation handler
 // ---------------------------------------------------------------------------
