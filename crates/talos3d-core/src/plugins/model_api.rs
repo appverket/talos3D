@@ -12074,6 +12074,26 @@ fn recipe_selection_query_terms(context: &serde_json::Value, element_class: &str
 }
 
 #[cfg(feature = "model-api")]
+fn requested_jurisdiction(context: &serde_json::Value) -> Option<String> {
+    ["jurisdiction", "region", "locale"]
+        .into_iter()
+        .filter_map(|key| context.get(key))
+        .find_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase())
+}
+
+#[cfg(feature = "model-api")]
+fn jurisdiction_matches_request(asset_jurisdiction: Option<&str>, requested: Option<&str>) -> bool {
+    match (asset_jurisdiction, requested) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(asset), Some(requested)) => asset.eq_ignore_ascii_case(requested),
+    }
+}
+
+#[cfg(feature = "model-api")]
 fn recipe_query_relevance_boost(id: &str, label: &str, query_terms: &[String]) -> f32 {
     if query_terms.is_empty() {
         return 0.0;
@@ -12112,6 +12132,7 @@ pub fn handle_select_recipe(
         .get("target_state")
         .and_then(|v| v.as_str())
         .and_then(RefinementState::from_str);
+    let requested_jurisdiction = requested_jurisdiction(&context);
 
     // PP76: consult registered GenerationPriorDescriptors scoped to
     // RecipeSelection for this element class.  Each prior is called with the
@@ -12213,6 +12234,12 @@ pub fn handle_select_recipe(
                     .installed_for_class(&element_class)
                     .into_iter()
                     .filter(|draft| {
+                        jurisdiction_matches_request(
+                            draft.jurisdiction.as_deref(),
+                            requested_jurisdiction.as_deref(),
+                        )
+                    })
+                    .filter(|draft| {
                         let supported: Vec<RefinementState> = draft
                             .supported_refinement_levels
                             .iter()
@@ -12294,6 +12321,17 @@ pub fn handle_select_recipe(
             world.get_resource::<crate::curation::RecipeArtifactRegistry>()
         {
             for (asset_id, artifact) in artifact_registry.artifacts_for_class(&element_class) {
+                if !jurisdiction_matches_request(
+                    artifact
+                        .meta
+                        .provenance
+                        .jurisdiction
+                        .as_ref()
+                        .map(|jurisdiction| jurisdiction.as_str()),
+                    requested_jurisdiction.as_deref(),
+                ) {
+                    continue;
+                }
                 if let Some(ts) = target_state {
                     if !recipe_supports_requested_or_lower_state(
                         &artifact.supported_refinement_states,
@@ -12442,12 +12480,19 @@ pub fn handle_discover_curated_paths(
 
     let path_kind = request.path_kind.unwrap_or_else(|| "recipe".into());
     let guidance_card_ids = guidance_card_ids_for_discovery(request.element_class.as_deref());
+    let requested_jurisdiction = requested_jurisdiction(&request.context);
     let mut related_asset_ids = Vec::new();
     if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
         related_asset_ids.extend(
             registry
                 .snapshot()
                 .into_iter()
+                .filter(|draft| {
+                    jurisdiction_matches_request(
+                        draft.jurisdiction.as_deref(),
+                        requested_jurisdiction.as_deref(),
+                    )
+                })
                 .map(|draft| draft.meta.id.as_str().to_string()),
         );
     }
@@ -12456,6 +12501,12 @@ pub fn handle_discover_curated_paths(
             registry
                 .snapshot()
                 .into_iter()
+                .filter(|draft| {
+                    jurisdiction_matches_request(
+                        draft.jurisdiction.as_deref(),
+                        requested_jurisdiction.as_deref(),
+                    )
+                })
                 .map(|draft| draft.meta.id.as_str().to_string()),
         );
     }
@@ -12471,6 +12522,7 @@ pub fn handle_discover_curated_paths(
             .into_iter()
             .flat_map(|registry| registry.iter()),
         request.element_class.as_deref(),
+        requested_jurisdiction.as_deref(),
     );
     let mut generation_priors = Vec::new();
 
@@ -12532,6 +12584,10 @@ pub fn handle_discover_curated_paths(
         "parametric" => {
             curated_assets.retain(|asset| {
                 curated_path_matches_request(asset, request.element_class.as_deref())
+                    && jurisdiction_matches_request(
+                        asset.jurisdiction.as_deref(),
+                        requested_jurisdiction.as_deref(),
+                    )
             });
             parametric_types = collect_parametric_types(request.element_class.as_deref());
         }
@@ -12710,9 +12766,21 @@ pub fn handle_discover_curated_paths(
 fn discover_matching_curated_assets<'a>(
     manifests: impl Iterator<Item = &'a crate::curation::CuratedManifest>,
     element_class: Option<&str>,
+    requested_jurisdiction: Option<&str>,
 ) -> Vec<CuratedAssetPathInfo> {
     let mut assets: Vec<_> = manifests
         .filter(|manifest| {
+            if !jurisdiction_matches_request(
+                manifest
+                    .meta
+                    .provenance
+                    .jurisdiction
+                    .as_ref()
+                    .map(|jurisdiction| jurisdiction.as_str()),
+                requested_jurisdiction,
+            ) {
+                return false;
+            }
             element_class.is_none_or(|needle| {
                 curated_path_text_matches(
                     needle,
@@ -12727,6 +12795,12 @@ fn discover_matching_curated_assets<'a>(
         .map(|manifest| CuratedAssetPathInfo {
             asset_id: manifest.meta.id.as_str().to_string(),
             manifest_kind: manifest.manifest_kind.as_str().to_string(),
+            jurisdiction: manifest
+                .meta
+                .provenance
+                .jurisdiction
+                .as_ref()
+                .map(|jurisdiction| jurisdiction.as_str().to_string()),
             label: manifest
                 .body
                 .get("label")

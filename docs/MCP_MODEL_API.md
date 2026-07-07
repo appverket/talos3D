@@ -497,6 +497,15 @@ assembly-pattern drafts, and corpus gaps flush to
 writes; I/O failure logs a warning and never fails the authoring call) and are
 recovered into the live registries on the next startup of the same instance.
 
+Region-specific learned knowledge is keyed by scope, not by global defaults.
+`discover_curated_paths` and `select_recipe` accept `jurisdiction`, `region`,
+or `locale` in their context object. Generic assets remain visible in every
+scope; jurisdiction-scoped learned recipes, recipe drafts, assembly-pattern
+drafts, and curated manifests are returned only when the requested scope
+matches. With no requested scope, discovery stays region-neutral and compact,
+so an agent must infer or ask for the project/request region before pulling
+regional construction knowledge.
+
 ## Lighting And Viewport Lookdev
 
 The renderer and lighting surfaces are intentionally agent-facing:

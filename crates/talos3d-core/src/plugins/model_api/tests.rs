@@ -8199,6 +8199,160 @@ fn discover_curated_paths_ranks_query_specific_installed_recipe_first() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn discover_curated_paths_filters_installed_recipes_by_jurisdiction() {
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, JurisdictionTag, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::model_api::server::CuratedPathDiscoveryRequest;
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    fn artifact(id: &str, jurisdiction: Option<&str>) -> RecipeArtifact {
+        RecipeArtifact {
+            meta: CurationMeta::new(
+                AssetId(format!("installed_recipe/{id}")),
+                AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+                Provenance {
+                    author: AgentId("test_agent".into()),
+                    confidence: Confidence::Medium,
+                    lineage: Lineage::Freeform,
+                    rationale: Some(format!("{id} fixture")),
+                    jurisdiction: jurisdiction.map(JurisdictionTag::new),
+                    catalog_dependencies: Vec::new(),
+                    evidence: Vec::new(),
+                },
+            )
+            .with_scope(Scope::Project)
+            .with_trust(Trust::Draft),
+            body: RecipeBody::AuthoringScript {
+                script: AuthoringScript::stub(MutationScope::None),
+            },
+            parameter_schema: serde_json::Value::Null,
+            target_class: "roof_system".into(),
+            supported_refinement_states: vec![RefinementState::Schematic],
+            tests: Vec::new(),
+        }
+    }
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+    let mut artifact_registry = RecipeArtifactRegistry::default();
+    artifact_registry.insert(artifact("generic_roof", None));
+    artifact_registry.insert(artifact("se_roof", Some("SE")));
+    artifact_registry.insert(artifact("no_roof", Some("NO")));
+    world.insert_resource(artifact_registry);
+
+    let ids_for = |context: serde_json::Value| -> Vec<String> {
+        handle_discover_curated_paths(
+            &world,
+            CuratedPathDiscoveryRequest {
+                path_kind: Some("recipe".into()),
+                element_class: Some("roof_system".into()),
+                query: Some("roof".into()),
+                context,
+            },
+        )
+        .expect("discovery should succeed")
+        .recipe_rankings
+        .into_iter()
+        .map(|ranking| ranking.id)
+        .collect()
+    };
+
+    assert_eq!(
+        ids_for(serde_json::json!({ "target_state": "Schematic" })),
+        vec!["generic_roof".to_string()],
+        "global discovery must not surface region-scoped recipes before a request region is known"
+    );
+
+    let se_ids = ids_for(serde_json::json!({
+        "target_state": "Schematic",
+        "jurisdiction": "se"
+    }));
+    assert!(se_ids.contains(&"generic_roof".to_string()));
+    assert!(se_ids.contains(&"se_roof".to_string()));
+    assert!(!se_ids.contains(&"no_roof".to_string()));
+
+    let no_ids = ids_for(serde_json::json!({
+        "target_state": "Schematic",
+        "region": "NO"
+    }));
+    assert!(no_ids.contains(&"generic_roof".to_string()));
+    assert!(no_ids.contains(&"no_roof".to_string()));
+    assert!(!no_ids.contains(&"se_roof".to_string()));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn select_recipe_filters_session_drafts_by_jurisdiction() {
+    use crate::plugins::recipe_drafts::{
+        RecipeDraftArtifact, RecipeDraftRegistry, RecipeDraftStatus,
+    };
+
+    fn draft(id: &str, jurisdiction: Option<&str>) -> RecipeDraftArtifact {
+        RecipeDraftArtifact {
+            id: id.into(),
+            meta: crate::plugins::knowledge_assets::default_recipe_draft_meta(),
+            residency: crate::plugins::knowledge_assets::KnowledgeResidency::SessionCache,
+            label: format!("{id} fixture"),
+            description: "jurisdiction-filter fixture".into(),
+            target_class: "roof_system".into(),
+            supported_refinement_levels: vec!["Constructible".into()],
+            parameters: Vec::new(),
+            jurisdiction: jurisdiction.map(str::to_string),
+            gap_id: None,
+            source_passage_refs: Vec::new(),
+            evidence_slots: Vec::new(),
+            runtime_claims: Vec::new(),
+            acquisition_context: serde_json::Value::Null,
+            draft_script: serde_json::Value::Null,
+            notes: Vec::new(),
+            status: RecipeDraftStatus::Installed,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+    let mut registry = RecipeDraftRegistry::default();
+    registry.save(draft("generic-draft", None));
+    registry.save(draft("se-draft", Some("SE")));
+    registry.save(draft("no-draft", Some("NO")));
+    world.insert_resource(registry);
+
+    let ids_for = |context: serde_json::Value| -> Vec<String> {
+        handle_select_recipe(&world, "roof_system".into(), context)
+            .expect("select_recipe should succeed")
+            .into_iter()
+            .map(|ranking| ranking.id)
+            .collect()
+    };
+
+    assert_eq!(
+        ids_for(serde_json::json!({
+            "target_state": "Constructible",
+            "include_session_drafts": true
+        })),
+        vec!["generic-draft".to_string()],
+        "global selection must not surface region-scoped session drafts"
+    );
+
+    let se_ids = ids_for(serde_json::json!({
+        "target_state": "Constructible",
+        "include_session_drafts": true,
+        "jurisdiction": "SE"
+    }));
+    assert!(se_ids.contains(&"generic-draft".to_string()));
+    assert!(se_ids.contains(&"se-draft".to_string()));
+    assert!(!se_ids.contains(&"no-draft".to_string()));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn select_recipe_surfaces_installed_recipe_parameters_and_defaults() {
     // An installed AuthoringScript recipe must surface its declared
     // parameters (names + defaults from parameter_defaults) in the ranking,

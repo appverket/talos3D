@@ -3836,6 +3836,8 @@ pub struct NonClassTermInfo {
 pub struct CuratedAssetPathInfo {
     pub asset_id: String,
     pub manifest_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jurisdiction: Option<String>,
     pub label: Option<String>,
     pub executable: bool,
     pub how_to_use: String,
@@ -6668,8 +6670,10 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         description = "Return viable recipe families for an element class, ranked by weight. \
             In PP71 all viable recipes tie at 1.0 (real priors land in PP76). \
             Viable means the recipe's supported_refinement_levels includes the target_state. \
-            Context schema: { target_state: string, jurisdiction?: string, \
-            include_session_drafts?: bool }."
+            Context schema: { target_state: string, jurisdiction?: string, region?: string, \
+            locale?: string, include_session_drafts?: bool }. Region-scoped learned recipes \
+            are returned only when the requested jurisdiction/region/locale matches; generic \
+            recipes remain visible."
     )]
     pub(super) async fn select_recipe_tool(
         &self,
@@ -6686,7 +6690,9 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         name = "discover_curated_paths",
         description = "Additive dynamic-knowledge discovery endpoint. Returns existing curated \
             paths plus an explicit NoCuratedPath gap candidate when recipe, parametric, or prior \
-            coverage is missing. Existing select/list tools remain compatible."
+            coverage is missing. Put task scope in context: target_state, jurisdiction/region/locale, \
+            and include_session_drafts. Scoped learned assets are filtered to the requested region \
+            so discovery stays progressive instead of flooding the agent with every jurisdiction pack."
     )]
     pub(super) async fn discover_curated_paths_tool(
         &self,
