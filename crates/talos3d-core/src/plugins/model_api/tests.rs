@@ -8658,6 +8658,29 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
          before={entity_count_before}, after={entity_count_after}"
     );
 
+    let root_entity = find_entity_by_element_id(
+        &mut world,
+        crate::plugins::identity::ElementId(result.root_element_id),
+    )
+    .expect("root anchor must exist");
+    assert!(
+        world
+            .get::<crate::capability_registry::ElementClassAssignment>(root_entity)
+            .is_none(),
+        "the tiny recipe anchor must not retain the semantic system class once grouped"
+    );
+
+    let group_id = result
+        .group_element_id
+        .expect("recipe-created geometry must be grouped");
+    let group_entity =
+        find_entity_by_element_id(&mut world, crate::plugins::identity::ElementId(group_id))
+            .expect("recipe output group must exist");
+    let assignment = world
+        .get::<crate::capability_registry::ElementClassAssignment>(group_entity)
+        .expect("recipe output group must carry the semantic class");
+    assert_eq!(assignment.element_class.0, "wall_assembly");
+
     // Undo is available: the PendingCommandQueue was flushed (commands went
     // through the pipeline), which means they are now in History. Verify by
     // checking that the pending queue is empty (flush happened) and that the

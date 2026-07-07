@@ -4387,6 +4387,61 @@ fn select_only_element(world: &mut World, element_id: ElementId) {
 }
 
 #[cfg(feature = "model-api")]
+fn move_recipe_semantics_from_anchor_to_group(
+    world: &mut World,
+    anchor_id: ElementId,
+    group_id: ElementId,
+) {
+    use crate::capability_registry::ElementClassAssignment;
+    use crate::plugins::refinement::{
+        AuthoringProvenance, ObligationSet, RefinementStateComponent, SemanticIntent,
+    };
+
+    let Some(anchor_entity) = find_entity_by_element_id(world, anchor_id) else {
+        return;
+    };
+    let Some(group_entity) = find_entity_by_element_id(world, group_id) else {
+        return;
+    };
+
+    let assignment = world.get::<ElementClassAssignment>(anchor_entity).cloned();
+    let refinement = world
+        .get::<RefinementStateComponent>(anchor_entity)
+        .cloned();
+    let intent = world.get::<SemanticIntent>(anchor_entity).cloned();
+    let provenance = world.get::<AuthoringProvenance>(anchor_entity).cloned();
+    let obligations = world.get::<ObligationSet>(anchor_entity).cloned();
+
+    {
+        let mut group = world.entity_mut(group_entity);
+        if let Some(assignment) = assignment.clone() {
+            group.insert(assignment);
+        }
+        if let Some(refinement) = refinement {
+            group.insert(refinement);
+        }
+        if let Some(intent) = intent {
+            group.insert(intent);
+        }
+        if let Some(provenance) = provenance {
+            group.insert(provenance);
+        }
+        if let Some(obligations) = obligations {
+            group.insert(obligations);
+        }
+    }
+
+    let mut anchor = world.entity_mut(anchor_entity);
+    if assignment.is_some() {
+        anchor.remove::<ElementClassAssignment>();
+    }
+    anchor.remove::<RefinementStateComponent>();
+    anchor.remove::<SemanticIntent>();
+    anchor.remove::<AuthoringProvenance>();
+    anchor.remove::<ObligationSet>();
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_get_assembly(world: &World, element_id: u64) -> Result<AssemblyDetails, String> {
     use crate::plugins::modeling::assembly::SemanticAssembly;
 
@@ -10906,14 +10961,16 @@ fn handle_instantiate_recipe(
         );
         send_event(world, CreateEntityCommand { snapshot });
         flush_model_api_write_pipeline(world);
+        move_recipe_semantics_from_anchor_to_group(world, ElementId(root), group_id);
         select_only_element(world, group_id);
         Some(group_id.0)
     };
 
-    // 5. Run validation on the root entity and collect findings. Failures here
-    //    are surfaced as structured findings, not as a hard error — placement
-    //    succeeded; the caller decides whether to address obligations.
-    let findings = handle_run_validation(world, root).unwrap_or_default();
+    // 5. Run validation on the semantic aggregate when the recipe produced one.
+    //    Failures here are surfaced as structured findings, not as a hard error:
+    //    placement succeeded; the caller decides whether to address obligations.
+    let validation_target = group_element_id.unwrap_or(root);
+    let findings = handle_run_validation(world, validation_target).unwrap_or_default();
 
     Ok(InstantiateRecipeResult {
         root_element_id: root,
