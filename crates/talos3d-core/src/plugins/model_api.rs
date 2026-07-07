@@ -10591,6 +10591,24 @@ fn promote_refinement_structured(
             .unwrap_or_default()
     };
 
+    if target_state == previous_state && recipe_id.is_some() {
+        let mut created_element_ids: Vec<u64> = collect_element_ids(world)
+            .difference(&before_ids)
+            .copied()
+            .collect();
+        created_element_ids.sort_unstable();
+        if script_steps_run > 0 || !created_element_ids.is_empty() {
+            return Ok(PromoteRefinementResult {
+                element_id,
+                previous_state: previous_state.as_str().to_string(),
+                new_state: previous_state.as_str().to_string(),
+                script_steps_run,
+                created_element_ids,
+                promotion_blocked: None,
+            });
+        }
+    }
+
     let overrides_map: std::collections::HashMap<ClaimPath, serde_json::Value> = overrides
         .as_object()
         .map(|obj| {
@@ -11751,6 +11769,61 @@ fn instantiate_hint(
 }
 
 #[cfg(feature = "model-api")]
+fn recipe_selection_query_terms(context: &serde_json::Value, element_class: &str) -> Vec<String> {
+    let mut raw = Vec::new();
+    for key in ["query", "prompt", "description", "brief"] {
+        if let Some(value) = context.get(key) {
+            match value {
+                serde_json::Value::String(text) => raw.push(text.as_str()),
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        if let Some(text) = item.as_str() {
+                            raw.push(text);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let class_tokens: std::collections::HashSet<String> = element_class
+        .split(['_', '.', ' '])
+        .filter(|token| token.len() >= 3)
+        .map(|token| token.to_ascii_lowercase())
+        .collect();
+    let mut terms = Vec::new();
+    for text in raw {
+        for token in text
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|token| token.chars().count() >= 3)
+        {
+            let token = token.to_lowercase();
+            if CLASS_TOKEN_STOPWORDS.contains(&token.as_str()) || class_tokens.contains(&token) {
+                continue;
+            }
+            if !terms.contains(&token) {
+                terms.push(token);
+            }
+        }
+    }
+    terms
+}
+
+#[cfg(feature = "model-api")]
+fn recipe_query_relevance_boost(id: &str, label: &str, query_terms: &[String]) -> f32 {
+    if query_terms.is_empty() {
+        return 0.0;
+    }
+    let haystack = format!("{} {}", id.to_lowercase(), label.to_lowercase());
+    let matches = query_terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count() as f32;
+    (matches * 0.15).min(0.75)
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_select_recipe(
     world: &World,
     element_class: String,
@@ -11788,6 +11861,7 @@ pub fn handle_select_recipe(
     use crate::capability_registry::{PriorContext, PriorScope};
 
     let prior_context = PriorContext::from_json(&context);
+    let query_terms = recipe_selection_query_terms(&context, &element_class);
     let recipe_selection_priors: Vec<_> = registry
         .map(|registry| {
             registry
@@ -11823,6 +11897,8 @@ pub fn handle_select_recipe(
                         })
                         .map(|p| (p.prior_fn)(&prior_context).weight)
                         .fold(1.0_f32, |acc, w| acc * w);
+                    let weight =
+                        weight + recipe_query_relevance_boost(&d.id.0, &d.label, &query_terms);
                     if weight <= 0.0 {
                         return None;
                     }
@@ -11884,6 +11960,8 @@ pub fn handle_select_recipe(
                                 draft.id
                             )
                         };
+                        let relevance_boost =
+                            recipe_query_relevance_boost(&draft.id, &draft.label, &query_terms);
                         RecipeRankingInfo {
                             how_to_instantiate,
                             id: draft.id,
@@ -11891,7 +11969,7 @@ pub fn handle_select_recipe(
                             label: draft.label,
                             // Executable learned assets still rank below shipped recipes;
                             // non-executable drafts are consultable only.
-                            weight: if executable { 0.75 } else { 0.25 },
+                            weight: if executable { 0.75 } else { 0.25 } + relevance_boost,
                             is_session_draft: true,
                             executable,
                             execution_path,
@@ -11971,7 +12049,7 @@ pub fn handle_select_recipe(
                         &artifact.target_class,
                         &parameters,
                     ),
-                    id: family_id,
+                    id: family_id.clone(),
                     target_class: artifact.target_class.clone(),
                     label: artifact
                         .meta
@@ -11980,7 +12058,17 @@ pub fn handle_select_recipe(
                         .clone()
                         .unwrap_or_else(|| artifact.target_class.clone()),
                     // Installed/learned recipes rank slightly below shipped ones.
-                    weight: 0.9,
+                    weight: 0.9
+                        + recipe_query_relevance_boost(
+                            &family_id,
+                            artifact
+                                .meta
+                                .provenance
+                                .rationale
+                                .as_deref()
+                                .unwrap_or(&artifact.target_class),
+                            &query_terms,
+                        ),
                     is_session_draft: false,
                     executable: true,
                     execution_path: Some("instantiate_recipe".into()),
@@ -12119,7 +12207,19 @@ pub fn handle_discover_curated_paths(
                 .element_class
                 .clone()
                 .ok_or_else(|| "recipe discovery requires element_class".to_string())?;
-            recipe_rankings = handle_select_recipe(world, element_class.clone(), request.context)?;
+            let mut context = request.context.clone();
+            if let Some(query) = request.query.as_deref() {
+                match &mut context {
+                    serde_json::Value::Object(map) => {
+                        map.entry("query".to_string())
+                            .or_insert_with(|| serde_json::Value::String(query.to_string()));
+                    }
+                    _ => {
+                        context = serde_json::json!({ "query": query });
+                    }
+                }
+            }
+            recipe_rankings = handle_select_recipe(world, element_class.clone(), context)?;
             // Even on the default `recipe` query, surface matching parametric
             // types so a single discover_curated_paths call reveals the geometry
             // path (e.g. the gable roof system + its trusses for `roof_system`)
@@ -12247,36 +12347,36 @@ pub fn handle_discover_curated_paths(
         None => None,
     };
 
-    let has_path = recipe_rankings.iter().any(|ranking| ranking.executable)
+    let has_materializable_path = recipe_rankings.iter().any(|ranking| ranking.executable)
         || !parametric_types.is_empty()
         || !definition_assets.is_empty()
-        || !curated_assets.is_empty()
         || !generation_priors.is_empty();
     related_asset_ids.extend(curated_assets.iter().map(|asset| asset.asset_id.clone()));
     related_asset_ids.sort();
     related_asset_ids.dedup();
     related_asset_ids.truncate(12);
     // A recognised native non-class term is not a gap: it already has a path.
-    let no_curated_path = (non_class_term.is_none() && !has_path).then(|| NoCuratedPathInfo {
-        element_class: request
-            .element_class
-            .clone()
-            .unwrap_or_else(|| "<unspecified>".into()),
-        missing_artifact_kind: format!("{path_kind}_curated_path"),
-        suggested_next_tool: "request_corpus_expansion".into(),
-        gap_record_is_terminal: false,
-        required_next_tools: curated_gap_required_next_tools(),
-        completion_criteria: curated_gap_completion_criteria(),
-        guidance_card_ids: guidance_card_ids.clone(),
-        related_installed_or_learned_asset_ids: related_asset_ids.clone(),
-    });
+    let no_curated_path =
+        (non_class_term.is_none() && !has_materializable_path).then(|| NoCuratedPathInfo {
+            element_class: request
+                .element_class
+                .clone()
+                .unwrap_or_else(|| "<unspecified>".into()),
+            missing_artifact_kind: format!("{path_kind}_curated_path"),
+            suggested_next_tool: "request_corpus_expansion".into(),
+            gap_record_is_terminal: false,
+            required_next_tools: curated_gap_required_next_tools(),
+            completion_criteria: curated_gap_completion_criteria(),
+            guidance_card_ids: guidance_card_ids.clone(),
+            related_installed_or_learned_asset_ids: related_asset_ids.clone(),
+        });
     let suggested_next_tool = if let Some(non_class_term) = &non_class_term {
         if non_class_term.native_entity_types.is_empty() {
             "list_vocabulary"
         } else {
             "create_entity"
         }
-    } else if has_path {
+    } else if has_materializable_path {
         match path_kind.as_str() {
             "recipe" if !recipe_rankings.is_empty() => "instantiate_recipe",
             "parametric" if !parametric_types.is_empty() => "parametric.create",
@@ -13231,8 +13331,9 @@ already contains a terrain_surface, skip this and go straight to dkg.terrain_fou
 a flat box slab or split the building into different coordinate frames. First author one \
 local-coordinate building assembly/group: wall bases, openings, roof, trim, and any temporary base \
 share one floor datum. Then either create a `conforming_solid` under that footprint or call \
-`terrain.plant_structure` on the semantic structure and terrain, or `terrain.plant_on_surface` on \
-the grouped building, so the whole assembly is raised onto the foundation top and the conforming \
+`invoke_command` with `command_id:\"terrain.plant_structure\"` on the semantic structure and \
+terrain, or `invoke_command` with `command_id:\"terrain.plant_on_surface\"` on the grouped building, \
+so the whole assembly is raised onto the foundation top and the conforming \
 foundation belongs to the planted group/assembly. A semantic `structure` plant converts the existing \
 bottom foundation body into the terrain-conforming foundation and records the planting contract. \
 The structure is the semantic prompt/refinement target and the foundation is a semantic \
@@ -13289,8 +13390,9 @@ terrain grade is metres above Y=0, the building is buried even if a separate fou
                 "The terrain placement contract is assembly-wide: a foundation at terrain \
 height does not fix walls or roofs authored later at world Y=0. Author the cottage in one \
 local frame, group it, make it a semantic `structure` with a bottom foundation body, then use \
-`terrain.plant_structure` with the structure and terrain ids; from the UI, select the visible \
-structure/group and terrain surface, then run Plant Structure. Verify child AABBs against sampled \
+`invoke_command { command_id: \"terrain.plant_structure\", parameters: {...} }` with the structure and \
+terrain ids; from the UI, select the visible structure/group and terrain surface, then run Plant \
+Structure. Verify child AABBs against sampled \
 terrain elevations and the planted foundation top. The resulting semantic `structure` is the prompt \
 target for refinement; its nested semantic `foundation_system` is the foundation target. The \
 selected/movable planted group is the behavior target for movement; it must include both the \

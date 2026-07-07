@@ -3773,6 +3773,11 @@ pub struct CuratedPathDiscoveryRequest {
     /// Element class or concept id the caller wants to author.
     #[serde(default)]
     pub(super) element_class: Option<String>,
+    /// Natural-language search terms from the authoring prompt. Discovery uses
+    /// these to rank matching curated paths without treating generic class
+    /// words as discriminators.
+    #[serde(default)]
+    pub(super) query: Option<String>,
     #[serde(default)]
     pub(super) context: serde_json::Value,
 }

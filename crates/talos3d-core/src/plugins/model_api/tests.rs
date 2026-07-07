@@ -4758,6 +4758,7 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         CuratedPathDiscoveryRequest {
             path_kind: Some("recipe".into()),
             element_class: Some("roof_system".into()),
+            query: None,
             context: serde_json::json!({ "target_state": "Constructible" }),
         },
     )
@@ -4896,6 +4897,8 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .contains("one local-coordinate building assembly"));
     assert!(terrain_card.summary.contains("terrain.plant_structure"));
     assert!(terrain_card.summary.contains("terrain.plant_on_surface"));
+    assert!(terrain_card.summary.contains("invoke_command"));
+    assert!(terrain_card.summary.contains("command_id"));
     assert!(terrain_card.summary.contains("semantic `structure`"));
     assert!(terrain_card
         .summary
@@ -4919,6 +4922,8 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .expect("terrain foundation card should include behavior body");
     assert!(terrain_body.contains("select the visible"));
     assert!(terrain_body.contains("terrain.plant_structure"));
+    assert!(terrain_body.contains("invoke_command"));
+    assert!(terrain_body.contains("command_id"));
     assert!(terrain_body.contains("nested semantic `foundation_system`"));
     assert!(terrain_body.contains("snapshot"));
     assert!(terrain_body.contains("max_height_box"));
@@ -5066,6 +5071,7 @@ fn curated_path_discovery_matches_aliases_and_curated_manifests() {
         CuratedPathDiscoveryRequest {
             path_kind: Some("parametric".into()),
             element_class: Some("roof_system".into()),
+            query: None,
             context: json!({}),
         },
     )
@@ -5081,6 +5087,7 @@ fn curated_path_discovery_matches_aliases_and_curated_manifests() {
         CuratedPathDiscoveryRequest {
             path_kind: Some("recipe".into()),
             element_class: Some("roof_system".into()),
+            query: None,
             context: json!({}),
         },
     )
@@ -5090,6 +5097,70 @@ fn curated_path_discovery_matches_aliases_and_curated_manifests() {
         .iter()
         .any(|asset| asset.asset_id == asset_id.as_str()));
     assert!(recipe.no_curated_path.is_none());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn consultable_curated_assets_do_not_close_materializable_path_gap() {
+    use crate::curation::provenance::{Confidence, Lineage, Provenance};
+    use crate::curation::{
+        CuratedManifest, CuratedManifestRegistry, CurationMeta, ManifestKindId, Scope, Trust,
+    };
+    use crate::plugins::refinement::AgentId;
+
+    let mut world = init_model_api_test_world();
+    let kind = ManifestKindId::new("construction_system_manifest.v1");
+    let asset_id = CuratedManifest::asset_id_for(&kind, "house.simple_cottage");
+    let manifest = CuratedManifest {
+        meta: CurationMeta::new(
+            asset_id.clone(),
+            CuratedManifest::asset_kind(),
+            Provenance {
+                author: AgentId("test".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: None,
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        manifest_kind: kind,
+        body: json!({
+            "label": "Simple cottage grounding notes",
+            "target_classes": ["house"],
+            "slots": []
+        }),
+    };
+    let mut manifests = CuratedManifestRegistry::default();
+    manifests.insert(manifest);
+    world.insert_resource(manifests);
+
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("house".into()),
+            query: None,
+            context: json!({}),
+        },
+    )
+    .expect("discovery should succeed");
+
+    assert!(
+        discovery
+            .curated_assets
+            .iter()
+            .any(|asset| asset.asset_id == asset_id.as_str()),
+        "consultable grounding asset should still be returned"
+    );
+    let gap = discovery
+        .no_curated_path
+        .expect("consultable-only assets must not close a materializable path gap");
+    assert_eq!(gap.suggested_next_tool, "request_corpus_expansion");
+    assert_eq!(discovery.suggested_next_tool, "request_corpus_expansion");
 }
 
 #[cfg(feature = "model-api")]
@@ -7781,6 +7852,7 @@ fn native_non_class_terms_agree_across_discovery_gap_and_annotation() {
         CuratedPathDiscoveryRequest {
             path_kind: Some("recipe".into()),
             element_class: Some("window".into()),
+            query: None,
             context: json!({}),
         },
     )
@@ -7857,6 +7929,7 @@ fn unknown_term_still_records_corpus_gap_and_no_curated_path() {
         CuratedPathDiscoveryRequest {
             path_kind: Some("recipe".into()),
             element_class: Some("flux_capacitor".into()),
+            query: None,
             context: json!({}),
         },
     )
@@ -7968,6 +8041,93 @@ fn select_recipe_surfaces_installed_recipe_artifact() {
     let empty = handle_select_recipe(&world, "wall_assembly".into(), serde_json::json!({}))
         .expect("select_recipe for different class should succeed");
     assert!(empty.is_empty(), "different class must return no results");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn discover_curated_paths_ranks_query_specific_installed_recipe_first() {
+    use crate::capability_registry::{
+        ElementClassId, GenerateInput, GenerateOutput, ObligationTemplate, RecipeFamilyDescriptor,
+    };
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::model_api::server::CuratedPathDiscoveryRequest;
+    use crate::plugins::refinement::{AgentId, RefinementState};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut world = World::new();
+    let mut capability_registry = CapabilityRegistry::default();
+    capability_registry.register_recipe_family(RecipeFamilyDescriptor {
+        id: crate::capability_registry::RecipeFamilyId("generic_roof".into()),
+        target_class: ElementClassId("roof_system".into()),
+        label: "Generic gable roof".into(),
+        description: "Generic roof recipe used when no specific finish is requested.".into(),
+        parameters: Vec::new(),
+        supported_refinement_levels: vec![RefinementState::Schematic],
+        obligation_specializations: HashMap::<RefinementState, Vec<ObligationTemplate>>::new(),
+        promotion_critical_path_specializations: HashMap::new(),
+        generate: Arc::new(
+            |_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
+                Ok(GenerateOutput::default())
+            },
+        ),
+    });
+    world.insert_resource(capability_registry);
+
+    let asset_id = AssetId("installed_recipe/standing_seam_specific".into());
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id.clone(),
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("Standing seam metal roof covering with folded sheet seams".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(MutationScope::None),
+        },
+        parameter_schema: serde_json::Value::Null,
+        target_class: "roof_system".into(),
+        supported_refinement_states: vec![RefinementState::Schematic],
+        tests: Vec::new(),
+    };
+    let mut artifact_registry = RecipeArtifactRegistry::default();
+    artifact_registry.insert(artifact);
+    world.insert_resource(artifact_registry);
+
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("roof_system".into()),
+            query: Some("standing seam metal roof".into()),
+            context: serde_json::json!({ "target_state": "Schematic" }),
+        },
+    )
+    .expect("recipe discovery should succeed");
+
+    assert_eq!(
+        discovery
+            .recipe_rankings
+            .first()
+            .map(|ranking| ranking.id.as_str()),
+        Some("standing_seam_specific"),
+        "query-specific installed executable recipe should outrank a generic class recipe"
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -8506,6 +8666,55 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
     assert!(
         queue.commands.is_empty(),
         "PendingCommandQueue must be empty after flush — all commands were committed"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_at_creation_state_materializes_without_promote_error() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::SemanticRole;
+
+    let mut world = init_model_api_test_world();
+
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test element class for same-level recipe instantiation.".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe(&mut world, "two_box_wall", "wall_assembly");
+    world.register_component::<crate::plugins::identity::ElementId>();
+
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Schematic".into()),
+        },
+    )
+    .expect("same-level executable recipe instantiation must materialize cleanly");
+
+    assert_eq!(result.state, "Schematic");
+    assert_eq!(result.steps_run_count, 2);
+    assert_eq!(
+        result.created_element_ids.len(),
+        2,
+        "script-created elements must be reported instead of hidden behind a promotion error"
+    );
+    assert!(
+        result.promotion_blocked.is_none(),
+        "same-level materialization is not a blocked promotion"
     );
 }
 
