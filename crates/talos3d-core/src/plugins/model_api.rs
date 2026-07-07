@@ -13441,11 +13441,14 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
             id: "dkg.close_gap".into(),
             title: "Close The Gap As Knowledge".into(),
             task_tags: vec!["curation".into(), "draft".into()],
-            summary: "After recording a gap, acquire evidence, normalize the vocabulary into reusable aliases, install the right corpus asset, and prove rediscovery; consultable-only drafts and one-off geometry do not close authoring gaps.".into(),
+            summary: "After recording a gap, acquire evidence, normalize vocabulary into reusable aliases, classify scope (generic vs jurisdiction/standard/product/catalog), install the right corpus asset, and prove rediscovery; consultable-only drafts and one-off geometry do not close authoring gaps.".into(),
             referenced_tool_ids: vec![
                 "discover_curated_paths".into(),
                 "select_recipe".into(),
                 "acquire_corpus_passage".into(),
+                "lookup_source_passage".into(),
+                "list_catalog_providers".into(),
+                "catalog_query".into(),
                 "save_recipe_draft".into(),
                 "save_assembly_pattern_draft".into(),
                 "definition.create".into(),
@@ -13459,9 +13462,12 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "scope": "project",
                 "label": "Learned roof system",
                 "target_class": "roof_system",
+                "jurisdiction": "<region-or-jurisdiction-if-known>",
                 "source_passage_refs": []
             })],
-            body_markdown: None,
+            body_markdown: Some(
+                "When construction practice affects geometry, semantics, validation, or procurement, close the gap as scoped knowledge, not as a local modeling trick.\n\nScope every claim before saving it: generic physical principle; jurisdiction or region; code/standard/regulatory source; manufacturer or product line; off-the-shelf catalog row; or project-only assumption. Use the most specific applicable scope. Do not hard-code any country into the harness: infer the project/request region when explicit, otherwise keep the knowledge generic or ask/record the region gap. For framing dimensions, center-to-center spacing, boards, trusses, fasteners, foundations, wall/floor/roof systems, windows, and doors, prefer region-applicable regulations, standards, supplier catalogs, and manufacturer instructions before generic defaults.\n\nRetrieve progressively and narrowly. First discover by element class, path kind, target state, region/jurisdiction when known, and the natural user terms plus normalized terms. Read only the guidance cards, passages, catalog rows, and Definitions needed for the next authoring decision; do not flood the agent context with a whole regional corpus.\n\nChoose the corpus asset by reuse shape: parametric family for sized systems such as framing modules or layered assemblies; Definition library entry for composable parts such as windows, doors, fixtures, hosted components, and reusable product assemblies; recipe or assembly pattern for construction sequences and layered systems; catalog row/material spec for procurement and BOM identity; validator or rule pack for hard requirements.\n\nBOM-relevant knowledge must preserve catalog/provider identity and off-the-shelf dimensions where available. Do not invent nominal lumber, stud spacing, board thickness, truss geometry, fastener schedules, or product sizes from generic memory when the prompt or project locale implies a regional supply chain. If evidence is missing, record the CorpusGap and leave the value as an explicit assumption instead of promoting it.\n\nAfter saving passages/drafts/Definitions/catalog-backed assets, rediscover using the natural user terms and the normalized English terms, then use the discovered executable or consultable path.".into(),
+            ),
         ..GuidanceCardInfo::default()
         },
         GuidanceCardInfo {

@@ -281,6 +281,8 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("request_corpus_expansion", ToolCategory::Discovery),
     ("acquire_corpus_passage", ToolCategory::Discovery),
     ("lookup_source_passage", ToolCategory::Discovery),
+    ("catalog_query", ToolCategory::Discovery),
+    ("list_catalog_providers", ToolCategory::Discovery),
     ("save_recipe_draft", ToolCategory::Discovery),
     ("set_recipe_draft_status", ToolCategory::Discovery),
     ("save_assembly_pattern_draft", ToolCategory::Discovery),
@@ -317,8 +319,6 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("import_file", ToolCategory::ProjectIo),
     ("list_importers", ToolCategory::ProjectIo),
     // --- Curation extended ---
-    ("catalog_query", ToolCategory::CurationExtended),
-    ("list_catalog_providers", ToolCategory::CurationExtended),
     ("get_recipe_draft", ToolCategory::CurationExtended),
     ("list_recipe_drafts", ToolCategory::CurationExtended),
     ("list_persisted_recipes", ToolCategory::CurationExtended),

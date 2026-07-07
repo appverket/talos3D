@@ -4946,6 +4946,9 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         "discover_curated_paths",
         "select_recipe",
         "acquire_corpus_passage",
+        "lookup_source_passage",
+        "list_catalog_providers",
+        "catalog_query",
         "request_corpus_expansion",
         "save_recipe_draft",
         "save_assembly_pattern_draft",
@@ -4998,6 +5001,12 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .contains(&"save_recipe_draft".to_string()));
     assert!(card
         .referenced_tool_ids
+        .contains(&"catalog_query".to_string()));
+    assert!(card
+        .referenced_tool_ids
+        .contains(&"definition.create".to_string()));
+    assert!(card
+        .referenced_tool_ids
         .contains(&"discover_curated_paths".to_string()));
     assert!(card
         .referenced_tool_ids
@@ -5005,6 +5014,25 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
     assert!(
         card.summary.contains("normalize") && card.summary.contains("rediscovery"),
         "close-gap guidance must require vocabulary normalization and rediscovery proof"
+    );
+    assert!(
+        card.summary.contains("jurisdiction") && card.summary.contains("catalog"),
+        "close-gap guidance must require scope classification for regional/catalog knowledge"
+    );
+    let body = card
+        .body_markdown
+        .as_deref()
+        .expect("close-gap guidance should explain scoped corpus acquisition");
+    assert!(body.contains("Do not hard-code any country"));
+    assert!(body.contains("Retrieve progressively and narrowly"));
+    assert!(body.contains("region-applicable regulations"));
+    assert!(body.contains("off-the-shelf"));
+    assert!(body.contains("BOM"));
+    assert!(body.contains("Definition library"));
+    assert!(body.contains("parametric family"));
+    assert!(
+        !body.contains("For Swedish framing"),
+        "close-gap guidance must stay region-keyed, not country-hard-coded"
     );
 }
 
@@ -9989,6 +10017,8 @@ mod capability_profiles {
             "request_corpus_expansion",
             "acquire_corpus_passage",
             "lookup_source_passage",
+            "list_catalog_providers",
+            "catalog_query",
             "save_recipe_draft",
             "save_assembly_pattern_draft",
             "set_recipe_draft_status",
