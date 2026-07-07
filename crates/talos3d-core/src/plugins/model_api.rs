@@ -5414,6 +5414,8 @@ fn build_definition_from_object(
         interface: Interface {
             parameters: parse_parameter_schema(object.get("parameters"))?,
             void_declaration: parse_optional_void_declaration(object.get("void_declaration"))?,
+            host_capabilities: Vec::new(),
+            hosted_requirements: Vec::new(),
             external_context_requirements: Vec::new(),
         },
         evaluators: parse_evaluators(object)?,
@@ -7427,6 +7429,7 @@ fn prepare_hosted_occurrence_request(
     let hosted_context = HostedOccurrenceContext {
         host_element_id,
         opening_element_id,
+        binding: None,
         anchors: anchors_by_id.into_values().collect(),
     };
     request_object.insert(

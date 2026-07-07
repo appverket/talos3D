@@ -5213,6 +5213,7 @@ fn build_hosted_occurrence_context(
     HostedOccurrenceContext {
         host_element_id: context.wall_element_id,
         opening_element_id: context.opening_element_id,
+        binding: None,
         anchors,
     }
 }
@@ -5342,6 +5343,8 @@ mod tests {
             interface: Interface {
                 parameters: ParameterSchema(vec![parameter]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
@@ -5448,6 +5451,8 @@ mod tests {
             interface: Interface {
                 parameters: ParameterSchema(vec![parameter]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
@@ -5532,6 +5537,8 @@ mod tests {
             interface: Interface {
                 parameters: ParameterSchema(Vec::new()),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),

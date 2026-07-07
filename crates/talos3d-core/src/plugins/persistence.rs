@@ -1918,6 +1918,8 @@ mod tests {
                     metadata: ParameterMetadata::default(),
                 }]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),

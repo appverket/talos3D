@@ -23,6 +23,7 @@ use crate::{
     capability_registry::{AuthoredEntityFactory, FaceId},
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id},
+        hosting_contracts::{HostedInteractionKind, HostingContractKindId},
         identity::ElementId,
         materials::{material_assignment_from_value, MaterialAssignment},
         modeling::{
@@ -64,11 +65,38 @@ impl HostedAnchor {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostedPlacementBinding {
+    /// Host capability selected on the A side of an A-hosts-B relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_capability_id: Option<String>,
+    /// Hosted requirement selected on the B Definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_requirement_id: Option<String>,
+    /// Contract kind used for validation and domain-owned adaptation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_kind: Option<HostingContractKindId>,
+    /// The generic interaction kind, e.g. through penetration or surface mount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_kind: Option<HostedInteractionKind>,
+    /// Host feature/opening/penetration entity created or updated by placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_feature_element_id: Option<ElementId>,
+    /// Stable id of the semantic placement plan that produced this binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_plan_id: Option<String>,
+    /// Stable id of the last resize plan that updated this binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resize_plan_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HostedOccurrenceContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_element_id: Option<ElementId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_element_id: Option<ElementId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<HostedPlacementBinding>,
     #[serde(default)]
     pub anchors: Vec<HostedAnchor>,
 }
@@ -202,6 +230,63 @@ pub struct GeneratedOccurrencePart {
 /// Marker component: this occurrence entity must be re-evaluated this frame.
 #[derive(Component)]
 pub struct NeedsEval;
+
+#[cfg(test)]
+mod hosted_occurrence_contract_context_tests {
+    use super::*;
+
+    #[test]
+    fn hosted_occurrence_contract_context_round_trips_generic_binding() {
+        let context = HostedOccurrenceContext {
+            host_element_id: Some(ElementId(10)),
+            opening_element_id: Some(ElementId(11)),
+            binding: Some(HostedPlacementBinding {
+                host_capability_id: Some("wall.planar_opening".into()),
+                hosted_requirement_id: Some("window.wall_through_opening".into()),
+                contract_kind: Some(HostingContractKindId("architecture::wall_opening".into())),
+                interaction_kind: Some(HostedInteractionKind::ThroughPenetration),
+                host_feature_element_id: Some(ElementId(11)),
+                placement_plan_id: Some("place-window-1".into()),
+                resize_plan_id: Some("resize-window-1".into()),
+            }),
+            anchors: vec![HostedAnchor {
+                id: "sill_midpoint".into(),
+                kind: Some("attachment".into()),
+                position: [1.0, 0.9, 0.0],
+            }],
+        };
+
+        let value = serde_json::to_value(&context).unwrap();
+        assert_eq!(value["binding"]["interaction_kind"], "through_penetration");
+        assert_eq!(value["binding"]["host_feature_element_id"], 11);
+
+        let parsed: HostedOccurrenceContext = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.interaction_kind),
+            Some(HostedInteractionKind::ThroughPenetration)
+        );
+        assert_eq!(
+            parsed.anchor_position("sill_midpoint"),
+            Some(Vec3::new(1.0, 0.9, 0.0))
+        );
+    }
+
+    #[test]
+    fn hosted_occurrence_contract_context_accepts_legacy_shape() {
+        let parsed: HostedOccurrenceContext = serde_json::from_value(serde_json::json!({
+            "host_element_id": 10,
+            "opening_element_id": 11,
+            "anchors": []
+        }))
+        .unwrap();
+
+        assert!(parsed.binding.is_none());
+        assert_eq!(parsed.host_element_id, Some(ElementId(10)));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ChangedDefinitions — Bevy resource
@@ -1967,6 +2052,8 @@ mod pp_098_dirty_taxonomy_tests {
                     parameter("finish_color", false),
                 ]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
@@ -2245,6 +2332,8 @@ mod pp_098_occurrence_cache_tests {
                     string_parameter("finish_color", "white", false),
                 ]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: vec![EvaluatorDecl::RectangularExtrusion(
@@ -2289,6 +2378,8 @@ mod pp_098_occurrence_cache_tests {
             interface: Interface {
                 parameters: ParameterSchema(vec![numeric_parameter("left_width", 2.0)]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
@@ -3160,6 +3251,8 @@ mod trig_and_rotation_tests {
                     },
                 ]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: vec![EvaluatorDecl::RectangularExtrusion(
@@ -3189,6 +3282,8 @@ mod trig_and_rotation_tests {
             interface: Interface {
                 parameters: ParameterSchema(vec![]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
@@ -3276,6 +3371,8 @@ mod trig_and_rotation_tests {
             interface: Interface {
                 parameters: ParameterSchema(vec![]),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),

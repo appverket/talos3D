@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::void_declaration::VoidDeclaration;
-use crate::plugins::{materials::MaterialAssignment, registry_generation::RegistryGeneration};
+use crate::plugins::{
+    hosting_contracts::{HostCapabilityDeclaration, HostedRequirementDeclaration},
+    materials::MaterialAssignment,
+    registry_generation::RegistryGeneration,
+};
 
 // ---------------------------------------------------------------------------
 // Global counters
@@ -198,6 +202,14 @@ pub enum ParameterScaleBehavior {
     /// The value is semantic state, not dimensional geometry.
     #[default]
     Semantic,
+    /// The value drives a host opening or penetration feature.
+    OpeningDriver,
+    /// The value preserves an authored semantic anchor during resize.
+    AnchorPreserving,
+    /// The value reflows repeated members by count or spacing policy.
+    RepeatOrReflow,
+    /// The value is computed from other authored parameters.
+    Derived,
 }
 
 /// Extended metadata used by agents and UI when authoring parameters.
@@ -791,6 +803,14 @@ pub struct Interface {
     pub parameters: ParameterSchema,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub void_declaration: Option<VoidDeclaration>,
+    /// Generic host capabilities this Definition can offer when an occurrence
+    /// is selected as A in an A-hosts-B workflow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_capabilities: Vec<HostCapabilityDeclaration>,
+    /// Generic hosted requirements this Definition needs another element to
+    /// satisfy when the occurrence is placed as B in an A-hosts-B workflow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosted_requirements: Vec<HostedRequirementDeclaration>,
     /// External-context requirements (`HostContract`,
     /// `RequiredContext`, `AdvisoryContext`) produced by PP-A2DB-2
     /// slice B's classifier. Populated during emission via
@@ -807,6 +827,21 @@ pub struct Interface {
 }
 
 impl Interface {
+    /// Builder helper for Definitions that advertise host capabilities.
+    pub fn with_host_capabilities(mut self, capabilities: Vec<HostCapabilityDeclaration>) -> Self {
+        self.host_capabilities = capabilities;
+        self
+    }
+
+    /// Builder helper for Definitions that must be hosted by another element.
+    pub fn with_hosted_requirements(
+        mut self,
+        requirements: Vec<HostedRequirementDeclaration>,
+    ) -> Self {
+        self.hosted_requirements = requirements;
+        self
+    }
+
     /// Builder helper for emitters: stamp the slice B requirements
     /// onto the Definition's interface during body construction.
     pub fn with_external_context_requirements(
@@ -1789,6 +1824,16 @@ fn merge_interface(base: Interface, child: Interface) -> Interface {
     Interface {
         parameters: merge_parameter_schema(base.parameters, child.parameters),
         void_declaration: child.void_declaration.or(base.void_declaration),
+        host_capabilities: if child.host_capabilities.is_empty() {
+            base.host_capabilities
+        } else {
+            child.host_capabilities
+        },
+        hosted_requirements: if child.hosted_requirements.is_empty() {
+            base.hosted_requirements
+        } else {
+            child.hosted_requirements
+        },
         external_context_requirements,
     }
 }
@@ -2154,6 +2199,42 @@ mod pp_dhost_param_type_tests {
         let value = serde_json::to_value(&parameter).unwrap();
         assert_eq!(value["metadata"]["scale_behavior"], json!("fixed_world"));
     }
+
+    #[test]
+    fn hosted_occurrence_contract_scale_behaviors_cover_smart_resize_roles() {
+        for (behavior, expected_json) in [
+            (
+                ParameterScaleBehavior::ScaleWithOccurrence,
+                "scale_with_occurrence",
+            ),
+            (ParameterScaleBehavior::FixedWorld, "fixed_world"),
+            (ParameterScaleBehavior::Ratio, "ratio"),
+            (ParameterScaleBehavior::Semantic, "semantic"),
+            (ParameterScaleBehavior::OpeningDriver, "opening_driver"),
+            (
+                ParameterScaleBehavior::AnchorPreserving,
+                "anchor_preserving",
+            ),
+            (ParameterScaleBehavior::RepeatOrReflow, "repeat_or_reflow"),
+            (ParameterScaleBehavior::Derived, "derived"),
+        ] {
+            let value = serde_json::to_value(behavior).unwrap();
+            assert_eq!(value, json!(expected_json));
+            let parsed: ParameterScaleBehavior = serde_json::from_value(value).unwrap();
+            assert_eq!(parsed, behavior);
+        }
+    }
+
+    #[test]
+    fn hosted_occurrence_contract_interface_defaults_are_backward_compatible() {
+        let interface: Interface = serde_json::from_value(json!({
+            "parameters": []
+        }))
+        .unwrap();
+
+        assert!(interface.host_capabilities.is_empty());
+        assert!(interface.hosted_requirements.is_empty());
+    }
 }
 
 // === PP-A2DB-2 slice C1: external_context_requirements on Interface =======
@@ -2470,6 +2551,8 @@ mod pp_098_geometry_param_hash_tests {
             interface: Interface {
                 parameters: ParameterSchema(params),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
@@ -2583,6 +2666,8 @@ mod pp_099_material_assignment_relocation_tests {
             interface: Interface {
                 parameters: ParameterSchema::default(),
                 void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
             evaluators: Vec::new(),
