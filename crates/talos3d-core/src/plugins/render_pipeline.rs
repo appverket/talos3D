@@ -980,8 +980,7 @@ fn sync_outline_mesh_overlays(
             ),
         >,
     )>,
-    mesh_assets: Res<Assets<Mesh>>,
-    mut outline_mesh_assets: ResMut<Assets<Mesh>>,
+    mut mesh_assets: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut outline_material: ResMut<OutlineMeshOverlayMaterial>,
 ) {
@@ -1001,8 +1000,7 @@ fn sync_outline_mesh_overlays(
         for (entity, mesh_handle, visibility, overlay) in &source_queries.p0() {
             sync_outline_mesh_overlay_for_source(
                 &mut commands,
-                &mesh_assets,
-                &mut outline_mesh_assets,
+                &mut mesh_assets,
                 &material_handle,
                 outline_active,
                 entity,
@@ -1015,8 +1013,7 @@ fn sync_outline_mesh_overlays(
         for (entity, mesh_handle, visibility, overlay) in &source_queries.p1() {
             sync_outline_mesh_overlay_for_source(
                 &mut commands,
-                &mesh_assets,
-                &mut outline_mesh_assets,
+                &mut mesh_assets,
                 &material_handle,
                 outline_active,
                 entity,
@@ -1030,8 +1027,7 @@ fn sync_outline_mesh_overlays(
 
 fn sync_outline_mesh_overlay_for_source(
     commands: &mut Commands,
-    mesh_assets: &Assets<Mesh>,
-    outline_mesh_assets: &mut Assets<Mesh>,
+    mesh_assets: &mut Assets<Mesh>,
     material_handle: &Handle<StandardMaterial>,
     outline_active: bool,
     source_entity: Entity,
@@ -1049,13 +1045,13 @@ fn sync_outline_mesh_overlay_for_source(
     }
     remove_outline_mesh_overlay(commands, source_entity, overlay);
 
-    let Some(source_mesh) = mesh_assets.get(&source_mesh_handle.0) else {
+    let Some(outline_mesh) = mesh_assets
+        .get(&source_mesh_handle.0)
+        .and_then(outline_mesh_from_surface_mesh)
+    else {
         return;
     };
-    let Some(outline_mesh) = outline_mesh_from_surface_mesh(source_mesh) else {
-        return;
-    };
-    let outline_mesh_handle = outline_mesh_assets.add(outline_mesh);
+    let outline_mesh_handle = mesh_assets.add(outline_mesh);
     let outline_entity = commands
         .spawn((
             Mesh3d(outline_mesh_handle),
