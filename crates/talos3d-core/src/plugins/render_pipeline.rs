@@ -5,9 +5,10 @@
 /// takes effect on the very next frame.
 use bevy::{
     anti_alias::fxaa::Fxaa,
+    asset::RenderAssetUsages,
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
-    mesh::{Indices, VertexAttributeValues},
+    mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::{
         ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel,
         ScreenSpaceReflections,
@@ -36,7 +37,6 @@ const CONTOUR_OVERLAY_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 1.0);
 const VISIBLE_EDGE_OVERLAY_COLOR: Color = Color::srgba(0.0, 0.0, 0.0, 1.0);
 const EDGE_QUANTIZATION_SCALE: f32 = 10_000.0;
 const DEFAULT_BACKGROUND_RGB: [f32; 3] = [0.17, 0.18, 0.20];
-#[cfg(test)]
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 const PAPER_BACKGROUND_RGB: [f32; 3] = [1.0, 1.0, 1.0];
@@ -278,6 +278,20 @@ struct SurfaceMaterialOverrideCacheKey {
     xray_alpha_milli: u16,
 }
 
+#[derive(Component, Debug, Clone)]
+struct OutlineMeshOverlay {
+    entity: Entity,
+    source_mesh: Handle<Mesh>,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+struct OutlineMeshOverlayEntity;
+
+#[derive(Resource, Debug, Clone, Default)]
+struct OutlineMeshOverlayMaterial {
+    handle: Option<Handle<StandardMaterial>>,
+}
+
 #[derive(Resource, Debug, Clone, Default)]
 pub(crate) struct PaperDrawingState {
     baseline: Option<RenderSettings>,
@@ -300,6 +314,7 @@ impl Plugin for RenderPipelinePlugin {
             .init_resource::<RenderPipelineSetupState>()
             .init_resource::<PaperDrawingState>()
             .init_resource::<SurfaceMaterialOverrideCache>()
+            .init_resource::<OutlineMeshOverlayMaterial>()
             .register_toolbar(ToolbarDescriptor {
                 id: VIEW_RENDER_TOOLBAR_ID.to_string(),
                 label: "Render".to_string(),
@@ -373,7 +388,7 @@ impl Plugin for RenderPipelinePlugin {
                                 "type": "number",
                                 "minimum": 0.02,
                                 "maximum": 0.95,
-                                "description": "Optional face alpha override. Defaults to 0.5."
+                                "description": "Optional face alpha override. Defaults to 0.28."
                             }
                         }
                     })),
@@ -432,6 +447,7 @@ impl Plugin for RenderPipelinePlugin {
                     sync_clear_color,
                     sync_wireframe_surface_visibility.after(MeshGenerationSet::Generate),
                     sync_surface_display_materials,
+                    sync_outline_mesh_overlays.after(MeshGenerationSet::Generate),
                 ),
             )
             .add_systems(
@@ -860,25 +876,51 @@ impl SurfaceMaterialOverrideCacheKey {
 fn sync_wireframe_surface_visibility(
     settings: Res<RenderSettings>,
     mut commands: Commands,
-    mesh_query: Query<
-        (
-            Entity,
-            Option<&Visibility>,
-            Option<&WireframeSurfaceVisibilityOverride>,
-        ),
-        With<Mesh3d>,
-    >,
+    mut mesh_queries: ParamSet<(
+        Query<
+            (
+                Entity,
+                Option<&Visibility>,
+                Option<&WireframeSurfaceVisibilityOverride>,
+            ),
+            With<Mesh3d>,
+        >,
+        Query<
+            (
+                Entity,
+                Option<&Visibility>,
+                Option<&WireframeSurfaceVisibilityOverride>,
+            ),
+            (With<Mesh3d>, Or<(Added<Mesh3d>, Changed<Visibility>)>),
+        >,
+    )>,
 ) {
     let wireframe_only =
         active_surface_material_mode(&settings) == Some(SurfaceMaterialMode::WireframeOnly);
-    for (entity, visibility, override_state) in &mesh_query {
-        apply_wireframe_surface_visibility(
-            &mut commands,
-            entity,
-            wireframe_only,
-            visibility.copied(),
-            override_state.copied(),
-        );
+    if !settings.is_changed() && !wireframe_only {
+        return;
+    }
+
+    if settings.is_changed() {
+        for (entity, visibility, override_state) in &mesh_queries.p0() {
+            apply_wireframe_surface_visibility(
+                &mut commands,
+                entity,
+                wireframe_only,
+                visibility.copied(),
+                override_state.copied(),
+            );
+        }
+    } else {
+        for (entity, visibility, override_state) in &mesh_queries.p1() {
+            apply_wireframe_surface_visibility(
+                &mut commands,
+                entity,
+                wireframe_only,
+                visibility.copied(),
+                override_state.copied(),
+            );
+        }
     }
 }
 
@@ -910,6 +952,161 @@ fn apply_wireframe_surface_visibility(
         }
         (false, _, None) => {}
     }
+}
+
+fn sync_outline_mesh_overlays(
+    settings: Res<RenderSettings>,
+    mut commands: Commands,
+    mut source_queries: ParamSet<(
+        Query<
+            (
+                Entity,
+                &Mesh3d,
+                Option<&Visibility>,
+                Option<&OutlineMeshOverlay>,
+            ),
+            With<ElementId>,
+        >,
+        Query<
+            (
+                Entity,
+                &Mesh3d,
+                Option<&Visibility>,
+                Option<&OutlineMeshOverlay>,
+            ),
+            (
+                With<ElementId>,
+                Or<(Added<Mesh3d>, Changed<Mesh3d>, Changed<Visibility>)>,
+            ),
+        >,
+    )>,
+    mesh_assets: Res<Assets<Mesh>>,
+    mut outline_mesh_assets: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut outline_material: ResMut<OutlineMeshOverlayMaterial>,
+) {
+    let outline_active =
+        live_depth_tested_outline_active(&settings) && !settings.wireframe_overlay_enabled;
+    if !settings.is_changed() && !outline_active {
+        return;
+    }
+
+    let material_handle = outline_overlay_material(
+        &mut outline_material,
+        &mut materials,
+        VISIBLE_EDGE_OVERLAY_COLOR,
+    );
+
+    if settings.is_changed() {
+        for (entity, mesh_handle, visibility, overlay) in &source_queries.p0() {
+            sync_outline_mesh_overlay_for_source(
+                &mut commands,
+                &mesh_assets,
+                &mut outline_mesh_assets,
+                &material_handle,
+                outline_active,
+                entity,
+                mesh_handle,
+                visibility.copied(),
+                overlay,
+            );
+        }
+    } else {
+        for (entity, mesh_handle, visibility, overlay) in &source_queries.p1() {
+            sync_outline_mesh_overlay_for_source(
+                &mut commands,
+                &mesh_assets,
+                &mut outline_mesh_assets,
+                &material_handle,
+                outline_active,
+                entity,
+                mesh_handle,
+                visibility.copied(),
+                overlay,
+            );
+        }
+    }
+}
+
+fn sync_outline_mesh_overlay_for_source(
+    commands: &mut Commands,
+    mesh_assets: &Assets<Mesh>,
+    outline_mesh_assets: &mut Assets<Mesh>,
+    material_handle: &Handle<StandardMaterial>,
+    outline_active: bool,
+    source_entity: Entity,
+    source_mesh_handle: &Mesh3d,
+    visibility: Option<Visibility>,
+    overlay: Option<&OutlineMeshOverlay>,
+) {
+    if !outline_active || visibility == Some(Visibility::Hidden) {
+        remove_outline_mesh_overlay(commands, source_entity, overlay);
+        return;
+    }
+
+    if overlay.is_some_and(|overlay| overlay.source_mesh == source_mesh_handle.0) {
+        return;
+    }
+    remove_outline_mesh_overlay(commands, source_entity, overlay);
+
+    let Some(source_mesh) = mesh_assets.get(&source_mesh_handle.0) else {
+        return;
+    };
+    let Some(outline_mesh) = outline_mesh_from_surface_mesh(source_mesh) else {
+        return;
+    };
+    let outline_mesh_handle = outline_mesh_assets.add(outline_mesh);
+    let outline_entity = commands
+        .spawn((
+            Mesh3d(outline_mesh_handle),
+            MeshMaterial3d(material_handle.clone()),
+            Transform::IDENTITY,
+            Visibility::Inherited,
+            OutlineMeshOverlayEntity,
+        ))
+        .id();
+    commands.entity(source_entity).add_child(outline_entity);
+    commands.entity(source_entity).insert(OutlineMeshOverlay {
+        entity: outline_entity,
+        source_mesh: source_mesh_handle.0.clone(),
+    });
+}
+
+fn remove_outline_mesh_overlay(
+    commands: &mut Commands,
+    source_entity: Entity,
+    overlay: Option<&OutlineMeshOverlay>,
+) {
+    if let Some(overlay) = overlay {
+        commands.entity(overlay.entity).despawn();
+        commands
+            .entity(source_entity)
+            .remove::<OutlineMeshOverlay>();
+    }
+}
+
+fn outline_overlay_material(
+    cache: &mut OutlineMeshOverlayMaterial,
+    materials: &mut Assets<StandardMaterial>,
+    color: Color,
+) -> Handle<StandardMaterial> {
+    if let Some(handle) = cache
+        .handle
+        .as_ref()
+        .filter(|handle| materials.contains(*handle))
+    {
+        return handle.clone();
+    }
+
+    let handle = materials.add(StandardMaterial {
+        base_color: color,
+        unlit: true,
+        alpha_mode: AlphaMode::Opaque,
+        depth_bias: 1.0,
+        ..Default::default()
+    });
+    cache.handle = Some(handle.clone());
+    handle
 }
 
 fn surface_material_override_is_current(
@@ -1069,10 +1266,7 @@ fn draw_model_edge_overlays(
     camera_query: Query<(&GlobalTransform, &Projection), With<OrbitCamera>>,
     mut gizmos: Gizmos,
 ) {
-    if !settings.wireframe_overlay_enabled
-        && !settings.contour_overlay_enabled
-        && !live_depth_tested_outline_active(&settings)
-    {
+    if !settings.wireframe_overlay_enabled && !settings.contour_overlay_enabled {
         return;
     }
 
@@ -1121,17 +1315,13 @@ fn draw_model_edge_overlays(
     }
 
     for subject in subjects {
-        if settings.wireframe_overlay_enabled || live_depth_tested_outline_active(&settings) {
+        if settings.wireframe_overlay_enabled {
             if let Some(factory) = registry.factory_for(subject.type_name) {
                 factory.draw_selection(
                     world,
                     subject.entity,
                     &mut gizmos,
-                    if settings.wireframe_overlay_enabled {
-                        wireframe_overlay_color(&settings)
-                    } else {
-                        VISIBLE_EDGE_OVERLAY_COLOR
-                    },
+                    wireframe_overlay_color(&settings),
                 );
             }
         }
@@ -1241,15 +1431,29 @@ fn draw_mesh_contours(
     }
 }
 
-#[cfg(test)]
-fn collect_feature_edges(mesh: &Mesh, mesh_transform: &GlobalTransform) -> Vec<FeatureEdgeState> {
-    let Some(positions) = mesh_positions(mesh) else {
-        return Vec::new();
-    };
-    let Some(indices) = mesh_triangle_indices(mesh, positions.len()) else {
-        return Vec::new();
-    };
+fn outline_mesh_from_surface_mesh(mesh: &Mesh) -> Option<Mesh> {
+    let positions = mesh_positions(mesh)?;
+    let indices = mesh_triangle_indices(mesh, positions.len())?;
+    let segments = collect_feature_edge_segments(&positions, &indices);
+    if segments.is_empty() {
+        return None;
+    }
 
+    let mut line_positions = Vec::with_capacity(segments.len() * 2);
+    for (start, end) in segments {
+        line_positions.push(start);
+        line_positions.push(end);
+    }
+
+    let mut outline_mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default());
+    outline_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, line_positions);
+    Some(outline_mesh)
+}
+
+fn collect_feature_edge_segments(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+) -> Vec<([f32; 3], [f32; 3])> {
     let mut edges = HashMap::<EdgeKey, FeatureEdgeState>::new();
     for triangle in indices.chunks(3) {
         if triangle.len() < 3 {
@@ -1263,40 +1467,61 @@ fn collect_feature_edges(mesh: &Mesh, mesh_transform: &GlobalTransform) -> Vec<F
             continue;
         };
 
-        let world_a = mesh_transform.transform_point(Vec3::from(local_a));
-        let world_b = mesh_transform.transform_point(Vec3::from(local_b));
-        let world_c = mesh_transform.transform_point(Vec3::from(local_c));
-        let normal = (world_b - world_a)
-            .cross(world_c - world_a)
+        let normal = (Vec3::from(local_b) - Vec3::from(local_a))
+            .cross(Vec3::from(local_c) - Vec3::from(local_a))
             .normalize_or_zero();
         if normal.length_squared() <= f32::EPSILON {
             continue;
         }
 
-        register_feature_edge(&mut edges, local_a, local_b, world_a, world_b, normal);
-        register_feature_edge(&mut edges, local_b, local_c, world_b, world_c, normal);
-        register_feature_edge(&mut edges, local_c, local_a, world_c, world_a, normal);
+        register_feature_edge(&mut edges, local_a, local_b, normal);
+        register_feature_edge(&mut edges, local_b, local_c, normal);
+        register_feature_edge(&mut edges, local_c, local_a, normal);
     }
 
     edges
         .into_values()
         .filter(FeatureEdgeState::is_visible_candidate)
+        .map(|edge| (edge.start, edge.end))
         .collect()
 }
 
 #[cfg(test)]
+fn collect_feature_edges(mesh: &Mesh, mesh_transform: &GlobalTransform) -> Vec<FeatureEdgeState> {
+    let Some(positions) = mesh_positions(mesh) else {
+        return Vec::new();
+    };
+    let Some(indices) = mesh_triangle_indices(mesh, positions.len()) else {
+        return Vec::new();
+    };
+
+    collect_feature_edge_segments(&positions, &indices)
+        .into_iter()
+        .map(|(start, end)| FeatureEdgeState {
+            start,
+            end,
+            start_world: mesh_transform.transform_point(Vec3::from(start)),
+            end_world: mesh_transform.transform_point(Vec3::from(end)),
+            normals: [Vec3::ZERO; 2],
+            total_faces: 1,
+        })
+        .collect()
+}
+
 fn register_feature_edge(
     edges: &mut HashMap<EdgeKey, FeatureEdgeState>,
     local_start: [f32; 3],
     local_end: [f32; 3],
-    world_start: Vec3,
-    world_end: Vec3,
     normal: Vec3,
 ) {
     let key = EdgeKey::from_points(local_start, local_end);
     let state = edges.entry(key).or_insert_with(|| FeatureEdgeState {
-        start_world: world_start,
-        end_world: world_end,
+        start: local_start,
+        end: local_end,
+        #[cfg(test)]
+        start_world: Vec3::from(local_start),
+        #[cfg(test)]
+        end_world: Vec3::from(local_end),
         normals: [Vec3::ZERO; 2],
         total_faces: 0,
     });
@@ -1442,15 +1667,17 @@ impl EdgeContourState {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg(test)]
 struct FeatureEdgeState {
+    start: [f32; 3],
+    end: [f32; 3],
+    #[cfg(test)]
     start_world: Vec3,
+    #[cfg(test)]
     end_world: Vec3,
     normals: [Vec3; 2],
     total_faces: u8,
 }
 
-#[cfg(test)]
 impl FeatureEdgeState {
     fn is_visible_candidate(&self) -> bool {
         match self.total_faces {
@@ -1831,6 +2058,43 @@ mod tests {
         };
 
         assert!(!live_depth_tested_outline_active(&settings));
+    }
+
+    #[test]
+    fn outline_mesh_omits_coplanar_internal_diagonal() {
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3];
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, Default::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_indices(Indices::U32(indices));
+
+        let outline = outline_mesh_from_surface_mesh(&mesh).expect("outline mesh");
+        let line_positions = mesh_positions(&outline).expect("line positions");
+
+        assert_eq!(
+            line_positions.len(),
+            8,
+            "four visible perimeter edges should emit two line vertices each"
+        );
+    }
+
+    #[test]
+    fn outline_material_is_depth_tested_visible_edge_linework() {
+        let mut cache = OutlineMeshOverlayMaterial::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+
+        let handle =
+            outline_overlay_material(&mut cache, &mut materials, VISIBLE_EDGE_OVERLAY_COLOR);
+        let material = materials.get(&handle).expect("outline material");
+
+        assert_eq!(material.alpha_mode, AlphaMode::Opaque);
+        assert!(material.unlit);
+        assert_eq!(material.depth_bias, 1.0);
     }
 
     #[test]
