@@ -301,6 +301,19 @@ impl CorpusPassageRegistry {
         out
     }
 
+    /// Proactive passages that are safe to advertise in a global bootstrap
+    /// snapshot before the task context has selected a region/jurisdiction.
+    pub fn globally_proactive_passages(&self) -> Vec<(&str, &ProactivePassageGuidance)> {
+        let mut out: Vec<(&str, &ProactivePassageGuidance)> = self
+            .passages
+            .iter()
+            .filter(|(_, entry)| entry.provenance.jurisdiction.is_none())
+            .filter_map(|(k, v)| v.proactive.as_ref().map(|p| (k.as_str(), p)))
+            .collect();
+        out.sort_by(|a, b| a.1.priority.cmp(&b.1.priority).then(a.0.cmp(b.0)));
+        out
+    }
+
     /// Look up a passage by ref.  Returns `None` if not registered.
     pub fn get(&self, passage_ref: &PassageRef) -> Option<&PassageEntry> {
         self.passages.get(passage_ref.0.as_str())

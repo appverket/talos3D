@@ -11660,15 +11660,17 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     must_read_guidance_card_ids.push("dkg.trajectory_eval".into());
     must_read_guidance_card_ids.push("dkg.no_curated_path".into());
     // Data-driven proactive "skill" cards come next, before the authoring
-    // override + references, so a passage that encodes generative authoring
-    // knowledge (e.g. the recursive substrate chain) is read up front rather
-    // than only after a validator backlink surfaces it reactively. The set and
-    // its priority are pure data; core just reads the registry.
+    // override + references, so generic generative authoring knowledge can be
+    // read up front rather than only after a validator backlink surfaces it
+    // reactively. The global snapshot does not advertise jurisdiction-scoped
+    // passages before the task context has selected a region; scoped passages
+    // stay addressable through guidance/passages and should be pulled by
+    // region-aware discovery or gap closeout.
     let proactive_passage_card_ids: Vec<String> = world
         .get_resource::<crate::plugins::corpus_gap::CorpusPassageRegistry>()
         .map(|registry| {
             registry
-                .proactive_passages()
+                .globally_proactive_passages()
                 .into_iter()
                 .map(|(passage_ref, _)| proactive_passage_card_id(passage_ref))
                 .collect()

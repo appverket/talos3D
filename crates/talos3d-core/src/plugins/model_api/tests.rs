@@ -362,13 +362,13 @@ fn proactive_passage_surfaces_as_must_read_skill_card() {
     use crate::plugins::corpus_gap::{CorpusPassageRegistry, ProactivePassageGuidance};
     use crate::plugins::knowledge_persistence::{build_provenance_for_passage, PersistedPassage};
 
-    let prov = |passage_ref: &str| {
+    let prov = |passage_ref: &str, jurisdiction: Option<&str>| {
         build_provenance_for_passage(&PersistedPassage {
             passage_ref: passage_ref.into(),
             text: String::new(),
             citation: "test".into(),
             source_url: None,
-            jurisdiction: None,
+            jurisdiction: jurisdiction.map(str::to_string),
             classification: None,
             license: Some("cc0".into()),
             proactive_guidance: None,
@@ -383,18 +383,32 @@ fn proactive_passage_surfaces_as_must_read_skill_card() {
     passages.register(
         PassageRef("REACTIVE_ONLY_PASSAGE".into()),
         "Some reactively-discoverable detail.",
-        prov("REACTIVE_ONLY_PASSAGE"),
+        prov("REACTIVE_ONLY_PASSAGE", None),
     );
     // A proactive passage MUST be promoted to a must-read card.
     passages.register_with_guidance(
         PassageRef("SKILL_SUBSTRATE_CHAIN".into()),
         "Full generative substrate-chain text lives here.",
-        prov("SKILL_SUBSTRATE_CHAIN"),
+        prov("SKILL_SUBSTRATE_CHAIN", None),
         Some(ProactivePassageGuidance {
             title: "Read first: build top-down along the substrate chain".into(),
             summary: "Frame establishes pitch; covering is derived from the frame face.".into(),
             task_tags: vec!["authoring".into(), "substrate".into()],
             priority: 1,
+        }),
+    );
+    // A jurisdiction-scoped proactive passage is still directly retrievable,
+    // but the global snapshot must not push it before a task/request region is
+    // known.
+    passages.register_with_guidance(
+        PassageRef("SE_REGION_SPECIFIC_DETAIL".into()),
+        "Swedish jurisdiction-specific construction detail.",
+        prov("SE_REGION_SPECIFIC_DETAIL", Some("SE")),
+        Some(ProactivePassageGuidance {
+            title: "Swedish region-specific detail".into(),
+            summary: "Use only when the request context selects SE.".into(),
+            task_tags: vec!["authoring".into(), "region".into()],
+            priority: 0,
         }),
     );
     world.insert_resource(passages);
@@ -416,6 +430,13 @@ fn proactive_passage_surfaces_as_must_read_skill_card() {
             .any(|id| id == "passage:REACTIVE_ONLY_PASSAGE"),
         "a passage without the proactive flag must NOT be advertised as must-read"
     );
+    assert!(
+        !snapshot
+            .must_read_guidance_card_ids
+            .iter()
+            .any(|id| id == "passage:SE_REGION_SPECIFIC_DETAIL"),
+        "a region-scoped passage must not be advertised by the global snapshot"
+    );
 
     // Every advertised card — including the new skill card — must resolve.
     for id in &snapshot.must_read_guidance_card_ids {
@@ -436,6 +457,9 @@ fn proactive_passage_surfaces_as_must_read_skill_card() {
         .referenced_tool_ids
         .iter()
         .any(|t| t == "lookup_source_passage"));
+    let region_card = handle_get_guidance_card(&world, "passage:SE_REGION_SPECIFIC_DETAIL".into())
+        .expect("region-scoped card remains directly retrievable");
+    assert!(region_card.summary.contains("SE"));
 }
 
 #[test]
