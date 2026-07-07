@@ -4442,6 +4442,49 @@ fn move_recipe_semantics_from_anchor_to_group(
 }
 
 #[cfg(feature = "model-api")]
+fn ensure_recipe_supports_target_state_before_create(
+    world: &World,
+    family_id: &str,
+    target_state_str: &str,
+) -> ApiResult<()> {
+    use crate::capability_registry::RecipeFamilyId;
+    use crate::plugins::refinement::RefinementState;
+
+    let target_state = RefinementState::from_str(target_state_str)
+        .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
+    let Some(artifact_registry) = world.get_resource::<crate::curation::RecipeArtifactRegistry>()
+    else {
+        return Ok(());
+    };
+    let Some(artifact) = artifact_registry.get_by_family(&RecipeFamilyId(family_id.to_string()))
+    else {
+        return Ok(());
+    };
+    if artifact.supported_refinement_states.is_empty()
+        || artifact.supported_refinement_states.contains(&target_state)
+    {
+        return Ok(());
+    }
+
+    let supported_labels: Vec<&str> = artifact
+        .supported_refinement_states
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    Err(format!(
+        "recipe '{family_id}' supports only refinement state(s) [{}] and cannot \
+         produce '{}'. This recipe is capped at that level (e.g. a covering-only \
+         shell with no structural framing is Schematic-max under the substrate \
+         contract); select a recipe whose supported_refinement_states includes \
+         '{}' (call select_recipe with that target_state), or build the missing \
+         substrate (e.g. roof framing) first.",
+        supported_labels.join(", "),
+        target_state.as_str(),
+        target_state.as_str(),
+    ))
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_get_assembly(world: &World, element_id: u64) -> Result<AssemblyDetails, String> {
     use crate::plugins::modeling::assembly::SemanticAssembly;
 
@@ -10751,6 +10794,11 @@ fn handle_instantiate_recipe(
         });
 
     let before = collect_element_ids(world);
+    ensure_recipe_supports_target_state_before_create(
+        world,
+        &request.family_id,
+        target_state.as_str(),
+    )?;
 
     // 1. Create the coarse identity-anchor root carrying the element class +
     //    recipe parameters, at the requested placement (metres). The recipe

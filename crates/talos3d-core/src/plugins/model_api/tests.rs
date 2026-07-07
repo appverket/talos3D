@@ -8507,13 +8507,30 @@ fn build_two_box_recipe_script() -> crate::curation::authoring_script::Authoring
 /// `RecipeArtifactRegistry` on the world.
 #[cfg(feature = "model-api")]
 fn install_two_box_recipe(world: &mut World, family_id: &str, target_class: &str) {
+    use crate::plugins::refinement::RefinementState;
+
+    install_two_box_recipe_with_states(
+        world,
+        family_id,
+        target_class,
+        vec![RefinementState::Schematic, RefinementState::Constructible],
+    );
+}
+
+#[cfg(feature = "model-api")]
+fn install_two_box_recipe_with_states(
+    world: &mut World,
+    family_id: &str,
+    target_class: &str,
+    supported_refinement_states: Vec<crate::plugins::refinement::RefinementState>,
+) {
     use crate::curation::{
         provenance::{Confidence, Lineage, Provenance},
         scope_trust::{Scope, Trust},
         AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
         RECIPE_ARTIFACT_KIND,
     };
-    use crate::plugins::refinement::{AgentId, RefinementState};
+    use crate::plugins::refinement::AgentId;
 
     let asset_id = AssetId(format!("installed_recipe/{family_id}"));
     let artifact = RecipeArtifact {
@@ -8537,10 +8554,7 @@ fn install_two_box_recipe(world: &mut World, family_id: &str, target_class: &str
         },
         parameter_schema: serde_json::json!({"type": "object", "properties": {}}),
         target_class: target_class.into(),
-        supported_refinement_states: vec![
-            RefinementState::Schematic,
-            RefinementState::Constructible,
-        ],
+        supported_refinement_states,
         tests: Vec::new(),
     };
     let mut registry = world
@@ -8738,6 +8752,58 @@ fn instantiate_recipe_at_creation_state_materializes_without_promote_error() {
     assert!(
         result.promotion_blocked.is_none(),
         "same-level materialization is not a blocked promotion"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_rejects_unsupported_target_state_before_creating_anchor() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::{RefinementState, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test element class for unsupported-state recipe instantiation.".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe_with_states(
+        &mut world,
+        "schematic_only_wall",
+        "wall_assembly",
+        vec![RefinementState::Schematic],
+    );
+
+    let ids_before = collect_element_ids(&mut world);
+    let err = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "schematic_only_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect_err("unsupported target state must fail before authoring");
+    assert!(
+        err.contains("supports only refinement state"),
+        "error should identify target-state mismatch; got {err}"
+    );
+
+    let ids_after = collect_element_ids(&mut world);
+    assert_eq!(
+        ids_after, ids_before,
+        "unsupported target-state preflight must not create a lingering root anchor"
     );
 }
 
