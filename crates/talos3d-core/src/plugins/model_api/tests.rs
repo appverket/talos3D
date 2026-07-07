@@ -1222,6 +1222,21 @@ fn write_handlers_create_transform_delete_and_list_handles() {
         get_entity_snapshot(&world, ElementId(box_id)).expect("box snapshot should exist");
     assert_eq!(box_snapshot["centre"], json!([3.5, 2.0, 3.0]));
 
+    handle_transform(
+        &mut world,
+        TransformToolRequest {
+            element_ids: vec![box_id],
+            operation: "translate".to_string(),
+            axis: None,
+            value: json!([0.0, 0.5, -1.0]),
+            pivot: None,
+        },
+    )
+    .expect("translate should be accepted as a move alias");
+    let box_snapshot =
+        get_entity_snapshot(&world, ElementId(box_id)).expect("box snapshot should exist");
+    assert_eq!(box_snapshot["centre"], json!([3.5, 2.5, 2.0]));
+
     let handles = handle_list_handles(&world, box_id).expect("box handles should exist");
     assert_eq!(handles.len(), 9);
     assert_eq!(handles[0].kind, "Vertex");

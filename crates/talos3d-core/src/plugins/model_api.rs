@@ -10006,7 +10006,7 @@ fn apply_transform_request(
     request: &TransformToolRequest,
 ) -> ApiResult<Vec<BoxedEntity>> {
     let axis = parse_axis(request.axis.as_deref())?;
-    match request.operation.to_ascii_lowercase().as_str() {
+    match normalized_transform_operation(&request.operation).as_str() {
         "move" => {
             let delta = if let Some(axis) = axis {
                 axis.unit_vector() * scalar_from_value(&request.value)?
@@ -10069,6 +10069,16 @@ fn apply_transform_request(
         operation => Err(format!(
             "Invalid transform operation '{operation}'. Valid operations: move, rotate, scale"
         )),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn normalized_transform_operation(operation: &str) -> String {
+    match operation.trim().to_ascii_lowercase().as_str() {
+        // MCP placement objects use `translate`, so accept the natural synonym
+        // here rather than making agents discover it through failed calls.
+        "translate" => "move".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -10137,7 +10147,7 @@ fn transform_group_frame(
     pivot: Vec3,
 ) -> ApiResult<GroupFrame> {
     let axis = parse_axis(request.axis.as_deref())?;
-    match request.operation.to_ascii_lowercase().as_str() {
+    match normalized_transform_operation(&request.operation).as_str() {
         "move" => {
             let delta = if let Some(axis) = axis {
                 axis.unit_vector() * scalar_from_value(&request.value)?
