@@ -10254,10 +10254,12 @@ mod capability_profiles {
             "list_entities",
             "get_entity_details",
             "model_summary",
+            "get_assembly",
             "get_world_aabb",
             // edit + materials
             "create_box",
             "create_entity",
+            "create_assembly",
             "transform",
             "apply_material",
             "create_material",
