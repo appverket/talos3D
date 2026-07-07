@@ -1098,7 +1098,6 @@ fn outline_overlay_material(
         base_color: color,
         unlit: true,
         alpha_mode: AlphaMode::Opaque,
-        depth_bias: 1.0,
         ..Default::default()
     });
     cache.handle = Some(handle.clone());
@@ -2090,7 +2089,10 @@ mod tests {
 
         assert_eq!(material.alpha_mode, AlphaMode::Opaque);
         assert!(material.unlit);
-        assert_eq!(material.depth_bias, 1.0);
+        assert_eq!(
+            material.depth_bias, 0.0,
+            "wgpu rejects depth bias on LineList pipelines; use triangle stroke meshes before biasing outline linework"
+        );
     }
 
     #[test]
