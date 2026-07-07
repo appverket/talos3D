@@ -6718,8 +6718,12 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             \nOptional: `placement` (`{ translate: [x,y,z] }` in **metres**), \
             `target_state` (if omitted, uses `\"Constructible\"` only when the recipe supports it; \
             otherwise uses the lowest declared supported state). \
-            \n\nReturns `{ root_element_id, created_element_ids, state }`. After this call, \
-            use `frame_entities([root_element_id])` to verify geometry was placed. \
+            \n\nReturns `{ root_element_id, group_element_id, created_element_ids, state }`. \
+            `root_element_id` is the semantic anchor and may be a tiny marker; do not use it \
+            as the visible wall/roof/foundation member of a larger building assembly when \
+            `group_element_id` or `created_element_ids` are present. For validation-relevant \
+            assemblies, add the aggregate `group_element_id` or the actual generated elements \
+            as members, and use `root_element_id` for refinement/obligation operations. \
             \n\nIf the response carries `promotion_blocked`, the geometry WAS created (it is \
             listed in `created_element_ids`) but the promotion gate blocked the refinement \
             claim on the listed `unsatisfied_obligations`. Do NOT retry this call — that \

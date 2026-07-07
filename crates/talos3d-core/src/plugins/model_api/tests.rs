@@ -4905,6 +4905,12 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
         .summary
         .contains("foundation -> wall frame/top plate"));
     assert!(skeleton_card.summary.contains("CorpusGaps"));
+    assert!(skeleton_card.summary.contains("marker boxes"));
+    assert!(skeleton_card.json_examples.iter().any(|example| example
+        .to_string()
+        .contains("group_element_id")
+        && example.to_string().contains("created_element_ids")
+        && example.to_string().contains("house_assembly_membership")));
     assert!(skeleton_card
         .referenced_tool_ids
         .contains(&"acquire_corpus_passage".to_string()));

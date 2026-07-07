@@ -13725,7 +13725,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "truss".into(),
                 "load_path".into(),
             ],
-            summary: "For Schematic+ house authoring, the agent must discover or acquire the foundation -> wall frame/top plate -> roof framing/truss load path. Missing roof/truss anatomy, bearing points, or executable paths are CorpusGaps, not permission to draw decorative sticks or stripes.".into(),
+            summary: "For Schematic+ house authoring, the agent must discover or acquire the foundation -> wall frame/top plate -> roof framing/truss load path and assemble validation-relevant generated geometry, not recipe marker boxes. Missing roof/truss anatomy, bearing points, executable paths, or generated aggregate membership are CorpusGaps, not permission to draw decorative sticks or stripes.".into(),
             referenced_tool_ids: vec![
                 "discover_curated_paths".into(),
                 "request_corpus_expansion".into(),
@@ -13764,6 +13764,12 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                     "element_class": "truss",
                     "kind": "recipe_or_assembly_pattern",
                     "rationale": "Roof is being promoted past schematic but no truss family with top chord, bottom chord, web members, panel points, and bearing-on-top-plate relation is available."
+                }),
+                serde_json::json!({
+                    "after_instantiate_recipe": {
+                        "use_root_element_id_for": ["refinement", "obligations"],
+                        "use_group_element_id_or_created_element_ids_for": ["house_assembly_membership", "validation", "screenshots"]
+                    }
                 }),
             ],
             body_markdown: None,
