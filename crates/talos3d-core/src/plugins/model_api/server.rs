@@ -1070,6 +1070,13 @@ impl ModelApiServer {
             .await??;
 
         wait_for_written_file(&saved_path).await?;
+        if let Some(warning) = crate::plugins::drawing_export::screenshot_quality_warning_for_path(
+            std::path::Path::new(&saved_path),
+        )? {
+            return Err(format!(
+                "Screenshot '{saved_path}' is not valid visual evidence: {warning}"
+            ));
+        }
         Ok(saved_path)
     }
 

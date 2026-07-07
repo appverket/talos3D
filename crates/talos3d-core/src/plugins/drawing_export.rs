@@ -655,6 +655,13 @@ fn write_rgb_to_path(path: &Path, rgb: &RgbImage) -> Result<(), String> {
     }
 }
 
+#[cfg(feature = "model-api")]
+pub(crate) fn screenshot_quality_warning_for_path(path: &Path) -> Result<Option<String>, String> {
+    let dynamic = image::open(path)
+        .map_err(|error| format!("cannot inspect screenshot '{}': {error}", path.display()))?;
+    Ok(screenshot_quality_warning(&dynamic.to_rgb8()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ScreenshotQuality {
     min_luma: u8,
@@ -1085,6 +1092,28 @@ mod tests {
         let rgb = RgbImage::from_pixel(128, 72, Rgb([0, 0, 0]));
         let warning = screenshot_quality_warning(&rgb).expect("black capture must warn");
         assert!(warning.contains("all-black"));
+    }
+
+    #[test]
+    fn screenshot_quality_flags_all_black_file() {
+        let path = std::env::temp_dir().join(format!(
+            "talos3d-black-screenshot-{}.png",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        RgbImage::from_pixel(16, 16, Rgb([0, 0, 0]))
+            .save(&path)
+            .expect("black test image should write");
+
+        let warning =
+            screenshot_quality_warning_for_path(&path).expect("black file should be inspectable");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(warning
+            .as_deref()
+            .is_some_and(|message| message.contains("all-black")));
     }
 
     #[test]
