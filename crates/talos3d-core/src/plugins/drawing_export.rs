@@ -5,8 +5,14 @@ use std::{
 
 use base64::Engine;
 use bevy::{
+    camera::RenderTarget,
     prelude::*,
-    render::{render_resource::TextureFormat, view::screenshot::Screenshot},
+    render::{
+        render_resource::{
+            Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+        },
+        view::screenshot::Screenshot,
+    },
 };
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, RgbImage};
 use serde_json::Value;
@@ -25,6 +31,8 @@ use crate::plugins::{
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
 #[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_EXPORT_FILE_STEM: &str = "drawing";
+const DEFAULT_OFFSCREEN_SCREENSHOT_WIDTH: u32 = 1600;
+const DEFAULT_OFFSCREEN_SCREENSHOT_HEIGHT: u32 = 1000;
 
 /// Capability id for the "2D drafting" extension that surfaces vector-paper
 /// output (PDF/SVG) in the UI.
@@ -222,6 +230,15 @@ pub(crate) struct PendingViewportExport {
     path: PathBuf,
     stage: PendingViewportExportStage,
     scope: ViewportExportScope,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+struct OffscreenViewportExportCamera;
+
+#[derive(Debug, Clone)]
+struct ViewportExportCleanup {
+    camera_entity: Entity,
+    render_target: Handle<Image>,
 }
 
 #[derive(Resource, Debug, Default, Clone)]
@@ -535,18 +552,138 @@ fn process_pending_viewport_export(world: &mut World) {
         ViewportExportScope::Viewport => capture_viewport(world),
         ViewportExportScope::AppWindow => None,
     };
+    if pending.scope == ViewportExportScope::Viewport {
+        if let Err(error) =
+            queue_offscreen_viewport_screenshot(world, pending.clone(), viewport_capture)
+        {
+            error!(
+                "Offscreen viewport export '{}' could not be prepared: {error}; falling back to primary-window capture",
+                pending.path.display()
+            );
+        } else {
+            return;
+        }
+    }
     world
         .commands()
         .spawn(Screenshot::primary_window())
-        .observe(save_viewport_export_to_disk(pending.path, viewport_capture));
+        .observe(save_viewport_export_to_disk_with_cleanup(
+            pending.path,
+            viewport_capture,
+            None,
+        ));
     world.flush();
 }
 
-pub(crate) fn save_viewport_export_to_disk(
+fn queue_offscreen_viewport_screenshot(
+    world: &mut World,
+    pending: PendingViewportExport,
+    viewport_capture: Option<ViewportCapture>,
+) -> Result<(), String> {
+    let size = offscreen_screenshot_size(viewport_capture);
+    let (camera, transform, projection) = active_orbit_camera_snapshot(world)?;
+    let render_target = create_offscreen_render_target(world, size)?;
+
+    let mut camera = camera;
+    camera.viewport = None;
+    camera.order = camera.order.saturating_sub(100);
+    camera.clear_color = ClearColorConfig::Custom(Color::srgb(0.78, 0.80, 0.72));
+
+    let camera_entity = world
+        .spawn((
+            Camera3d::default(),
+            camera,
+            RenderTarget::Image(render_target.clone().into()),
+            transform,
+            projection,
+            OffscreenViewportExportCamera,
+        ))
+        .id();
+
+    world
+        .commands()
+        .spawn(Screenshot::image(render_target.clone()))
+        .observe(save_viewport_export_to_disk_with_cleanup(
+            pending.path,
+            None,
+            Some(ViewportExportCleanup {
+                camera_entity,
+                render_target,
+            }),
+        ));
+    world.flush();
+    Ok(())
+}
+
+fn offscreen_screenshot_size(viewport_capture: Option<ViewportCapture>) -> UVec2 {
+    let Some(capture) = viewport_capture else {
+        return UVec2::new(
+            DEFAULT_OFFSCREEN_SCREENSHOT_WIDTH,
+            DEFAULT_OFFSCREEN_SCREENSHOT_HEIGHT,
+        );
+    };
+    UVec2::new(
+        (capture.width.round() as u32).clamp(1, 4096),
+        (capture.height.round() as u32).clamp(1, 4096),
+    )
+}
+
+fn active_orbit_camera_snapshot(
+    world: &mut World,
+) -> Result<(Camera, Transform, Projection), String> {
+    let mut query = world
+        .try_query::<(
+            &Camera,
+            &Transform,
+            &Projection,
+            &crate::plugins::camera::OrbitCamera,
+        )>()
+        .ok_or_else(|| "Orbit camera components are not registered".to_string())?;
+    query
+        .iter(world)
+        .find(|(camera, _, _, _)| camera.is_active)
+        .map(|(camera, transform, projection, _)| (camera.clone(), *transform, projection.clone()))
+        .ok_or_else(|| "No active orbit camera is available for offscreen capture".to_string())
+}
+
+fn create_offscreen_render_target(world: &mut World, size: UVec2) -> Result<Handle<Image>, String> {
+    let mut images = world
+        .get_resource_mut::<Assets<Image>>()
+        .ok_or_else(|| "Assets<Image> resource is not available".to_string())?;
+    let extent = Extent3d {
+        width: size.x.max(1),
+        height: size.y.max(1),
+        depth_or_array_layers: 1,
+    };
+    let mut image = Image {
+        texture_descriptor: TextureDescriptor {
+            label: Some("talos3d_mcp_offscreen_screenshot"),
+            size: extent,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Bgra8UnormSrgb,
+            mip_level_count: 1,
+            sample_count: 1,
+            usage: TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_DST
+                | TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        },
+        ..default()
+    };
+    image.resize(extent);
+    Ok(images.add(image))
+}
+
+fn save_viewport_export_to_disk_with_cleanup(
     path: PathBuf,
     viewport_capture: Option<ViewportCapture>,
-) -> impl FnMut(bevy::prelude::On<bevy::render::view::screenshot::ScreenshotCaptured>) {
-    move |screenshot_captured| {
+    cleanup: Option<ViewportExportCleanup>,
+) -> impl FnMut(
+    bevy::prelude::On<bevy::render::view::screenshot::ScreenshotCaptured>,
+    Commands,
+    ResMut<Assets<Image>>,
+) {
+    move |screenshot_captured, mut commands, mut images| {
         let img = screenshot_captured.image.clone();
         let source_format = img.texture_descriptor.format;
         match img.try_into_dynamic() {
@@ -568,6 +705,10 @@ pub(crate) fn save_viewport_export_to_disk(
             Err(error) => {
                 error!("Cannot save drawing export, screen format cannot be understood: {error}");
             }
+        }
+        if let Some(cleanup) = cleanup.clone() {
+            commands.entity(cleanup.camera_entity).despawn();
+            images.remove(cleanup.render_target.id());
         }
     }
 }
@@ -1169,5 +1310,29 @@ mod tests {
 
         assert!(!state.ui_suppressed());
         assert!(!state.annotation_overlays_suppressed());
+    }
+
+    #[test]
+    fn offscreen_screenshot_size_uses_viewport_or_default() {
+        assert_eq!(
+            offscreen_screenshot_size(None),
+            UVec2::new(
+                DEFAULT_OFFSCREEN_SCREENSHOT_WIDTH,
+                DEFAULT_OFFSCREEN_SCREENSHOT_HEIGHT
+            )
+        );
+
+        let capture = ViewportCapture {
+            left: 0.0,
+            top: 0.0,
+            width: 812.4,
+            height: 456.6,
+            window_width: 1024.0,
+            window_height: 768.0,
+        };
+        assert_eq!(
+            offscreen_screenshot_size(Some(capture)),
+            UVec2::new(812, 457)
+        );
     }
 }
