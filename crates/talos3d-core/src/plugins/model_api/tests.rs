@@ -9987,7 +9987,10 @@ mod capability_profiles {
             "instantiate_recipe",
             "list_generation_priors",
             "request_corpus_expansion",
+            "acquire_corpus_passage",
+            "lookup_source_passage",
             "save_recipe_draft",
+            "save_assembly_pattern_draft",
             "set_recipe_draft_status",
             "materialize_learned_asset",
             // definitions / parametric
