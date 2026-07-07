@@ -8887,6 +8887,65 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
 
 #[cfg(feature = "model-api")]
 #[test]
+fn instantiate_recipe_placement_transforms_generated_geometry_and_shrinks_root() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::SemanticRole;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test element class for placed recipe instantiation.".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe(&mut world, "two_box_wall", "wall_assembly");
+    world.register_component::<crate::plugins::identity::ElementId>();
+
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "two_box_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: serde_json::json!({}),
+            placement: Some(InstantiateRecipePlacement {
+                translate: [10.0, 5.0, -2.0],
+                rotate_euler_deg: [0.0, 0.0, 0.0],
+            }),
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("placed recipe instantiation must succeed");
+
+    assert_eq!(result.created_element_ids.len(), 2);
+    let first = get_entity_snapshot(&world, ElementId(result.created_element_ids[0]))
+        .expect("first recipe box exists");
+    let second = get_entity_snapshot(&world, ElementId(result.created_element_ids[1]))
+        .expect("second recipe box exists");
+    assert_eq!(first["centre"], json!([10.0, 6.0, -2.0]));
+    assert_eq!(second["centre"], json!([13.0, 6.0, -2.0]));
+
+    let root = get_entity_snapshot(&world, ElementId(result.root_element_id))
+        .expect("root locator exists");
+    assert_eq!(root["centre"], json!([10.0, 5.0, -2.0]));
+    let half_extents = root["half_extents"]
+        .as_array()
+        .expect("box root should report half_extents");
+    assert!(
+        half_extents
+            .iter()
+            .all(|v| v.as_f64().unwrap_or(f64::INFINITY) <= 0.011),
+        "root locator should be shrunk after recipe generation, got {half_extents:?}"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn instantiate_recipe_at_creation_state_materializes_without_promote_error() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
     use crate::plugins::refinement::SemanticRole;

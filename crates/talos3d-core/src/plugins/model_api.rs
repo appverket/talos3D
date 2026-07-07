@@ -10082,6 +10082,99 @@ fn normalized_transform_operation(operation: &str) -> String {
     }
 }
 
+#[cfg(feature = "model-api")]
+fn placement_has_effect(placement: &InstantiateRecipePlacement) -> bool {
+    placement.translate.iter().any(|v| v.abs() > 1e-9)
+        || placement.rotate_euler_deg.iter().any(|v| v.abs() > 1e-9)
+}
+
+#[cfg(feature = "model-api")]
+fn apply_instantiate_recipe_placement(
+    world: &mut World,
+    root: ElementId,
+    created_element_ids: &[u64],
+    anchor_centre: [f64; 3],
+    placement: &InstantiateRecipePlacement,
+) -> ApiResult<()> {
+    let mut ids = Vec::with_capacity(created_element_ids.len() + 1);
+    ids.push(root.0);
+    ids.extend(created_element_ids.iter().copied());
+
+    if !placement_has_effect(placement) {
+        return Ok(());
+    }
+
+    let rot = placement.rotate_euler_deg;
+    let q = Quat::from_euler(
+        EulerRot::XYZ,
+        (rot[0] as f32).to_radians(),
+        (rot[1] as f32).to_radians(),
+        (rot[2] as f32).to_radians(),
+    );
+    let pivot = Vec3::new(
+        anchor_centre[0] as f32,
+        anchor_centre[1] as f32,
+        anchor_centre[2] as f32,
+    );
+    let translate = Vec3::new(
+        placement.translate[0] as f32,
+        placement.translate[1] as f32,
+        placement.translate[2] as f32,
+    );
+
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for id in ids {
+        if let Ok(snap) = capture_snapshot_by_id(world, ElementId(id)) {
+            let c = snap.center();
+            let target = pivot + q * (c - pivot) + translate;
+            let rotated = snap.rotate_by(q);
+            let moved = rotated.translate_by(target - rotated.center());
+            before.push(snap);
+            after.push(moved);
+        }
+    }
+
+    if !before.is_empty() {
+        send_event(
+            world,
+            ApplyEntityChangesCommand {
+                label: "recipe placement transform",
+                before,
+                after,
+            },
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn shrink_recipe_root_locator(world: &mut World, root: ElementId) -> ApiResult<()> {
+    let Ok(snap) = capture_snapshot_by_id(world, root) else {
+        return Ok(());
+    };
+    let Some(bounds) = snap.bounds() else {
+        return Ok(());
+    };
+    let size = bounds.max - bounds.min;
+    let max_extent = size.x.max(size.y).max(size.z);
+    if max_extent <= 0.025 {
+        return Ok(());
+    }
+
+    let factor = (0.02 / max_extent).max(0.0001);
+    let shrunk = snap.scale_by(Vec3::splat(factor), snap.center());
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label: "shrink recipe root locator",
+            before: vec![snap],
+            after: vec![shrunk],
+        },
+    );
+    Ok(())
+}
+
 /// Transform a whole group as a rigid body (ADR-058): rigidly move/rotate every
 /// leaf member, and update the local frame of the group and any nested subgroup,
 /// so the assembly keeps its internal rectified authoring space. Returns
@@ -10888,8 +10981,10 @@ fn handle_instantiate_recipe(
     )?;
 
     // 1. Create the coarse identity-anchor root carrying the element class +
-    //    recipe parameters, at the requested placement (metres). The recipe
-    //    generates the real sub-element geometry on promotion.
+    //    recipe parameters in the recipe's local frame. The recipe generates
+    //    sub-element geometry in that same local frame; placement is applied
+    //    after generation as one rigid transform to the root and all generated
+    //    members.
     // Size the coarse identity-anchor box so the recipe generates geometry at
     // the intended scale (recipes derive sub-element geometry from the root's
     // extent). Use length_mm/height_mm/thickness_mm when present (mm→m), else a
@@ -10956,20 +11051,8 @@ fn handle_instantiate_recipe(
         } else if let (Some(cx), Some(cy), Some(cz)) = (num("cx"), num("cy"), num("cz")) {
             ([cx, cy, cz], [0.01, 0.01, 0.01])
         } else {
-            (placement.translate, half_extents)
+            ([0.0, 0.0, 0.0], half_extents)
         };
-    // Orientation: the recipe lays out its sub-elements in the host's local
-    // frame, so rotating the host box rotates the whole generated assembly
-    // coherently. Convert the requested Euler angles (degrees, XYZ) to the
-    // box rotation quaternion `[x, y, z, w]`.
-    let r = &placement.rotate_euler_deg;
-    let rotation = Quat::from_euler(
-        EulerRot::XYZ,
-        (r[0] as f32).to_radians(),
-        (r[1] as f32).to_radians(),
-        (r[2] as f32).to_radians(),
-    )
-    .to_array();
     // The box factory's raw create request uses `centre` + `half_extents`
     // (the create_box tool normalises `center`/`size`, but handle_create_entity
     // bypasses that normalisation).
@@ -10977,7 +11060,6 @@ fn handle_instantiate_recipe(
         "type": "box",
         "centre": anchor_centre,
         "half_extents": half_extents,
-        "rotation": rotation,
         "semantic": {
             "element_class": request.target_class,
             "refinement_state": "Schematic",
@@ -11010,45 +11092,29 @@ fn handle_instantiate_recipe(
         .collect();
     created_element_ids.sort_unstable();
 
-    // 4. Honour `placement.rotate_euler_deg` by rotating the generated assembly
-    //    rigidly about the footprint anchor centroid. Recipe scripts emit
-    //    geometry in absolute world coords (the anchor transform does not
-    //    propagate), and the generic `transform` rotate is about the world
-    //    origin — so neither rotates an assembly in place. This does: for each
-    //    generated element, rotate (rotate_by rotates the centre about the
-    //    origin and accumulates orientation) then translate the post-rotation
-    //    centre to its rotated-about-pivot target. Works for any entity type.
-    let rot = placement.rotate_euler_deg;
-    if rot.iter().any(|a| a.abs() > 1e-9) {
-        let q = Quat::from_euler(
-            EulerRot::XYZ,
-            (rot[0] as f32).to_radians(),
-            (rot[1] as f32).to_radians(),
-            (rot[2] as f32).to_radians(),
-        );
-        let pivot = Vec3::new(
-            anchor_centre[0] as f32,
-            anchor_centre[1] as f32,
-            anchor_centre[2] as f32,
-        );
-        for id in &created_element_ids {
-            if let Ok(snap) = capture_snapshot_by_id(world, ElementId(*id)) {
-                let c = snap.center();
-                let target = pivot + q * (c - pivot);
-                let rotated = snap.rotate_by(q);
-                let moved = rotated.translate_by(target - rotated.center());
-                send_event(
-                    world,
-                    ApplyEntityChangesCommand {
-                        label: "recipe placement rotation",
-                        before: vec![snap],
-                        after: vec![moved],
-                    },
-                );
-            }
-        }
+    // 4. Honour placement by applying one rigid transform to the generated
+    //    assembly and root locator. Recipes emit geometry in their local frame;
+    //    placement.translate is the world-space translation of that local frame.
+    //    Applying placement after generation is the only reliable way to keep
+    //    root, generated members, and rotation coherent for both script-backed
+    //    and native recipes.
+    apply_instantiate_recipe_placement(
+        world,
+        ElementId(root),
+        &created_element_ids,
+        anchor_centre,
+        &placement,
+    )?;
+    if placement_has_effect(&placement) {
         flush_model_api_write_pipeline(world);
     }
+
+    // Recipe roots are semantic locators, not visible construction geometry.
+    // Some recipes need a sized root during generation; shrink it after the
+    // recipe has emitted its real members so broad material application does
+    // not leave placeholder cubes on the finished structure.
+    shrink_recipe_root_locator(world, ElementId(root))?;
+    flush_model_api_write_pipeline(world);
 
     // Resolve the promotion outcome only after geometry was recorded and the
     // placement rotation applied. An obligation-gate block is partial success:
