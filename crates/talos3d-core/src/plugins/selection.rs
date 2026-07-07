@@ -52,6 +52,8 @@ const BOX_SELECT_DRAG_THRESHOLD: f32 = 5.0;
 /// moved past the drag threshold within this many frames of the press.
 const BOX_SELECT_START_GRACE_FRAMES: u32 = 18;
 const SELECTION_CLICK_SLOP_PX: f32 = 6.0;
+const SCREEN_BOUNDS_INTERIOR_MAX_AREA_PX2: f32 = 60.0 * 60.0;
+const SCREEN_BOUNDS_OUTLINE_TOLERANCE_PX: f32 = 8.0;
 
 type SelectedCompositeClickQueryItem = (
     Entity,
@@ -958,14 +960,33 @@ fn screen_bounds_hit(world: &mut World, cursor_position: Vec2) -> Option<HitCand
             {
                 return None;
             }
-            let size = screen_max - screen_min;
-            let area = (size.x.max(1.0)) * (size.y.max(1.0));
+            let score = screen_bounds_pick_score(cursor_position, screen_min, screen_max)?;
             Some(HitCandidate {
                 entity,
-                distance: area,
+                distance: score,
             })
         })
         .min_by(|left, right| left.distance.total_cmp(&right.distance))
+}
+
+fn screen_bounds_pick_score(cursor: Vec2, screen_min: Vec2, screen_max: Vec2) -> Option<f32> {
+    let size = (screen_max - screen_min).max(Vec2::ONE);
+    let area = size.x * size.y;
+    if area <= SCREEN_BOUNDS_INTERIOR_MAX_AREA_PX2 {
+        return Some(area);
+    }
+
+    let distance_to_outline = [
+        (cursor.x - screen_min.x).abs(),
+        (screen_max.x - cursor.x).abs(),
+        (cursor.y - screen_min.y).abs(),
+        (screen_max.y - cursor.y).abs(),
+    ]
+    .into_iter()
+    .fold(f32::MAX, f32::min);
+
+    (distance_to_outline <= SCREEN_BOUNDS_OUTLINE_TOLERANCE_PX)
+        .then_some(area + distance_to_outline)
 }
 
 fn snapshot_bounds_hit(world: &mut World, ray: Ray3d) -> Option<HitCandidate> {
@@ -1391,6 +1412,39 @@ mod tests {
         assert_eq!(state.drag_start, Some(Vec2::new(90.0, 110.0)));
         assert!(!state.is_dragging);
         assert_eq!(state.pending_frames, 0);
+    }
+
+    #[test]
+    fn large_screen_bounds_do_not_select_by_interior() {
+        let score = screen_bounds_pick_score(
+            Vec2::new(200.0, 200.0),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(400.0, 400.0),
+        );
+
+        assert!(score.is_none());
+    }
+
+    #[test]
+    fn large_screen_bounds_still_select_near_outline() {
+        let score = screen_bounds_pick_score(
+            Vec2::new(6.0, 200.0),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(400.0, 400.0),
+        );
+
+        assert!(score.is_some());
+    }
+
+    #[test]
+    fn small_screen_bounds_keep_interior_fallback() {
+        let score = screen_bounds_pick_score(
+            Vec2::new(20.0, 20.0),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(40.0, 40.0),
+        );
+
+        assert_eq!(score, Some(1600.0));
     }
 
     #[test]

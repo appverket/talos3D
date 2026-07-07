@@ -367,27 +367,22 @@ fn update_hovered_handle(world: &World, mut commands: Commands, hover_handles: H
     } else if let Some((cursor_position, camera, camera_transform, _projection)) =
         hover_handles.viewport.cursor_and_camera()
     {
-        hover_handles
-            .selected_query
-            .iter()
-            .filter_map(|entity| {
-                resolve_entity_handles(
-                    world,
-                    &hover_handles.registry,
-                    entity,
-                    camera,
-                    camera_transform,
-                    hover_handles.handle_context.display_mode,
-                    hover_handles.pivot_point.position,
-                )
-            })
-            .flatten()
-            .filter_map(|handle| {
-                let distance = handle.screen_position.distance(cursor_position);
-                (distance <= HANDLE_HIT_TOLERANCE_PX).then_some((distance, handle))
-            })
-            .min_by(|left, right| left.0.total_cmp(&right.0))
-            .map(|(_, handle)| handle)
+        selected_resolved_handles(
+            world,
+            &hover_handles.selected_query,
+            &hover_handles.registry,
+            camera,
+            camera_transform,
+            hover_handles.handle_context.display_mode,
+            hover_handles.pivot_point.position,
+        )
+        .into_iter()
+        .filter_map(|handle| {
+            let distance = handle.screen_position.distance(cursor_position);
+            (distance <= HANDLE_HIT_TOLERANCE_PX).then_some((distance, handle))
+        })
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, handle)| handle)
     } else {
         None
     };
@@ -763,43 +758,70 @@ fn draw_selected_handles(
         return;
     };
 
-    for entity in &selected_handles.selected_query {
-        let Ok(entity_ref) = world.get_entity(entity) else {
-            continue;
-        };
-        let Some(snapshot) = selected_handles
-            .registry
-            .capture_snapshot(&entity_ref, world)
-        else {
-            continue;
-        };
-
-        let Some(handles) = build_display_handles(
-            entity,
-            &snapshot,
-            selected_handles.handle_context.display_mode,
-            selected_handles.pivot_point.position,
-        ) else {
-            continue;
-        };
-
-        for handle in handles {
-            let highlighted = selected_handles
+    for handle in selected_resolved_handles(
+        world,
+        &selected_handles.selected_query,
+        &selected_handles.registry,
+        camera,
+        camera_transform,
+        selected_handles.handle_context.display_mode,
+        selected_handles.pivot_point.position,
+    ) {
+        let highlighted = selected_handles
+            .handle_state
+            .hovered
+            .as_ref()
+            .map(|hovered| hovered.matches(handle.entity, &handle.id))
+            .unwrap_or(false)
+            || selected_handles
                 .handle_state
-                .hovered
+                .pressed
                 .as_ref()
-                .map(|hovered| hovered.matches(entity, &handle.id))
-                .unwrap_or(false)
-                || selected_handles
-                    .handle_state
-                    .pressed
-                    .as_ref()
-                    .map(|pressed| pressed.handle.matches(entity, &handle.id))
-                    .unwrap_or(false);
-            let radius = handle_world_radius(camera, camera_transform, projection, handle.position);
-            draw_handle(&mut gizmos, &handle, radius, highlighted);
-        }
+                .map(|pressed| pressed.handle.matches(handle.entity, &handle.id))
+                .unwrap_or(false);
+        let radius = handle_world_radius(camera, camera_transform, projection, handle.position);
+        draw_handle(&mut gizmos, &handle, radius, highlighted);
     }
+}
+
+fn selected_resolved_handles(
+    world: &World,
+    selected_query: &Query<Entity, With<Selected>>,
+    registry: &CapabilityRegistry,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    display_mode: HandleDisplayMode,
+    pivot_position: Option<Vec3>,
+) -> Vec<ResolvedHandle> {
+    let selected = selected_query.iter().collect::<Vec<_>>();
+    if selected.len() > 1 {
+        return aggregate_transform_handles(
+            world,
+            registry,
+            &selected,
+            display_mode,
+            pivot_position,
+        )
+        .into_iter()
+        .flat_map(|handles| project_handles(camera, camera_transform, handles))
+        .collect();
+    }
+
+    selected
+        .into_iter()
+        .filter_map(|entity| {
+            resolve_entity_handles(
+                world,
+                registry,
+                entity,
+                camera,
+                camera_transform,
+                display_mode,
+                pivot_position,
+            )
+        })
+        .flatten()
+        .collect()
 }
 
 fn resolve_entity_handles(
@@ -819,17 +841,90 @@ fn resolve_entity_handles(
         .unwrap_or(Vec2::ZERO);
     let handles = build_display_handles(entity, &snapshot, display_mode, pivot_position)?
         .into_iter()
-        .filter_map(|handle| {
-            let viewport_pos = camera
-                .world_to_viewport(camera_transform, handle.position)
-                .ok()?;
-            Some(ResolvedHandle {
-                screen_position: viewport_pos + viewport_offset,
-                ..handle
-            })
-        })
+        .filter_map(|handle| project_handle(camera, camera_transform, viewport_offset, handle))
         .collect::<Vec<_>>();
     Some(handles)
+}
+
+fn project_handles(
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    handles: Vec<ResolvedHandle>,
+) -> Vec<ResolvedHandle> {
+    let viewport_offset = camera
+        .logical_viewport_rect()
+        .map(|rect| rect.min)
+        .unwrap_or(Vec2::ZERO);
+    handles
+        .into_iter()
+        .filter_map(|handle| project_handle(camera, camera_transform, viewport_offset, handle))
+        .collect()
+}
+
+fn project_handle(
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    viewport_offset: Vec2,
+    handle: ResolvedHandle,
+) -> Option<ResolvedHandle> {
+    let viewport_pos = camera
+        .world_to_viewport(camera_transform, handle.position)
+        .ok()?;
+    Some(ResolvedHandle {
+        screen_position: viewport_pos + viewport_offset,
+        ..handle
+    })
+}
+
+fn aggregate_transform_handles(
+    world: &World,
+    registry: &CapabilityRegistry,
+    selected: &[Entity],
+    display_mode: HandleDisplayMode,
+    pivot_position: Option<Vec3>,
+) -> Option<Vec<ResolvedHandle>> {
+    let snapshots = selected
+        .iter()
+        .filter_map(|entity| {
+            let entity_ref = world.get_entity(*entity).ok()?;
+            let snapshot = registry.capture_snapshot(&entity_ref, world)?;
+            snapshot.bounds().map(|bounds| (*entity, snapshot, bounds))
+        })
+        .collect::<Vec<_>>();
+    let (entity, snapshot, bounds) = aggregate_handle_context(&snapshots)?;
+
+    Some(match display_mode {
+        HandleDisplayMode::Combined => {
+            let mut handles = move_handles(entity, snapshot, bounds);
+            handles.push(vertical_lift_handle(entity, snapshot, bounds));
+            handles.push(rotate_ring_grip(
+                entity,
+                snapshot,
+                bounds,
+                pivot_position.unwrap_or(bounds.center()),
+            ));
+            handles
+        }
+        HandleDisplayMode::Move => move_handles(entity, snapshot, bounds),
+        HandleDisplayMode::Scale => scale_handles(entity, snapshot, bounds),
+        HandleDisplayMode::Rotate => {
+            rotate_handles(entity, snapshot, pivot_position.unwrap_or(bounds.center()))
+        }
+    })
+}
+
+fn aggregate_handle_context(
+    snapshots: &[(Entity, BoxedEntity, EntityBounds)],
+) -> Option<(Entity, &BoxedEntity, EntityBounds)> {
+    let (first_entity, first_snapshot, first_bounds) = snapshots.first()?;
+    let bounds = snapshots
+        .iter()
+        .skip(1)
+        .fold(*first_bounds, |acc, (_, _, bounds)| EntityBounds {
+            min: acc.min.min(bounds.min),
+            max: acc.max.max(bounds.max),
+        });
+    Some((*first_entity, first_snapshot, bounds))
 }
 
 fn build_display_handles(
@@ -1279,6 +1374,21 @@ fn draw_ring(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::{
+        identity::ElementId,
+        modeling::{primitives::Polyline, snapshots::PolylineSnapshot},
+    };
+
+    fn boxed_polyline(id: u64, a: Vec3, b: Vec3) -> BoxedEntity {
+        PolylineSnapshot {
+            element_id: ElementId(id),
+            primitive: Polyline { points: vec![a, b] },
+            layer: None,
+            elevation_metadata: None,
+            material_assignment: None,
+        }
+        .into()
+    }
 
     #[test]
     fn move_and_scale_handles_use_handle_position_as_anchor() {
@@ -1304,5 +1414,23 @@ mod tests {
             transform_handle_initial_cursor(TransformMode::Rotating, handle_position, fallback),
             fallback
         );
+    }
+
+    #[test]
+    fn aggregate_handle_context_unions_selected_bounds_once() {
+        let first = boxed_polyline(1, Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        let second = boxed_polyline(2, Vec3::new(4.0, -1.0, 2.0), Vec3::new(5.0, 3.0, 6.0));
+        let first_bounds = first.bounds().unwrap();
+        let second_bounds = second.bounds().unwrap();
+        let snapshots = vec![
+            (Entity::from_bits(10), first, first_bounds),
+            (Entity::from_bits(20), second, second_bounds),
+        ];
+
+        let (entity, _, bounds) = aggregate_handle_context(&snapshots).unwrap();
+
+        assert_eq!(entity, Entity::from_bits(10));
+        assert_eq!(bounds.min, Vec3::new(0.0, -1.0, 0.0));
+        assert_eq!(bounds.max, Vec3::new(5.0, 3.0, 6.0));
     }
 }
