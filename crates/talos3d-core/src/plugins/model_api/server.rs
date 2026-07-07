@@ -3839,6 +3839,8 @@ pub struct CuratedAssetPathInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jurisdiction: Option<String>,
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_types: Vec<String>,
     pub executable: bool,
     pub how_to_use: String,
 }

@@ -11963,10 +11963,9 @@ pub fn handle_list_recipe_families_with_options(
                 continue;
             }
             let parameters = match artifact.body.script() {
-                Some(script) => params_from_schema(
-                    &script.parameter_schema,
-                    Some(&script.parameter_defaults),
-                ),
+                Some(script) => {
+                    params_from_schema(&script.parameter_schema, Some(&script.parameter_defaults))
+                }
                 None => params_from_schema(&artifact.parameter_schema, None),
             };
             families.push(RecipeFamilyInfo {
@@ -12639,7 +12638,17 @@ pub fn handle_discover_curated_paths(
                     }
                 }
             }
-            recipe_rankings = handle_select_recipe(world, element_class.clone(), context)?;
+            recipe_rankings = handle_select_recipe(world, element_class.clone(), context.clone())?;
+            if !recipe_rankings.iter().any(|ranking| ranking.executable) {
+                bridge_recipe_rankings_from_curated_targets(
+                    world,
+                    &element_class,
+                    &context,
+                    request.query.as_deref(),
+                    &curated_assets,
+                    &mut recipe_rankings,
+                )?;
+            }
             // Even on the default `recipe` query, surface matching parametric
             // types so a single discover_curated_paths call reveals the geometry
             // path (e.g. the gable roof system + its trusses for `roof_system`)
@@ -12872,6 +12881,7 @@ fn discover_matching_curated_assets<'a>(
                 .and_then(Value::as_str)
                 .or_else(|| manifest.body.get("name").and_then(Value::as_str))
                 .map(str::to_string),
+            target_types: curated_manifest_target_types(&manifest.body),
             executable: false,
             how_to_use: "Curated knowledge asset only: inspect the manifest/pattern and use it to ground a draft or parametric/definition authoring path; it is not directly executable via instantiate_recipe.".into(),
         })
@@ -12879,6 +12889,175 @@ fn discover_matching_curated_assets<'a>(
     assets.sort_by(|left, right| left.asset_id.cmp(&right.asset_id));
     assets.truncate(12);
     assets
+}
+
+#[cfg(feature = "model-api")]
+fn bridge_recipe_rankings_from_curated_targets(
+    world: &World,
+    requested_element_class: &str,
+    context: &serde_json::Value,
+    query: Option<&str>,
+    curated_assets: &[CuratedAssetPathInfo],
+    recipe_rankings: &mut Vec<RecipeRankingInfo>,
+) -> ApiResult<()> {
+    let mut target_classes: Vec<String> = curated_assets
+        .iter()
+        .flat_map(|asset| asset.target_types.iter().cloned())
+        .filter(|target| target != requested_element_class)
+        .collect();
+    target_classes.sort();
+    target_classes.dedup();
+
+    let mut emitted: std::collections::HashSet<String> = recipe_rankings
+        .iter()
+        .map(|ranking| ranking.id.clone())
+        .collect();
+    let bridge_terms = curated_bridge_terms(requested_element_class, query, curated_assets);
+    let requested_head = requested_head_token(requested_element_class);
+    let mut candidates = Vec::new();
+    for target_class in target_classes {
+        let bridged = handle_select_recipe(world, target_class.clone(), context.clone())?;
+        for mut ranking in bridged.into_iter().filter(|ranking| ranking.executable) {
+            if !emitted.insert(ranking.id.clone()) {
+                continue;
+            }
+            let relevance =
+                bridged_recipe_relevance(&ranking, target_class.as_str(), &bridge_terms);
+            let head_target_match = requested_head
+                .as_ref()
+                .is_some_and(|head| class_text_contains_token(&ranking.target_class, head));
+            if relevance < 2 && !(relevance >= 1 && head_target_match) {
+                continue;
+            }
+            ranking.weight = (ranking.weight * 0.45) + (relevance as f32 * 0.12);
+            ranking.how_to_instantiate = format!(
+                "Discovered through a curated asset matching requested term {requested_element_class:?}; instantiate this compatible target_class {target_class:?}. {}",
+                ranking.how_to_instantiate
+            );
+            candidates.push(ranking);
+        }
+    }
+    if let Some(head) = requested_head {
+        let has_head_target = candidates
+            .iter()
+            .any(|ranking| class_text_contains_token(&ranking.target_class, &head));
+        if has_head_target {
+            candidates.retain(|ranking| class_text_contains_token(&ranking.target_class, &head));
+        }
+    }
+    recipe_rankings.append(&mut candidates);
+    recipe_rankings.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn curated_bridge_terms(
+    requested_element_class: &str,
+    query: Option<&str>,
+    curated_assets: &[CuratedAssetPathInfo],
+) -> Vec<String> {
+    let mut terms = bridge_tokens(requested_element_class);
+    if let Some(query) = query {
+        terms.extend(bridge_tokens(query));
+    }
+    for asset in curated_assets {
+        terms.extend(bridge_tokens(&asset.asset_id));
+        if let Some(label) = &asset.label {
+            terms.extend(bridge_tokens(label));
+        }
+    }
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+#[cfg(feature = "model-api")]
+fn bridged_recipe_relevance(
+    ranking: &RecipeRankingInfo,
+    target_class: &str,
+    bridge_terms: &[String],
+) -> usize {
+    let haystack = bridge_tokens(&format!(
+        "{} {} {}",
+        ranking.id, ranking.label, target_class
+    ));
+    bridge_terms
+        .iter()
+        .filter(|term| haystack.iter().any(|candidate| candidate == *term))
+        .count()
+}
+
+#[cfg(feature = "model-api")]
+fn requested_head_token(value: &str) -> Option<String> {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 3)
+        .map(|token| token.to_ascii_lowercase())
+        .filter(|token| !CLASS_TOKEN_STOPWORDS.contains(&token.as_str()))
+        .last()
+}
+
+#[cfg(feature = "model-api")]
+fn class_text_contains_token(value: &str, token: &str) -> bool {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|candidate| candidate.len() >= 3)
+        .map(|candidate| candidate.to_ascii_lowercase())
+        .any(|candidate| candidate == token)
+}
+
+#[cfg(feature = "model-api")]
+fn bridge_tokens(value: &str) -> Vec<String> {
+    const STOPWORDS: &[&str] = &[
+        "assembly",
+        "asset",
+        "class",
+        "component",
+        "curated",
+        "manifest",
+        "pattern",
+        "recipe",
+        "system",
+        "target",
+        "type",
+        "wall",
+    ];
+    let mut tokens: Vec<String> = value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 3)
+        .map(|token| token.to_ascii_lowercase())
+        .filter(|token| !STOPWORDS.contains(&token.as_str()))
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+#[cfg(feature = "model-api")]
+fn curated_manifest_target_types(body: &Value) -> Vec<String> {
+    let mut targets = Vec::new();
+    for key in ["target_types", "target_classes"] {
+        if let Some(values) = body.get(key).and_then(Value::as_array) {
+            targets.extend(
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    targets
 }
 
 #[cfg(feature = "model-api")]

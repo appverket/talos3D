@@ -5232,6 +5232,141 @@ fn consultable_curated_assets_do_not_close_materializable_path_gap() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn curated_asset_target_types_bridge_to_scoped_executable_recipes() {
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CuratedManifest, CuratedManifestRegistry, CurationMeta,
+        ManifestKindId, RecipeArtifact, RecipeArtifactRegistry, RecipeBody, RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let mut world = init_model_api_test_world();
+
+    let kind = ManifestKindId::new("assembly_pattern.v2");
+    let asset_id = CuratedManifest::asset_id_for(&kind, "closed_gable_end_wall");
+    let manifest = CuratedManifest {
+        meta: CurationMeta::new(
+            asset_id,
+            CuratedManifest::asset_kind(),
+            Provenance {
+                author: AgentId("test".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: None,
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        manifest_kind: kind,
+        body: json!({
+            "label": "Closed gable end wall",
+            "target_types": ["roof_system", "wall_assembly"],
+            "tags": ["gable", "closed_shell"]
+        }),
+    };
+    let mut manifests = CuratedManifestRegistry::default();
+    manifests.insert(manifest);
+    world.insert_resource(manifests);
+
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            AssetId("installed_recipe/gable_infill".into()),
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("Scoped gable infill recipe fixture".into()),
+                jurisdiction: Some(crate::curation::JurisdictionTag::new("SE")),
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(MutationScope::None),
+        },
+        parameter_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "min_x": { "type": "number" },
+                "max_x": { "type": "number" }
+            }
+        }),
+        target_class: "wall_assembly".into(),
+        supported_refinement_states: vec![RefinementState::Constructible],
+        tests: Vec::new(),
+    };
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact);
+    world.insert_resource(registry);
+
+    let unscoped = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("gable_end_wall".into()),
+            query: Some("closed gable end wall".into()),
+            context: json!({ "target_state": "Constructible" }),
+        },
+    )
+    .expect("unscoped discovery should succeed");
+    assert!(unscoped
+        .curated_assets
+        .iter()
+        .any(|asset| asset.target_types.contains(&"wall_assembly".to_string())));
+    assert!(
+        unscoped
+            .recipe_rankings
+            .iter()
+            .all(|ranking| ranking.id != "gable_infill"),
+        "region-scoped bridged recipe must not leak into unscoped discovery"
+    );
+    assert!(unscoped.no_curated_path.is_some());
+
+    let scoped = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("gable_end_wall".into()),
+            query: Some("closed gable end wall".into()),
+            context: json!({ "target_state": "Constructible", "region": "se" }),
+        },
+    )
+    .expect("scoped discovery should succeed");
+    let ranking = scoped
+        .recipe_rankings
+        .iter()
+        .find(|ranking| ranking.id == "gable_infill")
+        .expect("scoped bridge should surface compatible executable recipe");
+    assert_eq!(ranking.target_class, "wall_assembly");
+    assert_eq!(
+        ranking.execution_path.as_deref(),
+        Some("instantiate_recipe")
+    );
+    assert!(ranking
+        .how_to_instantiate
+        .contains("Discovered through a curated asset"));
+    assert!(scoped
+        .recipe_rankings
+        .iter()
+        .all(|ranking| ranking.target_class == "wall_assembly"));
+    assert!(scoped
+        .recipe_rankings
+        .iter()
+        .all(|ranking| ranking.id != "window_unit" && ranking.id != "door_unit"));
+    assert!(scoped.no_curated_path.is_none());
+    assert_eq!(scoped.suggested_next_tool, "instantiate_recipe");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn agent_skill_handlers_list_get_and_save_drafts() {
     use crate::plugins::agent_skills::{
         AgentSkill, AgentSkillDraftRequest, AgentSkillId, AgentSkillRegistry, AgentSkillTrustLevel,

@@ -218,6 +218,9 @@ pub struct AssemblyPatternV2 {
     /// Free-form orientation hint (`"exterior_to_interior"`,
     /// `"top_to_bottom"`, etc.).
     pub axis: String,
+    /// Capability-defined class or assembly ids the pattern applies to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_types: Vec<String>,
     pub slots: Vec<PatternSlot>,
     pub envelopes: Vec<PatternEnvelope>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -245,6 +248,7 @@ impl AssemblyPatternV2 {
             description: String::new(),
             concept_ref: concept_ref.into(),
             axis: String::new(),
+            target_types: Vec::new(),
             slots: Vec::new(),
             envelopes: Vec::new(),
             support_corridors: Vec::new(),
