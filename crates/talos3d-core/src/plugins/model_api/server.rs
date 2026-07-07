@@ -3704,7 +3704,9 @@ pub(super) struct InstantiateRecipeRequest {
     /// Optional placement. `translate` is in **metres** (world coordinates).
     #[serde(default)]
     pub(super) placement: Option<InstantiateRecipePlacement>,
-    /// Target refinement state (default `"Constructible"`).
+    /// Target refinement state. If omitted, defaults to `Constructible` only
+    /// when the recipe supports it; otherwise the lowest declared supported
+    /// state is used.
     pub(super) target_state: Option<String>,
 }
 
@@ -6706,7 +6708,8 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             (element class, e.g. `\"wall_assembly\"`), `parameters` (recipe-specific driver map, \
             e.g. `{\"length_mm\": 4000, \"height_mm\": 2700, \"thickness_mm\": 140}`). \
             \nOptional: `placement` (`{ translate: [x,y,z] }` in **metres**), \
-            `target_state` (default `\"Constructible\"`). \
+            `target_state` (if omitted, uses `\"Constructible\"` only when the recipe supports it; \
+            otherwise uses the lowest declared supported state). \
             \n\nReturns `{ root_element_id, created_element_ids, state }`. After this call, \
             use `frame_entities([root_element_id])` to verify geometry was placed. \
             \n\nIf the response carries `promotion_blocked`, the geometry WAS created (it is \

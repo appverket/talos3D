@@ -4485,6 +4485,48 @@ fn ensure_recipe_supports_target_state_before_create(
 }
 
 #[cfg(feature = "model-api")]
+fn preferred_recipe_target_state(
+    supported: &[crate::plugins::refinement::RefinementState],
+) -> Option<crate::plugins::refinement::RefinementState> {
+    use crate::plugins::refinement::RefinementState;
+
+    if supported.is_empty() {
+        return None;
+    }
+    if supported.contains(&RefinementState::Constructible) {
+        return Some(RefinementState::Constructible);
+    }
+    supported.iter().min().copied()
+}
+
+#[cfg(feature = "model-api")]
+fn default_instantiate_recipe_target_state(world: &World, family_id: &str) -> String {
+    use crate::capability_registry::{CapabilityRegistry, RecipeFamilyId};
+    use crate::plugins::refinement::RefinementState;
+
+    let family_id = RecipeFamilyId(family_id.to_string());
+    if let Some(state) = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .and_then(|registry| registry.get_by_family(&family_id))
+        .and_then(|artifact| preferred_recipe_target_state(&artifact.supported_refinement_states))
+    {
+        return state.as_str().to_string();
+    }
+
+    if let Some(state) = world
+        .get_resource::<CapabilityRegistry>()
+        .and_then(|registry| registry.recipe_family_descriptor(&family_id))
+        .and_then(|descriptor| {
+            preferred_recipe_target_state(&descriptor.supported_refinement_levels)
+        })
+    {
+        return state.as_str().to_string();
+    }
+
+    RefinementState::Constructible.as_str().to_string()
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_get_assembly(world: &World, element_id: u64) -> Result<AssemblyDetails, String> {
     use crate::plugins::modeling::assembly::SemanticAssembly;
 
@@ -10784,7 +10826,7 @@ fn handle_instantiate_recipe(
     let target_state = request
         .target_state
         .clone()
-        .unwrap_or_else(|| "Constructible".to_string());
+        .unwrap_or_else(|| default_instantiate_recipe_target_state(world, &request.family_id));
     let placement = request
         .placement
         .clone()
@@ -11853,11 +11895,13 @@ fn params_from_schema(
 fn instantiate_hint(
     family_id: &str,
     target_class: &str,
+    target_state: crate::plugins::refinement::RefinementState,
     parameters: &[RecipeParameterInfo],
 ) -> String {
     if parameters.is_empty() {
         return format!(
-            "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, parameters: {{...}} }}"
+            "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, target_state: {:?}, parameters: {{...}} }}",
+            target_state.as_str()
         );
     }
     let rendered: Vec<String> = parameters
@@ -11868,7 +11912,8 @@ fn instantiate_hint(
         })
         .collect();
     format!(
-        "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, parameters: {{ {} }} }} (omitted params fall back to the defaults shown)",
+        "Call instantiate_recipe {{ family_id: {family_id:?}, target_class: {target_class:?}, target_state: {:?}, parameters: {{ {} }} }} (omitted params fall back to the defaults shown)",
+        target_state.as_str(),
         rendered.join(", ")
     )
 }
@@ -12016,10 +12061,14 @@ pub fn handle_select_recipe(
                             default: p.default.clone(),
                         })
                         .collect();
+                    let hint_target_state = target_state
+                        .or_else(|| preferred_recipe_target_state(&d.supported_refinement_levels))
+                        .unwrap_or(RefinementState::Constructible);
                     Some(RecipeRankingInfo {
                         how_to_instantiate: instantiate_hint(
                             &d.id.0,
                             &d.target_class.0,
+                            hint_target_state,
                             &parameters,
                         ),
                         id: d.id.0.clone(),
@@ -12147,11 +12196,17 @@ pub fn handle_select_recipe(
                     ),
                     None => params_from_schema(&artifact.parameter_schema, None),
                 };
+                let hint_target_state = target_state
+                    .or_else(|| {
+                        preferred_recipe_target_state(&artifact.supported_refinement_states)
+                    })
+                    .unwrap_or(RefinementState::Constructible);
 
                 viable.push(RecipeRankingInfo {
                     how_to_instantiate: instantiate_hint(
                         &family_id,
                         &artifact.target_class,
+                        hint_target_state,
                         &parameters,
                     ),
                     id: family_id.clone(),

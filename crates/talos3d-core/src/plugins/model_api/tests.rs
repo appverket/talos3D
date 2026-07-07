@@ -8226,6 +8226,64 @@ fn select_recipe_surfaces_installed_recipe_parameters_and_defaults() {
     );
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn select_recipe_hint_names_supported_target_state_for_capped_recipe() {
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+
+    let asset_id = AssetId("installed_recipe/schematic_trim".into());
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id,
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("schematic-only trim recipe for test".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(MutationScope::None),
+        },
+        parameter_schema: serde_json::Value::Null,
+        target_class: "trim".into(),
+        supported_refinement_states: vec![RefinementState::Schematic],
+        tests: Vec::new(),
+    };
+
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact);
+    world.insert_resource(registry);
+
+    let ranking = handle_select_recipe(&world, "trim".into(), serde_json::json!({}))
+        .expect("select_recipe should succeed");
+
+    assert_eq!(ranking.len(), 1);
+    assert!(
+        ranking[0]
+            .how_to_instantiate
+            .contains("target_state: \"Schematic\""),
+        "hint must name the supported target_state for capped recipes, got: {}",
+        ranking[0].how_to_instantiate
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Change 2 — resolve_obligation handler
 // ---------------------------------------------------------------------------
@@ -8804,6 +8862,55 @@ fn instantiate_recipe_rejects_unsupported_target_state_before_creating_anchor() 
     assert_eq!(
         ids_after, ids_before,
         "unsupported target-state preflight must not create a lingering root anchor"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_omitted_target_state_uses_recipe_supported_state() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::{RefinementState, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test element class for omitted target-state recipe instantiation.".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe_with_states(
+        &mut world,
+        "schematic_only_wall",
+        "wall_assembly",
+        vec![RefinementState::Schematic],
+    );
+
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "schematic_only_wall".into(),
+            target_class: "wall_assembly".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: None,
+        },
+    )
+    .expect("omitted target_state must use the recipe's declared supported state");
+
+    assert_eq!(result.state, "Schematic");
+    assert_eq!(result.steps_run_count, 2);
+    assert_eq!(result.created_element_ids.len(), 2);
+    assert!(
+        result.promotion_blocked.is_none(),
+        "choosing the supported default state must not produce a promotion block"
     );
 }
 
