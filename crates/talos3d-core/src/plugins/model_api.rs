@@ -11932,6 +11932,71 @@ pub fn handle_list_recipe_families_with_options(
         })
         .unwrap_or_default();
 
+    // Keep list_recipe_families consistent with select_recipe for the
+    // artifact-backed execution path. Product apps often mirror shipped native
+    // descriptors into RecipeArtifactRegistry while the native CapabilityRegistry
+    // is not the public source a client sees. Region-scoped learned artifacts
+    // are intentionally not listed here because this request has no context
+    // field; callers should use select_recipe/discover_curated_paths with a
+    // jurisdiction/region scope to retrieve those progressively.
+    if let Some(artifact_registry) = world.get_resource::<crate::curation::RecipeArtifactRegistry>()
+    {
+        let mut emitted: std::collections::HashSet<String> =
+            families.iter().map(|family| family.id.clone()).collect();
+        for (asset_id, artifact) in artifact_registry.entries.iter().filter(|(_, artifact)| {
+            element_class
+                .as_deref()
+                .is_none_or(|class| artifact.target_class == class)
+                && artifact.meta.provenance.jurisdiction.is_none()
+        }) {
+            let family_id = artifact
+                .family_id()
+                .map(|family| family.0.clone())
+                .unwrap_or_else(|| {
+                    asset_id
+                        .0
+                        .split_once('/')
+                        .map(|(_, tail)| tail.to_string())
+                        .unwrap_or_else(|| asset_id.0.clone())
+                });
+            if !emitted.insert(family_id.clone()) {
+                continue;
+            }
+            let parameters = match artifact.body.script() {
+                Some(script) => params_from_schema(
+                    &script.parameter_schema,
+                    Some(&script.parameter_defaults),
+                ),
+                None => params_from_schema(&artifact.parameter_schema, None),
+            };
+            families.push(RecipeFamilyInfo {
+                id: family_id,
+                target_class: artifact.target_class.clone(),
+                label: artifact
+                    .meta
+                    .provenance
+                    .rationale
+                    .clone()
+                    .unwrap_or_else(|| artifact.target_class.clone()),
+                description: artifact
+                    .meta
+                    .provenance
+                    .rationale
+                    .clone()
+                    .unwrap_or_else(|| artifact.target_class.clone()),
+                supported_refinement_levels: artifact
+                    .supported_refinement_states
+                    .iter()
+                    .map(|state| state.as_str().to_string())
+                    .collect(),
+                parameters,
+                is_session_draft: false,
+                executable: true,
+                execution_path: Some("instantiate_recipe".into()),
+            });
+        }
+    }
+
     if include_session_drafts {
         if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
             families.extend(

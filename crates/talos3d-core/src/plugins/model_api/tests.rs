@@ -5538,7 +5538,8 @@ fn installed_recipe_drafts_are_consultable_from_recipe_discovery() {
         "roof_system".into(),
         serde_json::json!({
             "target_state": "Constructible",
-            "include_session_drafts": true
+            "include_session_drafts": true,
+            "jurisdiction": "SE"
         }),
     )
     .expect("select_recipe should surface installed drafts");
@@ -8112,6 +8113,74 @@ fn select_recipe_surfaces_installed_recipe_artifact() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn list_recipe_families_surfaces_unscoped_artifact_recipes_only() {
+    use crate::curation::authoring_script::AuthoringScript;
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    fn artifact(family: &str, jurisdiction: Option<&str>) -> RecipeArtifact {
+        let asset_id = AssetId(format!("installed_recipe/{family}"));
+        RecipeArtifact {
+            meta: CurationMeta::new(
+                asset_id,
+                AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+                Provenance {
+                    author: AgentId("test_agent".into()),
+                    confidence: Confidence::Medium,
+                    lineage: Lineage::Freeform,
+                    rationale: Some(format!("{family} test recipe")),
+                    jurisdiction: jurisdiction.map(crate::curation::JurisdictionTag::new),
+                    catalog_dependencies: Vec::new(),
+                    evidence: Vec::new(),
+                },
+            )
+            .with_scope(Scope::Project)
+            .with_trust(Trust::Draft),
+            body: RecipeBody::AuthoringScript {
+                script: AuthoringScript::stub(
+                    crate::curation::authoring_script::MutationScope::None,
+                ),
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "width_m": {"type": "number", "default": 1.0}
+                }
+            }),
+            target_class: "roof_system".into(),
+            supported_refinement_states: vec![RefinementState::Constructible],
+            tests: Vec::new(),
+        }
+    }
+
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+    let mut registry = RecipeArtifactRegistry::default();
+    registry.insert(artifact("global_roof", None));
+    registry.insert(artifact("se_scoped_roof", Some("SE")));
+    world.insert_resource(registry);
+
+    let families = handle_list_recipe_families(&world, Some("roof_system".into()));
+
+    assert!(
+        families.iter().any(|family| family.id == "global_roof"
+            && family.executable
+            && family.execution_path.as_deref() == Some("instantiate_recipe")),
+        "unscoped artifact recipe should be listed as executable: {families:?}"
+    );
+    assert!(
+        families.iter().all(|family| family.id != "se_scoped_roof"),
+        "region-scoped artifact should require contextual select_recipe/discover_curated_paths"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn discover_curated_paths_ranks_query_specific_installed_recipe_first() {
     use crate::capability_registry::{
         ElementClassId, GenerateInput, GenerateOutput, ObligationTemplate, RecipeFamilyDescriptor,
@@ -8202,7 +8271,7 @@ fn discover_curated_paths_ranks_query_specific_installed_recipe_first() {
 fn discover_curated_paths_filters_installed_recipes_by_jurisdiction() {
     use crate::curation::authoring_script::{AuthoringScript, MutationScope};
     use crate::curation::{
-        provenance::{Confidence, JurisdictionTag, Lineage, Provenance},
+        provenance::{Confidence, Lineage, Provenance},
         scope_trust::{Scope, Trust},
         AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
         RECIPE_ARTIFACT_KIND,
@@ -8220,7 +8289,7 @@ fn discover_curated_paths_filters_installed_recipes_by_jurisdiction() {
                     confidence: Confidence::Medium,
                     lineage: Lineage::Freeform,
                     rationale: Some(format!("{id} fixture")),
-                    jurisdiction: jurisdiction.map(JurisdictionTag::new),
+                    jurisdiction: jurisdiction.map(crate::curation::JurisdictionTag::new),
                     catalog_dependencies: Vec::new(),
                     evidence: Vec::new(),
                 },
