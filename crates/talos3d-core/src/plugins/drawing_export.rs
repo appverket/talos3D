@@ -796,7 +796,6 @@ fn write_rgb_to_path(path: &Path, rgb: &RgbImage) -> Result<(), String> {
     }
 }
 
-#[cfg(feature = "model-api")]
 pub(crate) fn screenshot_quality_warning_for_path(path: &Path) -> Result<Option<String>, String> {
     let dynamic = image::open(path)
         .map_err(|error| format!("cannot inspect screenshot '{}': {error}", path.display()))?;
