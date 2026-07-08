@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use talos3d_capability_api::commands::{
     CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
 };
@@ -29,10 +29,10 @@ use talos3d_core::{
         modeling::assembly::{AssemblyMemberRef, AssemblySnapshot, SemanticAssembly},
         modeling::generic_snapshot::PrimitiveSnapshot,
         modeling::group::{
-            GroupFrame, GroupMembers, GroupSnapshot, collect_group_members_recursive,
-            compute_group_bounds_in_frame_from_world, find_group_for_member, group_frame,
-            group_frame_change_snapshots, group_membership_add_snapshots, is_group,
-            remove_member_from_groups,
+            collect_group_members_recursive, compute_group_bounds_in_frame_from_world,
+            find_group_for_member, group_frame, group_frame_change_snapshots,
+            group_membership_add_snapshots, is_group, remove_member_from_groups, GroupFrame,
+            GroupMembers, GroupSnapshot,
         },
         modeling::primitives::{BoxPrimitive, ShapeRotation, TriangleMesh},
         modeling::snapshots::TriangleMeshSnapshot,
@@ -44,8 +44,8 @@ use talos3d_core::{
 
 use crate::{
     conforming::{
-        ConformingSolid, ConformingSolidSnapshot, DEFAULT_MAX_DEPTH, DEFAULT_MIN_THICKNESS,
-        build_conforming_triangle_mesh, conforming_metrics,
+        build_conforming_triangle_mesh, conforming_metrics, ConformingSolid,
+        ConformingSolidSnapshot, DEFAULT_MAX_DEPTH, DEFAULT_MIN_THICKNESS,
     },
     heightfield::TerrainHeightfield,
 };
@@ -1540,6 +1540,7 @@ fn replace_conforming_foundation_with_min_height_box(
         rotation: ShapeRotation(Quat::from_rotation_y(solid.yaw)),
         material_assignment: None,
         opening_context: None,
+        subobject_display_overrides: None,
     }
     .apply_to(world);
     Some(crate::conforming::ConformingMetrics {
@@ -1994,6 +1995,7 @@ fn execute_demote_conforming_foundation(
                 rotation: ShapeRotation(Quat::from_rotation_y(solid.yaw)),
                 material_assignment: None,
                 opening_context: None,
+                subobject_display_overrides: None,
             }
             .apply_to(world);
             metrics
@@ -2236,20 +2238,15 @@ mod tests {
             .get::<SemanticAssembly>(structure_entity)
             .expect("semantic structure assembly");
         assert_eq!(structure.assembly_type, "structure");
-        assert!(
-            structure
-                .members
-                .iter()
-                .any(|member| member.target == foundation_structure_id
-                    && member.role == "foundation")
-        );
-        assert!(
-            structure
-                .members
-                .iter()
-                .any(|member| member.target == foundation_id
-                    && member.role == "terrain_conforming_foundation")
-        );
+        assert!(structure
+            .members
+            .iter()
+            .any(|member| member.target == foundation_structure_id && member.role == "foundation"));
+        assert!(structure
+            .members
+            .iter()
+            .any(|member| member.target == foundation_id
+                && member.role == "terrain_conforming_foundation"));
     }
 
     #[test]
@@ -2464,13 +2461,10 @@ mod tests {
         let structure = world
             .get::<SemanticAssembly>(structure_entity)
             .expect("semantic structure");
-        assert!(
-            structure
-                .members
-                .iter()
-                .any(|member| member.target == foundation_structure_id
-                    && member.role == "foundation")
-        );
+        assert!(structure
+            .members
+            .iter()
+            .any(|member| member.target == foundation_structure_id && member.role == "foundation"));
     }
 
     #[test]
