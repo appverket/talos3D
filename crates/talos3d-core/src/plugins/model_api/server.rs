@@ -941,6 +941,10 @@ impl ModelApiServer {
         self.round_trip(ModelApiRequest::GetRenderSettings).await
     }
 
+    async fn request_get_perf_stats(&self) -> Result<PerfStatsInfo, String> {
+        self.round_trip(ModelApiRequest::GetPerfStats).await
+    }
+
     async fn request_set_render_settings(
         &self,
         request: RenderSettingsUpdateRequest,
@@ -5964,6 +5968,18 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(settings)
+    }
+
+    #[tool(
+        name = "get_perf_stats",
+        description = "Get the latest viewport performance sample. Requires the app to be built with the perf-stats feature for live FPS and CPU overlay counters; otherwise returns enabled=false."
+    )]
+    pub(super) async fn get_perf_stats_tool(&self) -> Result<CallToolResult, McpError> {
+        let stats = self
+            .request_get_perf_stats()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(stats)
     }
 
     #[tool(

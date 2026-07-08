@@ -2905,6 +2905,38 @@ fn handle_get_render_settings(world: &World) -> RenderSettingsInfo {
 }
 
 #[cfg(feature = "model-api")]
+fn handle_get_perf_stats(_world: &World) -> PerfStatsInfo {
+    #[cfg(feature = "perf-stats")]
+    {
+        let Some(stats) = _world.get_resource::<crate::plugins::perf_stats::PerfStats>() else {
+            return PerfStatsInfo::disabled();
+        };
+        let frame_ms = if stats.fps > f32::EPSILON {
+            1000.0 / stats.fps
+        } else {
+            0.0
+        };
+        return PerfStatsInfo {
+            enabled: true,
+            fps: stats.fps,
+            frame_ms,
+            transform_preview_ms: stats.transform_preview_ms,
+            outliner_build_ms: stats.outliner_build_ms,
+            outliner_draw_ms: stats.outliner_draw_ms,
+            layers_build_ms: stats.layers_build_ms,
+            layers_draw_ms: stats.layers_draw_ms,
+            mesh_regen_count: stats.mesh_regen_count,
+            gizmo_line_count: stats.gizmo_line_count,
+        };
+    }
+
+    #[cfg(not(feature = "perf-stats"))]
+    {
+        PerfStatsInfo::disabled()
+    }
+}
+
+#[cfg(feature = "model-api")]
 fn handle_set_render_settings(
     world: &mut World,
     request: RenderSettingsUpdateRequest,

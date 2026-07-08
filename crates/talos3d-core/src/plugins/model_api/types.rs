@@ -1110,6 +1110,38 @@ pub struct RenderSettingsInfo {
     pub xray_surface_alpha: f32,
 }
 
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerfStatsInfo {
+    pub enabled: bool,
+    pub fps: f32,
+    pub frame_ms: f32,
+    pub transform_preview_ms: f32,
+    pub outliner_build_ms: f32,
+    pub outliner_draw_ms: f32,
+    pub layers_build_ms: f32,
+    pub layers_draw_ms: f32,
+    pub mesh_regen_count: usize,
+    pub gizmo_line_count: usize,
+}
+
+impl PerfStatsInfo {
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            fps: 0.0,
+            frame_ms: 0.0,
+            transform_preview_ms: 0.0,
+            outliner_build_ms: 0.0,
+            outliner_draw_ms: 0.0,
+            layers_build_ms: 0.0,
+            layers_draw_ms: 0.0,
+            mesh_regen_count: 0,
+            gizmo_line_count: 0,
+        }
+    }
+}
+
 impl RenderSettingsInfo {
     #[cfg(feature = "model-api")]
     pub(super) fn from_settings(settings: &RenderSettings) -> Self {

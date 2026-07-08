@@ -291,6 +291,7 @@ pub(super) enum ModelApiRequest {
         response: oneshot::Sender<ApiResult<Vec<SceneLightInfo>>>,
     },
     GetRenderSettings(oneshot::Sender<RenderSettingsInfo>),
+    GetPerfStats(oneshot::Sender<PerfStatsInfo>),
     SetRenderSettings {
         request: RenderSettingsUpdateRequest,
         response: oneshot::Sender<ApiResult<RenderSettingsInfo>>,
@@ -1499,6 +1500,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::GetRenderSettings(response) => {
             let _ = response.send(handle_get_render_settings(world));
+        }
+        ModelApiRequest::GetPerfStats(response) => {
+            let _ = response.send(handle_get_perf_stats(world));
         }
         ModelApiRequest::SetRenderSettings { request, response } => {
             let _ = response.send(handle_set_render_settings(world, request));

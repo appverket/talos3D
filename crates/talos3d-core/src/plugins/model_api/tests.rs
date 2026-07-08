@@ -4387,6 +4387,18 @@ fn render_settings_round_trip_and_validate() {
     assert!(error.contains("Unknown tonemapping mode"));
 }
 
+#[cfg(all(feature = "model-api", not(feature = "perf-stats")))]
+#[test]
+fn perf_stats_report_disabled_when_feature_is_not_enabled() {
+    let world = init_model_api_test_world();
+
+    let stats = handle_get_perf_stats(&world);
+
+    assert!(!stats.enabled);
+    assert_eq!(stats.fps, 0.0);
+    assert_eq!(stats.frame_ms, 0.0);
+}
+
 #[cfg(feature = "model-api")]
 #[test]
 fn lighting_round_trip_and_restore_default_rig() {
@@ -10525,6 +10537,7 @@ mod capability_profiles {
             "bim_property_set.get",
             "quantity.set",
             "create_light",
+            "get_perf_stats",
             "set_render_settings",
             "definition.library.workspace.create",
             "procedural_session.create",
@@ -10613,6 +10626,7 @@ mod capability_profiles {
             "view_save",
             "clip_plane_create",
             "set_toolbar_layout",
+            "get_perf_stats",
             "invoke_command",
             "take_screenshot",
             "list_entities",

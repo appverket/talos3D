@@ -402,6 +402,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("set_ambient_light", ToolCategory::Presentation),
     ("restore_default_light_rig", ToolCategory::Presentation),
     ("get_render_settings", ToolCategory::Presentation),
+    ("get_perf_stats", ToolCategory::Presentation),
     ("set_render_settings", ToolCategory::Presentation),
     // --- Drafting / 2D ---
     ("place_dimension_between_handles", ToolCategory::Drafting2d),
