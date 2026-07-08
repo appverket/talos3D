@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
 
 #[cfg(feature = "perf-stats")]
@@ -8,7 +10,9 @@ use crate::{
     plugins::{
         commands::find_entity_by_element_id_readonly,
         cursor::{cursor_window_position, CursorSystems, CursorWorldPos},
+        identity::ElementId,
         layers::entity_on_visible_layer,
+        modeling::group::{GroupEditContext, GroupMembers},
         render_pipeline::RenderSettings,
         selection::Selected,
         transform::TransformState,
@@ -125,13 +129,20 @@ fn update_snap_result(world: &mut World) {
     let xray_enabled = world
         .get_resource::<RenderSettings>()
         .is_some_and(|settings| settings.xray_enabled);
+    let group_visibility = SnapGroupVisibility::from_world(world);
     let mut candidates: Vec<(SnapCandidateRank, SnapCandidate)> = Vec::new();
     let mut snap_points = Vec::new();
     let registry = world.resource::<CapabilityRegistry>();
     for factory in registry.factories() {
         factory.collect_snap_points(world, &mut snap_points);
     }
-    collect_authored_handle_snap_points(world, &mut snap_points, hovered_element_id, xray_enabled);
+    collect_authored_handle_snap_points(
+        world,
+        &mut snap_points,
+        hovered_element_id,
+        xray_enabled,
+        &group_visibility,
+    );
 
     for snap_point in snap_points {
         if !snap_point_is_selectable(
@@ -139,6 +150,7 @@ fn update_snap_result(world: &mut World) {
             snap_point.element_id,
             hovered_element_id,
             xray_enabled,
+            &group_visibility,
         ) {
             continue;
         }
@@ -197,6 +209,7 @@ fn collect_authored_handle_snap_points(
     out: &mut Vec<SnapPoint>,
     hovered_element_id: Option<crate::plugins::identity::ElementId>,
     xray_enabled: bool,
+    group_visibility: &SnapGroupVisibility,
 ) {
     let transform_active = !world.resource::<TransformState>().is_idle();
     let registry = world.resource::<CapabilityRegistry>();
@@ -205,13 +218,23 @@ fn collect_authored_handle_snap_points(
         let Some(owner) = hovered_element_id else {
             return;
         };
+        if !group_visibility.accepts(owner) {
+            return;
+        }
         let Some(entity) = find_entity_by_element_id_readonly(world, owner) else {
             return;
         };
         let Some(entity_ref) = world.get_entity(entity).ok() else {
             return;
         };
-        collect_entity_snap_points(world, registry, entity_ref, transform_active, out);
+        collect_entity_snap_points(
+            world,
+            registry,
+            entity_ref,
+            transform_active,
+            out,
+            group_visibility,
+        );
         return;
     }
 
@@ -220,7 +243,14 @@ fn collect_authored_handle_snap_points(
         .expect("EntityRef query should always be constructible");
 
     for entity_ref in query.iter(world) {
-        collect_entity_snap_points(world, registry, entity_ref, transform_active, out);
+        collect_entity_snap_points(
+            world,
+            registry,
+            entity_ref,
+            transform_active,
+            out,
+            group_visibility,
+        );
     }
 }
 
@@ -230,6 +260,7 @@ fn collect_entity_snap_points(
     entity_ref: EntityRef<'_>,
     transform_active: bool,
     out: &mut Vec<SnapPoint>,
+    group_visibility: &SnapGroupVisibility,
 ) {
     if !entity_ref.contains::<crate::plugins::identity::ElementId>() {
         return;
@@ -243,6 +274,9 @@ fn collect_entity_snap_points(
     let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
         return;
     };
+    if !group_visibility.accepts(snapshot.element_id()) {
+        return;
+    }
     if snapshot.scope() != crate::authored_entity::EntityScope::AuthoredModel {
         return;
     }
@@ -375,10 +409,14 @@ fn snap_point_is_selectable(
     element_id: Option<crate::plugins::identity::ElementId>,
     hovered_element_id: Option<crate::plugins::identity::ElementId>,
     xray_enabled: bool,
+    group_visibility: &SnapGroupVisibility,
 ) -> bool {
     let Some(element_id) = element_id else {
         return true;
     };
+    if !group_visibility.accepts(element_id) {
+        return false;
+    }
     if !xray_enabled && hovered_element_id != Some(element_id) {
         return false;
     }
@@ -386,6 +424,46 @@ fn snap_point_is_selectable(
         return true;
     };
     entity_is_visible_snap_owner(world, entity)
+}
+
+struct SnapGroupVisibility {
+    active_group: Option<ElementId>,
+    group_ids: HashSet<ElementId>,
+    parent_by_child: HashMap<ElementId, ElementId>,
+}
+
+impl SnapGroupVisibility {
+    fn from_world(world: &mut World) -> Self {
+        let active_group = world
+            .get_resource::<GroupEditContext>()
+            .and_then(GroupEditContext::current_group);
+        let mut group_ids = HashSet::new();
+        let mut parent_by_child = HashMap::new();
+        if let Some(mut group_query) = world.try_query::<(&ElementId, &GroupMembers)>() {
+            for (group_id, members) in group_query.iter(world) {
+                group_ids.insert(*group_id);
+                for member_id in &members.member_ids {
+                    parent_by_child.entry(*member_id).or_insert(*group_id);
+                }
+            }
+        }
+
+        Self {
+            active_group,
+            group_ids,
+            parent_by_child,
+        }
+    }
+
+    fn accepts(&self, element_id: ElementId) -> bool {
+        if self.group_ids.contains(&element_id) {
+            return false;
+        }
+        match self.active_group {
+            Some(active_group) => self.parent_by_child.get(&element_id) == Some(&active_group),
+            None => !self.parent_by_child.contains_key(&element_id),
+        }
+    }
 }
 
 fn entity_ref_is_visible_snap_owner(world: &World, entity_ref: EntityRef<'_>) -> bool {
@@ -595,6 +673,45 @@ fn draw_loop(gizmos: &mut Gizmos, corners: [Vec3; 4], color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::modeling::group::{GroupEditContext, GroupFrame, GroupMembers};
+
+    fn snap_group_visibility_world() -> (World, ElementId, ElementId, ElementId, ElementId) {
+        let mut world = World::new();
+        world.insert_resource(GroupEditContext::default());
+
+        let standalone_id = ElementId(1);
+        let child_id = ElementId(10);
+        let nested_group_id = ElementId(20);
+        let root_group_id = ElementId(30);
+        world.spawn(standalone_id);
+        world.spawn(child_id);
+        world.spawn((
+            nested_group_id,
+            GroupMembers {
+                name: "Nested".to_string(),
+                member_ids: vec![child_id],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            root_group_id,
+            GroupMembers {
+                name: "Root".to_string(),
+                member_ids: vec![nested_group_id],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+
+        (
+            world,
+            standalone_id,
+            child_id,
+            nested_group_id,
+            root_group_id,
+        )
+    }
 
     #[test]
     fn authored_handle_kind_maps_to_expected_snap_kind() {
@@ -693,14 +810,91 @@ mod tests {
 
     #[test]
     fn owned_snap_points_require_hovered_owner_unless_xray_is_enabled() {
-        let world = World::new();
+        let mut world = World::new();
         let owner = Some(crate::plugins::identity::ElementId(1));
         let other = Some(crate::plugins::identity::ElementId(2));
+        let visibility = SnapGroupVisibility::from_world(&mut world);
 
-        assert!(snap_point_is_selectable(&world, None, None, false));
-        assert!(snap_point_is_selectable(&world, owner, owner, false));
-        assert!(!snap_point_is_selectable(&world, owner, None, false));
-        assert!(!snap_point_is_selectable(&world, owner, other, false));
-        assert!(snap_point_is_selectable(&world, owner, None, true));
+        assert!(snap_point_is_selectable(
+            &world,
+            None,
+            None,
+            false,
+            &visibility
+        ));
+        assert!(snap_point_is_selectable(
+            &world,
+            owner,
+            owner,
+            false,
+            &visibility
+        ));
+        assert!(!snap_point_is_selectable(
+            &world,
+            owner,
+            None,
+            false,
+            &visibility
+        ));
+        assert!(!snap_point_is_selectable(
+            &world,
+            owner,
+            other,
+            false,
+            &visibility
+        ));
+        assert!(snap_point_is_selectable(
+            &world,
+            owner,
+            None,
+            true,
+            &visibility
+        ));
+    }
+
+    #[test]
+    fn snap_group_visibility_at_root_accepts_standalone_entities_only() {
+        let (mut world, standalone_id, child_id, nested_group_id, root_group_id) =
+            snap_group_visibility_world();
+
+        let visibility = SnapGroupVisibility::from_world(&mut world);
+
+        assert!(visibility.accepts(standalone_id));
+        assert!(!visibility.accepts(root_group_id));
+        assert!(!visibility.accepts(nested_group_id));
+        assert!(!visibility.accepts(child_id));
+    }
+
+    #[test]
+    fn snap_group_visibility_inside_group_waits_for_nested_drill_in() {
+        let (mut world, standalone_id, child_id, nested_group_id, root_group_id) =
+            snap_group_visibility_world();
+        let mut context = GroupEditContext::default();
+        context.enter(root_group_id);
+        world.insert_resource(context);
+
+        let visibility = SnapGroupVisibility::from_world(&mut world);
+
+        assert!(!visibility.accepts(standalone_id));
+        assert!(!visibility.accepts(root_group_id));
+        assert!(!visibility.accepts(nested_group_id));
+        assert!(!visibility.accepts(child_id));
+    }
+
+    #[test]
+    fn snap_group_visibility_inside_nested_group_accepts_nested_members() {
+        let (mut world, standalone_id, child_id, nested_group_id, root_group_id) =
+            snap_group_visibility_world();
+        let mut context = GroupEditContext::default();
+        context.enter(root_group_id);
+        context.enter(nested_group_id);
+        world.insert_resource(context);
+
+        let visibility = SnapGroupVisibility::from_world(&mut world);
+
+        assert!(!visibility.accepts(standalone_id));
+        assert!(!visibility.accepts(root_group_id));
+        assert!(!visibility.accepts(nested_group_id));
+        assert!(visibility.accepts(child_id));
     }
 }

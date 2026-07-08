@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use bevy::{ecs::world::EntityRef, prelude::*, window::PrimaryWindow};
 use bevy_egui::{egui, EguiContexts};
 use serde_json::Value;
@@ -14,6 +16,8 @@ use crate::{
         document_properties::DocumentProperties,
         drawing_export::ViewportExportState,
         egui_chrome::{ChromeInputCapture, EguiWantsInput},
+        identity::ElementId,
+        modeling::group::{GroupEditContext, GroupMembers},
         scene_ray,
         snap::{SnapResult, SnapSystems},
         tools::ActiveTool,
@@ -688,6 +692,7 @@ fn constrain_perpendicular_to_edge(
 fn resolve_tape_hover(world: &mut World) -> Option<TapeHoverTarget> {
     let cursor_screen = current_cursor_screen_position(world)?;
     let camera_context = current_camera_context(world)?;
+    let group_visibility = TapeGroupVisibility::from_world(world);
     let mut query = world
         .try_query::<EntityRef>()
         .expect("EntityRef query should always be constructible");
@@ -698,6 +703,9 @@ fn resolve_tape_hover(world: &mut World) -> Option<TapeHoverTarget> {
         let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) else {
             continue;
         };
+        if !group_visibility.accepts(snapshot.element_id()) {
+            continue;
+        }
 
         for handle in snapshot.handles() {
             add_control_candidate(
@@ -739,6 +747,46 @@ fn resolve_tape_hover(world: &mut World) -> Option<TapeHoverTarget> {
     }
 
     best.map(|candidate| candidate.target)
+}
+
+struct TapeGroupVisibility {
+    active_group: Option<ElementId>,
+    group_ids: HashSet<ElementId>,
+    parent_by_child: HashMap<ElementId, ElementId>,
+}
+
+impl TapeGroupVisibility {
+    fn from_world(world: &mut World) -> Self {
+        let active_group = world
+            .get_resource::<GroupEditContext>()
+            .and_then(GroupEditContext::current_group);
+        let mut parent_by_child = HashMap::new();
+        let mut group_ids = HashSet::new();
+        if let Some(mut group_query) = world.try_query::<(&ElementId, &GroupMembers)>() {
+            for (group_id, members) in group_query.iter(world) {
+                group_ids.insert(*group_id);
+                for member_id in &members.member_ids {
+                    parent_by_child.entry(*member_id).or_insert(*group_id);
+                }
+            }
+        }
+
+        Self {
+            active_group,
+            group_ids,
+            parent_by_child,
+        }
+    }
+
+    fn accepts(&self, element_id: ElementId) -> bool {
+        if self.group_ids.contains(&element_id) {
+            return false;
+        }
+        match self.active_group {
+            Some(active_group) => self.parent_by_child.get(&element_id) == Some(&active_group),
+            None => !self.parent_by_child.contains_key(&element_id),
+        }
+    }
 }
 
 fn current_cursor_screen_position(world: &mut World) -> Option<Vec2> {
@@ -973,6 +1021,48 @@ fn axis_value(point: Vec3, axis: TapeAxis) -> f32 {
 mod tests {
     use super::*;
     use crate::plugins::units::DisplayUnit;
+    use crate::plugins::{
+        identity::ElementId,
+        modeling::group::{GroupEditContext, GroupFrame, GroupMembers},
+    };
+
+    fn tape_group_visibility_world() -> (World, ElementId, ElementId, ElementId, ElementId) {
+        let mut world = World::new();
+        world.insert_resource(GroupEditContext::default());
+
+        let standalone_id = ElementId(1);
+        let child_id = ElementId(10);
+        let nested_group_id = ElementId(20);
+        let root_group_id = ElementId(30);
+        world.spawn(standalone_id);
+        world.spawn(child_id);
+        world.spawn((
+            nested_group_id,
+            GroupMembers {
+                name: "Nested".to_string(),
+                member_ids: vec![child_id],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            root_group_id,
+            GroupMembers {
+                name: "Root".to_string(),
+                member_ids: vec![nested_group_id],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+
+        (
+            world,
+            standalone_id,
+            child_id,
+            nested_group_id,
+            root_group_id,
+        )
+    }
 
     #[test]
     fn tape_rejects_coincident_points() {
@@ -1135,5 +1225,51 @@ mod tests {
 
         assert_eq!(camera_depth(&context, Vec3::Z), Some(1.0));
         assert_eq!(camera_depth(&context, -Vec3::Z), Some(1.0));
+    }
+
+    #[test]
+    fn tape_hover_visibility_at_root_rejects_grouped_members_and_group_bounds() {
+        let (mut world, standalone_id, child_id, nested_group_id, root_group_id) =
+            tape_group_visibility_world();
+
+        let visibility = TapeGroupVisibility::from_world(&mut world);
+
+        assert!(visibility.accepts(standalone_id));
+        assert!(!visibility.accepts(root_group_id));
+        assert!(!visibility.accepts(nested_group_id));
+        assert!(!visibility.accepts(child_id));
+    }
+
+    #[test]
+    fn tape_hover_visibility_inside_group_rejects_nested_group_until_drilled_in() {
+        let (mut world, standalone_id, child_id, nested_group_id, root_group_id) =
+            tape_group_visibility_world();
+        let mut context = GroupEditContext::default();
+        context.enter(root_group_id);
+        world.insert_resource(context);
+
+        let visibility = TapeGroupVisibility::from_world(&mut world);
+
+        assert!(!visibility.accepts(standalone_id));
+        assert!(!visibility.accepts(root_group_id));
+        assert!(!visibility.accepts(nested_group_id));
+        assert!(!visibility.accepts(child_id));
+    }
+
+    #[test]
+    fn tape_hover_visibility_inside_nested_group_accepts_nested_members() {
+        let (mut world, standalone_id, child_id, nested_group_id, root_group_id) =
+            tape_group_visibility_world();
+        let mut context = GroupEditContext::default();
+        context.enter(root_group_id);
+        context.enter(nested_group_id);
+        world.insert_resource(context);
+
+        let visibility = TapeGroupVisibility::from_world(&mut world);
+
+        assert!(!visibility.accepts(standalone_id));
+        assert!(!visibility.accepts(root_group_id));
+        assert!(!visibility.accepts(nested_group_id));
+        assert!(visibility.accepts(child_id));
     }
 }
