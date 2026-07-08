@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bevy::prelude::*;
-use delaunator::{Point, triangulate};
+use delaunator::{triangulate, Point};
 
 use crate::components::ElevationCurve;
 
@@ -762,7 +762,11 @@ fn triangle_circumradius(a: Vec2, b: Vec2, c: Vec2) -> f32 {
 }
 
 fn ordered_edge(u: usize, v: usize) -> (usize, usize) {
-    if u < v { (u, v) } else { (v, u) }
+    if u < v {
+        (u, v)
+    } else {
+        (v, u)
+    }
 }
 
 fn polygon_area(points: &[Vec2]) -> f32 {
@@ -1282,11 +1286,9 @@ mod tests {
         );
 
         assert_eq!(repaired.len(), 2);
-        assert!(
-            repaired
-                .iter()
-                .any(|curve| curve.source_fragment_count == 2)
-        );
+        assert!(repaired
+            .iter()
+            .any(|curve| curve.source_fragment_count == 2));
     }
 
     #[test]
@@ -1365,11 +1367,9 @@ mod tests {
 
         let support_points = sample_terminus_support_points(&curves, 1.0);
 
-        assert!(
-            support_points
-                .iter()
-                .any(|point| { (point.x - 8.0).abs() <= 0.1 && point.z > 0.0 && point.z < 4.0 })
-        );
+        assert!(support_points
+            .iter()
+            .any(|point| { (point.x - 8.0).abs() <= 0.1 && point.z > 0.0 && point.z < 4.0 }));
     }
 
     #[test]
@@ -1402,10 +1402,8 @@ mod tests {
         assert!(max_x >= 10.0);
         assert!(min_y <= 0.0);
         assert!(max_y >= 10.0);
-        assert!(
-            boundary
-                .iter()
-                .all(|point| !(point.x > 10.0 && point.y > 10.0))
-        );
+        assert!(boundary
+            .iter()
+            .all(|point| !(point.x > 10.0 && point.y > 10.0)));
     }
 }

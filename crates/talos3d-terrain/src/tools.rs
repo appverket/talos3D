@@ -328,20 +328,16 @@ fn queue_elevation_curve(
     });
     queue.apply_changes.write(ApplyEntityChangesCommand {
         label: "Update terrain surface sources",
-        before: vec![
-            TerrainSurfaceSnapshot {
-                element_id: surface_id,
-                surface: surface.clone(),
-            }
-            .into(),
-        ],
-        after: vec![
-            TerrainSurfaceSnapshot {
-                element_id: surface_id,
-                surface: updated_surface,
-            }
-            .into(),
-        ],
+        before: vec![TerrainSurfaceSnapshot {
+            element_id: surface_id,
+            surface: surface.clone(),
+        }
+        .into()],
+        after: vec![TerrainSurfaceSnapshot {
+            element_id: surface_id,
+            surface: updated_surface,
+        }
+        .into()],
     });
     queue.end_groups.write(EndCommandGroup);
 

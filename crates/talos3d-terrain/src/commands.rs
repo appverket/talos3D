@@ -18,18 +18,19 @@ use talos3d_core::plugins::{
 
 use crate::{
     components::{
-        DEFAULT_TERRAIN_CONTOUR_INTERVAL, DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE,
-        DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING, DEFAULT_TERRAIN_MAX_TRIANGLE_AREA,
-        DEFAULT_TERRAIN_MINIMUM_ANGLE, DEFAULT_TERRAIN_SMOOTHING, ElevationCurve,
-        ElevationCurveType, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface, TerrainSurfaceRole,
+        ElevationCurve, ElevationCurveType, NeedsTerrainMesh, TerrainMeshCache, TerrainSurface,
+        TerrainSurfaceRole, DEFAULT_TERRAIN_CONTOUR_INTERVAL,
+        DEFAULT_TERRAIN_CONTOUR_JOIN_TOLERANCE, DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
+        DEFAULT_TERRAIN_MAX_TRIANGLE_AREA, DEFAULT_TERRAIN_MINIMUM_ANGLE,
+        DEFAULT_TERRAIN_SMOOTHING,
     },
     cut_fill::{
-        CutFillAnalysisPanelState, CutFillAnalysisSummary, CutFillAnalysisTarget, CutFillOptions,
-        CutFillResult, cut_fill_against_datum, cut_fill_between_surfaces,
+        cut_fill_against_datum, cut_fill_between_surfaces, CutFillAnalysisPanelState,
+        CutFillAnalysisSummary, CutFillAnalysisTarget, CutFillOptions, CutFillResult,
     },
     reconstruction::{
-        ContourRepairSettings, estimate_terrain_boundary, planar_bounds_center,
-        repair_elevation_curves,
+        estimate_terrain_boundary, planar_bounds_center, repair_elevation_curves,
+        ContourRepairSettings,
     },
     review::TerrainGenerationReviewState,
     snapshots::{ElevationCurveSnapshot, TerrainSurfaceSnapshot},

@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use talos3d_core::{
     authored_entity::{
-        AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, HandleKind, PropertyFieldDef,
-        PropertyValue, PropertyValueKind, invalid_property_error, property_field,
-        property_field_with, read_only_property_field, scalar_from_json, vec2_from_json,
-        vec3_from_json,
+        invalid_property_error, property_field, property_field_with, read_only_property_field,
+        scalar_from_json, vec2_from_json, vec3_from_json, AuthoredEntity, BoxedEntity,
+        EntityBounds, HandleInfo, HandleKind, PropertyFieldDef, PropertyValue, PropertyValueKind,
     },
     capability_registry::{AuthoredEntityFactory, HitCandidate, ModelSummaryAccumulator},
     plugins::{
