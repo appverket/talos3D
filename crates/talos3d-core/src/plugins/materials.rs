@@ -1382,6 +1382,11 @@ fn material_id_from_handle_cache_key(key: &str) -> &str {
 
 pub struct MaterialPlugin;
 
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MaterialSyncSet {
+    ApplyAssignments,
+}
+
 impl Plugin for MaterialPlugin {
     fn build(&self, app: &mut App) {
         use crate::plugins::command_registry::{
@@ -1400,7 +1405,8 @@ impl Plugin for MaterialPlugin {
                     apply_material_assignments,
                     revert_removed_material_assignments,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(MaterialSyncSet::ApplyAssignments),
             )
             .register_command(
                 CommandDescriptor {

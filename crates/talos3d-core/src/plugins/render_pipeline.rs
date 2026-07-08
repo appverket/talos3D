@@ -27,6 +27,7 @@ use crate::{
             CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
         },
         identity::ElementId,
+        materials::MaterialSyncSet,
         modeling::mesh_generation::MeshGenerationSet,
         toolbar::{ToolbarDescriptor, ToolbarDock, ToolbarRegistryAppExt, ToolbarSection},
     },
@@ -447,7 +448,9 @@ impl Plugin for RenderPipelinePlugin {
                     sync_render_settings,
                     sync_clear_color,
                     sync_wireframe_surface_visibility.after(MeshGenerationSet::Generate),
-                    sync_surface_display_materials,
+                    sync_surface_display_materials
+                        .after(MeshGenerationSet::Generate)
+                        .after(MaterialSyncSet::ApplyAssignments),
                     sync_outline_mesh_overlays.after(MeshGenerationSet::Generate),
                 ),
             )
@@ -1195,7 +1198,7 @@ fn xray_material_from(source: &StandardMaterial, xray_alpha: f32) -> StandardMat
         cull_mode: None,
         unlit: true,
         fog_enabled: false,
-        alpha_mode: AlphaMode::AlphaToCoverage,
+        alpha_mode: AlphaMode::Blend,
         ..Default::default()
     }
 }
@@ -1227,12 +1230,8 @@ fn sync_camera_msaa(commands: &mut Commands, camera: Entity, settings: &RenderSe
         .insert(camera_msaa_for_settings(settings));
 }
 
-fn camera_msaa_for_settings(settings: &RenderSettings) -> Msaa {
-    if settings.xray_enabled {
-        Msaa::Sample4
-    } else {
-        Msaa::Off
-    }
+fn camera_msaa_for_settings(_settings: &RenderSettings) -> Msaa {
+    Msaa::Off
 }
 
 fn ssao_active_for_settings(settings: &RenderSettings) -> bool {
@@ -1819,7 +1818,7 @@ mod tests {
     }
 
     #[test]
-    fn xray_render_path_uses_msaa_and_disables_ssao_for_depth_written_translucency() {
+    fn xray_render_path_keeps_msaa_off_and_disables_ssao_for_fast_translucency() {
         let normal = RenderSettings::default();
         assert_eq!(camera_msaa_for_settings(&normal), Msaa::Off);
         assert!(ssao_active_for_settings(&normal));
@@ -1830,10 +1829,10 @@ mod tests {
             ..RenderSettings::default()
         };
 
-        assert_eq!(camera_msaa_for_settings(&xray), Msaa::Sample4);
+        assert_eq!(camera_msaa_for_settings(&xray), Msaa::Off);
         assert!(
             !ssao_active_for_settings(&xray),
-            "SSAO requires MSAA off; X-Ray uses alpha-to-coverage so visible-edge outline remains depth occluded"
+            "X-Ray uses a texture-free blended material path; keep post-processing cost down while translucent"
         );
     }
 
@@ -1884,7 +1883,7 @@ mod tests {
     }
 
     #[test]
-    fn xray_material_uses_depth_written_alpha_to_coverage_material() {
+    fn xray_material_uses_texture_free_blended_material() {
         let source = StandardMaterial {
             base_color: Color::srgba(0.2, 0.4, 0.6, 1.0),
             alpha_mode: AlphaMode::Opaque,
@@ -1895,7 +1894,7 @@ mod tests {
 
         let xray = xray_material_from(&source, DEFAULT_XRAY_SURFACE_ALPHA);
 
-        assert_eq!(xray.alpha_mode, AlphaMode::AlphaToCoverage);
+        assert_eq!(xray.alpha_mode, AlphaMode::Blend);
         assert_eq!(xray.base_color.alpha(), DEFAULT_XRAY_SURFACE_ALPHA);
         assert_eq!(xray.cull_mode, None);
         assert!(xray.unlit);
@@ -1936,7 +1935,7 @@ mod tests {
         assert!(xray.normal_map_texture.is_none());
         assert!(xray.occlusion_texture.is_none());
         assert!(xray.depth_map.is_none());
-        assert_eq!(xray.alpha_mode, AlphaMode::AlphaToCoverage);
+        assert_eq!(xray.alpha_mode, AlphaMode::Blend);
         assert_eq!(xray.base_color.alpha(), 0.33);
     }
 
@@ -2072,6 +2071,85 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(cache.handles.len(), 1);
+    }
+
+    #[test]
+    fn xray_override_reasserts_after_authored_material_assignment_changes_handle() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings {
+            xray_enabled: true,
+            xray_surface_alpha: 0.42,
+            ..RenderSettings::default()
+        })
+        .insert_resource(Assets::<StandardMaterial>::default())
+        .init_resource::<SurfaceMaterialOverrideCache>()
+        .add_systems(Update, sync_surface_display_materials);
+
+        let original_handle;
+        let authored_handle;
+        {
+            let mut materials = app.world_mut().resource_mut::<Assets<StandardMaterial>>();
+            original_handle = materials.add(StandardMaterial {
+                base_color: Color::srgba(0.8, 0.1, 0.1, 1.0),
+                alpha_mode: AlphaMode::Opaque,
+                ..Default::default()
+            });
+            authored_handle = materials.add(StandardMaterial {
+                base_color: Color::srgba(0.1, 0.2, 0.8, 1.0),
+                base_color_texture: Some(Handle::<Image>::default()),
+                alpha_mode: AlphaMode::Opaque,
+                ..Default::default()
+            });
+        }
+
+        let entity = app
+            .world_mut()
+            .spawn(MeshMaterial3d(original_handle.clone()))
+            .id();
+        app.update();
+
+        let first_override = app
+            .world()
+            .entity(entity)
+            .get::<SurfaceMaterialOverride>()
+            .expect("X-Ray should install an override")
+            .override_handle
+            .clone();
+        assert_eq!(
+            app.world()
+                .entity(entity)
+                .get::<MeshMaterial3d<StandardMaterial>>()
+                .expect("mesh material should remain present")
+                .0,
+            first_override
+        );
+
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(MeshMaterial3d(authored_handle.clone()));
+        app.update();
+
+        let entity_ref = app.world().entity(entity);
+        let state = entity_ref
+            .get::<SurfaceMaterialOverride>()
+            .expect("X-Ray should remain active after semantic material assignment");
+        assert_eq!(state.original, authored_handle);
+        let current_handle = entity_ref
+            .get::<MeshMaterial3d<StandardMaterial>>()
+            .expect("mesh material should remain present")
+            .0
+            .clone();
+        assert_eq!(current_handle, state.override_handle);
+        assert_ne!(current_handle, authored_handle);
+
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let current_material = materials
+            .get(&current_handle)
+            .expect("override material should exist");
+        assert_eq!(current_material.alpha_mode, AlphaMode::Blend);
+        assert_eq!(current_material.base_color.alpha(), 0.42);
+        assert!(current_material.base_color_texture.is_none());
+        assert!(current_material.unlit);
     }
 
     #[test]
