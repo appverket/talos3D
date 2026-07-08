@@ -3818,7 +3818,7 @@ fn draw_render_settings_window(
                 });
                 ui.label(
                     egui::RichText::new(
-                        "X-Ray swaps scene materials to translucent surfaces. Paper fill swaps scene materials to white unlit surfaces. Outline is depth-tested visible-edge linework; Wireframe shows full linework.",
+                        "X-Ray swaps scene materials to simple texture-free depth-writing translucent surfaces. Paper fill swaps scene materials to white unlit surfaces. Outline is depth-tested visible-edge linework; Wireframe shows full linework.",
                     )
                     .small()
                     .color(CHROME_MUTED),

@@ -40,7 +40,7 @@ const DEFAULT_BACKGROUND_RGB: [f32; 3] = [0.17, 0.18, 0.20];
 const FEATURE_EDGE_COS_THRESHOLD: f32 = 0.85;
 pub const VIEW_RENDER_TOOLBAR_ID: &str = "view.render";
 const PAPER_BACKGROUND_RGB: [f32; 3] = [1.0, 1.0, 1.0];
-const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.28;
+const DEFAULT_XRAY_SURFACE_ALPHA: f32 = 0.55;
 
 // ─── Settings resource ───────────────────────────────────────────────────────
 
@@ -273,9 +273,10 @@ struct SurfaceMaterialOverrideCache {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SurfaceMaterialOverrideCacheKey {
-    original: String,
+    original: Option<String>,
     mode: SurfaceMaterialMode,
     xray_alpha_milli: u16,
+    xray_base_rgb_milli: Option<[u16; 3]>,
 }
 
 #[derive(Component, Debug, Clone)]
@@ -388,7 +389,7 @@ impl Plugin for RenderPipelinePlugin {
                                 "type": "number",
                                 "minimum": 0.02,
                                 "maximum": 0.95,
-                                "description": "Optional face alpha override. Defaults to 0.28."
+                                "description": "Optional face alpha override. Defaults to 0.55."
                             }
                         }
                     })),
@@ -630,8 +631,7 @@ fn setup_render_pipeline_once(
         return;
     };
 
-    // SSAO requires MSAA disabled — set per-camera.
-    commands.entity(camera).insert(Msaa::Off);
+    sync_camera_msaa(&mut commands, camera, &settings);
 
     commands
         .entity(camera)
@@ -676,6 +676,7 @@ fn sync_render_settings(
             ev100: settings.exposure_ev100,
         });
 
+    sync_camera_msaa(&mut commands, camera, &settings);
     sync_ssao_component(&mut commands, camera, &settings);
     sync_bloom_component(&mut commands, camera, &settings);
     sync_ssr_component(&mut commands, camera, &settings);
@@ -846,7 +847,7 @@ fn cached_display_override_material(
     mode: SurfaceMaterialMode,
     xray_alpha: f32,
 ) -> Handle<StandardMaterial> {
-    let key = SurfaceMaterialOverrideCacheKey::new(original, mode, xray_alpha);
+    let key = SurfaceMaterialOverrideCacheKey::new(original, source, mode, xray_alpha);
     if let Some(handle) = override_cache.handles.get(&key) {
         if materials.contains(handle) {
             return handle.clone();
@@ -862,15 +863,29 @@ fn cached_display_override_material(
 impl SurfaceMaterialOverrideCacheKey {
     fn new(
         original: &Handle<StandardMaterial>,
+        source: &StandardMaterial,
         mode: SurfaceMaterialMode,
         xray_alpha: f32,
     ) -> Self {
+        let xray_base_rgb_milli = (mode == SurfaceMaterialMode::Xray).then(|| {
+            let base = source.base_color.to_srgba();
+            [
+                quantize_unit_milli(base.red),
+                quantize_unit_milli(base.green),
+                quantize_unit_milli(base.blue),
+            ]
+        });
         Self {
-            original: format!("{:?}", original.id()),
+            original: (mode != SurfaceMaterialMode::Xray).then(|| format!("{:?}", original.id())),
             mode,
-            xray_alpha_milli: (xray_alpha.clamp(0.0, 1.0) * 1000.0).round() as u16,
+            xray_alpha_milli: quantize_unit_milli(xray_alpha),
+            xray_base_rgb_milli,
         }
     }
+}
+
+fn quantize_unit_milli(value: f32) -> u16 {
+    (value.clamp(0.0, 1.0) * 1000.0).round() as u16
 }
 
 fn sync_wireframe_surface_visibility(
@@ -1164,14 +1179,25 @@ fn paper_fill_material_from(source: &StandardMaterial) -> StandardMaterial {
 }
 
 fn xray_material_from(source: &StandardMaterial, xray_alpha: f32) -> StandardMaterial {
-    let mut override_material = source.clone();
-    override_material
-        .base_color
-        .set_alpha(xray_alpha.clamp(0.02, 0.95));
-    override_material.base_color_texture = None;
-    override_material.alpha_mode = AlphaMode::Blend;
-    override_material.cull_mode = None;
-    override_material
+    let mut base_color = source.base_color;
+    base_color.set_alpha(xray_alpha.clamp(0.02, 0.95));
+    StandardMaterial {
+        base_color,
+        emissive: LinearRgba::BLACK,
+        perceptual_roughness: 1.0,
+        metallic: 0.0,
+        reflectance: 0.0,
+        diffuse_transmission: 0.0,
+        specular_transmission: 0.0,
+        thickness: 0.0,
+        clearcoat: 0.0,
+        anisotropy_strength: 0.0,
+        cull_mode: None,
+        unlit: true,
+        fog_enabled: false,
+        alpha_mode: AlphaMode::AlphaToCoverage,
+        ..Default::default()
+    }
 }
 
 fn wireframe_only_material_from(source: &StandardMaterial) -> StandardMaterial {
@@ -1195,8 +1221,26 @@ fn ssao_quality(level: u8) -> ScreenSpaceAmbientOcclusionQualityLevel {
     }
 }
 
+fn sync_camera_msaa(commands: &mut Commands, camera: Entity, settings: &RenderSettings) {
+    commands
+        .entity(camera)
+        .insert(camera_msaa_for_settings(settings));
+}
+
+fn camera_msaa_for_settings(settings: &RenderSettings) -> Msaa {
+    if settings.xray_enabled {
+        Msaa::Sample4
+    } else {
+        Msaa::Off
+    }
+}
+
+fn ssao_active_for_settings(settings: &RenderSettings) -> bool {
+    settings.ssao_enabled && !settings.xray_enabled
+}
+
 fn sync_ssao_component(commands: &mut Commands, camera: Entity, settings: &RenderSettings) {
-    if settings.ssao_enabled {
+    if ssao_active_for_settings(settings) {
         commands.entity(camera).insert(ScreenSpaceAmbientOcclusion {
             quality_level: ssao_quality(settings.ambient_occlusion_quality),
             constant_object_thickness: settings.ssao_constant_object_thickness,
@@ -1775,6 +1819,25 @@ mod tests {
     }
 
     #[test]
+    fn xray_render_path_uses_msaa_and_disables_ssao_for_depth_written_translucency() {
+        let normal = RenderSettings::default();
+        assert_eq!(camera_msaa_for_settings(&normal), Msaa::Off);
+        assert!(ssao_active_for_settings(&normal));
+
+        let xray = RenderSettings {
+            xray_enabled: true,
+            ssao_enabled: true,
+            ..RenderSettings::default()
+        };
+
+        assert_eq!(camera_msaa_for_settings(&xray), Msaa::Sample4);
+        assert!(
+            !ssao_active_for_settings(&xray),
+            "SSAO requires MSAA off; X-Ray uses alpha-to-coverage so visible-edge outline remains depth occluded"
+        );
+    }
+
+    #[test]
     fn xray_command_accepts_explicit_state_for_mcp_invocation() {
         let mut app = App::new();
         app.insert_resource(RenderSettings::default())
@@ -1821,19 +1884,22 @@ mod tests {
     }
 
     #[test]
-    fn xray_material_uses_bevy_transparent_blend_material() {
+    fn xray_material_uses_depth_written_alpha_to_coverage_material() {
         let source = StandardMaterial {
             base_color: Color::srgba(0.2, 0.4, 0.6, 1.0),
             alpha_mode: AlphaMode::Opaque,
             cull_mode: Some(Face::Back),
+            unlit: false,
             ..Default::default()
         };
 
         let xray = xray_material_from(&source, DEFAULT_XRAY_SURFACE_ALPHA);
 
-        assert_eq!(xray.alpha_mode, AlphaMode::Blend);
+        assert_eq!(xray.alpha_mode, AlphaMode::AlphaToCoverage);
         assert_eq!(xray.base_color.alpha(), DEFAULT_XRAY_SURFACE_ALPHA);
         assert_eq!(xray.cull_mode, None);
+        assert!(xray.unlit);
+        assert!(!xray.fog_enabled);
         assert_eq!(
             xray.base_color.to_srgba().red,
             source.base_color.to_srgba().red
@@ -1849,10 +1915,15 @@ mod tests {
     }
 
     #[test]
-    fn xray_material_drops_base_color_texture_so_alpha_controls_opacity() {
+    fn xray_material_drops_textures_so_alpha_controls_opacity() {
         let source = StandardMaterial {
             base_color: Color::srgba(0.2, 0.4, 0.6, 1.0),
             base_color_texture: Some(Handle::<Image>::default()),
+            emissive_texture: Some(Handle::<Image>::default()),
+            metallic_roughness_texture: Some(Handle::<Image>::default()),
+            normal_map_texture: Some(Handle::<Image>::default()),
+            occlusion_texture: Some(Handle::<Image>::default()),
+            depth_map: Some(Handle::<Image>::default()),
             alpha_mode: AlphaMode::Opaque,
             ..Default::default()
         };
@@ -1860,8 +1931,42 @@ mod tests {
         let xray = xray_material_from(&source, 0.33);
 
         assert!(xray.base_color_texture.is_none());
-        assert_eq!(xray.alpha_mode, AlphaMode::Blend);
+        assert!(xray.emissive_texture.is_none());
+        assert!(xray.metallic_roughness_texture.is_none());
+        assert!(xray.normal_map_texture.is_none());
+        assert!(xray.occlusion_texture.is_none());
+        assert!(xray.depth_map.is_none());
+        assert_eq!(xray.alpha_mode, AlphaMode::AlphaToCoverage);
         assert_eq!(xray.base_color.alpha(), 0.33);
+    }
+
+    #[test]
+    fn xray_material_removes_expensive_pbr_features() {
+        let source = StandardMaterial {
+            base_color: Color::srgba(0.2, 0.4, 0.6, 1.0),
+            emissive: LinearRgba::rgb(2.0, 1.0, 0.5),
+            perceptual_roughness: 0.1,
+            metallic: 1.0,
+            reflectance: 1.0,
+            diffuse_transmission: 0.5,
+            specular_transmission: 0.5,
+            thickness: 0.2,
+            clearcoat: 1.0,
+            anisotropy_strength: 1.0,
+            ..Default::default()
+        };
+
+        let xray = xray_material_from(&source, DEFAULT_XRAY_SURFACE_ALPHA);
+
+        assert_eq!(xray.emissive, LinearRgba::BLACK);
+        assert_eq!(xray.perceptual_roughness, 1.0);
+        assert_eq!(xray.metallic, 0.0);
+        assert_eq!(xray.reflectance, 0.0);
+        assert_eq!(xray.diffuse_transmission, 0.0);
+        assert_eq!(xray.specular_transmission, 0.0);
+        assert_eq!(xray.thickness, 0.0);
+        assert_eq!(xray.clearcoat, 0.0);
+        assert_eq!(xray.anisotropy_strength, 0.0);
     }
 
     #[test]
@@ -1929,6 +2034,44 @@ mod tests {
 
         assert_ne!(low_alpha, high_alpha);
         assert_eq!(cache.handles.len(), 2);
+    }
+
+    #[test]
+    fn display_override_cache_reuses_xray_materials_by_appearance() {
+        let mut materials = Assets::<StandardMaterial>::default();
+        let source_a = StandardMaterial {
+            base_color: Color::srgba(0.4, 0.5, 0.6, 1.0),
+            base_color_texture: Some(Handle::<Image>::default()),
+            ..Default::default()
+        };
+        let source_b = StandardMaterial {
+            base_color: Color::srgba(0.4, 0.5, 0.6, 1.0),
+            normal_map_texture: Some(Handle::<Image>::default()),
+            ..Default::default()
+        };
+        let handle_a = materials.add(source_a.clone());
+        let handle_b = materials.add(source_b.clone());
+        let mut cache = SurfaceMaterialOverrideCache::default();
+
+        let first = cached_display_override_material(
+            &mut cache,
+            &mut materials,
+            &handle_a,
+            &source_a,
+            SurfaceMaterialMode::Xray,
+            DEFAULT_XRAY_SURFACE_ALPHA,
+        );
+        let second = cached_display_override_material(
+            &mut cache,
+            &mut materials,
+            &handle_b,
+            &source_b,
+            SurfaceMaterialMode::Xray,
+            DEFAULT_XRAY_SURFACE_ALPHA,
+        );
+
+        assert_eq!(first, second);
+        assert_eq!(cache.handles.len(), 1);
     }
 
     #[test]
