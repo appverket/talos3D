@@ -4385,6 +4385,436 @@ pub fn handle_create_assembly(
 }
 
 #[cfg(feature = "model-api")]
+pub fn handle_preview_semantic_assembly_from_selection(
+    world: &mut World,
+    request: SemanticAssemblyFromSelectionPreviewRequest,
+) -> Result<SemanticAssemblyFromSelectionPreview, String> {
+    let expand_groups = request.expand_groups.unwrap_or(true);
+    let (source_element_ids, member_element_ids) =
+        resolve_semantic_assembly_source_members(world, request.element_ids, expand_groups)?;
+
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut assembly_options: Vec<SemanticAssemblyTypeOption> = registry
+        .assembly_type_descriptors()
+        .iter()
+        .map(|descriptor| SemanticAssemblyTypeOption {
+            assembly_type: descriptor.assembly_type.clone(),
+            label: descriptor.label.clone(),
+            description: descriptor.description.clone(),
+            score: score_assembly_option(
+                descriptor,
+                request.query.as_deref(),
+                request.assembly_type.as_deref(),
+            ),
+            expected_member_roles: descriptor.expected_member_roles.clone(),
+        })
+        .collect();
+    assembly_options.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.label.cmp(&b.label))
+            .then_with(|| a.assembly_type.cmp(&b.assembly_type))
+    });
+
+    let selected_assembly_type = request.assembly_type.clone().or_else(|| {
+        assembly_options
+            .first()
+            .map(|option| option.assembly_type.clone())
+    });
+    let role_options = selected_assembly_type
+        .as_deref()
+        .and_then(|assembly_type| registry.assembly_type_descriptor(assembly_type))
+        .map(|descriptor| role_options_for_descriptor(descriptor, member_element_ids.len()))
+        .unwrap_or_default();
+    let default_role = role_options
+        .iter()
+        .find(|option| option.suggested)
+        .or_else(|| role_options.first())
+        .map(|option| option.role.clone());
+
+    Ok(SemanticAssemblyFromSelectionPreview {
+        source_element_ids,
+        member_element_ids,
+        assembly_options,
+        selected_assembly_type,
+        role_options,
+        default_role,
+        prompt: "Choose the semantic assembly type, then choose what component role the selected geometry represents within that assembly.".into(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_create_semantic_assembly_from_selection(
+    world: &mut World,
+    request: CreateSemanticAssemblyFromSelectionRequest,
+) -> Result<CreateSemanticAssemblyFromSelectionResult, String> {
+    let expand_groups = request.expand_groups.unwrap_or(true);
+    let (source_element_ids, member_element_ids) =
+        resolve_semantic_assembly_source_members(world, request.element_ids, expand_groups)?;
+
+    let descriptor = world
+        .resource::<CapabilityRegistry>()
+        .assembly_type_descriptor(&request.assembly_type)
+        .cloned()
+        .ok_or_else(|| {
+            let valid = world
+                .resource::<CapabilityRegistry>()
+                .assembly_type_descriptors()
+                .iter()
+                .map(|descriptor| descriptor.assembly_type.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Unknown assembly type '{}'. Registered types: {}",
+                request.assembly_type, valid
+            )
+        })?;
+    validate_member_role_for_assembly(&descriptor, &request.member_role)?;
+
+    let label = request.label.unwrap_or_else(|| {
+        format!(
+            "{} ({})",
+            descriptor.label,
+            pluralize_members(member_element_ids.len())
+        )
+    });
+    let mut metadata = request.metadata;
+    merge_bottom_up_metadata(
+        &mut metadata,
+        &source_element_ids,
+        &member_element_ids,
+        &request.member_role,
+    );
+
+    let result = handle_create_assembly(
+        world,
+        CreateAssemblyRequest {
+            assembly_type: request.assembly_type.clone(),
+            label,
+            members: member_element_ids
+                .iter()
+                .copied()
+                .map(|target| AssemblyMemberRefRequest {
+                    target,
+                    role: request.member_role.clone(),
+                })
+                .collect(),
+            parameters: request.parameters,
+            metadata,
+            relations: Vec::new(),
+        },
+    )?;
+
+    let annotated_member_ids = if request.annotate_members.unwrap_or(true) {
+        let component_role = request
+            .component_role
+            .as_deref()
+            .unwrap_or(request.member_role.as_str());
+        annotate_members_with_component_role(world, &member_element_ids, component_role)
+    } else {
+        Vec::new()
+    };
+
+    Ok(CreateSemanticAssemblyFromSelectionResult {
+        assembly_id: result.assembly_id,
+        group_element_id: result.group_element_id,
+        relation_ids: result.relation_ids,
+        assembly_type: request.assembly_type,
+        member_role: request.member_role,
+        member_element_ids,
+        annotated_member_ids,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn resolve_semantic_assembly_source_members(
+    world: &mut World,
+    requested_element_ids: Vec<u64>,
+    expand_groups: bool,
+) -> Result<(Vec<u64>, Vec<u64>), String> {
+    let source_element_ids = if requested_element_ids.is_empty() {
+        handle_get_selection(world)
+    } else {
+        requested_element_ids
+    };
+    if source_element_ids.is_empty() {
+        return Err(
+            "Create Semantic Assembly requires a non-empty selection or explicit element_ids"
+                .to_string(),
+        );
+    }
+
+    let mut members = Vec::new();
+    let mut seen = HashSet::new();
+    for source_id in &source_element_ids {
+        let source = ElementId(*source_id);
+        ensure_user_editable_entity(world, source, "semantic assembly source")?;
+        let expanded = if expand_groups {
+            semantic_assembly_leaf_members(world, source)?
+        } else {
+            vec![source]
+        };
+        for member in expanded {
+            ensure_user_editable_entity(world, member, "semantic assembly member")?;
+            if seen.insert(member) {
+                members.push(member.0);
+            }
+        }
+    }
+
+    if members.is_empty() {
+        return Err("Create Semantic Assembly did not resolve any member geometry".to_string());
+    }
+    Ok((source_element_ids, members))
+}
+
+#[cfg(feature = "model-api")]
+fn semantic_assembly_leaf_members(
+    world: &World,
+    element_id: ElementId,
+) -> Result<Vec<ElementId>, String> {
+    let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
+        return Err(format!("Entity {} not found", element_id.0));
+    };
+    if world.get::<GroupMembers>(entity).is_none() {
+        return Ok(vec![element_id]);
+    }
+
+    let mut leaves = Vec::new();
+    let mut stack = vec![element_id];
+    while let Some(candidate) = stack.pop() {
+        let Some(candidate_entity) = find_entity_by_element_id_readonly(world, candidate) else {
+            continue;
+        };
+        if let Some(group) = world.get::<GroupMembers>(candidate_entity) {
+            for member in group.member_ids.iter().rev() {
+                stack.push(*member);
+            }
+        } else {
+            leaves.push(candidate);
+        }
+    }
+    Ok(leaves)
+}
+
+#[cfg(feature = "model-api")]
+fn score_assembly_option(
+    descriptor: &crate::capability_registry::AssemblyTypeDescriptor,
+    query: Option<&str>,
+    selected_assembly_type: Option<&str>,
+) -> f32 {
+    let mut score = if query.is_some() { 0.0 } else { 1.0 };
+    if selected_assembly_type == Some(descriptor.assembly_type.as_str()) {
+        score += 100.0;
+    }
+    let Some(query) = query.map(str::trim).filter(|query| !query.is_empty()) else {
+        return score;
+    };
+    let haystack = format!(
+        "{} {} {}",
+        descriptor.assembly_type, descriptor.label, descriptor.description
+    )
+    .to_ascii_lowercase();
+    for token in query
+        .split_whitespace()
+        .map(|token| token.to_ascii_lowercase())
+    {
+        if descriptor.assembly_type.eq_ignore_ascii_case(&token) {
+            score += 12.0;
+        } else if descriptor.label.to_ascii_lowercase().contains(&token) {
+            score += 8.0;
+        } else if haystack.contains(&token) {
+            score += 3.0;
+        }
+    }
+    score
+}
+
+#[cfg(feature = "model-api")]
+fn role_options_for_descriptor(
+    descriptor: &crate::capability_registry::AssemblyTypeDescriptor,
+    member_count: usize,
+) -> Vec<SemanticAssemblyRoleOption> {
+    let roles = if descriptor.expected_member_roles.is_empty() {
+        vec!["member".to_string()]
+    } else {
+        descriptor.expected_member_roles.clone()
+    };
+
+    roles
+        .into_iter()
+        .enumerate()
+        .map(|(index, role)| {
+            let role_descriptor = descriptor
+                .member_role_descriptors
+                .iter()
+                .find(|descriptor| descriptor.role == role);
+            let duplicate_role_policy = role_descriptor
+                .map(|descriptor| duplicate_role_policy_label(descriptor.duplicate_role_policy))
+                .unwrap_or("indexed_single_slots");
+            let collection_friendly = duplicate_role_policy == "collection_slot_allowed";
+            let suggested = if member_count > 1 {
+                collection_friendly || (index == 0 && !descriptor.member_role_descriptors.iter().any(|d| duplicate_role_policy_label(d.duplicate_role_policy) == "collection_slot_allowed"))
+            } else {
+                index == 0
+            };
+            SemanticAssemblyRoleOption {
+                role: role.clone(),
+                label: role_label(&role),
+                duplicate_role_policy: duplicate_role_policy.to_string(),
+                suggested,
+                rationale: if suggested && member_count > 1 && collection_friendly {
+                    "Multiple selected members can be treated as one component collection for this role.".into()
+                } else if suggested {
+                    "Default role from the selected assembly type vocabulary.".into()
+                } else {
+                    "Available role from the selected assembly type vocabulary.".into()
+                },
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+fn duplicate_role_policy_label(
+    policy: crate::capability_registry::DuplicateRoleGroupingPolicy,
+) -> &'static str {
+    match policy {
+        crate::capability_registry::DuplicateRoleGroupingPolicy::IndexedSingleSlots => {
+            "indexed_single_slots"
+        }
+        crate::capability_registry::DuplicateRoleGroupingPolicy::CollectionSlotAllowed => {
+            "collection_slot_allowed"
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn validate_member_role_for_assembly(
+    descriptor: &crate::capability_registry::AssemblyTypeDescriptor,
+    role: &str,
+) -> Result<(), String> {
+    if descriptor.expected_member_roles.is_empty()
+        || descriptor
+            .expected_member_roles
+            .iter()
+            .any(|expected| expected == role)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "Role '{}' is not valid for assembly type '{}'. Valid roles: {}",
+        role,
+        descriptor.assembly_type,
+        descriptor.expected_member_roles.join(", ")
+    ))
+}
+
+#[cfg(feature = "model-api")]
+fn role_label(role: &str) -> String {
+    role.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(feature = "model-api")]
+fn pluralize_members(count: usize) -> String {
+    if count == 1 {
+        "1 member".to_string()
+    } else {
+        format!("{count} members")
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn merge_bottom_up_metadata(
+    metadata: &mut Value,
+    source_element_ids: &[u64],
+    member_element_ids: &[u64],
+    member_role: &str,
+) {
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+    let object = metadata.as_object_mut().expect("metadata object");
+    object.insert(
+        "creation_mode".into(),
+        Value::String("bottom_up_selection".into()),
+    );
+    object.insert(
+        "source_element_ids".into(),
+        Value::Array(
+            source_element_ids
+                .iter()
+                .map(|id| Value::Number(serde_json::Number::from(*id)))
+                .collect(),
+        ),
+    );
+    object.insert(
+        "member_element_ids".into(),
+        Value::Array(
+            member_element_ids
+                .iter()
+                .map(|id| Value::Number(serde_json::Number::from(*id)))
+                .collect(),
+        ),
+    );
+    object.insert("member_role".into(), Value::String(member_role.to_string()));
+}
+
+#[cfg(feature = "model-api")]
+fn annotate_members_with_component_role(
+    world: &mut World,
+    member_element_ids: &[u64],
+    component_role: &str,
+) -> Vec<u64> {
+    use crate::plugins::refinement::SemanticIntent;
+
+    let mut annotated = Vec::new();
+    for member_id in member_element_ids {
+        let Some(entity) = find_entity_by_element_id(world, ElementId(*member_id)) else {
+            continue;
+        };
+        let mut intent = world
+            .get::<SemanticIntent>(entity)
+            .cloned()
+            .unwrap_or_default();
+        set_component_role_parameter(&mut intent.parameters, component_role);
+        world.entity_mut(entity).insert(intent);
+        annotated.push(*member_id);
+    }
+    annotated
+}
+
+#[cfg(feature = "model-api")]
+fn set_component_role_parameter(parameters: &mut Value, component_role: &str) {
+    if !parameters.is_object() {
+        let previous = std::mem::replace(parameters, serde_json::json!({}));
+        if !previous.is_null() {
+            parameters
+                .as_object_mut()
+                .expect("parameters object")
+                .insert("_previous_parameters".into(), previous);
+        }
+    }
+    parameters
+        .as_object_mut()
+        .expect("parameters object")
+        .insert(
+            "component_role".into(),
+            Value::String(component_role.to_string()),
+        );
+}
+
+#[cfg(feature = "model-api")]
 fn physical_group_snapshot(
     world: &World,
     group_id: ElementId,

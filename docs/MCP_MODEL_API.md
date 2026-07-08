@@ -288,6 +288,7 @@ describe the full surface. Current tool categories include:
 - `get_assembly`
 - `list_assembly_members`
 - `query_relations`
+- `preview_semantic_assembly_from_selection`
 
 `list_vocabulary` now returns:
 
@@ -360,6 +361,7 @@ trajectory that produced it.
 - `place_dimension_line`
 - `place_dimension_between_handles`
 - `create_assembly`
+- `create_semantic_assembly_from_selection`
 - `delete_entities`
 - `transform`
 - `set_property`
@@ -634,6 +636,24 @@ Example spot light creation:
 Semantic assemblies are authored records, distinct from editing groups. They
 are intended as a first step toward domain structures such as rooms, storeys,
 houses, and future domain-specific assemblies.
+
+For bottom-up modelling, prefer the selection-driven flow over constructing a
+raw `create_assembly` payload by hand:
+
+1. Select authored primitives or a group.
+2. Call `preview_semantic_assembly_from_selection` with optional `query` text
+   such as `"wall"`. The response expands selected groups to leaf members,
+   ranks registered assembly types, and returns valid member-role choices for
+   the chosen assembly type.
+3. Call `create_semantic_assembly_from_selection` with explicit
+   `assembly_type` and `member_role`. The tool creates the semantic assembly,
+   creates/selects a physical group for the same members, records
+   bottom-up-selection metadata, and may annotate member
+   `SemanticIntent.parameters.component_role` for later queries.
+
+This is the programmatic equivalent of the UI command **Create Semantic
+Assembly**: choose a semantic assembly from a searchable list, then choose what
+component role the selected geometry represents inside that assembly.
 
 ## Example: Fillet Via MCP
 

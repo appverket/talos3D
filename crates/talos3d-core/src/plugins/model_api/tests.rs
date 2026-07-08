@@ -6122,6 +6122,221 @@ fn create_assembly_creates_selected_physical_group_for_members() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn preview_semantic_assembly_from_selection_expands_group_and_lists_roles() {
+    use crate::capability_registry::{
+        AssemblyMemberRoleDescriptor, AssemblyTypeDescriptor, DuplicateRoleGroupingPolicy,
+    };
+    use crate::plugins::modeling::group::GroupMembers;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_assembly_type(AssemblyTypeDescriptor {
+            assembly_type: "wall_assembly".into(),
+            label: "Wall Assembly".into(),
+            description: "Layered wall assembly".into(),
+            expected_member_types: vec!["box".into()],
+            expected_member_roles: vec!["stud".into(), "cladding".into()],
+            member_role_descriptors: vec![AssemblyMemberRoleDescriptor {
+                role: "stud".into(),
+                duplicate_role_policy: DuplicateRoleGroupingPolicy::CollectionSlotAllowed,
+                role_vocabulary_version: Some("test".into()),
+            }],
+            expected_relation_types: Vec::new(),
+            parameter_schema: serde_json::json!({}),
+            member_obligations: Vec::new(),
+        });
+    let stud_a = handle_create_entity(
+        &mut world,
+        json!({"type": "box", "centre": [0.0, 1.5, 0.0], "half_extents": [0.025, 1.5, 0.05]}),
+    )
+    .unwrap();
+    let stud_b = handle_create_entity(
+        &mut world,
+        json!({"type": "box", "centre": [0.6, 1.5, 0.0], "half_extents": [0.025, 1.5, 0.05]}),
+    )
+    .unwrap();
+    let group_id = 500;
+    world.spawn((
+        ElementId(group_id),
+        GroupMembers {
+            name: "Stud group".into(),
+            member_ids: vec![ElementId(stud_a), ElementId(stud_b)],
+            frame: Default::default(),
+            linked_model: None,
+        },
+    ));
+
+    let preview = handle_preview_semantic_assembly_from_selection(
+        &mut world,
+        SemanticAssemblyFromSelectionPreviewRequest {
+            element_ids: vec![group_id],
+            query: Some("wall".into()),
+            assembly_type: Some("wall_assembly".into()),
+            expand_groups: Some(true),
+        },
+    )
+    .expect("preview should resolve group members");
+
+    assert_eq!(preview.source_element_ids, vec![group_id]);
+    assert_eq!(preview.member_element_ids, vec![stud_a, stud_b]);
+    assert_eq!(
+        preview.assembly_options.first().unwrap().assembly_type,
+        "wall_assembly"
+    );
+    assert_eq!(preview.default_role.as_deref(), Some("stud"));
+    let stud_role = preview
+        .role_options
+        .iter()
+        .find(|option| option.role == "stud")
+        .expect("stud role option");
+    assert!(stud_role.suggested);
+    assert_eq!(stud_role.duplicate_role_policy, "collection_slot_allowed");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn create_semantic_assembly_from_selection_uses_role_and_marks_members() {
+    use crate::capability_registry::{
+        AssemblyMemberRoleDescriptor, AssemblyTypeDescriptor, DuplicateRoleGroupingPolicy,
+    };
+    use crate::plugins::modeling::assembly::SemanticAssembly;
+    use crate::plugins::modeling::group::GroupMembers;
+    use crate::plugins::refinement::SemanticIntent;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_assembly_type(AssemblyTypeDescriptor {
+            assembly_type: "wall_assembly".into(),
+            label: "Wall Assembly".into(),
+            description: "Layered wall assembly".into(),
+            expected_member_types: vec!["box".into()],
+            expected_member_roles: vec!["stud".into(), "cladding".into()],
+            member_role_descriptors: vec![AssemblyMemberRoleDescriptor {
+                role: "stud".into(),
+                duplicate_role_policy: DuplicateRoleGroupingPolicy::CollectionSlotAllowed,
+                role_vocabulary_version: Some("test".into()),
+            }],
+            expected_relation_types: Vec::new(),
+            parameter_schema: serde_json::json!({}),
+            member_obligations: Vec::new(),
+        });
+    let stud_a = handle_create_entity(
+        &mut world,
+        json!({"type": "box", "centre": [0.0, 1.5, 0.0], "half_extents": [0.025, 1.5, 0.05]}),
+    )
+    .unwrap();
+    let stud_b = handle_create_entity(
+        &mut world,
+        json!({"type": "box", "centre": [0.6, 1.5, 0.0], "half_extents": [0.025, 1.5, 0.05]}),
+    )
+    .unwrap();
+
+    let result = handle_create_semantic_assembly_from_selection(
+        &mut world,
+        CreateSemanticAssemblyFromSelectionRequest {
+            assembly_type: "wall_assembly".into(),
+            member_role: "stud".into(),
+            label: Some("North wall studs".into()),
+            element_ids: vec![stud_a, stud_b],
+            expand_groups: Some(true),
+            annotate_members: Some(true),
+            component_role: None,
+            parameters: Value::Null,
+            metadata: Value::Null,
+        },
+    )
+    .expect("semantic assembly should be created");
+
+    assert_eq!(result.assembly_type, "wall_assembly");
+    assert_eq!(result.member_role, "stud");
+    assert_eq!(result.member_element_ids, vec![stud_a, stud_b]);
+    assert_eq!(result.annotated_member_ids, vec![stud_a, stud_b]);
+    assert!(result.group_element_id.is_some());
+
+    let assembly_entity =
+        find_entity_by_element_id_readonly(&world, ElementId(result.assembly_id)).unwrap();
+    let assembly = world
+        .get::<SemanticAssembly>(assembly_entity)
+        .expect("semantic assembly component");
+    assert_eq!(assembly.assembly_type, "wall_assembly");
+    assert_eq!(assembly.members.len(), 2);
+    assert!(assembly.members.iter().all(|member| member.role == "stud"));
+    assert_eq!(
+        assembly.metadata["creation_mode"],
+        json!("bottom_up_selection")
+    );
+
+    let group_entity = find_entity_by_element_id_readonly(
+        &world,
+        ElementId(result.group_element_id.expect("group id")),
+    )
+    .unwrap();
+    let group = world
+        .get::<GroupMembers>(group_entity)
+        .expect("physical group");
+    assert_eq!(group.member_ids, vec![ElementId(stud_a), ElementId(stud_b)]);
+
+    for member_id in [stud_a, stud_b] {
+        let entity = find_entity_by_element_id_readonly(&world, ElementId(member_id)).unwrap();
+        let intent = world.get::<SemanticIntent>(entity).unwrap();
+        assert_eq!(intent.parameters["component_role"], json!("stud"));
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn create_semantic_assembly_from_selection_rejects_invalid_role() {
+    use crate::capability_registry::AssemblyTypeDescriptor;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_assembly_type(AssemblyTypeDescriptor {
+            assembly_type: "wall_assembly".into(),
+            label: "Wall Assembly".into(),
+            description: "Layered wall assembly".into(),
+            expected_member_types: vec!["box".into()],
+            expected_member_roles: vec!["stud".into()],
+            member_role_descriptors: Vec::new(),
+            expected_relation_types: Vec::new(),
+            parameter_schema: serde_json::json!({}),
+            member_obligations: Vec::new(),
+        });
+    let box_id = handle_create_entity(
+        &mut world,
+        json!({"type": "box", "centre": [0.0, 0.5, 0.0], "half_extents": [0.1, 0.5, 0.1]}),
+    )
+    .unwrap();
+
+    let error = handle_create_semantic_assembly_from_selection(
+        &mut world,
+        CreateSemanticAssemblyFromSelectionRequest {
+            assembly_type: "wall_assembly".into(),
+            member_role: "roof_tile".into(),
+            label: None,
+            element_ids: vec![box_id],
+            expand_groups: None,
+            annotate_members: None,
+            component_role: None,
+            parameters: Value::Null,
+            metadata: Value::Null,
+        },
+    )
+    .expect_err("invalid role should be rejected");
+
+    assert!(error.contains("Role 'roof_tile' is not valid"));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn create_assembly_group_moves_members_as_a_unit() {
     let mut world = init_model_api_test_world();
     world
@@ -10482,6 +10697,8 @@ mod capability_profiles {
             "create_box",
             "create_entity",
             "create_assembly",
+            "preview_semantic_assembly_from_selection",
+            "create_semantic_assembly_from_selection",
             "transform",
             "apply_material",
             "create_material",

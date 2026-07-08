@@ -1166,6 +1166,26 @@ impl ModelApiServer {
             .await?
     }
 
+    async fn request_preview_semantic_assembly_from_selection(
+        &self,
+        request: SemanticAssemblyFromSelectionPreviewRequest,
+    ) -> ApiResult<SemanticAssemblyFromSelectionPreview> {
+        self.round_trip(
+            |response| ModelApiRequest::PreviewSemanticAssemblyFromSelection { request, response },
+        )
+        .await?
+    }
+
+    async fn request_create_semantic_assembly_from_selection(
+        &self,
+        request: CreateSemanticAssemblyFromSelectionRequest,
+    ) -> ApiResult<CreateSemanticAssemblyFromSelectionResult> {
+        self.round_trip(
+            |response| ModelApiRequest::CreateSemanticAssemblyFromSelection { request, response },
+        )
+        .await?
+    }
+
     async fn request_get_assembly(&self, element_id: u64) -> ApiResult<AssemblyDetails> {
         self.round_trip(|response| ModelApiRequest::GetAssembly {
             element_id,
@@ -4219,6 +4239,51 @@ pub struct AssemblyMemberRefRequest {
 
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SemanticAssemblyFromSelectionPreviewRequest {
+    /// Optional explicit source ids. Empty means the current selection.
+    #[serde(default)]
+    pub element_ids: Vec<u64>,
+    /// Optional search text used to rank assembly type options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    /// Optional assembly type whose member roles should be returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assembly_type: Option<String>,
+    /// Expand selected groups to recursive leaf members. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand_groups: Option<bool>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSemanticAssemblyFromSelectionRequest {
+    pub assembly_type: String,
+    pub member_role: String,
+    /// Optional label. Defaults to the assembly type label plus member count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional explicit source ids. Empty means the current selection.
+    #[serde(default)]
+    pub element_ids: Vec<u64>,
+    /// Expand selected groups to recursive leaf members. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand_groups: Option<bool>,
+    /// Add SemanticIntent.parameters.component_role to each member. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotate_members: Option<bool>,
+    /// Override the member component role annotation. Defaults to member_role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_role: Option<String>,
+    #[serde(default)]
+    pub parameters: Value,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRelationRequest {
     pub source: u64,
@@ -6379,6 +6444,36 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_create_assembly(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "preview_semantic_assembly_from_selection",
+        description = "Preview the bottom-up Create Semantic Assembly flow for the current selection or explicit element IDs. Expands selected groups, returns searchable/ranked assembly type options, and returns valid member-role choices for the selected assembly type without mutating the model."
+    )]
+    pub(super) async fn preview_semantic_assembly_from_selection_tool(
+        &self,
+        Parameters(params): Parameters<SemanticAssemblyFromSelectionPreviewRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_preview_semantic_assembly_from_selection(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "create_semantic_assembly_from_selection",
+        description = "Create a semantic assembly from the current selection or explicit element IDs after the user has chosen an assembly type and member role. Expands selected groups by default, annotates primitive members with component_role, creates a semantic assembly plus physical group, selects the new group, and commits as one undoable operation."
+    )]
+    pub(super) async fn create_semantic_assembly_from_selection_tool(
+        &self,
+        Parameters(params): Parameters<CreateSemanticAssemblyFromSelectionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_create_semantic_assembly_from_selection(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)

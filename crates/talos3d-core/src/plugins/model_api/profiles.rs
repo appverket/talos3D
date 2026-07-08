@@ -232,6 +232,10 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_constraints", ToolCategory::Inspection),
     ("list_element_classes", ToolCategory::Inspection),
     ("list_vocabulary", ToolCategory::Inspection),
+    (
+        "preview_semantic_assembly_from_selection",
+        ToolCategory::Inspection,
+    ),
     ("elevation_at", ToolCategory::Inspection),
     // --- Validation ---
     ("get_world_aabb", ToolCategory::Validation),
@@ -246,6 +250,10 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("create_entity", ToolCategory::Editing),
     ("create_box", ToolCategory::Editing),
     ("create_assembly", ToolCategory::Editing),
+    (
+        "create_semantic_assembly_from_selection",
+        ToolCategory::Editing,
+    ),
     ("delete_entities", ToolCategory::Editing),
     ("transform", ToolCategory::Editing),
     ("set_property", ToolCategory::Editing),

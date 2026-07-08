@@ -1494,6 +1494,40 @@ pub struct VocabularyInfo {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticAssemblyFromSelectionPreview {
+    pub source_element_ids: Vec<u64>,
+    pub member_element_ids: Vec<u64>,
+    pub assembly_options: Vec<SemanticAssemblyTypeOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_assembly_type: Option<String>,
+    pub role_options: Vec<SemanticAssemblyRoleOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_role: Option<String>,
+    pub prompt: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticAssemblyTypeOption {
+    pub assembly_type: String,
+    pub label: String,
+    pub description: String,
+    pub score: f32,
+    pub expected_member_roles: Vec<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticAssemblyRoleOption {
+    pub role: String,
+    pub label: String,
+    pub duplicate_role_policy: String,
+    pub suggested: bool,
+    pub rationale: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AssemblyEntry {
     pub element_id: u64,
     pub assembly_type: String,
@@ -1541,6 +1575,19 @@ pub struct CreateAssemblyResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_element_id: Option<u64>,
     pub relation_ids: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateSemanticAssemblyFromSelectionResult {
+    pub assembly_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_element_id: Option<u64>,
+    pub relation_ids: Vec<u64>,
+    pub assembly_type: String,
+    pub member_role: String,
+    pub member_element_ids: Vec<u64>,
+    pub annotated_member_ids: Vec<u64>,
 }
 
 // -----------------------------------------------------------------------
