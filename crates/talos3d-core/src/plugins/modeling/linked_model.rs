@@ -1117,6 +1117,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(world);
         PrimitiveSnapshot {
@@ -1128,6 +1129,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(world);
         let group = GroupSnapshot {
@@ -1301,6 +1303,7 @@ mod tests {
             rotation: ShapeRotation(rotation),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -1404,6 +1407,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
 
@@ -1506,6 +1510,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
 
@@ -1729,6 +1734,7 @@ mod tests {
                 rotation: ShapeRotation::default(),
                 material_assignment,
                 opening_context: None,
+                subobject_display_overrides: None,
             }
             .to_persisted_json(),
             semantic: None,

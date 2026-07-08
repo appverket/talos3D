@@ -175,6 +175,8 @@ pub struct SelectableSubobjectInfo {
     pub selectable: bool,
     pub supports_transform: bool,
     pub supports_visibility_override: bool,
+    #[serde(default)]
+    pub hidden: bool,
     pub unsupported_reason: Option<String>,
 }
 
@@ -182,6 +184,34 @@ pub struct SelectableSubobjectInfo {
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct SubobjectSelection {
     pub refs: Vec<SelectableSubobjectRef>,
+}
+
+#[derive(Component, Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SubobjectDisplayOverrides {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_edges: Vec<GeneratedEdgeRef>,
+}
+
+impl SubobjectDisplayOverrides {
+    pub fn is_edge_hidden(&self, edge: &GeneratedEdgeRef) -> bool {
+        self.hidden_edges.iter().any(|hidden| hidden == edge)
+    }
+
+    pub fn set_edge_hidden(&mut self, edge: GeneratedEdgeRef, hidden: bool) {
+        if hidden {
+            if !self.is_edge_hidden(&edge) {
+                self.hidden_edges.push(edge);
+                self.hidden_edges.sort_by_key(GeneratedEdgeRef::label);
+            }
+        } else {
+            self.hidden_edges.retain(|hidden_edge| hidden_edge != &edge);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hidden_edges.is_empty()
+    }
 }
 
 /// Identifies a specific face on an authored entity.

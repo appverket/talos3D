@@ -8,7 +8,7 @@ use crate::{
         property_field, AuthoredEntity, BoxedEntity, EntityBounds, HandleInfo, PropertyFieldDef,
         PropertyValue, PropertyValueKind, PushPullAffordance,
     },
-    capability_registry::FaceId,
+    capability_registry::{FaceId, GeneratedEdgeRef, SubobjectDisplayOverrides},
     plugins::{
         commands::{apply_mesh_primitive, despawn_by_element_id, find_entity_by_element_id},
         identity::ElementId,
@@ -31,6 +31,7 @@ pub struct PrimitiveSnapshot<P: Primitive> {
     pub rotation: ShapeRotation,
     pub material_assignment: Option<MaterialAssignment>,
     pub opening_context: Option<OpeningContext>,
+    pub subobject_display_overrides: Option<SubobjectDisplayOverrides>,
 }
 
 impl<P: Primitive> PartialEq for PrimitiveSnapshot<P>
@@ -43,6 +44,86 @@ where
             && self.rotation == other.rotation
             && self.material_assignment == other.material_assignment
             && self.opening_context == other.opening_context
+            && self.subobject_display_overrides == other.subobject_display_overrides
+    }
+}
+
+pub(crate) fn draw_primitive_wireframe_with_overrides<P: Primitive>(
+    primitive: &P,
+    rotation: ShapeRotation,
+    overrides: Option<&SubobjectDisplayOverrides>,
+    gizmos: &mut Gizmos,
+    color: Color,
+) {
+    let Some(overrides) = overrides.filter(|overrides| !overrides.is_empty()) else {
+        primitive.draw_wireframe(gizmos, rotation.0, color);
+        return;
+    };
+    let Some(mesh) = primitive.to_editable_mesh(rotation.0) else {
+        primitive.draw_wireframe(gizmos, rotation.0, color);
+        return;
+    };
+
+    let mut seen_edges = std::collections::HashSet::new();
+    for half_edge_index in 0..mesh.half_edges.len() as u32 {
+        let canonical = canonical_half_edge_index(&mesh, half_edge_index);
+        if !seen_edges.insert(canonical) {
+            continue;
+        }
+        let edge_ref = generated_edge_ref_for_half_edge(primitive, &mesh, canonical);
+        if overrides.is_edge_hidden(&edge_ref) {
+            continue;
+        }
+
+        let half_edge = &mesh.half_edges[canonical as usize];
+        let dest = mesh.half_edges[half_edge.next as usize].origin;
+        gizmos.line(
+            mesh.vertices[half_edge.origin as usize],
+            mesh.vertices[dest as usize],
+            color,
+        );
+    }
+}
+
+fn canonical_half_edge_index(
+    mesh: &super::editable_mesh::EditableMesh,
+    half_edge_index: u32,
+) -> u32 {
+    let half_edge = &mesh.half_edges[half_edge_index as usize];
+    if half_edge.twin == u32::MAX {
+        half_edge_index
+    } else {
+        half_edge_index.min(half_edge.twin)
+    }
+}
+
+fn generated_edge_ref_for_half_edge<P: Primitive>(
+    primitive: &P,
+    mesh: &super::editable_mesh::EditableMesh,
+    half_edge_index: u32,
+) -> GeneratedEdgeRef {
+    let canonical = canonical_half_edge_index(mesh, half_edge_index);
+    let (face_a, face_b) = mesh.faces_adjacent_to_edge(canonical);
+    let first = primitive.generated_face_ref(FaceId(face_a));
+    let second = face_b.and_then(|face_id| primitive.generated_face_ref(FaceId(face_id)));
+    match (first, second) {
+        (Some(a), Some(b)) => {
+            let (first, second) = if a.label() <= b.label() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            GeneratedEdgeRef::BetweenFaces {
+                first,
+                second,
+                edge_index: canonical,
+            }
+        }
+        (Some(face), None) | (None, Some(face)) => GeneratedEdgeRef::BoundaryOfFace {
+            face,
+            edge_index: canonical,
+        },
+        (None, None) => GeneratedEdgeRef::EditableMeshEdge(canonical),
     }
 }
 
@@ -77,6 +158,7 @@ where
             rotation: self.rotation,
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
+            subobject_display_overrides: self.subobject_display_overrides.clone(),
         }
         .into()
     }
@@ -89,6 +171,7 @@ where
             rotation: ShapeRotation(new_rotation),
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
+            subobject_display_overrides: self.subobject_display_overrides.clone(),
         }
         .into()
     }
@@ -100,6 +183,7 @@ where
             rotation: self.rotation,
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
+            subobject_display_overrides: self.subobject_display_overrides.clone(),
         }
         .into()
     }
@@ -116,6 +200,7 @@ where
                     rotation: ShapeRotation(new_rot),
                     material_assignment: self.material_assignment.clone(),
                     opening_context: self.opening_context,
+                    subobject_display_overrides: self.subobject_display_overrides.clone(),
                 }
                 .into(),
             ),
@@ -149,6 +234,7 @@ where
             rotation: self.rotation,
             material_assignment: self.material_assignment.clone(),
             opening_context: self.opening_context,
+            subobject_display_overrides: self.subobject_display_overrides.clone(),
         }
         .into())
     }
@@ -167,6 +253,26 @@ where
             rotation: self.rotation,
             material_assignment: assignment,
             opening_context: self.opening_context,
+            subobject_display_overrides: self.subobject_display_overrides.clone(),
+        }
+        .into())
+    }
+
+    fn subobject_display_overrides(&self) -> Option<SubobjectDisplayOverrides> {
+        self.subobject_display_overrides.clone()
+    }
+
+    fn set_subobject_display_overrides(
+        &self,
+        overrides: Option<SubobjectDisplayOverrides>,
+    ) -> Result<BoxedEntity, String> {
+        Ok(PrimitiveSnapshot {
+            element_id: self.element_id,
+            primitive: self.primitive.clone(),
+            rotation: self.rotation,
+            material_assignment: self.material_assignment.clone(),
+            opening_context: self.opening_context,
+            subobject_display_overrides: overrides.filter(|overrides| !overrides.is_empty()),
         }
         .into())
     }
@@ -194,6 +300,7 @@ where
                 rotation: self.rotation,
                 material_assignment: self.material_assignment.clone(),
                 opening_context: self.opening_context,
+                subobject_display_overrides: self.subobject_display_overrides.clone(),
             }
             .into(),
         )
@@ -226,6 +333,14 @@ where
                     serde_json::to_value(opening_context).unwrap_or(Value::Null),
                 );
             }
+            if let Some(overrides) = &self.subobject_display_overrides {
+                if !overrides.is_empty() {
+                    object.insert(
+                        "subobject_display_overrides".to_string(),
+                        serde_json::to_value(overrides).unwrap_or(Value::Null),
+                    );
+                }
+            }
         }
         json
     }
@@ -248,6 +363,15 @@ where
                 entity_mut.insert((opening_context, Visibility::Hidden));
             } else {
                 entity_mut.remove::<OpeningContext>();
+            }
+            if let Some(overrides) = self
+                .subobject_display_overrides
+                .as_ref()
+                .filter(|overrides| !overrides.is_empty())
+            {
+                entity_mut.insert(overrides.clone());
+            } else {
+                entity_mut.remove::<SubobjectDisplayOverrides>();
             }
         }
     }
@@ -281,6 +405,15 @@ where
             } else {
                 entity_mut.remove::<OpeningContext>();
             }
+            if let Some(overrides) = self
+                .subobject_display_overrides
+                .as_ref()
+                .filter(|overrides| !overrides.is_empty())
+            {
+                entity_mut.insert(overrides.clone());
+            } else {
+                entity_mut.remove::<SubobjectDisplayOverrides>();
+            }
         } else {
             self.apply_to(world);
         }
@@ -295,8 +428,13 @@ where
     }
 
     fn draw_preview(&self, gizmos: &mut Gizmos, color: Color) {
-        self.primitive
-            .draw_wireframe(gizmos, self.rotation.0, color);
+        draw_primitive_wireframe_with_overrides(
+            &self.primitive,
+            self.rotation,
+            self.subobject_display_overrides.as_ref(),
+            gizmos,
+            color,
+        );
     }
 
     fn preview_line_count(&self) -> usize {

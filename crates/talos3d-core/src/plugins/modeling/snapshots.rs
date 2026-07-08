@@ -1720,6 +1720,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         let fields = snapshot.property_fields();
@@ -1743,6 +1744,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
         let assigned = snapshot
             .set_property_json(
@@ -1833,6 +1835,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         let scaled = snapshot.scale_by(Vec3::new(2.0, 0.5, 3.0), Vec3::new(1.0, 1.0, 1.0));
@@ -1870,6 +1873,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
         let updated = BoxSnapshot {
             element_id: ElementId(1),
@@ -1880,6 +1884,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1915,6 +1920,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
         let updated = BoxSnapshot {
             element_id: ElementId(1),
@@ -1925,6 +1931,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -1959,6 +1966,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
         let updated = CylinderSnapshot {
             element_id: ElementId(2),
@@ -1970,6 +1978,7 @@ mod tests {
             rotation: ShapeRotation(Quat::from_rotation_y(0.25)),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -2011,6 +2020,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
         let updated = CylinderSnapshot {
             element_id: ElementId(2),
@@ -2022,6 +2032,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -2056,6 +2067,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
         let updated = PlaneSnapshot {
             element_id: ElementId(3),
@@ -2067,6 +2079,7 @@ mod tests {
             rotation: ShapeRotation(Quat::from_rotation_y(0.5)),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));
@@ -2110,6 +2123,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
         let updated = PlaneSnapshot {
             element_id: ElementId(3),
@@ -2121,6 +2135,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         };
 
         updated.apply_with_previous(&mut world, Some(&previous));

@@ -13,7 +13,7 @@ use crate::authored_entity::AuthoredEntity;
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::{
     CapabilityRegistry, FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
-    SelectableSubobjectRef, SubobjectSelection,
+    SelectableSubobjectRef, SubobjectDisplayOverrides, SubobjectSelection,
 };
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
@@ -3256,6 +3256,7 @@ fn handle_list_subobjects(
             selectable: true,
             supports_transform: true,
             supports_visibility_override: false,
+            hidden: false,
             unsupported_reason: Some(
                 "Entity has no evaluated face/edge interaction body.".to_string(),
             ),
@@ -3278,18 +3279,21 @@ fn handle_list_subobjects(
                 selectable: true,
                 supports_transform: true,
                 supports_visibility_override: false,
+                hidden: false,
                 unsupported_reason: None,
             });
         }
     }
 
     let mut seen_edges = HashSet::new();
+    let display_overrides = entity_ref.get::<SubobjectDisplayOverrides>();
     for half_edge_index in 0..mesh.half_edges.len() as u32 {
         let canonical = canonical_half_edge_index(&mesh, half_edge_index);
         if !seen_edges.insert(canonical) {
             continue;
         }
         let edge_ref = generated_edge_ref_for_half_edge(&mesh, &entity_ref, canonical);
+        let hidden = display_overrides.is_some_and(|overrides| overrides.is_edge_hidden(&edge_ref));
         out.push(SelectableSubobjectInfo {
             label: edge_ref.label(),
             reference: SelectableSubobjectRef::Edge {
@@ -3297,13 +3301,14 @@ fn handle_list_subobjects(
                 edge: edge_ref,
             },
             owner_element_id: element_id,
-            selectable: true,
+            selectable: !hidden,
             supports_transform: false,
-            supports_visibility_override: false,
-            unsupported_reason: Some(
-                "Edge transforms/visibility overrides require a representation-specific edit plan."
-                    .to_string(),
-            ),
+            supports_visibility_override: true,
+            hidden,
+            unsupported_reason: hidden.then(|| {
+                "Hidden generated edges remain addressable by stable ref but are not viewport-pickable until shown."
+                    .to_string()
+            }),
         });
     }
 
@@ -3428,9 +3433,22 @@ fn handle_apply_subobject_edit(
     world: &mut World,
     reference: SelectableSubobjectRef,
     operation: String,
-    _parameters: Value,
+    parameters: Value,
 ) -> Result<SubobjectEditResult, String> {
     validate_subobject_refs(world, std::slice::from_ref(&reference))?;
+    if let SelectableSubobjectRef::Edge { element_id, edge } = &reference {
+        if let Some(hidden) = subobject_visibility_target(&operation, &parameters)? {
+            apply_edge_visibility_override(world, *element_id, edge.clone(), hidden)?;
+            return Ok(SubobjectEditResult {
+                reference,
+                operation,
+                applied: true,
+                edit_plan_kind: "generated_edge_display_override".to_string(),
+                unsupported_reason: None,
+            });
+        }
+    }
+
     let (edit_plan_kind, unsupported_reason) = match &reference {
         SelectableSubobjectRef::Entity { .. } => (
             "entity_command_redirect".to_string(),
@@ -3458,6 +3476,55 @@ fn handle_apply_subobject_edit(
         edit_plan_kind,
         unsupported_reason,
     })
+}
+
+#[cfg(feature = "model-api")]
+fn subobject_visibility_target(
+    operation: &str,
+    parameters: &Value,
+) -> Result<Option<bool>, String> {
+    match operation {
+        "hide" => Ok(Some(true)),
+        "show" => Ok(Some(false)),
+        "set_visibility" | "visibility" => {
+            if let Some(hidden) = parameters.get("hidden").and_then(Value::as_bool) {
+                return Ok(Some(hidden));
+            }
+            if let Some(visible) = parameters.get("visible").and_then(Value::as_bool) {
+                return Ok(Some(!visible));
+            }
+            Err("Visibility edits require boolean 'hidden' or 'visible' parameter.".to_string())
+        }
+        _ => Ok(None),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn apply_edge_visibility_override(
+    world: &mut World,
+    element_id: u64,
+    edge: GeneratedEdgeRef,
+    hidden: bool,
+) -> Result<(), String> {
+    let before = capture_snapshot_by_id(world, ElementId(element_id))?;
+    let mut overrides = before.subobject_display_overrides().unwrap_or_default();
+    overrides.set_edge_hidden(edge, hidden);
+    let after =
+        before.set_subobject_display_overrides((!overrides.is_empty()).then_some(overrides))?;
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label: if hidden {
+                "Hide generated edge"
+            } else {
+                "Show generated edge"
+            },
+            before: vec![before],
+            after: vec![after],
+        },
+    );
+    flush_model_api_write_pipeline(world);
+    Ok(())
 }
 
 #[cfg(feature = "model-api")]
@@ -4120,6 +4187,7 @@ fn handle_split_box_face(
         rotation,
         material_assignment: None,
         opening_context: None,
+        subobject_display_overrides: None,
     };
     let snapshot_b: PrimitiveSnapshot<BoxPrimitive> = PrimitiveSnapshot {
         element_id: id_b,
@@ -4127,6 +4195,7 @@ fn handle_split_box_face(
         rotation,
         material_assignment: None,
         opening_context: None,
+        subobject_display_overrides: None,
     };
     let group_snapshot = GroupSnapshot {
         element_id: group_id,

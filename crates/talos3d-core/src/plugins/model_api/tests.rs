@@ -6549,6 +6549,140 @@ fn expand_subobject_selection_returns_bounding_edges_and_connected_faces() {
 }
 
 #[cfg(feature = "model-api")]
+fn first_top_edge(world: &mut World, element_id: u64) -> SelectableSubobjectRef {
+    handle_expand_subobject_selection(
+        world,
+        SelectableSubobjectRef::Face {
+            element_id,
+            face: GeneratedFaceRef::BoxFace {
+                axis: 1,
+                positive: true,
+            },
+        },
+        "bounding_edges",
+    )
+    .expect("face should expand to edges")
+    .into_iter()
+    .find(|reference| matches!(reference, SelectableSubobjectRef::Edge { .. }))
+    .expect("edge ref should exist")
+}
+
+#[cfg(feature = "model-api")]
+fn edge_hidden_in_listing(
+    world: &mut World,
+    element_id: u64,
+    edge_ref: &SelectableSubobjectRef,
+) -> bool {
+    handle_list_subobjects(world, element_id)
+        .expect("subobjects should list")
+        .into_iter()
+        .find(|info| &info.reference == edge_ref)
+        .expect("edge should remain addressable")
+        .hidden
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn subobject_edge_hide_show_uses_display_override_plan() {
+    let mut world = init_model_api_test_world();
+    let element_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.5, 0.0],
+            "half_extents": [1.0, 0.5, 2.0]
+        }),
+    )
+    .expect("box should be creatable");
+    let edge = first_top_edge(&mut world, element_id);
+
+    let result = handle_apply_subobject_edit(
+        &mut world,
+        edge.clone(),
+        "hide".to_string(),
+        json!({ "hidden": true }),
+    )
+    .expect("hide should apply");
+
+    assert!(result.applied);
+    assert_eq!(result.edit_plan_kind, "generated_edge_display_override");
+    assert!(edge_hidden_in_listing(&mut world, element_id, &edge));
+    let listing = handle_list_subobjects(&mut world, element_id).unwrap();
+    let hidden_info = listing
+        .iter()
+        .find(|info| info.reference == edge)
+        .expect("hidden edge should stay listed by stable ref");
+    assert!(!hidden_info.selectable);
+    assert!(hidden_info.supports_visibility_override);
+
+    let result = handle_apply_subobject_edit(
+        &mut world,
+        edge.clone(),
+        "show".to_string(),
+        json!({ "hidden": false }),
+    )
+    .expect("show should apply");
+
+    assert!(result.applied);
+    assert!(!edge_hidden_in_listing(&mut world, element_id, &edge));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn subobject_edge_visibility_override_is_undoable() {
+    let mut world = init_model_api_test_world();
+    let element_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.5, 0.0],
+            "half_extents": [1.0, 0.5, 2.0]
+        }),
+    )
+    .expect("box should be creatable");
+    let edge = first_top_edge(&mut world, element_id);
+
+    handle_apply_subobject_edit(&mut world, edge.clone(), "hide".to_string(), json!({}))
+        .expect("hide should apply");
+    assert!(edge_hidden_in_listing(&mut world, element_id, &edge));
+
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    apply_pending_history_commands(&mut world);
+    assert!(!edge_hidden_in_listing(&mut world, element_id, &edge));
+
+    world.resource_mut::<PendingCommandQueue>().queue_redo();
+    apply_pending_history_commands(&mut world);
+    assert!(edge_hidden_in_listing(&mut world, element_id, &edge));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn subobject_edge_visibility_override_survives_project_reload() {
+    let mut world = init_model_api_test_world();
+    let element_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.5, 0.0],
+            "half_extents": [1.0, 0.5, 2.0]
+        }),
+    )
+    .expect("box should be creatable");
+    let edge = first_top_edge(&mut world, element_id);
+    handle_apply_subobject_edit(&mut world, edge.clone(), "hide".to_string(), json!({}))
+        .expect("hide should apply");
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let path = tempdir.path().join("hidden-edge.talos3d");
+    handle_save_project(&mut world, path.to_str().unwrap()).expect("project should save");
+
+    let mut reloaded = init_model_api_test_world();
+    handle_load_project(&mut reloaded, path.to_str().unwrap()).expect("project should load");
+
+    assert!(edge_hidden_in_listing(&mut reloaded, element_id, &edge));
+}
+
+#[cfg(feature = "model-api")]
 #[test]
 fn subobject_selection_round_trips_stable_refs() {
     let mut world = init_model_api_test_world();
@@ -6582,7 +6716,7 @@ fn subobject_selection_round_trips_stable_refs() {
 
 #[cfg(feature = "model-api")]
 #[test]
-fn subobject_edge_edit_reports_structured_unsupported_plan() {
+fn subobject_edge_move_reports_structured_unsupported_plan() {
     let mut world = init_model_api_test_world();
     let element_id = handle_create_entity(
         &mut world,
@@ -6612,8 +6746,8 @@ fn subobject_edge_edit_reports_structured_unsupported_plan() {
     let result = handle_apply_subobject_edit(
         &mut world,
         edge,
-        "hide".to_string(),
-        json!({ "hidden": true }),
+        "move".to_string(),
+        json!({ "delta": [1.0, 0.0, 0.0] }),
     )
     .expect("valid edge ref should produce an edit-plan response");
 

@@ -3,6 +3,8 @@ use bevy::window::PrimaryWindow;
 
 use crate::plugins::modeling::editable_mesh::EditableMesh;
 use crate::plugins::modeling::primitive_trait::Primitive;
+#[cfg(feature = "perf-stats")]
+use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 use crate::{
     authored_entity::{PushPullAffordance, PushPullBlockReason},
     capability_registry::{
@@ -494,7 +496,11 @@ fn handle_face_escape(
     }
 }
 
-fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
+fn draw_face_highlights(
+    world: &World,
+    mut gizmos: Gizmos,
+    #[cfg(feature = "perf-stats")] mut perf_stats: ResMut<PerfStats>,
+) {
     let face_context = world.resource::<FaceEditContext>();
     let hovered = world.resource::<HoveredFace>();
     let push_pull = world.resource::<PushPullContext>();
@@ -534,13 +540,17 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
                 entity
             };
             if let Some(verts) = face_vertices_for_entity(world, render_entity, pp.face_id) {
-                draw_face_outline_for_entity(
+                let line_count = draw_face_outline_for_entity(
                     world,
                     &mut gizmos,
                     render_entity,
                     &verts,
                     PUSHPULL_EDGE_COLOR,
                 );
+                #[cfg(feature = "perf-stats")]
+                add_gizmo_line_count(&mut perf_stats, line_count);
+                #[cfg(not(feature = "perf-stats"))]
+                let _ = line_count;
             }
         }
         return;
@@ -556,13 +566,17 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
             if !is_selected {
                 let render_entity = face_entity_for(hit.entity);
                 if let Some(verts) = face_vertices_for_entity(world, render_entity, hit.face_id) {
-                    draw_face_outline_for_entity(
+                    let line_count = draw_face_outline_for_entity(
                         world,
                         &mut gizmos,
                         render_entity,
                         &verts,
                         FACE_HIGHLIGHT_EDGE,
                     );
+                    #[cfg(feature = "perf-stats")]
+                    add_gizmo_line_count(&mut perf_stats, line_count);
+                    #[cfg(not(feature = "perf-stats"))]
+                    let _ = line_count;
                 }
             }
         }
@@ -576,7 +590,7 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
             .map(|(op_entity, _)| op_entity)
             .unwrap_or(entity);
         if let Some(verts) = face_vertices_for_entity(world, render_entity, selected.face_id) {
-            draw_face_outline_for_entity(
+            let mut line_count = draw_face_outline_for_entity(
                 world,
                 &mut gizmos,
                 render_entity,
@@ -584,7 +598,8 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
                 FACE_SELECTED_EDGE,
             );
             if !is_drawing {
-                draw_face_hatch(&mut gizmos, &verts, selected.normal, FACE_SELECTED_HATCH);
+                line_count +=
+                    draw_face_hatch(&mut gizmos, &verts, selected.normal, FACE_SELECTED_HATCH);
                 let tip = selected.centroid + selected.normal * FACE_NORMAL_LENGTH;
                 let (tangent, _) = normal_basis(selected.normal);
                 let arrow_size = FACE_NORMAL_LENGTH * 0.2;
@@ -599,22 +614,31 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
                     tip - selected.normal * arrow_size - tangent * arrow_size,
                     FACE_NORMAL_COLOR,
                 );
+                line_count += 3;
             }
+            #[cfg(feature = "perf-stats")]
+            add_gizmo_line_count(&mut perf_stats, line_count);
+            #[cfg(not(feature = "perf-stats"))]
+            let _ = line_count;
         }
     }
 }
 
 /// Draw the outline of a face polygon.
-fn draw_face_outline(gizmos: &mut Gizmos, verts: &[Vec3], color: Color) {
+fn draw_face_outline(gizmos: &mut Gizmos, verts: &[Vec3], color: Color) -> usize {
     let n = verts.len();
+    if n < 2 {
+        return 0;
+    }
     for i in 0..n {
         gizmos.line(verts[i], verts[(i + 1) % n], color);
     }
+    n
 }
 
-fn draw_face_hatch(gizmos: &mut Gizmos, verts: &[Vec3], normal: Vec3, color: Color) {
+fn draw_face_hatch(gizmos: &mut Gizmos, verts: &[Vec3], normal: Vec3, color: Color) -> usize {
     if verts.len() < 3 {
-        return;
+        return 0;
     }
     let (mut min, mut max) = (verts[0], verts[0]);
     for &v in verts.iter().skip(1) {
@@ -632,7 +656,7 @@ fn draw_face_hatch(gizmos: &mut Gizmos, verts: &[Vec3], normal: Vec3, color: Col
         .map(|v| (*v - center).dot(bitangent).abs())
         .fold(0.0_f32, f32::max);
     if tangent_extent < 0.02 || bitangent_extent < 0.02 {
-        return;
+        return 0;
     }
 
     let diagonal = (max - min).length().max(0.1);
@@ -646,6 +670,7 @@ fn draw_face_hatch(gizmos: &mut Gizmos, verts: &[Vec3], normal: Vec3, color: Col
         let origin = center + bitangent * b + offset;
         gizmos.line(origin - tangent * span, origin + tangent * span, color);
     }
+    line_count as usize
 }
 
 fn active_camera_position(world: &World) -> Option<Vec3> {
@@ -705,10 +730,10 @@ fn draw_face_outline_for_entity(
     entity: Entity,
     verts: &[Vec3],
     color: Color,
-) {
+) -> usize {
     let n = verts.len();
     if n < 2 {
-        return;
+        return 0;
     }
 
     let camera_position = world
@@ -719,10 +744,10 @@ fn draw_face_outline_for_entity(
         .flatten();
 
     if camera_position.is_none() {
-        draw_face_outline(gizmos, verts, color);
-        return;
+        return draw_face_outline(gizmos, verts, color);
     }
 
+    let mut line_count = 0;
     for i in 0..n {
         let start = verts[i];
         let end = verts[(i + 1) % n];
@@ -731,8 +756,10 @@ fn draw_face_outline_for_entity(
         });
         if visible {
             gizmos.line(start, end, color);
+            line_count += 1;
         }
     }
+    line_count
 }
 
 /// Get the world-space vertex positions of a face for any entity type.

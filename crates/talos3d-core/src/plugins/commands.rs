@@ -497,6 +497,7 @@ pub(crate) fn enqueue_create_box(world: &mut World, command: CreateBoxCommand) -
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .into(),
     );
@@ -520,6 +521,7 @@ pub(crate) fn enqueue_create_cylinder(
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .into(),
     );
@@ -539,6 +541,7 @@ pub(crate) fn enqueue_create_sphere(world: &mut World, command: CreateSphereComm
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .into(),
     );
@@ -559,6 +562,7 @@ pub(crate) fn enqueue_create_plane(world: &mut World, command: CreatePlaneComman
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .into(),
     );

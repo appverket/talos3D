@@ -7,6 +7,7 @@ use crate::{
     authored_entity::BoxedEntity,
     capability_registry::{
         AuthoredEntityFactory, FaceHitCandidate, FaceId, HitCandidate, ModelSummaryAccumulator,
+        SubobjectDisplayOverrides,
     },
     plugins::{
         identity::ElementId,
@@ -16,7 +17,8 @@ use crate::{
 };
 
 use super::{
-    generic_snapshot::PrimitiveSnapshot, primitive_trait::Primitive,
+    generic_snapshot::{draw_primitive_wireframe_with_overrides, PrimitiveSnapshot},
+    primitive_trait::Primitive,
     snapshots::ray_triangle_intersection,
 };
 
@@ -56,6 +58,7 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
                     .unwrap_or_default(),
                 material_assignment: entity_ref.get::<MaterialAssignment>().cloned(),
                 opening_context: entity_ref.get::<OpeningContext>().copied(),
+                subobject_display_overrides: entity_ref.get::<SubobjectDisplayOverrides>().cloned(),
             }
             .into(),
         )
@@ -83,12 +86,19 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             .map(|value| serde_json::from_value::<OpeningContext>(value.clone()))
             .transpose()
             .map_err(|e| format!("Invalid opening_context in persisted JSON: {e}"))?;
+        let subobject_display_overrides = data
+            .get("subobject_display_overrides")
+            .map(|value| serde_json::from_value::<SubobjectDisplayOverrides>(value.clone()))
+            .transpose()
+            .map_err(|e| format!("Invalid subobject_display_overrides in persisted JSON: {e}"))?
+            .filter(|overrides| !overrides.is_empty());
         Ok(PrimitiveSnapshot {
             element_id,
             primitive,
             rotation,
             material_assignment,
             opening_context,
+            subobject_display_overrides,
         }
         .into())
     }
@@ -112,6 +122,7 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             rotation,
             material_assignment,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .into())
     }
@@ -127,7 +138,13 @@ impl<P: Primitive + PartialEq> AuthoredEntityFactory for PrimitiveFactory<P> {
             .get::<ShapeRotation>()
             .copied()
             .unwrap_or_default();
-        primitive.draw_wireframe(gizmos, rotation.0, color);
+        draw_primitive_wireframe_with_overrides(
+            primitive,
+            rotation,
+            entity_ref.get::<SubobjectDisplayOverrides>(),
+            gizmos,
+            color,
+        );
     }
 
     fn selection_line_count(&self, world: &World, entity: Entity) -> usize {

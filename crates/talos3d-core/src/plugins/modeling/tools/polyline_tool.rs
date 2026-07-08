@@ -281,6 +281,7 @@ fn create_profile_from_closed_polyline(
             rotation: ShapeRotation(rotation),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .into()
     };

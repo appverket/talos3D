@@ -858,6 +858,7 @@ impl Primitive for PlanePrimitive {
                 rotation: ShapeRotation(rotation),
                 material_assignment: None,
                 opening_context: None,
+                subobject_display_overrides: None,
             }
             .into(),
         ))

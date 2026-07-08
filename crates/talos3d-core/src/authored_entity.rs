@@ -3,7 +3,10 @@ use std::{any::Any, fmt};
 use bevy::prelude::*;
 use serde_json::Value;
 
-use crate::plugins::{identity::ElementId, materials::MaterialAssignment};
+use crate::{
+    capability_registry::SubobjectDisplayOverrides,
+    plugins::{identity::ElementId, materials::MaterialAssignment},
+};
 
 // --- Shared helpers for AuthoredEntity implementations ---
 
@@ -325,6 +328,19 @@ pub trait AuthoredEntity: Send + Sync + 'static {
             self.type_name()
         ))
     }
+    fn subobject_display_overrides(&self) -> Option<SubobjectDisplayOverrides> {
+        None
+    }
+    fn set_subobject_display_overrides(
+        &self,
+        overrides: Option<SubobjectDisplayOverrides>,
+    ) -> Result<BoxedEntity, String> {
+        let _ = overrides;
+        Err(format!(
+            "{} snapshots do not support subobject display overrides",
+            self.type_name()
+        ))
+    }
 
     fn handles(&self) -> Vec<HandleInfo>;
     fn bounds(&self) -> Option<EntityBounds> {
@@ -456,6 +472,17 @@ impl BoxedEntity {
         assignment: Option<MaterialAssignment>,
     ) -> Result<Self, String> {
         self.0.set_material_assignment(assignment)
+    }
+
+    pub fn subobject_display_overrides(&self) -> Option<SubobjectDisplayOverrides> {
+        self.0.subobject_display_overrides()
+    }
+
+    pub fn set_subobject_display_overrides(
+        &self,
+        overrides: Option<SubobjectDisplayOverrides>,
+    ) -> Result<Self, String> {
+        self.0.set_subobject_display_overrides(overrides)
     }
 
     pub fn handles(&self) -> Vec<HandleInfo> {
