@@ -5,7 +5,10 @@ use crate::plugins::modeling::editable_mesh::EditableMesh;
 use crate::plugins::modeling::primitive_trait::Primitive;
 use crate::{
     authored_entity::{PushPullAffordance, PushPullBlockReason},
-    capability_registry::{CapabilityRegistry, FaceHitCandidate, FaceId, GeneratedFaceRef},
+    capability_registry::{
+        CapabilityRegistry, FaceHitCandidate, FaceId, GeneratedEdgeRef, GeneratedFaceRef,
+        SelectableSubobjectRef, SubobjectSelection,
+    },
     plugins::{
         camera::OrbitCamera,
         commands::CreateEntityCommand,
@@ -41,6 +44,7 @@ use crate::{
 };
 const FACE_HIGHLIGHT_EDGE: Color = Color::srgba(0.3, 0.7, 1.0, 0.8);
 const FACE_SELECTED_EDGE: Color = Color::srgb(0.2, 1.0, 0.4);
+const FACE_SELECTED_HATCH: Color = Color::srgba(0.2, 1.0, 0.4, 0.42);
 const FACE_NORMAL_LENGTH: f32 = 0.5;
 const FACE_NORMAL_COLOR: Color = Color::srgb(0.3, 0.9, 1.0);
 const PUSHPULL_EDGE_COLOR: Color = Color::srgb(1.0, 0.7, 0.0);
@@ -49,6 +53,7 @@ const DRAWING_CLOSE_COLOR: Color = Color::srgb(0.2, 1.0, 0.4);
 const MIN_DRAWING_SEGMENT: f32 = 0.05;
 const CLOSE_THRESHOLD_PIXELS: f32 = 15.0;
 const FACE_CLICK_SLOP_PX: f32 = 6.0;
+const FACE_MULTI_CLICK_THRESHOLD_SECONDS: f64 = 0.4;
 
 pub struct FaceEditPlugin;
 
@@ -57,8 +62,10 @@ impl Plugin for FaceEditPlugin {
         app.init_resource::<FaceEditContext>()
             .init_resource::<HoveredFace>()
             .init_resource::<PressCapture>()
+            .init_resource::<FaceClickTracker>()
             .init_resource::<PushPullContext>()
             .init_resource::<FaceDrawingContext>()
+            .init_resource::<SubobjectSelection>()
             .add_systems(
                 Update,
                 (
@@ -236,6 +243,14 @@ struct PressCapture {
     shift_held: bool,
 }
 
+#[derive(Resource, Default, Debug, Clone)]
+struct FaceClickTracker {
+    last_click_time: f64,
+    last_element_id: Option<ElementId>,
+    last_face_id: Option<FaceId>,
+    click_count: u8,
+}
+
 fn update_hovered_face(world: &mut World) {
     if world
         .resource::<ChromeInputCapture>()
@@ -302,8 +317,11 @@ fn handle_face_click(
     hovered: Res<HoveredFace>,
     window_query: Query<&Window, With<PrimaryWindow>>,
     keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time<Real>>,
     mut press_capture: ResMut<PressCapture>,
     mut face_context: ResMut<FaceEditContext>,
+    mut click_tracker: ResMut<FaceClickTracker>,
+    mut subobject_selection: ResMut<SubobjectSelection>,
     ownership: Res<InputOwnership>,
 ) {
     if !ownership.is_idle() {
@@ -345,21 +363,102 @@ fn handle_face_click(
             if shift_held && already_selected {
                 face_context.selected_face = None;
                 face_context.csg_operand_target = None;
+                subobject_selection.refs.clear();
             } else {
                 // For CSG operand hits, the hit entity/element_id is the operand.
                 // The csg_operand_target is kept as set by update_hovered_face.
+                let click_count =
+                    face_click_count(&mut click_tracker, &hit, time.elapsed_secs_f64());
                 face_context.selected_face = Some(SelectedFace {
                     face_id: hit.face_id,
-                    generated_face_ref: hit.generated_face_ref,
+                    generated_face_ref: hit.generated_face_ref.clone(),
                     normal: hit.normal,
                     centroid: hit.centroid,
                 });
+                subobject_selection.refs = face_selection_refs(hit.element_id, &hit, click_count);
             }
         } else if !shift_held {
             face_context.selected_face = None;
             face_context.csg_operand_target = None;
+            subobject_selection.refs.clear();
         }
     }
+}
+
+fn face_click_count(tracker: &mut FaceClickTracker, hit: &FaceHitCandidate, now: f64) -> u8 {
+    let same_target = tracker.last_element_id == Some(hit.element_id)
+        && tracker.last_face_id == Some(hit.face_id)
+        && (now - tracker.last_click_time) <= FACE_MULTI_CLICK_THRESHOLD_SECONDS;
+    tracker.click_count = if same_target {
+        (tracker.click_count + 1).min(3)
+    } else {
+        1
+    };
+    tracker.last_click_time = now;
+    tracker.last_element_id = Some(hit.element_id);
+    tracker.last_face_id = Some(hit.face_id);
+    tracker.click_count
+}
+
+fn face_selection_refs(
+    element_id: ElementId,
+    hit: &FaceHitCandidate,
+    click_count: u8,
+) -> Vec<SelectableSubobjectRef> {
+    let element_id = element_id.0;
+    let Some(face_ref) = hit.generated_face_ref.clone() else {
+        return vec![SelectableSubobjectRef::Entity { element_id }];
+    };
+    let face = SelectableSubobjectRef::Face {
+        element_id,
+        face: face_ref.clone(),
+    };
+    match click_count {
+        1 => vec![face],
+        2 => {
+            let mut refs = vec![face.clone()];
+            refs.extend(generated_face_bounding_edge_refs(element_id, &face_ref));
+            refs
+        }
+        _ => {
+            let mut refs = vec![face];
+            refs.extend(generated_face_bounding_edge_refs(element_id, &face_ref));
+            refs
+        }
+    }
+}
+
+fn generated_face_bounding_edge_refs(
+    element_id: u64,
+    face_ref: &GeneratedFaceRef,
+) -> Vec<SelectableSubobjectRef> {
+    // Viewport double-click expansion runs before the heavier evaluated-body
+    // API path. It records stable generated refs for the common primitive face
+    // families and lets the Model API provide full evaluated topology details.
+    let count = match face_ref {
+        GeneratedFaceRef::BoxFace { .. } => 4,
+        GeneratedFaceRef::PlaneFace => 4,
+        GeneratedFaceRef::CylinderTop | GeneratedFaceRef::CylinderBottom => 16,
+        GeneratedFaceRef::CylinderSide => 16,
+        GeneratedFaceRef::ProfileTop | GeneratedFaceRef::ProfileBottom => 4,
+        GeneratedFaceRef::ProfileSideSegment(_)
+        | GeneratedFaceRef::ProfileSideArcSegment(_)
+        | GeneratedFaceRef::ProfileSideClosingSegment
+        | GeneratedFaceRef::FeatureCap
+        | GeneratedFaceRef::FeatureAnchor
+        | GeneratedFaceRef::FeatureSideSegment(_)
+        | GeneratedFaceRef::FeatureSideArcSegment(_)
+        | GeneratedFaceRef::FeatureSideClosingSegment => 1,
+    };
+    (0..count)
+        .map(|edge_index| SelectableSubobjectRef::Edge {
+            element_id,
+            edge: GeneratedEdgeRef::BoundaryOfFace {
+                face: face_ref.clone(),
+                edge_index,
+            },
+        })
+        .collect()
 }
 
 fn handle_face_escape(
@@ -484,9 +583,8 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
                 &verts,
                 FACE_SELECTED_EDGE,
             );
-            // Keep selected-face feedback clean: the hatch lines read as stray
-            // gridlines on small caps and obscure the actual profile edge.
             if !is_drawing {
+                draw_face_hatch(&mut gizmos, &verts, selected.normal, FACE_SELECTED_HATCH);
                 let tip = selected.centroid + selected.normal * FACE_NORMAL_LENGTH;
                 let (tangent, _) = normal_basis(selected.normal);
                 let arrow_size = FACE_NORMAL_LENGTH * 0.2;
@@ -511,6 +609,42 @@ fn draw_face_outline(gizmos: &mut Gizmos, verts: &[Vec3], color: Color) {
     let n = verts.len();
     for i in 0..n {
         gizmos.line(verts[i], verts[(i + 1) % n], color);
+    }
+}
+
+fn draw_face_hatch(gizmos: &mut Gizmos, verts: &[Vec3], normal: Vec3, color: Color) {
+    if verts.len() < 3 {
+        return;
+    }
+    let (mut min, mut max) = (verts[0], verts[0]);
+    for &v in verts.iter().skip(1) {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    let center = verts.iter().copied().sum::<Vec3>() / verts.len() as f32;
+    let (tangent, bitangent) = normal_basis(normal);
+    let tangent_extent = verts
+        .iter()
+        .map(|v| (*v - center).dot(tangent).abs())
+        .fold(0.0_f32, f32::max);
+    let bitangent_extent = verts
+        .iter()
+        .map(|v| (*v - center).dot(bitangent).abs())
+        .fold(0.0_f32, f32::max);
+    if tangent_extent < 0.02 || bitangent_extent < 0.02 {
+        return;
+    }
+
+    let diagonal = (max - min).length().max(0.1);
+    let spacing = (diagonal / 14.0).clamp(0.08, 0.45);
+    let line_count = ((bitangent_extent * 2.0) / spacing).ceil().clamp(3.0, 18.0) as i32;
+    let start = -(line_count as f32 - 1.0) * spacing * 0.5;
+    let offset = normal.normalize_or_zero() * 0.004;
+    for i in 0..line_count {
+        let b = start + i as f32 * spacing;
+        let span = tangent_extent * 0.72;
+        let origin = center + bitangent * b + offset;
+        gizmos.line(origin - tangent * span, origin + tangent * span, color);
     }
 }
 

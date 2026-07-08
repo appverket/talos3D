@@ -976,6 +976,58 @@ impl ModelApiServer {
         .await?
     }
 
+    async fn request_list_subobjects(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<Vec<SelectableSubobjectInfo>> {
+        self.round_trip(|response| ModelApiRequest::ListSubobjects {
+            element_id,
+            response,
+        })
+        .await?
+    }
+
+    async fn request_get_subobject_selection(&self) -> Result<Vec<SelectableSubobjectRef>, String> {
+        self.round_trip(|response| ModelApiRequest::GetSubobjectSelection { response })
+            .await
+    }
+
+    async fn request_set_subobject_selection(
+        &self,
+        refs: Vec<SelectableSubobjectRef>,
+    ) -> ApiResult<Vec<SelectableSubobjectRef>> {
+        self.round_trip(|response| ModelApiRequest::SetSubobjectSelection { refs, response })
+            .await?
+    }
+
+    async fn request_expand_subobject_selection(
+        &self,
+        reference: SelectableSubobjectRef,
+        mode: String,
+    ) -> ApiResult<Vec<SelectableSubobjectRef>> {
+        self.round_trip(|response| ModelApiRequest::ExpandSubobjectSelection {
+            reference,
+            mode,
+            response,
+        })
+        .await?
+    }
+
+    async fn request_apply_subobject_edit(
+        &self,
+        reference: SelectableSubobjectRef,
+        operation: String,
+        parameters: Value,
+    ) -> ApiResult<SubobjectEditResult> {
+        self.round_trip(|response| ModelApiRequest::ApplySubobjectEdit {
+            reference,
+            operation,
+            parameters,
+            response,
+        })
+        .await?
+    }
+
     async fn request_ux_observe(&self) -> ApiResult<crate::plugins::ux_harness::UxHarnessSnapshot> {
         self.round_trip(|response| ModelApiRequest::UxObserve { response })
             .await?
@@ -2809,6 +2861,38 @@ pub(super) struct ViewDeleteRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SetSelectionRequest {
     pub(super) element_ids: Vec<u64>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ListSubobjectsRequest {
+    pub(super) element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct SetSubobjectSelectionRequest {
+    pub(super) refs: Vec<SelectableSubobjectRef>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ExpandSubobjectSelectionRequest {
+    pub(super) reference: SelectableSubobjectRef,
+    pub(super) mode: String,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ApplySubobjectEditRequest {
+    pub(super) reference: SelectableSubobjectRef,
+    pub(super) operation: String,
+    #[serde(default)]
+    pub(super) parameters: Value,
 }
 
 #[cfg(feature = "model-api")]
@@ -6116,6 +6200,78 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(selection)
+    }
+
+    #[tool(
+        name = "list_subobjects",
+        description = "List stable generated face and edge subobject refs for an entity. Returns authored/evaluated refs, not transient render triangle ids."
+    )]
+    pub(super) async fn list_subobjects_tool(
+        &self,
+        Parameters(params): Parameters<ListSubobjectsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let subobjects = self
+            .request_list_subobjects(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(subobjects)
+    }
+
+    #[tool(
+        name = "get_subobject_selection",
+        description = "Get the current selection as stable subobject refs. Whole-entity selection is returned as entity refs."
+    )]
+    pub(super) async fn get_subobject_selection_tool(&self) -> Result<CallToolResult, McpError> {
+        let selection = self
+            .request_get_subobject_selection()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(selection)
+    }
+
+    #[tool(
+        name = "set_subobject_selection",
+        description = "Replace the current subobject selection with stable entity, face, edge, or handle refs."
+    )]
+    pub(super) async fn set_subobject_selection_tool(
+        &self,
+        Parameters(params): Parameters<SetSubobjectSelectionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let selection = self
+            .request_set_subobject_selection(params.refs)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(selection)
+    }
+
+    #[tool(
+        name = "expand_subobject_selection",
+        description = "Expand a face or edge ref using SketchUp-style modes: bounding_edges, connected_faces, or all_connected."
+    )]
+    pub(super) async fn expand_subobject_selection_tool(
+        &self,
+        Parameters(params): Parameters<ExpandSubobjectSelectionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let selection = self
+            .request_expand_subobject_selection(params.reference, params.mode)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(selection)
+    }
+
+    #[tool(
+        name = "apply_subobject_edit",
+        description = "Validate a stable subobject ref and attempt an edge/face/handle edit. PP-SUBSEL-1 returns structured unsupported results until representation-specific edit plans land."
+    )]
+    pub(super) async fn apply_subobject_edit_tool(
+        &self,
+        Parameters(params): Parameters<ApplySubobjectEditRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_apply_subobject_edit(params.reference, params.operation, params.parameters)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
     }
 
     #[tool(

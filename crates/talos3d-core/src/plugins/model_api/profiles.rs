@@ -227,6 +227,8 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("query_relations", ToolCategory::Inspection),
     ("entity_dependencies", ToolCategory::Inspection),
     ("get_selection", ToolCategory::Inspection),
+    ("get_subobject_selection", ToolCategory::Inspection),
+    ("list_subobjects", ToolCategory::Inspection),
     ("get_editing_context", ToolCategory::Inspection),
     ("list_layers", ToolCategory::Inspection),
     ("list_constraints", ToolCategory::Inspection),
@@ -259,6 +261,9 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("set_property", ToolCategory::Editing),
     ("set_entity_property", ToolCategory::Editing),
     ("set_selection", ToolCategory::Editing),
+    ("set_subobject_selection", ToolCategory::Editing),
+    ("expand_subobject_selection", ToolCategory::Editing),
+    ("apply_subobject_edit", ToolCategory::Editing),
     ("split_box_face", ToolCategory::Editing),
     ("prepare_site_surface", ToolCategory::Editing),
     // --- Commands (generic capability-command surface) ---

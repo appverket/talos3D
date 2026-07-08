@@ -6462,6 +6462,170 @@ fn set_selection_on_group_member_selects_group_at_root() {
     assert_eq!(handle_get_selection(&mut world), vec![group_id]);
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn list_subobjects_returns_generated_box_faces_and_edges() {
+    let mut world = init_model_api_test_world();
+    let element_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.5, 0.0],
+            "half_extents": [1.0, 0.5, 2.0]
+        }),
+    )
+    .expect("box should be creatable");
+
+    let subobjects =
+        handle_list_subobjects(&mut world, element_id).expect("box subobjects should be listed");
+    let face_count = subobjects
+        .iter()
+        .filter(|info| matches!(info.reference, SelectableSubobjectRef::Face { .. }))
+        .count();
+    let edge_count = subobjects
+        .iter()
+        .filter(|info| matches!(info.reference, SelectableSubobjectRef::Edge { .. }))
+        .count();
+
+    assert_eq!(face_count, 6);
+    assert_eq!(edge_count, 12);
+    assert!(subobjects.iter().any(|info| matches!(
+        &info.reference,
+        SelectableSubobjectRef::Face {
+            face: GeneratedFaceRef::BoxFace {
+                axis: 1,
+                positive: true
+            },
+            ..
+        }
+    )));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn expand_subobject_selection_returns_bounding_edges_and_connected_faces() {
+    let mut world = init_model_api_test_world();
+    let element_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.5, 0.0],
+            "half_extents": [1.0, 0.5, 2.0]
+        }),
+    )
+    .expect("box should be creatable");
+    let face = SelectableSubobjectRef::Face {
+        element_id,
+        face: GeneratedFaceRef::BoxFace {
+            axis: 1,
+            positive: true,
+        },
+    };
+
+    let bounding_edges =
+        handle_expand_subobject_selection(&mut world, face.clone(), "bounding_edges")
+            .expect("face should expand to bounding edges");
+
+    assert_eq!(bounding_edges.len(), 4);
+    let first_edge = bounding_edges
+        .iter()
+        .find_map(|reference| match reference {
+            SelectableSubobjectRef::Edge { edge, .. } => Some(edge.clone()),
+            _ => None,
+        })
+        .expect("at least one edge ref");
+    let connected_faces = handle_expand_subobject_selection(
+        &mut world,
+        SelectableSubobjectRef::Edge {
+            element_id,
+            edge: first_edge,
+        },
+        "connected_faces",
+    )
+    .expect("edge should expand to connected faces");
+
+    assert_eq!(connected_faces.len(), 2);
+    assert!(connected_faces.contains(&face));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn subobject_selection_round_trips_stable_refs() {
+    let mut world = init_model_api_test_world();
+    let element_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.5, 0.0],
+            "half_extents": [1.0, 0.5, 2.0]
+        }),
+    )
+    .expect("box should be creatable");
+    let reference = SelectableSubobjectRef::Face {
+        element_id,
+        face: GeneratedFaceRef::BoxFace {
+            axis: 0,
+            positive: false,
+        },
+    };
+
+    let json = serde_json::to_value(&reference).expect("subobject ref should serialize");
+    let restored: SelectableSubobjectRef =
+        serde_json::from_value(json).expect("subobject ref should deserialize");
+    assert_eq!(restored, reference);
+
+    let selected = handle_set_subobject_selection(&mut world, vec![reference.clone()])
+        .expect("valid face ref should be selectable");
+    assert_eq!(selected, vec![reference.clone()]);
+    assert_eq!(handle_get_subobject_selection(&mut world), vec![reference]);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn subobject_edge_edit_reports_structured_unsupported_plan() {
+    let mut world = init_model_api_test_world();
+    let element_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.5, 0.0],
+            "half_extents": [1.0, 0.5, 2.0]
+        }),
+    )
+    .expect("box should be creatable");
+    let edge = handle_expand_subobject_selection(
+        &mut world,
+        SelectableSubobjectRef::Face {
+            element_id,
+            face: GeneratedFaceRef::BoxFace {
+                axis: 1,
+                positive: true,
+            },
+        },
+        "bounding_edges",
+    )
+    .expect("face should expand to edges")
+    .into_iter()
+    .find(|reference| matches!(reference, SelectableSubobjectRef::Edge { .. }))
+    .expect("edge ref should exist");
+
+    let result = handle_apply_subobject_edit(
+        &mut world,
+        edge,
+        "hide".to_string(),
+        json!({ "hidden": true }),
+    )
+    .expect("valid edge ref should produce an edit-plan response");
+
+    assert!(!result.applied);
+    assert_eq!(result.edit_plan_kind, "edge_edit_plan_missing");
+    assert!(result
+        .unsupported_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("representation-specific generated-edge edit plan"));
+}
+
 /// A bare house (no resolved sub-structure) cannot be previewed as a clean
 /// commit when skipping straight to Detailed — every in-force member
 /// obligation surfaces as a missing input and an error finding.

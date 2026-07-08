@@ -81,6 +81,109 @@ impl GeneratedFaceRef {
     }
 }
 
+/// Stable generated edge references exposed above raw topology where possible.
+///
+/// The first slice intentionally derives edges from evaluated interaction
+/// bodies. The `edge_index` fields are canonical half-edge ids within that
+/// evaluated body and are kept with adjacent/generated face refs so agents see
+/// which authored/evaluated surfaces the edge belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub enum GeneratedEdgeRef {
+    BetweenFaces {
+        first: GeneratedFaceRef,
+        second: GeneratedFaceRef,
+        edge_index: u32,
+    },
+    BoundaryOfFace {
+        face: GeneratedFaceRef,
+        edge_index: u32,
+    },
+    EditableMeshEdge(u32),
+}
+
+impl GeneratedEdgeRef {
+    pub fn label(&self) -> String {
+        match self {
+            Self::BetweenFaces {
+                first,
+                second,
+                edge_index,
+            } => format!("edge:{}:{}:{}", first.label(), second.label(), edge_index),
+            Self::BoundaryOfFace { face, edge_index } => {
+                format!("edge:{}:boundary:{}", face.label(), edge_index)
+            }
+            Self::EditableMeshEdge(edge_index) => format!("edge:{edge_index}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub enum SelectableSubobjectRef {
+    Entity {
+        element_id: u64,
+    },
+    Handle {
+        element_id: u64,
+        handle_id: String,
+    },
+    Face {
+        element_id: u64,
+        face: GeneratedFaceRef,
+    },
+    Edge {
+        element_id: u64,
+        edge: GeneratedEdgeRef,
+    },
+}
+
+impl SelectableSubobjectRef {
+    pub fn element_id(&self) -> u64 {
+        match self {
+            Self::Entity { element_id }
+            | Self::Handle { element_id, .. }
+            | Self::Face { element_id, .. }
+            | Self::Edge { element_id, .. } => *element_id,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Entity { element_id } => format!("entity:{element_id}"),
+            Self::Handle {
+                element_id,
+                handle_id,
+            } => format!("entity:{element_id}:handle:{handle_id}"),
+            Self::Face { element_id, face } => {
+                format!("entity:{}:face:{}", element_id, face.label())
+            }
+            Self::Edge { element_id, edge } => {
+                format!("entity:{}:{}", element_id, edge.label())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SelectableSubobjectInfo {
+    pub reference: SelectableSubobjectRef,
+    pub label: String,
+    pub owner_element_id: u64,
+    pub selectable: bool,
+    pub supports_transform: bool,
+    pub supports_visibility_override: bool,
+    pub unsupported_reason: Option<String>,
+}
+
+#[derive(Resource, Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SubobjectSelection {
+    pub refs: Vec<SelectableSubobjectRef>,
+}
+
 /// Identifies a specific face on an authored entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FaceId(pub u32);

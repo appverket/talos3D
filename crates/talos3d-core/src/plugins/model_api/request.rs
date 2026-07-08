@@ -307,6 +307,28 @@ pub(super) enum ModelApiRequest {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<Vec<u64>>>,
     },
+    ListSubobjects {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<Vec<SelectableSubobjectInfo>>>,
+    },
+    GetSubobjectSelection {
+        response: oneshot::Sender<Vec<SelectableSubobjectRef>>,
+    },
+    SetSubobjectSelection {
+        refs: Vec<SelectableSubobjectRef>,
+        response: oneshot::Sender<ApiResult<Vec<SelectableSubobjectRef>>>,
+    },
+    ExpandSubobjectSelection {
+        reference: SelectableSubobjectRef,
+        mode: String,
+        response: oneshot::Sender<ApiResult<Vec<SelectableSubobjectRef>>>,
+    },
+    ApplySubobjectEdit {
+        reference: SelectableSubobjectRef,
+        operation: String,
+        parameters: Value,
+        response: oneshot::Sender<ApiResult<SubobjectEditResult>>,
+    },
     // --- Live UX harness ---
     UxObserve {
         response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxHarnessSnapshot>>,
@@ -1530,6 +1552,35 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(handle_set_selection(world, element_ids));
+        }
+        ModelApiRequest::ListSubobjects {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_list_subobjects(world, element_id));
+        }
+        ModelApiRequest::GetSubobjectSelection { response } => {
+            let _ = response.send(handle_get_subobject_selection(world));
+        }
+        ModelApiRequest::SetSubobjectSelection { refs, response } => {
+            let _ = response.send(handle_set_subobject_selection(world, refs));
+        }
+        ModelApiRequest::ExpandSubobjectSelection {
+            reference,
+            mode,
+            response,
+        } => {
+            let _ = response.send(handle_expand_subobject_selection(world, reference, &mode));
+        }
+        ModelApiRequest::ApplySubobjectEdit {
+            reference,
+            operation,
+            parameters,
+            response,
+        } => {
+            let _ = response.send(handle_apply_subobject_edit(
+                world, reference, operation, parameters,
+            ));
         }
         // --- Live UX harness ---
         ModelApiRequest::UxObserve { response } => {

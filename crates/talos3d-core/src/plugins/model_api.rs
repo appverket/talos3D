@@ -11,7 +11,10 @@ use serde_json::Value;
 #[cfg(feature = "model-api")]
 use crate::authored_entity::AuthoredEntity;
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
-use crate::capability_registry::CapabilityRegistry;
+use crate::capability_registry::{
+    CapabilityRegistry, FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
+    SelectableSubobjectRef, SubobjectSelection,
+};
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
 use crate::curation::MaterialSpecBody;
@@ -47,6 +50,13 @@ use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
+#[cfg(feature = "model-api")]
+use crate::plugins::modeling::{
+    editable_mesh::EditableMesh,
+    primitive_trait::Primitive,
+    primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation, SpherePrimitive},
+    profile::{ProfileExtrusion, ProfileRevolve, ProfileSweep},
+};
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::{EdgeDisplayMode, RenderSettings, RenderTonemapping};
 #[cfg(feature = "model-api")]
@@ -3224,6 +3234,419 @@ fn handle_set_selection(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<
     }
     result_ids.sort();
     Ok(result_ids)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_list_subobjects(
+    world: &mut World,
+    element_id: u64,
+) -> Result<Vec<SelectableSubobjectInfo>, String> {
+    let eid = ElementId(element_id);
+    ensure_user_editable_entity(world, eid, "subobject listing")?;
+    let entity = find_entity_by_element_id(world, eid)
+        .ok_or_else(|| format!("Element {element_id} not found"))?;
+    let entity_ref = world
+        .get_entity(entity)
+        .map_err(|_| format!("Element {element_id} entity is not available"))?;
+    let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
+        return Ok(vec![SelectableSubobjectInfo {
+            reference: SelectableSubobjectRef::Entity { element_id },
+            label: format!("entity:{element_id}"),
+            owner_element_id: element_id,
+            selectable: true,
+            supports_transform: true,
+            supports_visibility_override: false,
+            unsupported_reason: Some(
+                "Entity has no evaluated face/edge interaction body.".to_string(),
+            ),
+        }]);
+    };
+
+    let mut out = Vec::new();
+    for face_index in 0..mesh.faces.len() as u32 {
+        if mesh.faces[face_index as usize].half_edge == u32::MAX {
+            continue;
+        }
+        if let Some(face_ref) = generated_face_ref_for_entity(&entity_ref, FaceId(face_index)) {
+            out.push(SelectableSubobjectInfo {
+                label: format!("face:{}", face_ref.label()),
+                reference: SelectableSubobjectRef::Face {
+                    element_id,
+                    face: face_ref,
+                },
+                owner_element_id: element_id,
+                selectable: true,
+                supports_transform: true,
+                supports_visibility_override: false,
+                unsupported_reason: None,
+            });
+        }
+    }
+
+    let mut seen_edges = HashSet::new();
+    for half_edge_index in 0..mesh.half_edges.len() as u32 {
+        let canonical = canonical_half_edge_index(&mesh, half_edge_index);
+        if !seen_edges.insert(canonical) {
+            continue;
+        }
+        let edge_ref = generated_edge_ref_for_half_edge(&mesh, &entity_ref, canonical);
+        out.push(SelectableSubobjectInfo {
+            label: edge_ref.label(),
+            reference: SelectableSubobjectRef::Edge {
+                element_id,
+                edge: edge_ref,
+            },
+            owner_element_id: element_id,
+            selectable: true,
+            supports_transform: false,
+            supports_visibility_override: false,
+            unsupported_reason: Some(
+                "Edge transforms/visibility overrides require a representation-specific edit plan."
+                    .to_string(),
+            ),
+        });
+    }
+
+    Ok(out)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_get_subobject_selection(world: &mut World) -> Vec<SelectableSubobjectRef> {
+    if let Some(selection) = world.get_resource::<SubobjectSelection>() {
+        if !selection.refs.is_empty() {
+            return selection.refs.clone();
+        }
+    }
+    handle_get_selection(world)
+        .into_iter()
+        .map(|element_id| SelectableSubobjectRef::Entity { element_id })
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+fn handle_set_subobject_selection(
+    world: &mut World,
+    refs: Vec<SelectableSubobjectRef>,
+) -> Result<Vec<SelectableSubobjectRef>, String> {
+    validate_subobject_refs(world, &refs)?;
+    let entity_ids: Vec<u64> = refs
+        .iter()
+        .filter_map(|reference| match reference {
+            SelectableSubobjectRef::Entity { element_id } => Some(*element_id),
+            _ => None,
+        })
+        .collect();
+    if !entity_ids.is_empty() {
+        handle_set_selection(world, entity_ids)?;
+    }
+    world.insert_resource(SubobjectSelection { refs: refs.clone() });
+    Ok(refs)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_expand_subobject_selection(
+    world: &mut World,
+    reference: SelectableSubobjectRef,
+    mode: &str,
+) -> Result<Vec<SelectableSubobjectRef>, String> {
+    validate_subobject_refs(world, std::slice::from_ref(&reference))?;
+    let element_id = reference.element_id();
+    let entity = find_entity_by_element_id(world, ElementId(element_id))
+        .ok_or_else(|| format!("Element {element_id} not found"))?;
+    let entity_ref = world
+        .get_entity(entity)
+        .map_err(|_| format!("Element {element_id} entity is not available"))?;
+    let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
+        return Err(format!(
+            "Element {element_id} has no evaluated subobject topology to expand"
+        ));
+    };
+
+    let mut refs = Vec::new();
+    match (&reference, mode) {
+        (SelectableSubobjectRef::Face { face, .. }, "bounding_edges") => {
+            let face_id = resolve_face_ref(&entity_ref, &mesh, face)
+                .ok_or_else(|| format!("Face '{}' was not found", face.label()))?;
+            for half_edge in mesh.edges_of_face(face_id.0) {
+                refs.push(SelectableSubobjectRef::Edge {
+                    element_id,
+                    edge: generated_edge_ref_for_half_edge(
+                        &mesh,
+                        &entity_ref,
+                        canonical_half_edge_index(&mesh, half_edge),
+                    ),
+                });
+            }
+        }
+        (SelectableSubobjectRef::Edge { edge, .. }, "connected_faces") => {
+            let half_edge = resolve_edge_ref(&entity_ref, &mesh, edge)
+                .ok_or_else(|| format!("Edge '{}' was not found", edge.label()))?;
+            let (face_a, face_b) = mesh.faces_adjacent_to_edge(half_edge);
+            for face_id in [Some(face_a), face_b].into_iter().flatten() {
+                if let Some(face_ref) = generated_face_ref_for_entity(&entity_ref, FaceId(face_id))
+                {
+                    refs.push(SelectableSubobjectRef::Face {
+                        element_id,
+                        face: face_ref,
+                    });
+                }
+            }
+        }
+        (
+            SelectableSubobjectRef::Face { .. } | SelectableSubobjectRef::Edge { .. },
+            "all_connected",
+        ) => {
+            refs = handle_list_subobjects(world, element_id)?
+                .into_iter()
+                .map(|info| info.reference)
+                .collect();
+        }
+        (SelectableSubobjectRef::Face { .. }, other) => {
+            return Err(format!(
+                "Unsupported face expansion mode '{other}'. Use bounding_edges or all_connected."
+            ));
+        }
+        (SelectableSubobjectRef::Edge { .. }, other) => {
+            return Err(format!(
+                "Unsupported edge expansion mode '{other}'. Use connected_faces or all_connected."
+            ));
+        }
+        _ => {
+            return Err(
+                "Only face and edge subobject refs support expansion in PP-SUBSEL-1.".to_string(),
+            );
+        }
+    }
+
+    refs.sort_by_key(SelectableSubobjectRef::label);
+    refs.dedup();
+    Ok(refs)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_apply_subobject_edit(
+    world: &mut World,
+    reference: SelectableSubobjectRef,
+    operation: String,
+    _parameters: Value,
+) -> Result<SubobjectEditResult, String> {
+    validate_subobject_refs(world, std::slice::from_ref(&reference))?;
+    let (edit_plan_kind, unsupported_reason) = match &reference {
+        SelectableSubobjectRef::Entity { .. } => (
+            "entity_command_redirect".to_string(),
+            Some("Use transform, set_property, or delete_entities for whole-entity edits.".to_string()),
+        ),
+        SelectableSubobjectRef::Handle { .. } => (
+            "handle_edit_plan_missing".to_string(),
+            Some("Handle-level API edit plans are not implemented in this PP-SUBSEL-1 slice.".to_string()),
+        ),
+        SelectableSubobjectRef::Face { .. } => (
+            "face_edit_plan_missing".to_string(),
+            Some("Face edits are available through viewport push/pull; Model API face edit plans are a follow-on slice.".to_string()),
+        ),
+        SelectableSubobjectRef::Edge { .. } => (
+            "edge_edit_plan_missing".to_string(),
+            Some(format!(
+                "Operation '{operation}' needs a representation-specific generated-edge edit plan before it can modify authored state."
+            )),
+        ),
+    };
+    Ok(SubobjectEditResult {
+        reference,
+        operation,
+        applied: false,
+        edit_plan_kind,
+        unsupported_reason,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn validate_subobject_refs(world: &World, refs: &[SelectableSubobjectRef]) -> Result<(), String> {
+    for reference in refs {
+        let eid = ElementId(reference.element_id());
+        ensure_user_editable_entity(world, eid, "subobject selection")?;
+        let entity = find_entity_by_element_id_readonly(world, eid)
+            .ok_or_else(|| format!("Element {} not found", eid.0))?;
+        let entity_ref = world
+            .get_entity(entity)
+            .map_err(|_| format!("Element {} entity is not available", eid.0))?;
+        match reference {
+            SelectableSubobjectRef::Entity { .. } => {}
+            SelectableSubobjectRef::Handle { .. } => {}
+            SelectableSubobjectRef::Face { face, .. } => {
+                let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
+                    return Err(format!("Element {} has no selectable faces", eid.0));
+                };
+                if resolve_face_ref(&entity_ref, &mesh, face).is_none() {
+                    return Err(format!("Element {} has no face '{}'", eid.0, face.label()));
+                }
+            }
+            SelectableSubobjectRef::Edge { edge, .. } => {
+                let Some(mesh) = evaluated_subobject_mesh(&entity_ref) else {
+                    return Err(format!("Element {} has no selectable edges", eid.0));
+                };
+                if resolve_edge_ref(&entity_ref, &mesh, edge).is_none() {
+                    return Err(format!("Element {} has no edge '{}'", eid.0, edge.label()));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn evaluated_subobject_mesh(entity_ref: &EntityRef) -> Option<EditableMesh> {
+    if let Some(mesh) = entity_ref.get::<EditableMesh>() {
+        return Some(mesh.clone());
+    }
+    let rotation = entity_ref
+        .get::<ShapeRotation>()
+        .copied()
+        .unwrap_or_default()
+        .0;
+    entity_ref
+        .get::<BoxPrimitive>()
+        .and_then(|primitive| primitive.to_editable_mesh(rotation))
+        .or_else(|| {
+            entity_ref
+                .get::<CylinderPrimitive>()
+                .and_then(|primitive| primitive.to_editable_mesh(rotation))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<SpherePrimitive>()
+                .and_then(|primitive| primitive.to_editable_mesh(rotation))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<PlanePrimitive>()
+                .and_then(|primitive| primitive.to_editable_mesh(rotation))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<ProfileExtrusion>()
+                .and_then(|primitive| primitive.to_editable_mesh(rotation))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<ProfileSweep>()
+                .and_then(|primitive| primitive.to_editable_mesh(rotation))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<ProfileRevolve>()
+                .and_then(|primitive| primitive.to_editable_mesh(rotation))
+        })
+}
+
+#[cfg(feature = "model-api")]
+fn generated_face_ref_for_entity(
+    entity_ref: &EntityRef,
+    face_id: FaceId,
+) -> Option<GeneratedFaceRef> {
+    entity_ref
+        .get::<BoxPrimitive>()
+        .and_then(|primitive| primitive.generated_face_ref(face_id))
+        .or_else(|| {
+            entity_ref
+                .get::<CylinderPrimitive>()
+                .and_then(|primitive| primitive.generated_face_ref(face_id))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<PlanePrimitive>()
+                .and_then(|primitive| primitive.generated_face_ref(face_id))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<ProfileExtrusion>()
+                .and_then(|primitive| primitive.generated_face_ref(face_id))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<ProfileSweep>()
+                .and_then(|primitive| primitive.generated_face_ref(face_id))
+        })
+        .or_else(|| {
+            entity_ref
+                .get::<ProfileRevolve>()
+                .and_then(|primitive| primitive.generated_face_ref(face_id))
+        })
+}
+
+#[cfg(feature = "model-api")]
+fn canonical_half_edge_index(mesh: &EditableMesh, half_edge_index: u32) -> u32 {
+    let half_edge = &mesh.half_edges[half_edge_index as usize];
+    if half_edge.twin == u32::MAX {
+        half_edge_index
+    } else {
+        half_edge_index.min(half_edge.twin)
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn generated_edge_ref_for_half_edge(
+    mesh: &EditableMesh,
+    entity_ref: &EntityRef,
+    half_edge_index: u32,
+) -> GeneratedEdgeRef {
+    let canonical = canonical_half_edge_index(mesh, half_edge_index);
+    let (face_a, face_b) = mesh.faces_adjacent_to_edge(canonical);
+    let first = generated_face_ref_for_entity(entity_ref, FaceId(face_a));
+    let second =
+        face_b.and_then(|face_id| generated_face_ref_for_entity(entity_ref, FaceId(face_id)));
+    match (first, second) {
+        (Some(a), Some(b)) => {
+            let (first, second) = if a.label() <= b.label() {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            GeneratedEdgeRef::BetweenFaces {
+                first,
+                second,
+                edge_index: canonical,
+            }
+        }
+        (Some(face), None) | (None, Some(face)) => GeneratedEdgeRef::BoundaryOfFace {
+            face,
+            edge_index: canonical,
+        },
+        (None, None) => GeneratedEdgeRef::EditableMeshEdge(canonical),
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn resolve_face_ref(
+    entity_ref: &EntityRef,
+    mesh: &EditableMesh,
+    target: &GeneratedFaceRef,
+) -> Option<FaceId> {
+    (0..mesh.faces.len() as u32).find_map(|face_index| {
+        (mesh.faces[face_index as usize].half_edge != u32::MAX
+            && generated_face_ref_for_entity(entity_ref, FaceId(face_index)).as_ref()
+                == Some(target))
+        .then_some(FaceId(face_index))
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn resolve_edge_ref(
+    entity_ref: &EntityRef,
+    mesh: &EditableMesh,
+    target: &GeneratedEdgeRef,
+) -> Option<u32> {
+    let mut seen_edges = HashSet::new();
+    for half_edge_index in 0..mesh.half_edges.len() as u32 {
+        let canonical = canonical_half_edge_index(mesh, half_edge_index);
+        if !seen_edges.insert(canonical) {
+            continue;
+        }
+        if &generated_edge_ref_for_half_edge(mesh, entity_ref, canonical) == target {
+            return Some(canonical);
+        }
+    }
+    None
 }
 
 #[cfg(feature = "model-api")]
