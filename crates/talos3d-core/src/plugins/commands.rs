@@ -895,7 +895,14 @@ mod tests {
         capability_registry::CapabilityRegistry,
         plugins::{
             history::{apply_pending_history_commands, History},
-            modeling::{primitives::Polyline, snapshots::PolylineFactory},
+            modeling::{
+                assembly::{RelationFactory, SemanticRelation},
+                group::{
+                    GroupFactory, GroupFrame, GroupMembers, LinkedModelIdMapping, LinkedModelRef,
+                },
+                primitives::Polyline,
+                snapshots::PolylineFactory,
+            },
         },
     };
 
@@ -929,5 +936,108 @@ mod tests {
         apply_pending_history_commands(&mut world);
 
         assert!(find_entity_by_element_id(&mut world, element_id).is_none());
+    }
+
+    #[test]
+    fn deleting_linked_group_removes_nested_instance_but_not_source_file() {
+        let temp = tempfile::tempdir().expect("temporary linked project directory");
+        let linked_path = temp.path().join("source.talos3d");
+        std::fs::write(&linked_path, b"linked source stays unchanged")
+            .expect("write linked source fixture");
+
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(GroupFactory);
+        registry.register_factory(PolylineFactory);
+        registry.register_factory(RelationFactory);
+        world.insert_resource(registry);
+        world.insert_resource(PendingCommandQueue::default());
+        world.insert_resource(History::default());
+        world.insert_resource(Messages::<DeleteEntitiesCommand>::default());
+        world.insert_resource(Messages::<ResolvedDeleteEntitiesCommand>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+
+        let root_id = ElementId(100);
+        let nested_group_id = ElementId(101);
+        let leaf_id = ElementId(102);
+        let relation_id = ElementId(103);
+        let host_id = ElementId(104);
+        world.spawn((
+            leaf_id,
+            Polyline {
+                points: vec![Vec3::ZERO, Vec3::X],
+            },
+        ));
+        world.spawn(host_id);
+        world.spawn((
+            nested_group_id,
+            GroupMembers {
+                name: "Nested linked assembly".to_string(),
+                member_ids: vec![leaf_id],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            root_id,
+            GroupMembers {
+                name: "Linked model".to_string(),
+                member_ids: vec![nested_group_id],
+                frame: GroupFrame::identity(),
+                linked_model: Some(LinkedModelRef {
+                    path: linked_path.to_string_lossy().into_owned(),
+                    source_root_id: ElementId(1),
+                    source_to_scene_ids: vec![LinkedModelIdMapping {
+                        source_id: ElementId(2),
+                        scene_id: leaf_id,
+                    }],
+                    content_hash: 42,
+                }),
+            },
+        ));
+        world.spawn((
+            relation_id,
+            SemanticRelation {
+                source: leaf_id,
+                target: host_id,
+                relation_type: "contains".to_string(),
+                parameters: serde_json::Value::Null,
+            },
+        ));
+
+        world
+            .resource_mut::<Messages<DeleteEntitiesCommand>>()
+            .write(DeleteEntitiesCommand {
+                element_ids: vec![root_id],
+            });
+        queue_delete_entities_commands(&mut world);
+        apply_pending_history_commands(&mut world);
+
+        for id in [root_id, nested_group_id, leaf_id, relation_id] {
+            assert!(
+                find_entity_by_element_id(&mut world, id).is_none(),
+                "linked instance constituent {} should be deleted",
+                id.0
+            );
+        }
+        assert_eq!(
+            std::fs::read(&linked_path).expect("linked source should remain"),
+            b"linked source stays unchanged"
+        );
+        assert!(find_entity_by_element_id(&mut world, host_id).is_some());
+
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands(&mut world);
+        for id in [root_id, nested_group_id, leaf_id, relation_id] {
+            assert!(
+                find_entity_by_element_id(&mut world, id).is_some(),
+                "undo should restore linked instance constituent {}",
+                id.0
+            );
+        }
+        assert_eq!(
+            std::fs::read(&linked_path).expect("linked source should still remain"),
+            b"linked source stays unchanged"
+        );
     }
 }

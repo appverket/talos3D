@@ -61,6 +61,7 @@ use crate::plugins::{
         occurrence::OccurrenceIdentity,
     },
     palette::{draw_command_palette, PaletteState},
+    persistence::{RecentFiles, RecoveryFiles},
     property_edit::{
         parse_property_value, property_panel_selection_signature, shared_property_value,
         PropertyEditState, PropertyPanelData, PropertyPanelState, SelectionSemanticKind,
@@ -740,6 +741,101 @@ fn queue_visible_command(
     );
 }
 
+fn queue_parameterized_file_command(
+    ctx: &egui::Context,
+    pending_command_invocations: &mut PendingCommandInvocations,
+    status_bar_data: &mut StatusBarData,
+    label: String,
+    command_id: &str,
+    path: &std::path::Path,
+) {
+    egui::Popup::close_all(ctx);
+    status_bar_data.begin_command(label);
+    queue_command_invocation_resource(
+        pending_command_invocations,
+        command_id,
+        serde_json::json!({"path": path.to_string_lossy()}),
+    );
+}
+
+fn recent_file_label(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let parent = path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .map(|parent| parent.to_string_lossy().into_owned());
+    match parent {
+        Some(parent) => format!("{name} — {parent}"),
+        None => name,
+    }
+}
+
+fn draw_document_history_menus(
+    ui: &mut egui::Ui,
+    recent_files: &RecentFiles,
+    recovery_files: &RecoveryFiles,
+    pending_command_invocations: &mut PendingCommandInvocations,
+    status_bar_data: &mut StatusBarData,
+    hovered_menu_hint: &mut Option<String>,
+) {
+    ui.menu_button("Open Recent", |ui| {
+        if recent_files.paths().is_empty() {
+            ui.add_enabled(false, egui::Button::new("No recent projects"));
+        }
+        for path in recent_files.paths() {
+            let response =
+                menu_row_button(ui, recent_file_label(path)).on_hover_text(path.to_string_lossy());
+            if response.contains_pointer() {
+                *hovered_menu_hint = Some(format!("Open {}", path.display()));
+            }
+            if response.clicked() {
+                queue_parameterized_file_command(
+                    ui.ctx(),
+                    pending_command_invocations,
+                    status_bar_data,
+                    "Open recent project".to_string(),
+                    "core.open_recent",
+                    path,
+                );
+            }
+        }
+    });
+
+    ui.menu_button("Recover Autosave", |ui| {
+        if recovery_files.files().is_empty() {
+            ui.add_enabled(false, egui::Button::new("No recovery files"));
+        }
+        for recovery in recovery_files.files() {
+            let source = recovery
+                .original_path
+                .as_deref()
+                .map(recent_file_label)
+                .unwrap_or_else(|| recovery.display_name.clone());
+            let response =
+                menu_row_button(ui, source).on_hover_text(recovery.recovery_path.to_string_lossy());
+            if response.contains_pointer() {
+                *hovered_menu_hint = Some(format!(
+                    "Recover autosaved work from {}",
+                    recovery.recovery_path.display()
+                ));
+            }
+            if response.clicked() {
+                queue_parameterized_file_command(
+                    ui.ctx(),
+                    pending_command_invocations,
+                    status_bar_data,
+                    "Recover autosave".to_string(),
+                    "core.recover_autosave",
+                    &recovery.recovery_path,
+                );
+            }
+        }
+    });
+}
+
 /// Predicate: would this group render inline under the menu-collapse rule? Used
 /// by `draw_category_menu_contents` to decide whether to emit a visual
 /// separator before the *next* group when the previous one was a submenu.
@@ -967,6 +1063,8 @@ fn draw_category_menu_contents(
     toolbar_registry: &ToolbarRegistry,
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
+    recent_files: &RecentFiles,
+    recovery_files: &RecoveryFiles,
 ) {
     let groups = category_menu_groups(category);
     if groups.is_empty() {
@@ -1019,6 +1117,15 @@ fn draw_category_menu_contents(
         category,
         crate::plugins::command_registry::CommandCategory::File
     ) {
+        ui.separator();
+        draw_document_history_menus(
+            ui,
+            recent_files,
+            recovery_files,
+            pending_command_invocations,
+            status_bar_data,
+            hovered_menu_hint,
+        );
         ui.separator();
         draw_project_settings_menu_button(ui, hovered_menu_hint, project_settings_window_state);
     }
@@ -1199,6 +1306,8 @@ struct ChromeData<'w, 's> {
     chrome_input_capture: ResMut<'w, ChromeInputCapture>,
     drag_state: ResMut<'w, ToolbarDragState>,
     viewport_context_menu: ResMut<'w, ViewportContextMenu>,
+    recent_files: Res<'w, RecentFiles>,
+    recovery_files: Res<'w, RecoveryFiles>,
     #[cfg(feature = "model-api")]
     model_api_runtime_info: Option<Res<'w, ModelApiRuntimeInfo>>,
     #[cfg(feature = "perf-stats")]
@@ -1279,6 +1388,8 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                             &data.toolbar_registry,
                             &mut data.toolbar_layout_state,
                             &mut data.doc_props,
+                            &data.recent_files,
+                            &data.recovery_files,
                         );
                     });
                 }

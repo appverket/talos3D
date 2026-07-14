@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeSet,
+    fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::*;
@@ -23,7 +25,7 @@ use crate::{
         definition_preview_scene::PreviewOnly,
         document_properties::DocumentProperties,
         document_state::DocumentState,
-        history::{History, PendingCommandQueue},
+        history::{History, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         layers::{LayerRegistry, DEFAULT_LAYER_NAME},
         lighting::{ensure_default_lighting_scene, SceneLightingSettings},
@@ -53,20 +55,142 @@ const PROJECT_FORMAT_TAG: &str = "adr049-opening-feature";
 const FEEDBACK_DURATION_SECONDS: f32 = 2.0;
 const FILE_EXTENSION: &str = "talos3d";
 const MATERIAL_REF_PREFIX: &str = "material_def.v1/";
+const MAX_RECENT_FILES: usize = 10;
+const MAX_RECOVERY_FILES: usize = 10;
+const RECOVERY_AUTOSAVE_INTERVAL_SECONDS: f32 = 30.0;
+const RECENT_FILES_NAME: &str = "recent-files.json";
+const RECOVERY_DIRECTORY_NAME: &str = "recovery";
 
 pub struct PersistencePlugin;
 
 impl Plugin for PersistencePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<OpaquePersistedEntities>().add_systems(
-            Update,
-            (
-                new_document_shortcut,
-                save_project_shortcut,
-                save_as_shortcut,
-                load_project_shortcut,
-            ),
-        );
+        app.init_resource::<OpaquePersistedEntities>()
+            .insert_resource(RecentFiles::load())
+            .insert_resource(RecoveryFiles::load())
+            .init_resource::<RecoveryAutosaveState>()
+            .add_systems(
+                Update,
+                (
+                    new_document_shortcut,
+                    save_project_shortcut,
+                    save_as_shortcut,
+                    load_project_shortcut,
+                ),
+            )
+            .add_systems(Update, autosave_recovery_system.after(HistorySet::Apply));
+    }
+}
+
+#[derive(Resource, Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentFiles {
+    paths: Vec<PathBuf>,
+}
+
+impl RecentFiles {
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    fn load() -> Self {
+        let Ok(path) = recent_files_path() else {
+            return Self::default();
+        };
+        let Ok(bytes) = fs::read(path) else {
+            return Self::default();
+        };
+        let Ok(mut recent) = serde_json::from_slice::<Self>(&bytes) else {
+            return Self::default();
+        };
+        recent.normalize();
+        recent
+    }
+
+    fn record(&mut self, path: PathBuf) {
+        let path = normalized_project_path(path);
+        self.paths.retain(|existing| existing != &path);
+        self.paths.insert(0, path);
+        self.normalize();
+    }
+
+    fn remove(&mut self, path: &Path) {
+        let path = normalized_project_path(path.to_path_buf());
+        self.paths.retain(|existing| existing != &path);
+    }
+
+    fn normalize(&mut self) {
+        let mut normalized = Vec::new();
+        for path in self.paths.drain(..) {
+            let path = normalized_project_path(path);
+            if !normalized.contains(&path) {
+                normalized.push(path);
+            }
+            if normalized.len() == MAX_RECENT_FILES {
+                break;
+            }
+        }
+        self.paths = normalized;
+    }
+
+    fn persist(&self) -> Result<(), String> {
+        let path = recent_files_path()?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+        atomic_write_local(&path, &bytes)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecoveryFile {
+    pub id: String,
+    pub recovery_path: PathBuf,
+    pub original_path: Option<PathBuf>,
+    pub display_name: String,
+    pub saved_at_unix_ms: u128,
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct RecoveryFiles {
+    files: Vec<RecoveryFile>,
+}
+
+impl RecoveryFiles {
+    pub fn files(&self) -> &[RecoveryFile] {
+        &self.files
+    }
+
+    fn load() -> Self {
+        let mut files = scan_recovery_files();
+        files.truncate(MAX_RECOVERY_FILES);
+        Self { files }
+    }
+
+    fn refresh(&mut self) {
+        *self = Self::load();
+    }
+}
+
+#[derive(Resource, Debug)]
+struct RecoveryAutosaveState {
+    timer: Timer,
+    recovery_id: String,
+    was_dirty: bool,
+}
+
+impl Default for RecoveryAutosaveState {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(RECOVERY_AUTOSAVE_INTERVAL_SECONDS, TimerMode::Repeating),
+            recovery_id: new_recovery_id(),
+            was_dirty: false,
+        }
+    }
+}
+
+impl RecoveryAutosaveState {
+    fn rotate_document(&mut self) {
+        self.recovery_id = new_recovery_id();
+        self.was_dirty = false;
+        self.timer.reset();
     }
 }
 
@@ -285,6 +409,46 @@ pub fn load_project_from_path(world: &mut World, path: PathBuf) -> Result<PathBu
     Ok(path)
 }
 
+/// Open one path from the persistent recent-file list.
+pub fn open_recent_project(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
+    if !path.exists() {
+        if let Some(mut recent) = world.get_resource_mut::<RecentFiles>() {
+            recent.remove(&path);
+            if let Err(error) = recent.persist() {
+                warn!("Failed to update recent project list: {error}");
+            }
+        }
+        return Err(format!(
+            "Recent project '{}' no longer exists",
+            path.display()
+        ));
+    }
+    load_project_from_path(world, path)
+}
+
+/// Restore an autosaved project without treating the recovery file as the
+/// document's real path. The recovered document stays dirty until the user
+/// explicitly saves it.
+pub fn recover_project_from_path(world: &mut World, path: PathBuf) -> Result<PathBuf, String> {
+    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+    let project: ProjectFile = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let recovery = recovery_record_from_disk(&path)
+        .ok_or_else(|| format!("'{}' is not a recovery project", path.display()))?;
+    load_project(world, project)?;
+
+    {
+        let mut document = world.resource_mut::<DocumentState>();
+        document.current_path = recovery.original_path.clone();
+        document.dirty = true;
+    }
+    if let Some(mut state) = world.get_resource_mut::<RecoveryAutosaveState>() {
+        state.recovery_id = recovery.id;
+        state.was_dirty = true;
+        state.timer.reset();
+    }
+    Ok(path)
+}
+
 /// Open a Save As dialog, save to the chosen path.
 #[cfg(target_arch = "wasm32")]
 pub fn save_as_now(_world: &mut World) -> Result<Option<()>, String> {
@@ -391,6 +555,9 @@ pub fn new_document(world: &mut World) {
         .resource_mut::<NextState<ActiveTool>>()
         .set(ActiveTool::Select);
     world.resource_mut::<DocumentState>().reset();
+    if let Some(mut autosave) = world.get_resource_mut::<RecoveryAutosaveState>() {
+        autosave.rotate_document();
+    }
 }
 
 // --- Internal ---
@@ -406,6 +573,9 @@ fn save_to_path(world: &mut World, path: &Path) -> Result<(), String> {
         .resource_mut::<DocumentState>()
         .mark_saved(path.to_path_buf());
 
+    record_recent_path(world, path.to_path_buf());
+    clear_active_recovery(world);
+
     Ok(())
 }
 
@@ -418,6 +588,12 @@ fn load_from_path(world: &mut World, path: &Path) -> Result<(), String> {
 
     let mut doc_state = world.resource_mut::<DocumentState>();
     doc_state.mark_saved(path.to_path_buf());
+    drop(doc_state);
+
+    record_recent_path(world, path.to_path_buf());
+    if let Some(mut autosave) = world.get_resource_mut::<RecoveryAutosaveState>() {
+        autosave.rotate_document();
+    }
 
     Ok(())
 }
@@ -432,6 +608,259 @@ fn ensure_extension(mut path: PathBuf) -> PathBuf {
             path.set_file_name(name);
             path
         }
+    }
+}
+
+fn record_recent_path(world: &mut World, path: PathBuf) {
+    let Some(mut recent) = world.get_resource_mut::<RecentFiles>() else {
+        return;
+    };
+    recent.record(path);
+    if let Err(error) = recent.persist() {
+        warn!("Failed to persist recent project list: {error}");
+    }
+}
+
+fn normalized_project_path(path: PathBuf) -> PathBuf {
+    path.canonicalize().unwrap_or(path)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn persistence_state_directory() -> Result<PathBuf, String> {
+    use etcetera::AppStrategy;
+
+    if let Some(path) = std::env::var_os("TALOS3D_STATE_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    let strategy = etcetera::choose_app_strategy(etcetera::AppStrategyArgs {
+        top_level_domain: "com".to_owned(),
+        author: "appverket".to_owned(),
+        app_name: "talos3d".to_owned(),
+    })
+    .map_err(|error| format!("state directory: {error}"))?;
+    Ok(strategy.data_dir().join("document-state"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn persistence_state_directory() -> Result<PathBuf, String> {
+    Err("Local recovery files are unavailable in the browser shell".to_string())
+}
+
+fn recent_files_path() -> Result<PathBuf, String> {
+    Ok(persistence_state_directory()?.join(RECENT_FILES_NAME))
+}
+
+fn recovery_directory() -> Result<PathBuf, String> {
+    Ok(persistence_state_directory()?.join(RECOVERY_DIRECTORY_NAME))
+}
+
+fn recovery_project_path(id: &str) -> Result<PathBuf, String> {
+    Ok(recovery_directory()?.join(format!("autosave-{id}.{FILE_EXTENSION}")))
+}
+
+fn recovery_metadata_path(recovery_path: &Path) -> PathBuf {
+    recovery_path.with_extension("json")
+}
+
+fn recovery_record_from_disk(recovery_path: &Path) -> Option<RecoveryFile> {
+    if !recovery_path.is_file() {
+        return None;
+    }
+    let metadata_path = recovery_metadata_path(recovery_path);
+    if let Ok(bytes) = fs::read(metadata_path) {
+        if let Ok(mut record) = serde_json::from_slice::<RecoveryFile>(&bytes) {
+            record.recovery_path = recovery_path.to_path_buf();
+            return Some(record);
+        }
+    }
+
+    let stem = recovery_path.file_stem()?.to_string_lossy();
+    let id = stem.strip_prefix("autosave-").unwrap_or(&stem).to_string();
+    let saved_at_unix_ms = recovery_path
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    Some(RecoveryFile {
+        id,
+        recovery_path: recovery_path.to_path_buf(),
+        original_path: None,
+        display_name: "Untitled recovered project".to_string(),
+        saved_at_unix_ms,
+    })
+}
+
+fn scan_recovery_files() -> Vec<RecoveryFile> {
+    let Ok(directory) = recovery_directory() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut files = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == FILE_EXTENSION)
+        })
+        .filter_map(|recovery_path| recovery_record_from_disk(&recovery_path))
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| right.saved_at_unix_ms.cmp(&left.saved_at_unix_ms));
+    files
+}
+
+fn atomic_write_local(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temporary = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .map(|extension| extension.to_string_lossy())
+            .unwrap_or_default()
+    ));
+    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    match fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(_) if path.exists() => {
+            fs::remove_file(path).map_err(|error| error.to_string())?;
+            fs::rename(temporary, path).map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn new_recovery_id() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return uuid::Uuid::new_v4().simple().to_string();
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        format!("browser-{}", unix_time_ms())
+    }
+}
+
+fn unix_time_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn autosave_recovery_system(world: &mut World) {
+    let dirty = world
+        .get_resource::<DocumentState>()
+        .is_some_and(|document| document.dirty);
+    let delta = world
+        .get_resource::<Time>()
+        .map(Time::delta)
+        .unwrap_or_default();
+    let should_autosave = {
+        let mut state = world.resource_mut::<RecoveryAutosaveState>();
+        if !dirty {
+            state.was_dirty = false;
+            state.timer.reset();
+            return;
+        }
+        state.timer.tick(delta);
+        let should_autosave = !state.was_dirty || state.timer.just_finished();
+        state.was_dirty = true;
+        should_autosave
+    };
+    if should_autosave {
+        if let Err(error) = write_recovery_autosave(world) {
+            warn!("Recovery autosave failed: {error}");
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn autosave_recovery_system(_world: &mut World) {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_recovery_autosave(world: &mut World) -> Result<PathBuf, String> {
+    let project = build_project_file(world)?;
+    let (recovery_id, original_path, display_name) = {
+        let state = world.resource::<RecoveryAutosaveState>();
+        let document = world.resource::<DocumentState>();
+        (
+            state.recovery_id.clone(),
+            document.current_path.clone(),
+            document.display_name(),
+        )
+    };
+    let recovery_path = recovery_project_path(&recovery_id)?;
+    let saved_at_unix_ms = unix_time_ms();
+    let bytes = serde_json::to_vec_pretty(&project).map_err(|error| error.to_string())?;
+    atomic_write_local(&recovery_path, &bytes)?;
+
+    let record = RecoveryFile {
+        id: recovery_id,
+        recovery_path: recovery_path.clone(),
+        original_path,
+        display_name,
+        saved_at_unix_ms,
+    };
+    let metadata = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
+    atomic_write_local(&recovery_metadata_path(&recovery_path), &metadata)?;
+    prune_recovery_files()?;
+    if let Some(mut recovery_files) = world.get_resource_mut::<RecoveryFiles>() {
+        recovery_files.refresh();
+    }
+    Ok(recovery_path)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn prune_recovery_files() -> Result<(), String> {
+    for record in scan_recovery_files().into_iter().skip(MAX_RECOVERY_FILES) {
+        if record.recovery_path.exists() {
+            fs::remove_file(&record.recovery_path).map_err(|error| error.to_string())?;
+        }
+        let metadata = recovery_metadata_path(&record.recovery_path);
+        if metadata.exists() {
+            fs::remove_file(metadata).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn clear_active_recovery(world: &mut World) {
+    let Some(recovery_id) = world
+        .get_resource::<RecoveryAutosaveState>()
+        .map(|state| state.recovery_id.clone())
+    else {
+        return;
+    };
+    if let Ok(path) = recovery_project_path(&recovery_id) {
+        if path.exists() {
+            if let Err(error) = fs::remove_file(&path) {
+                warn!(
+                    "Failed to remove recovery file '{}': {error}",
+                    path.display()
+                );
+            }
+        }
+        let metadata = recovery_metadata_path(&path);
+        if metadata.exists() {
+            if let Err(error) = fs::remove_file(&metadata) {
+                warn!(
+                    "Failed to remove recovery metadata '{}': {error}",
+                    metadata.display()
+                );
+            }
+        }
+    }
+    if let Some(mut state) = world.get_resource_mut::<RecoveryAutosaveState>() {
+        state.was_dirty = false;
+        state.timer.reset();
+    }
+    if let Some(mut recovery_files) = world.get_resource_mut::<RecoveryFiles>() {
+        recovery_files.refresh();
     }
 }
 
@@ -1180,6 +1609,121 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
+
+    #[test]
+    fn recent_files_are_mru_deduplicated_and_capped_at_ten() {
+        let mut recent = RecentFiles::default();
+        for index in 0..12 {
+            recent.record(PathBuf::from(format!("/projects/project-{index}.talos3d")));
+        }
+        recent.record(PathBuf::from("/projects/project-5.talos3d"));
+
+        assert_eq!(recent.paths().len(), MAX_RECENT_FILES);
+        assert_eq!(
+            recent.paths().first(),
+            Some(&PathBuf::from("/projects/project-5.talos3d"))
+        );
+        assert_eq!(
+            recent
+                .paths()
+                .iter()
+                .filter(|path| path.ends_with("project-5.talos3d"))
+                .count(),
+            1
+        );
+        assert!(!recent
+            .paths()
+            .contains(&PathBuf::from("/projects/project-0.talos3d")));
+    }
+
+    #[test]
+    fn recovery_file_without_metadata_is_still_discoverable_after_a_kill() {
+        let temp = tempfile::tempdir().expect("temporary recovery directory");
+        let path = temp.path().join("autosave-crashed.talos3d");
+        fs::write(&path, b"complete project bytes").expect("write recovery fixture");
+
+        let record = recovery_record_from_disk(&path)
+            .expect("a complete autosave remains discoverable without its metadata sidecar");
+        assert_eq!(record.id, "crashed");
+        assert_eq!(record.recovery_path, path);
+        assert!(record.original_path.is_none());
+    }
+
+    #[test]
+    fn recovering_autosave_restores_original_path_but_keeps_document_dirty() {
+        let temp = tempfile::tempdir().expect("temporary recovery directory");
+        let recovery_path = temp.path().join("autosave-session.talos3d");
+        let original_path = temp.path().join("original.talos3d");
+        let project = ProjectFile {
+            version: PROJECT_FILE_VERSION,
+            created_by: Some(current_project_created_by()),
+            next_element_id: 1,
+            document_properties: Some(DocumentProperties::default()),
+            layers: None,
+            materials: None,
+            textures: None,
+            definitions: None,
+            definition_libraries: None,
+            named_views: None,
+            lighting: Some(SceneLightingSettings::default()),
+            sources: None,
+            nominations: None,
+            material_specs: None,
+            knowledge_recipe_drafts: None,
+            knowledge_assembly_pattern_drafts: None,
+            corpus_gaps: None,
+            entities: Vec::new(),
+        };
+        atomic_write_local(
+            &recovery_path,
+            &serde_json::to_vec_pretty(&project).expect("serialize recovery project"),
+        )
+        .expect("write recovery project");
+        let record = RecoveryFile {
+            id: "session".to_string(),
+            recovery_path: recovery_path.clone(),
+            original_path: Some(original_path.clone()),
+            display_name: "original.talos3d".to_string(),
+            saved_at_unix_ms: 123,
+        };
+        atomic_write_local(
+            &recovery_metadata_path(&recovery_path),
+            &serde_json::to_vec_pretty(&record).expect("serialize recovery metadata"),
+        )
+        .expect("write recovery metadata");
+
+        let mut world = World::new();
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(MaterialRegistry::default());
+        world.insert_resource(TextureRegistry::default());
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(DefinitionLibraryRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+        world.insert_resource(History::default());
+        world.insert_resource(PendingCommandQueue::default());
+        world.insert_resource(PropertyEditState::default());
+        world.insert_resource(TransformState::default());
+        world.insert_resource(State::new(ActiveTool::Select));
+        world.insert_resource(NextState::<ActiveTool>::default());
+        world.insert_resource(DocumentState::default());
+        world.insert_resource(RecoveryAutosaveState::default());
+
+        recover_project_from_path(&mut world, recovery_path).expect("recovery project should load");
+
+        let document = world.resource::<DocumentState>();
+        assert_eq!(document.current_path, Some(original_path));
+        assert!(
+            document.dirty,
+            "recovered work must require an explicit save"
+        );
+        assert_eq!(
+            world.resource::<RecoveryAutosaveState>().recovery_id,
+            "session"
+        );
+    }
 
     #[test]
     fn build_project_file_omits_bundled_definition_libraries() {

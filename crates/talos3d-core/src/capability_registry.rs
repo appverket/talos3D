@@ -1560,11 +1560,18 @@ impl CapabilityRegistry {
 
     pub fn expand_delete_ids(&self, world: &World, requested_ids: &[ElementId]) -> Vec<ElementId> {
         let mut expanded = requested_ids.to_vec();
-        for factory in &self.ordered_factories {
-            factory.collect_delete_dependencies(world, requested_ids, &mut expanded);
+        loop {
+            let previous_len = expanded.len();
+            let dependency_roots = expanded.clone();
+            for factory in &self.ordered_factories {
+                factory.collect_delete_dependencies(world, &dependency_roots, &mut expanded);
+            }
+            expanded.sort_unstable_by_key(|element_id| element_id.0);
+            expanded.dedup();
+            if expanded.len() == previous_len {
+                break;
+            }
         }
-        expanded.sort_unstable_by_key(|element_id| element_id.0);
-        expanded.dedup();
         expanded
     }
 

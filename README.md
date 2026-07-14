@@ -86,6 +86,8 @@ Talos3D already includes:
 - authored fillet and chamfer features with command and MCP-driven editing
 - authored scene lighting with persistent ambient state, recoverable default
   rig, and MCP light-management tools
+- desktop project recovery autosaves plus a persistent ten-project Open Recent
+  list in the File menu
 - an embedded assistant chat lane that uses the MCP surface for model work and
   supports managed relay or direct OpenAI/Anthropic provider connections
 - an architectural capability with walls, openings, BIM metadata, and

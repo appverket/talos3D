@@ -6,9 +6,16 @@ use serde_json::Value;
 
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
-    camera::focus_orbit_camera_on_bounds, commands::DeleteEntitiesCommand,
-    history::PendingCommandQueue, identity::ElementId, lighting::scene_light_object_exposed,
-    palette::PaletteState, selection::Selected, tools::ActiveTool, transform::PivotPoint,
+    camera::focus_orbit_camera_on_bounds,
+    commands::DeleteEntitiesCommand,
+    history::PendingCommandQueue,
+    identity::ElementId,
+    lighting::scene_light_object_exposed,
+    palette::PaletteState,
+    persistence::{open_recent_project, recover_project_from_path},
+    selection::Selected,
+    tools::ActiveTool,
+    transform::PivotPoint,
 };
 
 use crate::plugins::icons;
@@ -572,6 +579,50 @@ pub fn register_core_commands(app: &mut App) {
     )
     .register_command(
         CommandDescriptor {
+            id: "core.open_recent".to_string(),
+            label: "Open Recent".to_string(),
+            description: "Open a project from the persistent recent-file list".to_string(),
+            category: CommandCategory::File,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {"path": {"type": "string"}}
+            })),
+            default_shortcut: None,
+            icon: Some("icon.open".to_string()),
+            hint: Some("Open a recently used Talos3D project".to_string()),
+            requires_selection: false,
+            show_in_menu: false,
+            version: 1,
+            activates_tool: None,
+            capability_id: None,
+        },
+        execute_open_recent,
+    )
+    .register_command(
+        CommandDescriptor {
+            id: "core.recover_autosave".to_string(),
+            label: "Recover Autosave".to_string(),
+            description: "Restore a crash-recovery autosave as a dirty project".to_string(),
+            category: CommandCategory::File,
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {"path": {"type": "string"}}
+            })),
+            default_shortcut: None,
+            icon: Some("icon.open".to_string()),
+            hint: Some("Recover work from an autosaved project snapshot".to_string()),
+            requires_selection: false,
+            show_in_menu: false,
+            version: 1,
+            activates_tool: None,
+            capability_id: None,
+        },
+        execute_recover_autosave,
+    )
+    .register_command(
+        CommandDescriptor {
             id: "core.save".to_string(),
             label: "Save".to_string(),
             description: "Save the current project".to_string(),
@@ -925,6 +976,35 @@ fn execute_open(world: &mut World, _: &Value) -> Result<CommandResult, String> {
         Ok(None) => Ok(CommandResult::empty()),
         Err(e) => Err(e),
     }
+}
+
+fn execute_open_recent(world: &mut World, parameters: &Value) -> Result<CommandResult, String> {
+    let path = parameters
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| "Open Recent requires a non-empty path".to_string())?;
+    let path = open_recent_project(world, path.into())?;
+    Ok(CommandResult {
+        output: Some(serde_json::json!({"path": path})),
+        ..CommandResult::empty()
+    })
+}
+
+fn execute_recover_autosave(
+    world: &mut World,
+    parameters: &Value,
+) -> Result<CommandResult, String> {
+    let path = parameters
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| "Recover Autosave requires a non-empty path".to_string())?;
+    let path = recover_project_from_path(world, path.into())?;
+    Ok(CommandResult {
+        output: Some(serde_json::json!({"recovery_path": path})),
+        ..CommandResult::empty()
+    })
 }
 
 fn execute_save(world: &mut World, _: &Value) -> Result<CommandResult, String> {

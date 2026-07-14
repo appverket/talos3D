@@ -1,5 +1,5 @@
 use crate::plugins::commands::find_entity_by_element_id_readonly;
-use std::any::Any;
+use std::{any::Any, collections::HashSet};
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -431,20 +431,13 @@ impl AuthoredEntityFactory for GroupFactory {
         requested_ids: &[ElementId],
         out: &mut Vec<ElementId>,
     ) {
-        // When a group is deleted, also delete its members
-        let mut q = world.try_query::<EntityRef>().unwrap();
-        for entity_ref in q.iter(world) {
-            let (Some(element_id), Some(members)) = (
-                entity_ref.get::<ElementId>(),
-                entity_ref.get::<GroupMembers>(),
-            ) else {
-                continue;
-            };
-            if requested_ids.contains(element_id) {
-                for member_id in &members.member_ids {
-                    if !out.contains(member_id) {
-                        out.push(*member_id);
-                    }
+        // A group is an aggregate for deletion. Expand through nested groups
+        // so deleting a linked-model root removes every instantiated scene
+        // constituent while leaving the external linked project untouched.
+        for requested_id in requested_ids {
+            for member_id in collect_group_members_recursive(world, *requested_id) {
+                if !out.contains(&member_id) {
+                    out.push(member_id);
                 }
             }
         }
@@ -562,7 +555,11 @@ pub fn find_group_for_member(world: &World, member_id: ElementId) -> Option<Elem
 pub fn collect_group_members_recursive(world: &World, group_id: ElementId) -> Vec<ElementId> {
     let mut result = Vec::new();
     let mut stack = vec![group_id];
+    let mut visited = HashSet::new();
     while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
         if let Some(entity) = find_entity_by_element_id_readonly(world, id) {
             if let Some(members) = world.get::<GroupMembers>(entity) {
                 for member_id in &members.member_ids {
