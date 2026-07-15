@@ -9857,10 +9857,14 @@ fn execute_model_api_delete_entities_command(
     let request: DeleteEntitiesRequest =
         serde_json::from_value(parameters.clone()).map_err(|e| e.to_string())?;
     let requested_ids = request.element_ids.clone();
-    let deleted_count = handle_delete_entities(world, request.element_ids)?;
+    let recursive = request.recursive;
+    let deleted_count = handle_delete_entities_with_options(world, request.element_ids, recursive)?;
     Ok(CommandResult {
         deleted: requested_ids,
-        output: Some(json!({ "deleted_count": deleted_count })),
+        output: Some(json!({
+            "deleted_count": deleted_count,
+            "recursive": recursive,
+        })),
         ..CommandResult::default()
     })
 }
@@ -10337,6 +10341,15 @@ pub fn handle_accept_semantic_shadow_candidate(
 
 #[cfg(feature = "model-api")]
 pub fn handle_delete_entities(world: &mut World, element_ids: Vec<u64>) -> Result<usize, String> {
+    handle_delete_entities_with_options(world, element_ids, true)
+}
+
+#[cfg(feature = "model-api")]
+pub fn handle_delete_entities_with_options(
+    world: &mut World,
+    element_ids: Vec<u64>,
+    recursive: bool,
+) -> Result<usize, String> {
     if element_ids.is_empty() {
         return Err("No entities found for the given IDs".to_string());
     }
@@ -10346,9 +10359,13 @@ pub fn handle_delete_entities(world: &mut World, element_ids: Vec<u64>) -> Resul
         ensure_user_editable_entity(world, *element_id, "deleted")?;
     }
 
-    let expanded_ids = world
-        .resource::<CapabilityRegistry>()
-        .expand_delete_ids(world, &ids);
+    let expanded_ids = if recursive {
+        world
+            .resource::<CapabilityRegistry>()
+            .expand_delete_ids(world, &ids)
+    } else {
+        ids.clone()
+    };
     let deleted_count = expanded_ids.len();
     send_event(
         world,
@@ -12746,7 +12763,7 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     let mut snapshot = CapabilitySnapshotInfo {
         snapshot_version: 1,
         expanded,
-        size_budget_bytes: 12 * 1024,
+        size_budget_bytes: 16 * 1024,
         estimated_json_bytes: 0,
         summary,
         computed,
@@ -13768,6 +13785,15 @@ pub fn handle_discover_curated_paths(
         }
     } else if has_materializable_path {
         match path_kind.as_str() {
+            "recipe"
+                if query_specific_parametric_beats_recipes(
+                    request.query.as_deref(),
+                    &parametric_types,
+                    &recipe_rankings,
+                ) =>
+            {
+                "parametric.create"
+            }
             "recipe" if !recipe_rankings.is_empty() => "instantiate_recipe",
             "parametric" if !parametric_types.is_empty() => "parametric.create",
             "definition" if !definition_assets.is_empty() => "occurrence.create",
@@ -13791,6 +13817,43 @@ pub fn handle_discover_curated_paths(
         suggested_next_tool: suggested_next_tool.into(),
         guidance_card_ids,
     })
+}
+
+#[cfg(feature = "model-api")]
+fn query_specific_parametric_beats_recipes(
+    query: Option<&str>,
+    parametric_types: &[crate::plugins::parametric_mcp::ParametricTypeInfo],
+    recipe_rankings: &[RecipeRankingInfo],
+) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    if parametric_types.is_empty() {
+        return false;
+    }
+    let query_terms = bridge_tokens(query);
+    if query_terms.is_empty() {
+        return false;
+    }
+    let overlap = |text: &str| -> usize {
+        let tokens = bridge_tokens(text);
+        query_terms
+            .iter()
+            .filter(|term| tokens.iter().any(|candidate| candidate == *term))
+            .count()
+    };
+    let best_parametric = parametric_types
+        .iter()
+        .map(|path| overlap(&format!("{} {}", path.id, path.label)))
+        .max()
+        .unwrap_or(0);
+    let best_recipe = recipe_rankings
+        .iter()
+        .map(|ranking| overlap(&format!("{} {}", ranking.id, ranking.label)))
+        .max()
+        .unwrap_or(0);
+
+    best_parametric >= 2 && best_parametric > best_recipe
 }
 
 #[cfg(feature = "model-api")]

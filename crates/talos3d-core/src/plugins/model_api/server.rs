@@ -2480,6 +2480,11 @@ pub(super) struct GetEntityRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct DeleteEntitiesRequest {
     pub(super) element_ids: Vec<u64>,
+    /// When true (the default), delete expansion follows capability-owned
+    /// semantics such as deleting group members with the group. Set false to
+    /// delete only the explicitly listed entity shells.
+    #[serde(default = "default_true")]
+    pub(super) recursive: bool,
 }
 
 #[cfg(feature = "model-api")]
@@ -3186,7 +3191,7 @@ impl CapabilitySnapshotInfo {
         Self {
             snapshot_version: 1,
             expanded,
-            size_budget_bytes: 12 * 1024,
+            size_budget_bytes: 16 * 1024,
             estimated_json_bytes: 0,
             summary: CapabilitySnapshotSummary::default(),
             computed: CapabilitySnapshotComputed::default(),
@@ -3886,17 +3891,17 @@ pub(super) struct SelectRecipeRequest {
 pub struct CuratedPathDiscoveryRequest {
     /// `recipe`, `parametric`, `definition`, or `prior`. Defaults to `recipe`.
     #[serde(default)]
-    pub(super) path_kind: Option<String>,
+    pub path_kind: Option<String>,
     /// Element class or concept id the caller wants to author.
     #[serde(default)]
-    pub(super) element_class: Option<String>,
+    pub element_class: Option<String>,
     /// Natural-language search terms from the authoring prompt. Discovery uses
     /// these to rank matching curated paths without treating generic class
     /// words as discriminators.
     #[serde(default)]
-    pub(super) query: Option<String>,
+    pub query: Option<String>,
     #[serde(default)]
-    pub(super) context: serde_json::Value,
+    pub context: serde_json::Value,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -4806,7 +4811,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "delete_entities",
-        description = "Delete one or more entities by element ID through the command pipeline. Returns CommandResult."
+        description = "Delete one or more entities by element ID through the command pipeline. By default recursive=true, so capability delete expansion applies (for example, deleting a group may delete its members). Use recursive=false to delete only the explicitly listed entity shells. Returns CommandResult."
     )]
     pub(super) async fn delete_entities_tool(
         &self,

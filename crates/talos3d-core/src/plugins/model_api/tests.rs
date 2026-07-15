@@ -6122,6 +6122,65 @@ fn create_assembly_creates_selected_physical_group_for_members() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn delete_entities_can_delete_group_shell_without_members() {
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
+    register_house_with_member_obligations(&mut world);
+    let foundation = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.25, 0.0],
+            "half_extents": [4.0, 0.25, 3.0]
+        }),
+    )
+    .expect("foundation should be creatable");
+    let wall = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 1.75, -3.0],
+            "half_extents": [4.0, 1.5, 0.15]
+        }),
+    )
+    .expect("wall should be creatable");
+
+    let result = handle_create_assembly(
+        &mut world,
+        CreateAssemblyRequest {
+            assembly_type: "house".into(),
+            label: "Grouped members".into(),
+            members: vec![
+                AssemblyMemberRefRequest {
+                    target: foundation,
+                    role: "foundation".into(),
+                },
+                AssemblyMemberRefRequest {
+                    target: wall,
+                    role: "exterior_wall".into(),
+                },
+            ],
+            parameters: Value::Null,
+            metadata: Value::Null,
+            relations: Vec::new(),
+        },
+    )
+    .expect("assembly should be creatable");
+    let group_id = result.group_element_id.expect("physical group id");
+
+    let deleted_count = handle_delete_entities_with_options(&mut world, vec![group_id], false)
+        .expect("non-recursive delete should remove only the group shell");
+
+    assert_eq!(deleted_count, 1);
+    assert!(get_entity_snapshot(&world, ElementId(group_id)).is_none());
+    assert!(get_entity_snapshot(&world, ElementId(foundation)).is_some());
+    assert!(get_entity_snapshot(&world, ElementId(wall)).is_some());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn preview_semantic_assembly_from_selection_expands_group_and_lists_roles() {
     use crate::capability_registry::{
         AssemblyMemberRoleDescriptor, AssemblyTypeDescriptor, DuplicateRoleGroupingPolicy,
