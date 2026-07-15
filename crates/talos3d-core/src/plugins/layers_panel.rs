@@ -452,19 +452,16 @@ fn render_member(
 ) {
     ui.horizontal(|ui| {
         ui.add_space(INDENT * 1.5);
-        let drag_id = egui::Id::new(("talos_layer_member", member.element_id));
         let payload = LayerMemberDrag {
             entity: member.entity,
             element_id: member.element_id,
         };
         let is_selected = selected.contains(&member.entity);
         let label = format!("- {}", member.label);
-        let inner = ui
-            .dnd_drag_source(drag_id, payload, |ui| {
-                ui.selectable_label(is_selected, label)
-            })
-            .inner;
-        if inner.clicked() {
+        let response = member_row_response(ui, is_selected, label)
+            .on_hover_text("Click to select • Drag to move to another layer");
+        response.dnd_set_drag_payload(payload);
+        if response.clicked() {
             let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
             actions.select = Some(LayerMemberSelect {
                 entity: member.entity,
@@ -473,6 +470,19 @@ fn render_member(
             });
         }
     });
+}
+
+/// A member row is one interaction target with two deliberately compatible
+/// gestures: a click selects it, while movement beyond egui's drag threshold
+/// starts a layer reassignment. Using `dnd_drag_source` here would overlay a
+/// drag-only response on the selectable label and let that response win the
+/// pointer gesture intermittently.
+fn member_row_response(
+    ui: &mut egui::Ui,
+    is_selected: bool,
+    label: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    ui.add(egui::Button::selectable(is_selected, label).sense(egui::Sense::click_and_drag()))
 }
 
 /// Paint a small disclosure triangle; returns whether it was clicked.
@@ -654,6 +664,15 @@ mod tests {
         assert!(world.resource::<LayersPanelState>().visible);
         execute_toggle_layers(&mut world, &Value::Null).unwrap();
         assert!(!world.resource::<LayersPanelState>().visible);
+    }
+
+    #[test]
+    fn member_row_uses_one_response_for_click_selection_and_dragging() {
+        egui::__run_test_ui(|ui| {
+            let response = member_row_response(ui, false, "Polyline");
+            assert!(response.sense.senses_click());
+            assert!(response.sense.senses_drag());
+        });
     }
 
     #[test]
