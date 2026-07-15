@@ -580,6 +580,35 @@ fn get_entity_details_returns_normalized_property_list() {
     assert_eq!(details.properties[2].kind, "text");
 }
 
+#[test]
+fn get_entities_details_returns_bulk_details_and_missing_ids() {
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+    world.insert_resource(registry);
+
+    for (id, x) in [(3, 1.0), (4, 2.0)] {
+        world.spawn((
+            ElementId(id),
+            BoxPrimitive {
+                centre: Vec3::new(x, 2.0, 3.0),
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            ShapeRotation::default(),
+        ));
+    }
+
+    let response = get_entities_details(&world, vec![4, 999, 3]);
+
+    let returned_ids: Vec<u64> = response
+        .details
+        .iter()
+        .map(|details| details.element_id)
+        .collect();
+    assert_eq!(returned_ids, vec![4, 3]);
+    assert_eq!(response.missing, vec![999]);
+}
+
 #[cfg(feature = "model-api")]
 fn init_model_api_test_world() -> World {
     let mut world = World::new();
@@ -1674,6 +1703,18 @@ async fn mcp_tools_return_structured_model_data() {
     assert!(prop_names.contains(&"center"));
     assert!(prop_names.contains(&"half_extents"));
     assert!(prop_names.contains(&"material"));
+
+    let bulk_details: EntitiesDetailsResponse = server
+        .get_entities_details_tool(Parameters(GetEntitiesRequest {
+            element_ids: vec![10, 999],
+        }))
+        .await
+        .expect("get_entities_details tool should succeed")
+        .into_typed()
+        .expect("get_entities_details result should deserialize");
+    assert_eq!(bulk_details.details.len(), 1);
+    assert_eq!(bulk_details.details[0].element_id, 10);
+    assert_eq!(bulk_details.missing, vec![999]);
 
     let summary: ModelSummary = server
         .model_summary_tool()

@@ -242,6 +242,17 @@ impl ModelApiServer {
         .await
     }
 
+    async fn request_get_entities_details(
+        &self,
+        element_ids: Vec<u64>,
+    ) -> Result<EntitiesDetailsResponse, String> {
+        self.round_trip(|response| ModelApiRequest::GetEntitiesDetails {
+            element_ids,
+            response,
+        })
+        .await
+    }
+
     async fn request_model_summary(&self) -> Result<ModelSummary, String> {
         self.round_trip(ModelApiRequest::ModelSummary).await
     }
@@ -2473,6 +2484,13 @@ pub struct SessionProfileInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct GetEntityRequest {
     pub(super) element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct GetEntitiesRequest {
+    pub(super) element_ids: Vec<u64>,
 }
 
 #[cfg(feature = "model-api")]
@@ -4713,6 +4731,27 @@ impl ModelApiServer {
             .ok_or_else(|| {
                 McpError::invalid_params(format!("entity {} not found", params.element_id), None)
             })?;
+        json_tool_result(details)
+    }
+
+    #[tool(
+        name = "get_entities_details",
+        description = "Get normalized details for multiple entities by element ID in one call. Returns {details, missing}; useful for inspecting generated assembly members without repeated MCP round trips."
+    )]
+    pub(super) async fn get_entities_details_tool(
+        &self,
+        Parameters(params): Parameters<GetEntitiesRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.element_ids.is_empty() {
+            return Err(McpError::invalid_params(
+                "element_ids must contain at least one id".to_string(),
+                None,
+            ));
+        }
+        let details = self
+            .request_get_entities_details(params.element_ids)
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(details)
     }
 

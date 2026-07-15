@@ -219,6 +219,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_entities", ToolCategory::Inspection),
     ("get_entity", ToolCategory::Inspection),
     ("get_entity_details", ToolCategory::Inspection),
+    ("get_entities_details", ToolCategory::Inspection),
     ("model_summary", ToolCategory::Inspection),
     ("outline_tree", ToolCategory::Inspection),
     ("get_assembly", ToolCategory::Inspection),

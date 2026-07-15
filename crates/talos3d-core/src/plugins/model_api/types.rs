@@ -66,6 +66,13 @@ pub struct EntityDetails {
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntitiesDetailsResponse {
+    pub details: Vec<EntityDetails>,
+    pub missing: Vec<u64>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubobjectEditResult {
     pub reference: SelectableSubobjectRef,
     pub operation: String,

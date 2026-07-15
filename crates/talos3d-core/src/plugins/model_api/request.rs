@@ -16,6 +16,10 @@ pub(super) enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<Option<EntityDetails>>,
     },
+    GetEntitiesDetails {
+        element_ids: Vec<u64>,
+        response: oneshot::Sender<EntitiesDetailsResponse>,
+    },
     ModelSummary(oneshot::Sender<ModelSummary>),
     OutlineTree(oneshot::Sender<Value>),
     ListImporters(oneshot::Sender<Vec<ImporterDescriptor>>),
@@ -1168,6 +1172,12 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(get_entity_details(world, ElementId(element_id)));
+        }
+        ModelApiRequest::GetEntitiesDetails {
+            element_ids,
+            response,
+        } => {
+            let _ = response.send(get_entities_details(world, element_ids));
         }
         ModelApiRequest::ModelSummary(response) => {
             let _ = response.send(model_summary(world));

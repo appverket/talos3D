@@ -382,6 +382,20 @@ pub fn get_entity_details(world: &World, element_id: ElementId) -> Option<Entity
     Some(entity_details_from_snapshot(world, &snapshot))
 }
 
+pub fn get_entities_details(world: &World, element_ids: Vec<u64>) -> EntitiesDetailsResponse {
+    let mut details = Vec::with_capacity(element_ids.len());
+    let mut missing = Vec::new();
+
+    for raw_id in element_ids {
+        match get_entity_details(world, ElementId(raw_id)) {
+            Some(entity_details) => details.push(entity_details),
+            None => missing.push(raw_id),
+        }
+    }
+
+    EntitiesDetailsResponse { details, missing }
+}
+
 pub fn model_summary(world: &World) -> ModelSummary {
     let summary = world
         .resource::<CapabilityRegistry>()
