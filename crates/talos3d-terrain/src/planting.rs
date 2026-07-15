@@ -19,7 +19,7 @@ use talos3d_capability_api::commands::{
 };
 use talos3d_core::{
     authored_entity::{AuthoredEntity, BoxedEntity, EntityBounds},
-    capability_registry::CapabilityRegistry,
+    capability_registry::{CapabilityRegistry, ElementClassAssignment},
     plugins::{
         commands::{
             despawn_by_element_id, find_entity_by_element_id, find_entity_by_element_id_readonly,
@@ -568,6 +568,70 @@ fn member_bounds_excluding(
                 any = true;
             }
         }
+    }
+    any.then_some(EntityBounds { min, max })
+}
+
+fn is_planting_marker_bounds(bounds: EntityBounds) -> bool {
+    let size = bounds.max - bounds.min;
+    size.x <= 0.05 && size.y <= 0.05 && size.z <= 0.05
+}
+
+fn is_planting_visual_finish(entity_ref: &bevy::ecs::world::EntityRef<'_>) -> bool {
+    entity_ref
+        .get::<ElementClassAssignment>()
+        .is_some_and(|assignment| {
+            matches!(
+                assignment.element_class.0.as_str(),
+                "trim" | "architectural_trim"
+            )
+        })
+}
+
+fn planting_body_bounds(world: &World, root_ids: &[ElementId]) -> Option<EntityBounds> {
+    let registry = world.resource::<CapabilityRegistry>();
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut any = false;
+    let mut stack = root_ids.to_vec();
+    while let Some(id) = stack.pop() {
+        let Some(entity) = find_entity_by_element_id_readonly(world, id) else {
+            continue;
+        };
+        let Ok(entity_ref) = world.get_entity(entity) else {
+            continue;
+        };
+        if let Some(members) = entity_ref.get::<GroupMembers>() {
+            stack.extend(members.member_ids.iter().copied());
+            continue;
+        }
+        if is_planting_visual_finish(&entity_ref) {
+            continue;
+        }
+        let bounds = registry
+            .capture_snapshot(&entity_ref, world)
+            .and_then(|snapshot| snapshot.bounds())
+            .or_else(|| {
+                entity_ref
+                    .get::<bevy::camera::primitives::Aabb>()
+                    .map(|aabb| {
+                        let center = Vec3::from(aabb.center);
+                        let half = Vec3::from(aabb.half_extents);
+                        EntityBounds {
+                            min: center - half,
+                            max: center + half,
+                        }
+                    })
+            });
+        let Some(bounds) = bounds else {
+            continue;
+        };
+        if is_planting_marker_bounds(bounds) {
+            continue;
+        }
+        min = min.min(bounds.min);
+        max = max.max(bounds.max);
+        any = true;
     }
     any.then_some(EntityBounds { min, max })
 }
@@ -1790,10 +1854,12 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
 
     let target_before =
         capture(world, target_entity).ok_or_else(|| "cannot capture target".to_string())?;
-    let bounds = target_before
-        .0
-        .bounds()
-        .ok_or_else(|| "target has no bounds".to_string())?;
+    let bounds = if is_group(world, target_id) {
+        planting_body_bounds(world, &group_member_ids(world, target_id))
+    } else {
+        target_before.0.bounds()
+    }
+    .ok_or_else(|| "target has no bounds".to_string())?;
     let footprint_bounds = hide_id
         .and_then(|id| capture_by_id(world, id).and_then(|snapshot| snapshot.bounds()))
         .unwrap_or(bounds);
@@ -2076,7 +2142,7 @@ mod tests {
     use crate::conforming::ConformingSolidFactory;
     use talos3d_core::{
         authored_entity::AuthoredEntity,
-        capability_registry::CapabilityRegistry,
+        capability_registry::{CapabilityRegistry, ElementClassAssignment, ElementClassId},
         plugins::modeling::{
             assembly::SemanticAssembly,
             generic_factory::PrimitiveFactory,
@@ -2136,6 +2202,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2264,6 +2331,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         PrimitiveSnapshot {
@@ -2277,6 +2345,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2325,6 +2394,100 @@ mod tests {
     }
 
     #[test]
+    fn plant_on_surface_ignores_marker_and_trim_when_base_is_not_explicit() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), flat_heightfield(2.0)));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(2.5, 0.5, 3.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        PrimitiveSnapshot {
+            element_id: ElementId(3),
+            primitive: BoxPrimitive {
+                // Tiny semantic anchor/recipe marker below the visible body.
+                centre: Vec3::new(0.0, -9.0, 0.0),
+                half_extents: Vec3::splat(0.01),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        PrimitiveSnapshot {
+            element_id: ElementId(4),
+            primitive: BoxPrimitive {
+                // Finish/overhang detail must not expand the foundation plan.
+                centre: Vec3::new(0.0, 1.4, 0.0),
+                half_extents: Vec3::new(3.8, 0.1, 3.6),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        let trim_entity = find_entity_by_element_id(&mut world, ElementId(4)).expect("trim entity");
+        world
+            .entity_mut(trim_entity)
+            .insert(ElementClassAssignment {
+                element_class: ElementClassId("architectural_trim".into()),
+                active_recipe: None,
+            });
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Cottage with marker and trim".to_string(),
+            member_ids: vec![ElementId(2), ElementId(3), ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let raised_by = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("raised_by"))
+            .and_then(Value::as_f64)
+            .expect("raised_by") as f32;
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+        let foundation_entity =
+            find_entity_by_element_id(&mut world, foundation_id).expect("foundation entity");
+        let foundation = world
+            .get::<ConformingSolid>(foundation_entity)
+            .expect("conforming foundation");
+
+        assert!((raised_by - 2.2).abs() < 0.05);
+        assert!((foundation.half_extents.x - 2.5).abs() < 0.01);
+        assert!((foundation.half_extents.y - 3.0).abs() < 0.01);
+    }
+
+    #[test]
     fn plant_structure_uses_selected_group_and_terrain_and_converts_foundation() {
         let mut world = test_world();
         world.spawn((ElementId(10), flat_heightfield(2.0), Selected));
@@ -2338,6 +2501,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         PrimitiveSnapshot {
@@ -2349,6 +2513,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2490,6 +2655,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2587,6 +2753,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2663,6 +2830,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2753,6 +2921,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2850,6 +3019,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         PrimitiveSnapshot {
@@ -2861,6 +3031,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -2944,6 +3115,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -3017,6 +3189,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -3103,6 +3276,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -3169,6 +3343,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         PrimitiveSnapshot {
@@ -3180,6 +3355,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
@@ -3274,6 +3450,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         PrimitiveSnapshot {
@@ -3285,6 +3462,7 @@ mod tests {
             rotation: ShapeRotation::default(),
             material_assignment: None,
             opening_context: None,
+            subobject_display_overrides: None,
         }
         .apply_to(&mut world);
         GroupSnapshot {
