@@ -6606,6 +6606,21 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "save_model",
+        description = "Alias for save_project: save the current Talos3D model/project to a specific path on disk and return the resolved file path."
+    )]
+    pub(super) async fn save_model_tool(
+        &self,
+        Parameters(params): Parameters<SaveProjectRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let path = self
+            .request_save_project(params.path)
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(serde_json::json!({ "path": path }))
+    }
+
+    #[tool(
         name = "load_project",
         description = "Load a Talos3D project from a specific path on disk and return the resolved file path."
     )]

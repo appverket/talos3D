@@ -12786,11 +12786,17 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
     let mut no_curated_paths = Vec::new();
     if let Some(registry) = world.get_resource::<CapabilityRegistry>() {
         for class in registry.element_class_descriptors() {
-            let recipe_count = registry.recipe_family_descriptors(Some(&class.id)).len();
+            let lookup_class_ids = recipe_lookup_class_ids(registry, &class.id.0);
+            let recipe_count = lookup_class_ids
+                .iter()
+                .map(|lookup_class| registry.recipe_family_descriptors(Some(lookup_class)).len())
+                .sum::<usize>();
             // A class has a curated executable path if a shipped native recipe
             // OR a durable installed `RecipeArtifactRegistry` recipe targets it.
             // Only the genuine absence of both is a corpus gap.
-            let has_installed_recipe = installed_recipe_classes.contains(&class.id.0);
+            let has_installed_recipe = lookup_class_ids
+                .iter()
+                .any(|lookup_class| installed_recipe_classes.contains(&lookup_class.0));
             if recipe_count == 0 && !has_installed_recipe {
                 no_curated_paths.push(NoCuratedPathInfo {
                     element_class: class.id.0.clone(),
@@ -12943,6 +12949,40 @@ fn recipe_draft_has_materialization_path(
 }
 
 #[cfg(feature = "model-api")]
+fn element_class_alias_target(
+    registry: &crate::capability_registry::CapabilityRegistry,
+    class_id: &crate::capability_registry::ElementClassId,
+) -> Option<crate::capability_registry::ElementClassId> {
+    let descriptor = registry.element_class_descriptor(class_id)?;
+    let alias = descriptor
+        .description
+        .split_once("Alias of `")
+        .and_then(|(_, tail)| tail.split_once('`'))
+        .map(|(alias, _)| alias.trim())
+        .filter(|alias| !alias.is_empty())?;
+    let alias_id = crate::capability_registry::ElementClassId(alias.to_string());
+    registry
+        .element_class_descriptor(&alias_id)
+        .is_some()
+        .then_some(alias_id)
+}
+
+#[cfg(feature = "model-api")]
+fn recipe_lookup_class_ids(
+    registry: &crate::capability_registry::CapabilityRegistry,
+    element_class: &str,
+) -> Vec<crate::capability_registry::ElementClassId> {
+    let class_id = crate::capability_registry::ElementClassId(element_class.to_string());
+    let mut classes = vec![class_id.clone()];
+    if let Some(alias_id) = element_class_alias_target(registry, &class_id) {
+        if !classes.iter().any(|existing| existing == &alias_id) {
+            classes.push(alias_id);
+        }
+    }
+    classes
+}
+
+#[cfg(feature = "model-api")]
 pub fn handle_list_recipe_families(
     world: &World,
     element_class: Option<String>,
@@ -12959,15 +12999,31 @@ pub fn handle_list_recipe_families_with_options(
     use crate::capability_registry::{CapabilityRegistry, ElementClassId};
     use crate::plugins::recipe_drafts::{RecipeDraftRegistry, RecipeDraftStatus};
 
-    let filter = element_class
-        .as_deref()
-        .map(|s| ElementClassId(s.to_string()));
+    let lookup_filters = world
+        .get_resource::<CapabilityRegistry>()
+        .map(|registry| match element_class.as_deref() {
+            Some(class) => recipe_lookup_class_ids(registry, class),
+            None => Vec::new(),
+        })
+        .unwrap_or_else(|| {
+            element_class
+                .as_deref()
+                .map(|class| vec![ElementClassId(class.to_string())])
+                .unwrap_or_default()
+        });
 
     let mut families: Vec<RecipeFamilyInfo> = world
         .get_resource::<CapabilityRegistry>()
         .map(|registry| {
-            registry
-                .recipe_family_descriptors(filter.as_ref())
+            let descriptors = if element_class.is_some() {
+                lookup_filters
+                    .iter()
+                    .flat_map(|filter| registry.recipe_family_descriptors(Some(filter)))
+                    .collect::<Vec<_>>()
+            } else {
+                registry.recipe_family_descriptors(None)
+            };
+            descriptors
                 .into_iter()
                 .map(|d| RecipeFamilyInfo {
                     id: d.id.0.clone(),
@@ -13011,10 +13067,11 @@ pub fn handle_list_recipe_families_with_options(
         let mut emitted: std::collections::HashSet<String> =
             families.iter().map(|family| family.id.clone()).collect();
         for (asset_id, artifact) in artifact_registry.entries.iter().filter(|(_, artifact)| {
-            element_class
-                .as_deref()
-                .is_none_or(|class| artifact.target_class == class)
-                && artifact.meta.provenance.jurisdiction.is_none()
+            element_class.as_deref().is_none_or(|_| {
+                lookup_filters
+                    .iter()
+                    .any(|class| artifact.target_class == class.0)
+            }) && artifact.meta.provenance.jurisdiction.is_none()
         }) {
             let family_id = artifact
                 .family_id()
@@ -13065,34 +13122,38 @@ pub fn handle_list_recipe_families_with_options(
 
     if include_session_drafts {
         if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
-            families.extend(
-                registry
-                    .list(element_class.as_deref(), Some(RecipeDraftStatus::Installed))
-                    .into_iter()
-                    .map(|draft| {
-                        let executable = recipe_draft_has_materialization_path(&draft);
-                        RecipeFamilyInfo {
-                            id: draft.id,
-                            target_class: draft.target_class,
-                            label: draft.label,
-                            description: draft.description,
-                            supported_refinement_levels: draft.supported_refinement_levels,
-                            parameters: draft
-                                .parameters
-                                .into_iter()
-                                .map(|parameter| RecipeParameterInfo {
-                                    name: parameter.name,
-                                    value_schema: parameter.value_schema,
-                                    default: parameter.default,
-                                })
-                                .collect(),
-                            is_session_draft: true,
-                            executable,
-                            execution_path: executable
-                                .then(|| "materialize_learned_asset".to_string()),
-                        }
-                    }),
-            );
+            let drafts = if element_class.is_some() {
+                lookup_filters
+                    .iter()
+                    .flat_map(|class| {
+                        registry.list(Some(class.0.as_str()), Some(RecipeDraftStatus::Installed))
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                registry.list(None, Some(RecipeDraftStatus::Installed))
+            };
+            families.extend(drafts.into_iter().map(|draft| {
+                let executable = recipe_draft_has_materialization_path(&draft);
+                RecipeFamilyInfo {
+                    id: draft.id,
+                    target_class: draft.target_class,
+                    label: draft.label,
+                    description: draft.description,
+                    supported_refinement_levels: draft.supported_refinement_levels,
+                    parameters: draft
+                        .parameters
+                        .into_iter()
+                        .map(|parameter| RecipeParameterInfo {
+                            name: parameter.name,
+                            value_schema: parameter.value_schema,
+                            default: parameter.default,
+                        })
+                        .collect(),
+                    is_session_draft: true,
+                    executable,
+                    execution_path: executable.then(|| "materialize_learned_asset".to_string()),
+                }
+            }));
         }
     }
 
@@ -13257,6 +13318,9 @@ pub fn handle_select_recipe(
     }
 
     let class_id = ElementClassId(element_class.clone());
+    let lookup_class_ids = registry
+        .map(|registry| recipe_lookup_class_ids(registry, &element_class))
+        .unwrap_or_else(|| vec![class_id.clone()]);
 
     // Optionally filter by target_state from the context object.
     let target_state: Option<RefinementState> = context
@@ -13289,9 +13353,9 @@ pub fn handle_select_recipe(
 
     let mut viable: Vec<RecipeRankingInfo> = registry
         .map(|registry| {
-            registry
-                .recipe_family_descriptors(Some(&class_id))
-                .into_iter()
+            lookup_class_ids
+                .iter()
+                .flat_map(|lookup_class| registry.recipe_family_descriptors(Some(lookup_class)))
                 .filter(|d| {
                     recipe_supports_requested_or_lower_state(
                         &d.supported_refinement_levels,
@@ -13361,9 +13425,9 @@ pub fn handle_select_recipe(
     if include_session_drafts {
         if let Some(registry) = world.get_resource::<RecipeDraftRegistry>() {
             viable.extend(
-                registry
-                    .installed_for_class(&element_class)
-                    .into_iter()
+                lookup_class_ids
+                    .iter()
+                    .flat_map(|lookup_class| registry.installed_for_class(&lookup_class.0))
                     .filter(|draft| {
                         jurisdiction_matches_request(
                             draft.jurisdiction.as_deref(),
@@ -13451,7 +13515,10 @@ pub fn handle_select_recipe(
         if let Some(artifact_registry) =
             world.get_resource::<crate::curation::RecipeArtifactRegistry>()
         {
-            for (asset_id, artifact) in artifact_registry.artifacts_for_class(&element_class) {
+            for (asset_id, artifact) in lookup_class_ids
+                .iter()
+                .flat_map(|lookup_class| artifact_registry.artifacts_for_class(&lookup_class.0))
+            {
                 if !jurisdiction_matches_request(
                     artifact
                         .meta
@@ -13625,7 +13692,13 @@ pub fn handle_discover_curated_paths(
     use crate::plugins::recipe_drafts::RecipeDraftRegistry;
     use crate::relational::registry::ParametricRegistry;
 
-    let path_kind = request.path_kind.unwrap_or_else(|| "recipe".into());
+    let path_kind = request
+        .path_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("recipe")
+        .to_ascii_lowercase();
     let guidance_card_ids = guidance_card_ids_for_discovery(request.element_class.as_deref());
     let requested_jurisdiction = requested_jurisdiction(&request.context);
     let mut related_asset_ids = Vec::new();

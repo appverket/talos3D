@@ -115,7 +115,7 @@ fn terrain_conforming_foundation_skill() -> AgentSkill {
             \"surface_id\":<terrain surface id>, \"position\":[x,z], \"half_extents\":[hx,hz], \
             \"min_thickness\":0.5, \"max_depth\":3.0}`. Move/re-conform it with \
             `set_property {\"property_name\":\"position\",\"value\":[x,0,z]}` — Y re-derives.\n\n\
-            **Plant a semantic structure:** select one semantic `structure` (or its referenced \
+            **Plant a semantic structure:** select one semantic `structure`, `house`, or `building` assembly (or its referenced \
             building group) and one terrain surface, then run Plant Structure; over MCP call \
             `invoke_command {\"command_id\":\"terrain.plant_structure\", \"parameters\": \
             {\"structure_id\":<structure>, \"surface_id\":<terrain>}}`. \

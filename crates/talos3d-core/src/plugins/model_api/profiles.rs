@@ -333,6 +333,7 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("set_camera", ToolCategory::Capture),
     // --- Project I/O ---
     ("save_project", ToolCategory::ProjectIo),
+    ("save_model", ToolCategory::ProjectIo),
     ("load_project", ToolCategory::ProjectIo),
     ("import_file", ToolCategory::ProjectIo),
     ("list_importers", ToolCategory::ProjectIo),

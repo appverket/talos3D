@@ -43,6 +43,7 @@ use talos3d_core::{
 };
 
 use crate::{
+    components::TerrainSurface,
     conforming::{
         build_conforming_triangle_mesh, conforming_metrics, ConformingSolid,
         ConformingSolidSnapshot, DEFAULT_MAX_DEPTH, DEFAULT_MIN_THICKNESS,
@@ -294,8 +295,7 @@ fn selected_element_ids(world: &mut World) -> Vec<ElementId> {
 }
 
 fn has_heightfield(world: &mut World, surface_id: ElementId) -> bool {
-    let mut query = world.query::<(&ElementId, &TerrainHeightfield)>();
-    query.iter(world).any(|(id, _)| *id == surface_id)
+    find_heightfield(world, surface_id).is_some()
 }
 
 fn find_heightfield(world: &mut World, surface_id: ElementId) -> Option<TerrainHeightfield> {
@@ -304,6 +304,7 @@ fn find_heightfield(world: &mut World, surface_id: ElementId) -> Option<TerrainH
         .iter(world)
         .find(|(id, _)| id.0 == surface_id.0)
         .map(|(_, hf)| hf.clone())
+        .or_else(|| flat_heightfield_from_surface(world, surface_id))
 }
 
 fn find_heightfield_readonly(world: &World, surface_id: ElementId) -> Option<TerrainHeightfield> {
@@ -312,6 +313,44 @@ fn find_heightfield_readonly(world: &World, surface_id: ElementId) -> Option<Ter
         .iter(world)
         .find(|(id, _)| id.0 == surface_id.0)
         .map(|(_, hf)| hf.clone())
+        .or_else(|| flat_heightfield_from_surface_readonly(world, surface_id))
+}
+
+fn flat_heightfield_from_surface(
+    world: &mut World,
+    surface_id: ElementId,
+) -> Option<TerrainHeightfield> {
+    flat_heightfield_from_surface_readonly(world, surface_id)
+}
+
+fn flat_heightfield_from_surface_readonly(
+    world: &World,
+    surface_id: ElementId,
+) -> Option<TerrainHeightfield> {
+    let mut query = world.try_query::<(&ElementId, &TerrainSurface)>()?;
+    let (_, surface) = query.iter(world).find(|(id, _)| **id == surface_id)?;
+    let y = surface.datum_elevation + surface.offset.y;
+    let points = if surface.boundary.is_empty() {
+        let center = surface.offset;
+        vec![
+            Vec3::new(center.x - 5.0, y, center.z - 5.0),
+            Vec3::new(center.x + 5.0, y, center.z - 5.0),
+            Vec3::new(center.x + 5.0, y, center.z + 5.0),
+            Vec3::new(center.x - 5.0, y, center.z + 5.0),
+        ]
+    } else {
+        surface
+            .boundary
+            .iter()
+            .map(|point| Vec3::new(point.x, y, point.y))
+            .collect()
+    };
+    TerrainHeightfield::build(
+        &points,
+        &[],
+        surface.drape_sample_spacing.max(0.05),
+        surface.smoothing,
+    )
 }
 
 fn capture(world: &World, entity: Entity) -> Option<talos3d_core::authored_entity::BoxedEntity> {
@@ -331,6 +370,10 @@ fn semantic_assembly_by_id(world: &mut World, element_id: ElementId) -> Option<S
     world.get::<SemanticAssembly>(entity).cloned()
 }
 
+fn is_structure_assembly_type(assembly_type: &str) -> bool {
+    matches!(assembly_type, "structure" | "house" | "building")
+}
+
 fn is_foundation_body(world: &mut World, element_id: ElementId) -> bool {
     let Some(entity) = find_entity_by_element_id(world, element_id) else {
         return false;
@@ -345,7 +388,7 @@ fn structure_ids_referencing_target(world: &mut World, target_id: ElementId) -> 
     query
         .iter(world)
         .filter(|(_, assembly)| {
-            assembly.assembly_type == "structure"
+            is_structure_assembly_type(&assembly.assembly_type)
                 && assembly
                     .members
                     .iter()
@@ -359,7 +402,7 @@ fn selected_structure_candidates(world: &mut World, selected_ids: &[ElementId]) 
     let mut candidates = Vec::new();
     for selected_id in selected_ids {
         if semantic_assembly_by_id(world, *selected_id)
-            .is_some_and(|assembly| assembly.assembly_type == "structure")
+            .is_some_and(|assembly| is_structure_assembly_type(&assembly.assembly_type))
         {
             candidates.push(*selected_id);
             continue;
@@ -382,7 +425,7 @@ fn selected_surface_candidates(world: &mut World, selected_ids: &[ElementId]) ->
 }
 
 fn plant_structure_usage() -> String {
-    "Plant Structure: select exactly one semantic structure (or its referenced building group) \
+    "Plant Structure: select exactly one semantic structure/house/building assembly (or its referenced building group) \
      and one terrain surface, then run Plant Structure; or invoke with structure_id and surface_id."
         .to_string()
 }
@@ -418,10 +461,10 @@ fn resolve_plant_structure_args(
             }
         })?;
     if semantic_assembly_by_id(world, structure_id)
-        .is_none_or(|assembly| assembly.assembly_type != "structure")
+        .is_none_or(|assembly| !is_structure_assembly_type(&assembly.assembly_type))
     {
         return Err(format!(
-            "Plant Structure: structure_id {} is not a semantic structure assembly.",
+            "Plant Structure: structure_id {} is not a semantic structure/house/building assembly.",
             structure_id.0
         ));
     }
@@ -1214,9 +1257,9 @@ fn resolve_structure_plant_target(
 ) -> Result<StructurePlantTarget, String> {
     let structure = semantic_assembly_by_id(world, structure_id)
         .ok_or_else(|| format!("Structure {} was not found.", structure_id.0))?;
-    if structure.assembly_type != "structure" {
+    if !is_structure_assembly_type(&structure.assembly_type) {
         return Err(format!(
-            "Plant Structure: {} is a '{}' assembly, not a structure.",
+            "Plant Structure: {} is a '{}' assembly, not a structure/house/building.",
             structure_id.0, structure.assembly_type
         ));
     }
@@ -1318,7 +1361,7 @@ struct PersistedPlantedStructure {
 }
 
 fn is_persisted_planted_structure(assembly: &SemanticAssembly) -> bool {
-    if assembly.assembly_type != "structure" {
+    if !is_structure_assembly_type(&assembly.assembly_type) {
         return false;
     }
     if let Some(placement_kind) = assembly
@@ -2633,10 +2676,191 @@ mod tests {
     }
 
     #[test]
+    fn plant_structure_accepts_house_assembly_as_structure_alias() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), flat_heightfield(0.75)));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 1.0, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        PrimitiveSnapshot {
+            element_id: ElementId(3),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.1, 0.0),
+                half_extents: Vec3::new(1.2, 0.1, 1.2),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Cottage group".to_string(),
+            member_ids: vec![ElementId(2), ElementId(3)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+        AssemblySnapshot {
+            element_id: ElementId(20),
+            assembly: SemanticAssembly {
+                assembly_type: "house".to_string(),
+                label: "Semantic cottage".to_string(),
+                members: vec![
+                    AssemblyMemberRef {
+                        target: ElementId(1),
+                        role: "superstructure_group".to_string(),
+                    },
+                    AssemblyMemberRef {
+                        target: ElementId(3),
+                        role: "foundation".to_string(),
+                    },
+                ],
+                parameters: json!({ "footprint_length_m": 6.0, "gable_span_m": 5.0 }),
+                metadata: json!({ "typology": "small cottage" }),
+            },
+            refinement_state: None,
+            obligations: None,
+            claim_grounding: None,
+            authoring_provenance: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_structure(
+            &mut world,
+            &json!({
+                "structure_id": 20,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("house assembly should plant as a semantic structure");
+
+        assert_eq!(
+            result
+                .output
+                .as_ref()
+                .and_then(|output| output.get("structure_id"))
+                .and_then(Value::as_u64),
+            Some(20)
+        );
+        let group_entity =
+            find_entity_by_element_id(&mut world, ElementId(1)).expect("group entity");
+        assert_eq!(
+            world
+                .get::<PlantedStructure>(group_entity)
+                .expect("planted structure contract")
+                .structure_id,
+            ElementId(20)
+        );
+    }
+
+    #[test]
+    fn plant_structure_uses_flat_surface_datum_when_heightfield_is_absent() {
+        let mut world = test_world();
+        let mut surface = TerrainSurface::new("Flat site".to_string(), Vec::new());
+        surface.datum_elevation = 1.25;
+        world.spawn((ElementId(10), surface));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 1.0, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        PrimitiveSnapshot {
+            element_id: ElementId(3),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.1, 0.0),
+                half_extents: Vec3::new(1.2, 0.1, 1.2),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Cottage group".to_string(),
+            member_ids: vec![ElementId(2), ElementId(3)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+        AssemblySnapshot {
+            element_id: ElementId(20),
+            assembly: SemanticAssembly {
+                assembly_type: "house".to_string(),
+                label: "Semantic cottage".to_string(),
+                members: vec![
+                    AssemblyMemberRef {
+                        target: ElementId(1),
+                        role: "superstructure_group".to_string(),
+                    },
+                    AssemblyMemberRef {
+                        target: ElementId(3),
+                        role: "foundation".to_string(),
+                    },
+                ],
+                parameters: json!({}),
+                metadata: json!({ "typology": "small cottage" }),
+            },
+            refinement_state: None,
+            obligations: None,
+            claim_grounding: None,
+            authoring_provenance: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_structure(
+            &mut world,
+            &json!({
+                "structure_id": 20,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("flat terrain surface datum should be plantable");
+
+        let y_top = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("y_top"))
+            .and_then(Value::as_f64)
+            .expect("y_top");
+        assert!((y_top - 1.45).abs() < 0.01);
+        let group_entity =
+            find_entity_by_element_id(&mut world, ElementId(1)).expect("group entity");
+        assert!(world.get::<PlantedStructure>(group_entity).is_some());
+    }
+
+    #[test]
     fn plant_structure_reports_selection_guidance_when_arguments_are_missing() {
         let mut world = test_world();
         let err = execute_plant_structure(&mut world, &json!({})).expect_err("missing args");
-        assert!(err.contains("select exactly one semantic structure"));
+        assert!(err.contains("select exactly one semantic structure/house/building assembly"));
         assert!(err.contains("structure_id"));
         assert!(err.contains("surface_id"));
     }

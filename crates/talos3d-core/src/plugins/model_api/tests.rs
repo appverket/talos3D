@@ -5153,6 +5153,24 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn discover_curated_paths_blank_path_kind_defaults_to_recipe() {
+    let world = init_model_api_test_world();
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("  ".into()),
+            element_class: Some("roof_system".into()),
+            query: None,
+            context: serde_json::json!({ "target_state": "Constructible" }),
+        },
+    )
+    .expect("blank optional path_kind should use the documented recipe default");
+
+    assert_eq!(discovery.path_kind, "recipe");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn curated_path_discovery_matches_aliases_and_curated_manifests() {
     use crate::curation::provenance::{Confidence, Lineage, Provenance};
     use crate::curation::{
@@ -9566,6 +9584,100 @@ fn discover_curated_paths_surfaces_lower_state_recipe_instead_of_false_gap() {
     );
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn discover_curated_paths_resolves_element_class_alias_recipes() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::model_api::server::CuratedPathDiscoveryRequest;
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let mut registry = CapabilityRegistry::default();
+    registry.register_element_class(ElementClassDescriptor {
+        id: ElementClassId("trim".into()),
+        label: "Trim".into(),
+        description: "Architectural finish trim.".into(),
+        semantic_roles: Vec::new(),
+        class_min_obligations: Default::default(),
+        class_min_promotion_critical_paths: Default::default(),
+        parameter_schema: serde_json::Value::Null,
+    });
+    registry.register_element_class(ElementClassDescriptor {
+        id: ElementClassId("architectural_trim".into()),
+        label: "Architectural Trim".into(),
+        description:
+            "Architectural finish trim. Alias of `trim` for explicit architectural vocabulary."
+                .into(),
+        semantic_roles: Vec::new(),
+        class_min_obligations: Default::default(),
+        class_min_promotion_critical_paths: Default::default(),
+        parameter_schema: serde_json::Value::Null,
+    });
+
+    let mut world = World::new();
+    world.insert_resource(registry);
+
+    let asset_id = AssetId("installed_recipe/simple_trim_board".into());
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            asset_id,
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("simple trim board recipe for test".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(MutationScope::None),
+        },
+        parameter_schema: serde_json::Value::Null,
+        target_class: "trim".into(),
+        supported_refinement_states: vec![RefinementState::Schematic],
+        tests: Vec::new(),
+    };
+    let mut recipes = RecipeArtifactRegistry::default();
+    recipes.insert(artifact);
+    world.insert_resource(recipes);
+
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("architectural_trim".into()),
+            query: Some("white corner trim boards".into()),
+            context: serde_json::json!({ "target_state": "Schematic" }),
+        },
+    )
+    .expect("alias discovery should succeed");
+
+    assert!(
+        discovery.no_curated_path.is_none(),
+        "alias classes must not produce a false corpus gap when their canonical class has a recipe"
+    );
+    assert_eq!(
+        discovery
+            .recipe_rankings
+            .first()
+            .map(|ranking| ranking.id.as_str()),
+        Some("simple_trim_board")
+    );
+    assert_eq!(discovery.recipe_rankings[0].target_class, "trim");
+    assert_eq!(discovery.suggested_next_tool, "instantiate_recipe");
+}
+
 // ---------------------------------------------------------------------------
 // Change 2 — resolve_obligation handler
 // ---------------------------------------------------------------------------
@@ -11365,6 +11477,7 @@ mod capability_profiles {
             "promote_refinement",
             "definition.instantiate",
             "save_project",
+            "save_model",
             "invoke_command",
         ] {
             assert!(

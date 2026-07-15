@@ -226,7 +226,7 @@ pub fn assign_default_layer(
     for entity in &query {
         commands
             .entity(entity)
-            .insert(LayerAssignment::default_layer());
+            .try_insert(LayerAssignment::default_layer());
     }
 }
 
@@ -289,6 +289,7 @@ pub fn count_entities_per_layer(world: &World) -> BTreeMap<String, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::SystemState;
 
     #[test]
     fn exempt_entities_are_never_layer_managed() {
@@ -337,5 +338,31 @@ mod tests {
             *app.world().get::<Visibility>(light).unwrap(),
             Visibility::Inherited
         );
+    }
+
+    #[test]
+    fn default_layer_assignment_ignores_entities_despawned_before_commands_apply() {
+        let mut world = World::new();
+        let entity = world.spawn((ElementId(42), Visibility::Inherited)).id();
+        let mut state = SystemState::<(
+            Commands,
+            Query<
+                Entity,
+                (
+                    With<ElementId>,
+                    Without<LayerAssignment>,
+                    Without<LayerVisibilityExempt>,
+                ),
+            >,
+        )>::new(&mut world);
+
+        {
+            let (commands, query) = state.get_mut(&mut world).expect("system state");
+            assign_default_layer(commands, query);
+        }
+        world.despawn(entity);
+        state.apply(&mut world);
+
+        assert!(world.get_entity(entity).is_err());
     }
 }
