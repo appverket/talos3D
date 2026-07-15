@@ -1,5 +1,8 @@
 use crate::plugins::commands::find_entity_by_element_id_readonly;
-use std::{any::Any, collections::HashSet};
+use std::{
+    any::Any,
+    collections::{HashMap, HashSet},
+};
 
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -578,17 +581,21 @@ pub fn compute_group_bounds_from_world(
     member_ids: &[ElementId],
 ) -> Option<EntityBounds> {
     let registry = world.resource::<CapabilityRegistry>();
+    let element_index = element_entity_index(world);
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
+    let mut visited = HashSet::new();
 
     let mut stack: Vec<ElementId> = member_ids.to_vec();
     while let Some(id) = stack.pop() {
-        let mut q = world.try_query::<EntityRef>().unwrap();
-        let Some(entity_ref) = q
-            .iter(world)
-            .find(|e| e.get::<ElementId>().copied() == Some(id))
-        else {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(entity) = element_index.get(&id).copied() else {
+            continue;
+        };
+        let Ok(entity_ref) = world.get_entity(entity) else {
             continue;
         };
         if let Some(members) = entity_ref.get::<GroupMembers>() {
@@ -626,19 +633,23 @@ pub fn compute_group_bounds_in_frame_from_world(
     frame: &GroupFrame,
 ) -> Option<EntityBounds> {
     let registry = world.resource::<CapabilityRegistry>();
+    let element_index = element_entity_index(world);
     let inverse_rotation = frame.rotation.inverse();
     let to_local = |point: Vec3| inverse_rotation * (point - frame.translation);
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     let mut any = false;
+    let mut visited = HashSet::new();
 
     let mut stack: Vec<ElementId> = member_ids.to_vec();
     while let Some(id) = stack.pop() {
-        let mut q = world.try_query::<EntityRef>().unwrap();
-        let Some(entity_ref) = q
-            .iter(world)
-            .find(|e| e.get::<ElementId>().copied() == Some(id))
-        else {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(entity) = element_index.get(&id).copied() else {
+            continue;
+        };
+        let Ok(entity_ref) = world.get_entity(entity) else {
             continue;
         };
         if let Some(members) = entity_ref.get::<GroupMembers>() {
@@ -684,6 +695,15 @@ pub fn compute_group_bounds_in_frame_from_world(
     }
 
     any.then_some(EntityBounds { min, max })
+}
+
+fn element_entity_index(world: &World) -> HashMap<ElementId, Entity> {
+    let mut index = HashMap::new();
+    let mut query = world.try_query::<(Entity, &ElementId)>().unwrap();
+    for (entity, element_id) in query.iter(world) {
+        index.insert(*element_id, entity);
+    }
+    index
 }
 
 fn draw_axis_aligned_bounds_wireframe(gizmos: &mut Gizmos, bounds: &EntityBounds, color: Color) {
@@ -810,6 +830,13 @@ pub fn remove_member_from_groups(world: &mut World, member_id: ElementId) {
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+    use crate::{
+        capability_registry::CapabilityRegistry,
+        plugins::modeling::{
+            generic_factory::PrimitiveFactory,
+            primitives::{BoxPrimitive, ShapeRotation},
+        },
+    };
 
     fn approx(a: Vec3, b: Vec3) -> bool {
         a.abs_diff_eq(b, 1e-4)
@@ -860,5 +887,45 @@ mod frame_tests {
             composed.point_to_world(Vec3::X),
             Vec3::new(0.0, 0.0, -3.0)
         ));
+    }
+
+    #[test]
+    fn group_bounds_use_indexed_lookup_and_ignore_nested_cycles() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        world.insert_resource(registry);
+
+        world.spawn((
+            ElementId(1),
+            BoxPrimitive {
+                centre: Vec3::new(10.0, 2.0, -1.0),
+                half_extents: Vec3::new(1.0, 0.5, 2.0),
+            },
+            ShapeRotation::default(),
+        ));
+        world.spawn((
+            ElementId(2),
+            GroupMembers {
+                name: "child".into(),
+                member_ids: vec![ElementId(1), ElementId(3)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(3),
+            GroupMembers {
+                name: "parent".into(),
+                member_ids: vec![ElementId(2)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+
+        let bounds = compute_group_bounds_from_world(&world, &[ElementId(3)])
+            .expect("cyclic nested group with a leaf should still have bounds");
+        assert!(approx(bounds.min, Vec3::new(9.0, 1.5, -3.0)));
+        assert!(approx(bounds.max, Vec3::new(11.0, 2.5, 1.0)));
     }
 }

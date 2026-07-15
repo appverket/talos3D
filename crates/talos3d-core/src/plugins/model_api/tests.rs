@@ -1509,6 +1509,23 @@ fn poll_model_api_requests_services_channel_queries() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn model_api_configures_reactive_update_mode_for_explicit_wakeups() {
+    let mut app = App::new();
+    configure_model_api_update_mode(&mut app);
+
+    let settings = app.world().resource::<bevy::winit::WinitSettings>();
+    assert!(matches!(
+        settings.focused_mode,
+        bevy::winit::UpdateMode::Reactive { .. }
+    ));
+    assert!(matches!(
+        settings.unfocused_mode,
+        bevy::winit::UpdateMode::Reactive { .. }
+    ));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn import_handlers_list_importers_and_create_triangle_meshes() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
     use crate::plugins::refinement::SemanticRole;
@@ -1635,7 +1652,7 @@ async fn mcp_tools_return_structured_model_data() {
         }
     });
 
-    let server = ModelApiServer::new(sender);
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
     let tools = server.tool_router.list_all();
     let tool_names: std::collections::BTreeSet<_> =
         tools.iter().map(|tool| tool.name.clone()).collect();
@@ -1844,7 +1861,7 @@ async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
         }
     });
 
-    let server = ModelApiServer::new(sender);
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
 
     // The five session tools are registered on the MCP surface.
     let tool_names: std::collections::BTreeSet<_> = server
@@ -2141,7 +2158,7 @@ async fn get_authoring_guidance_tool_returns_resource_contents() {
         }
     });
 
-    let server = ModelApiServer::new(sender);
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
     let tool_names: std::collections::BTreeSet<_> = server
         .tool_router
         .list_all()
@@ -2189,7 +2206,7 @@ async fn get_authoring_guidance_tool_returns_default_when_unset() {
         }
     });
 
-    let server = ModelApiServer::new(sender);
+    let server = ModelApiServer::new(ModelApiRequestSender::new(sender));
     let guidance: AuthoringGuidance = server
         .get_authoring_guidance_tool()
         .await
@@ -5422,6 +5439,49 @@ fn curated_asset_target_types_bridge_to_scoped_executable_recipes() {
         .all(|ranking| ranking.id != "window_unit" && ranking.id != "door_unit"));
     assert!(scoped.no_curated_path.is_none());
     assert_eq!(scoped.suggested_next_tool, "instantiate_recipe");
+
+    use std::collections::BTreeMap;
+
+    use crate::relational::{
+        registry::{ParametricRegistry, ParametricTypeDef},
+        transform::TransformBindings,
+        ComponentParams,
+    };
+
+    let mut parametrics = ParametricRegistry::default();
+    parametrics.register(ParametricTypeDef {
+        id: "architecture.roof.covering.standing_seam_gable".into(),
+        label: "Standing-Seam Gable Roof Covering (Falsat Plattak)".into(),
+        params: ComponentParams::default(),
+        driver_units: BTreeMap::new(),
+        defaults: BTreeMap::new(),
+        derivations: BTreeMap::new(),
+        transform: TransformBindings::default(),
+        public: true,
+        representation: None,
+    });
+    world.insert_resource(parametrics);
+
+    let parametric_specific = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: Some("roof_system".into()),
+            query: Some("Falsat Plattak standing seam metal roof".into()),
+            context: json!({ "target_state": "Constructible", "region": "se" }),
+        },
+    )
+    .expect("parametric-specific discovery should succeed");
+    assert_eq!(parametric_specific.suggested_next_tool, "parametric.create");
+    assert!(parametric_specific
+        .parametric_types
+        .iter()
+        .any(|path| path.id == "architecture.roof.covering.standing_seam_gable"));
+    assert!(
+        parametric_specific.recipe_rankings.is_empty(),
+        "query-specific parametric discovery must not backfill cross-class recipe bridges: {:?}",
+        parametric_specific.recipe_rankings
+    );
 }
 
 #[cfg(feature = "model-api")]
@@ -8879,6 +8939,94 @@ fn select_recipe_surfaces_installed_recipe_artifact() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn select_recipe_applies_recipe_priors_to_installed_recipe_artifacts() {
+    use crate::capability_registry::{
+        CorpusProvenance, ElementClassId, GenerationPriorDescriptor, LicenseTag, PassageRef,
+        PriorId, PriorScope, RecipeFamilyId,
+    };
+    use crate::curation::authoring_script::AuthoringScript;
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    fn artifact(family: &str) -> RecipeArtifact {
+        RecipeArtifact {
+            meta: CurationMeta::new(
+                AssetId(format!("installed_recipe/{family}")),
+                AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+                Provenance {
+                    author: AgentId("test_agent".into()),
+                    confidence: Confidence::Medium,
+                    lineage: Lineage::Freeform,
+                    rationale: Some(format!("{family} test recipe")),
+                    jurisdiction: None,
+                    catalog_dependencies: Vec::new(),
+                    evidence: Vec::new(),
+                },
+            )
+            .with_scope(Scope::Project)
+            .with_trust(Trust::Draft),
+            body: RecipeBody::AuthoringScript {
+                script: AuthoringScript::stub(
+                    crate::curation::authoring_script::MutationScope::None,
+                ),
+            },
+            parameter_schema: serde_json::Value::Null,
+            target_class: "roof_system".into(),
+            supported_refinement_states: vec![RefinementState::Constructible],
+            tests: Vec::new(),
+        }
+    }
+
+    let mut world = World::new();
+    let mut capability_registry = CapabilityRegistry::default();
+    capability_registry.register_generation_prior(GenerationPriorDescriptor {
+        id: PriorId("test_veto_incompatible_artifact_roof".into()),
+        label: "Test artifact veto".into(),
+        description: "Veto one installed artifact recipe.".into(),
+        scope: PriorScope::RecipeSelection {
+            element_class: ElementClassId("roof_system".into()),
+            recipe_family: Some(RecipeFamilyId("incompatible_roof".into())),
+        },
+        source_provenance: CorpusProvenance {
+            source: "test".into(),
+            source_version: "test".into(),
+            jurisdiction: None,
+            ingested_at: 0,
+            license: LicenseTag::Cc0,
+            backlink: None::<PassageRef>,
+            supersedes: Vec::new(),
+        },
+        prior_fn: std::sync::Arc::new(|_| crate::capability_registry::PriorEvaluation {
+            weight: 0.0,
+            suggestion: None,
+            rationale: "incompatible with active roof-covering facet".into(),
+        }),
+    });
+    world.insert_resource(capability_registry);
+
+    let mut recipe_artifacts = RecipeArtifactRegistry::default();
+    recipe_artifacts.insert(artifact("compatible_roof"));
+    recipe_artifacts.insert(artifact("incompatible_roof"));
+    world.insert_resource(recipe_artifacts);
+
+    let ranking = handle_select_recipe(
+        &world,
+        "roof_system".into(),
+        serde_json::json!({ "target_state": "Constructible" }),
+    )
+    .expect("select_recipe should succeed");
+
+    assert_eq!(ranking.len(), 1);
+    assert_eq!(ranking[0].id, "compatible_roof");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn list_recipe_families_surfaces_unscoped_artifact_recipes_only() {
     use crate::curation::authoring_script::AuthoringScript;
     use crate::curation::{
@@ -11320,7 +11468,7 @@ mod capability_profiles {
     fn out_of_profile_calls_are_rejected_with_guidance() {
         let (sender, _receiver) = std::sync::mpsc::channel();
         let server = super::super::ModelApiServer::with_profile_state(
-            sender,
+            super::super::ModelApiRequestSender::new(sender),
             SessionProfileState::new(CapabilityProfile::Authoring),
         );
         let error = server

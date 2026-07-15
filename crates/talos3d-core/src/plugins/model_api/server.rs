@@ -3,7 +3,7 @@ use super::*;
 #[cfg(feature = "model-api")]
 #[derive(Debug, Clone)]
 pub(super) struct ModelApiServer {
-    pub(super) sender: mpsc::Sender<ModelApiRequest>,
+    pub(super) sender: ModelApiRequestSender,
     pub(super) tool_router: ToolRouter<Self>,
     /// Active capability profile gating which tools this session advertises
     /// and accepts. Shared (`Arc`) so the stateless HTTP transport's
@@ -134,7 +134,7 @@ fn sanitize_schema_node(node: &mut serde_json::Value) {
 
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
-    pub(super) fn new(sender: mpsc::Sender<ModelApiRequest>) -> Self {
+    pub(super) fn new(sender: ModelApiRequestSender) -> Self {
         Self::with_profile_state(sender, SessionProfileState::new(default_profile_from_env()))
     }
 
@@ -142,7 +142,7 @@ impl ModelApiServer {
     /// transport passes one shared state per endpoint so its per-request
     /// (stateless-mode) instances behave as one profile session.
     pub(super) fn with_profile_state(
-        sender: mpsc::Sender<ModelApiRequest>,
+        sender: ModelApiRequestSender,
         profile_state: SessionProfileState,
     ) -> Self {
         Self {

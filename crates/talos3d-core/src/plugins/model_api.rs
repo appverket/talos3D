@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "model-api")]
 use bevy::window::PrimaryWindow;
+#[cfg(feature = "model-api")]
+use bevy::winit::{EventLoopProxy, EventLoopProxyWrapper, WinitSettings, WinitUserEvent};
 use bevy::{ecs::world::EntityRef, prelude::*};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "model-api")]
@@ -95,7 +97,7 @@ use std::{
     env, fs,
     net::TcpListener as StdTcpListener,
     path::{Path, PathBuf},
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -147,7 +149,10 @@ impl Plugin for ModelApiPlugin {
             }
         };
         let (sender, receiver) = mpsc::channel();
+        let request_sender = ModelApiRequestSender::new(sender);
+        configure_model_api_update_mode(app);
         app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
+        app.insert_resource(ModelApiWakeHandle(request_sender.clone()));
         app.insert_resource(runtime_info.clone());
         app.insert_resource(ModelApiDiscoveryCleanup::new(&runtime_info));
         // Ensure the Semantic Procedural Session substrate (ADR-051) is
@@ -176,7 +181,14 @@ impl Plugin for ModelApiPlugin {
             register_model_api_session_tools(&mut session_tools);
         }
         app.add_systems(Update, poll_model_api_requests.before(HistorySet::Queue));
-        app.add_systems(Startup, annotate_window_title_with_model_api_instance);
+        app.add_systems(
+            Startup,
+            (
+                install_model_api_wake_proxy,
+                annotate_window_title_with_model_api_instance,
+            )
+                .chain(),
+        );
         // Load user-installed recipes and passages from disk into their
         // in-memory registries (Change-3 / Change-7). Runs after all
         // domain plugins have populated shipped content so installed assets
@@ -189,7 +201,74 @@ impl Plugin for ModelApiPlugin {
             )
                 .chain(),
         );
-        spawn_model_api_server(sender, runtime_info, http_listener);
+        spawn_model_api_server(request_sender, runtime_info, http_listener);
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn configure_model_api_update_mode(app: &mut App) {
+    // MCP requests wake the Bevy event loop explicitly. Use the desktop profile
+    // so model-api sessions stay responsive without burning render frames while
+    // idle or unfocused.
+    app.insert_resource(WinitSettings::desktop_app());
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Clone)]
+pub(super) struct ModelApiRequestSender {
+    sender: mpsc::Sender<ModelApiRequest>,
+    wake_proxy: Arc<Mutex<Option<EventLoopProxy<WinitUserEvent>>>>,
+}
+
+#[cfg(feature = "model-api")]
+impl ModelApiRequestSender {
+    fn new(sender: mpsc::Sender<ModelApiRequest>) -> Self {
+        Self {
+            sender,
+            wake_proxy: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn set_wake_proxy(&self, proxy: EventLoopProxy<WinitUserEvent>) {
+        if let Ok(mut guard) = self.wake_proxy.lock() {
+            *guard = Some(proxy);
+        }
+    }
+
+    fn send(&self, request: ModelApiRequest) -> Result<(), mpsc::SendError<ModelApiRequest>> {
+        self.sender.send(request)?;
+        if let Ok(guard) = self.wake_proxy.lock() {
+            if let Some(proxy) = guard.as_ref() {
+                let _ = proxy.send_event(WinitUserEvent::WakeUp);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "model-api")]
+impl std::fmt::Debug for ModelApiRequestSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelApiRequestSender")
+            .field(
+                "wake_proxy_installed",
+                &self.wake_proxy.lock().is_ok_and(|guard| guard.is_some()),
+            )
+            .finish()
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Resource, Clone)]
+struct ModelApiWakeHandle(ModelApiRequestSender);
+
+#[cfg(feature = "model-api")]
+fn install_model_api_wake_proxy(
+    event_loop_proxy: Option<Res<EventLoopProxyWrapper>>,
+    wake_handle: Res<ModelApiWakeHandle>,
+) {
+    if let Some(proxy) = event_loop_proxy {
+        wake_handle.0.set_wake_proxy((**proxy).clone());
     }
 }
 
@@ -13409,6 +13488,22 @@ pub fn handle_select_recipe(
                     continue;
                 }
 
+                let prior_weight = recipe_selection_priors
+                    .iter()
+                    .filter(|p| match &p.scope {
+                        PriorScope::RecipeSelection { recipe_family, .. } => {
+                            recipe_family.is_none()
+                                || recipe_family.as_ref().map(|rf| rf.0.as_str())
+                                    == Some(family_id.as_str())
+                        }
+                        _ => false,
+                    })
+                    .map(|p| (p.prior_fn)(&prior_context).weight)
+                    .fold(1.0_f32, |acc, w| acc * w);
+                if prior_weight <= 0.0 {
+                    continue;
+                }
+
                 // Surface the recipe's declared parameters so a caller can
                 // pass them up front. AuthoringScript bodies carry the schema
                 // (+ defaults) under `script`; native bodies mirror it on the
@@ -13446,7 +13541,7 @@ pub fn handle_select_recipe(
                         .unwrap_or_else(|| artifact.target_class.clone()),
                     // Installed/learned recipes rank slightly below shipped ones.
                     weight: {
-                        let mut weight = 0.9
+                        let mut weight = (0.9 * prior_weight)
                             + recipe_query_relevance_boost(
                                 &family_id,
                                 artifact
@@ -13627,7 +13722,18 @@ pub fn handle_discover_curated_paths(
                 }
             }
             recipe_rankings = handle_select_recipe(world, element_class.clone(), context.clone())?;
-            if !recipe_rankings.iter().any(|ranking| ranking.executable) {
+            // Even on the default `recipe` query, surface matching parametric
+            // types so a single discover_curated_paths call reveals the geometry
+            // path (e.g. the gable roof system + its trusses for `roof_system`)
+            // instead of reporting a bare no-curated-path that hides them.
+            parametric_types = collect_parametric_types(Some(element_class.as_str()));
+            if !recipe_rankings.iter().any(|ranking| ranking.executable)
+                && !query_specific_parametric_beats_recipes(
+                    request.query.as_deref(),
+                    &parametric_types,
+                    &recipe_rankings,
+                )
+            {
                 bridge_recipe_rankings_from_curated_targets(
                     world,
                     &element_class,
@@ -13637,11 +13743,6 @@ pub fn handle_discover_curated_paths(
                     &mut recipe_rankings,
                 )?;
             }
-            // Even on the default `recipe` query, surface matching parametric
-            // types so a single discover_curated_paths call reveals the geometry
-            // path (e.g. the gable roof system + its trusses for `roof_system`)
-            // instead of reporting a bare no-curated-path that hides them.
-            parametric_types = collect_parametric_types(Some(element_class.as_str()));
         }
         "parametric" => {
             curated_assets.retain(|asset| {

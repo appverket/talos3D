@@ -67,7 +67,7 @@ impl Drop for ModelApiDiscoveryCleanup {
 
 #[cfg(feature = "model-api")]
 pub(super) fn spawn_model_api_server(
-    sender: mpsc::Sender<ModelApiRequest>,
+    sender: ModelApiRequestSender,
     runtime_info: ModelApiRuntimeInfo,
     http_listener: StdTcpListener,
 ) {
