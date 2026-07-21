@@ -2449,6 +2449,42 @@ fn json_tool_result<T: Serialize>(value: T) -> Result<CallToolResult, McpError> 
     Ok(CallToolResult::success(vec![content]))
 }
 
+#[cfg(feature = "model-api")]
+pub(super) fn screenshot_tool_result(path: String) -> Result<CallToolResult, McpError> {
+    use base64::Engine as _;
+
+    let mime_type = std::path::Path::new(&path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .and_then(|extension| match extension.to_ascii_lowercase().as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "webp" => Some("image/webp"),
+            _ => None,
+        });
+    let mut content = vec![Content::json(serde_json::json!({ "path": path.clone() }))?];
+    if let Some(mime_type) = mime_type {
+        let bytes = std::fs::read(&path).map_err(|error| {
+            McpError::internal_error(
+                format!("screenshot was saved but could not be read back from {path}: {error}"),
+                None,
+            )
+        })?;
+        const MAX_INLINE_SCREENSHOT_BYTES: usize = 12 * 1024 * 1024;
+        if bytes.len() <= MAX_INLINE_SCREENSHOT_BYTES {
+            content.push(Content::image(
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+                mime_type,
+            ));
+        } else {
+            content.push(Content::text(format!(
+                "Screenshot exceeds the {MAX_INLINE_SCREENSHOT_BYTES}-byte inline limit; use the returned path from a local client."
+            )));
+        }
+    }
+    Ok(CallToolResult::success(content))
+}
+
 // Hand-written (instead of `#[tool_handler]`) so tools/list and tools/call are
 // gated by the session's active capability profile.
 #[cfg(feature = "model-api")]
@@ -6917,7 +6953,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "take_screenshot",
-        description = "Capture a screenshot and save it to disk. By default the image is cropped to the active modeling viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Pass include_ui=true to capture the full app window with egui panels and chrome for UX validation. Raster formats save as images; PDF and SVG embed the captured image."
+        description = "Capture a screenshot, save it to disk, and return both its path and inline image content for PNG/JPEG/WebP so network-only agents can inspect the pixels. By default the image is cropped to the active modeling viewport so app chrome is excluded, while authored viewport annotations such as dimensions remain visible. Pass include_ui=true to capture the full app window with egui panels and chrome for UX validation. PDF and SVG return the saved path."
     )]
     pub(super) async fn take_screenshot_tool(
         &self,
@@ -6927,7 +6963,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .request_take_screenshot(params.path, params.include_ui)
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
-        json_tool_result(serde_json::json!({ "path": path }))
+        screenshot_tool_result(path)
     }
 
     #[tool(

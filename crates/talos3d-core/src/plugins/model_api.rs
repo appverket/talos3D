@@ -13784,10 +13784,6 @@ pub fn handle_discover_curated_paths(
 
     match path_kind.as_str() {
         "recipe" => {
-            let element_class = request
-                .element_class
-                .clone()
-                .ok_or_else(|| "recipe discovery requires element_class".to_string())?;
             let mut context = request.context.clone();
             if let Some(query) = request.query.as_deref() {
                 match &mut context {
@@ -13800,12 +13796,41 @@ pub fn handle_discover_curated_paths(
                     }
                 }
             }
-            recipe_rankings = handle_select_recipe(world, element_class.clone(), context.clone())?;
+            let element_classes = match request.element_class.as_ref() {
+                Some(element_class) => vec![element_class.clone()],
+                None => world
+                    .get_resource::<CapabilityRegistry>()
+                    .map(|registry| {
+                        registry
+                            .recipe_family_descriptors(None)
+                            .into_iter()
+                            .map(|descriptor| descriptor.target_class.0.clone())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            };
+            for element_class in &element_classes {
+                recipe_rankings.extend(handle_select_recipe(
+                    world,
+                    element_class.clone(),
+                    context.clone(),
+                )?);
+            }
+            recipe_rankings.sort_by(|left, right| {
+                right
+                    .weight
+                    .partial_cmp(&left.weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            recipe_rankings.truncate(12);
             // Even on the default `recipe` query, surface matching parametric
             // types so a single discover_curated_paths call reveals the geometry
             // path (e.g. the gable roof system + its trusses for `roof_system`)
             // instead of reporting a bare no-curated-path that hides them.
-            parametric_types = collect_parametric_types(Some(element_class.as_str()));
+            parametric_types = collect_parametric_types(request.element_class.as_deref());
             if !recipe_rankings.iter().any(|ranking| ranking.executable)
                 && !query_specific_parametric_beats_recipes(
                     request.query.as_deref(),
@@ -13813,14 +13838,16 @@ pub fn handle_discover_curated_paths(
                     &recipe_rankings,
                 )
             {
-                bridge_recipe_rankings_from_curated_targets(
-                    world,
-                    &element_class,
-                    &context,
-                    request.query.as_deref(),
-                    &curated_assets,
-                    &mut recipe_rankings,
-                )?;
+                if let Some(element_class) = request.element_class.as_ref() {
+                    bridge_recipe_rankings_from_curated_targets(
+                        world,
+                        element_class,
+                        &context,
+                        request.query.as_deref(),
+                        &curated_assets,
+                        &mut recipe_rankings,
+                    )?;
+                }
             }
         }
         "parametric" => {
@@ -15005,6 +15032,7 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 "acquire_corpus_passage".into(),
                 "request_corpus_expansion".into(),
                 "take_screenshot".into(),
+                "set_selection".into(),
                 "run_validation_v2".into(),
             ],
             next_card_ids: vec!["dkg.close_gap".into(), "dkg.executable_asset".into()],
@@ -15027,7 +15055,11 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                  trim. Author from that checklist before taking screenshots. Frame the authored \
                  target so it occupies the image and the requested cues are inspectable; if the \
                  screenshot mostly shows terrain, shadow, cropped roof, or unrelated context, \
-                 reframe/repair and retake before claiming success. If the necessary \
+                 reframe/repair and retake before claiming success. Clear selection before the \
+                 final evidence capture unless selection feedback is itself under test, so \
+                 outlines, handles, and rotation guides do not obscure morphology. Inspect the \
+                 inline raster image returned by `take_screenshot`; a saved path alone is not \
+                 visual evidence for a network-only agent. If the necessary \
                  morphology knowledge is not discoverable, acquire it and save it as a prior, \
                  assembly pattern, recipe draft, Definition, validator, or agent skill so the \
                  next agent can find it through MCP."

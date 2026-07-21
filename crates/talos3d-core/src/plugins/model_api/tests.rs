@@ -5232,6 +5232,65 @@ fn discover_curated_paths_blank_path_kind_defaults_to_recipe() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn recipe_discovery_without_element_class_searches_bounded_registered_targets() {
+    use crate::capability_registry::{
+        ElementClassId, GenerateInput, GenerateOutput, RecipeFamilyDescriptor, RecipeFamilyId,
+    };
+    use crate::plugins::refinement::RefinementState;
+    use std::sync::Arc;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_recipe_family(RecipeFamilyDescriptor {
+            id: RecipeFamilyId("test_cottage".into()),
+            target_class: ElementClassId("building".into()),
+            label: "Test cottage".into(),
+            description: "A bounded task-discovery fixture".into(),
+            parameters: Vec::new(),
+            supported_refinement_levels: vec![RefinementState::Schematic],
+            obligation_specializations: Default::default(),
+            promotion_critical_path_specializations: Default::default(),
+            generate: Arc::new(
+                |_: GenerateInput, _: &mut World| -> Result<GenerateOutput, String> {
+                    Ok(GenerateOutput::default())
+                },
+            ),
+        });
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("recipe".into()),
+            element_class: None,
+            query: Some("Swedish cottage with planted foundation".into()),
+            context: serde_json::json!({ "target_state": "Schematic" }),
+        },
+    )
+    .expect("task-only welcome discovery must be directly executable");
+
+    assert_eq!(discovery.path_kind, "recipe");
+    assert!(!discovery.recipe_rankings.is_empty());
+    assert!(discovery.recipe_rankings.len() <= 12);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn screenshot_result_inlines_raster_for_network_only_agents() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("network-proof.png");
+    std::fs::write(&path, [0x89, b'P', b'N', b'G']).expect("fixture should write");
+
+    let result = screenshot_tool_result(path.display().to_string()).expect("result should encode");
+    let encoded = serde_json::to_value(result).expect("result should serialize");
+    let content = encoded["content"].as_array().expect("content array");
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["mimeType"], "image/png");
+    assert!(!content[1]["data"].as_str().unwrap_or_default().is_empty());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn curated_path_discovery_matches_aliases_and_curated_manifests() {
     use crate::curation::provenance::{Confidence, Lineage, Provenance};
     use crate::curation::{
@@ -11567,6 +11626,7 @@ mod capability_profiles {
             "preview_semantic_assembly_from_selection",
             "create_semantic_assembly_from_selection",
             "transform",
+            "boolean_difference",
             "apply_material",
             "create_material",
             // recipes / discovery / gap flow
