@@ -14,7 +14,7 @@ perf-stats = ["talos3d-core/perf-stats"]
 terrain = ["dep:talos3d-terrain"]
 
 [dependencies]
-bevy = { version = "0.18", default-features = false, features = [
+bevy = { version = "0.19", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_gizmos",
@@ -46,10 +46,3 @@ codegen-units = 1
 
 [profile.release.package."*"]
 opt-level = 3
-
-[patch.crates-io]
-bevy_egui = { path = "../vendor/bevy_egui" }
-egui = { path = "../vendor/egui-0.33.3/egui" }
-epaint = { path = "../vendor/egui-0.33.3/epaint" }
-emath = { path = "../vendor/egui-0.33.3/emath" }
-ecolor = { path = "../vendor/egui-0.33.3/ecolor" }

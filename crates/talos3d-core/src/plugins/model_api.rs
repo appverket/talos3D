@@ -12718,7 +12718,12 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let must_read_agent_skill_ids = take_ids(agent_skill_ids.clone());
+    // Agent skills are task-specific operating procedures, not global
+    // bootstrap requirements. The session welcome ranks them against the
+    // Agent Hello task; marking every installed skill as must-read here floods
+    // unrelated sessions (for example, terrain-foundation guidance in a roof
+    // task). Capability counts/ids remain discoverable in the snapshot.
+    let must_read_agent_skill_ids = Vec::new();
 
     let mut must_read_guidance_card_ids = Vec::new();
     let mut guidance_overrides = Vec::new();

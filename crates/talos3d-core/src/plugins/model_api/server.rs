@@ -2457,6 +2457,374 @@ pub(super) struct SetSessionProfileRequest {
     pub(super) profile: Option<String>,
 }
 
+/// Client features declared during the Talos3D-native session handshake.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentClientCapabilities {
+    /// The client can fetch and follow Talos3D agent skills.
+    #[serde(default)]
+    pub agent_skills: bool,
+    /// The client supports MCP resources and prompts in addition to tools.
+    #[serde(default)]
+    pub mcp_resources_and_prompts: bool,
+    /// The client can inspect image results such as screenshots.
+    #[serde(default)]
+    pub images: bool,
+    /// The client can receive asynchronous invalidation notifications.
+    #[serde(default)]
+    pub notifications: bool,
+    /// The client can ask the user for approval during the session.
+    #[serde(default)]
+    pub interactive_approval: bool,
+}
+
+/// Agent-to-Talos3D half of the welcome/session-negotiation contract.
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentHello {
+    /// Human-readable client or agent name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// Client version, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
+    /// Protocol projection used by the client, normally `mcp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// The user's current task or intent. Used only for bounded recommendations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Desired capability profile. Negotiation reports the change; it never
+    /// silently switches profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_profile: Option<String>,
+    /// Approximate context budget available to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget_tokens: Option<u32>,
+    /// `user_delegated`, `autonomous`, or `unspecified`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_mode: Option<String>,
+    #[serde(default)]
+    pub supports: AgentClientCapabilities,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionSecurityInfo {
+    pub transport_scope: String,
+    pub authentication_assurance: String,
+    pub authorization_assurance: String,
+    pub delegated_identity: bool,
+    pub capability_profile_is_authorization: bool,
+    pub note: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentBootstrapStep {
+    pub order: u32,
+    pub action: String,
+    pub required: bool,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentWelcomeRefreshInfo {
+    pub knowledge_epoch: Option<String>,
+    pub revision_anchor: String,
+    pub refresh_triggers: Vec<String>,
+    pub refresh_tools: Vec<String>,
+    pub notifications_available: bool,
+    pub note: String,
+}
+
+/// Talos3D-to-agent half of the welcome/session-negotiation contract.
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentWelcome {
+    pub contract: String,
+    pub contract_version: u32,
+    pub hello: AgentHello,
+    pub instance: InstanceInfo,
+    pub security: SessionSecurityInfo,
+    pub active_profile: String,
+    pub requested_profile: Option<String>,
+    pub requested_profile_available: bool,
+    pub profile_change_required: bool,
+    pub available_profiles: Vec<SessionProfileSummary>,
+    pub capability_snapshot: CapabilitySnapshotInfo,
+    pub required_guidance_card_ids: Vec<String>,
+    pub recommended_agent_skills: Vec<crate::plugins::agent_skills::AgentSkillSummary>,
+    pub skill_fallback_tools: Vec<String>,
+    pub bootstrap_steps: Vec<AgentBootstrapStep>,
+    pub required_invariants: Vec<String>,
+    pub refresh: AgentWelcomeRefreshInfo,
+    pub warnings: Vec<String>,
+}
+
+#[cfg(feature = "model-api")]
+fn relevant_agent_skills(
+    hello: &AgentHello,
+    must_read_ids: &[String],
+    skills: Vec<crate::plugins::agent_skills::AgentSkillSummary>,
+) -> Vec<crate::plugins::agent_skills::AgentSkillSummary> {
+    if !hello.supports.agent_skills {
+        return Vec::new();
+    }
+    const STOP_WORDS: &[&str] = &[
+        "and", "the", "for", "with", "from", "into", "inspect", "author", "create", "make",
+        "model", "system",
+    ];
+    let task_tokens = hello
+        .task
+        .as_deref()
+        .unwrap_or_default()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| token.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .filter(|token| !STOP_WORDS.contains(&token.as_str()))
+        .collect::<Vec<_>>();
+    let mut scored = skills
+        .into_iter()
+        .filter_map(|skill| {
+            let mut score = usize::from(must_read_ids.contains(&skill.id)) * 100;
+            let searchable = format!(
+                "{} {} {} {}",
+                skill.id,
+                skill.title,
+                skill.summary,
+                skill.task_tags.join(" ")
+            )
+            .to_ascii_lowercase()
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|token| token.len() >= 3)
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+            score += task_tokens
+                .iter()
+                .filter(|token| searchable.contains(token.as_str()))
+                .count();
+            (score > 0).then_some((score, skill))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let limit = if hello
+        .context_budget_tokens
+        .is_some_and(|budget| budget < 8_000)
+    {
+        2
+    } else {
+        5
+    };
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, skill)| skill)
+        .collect()
+}
+
+#[cfg(feature = "model-api")]
+pub(super) fn assemble_agent_welcome(
+    hello: AgentHello,
+    instance: InstanceInfo,
+    profile: CapabilityProfile,
+    mut snapshot: CapabilitySnapshotInfo,
+    skills: Vec<crate::plugins::agent_skills::AgentSkillSummary>,
+) -> AgentWelcome {
+    snapshot
+        .next_tools
+        .retain(|tool| profile_allows(profile, tool));
+    let requested_profile = hello.requested_profile.clone();
+    let parsed_requested = requested_profile
+        .as_deref()
+        .and_then(CapabilityProfile::from_name);
+    let requested_profile_available = requested_profile.is_none() || parsed_requested.is_some();
+    let profile_change_required = parsed_requested.is_some_and(|requested| requested != profile);
+    let catalog = profile_tool_catalog();
+    let available_profiles = CapabilityProfile::ALL
+        .map(|candidate| SessionProfileSummary {
+            name: candidate.name().to_string(),
+            description: candidate.description().to_string(),
+            tool_count: catalog.tools_for(candidate).len(),
+        })
+        .to_vec();
+    let required_guidance_card_ids = snapshot.must_read_guidance_card_ids.clone();
+    let welcome_digest = serde_json::to_vec(&(&snapshot, &skills))
+        .map(|bytes| format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+        .unwrap_or_else(|_| "digest-unavailable".to_string());
+    let recommended_agent_skills =
+        relevant_agent_skills(&hello, &snapshot.must_read_agent_skill_ids, skills);
+    let loopback = matches!(
+        instance.http_host.as_str(),
+        "127.0.0.1" | "::1" | "localhost"
+    );
+    let mut warnings = Vec::new();
+    if requested_profile.is_some() && !requested_profile_available {
+        warnings.push(format!(
+            "Requested profile {:?} is unknown; choose one of the available profiles.",
+            requested_profile.as_deref().unwrap_or_default()
+        ));
+    }
+    if !hello.supports.images {
+        warnings.push(
+            "This client reported no image support; use structured geometric checks, but visual verification still requires an image-capable reviewer."
+                .to_string(),
+        );
+    }
+
+    let mut bootstrap_steps = Vec::new();
+    if profile_change_required {
+        bootstrap_steps.push(AgentBootstrapStep {
+            order: 1,
+            action: "set_session_profile".to_string(),
+            required: false,
+            reason: "The requested profile differs from the active profile; Talos3D does not switch it implicitly."
+                .to_string(),
+            arguments: parsed_requested.map(|requested| serde_json::json!({"profile": requested.name()})),
+        });
+    }
+    bootstrap_steps.push(AgentBootstrapStep {
+        order: bootstrap_steps.len() as u32 + 1,
+        action: "get_authoring_guidance".to_string(),
+        required: true,
+        reason: "Load the authoritative authoring contract served by this running instance."
+            .to_string(),
+        arguments: None,
+    });
+    for card_id in &required_guidance_card_ids {
+        bootstrap_steps.push(AgentBootstrapStep {
+            order: bootstrap_steps.len() as u32 + 1,
+            action: "get_guidance_card".to_string(),
+            required: true,
+            reason: "Resolve a must-read card named by the live capability snapshot.".to_string(),
+            arguments: Some(serde_json::json!({"card_id": card_id})),
+        });
+    }
+    for skill in &recommended_agent_skills {
+        bootstrap_steps.push(AgentBootstrapStep {
+            order: bootstrap_steps.len() as u32 + 1,
+            action: "get_agent_skill".to_string(),
+            required: snapshot.must_read_agent_skill_ids.contains(&skill.id),
+            reason: "Fetch a bounded operating procedure relevant to this task.".to_string(),
+            arguments: Some(serde_json::json!({"skill_id": skill.id})),
+        });
+    }
+    for skill_id in snapshot
+        .must_read_agent_skill_ids
+        .iter()
+        .filter(|skill_id| {
+            !recommended_agent_skills
+                .iter()
+                .any(|skill| &skill.id == *skill_id)
+        })
+    {
+        bootstrap_steps.push(AgentBootstrapStep {
+            order: bootstrap_steps.len() as u32 + 1,
+            action: "get_agent_skill".to_string(),
+            required: true,
+            reason: "Resolve a must-read operating procedure through the MCP tool fallback."
+                .to_string(),
+            arguments: Some(serde_json::json!({"skill_id": skill_id})),
+        });
+    }
+    for path_kind in ["recipe", "parametric", "definition", "prior"] {
+        bootstrap_steps.push(AgentBootstrapStep {
+            order: bootstrap_steps.len() as u32 + 1,
+            action: "discover_curated_paths".to_string(),
+            required: hello.task.is_some(),
+            reason: format!(
+                "Probe the {path_kind} path before authoring; an empty relevant result is a first-class corpus gap."
+            ),
+            arguments: hello
+                .task
+                .as_ref()
+                .map(|task| serde_json::json!({"path_kind": path_kind, "query": task})),
+        });
+    }
+
+    let guidance_revision = instance
+        .authoring_guidance_id
+        .as_deref()
+        .zip(instance.authoring_guidance_version)
+        .map(|(id, version)| format!("{id}@{version}"))
+        .unwrap_or_else(|| "no-authoring-guidance-reported".to_string());
+    let revision_anchor = format!(
+        "welcome-v1;guidance={guidance_revision};snapshot-v{};profile={};content={welcome_digest}",
+        snapshot.snapshot_version,
+        profile.name()
+    );
+
+    AgentWelcome {
+        contract: "talos3d.agent-welcome".to_string(),
+        contract_version: 1,
+        hello: hello.clone(),
+        instance,
+        security: SessionSecurityInfo {
+            transport_scope: if loopback { "local_loopback" } else { "network" }.to_string(),
+            authentication_assurance: "not_provided_by_talos3d_core_model_api".to_string(),
+            authorization_assurance: "not_provided_by_talos3d_core_model_api".to_string(),
+            delegated_identity: false,
+            capability_profile_is_authorization: false,
+            note: "The current core Model API reports its transport boundary only. Capability profiles gate tool exposure; they do not authenticate a principal or grant authority."
+                .to_string(),
+        },
+        active_profile: profile.name().to_string(),
+        requested_profile,
+        requested_profile_available,
+        profile_change_required,
+        available_profiles,
+        capability_snapshot: snapshot,
+        required_guidance_card_ids,
+        recommended_agent_skills,
+        skill_fallback_tools: vec![
+            "list_guidance_cards".to_string(),
+            "get_guidance_card".to_string(),
+            "get_agent_skill".to_string(),
+            "discover_curated_paths".to_string(),
+        ],
+        bootstrap_steps,
+        required_invariants: vec![
+            "Confirm AgentWelcome.instance.instance_id before acting.".to_string(),
+            "Treat get_authoring_guidance from the running instance as authoritative."
+                .to_string(),
+            "Use curated recipes, parametrics, definitions, and priors when present; report a CorpusGap instead of bluffing missing construction knowledge."
+                .to_string(),
+            "Use the same structured command/edit-plan path as human interaction; validate geometry and inspect rendered output before declaring success."
+                .to_string(),
+        ],
+        refresh: AgentWelcomeRefreshInfo {
+            knowledge_epoch: None,
+            revision_anchor,
+            refresh_triggers: vec![
+                "reconnect".to_string(),
+                "task_change".to_string(),
+                "profile_change".to_string(),
+                "tools_list_changed".to_string(),
+                "missing_or_stale_guidance".to_string(),
+                "curated_path_or_corpus_gap_change".to_string(),
+            ],
+            refresh_tools: vec![
+                "negotiate_agent_session".to_string(),
+                "get_instance_info".to_string(),
+                "get_capability_snapshot".to_string(),
+            ],
+            notifications_available: false,
+            note: "The current substrate has no single authoritative mutable-knowledge epoch or general knowledge-invalidation notification stream. Cache by stable ids and exposed revisions; repeat negotiation on the listed triggers."
+                .to_string(),
+        },
+        warnings,
+    }
+}
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionProfileSummary {
@@ -4623,6 +4991,31 @@ impl ModelApiServer {
             .await
             .map_err(|error| McpError::internal_error(error, None))?;
         json_tool_result(info)
+    }
+
+    #[tool(
+        name = "negotiate_agent_session",
+        description = "Negotiate a Talos3D-native agent session. Send client capabilities, task, and optional requested profile; receive a compact live welcome containing exact instance identity, active/available profiles, honest security assurance, capability snapshot, required guidance, optional skill recommendations, ordered bootstrap steps, and refresh triggers. This call does not authenticate, authorize, or silently switch profiles."
+    )]
+    pub(super) async fn negotiate_agent_session_tool(
+        &self,
+        Parameters(hello): Parameters<AgentHello>,
+    ) -> Result<CallToolResult, McpError> {
+        let instance = self
+            .request_get_instance_info()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        let snapshot = self.request_get_capability_snapshot(false).await;
+        let skills = self
+            .request_list_agent_skills(crate::plugins::agent_skills::AgentSkillSearch::default())
+            .await;
+        json_tool_result(assemble_agent_welcome(
+            hello,
+            instance,
+            self.profile_state.get(),
+            snapshot,
+            skills,
+        ))
     }
 
     #[tool(

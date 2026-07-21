@@ -206,6 +206,7 @@ pub(super) enum ToolCategory {
 pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     // --- Session contract (every profile) ---
     ("get_instance_info", ToolCategory::SessionContract),
+    ("negotiate_agent_session", ToolCategory::SessionContract),
     ("set_session_profile", ToolCategory::SessionContract),
     ("get_authoring_guidance", ToolCategory::SessionContract),
     ("get_capability_snapshot", ToolCategory::SessionContract),

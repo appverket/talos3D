@@ -1,254 +1,95 @@
-# Engine Fork Workflow
+# Engine And UI Dependency Workflow
 
 ## Purpose
 
-This document defines the only supported way to work with Talos3D when local
-forks of Bevy and egui are involved.
+This document defines the supported way to change Bevy, `bevy_egui`, or egui
+dependencies used by Talos3D. The goals are reproducible builds, a legible
+dependency graph, and fixes that land in the layer that owns them.
 
-The goal is simple:
+## Current Policy
 
-- keep Talos3D understandable
-- keep local builds predictable
-- reduce surprise when upstream changes land
-- make sure humans and AI agents follow the same structure
+Talos3D uses registry-resolved `bevy_egui` and egui versions compatible with
+its Bevy version. The historical vendored egui bridge/backport is retired.
 
-If a task touches Bevy, egui, `bevy_egui`, or editor UI behavior that may be
-affected by those dependencies, read this document first.
+Do not:
 
-## Repositories
+- add `vendor/bevy_egui` or `vendor/egui-*` trees;
+- add local egui or `bevy_egui` entries under `[patch.crates-io]`;
+- pin unrelated app launchers to an older Bevy/egui compatibility line;
+- fix a Talos3D behavior bug by modifying a dependency when the defect belongs
+  in Talos3D.
 
-Talos3D currently depends on three layers:
+The normal dependency shape is:
 
-1. Talos3D app and platform code
-2. Bevy engine
-3. egui UI library
-
-Example local checkouts:
-
-- Talos3D: `/path/to/talos3d-core`
-- Bevy fork: `/path/to/bevy`
-- egui fork: `/path/to/egui`
-
-Current important constraint:
-
-- Talos3D uses vendored `bevy_egui`
-- that vendored `bevy_egui` is on the Bevy `0.18` / egui `0.33` line
-- local egui `main` is newer and already contains fixes that Talos3D cannot
-  use directly until the bridge is updated
-
-## Plain-English Model
-
-Treat the three repositories as having different jobs:
-
-- Talos3D is where product behavior lives
-- Bevy is the engine fork we may track more closely over time
-- egui is the UI library fork
-- `bevy_egui` is the bridge between Bevy and egui
-
-The bridge matters because Talos3D does not talk directly to egui. It talks to
-egui through `bevy_egui`.
-
-That means:
-
-- a fix in egui does not automatically fix Talos3D
-- a fix in Bevy does not automatically fix Talos3D
-- sometimes the real work is in the bridge
-
-## Branch Structure
-
-Use these branch roles consistently.
-
-### Talos3D
-
-- `main`
-  - normal Talos3D development branch
-  - should stay buildable without depending on in-progress engine migrations
-- `talos/bevy-main`
-  - Talos3D integration branch for tracking newer Bevy work
-  - this is where path dependencies to local Bevy belong
-
-### Bevy fork
-
-- `main`
-  - mirror of upstream Bevy `main`
-  - do not put Talos-specific experiments directly here
-- `talos/<topic>`
-  - only for Bevy changes that are real engine changes and could be proposed
-    upstream
-
-### egui fork
-
-- `main`
-  - mirror of upstream egui `main`
-- `talos/egui-0.33-panel-fix`
-  - backport branch for fixes needed by the old egui line that Talos3D still
-    reaches through vendored `bevy_egui`
-- `talos/<topic>`
-  - only for egui changes that belong upstream
-
-## Hard Rules
-
-These rules are here to lower cognitive load.
-
-1. Do not develop Talos-specific engine work directly on Bevy fork `main`.
-2. Do not develop Talos-specific UI library work directly on egui fork `main`.
-3. Keep fork `main` branches as mirrors of upstream `main`.
-4. Put local experimental or upstreamable changes on named topic branches.
-5. Treat `bevy_egui` as a separate compatibility layer, not as “just Bevy” or
-   “just egui”.
-
-## One-Time Setup
-
-Each fork should have both `origin` and `upstream`.
-
-### Bevy
-
-```bash
-cd /path/to/bevy
-git remote add upstream https://github.com/bevyengine/bevy.git
-git fetch upstream
+```text
+Talos3D app
+  -> talos3d-core
+  -> compatible released Bevy + bevy_egui + egui graph
 ```
 
-### egui
+All app compositions should use the same Bevy compatibility line as
+`crates/talos3d-core/Cargo.toml` unless a deliberate migration branch records
+why they differ.
 
-```bash
-cd /path/to/egui
-git remote add upstream https://github.com/emilk/egui.git
-git fetch upstream
-```
+## Decide Which Layer Owns The Problem
 
-You only need to add `upstream` once.
+- Talos3D interaction, layout, command, or product semantics belong in
+  Talos3D.
+- Bevy scheduling, rendering, ECS, windowing, or engine defects belong in
+  Bevy.
+- egui widget/layout defects belong in egui.
+- Bevy-to-egui integration defects belong in `bevy_egui`.
 
-## How To Refresh Forks
+When the defect belongs upstream, treat the dependency as repairable
+infrastructure: prepare the smallest regression-covered fix and propose it
+upstream. Do not preserve a permanent Talos3D-only vendor fork.
 
-This is the normal refresh flow.
+## Supported Working Modes
 
-### Refresh Bevy fork `main`
+### Released dependencies
 
-```bash
-cd /path/to/bevy
-git fetch upstream
-git checkout main
-git rebase upstream/main
-```
-
-### Refresh egui fork `main`
-
-```bash
-cd /path/to/egui
-git fetch upstream
-git checkout main
-git rebase upstream/main
-```
-
-If you want your GitHub fork updated too:
-
-```bash
-git push origin main
-```
-
-## Current Recommended Working Modes
-
-There are two supported modes.
-
-### Mode A: Immediate Product Fixes
-
-Use this when:
-
-- Talos3D needs a fix now
-- the fix already exists in a newer egui or Bevy line
-- the bridge is still pinned to older versions
-
-Current example:
-
-- egui `main` already contains the panel-state clamp fix
-- Talos3D still reaches egui through vendored `bevy_egui` on the older egui
-  `0.33` line
-- therefore the quickest safe path is a backport branch, not a full bridge
-  upgrade
-
-Recommended branch:
-
-```bash
-cd /path/to/egui
-git fetch upstream --tags
-git checkout -b talos/egui-0.33-panel-fix tags/0.33.3
-```
-
-Then backport the needed fix onto that branch.
-
-### Mode B: Engine Tracking
-
-Use this when:
-
-- Talos3D needs new Bevy features from `main`
-- you want to migrate continuously instead of waiting for a release drop
-
-Recommended branch:
+This is the default. Update the compatible registry versions and lockfile,
+then verify every Talos3D app composition that consumes them.
 
 ```bash
 cd /path/to/talos3d-core
-git checkout -b talos/bevy-main
+cargo update
+cargo check -p talos3d-core
+cargo test -p talos3d-core
 ```
 
-This is the only Talos3D branch where local Bevy path dependencies should be
-introduced.
+Run launcher checks from their own manifests because `app/` and `app-core/`
+are separate Cargo workspaces.
 
-## How To Build Talos3D Against A Local egui Backport
+### Temporary upstream source pin
 
-This is the lowest-risk way to consume a fix that exists in newer egui but is
-still needed through the old bridge.
+Use a source revision only when a required upstream fix is merged but no
+compatible release exists yet. Record:
 
-Keep the existing vendored `bevy_egui` patch in Talos3D:
+- upstream repository and commit;
+- issue or pull-request link;
+- license/provenance;
+- affected app compositions;
+- removal condition.
 
-```toml
-[patch.crates-io]
-bevy_egui = { path = "vendor/bevy_egui" }
-```
+Prefer a Git revision pin in the relevant manifest. Keep it on a topic branch,
+verify it in CI, and remove it as soon as a compatible release contains the
+fix. A source pin is not permission to restore an egui vendor tree.
 
-Then temporarily add local egui overrides in Talos3D root `Cargo.toml`:
+### Local Bevy tracking
 
-```toml
-[patch.crates-io]
-bevy_egui = { path = "vendor/bevy_egui" }
-egui = { path = "/path/to/egui/crates/egui" }
-epaint = { path = "/path/to/egui/crates/epaint" }
-emath = { path = "/path/to/egui/crates/emath" }
-ecolor = { path = "/path/to/egui/crates/ecolor" }
-```
+Use a dedicated `talos/bevy-main` Talos3D integration branch when validating
+Bevy `main` or preparing an upstream engine fix. Local Bevy path dependencies
+belong only on that integration branch.
 
-Important:
+Recommended branches:
 
-- the local egui checkout used for this must be on a compatible `0.33.x`
-  branch
-- do not point Talos3D at egui `main` unless the `bevy_egui` bridge has been
-  migrated too
+- Talos3D `main`: normal development, released dependencies;
+- Talos3D `talos/bevy-main`: engine-integration work;
+- Bevy fork `main`: clean upstream mirror;
+- Bevy fork `talos/<topic>`: upstreamable engine change.
 
-Then build normally:
-
-```bash
-cd /path/to/talos3d-core
-cargo build
-cargo test
-cargo run
-```
-
-## How To Build Talos3D Against Local Bevy `main`
-
-Do this only on `talos/bevy-main`.
-
-In the Talos3D manifests that currently depend on `bevy = "0.18"`, replace the
-versioned dependency with a path dependency to the local Bevy checkout.
-
-The main files are:
-
-- `/path/to/talos3d-core/Cargo.toml`
-- `/path/to/talos3d-core/crates/talos3d-core/Cargo.toml`
-- `/path/to/talos3d-core/crates/talos3d-terrain/Cargo.toml`
-- `/path/to/talos3d-architecture/crates/talos3d-architectural/Cargo.toml`
-  when validating the optional architecture extension repo
-
-Example shape:
+Example temporary shape:
 
 ```toml
 bevy = { path = "/path/to/bevy", default-features = false, features = [
@@ -267,121 +108,68 @@ bevy = { path = "/path/to/bevy", default-features = false, features = [
     "bevy_window",
     "bevy_text",
     "bevy_ui",
-    "tonemapping_luts",
-    "webgpu",
     "default_font",
     "png",
     "jpeg",
 ] }
 ```
 
-Then build Talos3D from the Talos3D repository, not from Bevy:
+Build Talos3D from the Talos3D repository; Cargo will resolve the local Bevy
+workspace through that path.
+
+## Verification
+
+For any dependency-line change:
+
+1. Inspect `cargo tree` for duplicate incompatible Bevy, egui, or
+   `bevy_egui` versions.
+2. Regenerate each affected lockfile.
+3. Compile `talos3d-core` with and without optional features touched by the
+   change.
+4. Compile the exact app compositions users run.
+5. Run focused UI/input tests and visually inspect the affected behavior.
+6. Confirm no `vendor/bevy_egui`, `vendor/egui-*`, or local egui patch was
+   introduced.
+7. Record upstream provenance and the removal condition for any temporary pin.
+
+Useful checks:
 
 ```bash
-cd /path/to/talos3d-core
-cargo build
-cargo test
-cargo run
+rg 'vendor/(bevy_egui|egui)|patch.crates-io' .
+cargo tree -d
+cargo check -p talos3d-core
+cargo check -p talos3d-core --features model-api
+cargo check --manifest-path app-core/Cargo.toml --features model-api
 ```
 
-Cargo will automatically use the local Bevy workspace.
+## Maintenance
 
-## When Not To Point Talos3D At egui `main`
+Normal maintenance follows released versions, not continuously refreshed local
+egui forks. When actively tracking Bevy `main`:
 
-Do not point Talos3D directly at egui `main` when all of these are true:
+1. refresh the clean Bevy fork mirror;
+2. rebase the Bevy topic and Talos3D integration branches;
+3. rebuild affected Talos3D app compositions;
+4. keep fixes in the smallest owning layer;
+5. upstream dependency fixes and return Talos3D to released dependencies.
 
-- Talos3D still uses vendored `bevy_egui`
-- vendored `bevy_egui` still depends on `egui 0.33`
-- vendored `bevy_egui` still uses APIs removed in egui `0.34`
+## Agent Checklist
 
-Current example:
+When a task mentions Bevy, egui, `bevy_egui`, panels, viewport sizing, input,
+or engine upgrades:
 
-- vendored `bevy_egui` still uses `ctx.run(...)`
-- egui `0.34` moved to `Context::run_ui`
-
-That means a direct dependency bump is not enough. The bridge source must be
-migrated.
-
-## What To Do When A Fix Exists Upstream But Talos3D Still Misses It
-
-Use this sequence:
-
-1. Check whether the fix is in egui, Bevy, or `bevy_egui`.
-2. Check whether Talos3D can actually reach that fix through its current
-   dependency graph.
-3. If not, choose the smallest safe move:
-   - backport fix onto compatible old branch
-   - or migrate bridge
-   - or move Talos3D integration branch forward
-
-Current panel-growth case:
-
-1. Fix exists in egui `main`
-2. Talos3D cannot reach it because vendored `bevy_egui` pins egui `0.33`
-3. therefore:
-   - immediate fix path: backport onto egui `0.33.x`
-   - longer-term path: migrate `bevy_egui` forward
-
-## Minimal Weekly Maintenance Routine
-
-If Talos3D is actively tracking newer engine work, do this once per week:
-
-1. Refresh Bevy fork `main`
-2. Refresh egui fork `main`
-3. Rebuild Talos3D integration branch
-4. Fix breakage in the smallest valid layer
-5. Push upstreamable changes to topic branches, not to fork `main`
-
-In commands:
-
-```bash
-cd /path/to/bevy
-git fetch upstream
-git checkout main
-git rebase upstream/main
-
-cd /path/to/egui
-git fetch upstream
-git checkout main
-git rebase upstream/main
-
-cd /path/to/talos3d-core
-cargo build
-cargo test
-```
-
-## Checklist For Humans
-
-Before touching engine dependencies:
-
-- read this document
-- decide whether this is an immediate fix or an engine-tracking task
-- decide which repository actually owns the problem
-- create a topic branch if the change is not a pure fork refresh
-- avoid editing fork `main` directly
-
-## Checklist For AI Agents
-
-If a task mentions Bevy, egui, `bevy_egui`, panels, viewport sizing, UI
-regressions, or engine upgrades:
-
-1. Read this document first.
-2. Do not assume Talos3D can consume fixes from egui `main` directly.
-3. Check the bridge version before proposing dependency bumps.
-4. Prefer the smallest safe move:
-   - local Talos fix
-   - compatible backport
-   - bridge migration
-   - full engine tracking
-5. Keep fork `main` branches clean mirrors of upstream.
+1. Read this document.
+2. Inspect the actual dependency graph and lockfiles.
+3. Do not reintroduce egui vendoring or local egui patches.
+4. Identify the owning layer with evidence.
+5. Use the smallest safe released update or a temporary reviewed source pin.
+6. Verify both the shared crate and the exact product launcher.
+7. Preserve the shared human/agent semantic edit path for interaction changes.
 
 ## Current Decision Summary
 
-For the current assistant sidebar panel-growth problem:
-
-- egui `main` already contains the correct panel-state clamp
-- Talos3D cannot reach that fix directly today
-- the immediate path is a compatible egui backport branch
-- the longer-term path is a `bevy_egui` migration plus a Bevy tracking branch
-
-This is the structure future work should follow unless this document is updated.
+The older sidebar workaround that required a vendored egui bridge is resolved
+by the current dependency line. Talos3D now uses registry dependencies and no
+egui vendor tree. Future integration defects should be fixed upstream or
+carried briefly as reviewed source pins, never as a revived permanent vendor
+fork.

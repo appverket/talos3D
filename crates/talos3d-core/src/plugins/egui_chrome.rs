@@ -326,6 +326,7 @@ impl Plugin for EguiChromePlugin {
         .init_resource::<RenderSettingsWindowState>()
         .init_resource::<ProjectSettingsWindowState>()
         .init_resource::<ExtensionsWindowState>()
+        .init_resource::<AgentConnectionWindowState>()
         .add_systems(
             PreUpdate,
             restrict_egui_context_map_to_primary_window.after(EguiPreUpdateSet::InitContexts),
@@ -353,6 +354,33 @@ impl ViewportContextMenu {
     pub(crate) fn is_open(&self) -> bool {
         self.open
     }
+}
+
+#[derive(Resource, Default, Debug, Clone)]
+struct AgentConnectionWindowState {
+    visible: bool,
+    copy_status: Option<String>,
+}
+
+fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str) -> String {
+    format!(
+        "Connect to the running Talos3D instance at this MCP endpoint:\n\n\
+         {http_url}\n\n\
+         Expected instance id: {instance_id}\n\n\
+         After connecting, call `negotiate_agent_session` first. Send an Agent Hello that \
+         identifies your client, describes my current task, requests the narrowest suitable \
+         capability profile, and accurately declares support for agent skills, MCP resources \
+         and prompts, images, notifications, and interactive approval.\n\n\
+         Confirm that Agent Welcome returns instance id `{instance_id}` before acting. Follow \
+         its ordered bootstrap steps and required invariants. Treat guidance served by the \
+         running instance as authoritative, fetch task-specific knowledge progressively, and \
+         do not begin model edits until all required bootstrap steps are complete. Do not \
+         interpret a capability profile as authentication or authorization.\n\n\
+         When authoring, probe Talos3D's curated recipe, parametric, definition, and prior \
+         paths before creating geometry. If no curated path exists, report the CorpusGap \
+         instead of improvising construction knowledge. Validate with structured geometric \
+         checks and inspect rendered output before declaring success."
+    )
 }
 
 /// Stable input claim published by the chrome pass for viewport consumers.
@@ -444,7 +472,8 @@ fn restrict_egui_context_map_to_primary_window(
 #[cfg(test)]
 mod chrome_input_capture_tests {
     use super::{
-        restrict_egui_context_map_to_primary_window, ChromeInputCapture, ChromeInputFrameClaim,
+        build_agent_onboarding_prompt, restrict_egui_context_map_to_primary_window,
+        ChromeInputCapture, ChromeInputFrameClaim,
     };
     use bevy::{prelude::*, window::PrimaryWindow};
     use bevy_egui::{input::WindowToEguiContextMap, PrimaryEguiContext};
@@ -461,6 +490,21 @@ mod chrome_input_capture_tests {
 
         assert!(capture.wants_any_pointer_input());
         assert!(capture.wants_any_keyboard_input());
+    }
+
+    #[test]
+    fn agent_onboarding_prompt_is_bound_to_live_instance() {
+        let prompt = build_agent_onboarding_prompt(
+            "talos3d-architecture-app-1234",
+            "http://127.0.0.1:25020/mcp",
+        );
+
+        assert!(prompt.contains("http://127.0.0.1:25020/mcp"));
+        assert!(prompt.contains("talos3d-architecture-app-1234"));
+        assert!(prompt.contains("negotiate_agent_session"));
+        assert!(prompt.contains("CorpusGap"));
+        assert!(!prompt.contains("AWS"));
+        assert!(!prompt.contains("Cloudflare"));
     }
 
     #[test]
@@ -1222,6 +1266,7 @@ struct ChromeData<'w, 's> {
     capability_registry: Res<'w, CapabilityRegistry>,
     capability_activation: ResMut<'w, CapabilityActivation>,
     extensions_window_state: ResMut<'w, ExtensionsWindowState>,
+    agent_connection_window_state: ResMut<'w, AgentConnectionWindowState>,
     toolbar_layout_state: ResMut<'w, ToolbarLayoutState>,
     floating_states: ResMut<'w, FloatingToolbarStates>,
     pending_command_invocations: ResMut<'w, PendingCommandInvocations>,
@@ -1393,6 +1438,13 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                         );
                     });
                 }
+                ui.menu_button("AI", |ui| {
+                    if ui.button("Connect an AI Agent…").clicked() {
+                        data.agent_connection_window_state.visible = true;
+                        data.agent_connection_window_state.copy_status = None;
+                        ui.close();
+                    }
+                });
                 ui.menu_button("About", draw_about_menu);
             });
         });
@@ -1632,6 +1684,18 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &mut data.extensions_window_state,
         &data.capability_registry,
         &mut data.capability_activation,
+    );
+    #[cfg(feature = "model-api")]
+    let agent_connection_details = data
+        .model_api_runtime_info
+        .as_deref()
+        .map(|runtime| (runtime.instance_id.clone(), runtime.http_url.clone()));
+    #[cfg(not(feature = "model-api"))]
+    let agent_connection_details: Option<(String, String)> = None;
+    draw_agent_connection_window(
+        &ctx,
+        &mut data.agent_connection_window_state,
+        agent_connection_details.as_ref(),
     );
     draw_import_review_window(&ctx, &mut data);
     draw_import_progress_window(&ctx, &data);
@@ -2093,6 +2157,83 @@ fn default_assistant_mcp_url<'a>(_data: &'a ChromeData) -> Option<&'a str> {
     {
         None
     }
+}
+
+fn draw_agent_connection_window(
+    ctx: &egui::Context,
+    state: &mut AgentConnectionWindowState,
+    runtime: Option<&(String, String)>,
+) {
+    if !state.visible {
+        return;
+    }
+
+    let mut open = state.visible;
+    let mut copy_status = state.copy_status.clone();
+    egui::Window::new("Connect an AI Agent")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(640.0)
+        .min_width(460.0)
+        .show(ctx, |ui| {
+            ui.label(
+                "Give this prompt to any MCP-capable AI agent. Talos3D will introduce the live instance and return the current guidance, capabilities, and next steps.",
+            );
+            ui.add_space(8.0);
+
+            let Some((instance_id, http_url)) = runtime else {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "The Talos3D Model API is not running in this app build. Start a model-api-enabled app to generate an instance-specific onboarding prompt.",
+                );
+                return;
+            };
+
+            egui::Grid::new("agent_connection_runtime")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Instance");
+                    ui.monospace(instance_id);
+                    ui.end_row();
+                    ui.label("MCP endpoint");
+                    ui.monospace(http_url);
+                    ui.end_row();
+                });
+
+            ui.add_space(10.0);
+            ui.label("Onboarding prompt");
+            let mut prompt = build_agent_onboarding_prompt(instance_id, http_url);
+            ui.add_sized(
+                [ui.available_width(), 280.0],
+                egui::TextEdit::multiline(&mut prompt)
+                    .font(egui::TextStyle::Monospace)
+                    .interactive(false),
+            );
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Copy onboarding prompt").clicked() {
+                    ctx.copy_text(prompt.clone());
+                    copy_status = Some("Onboarding prompt copied.".to_string());
+                }
+                if ui.button("Copy MCP endpoint").clicked() {
+                    ctx.copy_text(http_url.clone());
+                    copy_status = Some("MCP endpoint copied.".to_string());
+                }
+                if let Some(status) = copy_status.as_deref() {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, status);
+                }
+            });
+            ui.add_space(4.0);
+            ui.weak(
+                "The prompt contains connection facts only. Current Talos3D knowledge is fetched during negotiation instead of being frozen into this text.",
+            );
+        });
+
+    state.visible = open;
+    state.copy_status = copy_status;
 }
 
 fn draw_import_review_window(ctx: &egui::Context, data: &mut ChromeData) {

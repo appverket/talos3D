@@ -97,29 +97,33 @@ stable element ids and editable properties.
 Agents should treat MCP as a semantic model contract, not as a geometry macro
 recorder. The expected loop is:
 
-1. Inspect the instance and loaded capability surface with `get_instance_info`,
-   `list_vocabulary`, `list_element_classes`, `list_recipe_families`,
-   `list_constraints`, `list_generation_priors`, and
-   `list_catalog_providers`.
-2. Inspect the current document with `model_summary`, entity queries, assembly
+1. Start with `negotiate_agent_session`. Confirm the returned instance id and
+   follow its required bootstrap steps. The welcome composes the live guidance,
+   active capability profile, bounded capability snapshot, relevant skills or
+   card fallbacks, and refresh triggers for the current task.
+2. Inspect the loaded capability surface with `list_vocabulary`,
+   `list_element_classes`, `list_recipe_families`, `list_constraints`,
+   `list_generation_priors`, and `list_catalog_providers` as directed by the
+   welcome.
+3. Inspect the current document with `model_summary`, entity queries, assembly
    queries, relation queries, selection state, camera state, and screenshots
    where visual grounding is useful.
-3. Author or refine semantic structure through commands and Model API tools.
+4. Author or refine semantic structure through commands and Model API tools.
    Prefer authored entities, assemblies, relations, recipes, definitions, and
    stable handles over raw coordinate reconstruction.
    For repeatable work, capture the intended entities, relations, recipe
    choices, validation expectations, and deferrals as a scenario file rather
    than leaving the plan only in the prompt transcript.
-4. Run validation after meaningful changes. Treat findings as part of the
+5. Run validation after meaningful changes. Treat findings as part of the
    authoring loop, not as a final report bolted on at the end.
-5. Explain unresolved findings and obligations in terms of refinement state:
+6. Explain unresolved findings and obligations in terms of refinement state:
    conceptual gaps, schematic coordination issues, constructible blockers, or
    explicitly deferred work.
-6. When a needed recipe, assembly pattern, source, or rule is missing, create a
+7. When a needed recipe, assembly pattern, source, or rule is missing, create a
    gap or session draft instead of inventing unsupported structure silently.
-7. Re-run validation after each refinement step and preserve accepted waivers
+8. Re-run validation after each refinement step and preserve accepted waivers
    or deferrals as authored state.
-8. Produce named views, screenshots, and drawing exports from the same authored
+9. Produce named views, screenshots, and drawing exports from the same authored
    model when the result is ready to communicate.
 
 This loop is intentionally agent-independent. The embedded assistant, Claude,
@@ -191,12 +195,46 @@ instance beyond the local machine — e.g. a cloud model reaching a web-deployed
 Talos3D over a gateway/bridge — requires a real authn layer (per-instance bearer
 token) at that boundary; the loopback guard alone is insufficient there.
 
+## Agent Welcome And Onboarding
+
+`negotiate_agent_session` is the Talos3D-native connection handshake. It is
+available in every capability profile and accepts an Agent Hello with optional
+client identity, task, requested profile, context budget, delegation mode, and
+support flags for skills, MCP resources/prompts, images, notifications, and
+interactive approval.
+
+The Agent Welcome returns:
+
+- the exact `InstanceInfo` for the running app;
+- the active and available profiles without silently switching them;
+- the security assurance known by this server (currently the loopback boundary,
+  explicitly not authentication or authorization);
+- a compact live capability snapshot and required guidance-card ids;
+- at most a small context-budget-aware set of task-relevant agent-skill
+  summaries when the client supports skills;
+- tool/card fallbacks, ordered bootstrap calls, required invariants, and refresh
+  triggers;
+- revision anchors for the facts the runtime can version, and an explicit
+  `null` knowledge epoch while no single authoritative mutable-knowledge epoch
+  exists.
+
+The handshake is safe to repeat after reconnect, task/profile change,
+`tools/list_changed`, stale guidance, or curated-path/corpus changes. It
+composes the same runtime registries as the normal tools; it is not a second
+knowledge store.
+
+Desktop apps expose this through **AI → Connect an AI Agent…**. The dialog shows
+the live instance and endpoint and generates a ready-to-paste onboarding prompt
+with one-click copy. The prompt carries only rendezvous facts and stable
+instructions; current Talos3D knowledge still comes from the welcome and its
+follow-up calls.
+
 ## Capability Profiles (tool gating)
 
-The full router registers ~240 tools, whose schemas cost a connecting agent
+The full router registers a large tool surface, whose schemas cost a connecting agent
 roughly 196 KB (~35k tokens) of cold-start context. To keep sessions lean, the
 advertised tool surface is gated by a named **capability profile**. The session
-contract — `get_instance_info`, `get_authoring_guidance`,
+contract — `get_instance_info`, `negotiate_agent_session`, `get_authoring_guidance`,
 `get_capability_snapshot`, `list_guidance_cards` / `get_guidance_card`,
 `discover_curated_paths`, agent-skill discovery, and `set_session_profile`
 itself — is present in **every** profile, so a fresh MCP-only agent can always
@@ -276,6 +314,7 @@ describe the full surface. Current tool categories include:
 ### Model inspection
 
 - `get_instance_info`
+- `negotiate_agent_session`
 - `list_entities`
 - `get_entity`
 - `get_entity_details`
