@@ -238,12 +238,23 @@ impl ModelApiRequestSender {
 
     fn send(&self, request: ModelApiRequest) -> Result<(), mpsc::SendError<ModelApiRequest>> {
         self.sender.send(request)?;
+        self.wake();
+        Ok(())
+    }
+
+    /// Wake the Bevy event loop without enqueueing another model request.
+    ///
+    /// Most MCP calls need one frame to service their request. A screenshot
+    /// needs several: flush UI state, queue the render capture, complete the
+    /// GPU readback, and deliver the observer that writes the file. Keep those
+    /// frames moving even when the app is unfocused and Winit is in its
+    /// minute-long low-power wait mode.
+    fn wake(&self) {
         if let Ok(guard) = self.wake_proxy.lock() {
             if let Some(proxy) = guard.as_ref() {
                 let _ = proxy.send_event(WinitUserEvent::WakeUp);
             }
         }
-        Ok(())
     }
 }
 

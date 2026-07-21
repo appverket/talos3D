@@ -1196,7 +1196,7 @@ impl ModelApiServer {
             })
             .await??;
 
-        wait_for_written_file(&saved_path).await?;
+        wait_for_written_file(&saved_path, &self.sender).await?;
         if let Some(warning) = crate::plugins::drawing_export::screenshot_quality_warning_for_path(
             std::path::Path::new(&saved_path),
         )? {
@@ -1212,7 +1212,7 @@ impl ModelApiServer {
             .round_trip(|response| ModelApiRequest::ExportDrawing { path, response })
             .await??;
 
-        wait_for_written_file(&saved_path).await?;
+        wait_for_written_file(&saved_path, &self.sender).await?;
         Ok(saved_path)
     }
 
@@ -1229,7 +1229,7 @@ impl ModelApiServer {
             })
             .await??;
 
-        wait_for_written_file(&saved_path).await?;
+        wait_for_written_file(&saved_path, &self.sender).await?;
         Ok(saved_path)
     }
 
@@ -3552,7 +3552,10 @@ fn default_screenshot_path() -> String {
 }
 
 #[cfg(feature = "model-api")]
-async fn wait_for_written_file(path: &str) -> Result<(), String> {
+async fn wait_for_written_file(
+    path: &str,
+    wake_handle: &ModelApiRequestSender,
+) -> Result<(), String> {
     const ATTEMPTS: usize = 600;
     const POLL_INTERVAL_MS: u64 = 100;
     const STABLE_POLLS_REQUIRED: usize = 3;
@@ -3578,6 +3581,11 @@ async fn wait_for_written_file(path: &str) -> Result<(), String> {
                 stable_polls = 0;
             }
         }
+        // Screenshot/export work crosses multiple Bevy render frames. A
+        // model-api app may be unfocused, where Winit's desktop low-power mode
+        // otherwise waits up to a minute between frames. Explicitly wake each
+        // polling interval so one request deterministically reaches disk.
+        wake_handle.wake();
         sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
 
