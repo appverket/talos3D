@@ -376,6 +376,19 @@ fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, access_token
          identifies your client, describes my current task, requests the narrowest suitable \
          capability profile, and accurately declares support for agent skills, MCP resources \
          and prompts, images, notifications, and interactive approval.\n\n\
+         Do not fetch or parse the full tool catalog to discover this first call. Invoke it as \
+         one structured MCP `tools/call` request; do not concatenate JSON fragments. Its exact \
+         argument shape is:\n\n\
+         {{\"agent_name\":\"<your agent name>\",\"agent_version\":\"<version if known>\",\
+         \"protocol\":\"mcp\",\"task\":\"<the user's current task>\",\
+         \"requested_profile\":\"authoring\",\"delegation_mode\":\"user_delegated\",\
+         \"supports\":{{\"agent_skills\":true,\"mcp_resources_and_prompts\":true,\
+         \"images\":true,\"notifications\":false,\"interactive_approval\":false}}}}\n\n\
+         If you are using raw HTTP instead of an MCP client, serialize exactly one JSON-RPC \
+         object whose method is `tools/call`, whose params.name is \
+         `negotiate_agent_session`, and whose params.arguments is the object above. Use a JSON \
+         serializer or a literal single object; never append multiple objects or shell-built \
+         fragments.\n\n\
          Confirm that Agent Welcome returns instance id `{instance_id}` before acting. Follow \
          its ordered bootstrap steps and required invariants. Treat guidance served by the \
          running instance as authoritative, fetch task-specific knowledge progressively, and \
@@ -510,6 +523,10 @@ mod chrome_input_capture_tests {
         assert!(prompt.contains("http://127.0.0.1:25020/mcp"));
         assert!(prompt.contains("talos3d-architecture-app-1234"));
         assert!(prompt.contains("negotiate_agent_session"));
+        assert!(prompt.contains("Do not fetch or parse the full tool catalog"));
+        assert!(prompt.contains("\"requested_profile\":\"authoring\""));
+        assert!(prompt.contains("params.arguments"));
+        assert!(prompt.contains("never append multiple objects"));
         assert!(prompt.contains("Authorization: Bearer test-session-token"));
         assert!(prompt.contains("instance_bound_ephemeral_bearer"));
         assert!(!prompt.contains("Do not verify"));
