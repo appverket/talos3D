@@ -11,7 +11,7 @@ pub use bevy_egui::input::EguiWantsInput;
 use crate::capability_registry::{CapabilityActivation, CapabilityRegistry};
 use crate::curation::{NominationQueue, SourceRegistry};
 #[cfg(feature = "model-api")]
-use crate::plugins::model_api::ModelApiRuntimeInfo;
+use crate::plugins::model_api::{ModelApiAuthentication, ModelApiRuntimeInfo};
 #[cfg(feature = "perf-stats")]
 use crate::plugins::perf_stats::{
     add_layers_draw_time, add_outliner_draw_time, overlay_text as perf_overlay_text, PerfStats,
@@ -362,11 +362,16 @@ struct AgentConnectionWindowState {
     copy_status: Option<String>,
 }
 
-fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str) -> String {
+fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, access_token: &str) -> String {
     format!(
         "Connect to the running Talos3D instance at this MCP endpoint:\n\n\
          {http_url}\n\n\
          Expected instance id: {instance_id}\n\n\
+         Authenticate every HTTP MCP request with this exact header:\n\n\
+         Authorization: Bearer {access_token}\n\n\
+         This is an ephemeral credential for this running Talos3D instance. Do not send it \
+         to any other host or persist it after the session. A request without this header \
+         must be treated as an authentication failure.\n\n\
          After connecting, call `negotiate_agent_session` first. Send an Agent Hello that \
          identifies your client, describes my current task, requests the narrowest suitable \
          capability profile, and accurately declares support for agent skills, MCP resources \
@@ -374,8 +379,10 @@ fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str) -> String {
          Confirm that Agent Welcome returns instance id `{instance_id}` before acting. Follow \
          its ordered bootstrap steps and required invariants. Treat guidance served by the \
          running instance as authoritative, fetch task-specific knowledge progressively, and \
-         do not begin model edits until all required bootstrap steps are complete. Do not \
-         interpret a capability profile as authentication or authorization.\n\n\
+         do not begin model edits until all required bootstrap steps are complete. Verify \
+         that its security.authentication_assurance is \
+         `instance_bound_ephemeral_bearer`. Do not interpret a capability profile as \
+         authentication or authorization.\n\n\
          When authoring, probe Talos3D's curated recipe, parametric, definition, and prior \
          paths before creating geometry. If no curated path exists, report the CorpusGap \
          instead of improvising construction knowledge. Validate with structured geometric \
@@ -497,11 +504,15 @@ mod chrome_input_capture_tests {
         let prompt = build_agent_onboarding_prompt(
             "talos3d-architecture-app-1234",
             "http://127.0.0.1:25020/mcp",
+            "test-session-token",
         );
 
         assert!(prompt.contains("http://127.0.0.1:25020/mcp"));
         assert!(prompt.contains("talos3d-architecture-app-1234"));
         assert!(prompt.contains("negotiate_agent_session"));
+        assert!(prompt.contains("Authorization: Bearer test-session-token"));
+        assert!(prompt.contains("instance_bound_ephemeral_bearer"));
+        assert!(!prompt.contains("Do not verify"));
         assert!(prompt.contains("CorpusGap"));
         assert!(!prompt.contains("AWS"));
         assert!(!prompt.contains("Cloudflare"));
@@ -1355,6 +1366,8 @@ struct ChromeData<'w, 's> {
     recovery_files: Res<'w, RecoveryFiles>,
     #[cfg(feature = "model-api")]
     model_api_runtime_info: Option<Res<'w, ModelApiRuntimeInfo>>,
+    #[cfg(feature = "model-api")]
+    model_api_authentication: Option<Res<'w, ModelApiAuthentication>>,
     #[cfg(feature = "perf-stats")]
     perf_stats: ResMut<'w, PerfStats>,
 }
@@ -1689,9 +1702,16 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
     let agent_connection_details = data
         .model_api_runtime_info
         .as_deref()
-        .map(|runtime| (runtime.instance_id.clone(), runtime.http_url.clone()));
+        .zip(data.model_api_authentication.as_deref())
+        .map(|(runtime, authentication)| {
+            (
+                runtime.instance_id.clone(),
+                runtime.http_url.clone(),
+                authentication.access_token_for_onboarding().to_string(),
+            )
+        });
     #[cfg(not(feature = "model-api"))]
-    let agent_connection_details: Option<(String, String)> = None;
+    let agent_connection_details: Option<(String, String, String)> = None;
     draw_agent_connection_window(
         &ctx,
         &mut data.agent_connection_window_state,
@@ -2162,7 +2182,7 @@ fn default_assistant_mcp_url<'a>(_data: &'a ChromeData) -> Option<&'a str> {
 fn draw_agent_connection_window(
     ctx: &egui::Context,
     state: &mut AgentConnectionWindowState,
-    runtime: Option<&(String, String)>,
+    runtime: Option<&(String, String, String)>,
 ) {
     if !state.visible {
         return;
@@ -2182,7 +2202,7 @@ fn draw_agent_connection_window(
             );
             ui.add_space(8.0);
 
-            let Some((instance_id, http_url)) = runtime else {
+            let Some((instance_id, http_url, access_token)) = runtime else {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "The Talos3D Model API is not running in this app build. Start a model-api-enabled app to generate an instance-specific onboarding prompt.",
@@ -2200,11 +2220,14 @@ fn draw_agent_connection_window(
                     ui.label("MCP endpoint");
                     ui.monospace(http_url);
                     ui.end_row();
+                    ui.label("Authentication");
+                    ui.label("Required — ephemeral instance bearer included below");
+                    ui.end_row();
                 });
 
             ui.add_space(10.0);
             ui.label("Onboarding prompt");
-            let mut prompt = build_agent_onboarding_prompt(instance_id, http_url);
+            let mut prompt = build_agent_onboarding_prompt(instance_id, http_url, access_token);
             ui.add_sized(
                 [ui.available_width(), 280.0],
                 egui::TextEdit::multiline(&mut prompt)
@@ -2228,7 +2251,7 @@ fn draw_agent_connection_window(
             });
             ui.add_space(4.0);
             ui.weak(
-                "The prompt contains connection facts only. Current Talos3D knowledge is fetched during negotiation instead of being frozen into this text.",
+                "The prompt contains an ephemeral credential for this running instance. Share it only with the intended agent. Current Talos3D knowledge is fetched during negotiation instead of being frozen into this text.",
             );
         });
 

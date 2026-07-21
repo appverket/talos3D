@@ -10,6 +10,45 @@ pub(super) struct ModelApiServer {
     /// per-request server instances see profile switches made by earlier
     /// requests on the same endpoint.
     pub(super) profile_state: SessionProfileState,
+    pub(super) transport_security: ModelApiTransportSecurity,
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ModelApiTransportSecurity {
+    LocalStdio,
+    InstanceBearerHttp,
+}
+
+#[cfg(feature = "model-api")]
+impl ModelApiTransportSecurity {
+    pub(super) fn session_info(self, loopback: bool) -> SessionSecurityInfo {
+        match self {
+            Self::LocalStdio => SessionSecurityInfo {
+                transport_scope: "local_stdio_process_channel".to_string(),
+                authentication_assurance: "inherited_parent_process_channel".to_string(),
+                authorization_assurance: "local_process_possession_only".to_string(),
+                delegated_identity: false,
+                capability_profile_is_authorization: false,
+                note: "The stdio transport inherits its trust from the process that launched Talos3D; it does not establish a delegated user or agent identity. Capability profiles remain tool-surface filters, not authorization grants."
+                    .to_string(),
+            },
+            Self::InstanceBearerHttp => SessionSecurityInfo {
+                transport_scope: if loopback {
+                    "local_loopback_http"
+                } else {
+                    "network_http"
+                }
+                .to_string(),
+                authentication_assurance: "instance_bound_ephemeral_bearer".to_string(),
+                authorization_assurance: "bearer_possession_for_this_running_instance".to_string(),
+                delegated_identity: false,
+                capability_profile_is_authorization: false,
+                note: "Every HTTP MCP request passed the random per-process bearer check. The bearer authenticates possession of this instance handoff, not a named user or delegated agent identity. Capability profiles remain independent tool-surface filters."
+                    .to_string(),
+            },
+        }
+    }
 }
 
 /// Process-wide frozen tool catalog: the sanitized router plus one frozen,
@@ -135,12 +174,18 @@ fn sanitize_schema_node(node: &mut serde_json::Value) {
 #[cfg(feature = "model-api")]
 impl ModelApiServer {
     pub(super) fn new(sender: ModelApiRequestSender) -> Self {
-        Self::with_profile_state(sender, SessionProfileState::new(default_profile_from_env()))
+        Self {
+            sender,
+            tool_router: profile_tool_catalog().router.clone(),
+            profile_state: SessionProfileState::new(default_profile_from_env()),
+            transport_security: ModelApiTransportSecurity::LocalStdio,
+        }
     }
 
     /// Build a server bound to an existing session profile state. The HTTP
     /// transport passes one shared state per endpoint so its per-request
     /// (stateless-mode) instances behave as one profile session.
+    #[cfg(test)]
     pub(super) fn with_profile_state(
         sender: ModelApiRequestSender,
         profile_state: SessionProfileState,
@@ -149,6 +194,19 @@ impl ModelApiServer {
             sender,
             tool_router: profile_tool_catalog().router.clone(),
             profile_state,
+            transport_security: ModelApiTransportSecurity::LocalStdio,
+        }
+    }
+
+    pub(super) fn with_authenticated_http_profile_state(
+        sender: ModelApiRequestSender,
+        profile_state: SessionProfileState,
+    ) -> Self {
+        Self {
+            sender,
+            tool_router: profile_tool_catalog().router.clone(),
+            profile_state,
+            transport_security: ModelApiTransportSecurity::InstanceBearerHttp,
         }
     }
 
@@ -2639,6 +2697,7 @@ pub(super) fn assemble_agent_welcome(
     profile: CapabilityProfile,
     mut snapshot: CapabilitySnapshotInfo,
     skills: Vec<crate::plugins::agent_skills::AgentSkillSummary>,
+    security: SessionSecurityInfo,
 ) -> AgentWelcome {
     snapshot
         .next_tools
@@ -2663,10 +2722,6 @@ pub(super) fn assemble_agent_welcome(
         .unwrap_or_else(|_| "digest-unavailable".to_string());
     let recommended_agent_skills =
         relevant_agent_skills(&hello, &snapshot.must_read_agent_skill_ids, skills);
-    let loopback = matches!(
-        instance.http_host.as_str(),
-        "127.0.0.1" | "::1" | "localhost"
-    );
     let mut warnings = Vec::new();
     if requested_profile.is_some() && !requested_profile_available {
         warnings.push(format!(
@@ -2768,15 +2823,7 @@ pub(super) fn assemble_agent_welcome(
         contract_version: 1,
         hello: hello.clone(),
         instance,
-        security: SessionSecurityInfo {
-            transport_scope: if loopback { "local_loopback" } else { "network" }.to_string(),
-            authentication_assurance: "not_provided_by_talos3d_core_model_api".to_string(),
-            authorization_assurance: "not_provided_by_talos3d_core_model_api".to_string(),
-            delegated_identity: false,
-            capability_profile_is_authorization: false,
-            note: "The current core Model API reports its transport boundary only. Capability profiles gate tool exposure; they do not authenticate a principal or grant authority."
-                .to_string(),
-        },
+        security,
         active_profile: profile.name().to_string(),
         requested_profile,
         requested_profile_available,
@@ -4995,7 +5042,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "negotiate_agent_session",
-        description = "Negotiate a Talos3D-native agent session. Send client capabilities, task, and optional requested profile; receive a compact live welcome containing exact instance identity, active/available profiles, honest security assurance, capability snapshot, required guidance, optional skill recommendations, ordered bootstrap steps, and refresh triggers. This call does not authenticate, authorize, or silently switch profiles."
+        description = "Negotiate a Talos3D-native agent session after transport authentication. Send client capabilities, task, and optional requested profile; receive a compact live welcome containing exact instance identity, active/available profiles, honest security assurance, capability snapshot, required guidance, optional skill recommendations, ordered bootstrap steps, and refresh triggers. This call reports the authentication already enforced by the transport; it does not silently switch profiles or establish delegated user identity."
     )]
     pub(super) async fn negotiate_agent_session_tool(
         &self,
@@ -5009,12 +5056,18 @@ impl ModelApiServer {
         let skills = self
             .request_list_agent_skills(crate::plugins::agent_skills::AgentSkillSearch::default())
             .await;
+        let loopback = matches!(
+            instance.http_host.as_str(),
+            "127.0.0.1" | "::1" | "localhost"
+        );
+        let security = self.transport_security.session_info(loopback);
         json_tool_result(assemble_agent_welcome(
             hello,
             instance,
             self.profile_state.get(),
             snapshot,
             skills,
+            security,
         ))
     }
 

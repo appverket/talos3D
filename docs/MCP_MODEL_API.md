@@ -175,25 +175,39 @@ repository-scoped endpoint config with the actual bound port:
 ```
 
 Those files are intentionally ignored so local ports and instance choices do not
-end up committed. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit
-config files when launching from a packaged app or another directory. Set
+end up committed. They contain discovery facts only, never the bearer
+credential. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit config
+files when launching from a packaged app or another directory. Set
 `TALOS3D_WRITE_MCP_CONFIG=false` to disable writing local client configs.
 
 ### Access control
 
-The HTTP transport binds to `127.0.0.1` only and additionally enforces a
-loopback access guard on every request: the `Host` header must name a loopback
-authority the server actually bound (defeating DNS-rebinding), and any `Origin`
-header present must be the matching loopback origin (defeating cross-origin
-browser drive-bys). Local stdio/HTTP MCP clients are unaffected — they send a
-loopback `Host` and no browser `Origin`. Requests that fail the guard get
-`403 Forbidden`.
+The HTTP transport requires a random per-process bearer credential on every
+request. The credential is generated when the app starts, kept out of logs,
+runtime manifests, `InstanceInfo`, and repository-local discovery configs, and
+delivered only through the user-visible **Connect an AI Agent** prompt. Clients
+must send:
 
-This guard is **not** authentication: it stops untrusted web pages, not other
-local processes or a remote caller arriving through a reverse proxy. Exposing an
-instance beyond the local machine — e.g. a cloud model reaching a web-deployed
-Talos3D over a gateway/bridge — requires a real authn layer (per-instance bearer
-token) at that boundary; the loopback guard alone is insufficient there.
+```http
+Authorization: Bearer <ephemeral-instance-token>
+```
+
+Missing or invalid credentials receive `401 Unauthorized`. Restarting the app
+invalidates the credential. Possession authenticates the instance handoff; it
+does not establish a named user, delegated agent identity, or independent
+command authorization policy.
+
+Production defaults to a generated credential. A gateway or repeatable test
+harness may provision a token of at least 32 non-whitespace characters through
+`TALOS3D_MODEL_API_TOKEN`; Talos3D still keeps that value out of logs,
+manifests, discovery configs, and `InstanceInfo`.
+
+The bearer check complements the loopback access guard: the `Host` header must
+name the loopback authority actually bound (defeating DNS-rebinding), and any
+`Origin` header must be the matching loopback origin (defeating cross-origin
+browser drive-bys). Requests that fail those checks receive `403 Forbidden`.
+Capability profiles remain separate tool-surface filters and are never treated
+as authentication or authorization.
 
 ## Agent Welcome And Onboarding
 
@@ -207,8 +221,9 @@ The Agent Welcome returns:
 
 - the exact `InstanceInfo` for the running app;
 - the active and available profiles without silently switching them;
-- the security assurance known by this server (currently the loopback boundary,
-  explicitly not authentication or authorization);
+- the security assurance known by this transport, including successful
+  instance-bound bearer authentication for HTTP without claiming delegated
+  user identity;
 - a compact live capability snapshot and required guidance-card ids;
 - at most a small context-budget-aware set of task-relevant agent-skill
   summaries when the client supports skills;
@@ -225,9 +240,10 @@ knowledge store.
 
 Desktop apps expose this through **AI → Connect an AI Agent…**. The dialog shows
 the live instance and endpoint and generates a ready-to-paste onboarding prompt
-with one-click copy. The prompt carries only rendezvous facts and stable
-instructions; current Talos3D knowledge still comes from the welcome and its
-follow-up calls.
+with one-click copy. The prompt carries the ephemeral bearer credential,
+rendezvous facts, and stable instructions; current Talos3D knowledge still
+comes from the welcome and its follow-up calls. Treat the copied prompt as a
+short-lived secret and share it only with the intended agent.
 
 ## Capability Profiles (tool gating)
 

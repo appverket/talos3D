@@ -11307,7 +11307,7 @@ mod capability_profiles {
     use super::super::{
         assemble_agent_welcome, capability_snapshot_next_tools, profile_tool_catalog,
         AgentClientCapabilities, AgentHello, CapabilityProfile, CapabilitySnapshotInfo,
-        InstanceInfo,
+        InstanceInfo, ModelApiTransportSecurity,
     };
     use crate::plugins::agent_skills::AgentSkillSummary;
     use std::collections::BTreeSet;
@@ -11470,6 +11470,7 @@ mod capability_profiles {
                 skill("roof-review", "roof visual review workflow"),
                 unrelated_skill,
             ],
+            ModelApiTransportSecurity::InstanceBearerHttp.session_info(true),
         );
 
         assert_eq!(welcome.contract, "talos3d.agent-welcome");
@@ -11478,6 +11479,11 @@ mod capability_profiles {
         assert!(welcome.requested_profile_available);
         assert!(welcome.profile_change_required);
         assert!(!welcome.security.capability_profile_is_authorization);
+        assert_eq!(
+            welcome.security.authentication_assurance,
+            "instance_bound_ephemeral_bearer"
+        );
+        assert!(!welcome.security.delegated_identity);
         assert_eq!(welcome.recommended_agent_skills.len(), 2);
         assert!(welcome
             .recommended_agent_skills
@@ -11517,6 +11523,7 @@ mod capability_profiles {
             CapabilityProfile::Inspection,
             welcome.capability_snapshot.clone(),
             Vec::new(),
+            ModelApiTransportSecurity::InstanceBearerHttp.session_info(true),
         );
         assert!(fallback.recommended_agent_skills.is_empty());
         assert!(fallback.bootstrap_steps.iter().any(|step| {

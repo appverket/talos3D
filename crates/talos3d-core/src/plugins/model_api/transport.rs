@@ -18,6 +18,8 @@ const MODEL_API_MCP_CONFIG_PATHS_ENV: &str = "TALOS3D_MCP_CONFIG_PATHS";
 const MODEL_API_WRITE_MCP_CONFIG_ENV: &str = "TALOS3D_WRITE_MCP_CONFIG";
 #[cfg(feature = "model-api")]
 const MODEL_API_MCP_SERVER_NAME: &str = "talos3d";
+#[cfg(feature = "model-api")]
+const MODEL_API_TOKEN_ENV: &str = "TALOS3D_MODEL_API_TOKEN";
 
 #[cfg(feature = "model-api")]
 #[derive(Resource, Debug)]
@@ -69,6 +71,7 @@ impl Drop for ModelApiDiscoveryCleanup {
 pub(super) fn spawn_model_api_server(
     sender: ModelApiRequestSender,
     runtime_info: ModelApiRuntimeInfo,
+    authentication: ModelApiAuthentication,
     http_listener: StdTcpListener,
 ) {
     let http_sender = sender.clone();
@@ -147,7 +150,7 @@ pub(super) fn spawn_model_api_server(
                     let service: StreamableHttpService<ModelApiServer, LocalSessionManager> =
                         StreamableHttpService::new(
                             move || {
-                                Ok(ModelApiServer::with_profile_state(
+                                Ok(ModelApiServer::with_authenticated_http_profile_state(
                                     sender.clone(),
                                     state.clone(),
                                 ))
@@ -158,7 +161,10 @@ pub(super) fn spawn_model_api_server(
                     service
                 };
 
-                let guard = LocalAccessGuard::for_port(runtime_info.http_port);
+                let guard = LocalAccessGuard::for_port(
+                    runtime_info.http_port,
+                    authentication.authorization_header_value(),
+                );
                 let mut router = axum::Router::new()
                     .route_service("/mcp", profile_service(default_profile_from_env()));
                 for profile in CapabilityProfile::ALL {
@@ -206,19 +212,20 @@ pub(super) fn spawn_model_api_server(
 /// — with no authentication. This guard enforces the MCP Streamable-HTTP
 /// requirement to validate `Origin` and reject non-loopback hosts.
 ///
-/// Authn (per-instance bearer token, and the cloud-bridge/gateway path to a
-/// web-deployed instance) is a separate, planned layer; this struct is the seam
-/// it will extend.
+/// A random per-process bearer credential is enforced after these browser and
+/// host checks. The two layers are complementary: authentication does not make
+/// an attacker-controlled `Origin` or rebinding `Host` acceptable.
 #[cfg(feature = "model-api")]
 #[derive(Clone)]
 struct LocalAccessGuard {
     allowed_hosts: std::sync::Arc<Vec<String>>,
     allowed_origins: std::sync::Arc<Vec<String>>,
+    expected_authorization: std::sync::Arc<str>,
 }
 
 #[cfg(feature = "model-api")]
 impl LocalAccessGuard {
-    fn for_port(port: u16) -> Self {
+    fn for_port(port: u16, expected_authorization: String) -> Self {
         Self {
             allowed_hosts: std::sync::Arc::new(vec![
                 format!("127.0.0.1:{port}"),
@@ -230,8 +237,35 @@ impl LocalAccessGuard {
                 format!("http://localhost:{port}"),
                 format!("http://[::1]:{port}"),
             ]),
+            expected_authorization: std::sync::Arc::from(expected_authorization),
         }
     }
+}
+
+#[cfg(feature = "model-api")]
+fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+#[cfg(feature = "model-api")]
+fn bearer_authentication_allowed(
+    headers: &axum::http::HeaderMap,
+    expected_authorization: &str,
+) -> bool {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|provided| {
+            constant_time_bytes_equal(provided.as_bytes(), expected_authorization.as_bytes())
+        })
 }
 
 /// Pure access decision, factored out so it can be unit-tested without an HTTP
@@ -273,19 +307,22 @@ async fn enforce_local_access(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
-    if local_access_allowed(
+    if !local_access_allowed(
         request.headers(),
         &guard.allowed_hosts,
         &guard.allowed_origins,
     ) {
-        Ok(next.run(request).await)
-    } else {
-        Err(axum::http::StatusCode::FORBIDDEN)
+        return Err(axum::http::StatusCode::FORBIDDEN);
     }
+    if !bearer_authentication_allowed(request.headers(), &guard.expected_authorization) {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
 }
 
 #[cfg(feature = "model-api")]
-pub(super) fn resolve_model_api_runtime() -> Result<(ModelApiRuntimeInfo, StdTcpListener), String> {
+pub(super) fn resolve_model_api_runtime(
+) -> Result<(ModelApiRuntimeInfo, ModelApiAuthentication, StdTcpListener), String> {
     let app_name = current_app_name();
     let pid = std::process::id();
     let started_at_unix_ms = SystemTime::now()
@@ -343,9 +380,15 @@ pub(super) fn resolve_model_api_runtime() -> Result<(ModelApiRuntimeInfo, StdTcp
         started_at_unix_ms,
         requested_port,
     };
+    let authentication = env::var(MODEL_API_TOKEN_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(ModelApiAuthentication::from_configured_token)
+        .transpose()?
+        .unwrap_or_else(ModelApiAuthentication::generate);
     write_local_mcp_client_configs(&runtime_info);
 
-    Ok((runtime_info, listener))
+    Ok((runtime_info, authentication, listener))
 }
 
 #[cfg(feature = "model-api")]
@@ -417,7 +460,12 @@ fn write_instance_registry_manifest(
         "http_url": format!("http://{MODEL_API_DEFAULT_HTTP_HOST}:{http_port}/mcp"),
         "registry_path": registry_path.display().to_string(),
         "started_at_unix_ms": started_at_unix_ms,
-        "requested_port": requested_port
+        "requested_port": requested_port,
+        "authentication": {
+            "type": "bearer",
+            "required": true,
+            "credential_delivery": "in_app_onboarding_prompt"
+        }
     });
     let bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("failed to serialize instance manifest: {error}"))?;
@@ -599,12 +647,67 @@ mod tests {
     use axum::http::{header, HeaderMap, HeaderValue};
 
     fn guard() -> LocalAccessGuard {
-        LocalAccessGuard::for_port(24842)
+        LocalAccessGuard::for_port(24842, "Bearer test-session-token".to_string())
     }
 
     fn allowed(headers: &HeaderMap) -> bool {
         let g = guard();
         local_access_allowed(headers, &g.allowed_hosts, &g.allowed_origins)
+    }
+
+    fn authenticated(headers: &HeaderMap) -> bool {
+        let g = guard();
+        bearer_authentication_allowed(headers, &g.expected_authorization)
+    }
+
+    #[test]
+    fn exact_instance_bearer_is_authenticated() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-session-token"),
+        );
+        assert!(authenticated(&headers));
+    }
+
+    #[test]
+    fn missing_bearer_is_not_authenticated() {
+        assert!(!authenticated(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn wrong_bearer_is_not_authenticated() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer another-session-token"),
+        );
+        assert!(!authenticated(&headers));
+    }
+
+    #[test]
+    fn generated_credentials_are_unique_and_redacted() {
+        let first = ModelApiAuthentication::generate();
+        let second = ModelApiAuthentication::generate();
+        assert_ne!(
+            first.access_token_for_onboarding(),
+            second.access_token_for_onboarding()
+        );
+        assert!(first.access_token_for_onboarding().starts_with("talos3d_"));
+        assert!(!format!("{first:?}").contains(first.access_token_for_onboarding()));
+    }
+
+    #[test]
+    fn configured_credential_requires_strong_header_safe_value() {
+        assert!(ModelApiAuthentication::from_configured_token("too-short".to_string()).is_err());
+        assert!(ModelApiAuthentication::from_configured_token(
+            "long-enough-token-that-contains whitespace".to_string()
+        )
+        .is_err());
+        assert!(ModelApiAuthentication::from_configured_token(
+            "repeatable-test-token-0123456789abcdef".to_string()
+        )
+        .is_ok());
     }
 
     #[test]

@@ -141,7 +141,7 @@ const CMD_MODEL_API_SET_ENTITY_PROPERTY: &str = "core.set_entity_property";
 #[cfg(feature = "model-api")]
 impl Plugin for ModelApiPlugin {
     fn build(&self, app: &mut App) {
-        let (runtime_info, http_listener) = match resolve_model_api_runtime() {
+        let (runtime_info, authentication, http_listener) = match resolve_model_api_runtime() {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("failed to configure model API runtime: {error}");
@@ -154,6 +154,7 @@ impl Plugin for ModelApiPlugin {
         app.insert_resource(ModelApiReceiver(Mutex::new(receiver)));
         app.insert_resource(ModelApiWakeHandle(request_sender.clone()));
         app.insert_resource(runtime_info.clone());
+        app.insert_resource(authentication.clone());
         app.insert_resource(ModelApiDiscoveryCleanup::new(&runtime_info));
         // Ensure the Semantic Procedural Session substrate (ADR-051) is
         // installed so `procedural_session.*` tools have resources to
@@ -201,7 +202,7 @@ impl Plugin for ModelApiPlugin {
             )
                 .chain(),
         );
-        spawn_model_api_server(request_sender, runtime_info, http_listener);
+        spawn_model_api_server(request_sender, runtime_info, authentication, http_listener);
     }
 }
 

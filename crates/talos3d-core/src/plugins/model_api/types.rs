@@ -15,6 +15,65 @@ pub struct ModelApiRuntimeInfo {
     pub requested_port: Option<u16>,
 }
 
+/// Ephemeral credential for the HTTP MCP transport.
+///
+/// The token exists only in process memory and the user-visible onboarding
+/// handoff. It is deliberately absent from discovery manifests, logs,
+/// `InstanceInfo`, and serialization so local discovery never becomes a secret
+/// distribution channel.
+#[cfg(feature = "model-api")]
+#[derive(Resource, Clone)]
+pub struct ModelApiAuthentication {
+    access_token: Arc<str>,
+}
+
+#[cfg(feature = "model-api")]
+impl ModelApiAuthentication {
+    pub(super) fn generate() -> Self {
+        // Two independent UUIDv4 values provide 244 random bits after UUID
+        // version/variant bits. The prefix makes accidental credential-type
+        // confusion visible without weakening the random portion.
+        let access_token = format!(
+            "talos3d_{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        Self {
+            access_token: Arc::from(access_token),
+        }
+    }
+
+    pub(super) fn from_configured_token(access_token: String) -> Result<Self, String> {
+        if access_token.len() < 32 {
+            return Err("TALOS3D_MODEL_API_TOKEN must contain at least 32 characters".to_string());
+        }
+        if access_token.chars().any(char::is_whitespace) {
+            return Err("TALOS3D_MODEL_API_TOKEN must not contain whitespace".to_string());
+        }
+        Ok(Self {
+            access_token: Arc::from(access_token),
+        })
+    }
+
+    pub(crate) fn access_token_for_onboarding(&self) -> &str {
+        &self.access_token
+    }
+
+    pub(super) fn authorization_header_value(&self) -> String {
+        format!("Bearer {}", self.access_token)
+    }
+}
+
+#[cfg(feature = "model-api")]
+impl std::fmt::Debug for ModelApiAuthentication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelApiAuthentication")
+            .field("access_token", &"<redacted>")
+            .finish()
+    }
+}
+
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EntityEntry {
