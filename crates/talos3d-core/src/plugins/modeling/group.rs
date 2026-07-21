@@ -558,16 +558,15 @@ pub fn find_group_for_member(world: &World, member_id: ElementId) -> Option<Elem
 pub fn collect_group_members_recursive(world: &World, group_id: ElementId) -> Vec<ElementId> {
     let mut result = Vec::new();
     let mut stack = vec![group_id];
-    let mut visited = HashSet::new();
+    let mut discovered = HashSet::from([group_id]);
     while let Some(id) = stack.pop() {
-        if !visited.insert(id) {
-            continue;
-        }
         if let Some(entity) = find_entity_by_element_id_readonly(world, id) {
             if let Some(members) = world.get::<GroupMembers>(entity) {
                 for member_id in &members.member_ids {
-                    result.push(*member_id);
-                    stack.push(*member_id);
+                    if discovered.insert(*member_id) {
+                        result.push(*member_id);
+                        stack.push(*member_id);
+                    }
                 }
             }
         }
@@ -927,5 +926,40 @@ mod frame_tests {
             .expect("cyclic nested group with a leaf should still have bounds");
         assert!(approx(bounds.min, Vec3::new(9.0, 1.5, -3.0)));
         assert!(approx(bounds.max, Vec3::new(11.0, 2.5, 1.0)));
+    }
+
+    #[test]
+    fn recursive_members_are_unique_across_shared_nested_groups() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(2),
+            GroupMembers {
+                name: "left".into(),
+                member_ids: vec![ElementId(4)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(3),
+            GroupMembers {
+                name: "right".into(),
+                member_ids: vec![ElementId(4)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "root".into(),
+                member_ids: vec![ElementId(2), ElementId(3), ElementId(4)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+
+        let members = collect_group_members_recursive(&world, ElementId(1));
+        assert_eq!(members, vec![ElementId(2), ElementId(3), ElementId(4)]);
     }
 }

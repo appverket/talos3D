@@ -3132,6 +3132,93 @@ mod tests {
     }
 
     #[test]
+    fn nested_shared_members_plant_once_and_unplant_to_original_datum() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(4),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(2),
+            name: "Nested roof assembly".to_string(),
+            member_ids: vec![ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(3),
+            name: "Second semantic view".to_string(),
+            member_ids: vec![ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Cottage with shared nested membership".to_string(),
+            member_ids: vec![ElementId(2), ElementId(3), ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant nested grouped target");
+        let y_top = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("y_top"))
+            .and_then(Value::as_f64)
+            .expect("foundation top") as f32;
+
+        let body_entity = find_entity_by_element_id(&mut world, ElementId(4)).expect("body");
+        let planted_body = world
+            .get::<BoxPrimitive>(body_entity)
+            .expect("planted body");
+        assert!(
+            (planted_body.centre.y - (y_top + 0.5)).abs() < 0.01,
+            "a leaf reachable through several nested groups must move exactly once; got {} for top {y_top}",
+            planted_body.centre.y
+        );
+
+        execute_unplant_on_surface(&mut world, &json!({ "target_id": 1 }))
+            .expect("unplant nested grouped target");
+        let body_entity = find_entity_by_element_id(&mut world, ElementId(4)).expect("body");
+        let restored_body = world
+            .get::<BoxPrimitive>(body_entity)
+            .expect("restored body");
+        assert!(
+            (restored_body.centre.y - 0.5).abs() < 0.01,
+            "unplant must restore the original datum; got {}",
+            restored_body.centre.y
+        );
+    }
+
+    #[test]
     fn planted_structure_rehydrates_from_semantic_assembly_after_reload() {
         let mut world = test_world();
         world.spawn((ElementId(10), ramp_heightfield()));
