@@ -57,6 +57,7 @@ fn terrain_conforming_foundation_skill() -> AgentSkill {
             "plant building".to_string(),
             "site".to_string(),
         ],
+        must_read_at_bootstrap: true,
         referenced_tool_ids: vec![
             "create_entity".to_string(),
             "invoke_command".to_string(),
@@ -211,6 +212,10 @@ mod tests {
     #[test]
     fn terrain_conforming_foundation_skill_uses_live_mcp_command_surface() {
         let skill = terrain_conforming_foundation_skill();
+        assert!(
+            skill.must_read_at_bootstrap,
+            "the architecture guidance names this safety-critical workflow as a mandatory bootstrap skill"
+        );
 
         assert!(skill
             .referenced_tool_ids

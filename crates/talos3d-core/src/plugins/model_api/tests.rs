@@ -5636,6 +5636,7 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
         title: "Window Authoring".into(),
         summary: "Hosted window workflow".into(),
         task_tags: vec!["window".into(), "hosted_component".into()],
+        must_read_at_bootstrap: true,
         referenced_tool_ids: vec!["definition.instantiate_hosted".into()],
         required_tool_ids: vec!["get_capability_snapshot".into()],
         forbidden_tool_ids: vec!["create_box".into()],
@@ -5651,6 +5652,13 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
         source_path: Some("assets/agent_skills/architecture_authoring.v1.json".into()),
     });
     world.insert_resource(registry);
+
+    let snapshot = handle_get_capability_snapshot(&world, false);
+    assert_eq!(
+        snapshot.must_read_agent_skill_ids,
+        vec!["architecture.skill.window_authoring".to_string()],
+        "only skills explicitly declared mandatory belong in the global bootstrap list"
+    );
 
     let found = handle_list_agent_skills(
         &world,
@@ -5678,6 +5686,7 @@ fn agent_skill_handlers_list_get_and_save_drafts() {
             title: "Opening Review".into(),
             summary: "Review hosted openings before promotion.".into(),
             task_tags: vec!["opening".into()],
+            must_read_at_bootstrap: false,
             referenced_tool_ids: vec!["run_validation_v2".into()],
             required_tool_ids: vec!["get_capability_snapshot".into()],
             forbidden_tool_ids: vec!["create_box".into()],
@@ -11495,6 +11504,7 @@ mod capability_profiles {
             title: id.replace('-', " "),
             summary: summary.to_string(),
             task_tags: vec!["roof".to_string()],
+            must_read_at_bootstrap: false,
             referenced_tool_ids: Vec::new(),
             required_tool_ids: Vec::new(),
             forbidden_tool_ids: Vec::new(),
@@ -11504,6 +11514,22 @@ mod capability_profiles {
             trust_level: "shipped".to_string(),
             source_path: None,
         }
+    }
+
+    #[test]
+    fn agent_hello_rejects_stale_or_unknown_capability_shapes() {
+        let stale = serde_json::json!({
+            "client": {"name": "stale-client", "version": "1"},
+            "client_capabilities": {"vision": true, "inline_images": true},
+            "task_intent": "author a cottage"
+        });
+        assert!(serde_json::from_value::<AgentHello>(stale).is_err());
+
+        let unknown_support = serde_json::json!({
+            "agent_name": "client",
+            "supports": {"images": true, "vision": true}
+        });
+        assert!(serde_json::from_value::<AgentHello>(unknown_support).is_err());
     }
 
     #[test]

@@ -2557,6 +2557,7 @@ pub(super) struct SetSessionProfileRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentClientCapabilities {
     /// The client can fetch and follow Talos3D agent skills.
     #[serde(default)]
@@ -2579,6 +2580,7 @@ pub struct AgentClientCapabilities {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentHello {
     /// Human-readable client or agent name.
     #[serde(default, skip_serializing_if = "Option::is_none")]

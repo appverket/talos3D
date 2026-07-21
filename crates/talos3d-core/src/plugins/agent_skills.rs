@@ -53,6 +53,12 @@ pub struct AgentSkill {
     pub summary: String,
     #[serde(default)]
     pub task_tags: Vec<String>,
+    /// Whether every session connected to an app that installs this skill must
+    /// read it before authoring. Keep this false for ordinary task-ranked
+    /// skills; use it for safety-critical substrate contracts that the live
+    /// authoring guidance names as mandatory.
+    #[serde(default)]
+    pub must_read_at_bootstrap: bool,
     #[serde(default)]
     pub referenced_tool_ids: Vec<String>,
     #[serde(default)]
@@ -87,6 +93,7 @@ impl AgentSkill {
             title: self.title.clone(),
             summary: self.summary.clone(),
             task_tags: self.task_tags.clone(),
+            must_read_at_bootstrap: self.must_read_at_bootstrap,
             referenced_tool_ids: self.referenced_tool_ids.clone(),
             required_tool_ids: self.required_tool_ids.clone(),
             forbidden_tool_ids: self.forbidden_tool_ids.clone(),
@@ -127,6 +134,7 @@ pub struct AgentSkillSummary {
     pub title: String,
     pub summary: String,
     pub task_tags: Vec<String>,
+    pub must_read_at_bootstrap: bool,
     pub referenced_tool_ids: Vec<String>,
     pub required_tool_ids: Vec<String>,
     pub forbidden_tool_ids: Vec<String>,
@@ -155,6 +163,8 @@ pub struct AgentSkillDraftRequest {
     pub summary: String,
     #[serde(default)]
     pub task_tags: Vec<String>,
+    #[serde(default)]
+    pub must_read_at_bootstrap: bool,
     #[serde(default)]
     pub referenced_tool_ids: Vec<String>,
     #[serde(default)]
@@ -188,6 +198,7 @@ impl AgentSkillDraftRequest {
             title: self.title,
             summary: self.summary,
             task_tags: self.task_tags,
+            must_read_at_bootstrap: self.must_read_at_bootstrap,
             referenced_tool_ids: self.referenced_tool_ids,
             required_tool_ids: self.required_tool_ids,
             forbidden_tool_ids: self.forbidden_tool_ids,
@@ -278,6 +289,7 @@ mod tests {
             title: "Window Authoring".into(),
             summary: "Hosted window workflow".into(),
             task_tags: vec!["window".into(), "hosted_component".into()],
+            must_read_at_bootstrap: false,
             referenced_tool_ids: vec!["definition.instantiate_hosted".into()],
             required_tool_ids: Vec::new(),
             forbidden_tool_ids: Vec::new(),
@@ -308,6 +320,7 @@ mod tests {
             title: "My Draft Skill".into(),
             summary: "Example".into(),
             task_tags: vec![],
+            must_read_at_bootstrap: false,
             referenced_tool_ids: vec![],
             required_tool_ids: vec![],
             forbidden_tool_ids: vec![],
