@@ -16852,8 +16852,9 @@ fn world_instance_id(world: &World) -> String {
 /// Returns `None` when the entity has no geometry.
 #[cfg(feature = "model-api")]
 fn element_world_aabb(world: &World, element_id: u64) -> Option<ElementAabb> {
-    let snapshot = capture_entity_snapshot(world, ElementId(element_id))?;
-    let bounds = snapshot.bounds()?;
+    let bounds = capture_entity_snapshot(world, ElementId(element_id))
+        .and_then(|snapshot| snapshot.bounds())
+        .or_else(|| render_component_world_bounds(world, ElementId(element_id)))?;
     Some(ElementAabb {
         element_id,
         min: [
@@ -16867,6 +16868,37 @@ fn element_world_aabb(world: &World, element_id: u64) -> Option<ElementAabb> {
             bounds.max.z as f64,
         ],
     })
+}
+
+/// Resolve bounds from Bevy's rendered mesh components when an authored
+/// snapshot deliberately has no semantic bounds.
+///
+/// Adaptive geometry such as a terrain-conforming foundation returns `None`
+/// from `AuthoredEntity::bounds()` so generic transform handles cannot move it
+/// as a rigid box. It still has a rendered `Aabb`; geometric validation must
+/// inspect that real mesh instead of reporting the live element as missing.
+#[cfg(feature = "model-api")]
+fn render_component_world_bounds(
+    world: &World,
+    element_id: ElementId,
+) -> Option<crate::authored_entity::EntityBounds> {
+    let entity = crate::plugins::commands::find_entity_by_element_id_readonly(world, element_id)?;
+    let aabb = world.get::<bevy::camera::primitives::Aabb>(entity)?;
+    let transform = world.get::<GlobalTransform>(entity)?;
+    let center = Vec3::from(aabb.center);
+    let half = Vec3::from(aabb.half_extents);
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for x in [-half.x, half.x] {
+        for y in [-half.y, half.y] {
+            for z in [-half.z, half.z] {
+                let corner = transform.transform_point(center + Vec3::new(x, y, z));
+                min = min.min(corner);
+                max = max.max(corner);
+            }
+        }
+    }
+    Some(crate::authored_entity::EntityBounds { min, max })
 }
 
 /// Combine two [`ElementAabb`]s into their union.
@@ -16913,20 +16945,7 @@ fn all_entity_aabbs(world: &World) -> Vec<ElementAabb> {
             if NON_SOLID_ENTITY_TYPES.contains(&snapshot.type_name()) {
                 return None;
             }
-            let bounds = snapshot.bounds()?;
-            Some(ElementAabb {
-                element_id: eid,
-                min: [
-                    bounds.min.x as f64,
-                    bounds.min.y as f64,
-                    bounds.min.z as f64,
-                ],
-                max: [
-                    bounds.max.x as f64,
-                    bounds.max.y as f64,
-                    bounds.max.z as f64,
-                ],
-            })
+            element_world_aabb(world, eid)
         })
         .collect()
 }

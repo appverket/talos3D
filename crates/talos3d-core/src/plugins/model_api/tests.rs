@@ -10901,6 +10901,34 @@ fn get_world_aabb_returns_correct_bounds() {
 
 #[test]
 #[cfg(feature = "model-api")]
+fn get_world_aabb_falls_back_to_rendered_mesh_bounds() {
+    let mut world = World::new();
+    world.insert_resource(CapabilityRegistry::default());
+    world.spawn((
+        ElementId(30),
+        bevy::camera::primitives::Aabb::from_min_max(
+            Vec3::new(-1.0, -2.0, -3.0),
+            Vec3::new(1.0, 2.0, 3.0),
+        ),
+        GlobalTransform::from(Transform::from_xyz(10.0, 20.0, 30.0)),
+    ));
+
+    let result = handle_get_world_aabb(
+        &world,
+        GetWorldAabbRequest {
+            element_ids: vec![30],
+        },
+    )
+    .expect("rendered AABB fallback must succeed");
+
+    assert!(result.errors.is_empty());
+    let bounds = &result.elements[0];
+    assert_eq!(bounds.min, [9.0, 18.0, 27.0]);
+    assert_eq!(bounds.max, [11.0, 22.0, 33.0]);
+}
+
+#[test]
+#[cfg(feature = "model-api")]
 fn get_world_aabb_error_entry_for_missing_element() {
     let world = make_two_box_world();
     let result = handle_get_world_aabb(

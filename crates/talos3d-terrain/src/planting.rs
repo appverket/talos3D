@@ -1936,6 +1936,14 @@ fn execute_plant_structure(world: &mut World, params: &Value) -> Result<CommandR
             "planted_group_id": target.group_id.0,
             "foundation_structure_id": target.foundation_structure_id.0,
             "foundation_id": target.foundation_body_id.0,
+            "foundation_body_id": target.foundation_body_id.0,
+            "conforming_foundation_body_id": target.foundation_body_id.0,
+            "foundation_replacement": {
+                "identity_contract": "stable_element_id_replaced_in_place",
+                "previous_body_id": target.foundation_body_id.0,
+                "conforming_body_id": target.foundation_body_id.0,
+                "aabb_expectation": "footprint is preserved; top equals y_top; underside conforms to terrain, so min_y is not a rigid raised_by translation"
+            },
             "surface_id": surface_id.0,
             "y_top": y_top,
             "raised_by": y_delta,
@@ -2687,6 +2695,23 @@ mod tests {
                 .and_then(|output| output.get("structure_id"))
                 .and_then(Value::as_u64),
             Some(20)
+        );
+        assert_eq!(
+            result
+                .output
+                .as_ref()
+                .and_then(|output| output.get("conforming_foundation_body_id"))
+                .and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            result
+                .output
+                .as_ref()
+                .and_then(|output| output.get("foundation_replacement"))
+                .and_then(|replacement| replacement.get("identity_contract"))
+                .and_then(Value::as_str),
+            Some("stable_element_id_replaced_in_place")
         );
 
         let foundation_entity =

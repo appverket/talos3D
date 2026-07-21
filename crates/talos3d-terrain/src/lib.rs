@@ -152,7 +152,11 @@ fn terrain_conforming_foundation_skill() -> AgentSkill {
             `invoke_command {\"command_id\":\"terrain.unplant_on_surface\", \"parameters\": \
             {\"target_id\":<object>}}` reverses it.\n\n\
             **Mandatory postcondition:** record representative pre-plant AABBs for foundation, \
-            walls, roof, openings, and trim. After the single plant call, every non-foundation \
+            walls, roof, openings, and trim. The plant response returns \
+            `conforming_foundation_body_id`: the original rigid body is replaced in place under \
+            that stable element id. On the next MCP request, inspect its rendered AABB; its plan \
+            footprint must be preserved and its top must equal `y_top`, but its terrain-hugging \
+            underside/min-Y is intentionally not a rigid `raised_by` translation. Every non-foundation \
             representative must have moved vertically by `raised_by` (within tolerance) and its \
             bottom must meet the returned `y_top`; the foundation stays at `y_top`. If only a \
             foundation branch moved, stop and report a planting-contract defect — never repair \
