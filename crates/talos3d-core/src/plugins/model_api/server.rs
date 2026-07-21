@@ -40,11 +40,13 @@ impl ModelApiTransportSecurity {
                     "network_http"
                 }
                 .to_string(),
-                authentication_assurance: "instance_bound_ephemeral_bearer".to_string(),
-                authorization_assurance: "bearer_possession_for_this_running_instance".to_string(),
+                authentication_assurance:
+                    "instance_bound_ephemeral_bearer_from_one_time_pairing".to_string(),
+                authorization_assurance:
+                    "local_user_mediated_pairing_for_this_running_instance".to_string(),
                 delegated_identity: false,
                 capability_profile_is_authorization: false,
-                note: "Every HTTP MCP request passed the random per-process bearer check. The bearer authenticates possession of this instance handoff, not a named user or delegated agent identity. Capability profiles remain independent tool-surface filters."
+                note: "Every HTTP MCP request passed the random per-process bearer check. That bearer was issued only after a single-use pairing grant from the local Talos3D UX was redeemed. Local desktop user presence authorizes this instance handoff; it does not establish a named user or delegated agent identity. Remote/shared deployments must use MCP OAuth discovery and user consent instead. Capability profiles remain independent tool-surface filters."
                     .to_string(),
             },
         }

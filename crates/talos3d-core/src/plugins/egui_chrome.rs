@@ -362,16 +362,20 @@ struct AgentConnectionWindowState {
     copy_status: Option<String>,
 }
 
-fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, access_token: &str) -> String {
+fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, pairing_code: &str) -> String {
     format!(
         "Connect to the running Talos3D instance at this MCP endpoint:\n\n\
          {http_url}\n\n\
          Expected instance id: {instance_id}\n\n\
-         Authenticate every HTTP MCP request with this exact header:\n\n\
-         Authorization: Bearer {access_token}\n\n\
-         This is an ephemeral credential for this running Talos3D instance. Do not send it \
-         to any other host or persist it after the session. A request without this header \
-         must be treated as an authentication failure.\n\n\
+         Before MCP initialization, redeem this single-use local pairing code by POSTing one \
+         JSON object to `{http_url}/pair`:\n\n\
+         {{\"pairing_code\":\"{pairing_code}\",\"agent_name\":\"<your agent name>\"}}\n\n\
+         The response contains a separate `access_token`. Authenticate every subsequent HTTP \
+         MCP request with `Authorization: Bearer <access_token>`. The pairing code is not an \
+         access token and must fail if replayed. This local-desktop handoff is authorized by \
+         the user who opened Talos3D's Connect an AI Agent window; it does not establish a \
+         named delegated user identity. Send the code and token only to this loopback host, \
+         never log or persist either value, and discard the token when this app exits.\n\n\
          After connecting, call `negotiate_agent_session` first. Send an Agent Hello that \
          identifies your client, describes my current task, requests the narrowest suitable \
          capability profile, and accurately declares support for agent skills, MCP resources \
@@ -394,7 +398,7 @@ fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, access_token
          running instance as authoritative, fetch task-specific knowledge progressively, and \
          do not begin model edits until all required bootstrap steps are complete. Verify \
          that its security.authentication_assurance is \
-         `instance_bound_ephemeral_bearer`. Do not interpret a capability profile as \
+         `instance_bound_ephemeral_bearer_from_one_time_pairing`. Do not interpret a capability profile as \
          authentication or authorization.\n\n\
          When authoring, probe Talos3D's curated recipe, parametric, definition, and prior \
          paths before creating geometry. If no curated path exists, report the CorpusGap \
@@ -527,8 +531,11 @@ mod chrome_input_capture_tests {
         assert!(prompt.contains("\"requested_profile\":\"authoring\""));
         assert!(prompt.contains("params.arguments"));
         assert!(prompt.contains("never append multiple objects"));
-        assert!(prompt.contains("Authorization: Bearer test-session-token"));
-        assert!(prompt.contains("instance_bound_ephemeral_bearer"));
+        assert!(prompt.contains("/mcp/pair"));
+        assert!(prompt.contains("\"pairing_code\":\"test-session-token\""));
+        assert!(prompt.contains("pairing code is not an access token"));
+        assert!(prompt.contains("must fail if replayed"));
+        assert!(prompt.contains("instance_bound_ephemeral_bearer_from_one_time_pairing"));
         assert!(!prompt.contains("Do not verify"));
         assert!(prompt.contains("CorpusGap"));
         assert!(!prompt.contains("AWS"));
@@ -1724,7 +1731,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
             (
                 runtime.instance_id.clone(),
                 runtime.http_url.clone(),
-                authentication.access_token_for_onboarding().to_string(),
+                authentication.pairing_code_for_onboarding().to_string(),
             )
         });
     #[cfg(not(feature = "model-api"))]
@@ -2219,7 +2226,7 @@ fn draw_agent_connection_window(
             );
             ui.add_space(8.0);
 
-            let Some((instance_id, http_url, access_token)) = runtime else {
+            let Some((instance_id, http_url, pairing_code)) = runtime else {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "The Talos3D Model API is not running in this app build. Start a model-api-enabled app to generate an instance-specific onboarding prompt.",
@@ -2238,13 +2245,13 @@ fn draw_agent_connection_window(
                     ui.monospace(http_url);
                     ui.end_row();
                     ui.label("Authentication");
-                    ui.label("Required — ephemeral instance bearer included below");
+                    ui.label("Required — single-use local pairing grant included below");
                     ui.end_row();
                 });
 
             ui.add_space(10.0);
             ui.label("Onboarding prompt");
-            let mut prompt = build_agent_onboarding_prompt(instance_id, http_url, access_token);
+            let mut prompt = build_agent_onboarding_prompt(instance_id, http_url, pairing_code);
             ui.add_sized(
                 [ui.available_width(), 280.0],
                 egui::TextEdit::multiline(&mut prompt)
@@ -2268,7 +2275,7 @@ fn draw_agent_connection_window(
             });
             ui.add_space(4.0);
             ui.weak(
-                "The prompt contains an ephemeral credential for this running instance. Share it only with the intended agent. Current Talos3D knowledge is fetched during negotiation instead of being frozen into this text.",
+                "The prompt contains a single-use local pairing grant, not the MCP access token. Share it only with the intended agent. Current Talos3D knowledge is fetched during negotiation instead of being frozen into this text.",
             );
         });
 

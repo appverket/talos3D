@@ -11540,7 +11540,7 @@ mod capability_profiles {
         assert!(!welcome.security.capability_profile_is_authorization);
         assert_eq!(
             welcome.security.authentication_assurance,
-            "instance_bound_ephemeral_bearer"
+            "instance_bound_ephemeral_bearer_from_one_time_pairing"
         );
         assert!(!welcome.security.delegated_identity);
         assert_eq!(welcome.recommended_agent_skills.len(), 2);

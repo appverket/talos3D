@@ -15,16 +15,17 @@ pub struct ModelApiRuntimeInfo {
     pub requested_port: Option<u16>,
 }
 
-/// Ephemeral credential for the HTTP MCP transport.
+/// Local-desktop pairing state for the HTTP MCP transport.
 ///
-/// The token exists only in process memory and the user-visible onboarding
-/// handoff. It is deliberately absent from discovery manifests, logs,
-/// `InstanceInfo`, and serialization so local discovery never becomes a secret
-/// distribution channel.
+/// The user-visible handoff contains only a single-use pairing code. Redeeming
+/// that code yields the separate bearer accepted by the MCP endpoint. Neither
+/// value is serialized, logged, or written to discovery manifests.
 #[cfg(feature = "model-api")]
 #[derive(Resource, Clone)]
 pub struct ModelApiAuthentication {
+    pairing_code: Arc<str>,
     access_token: Arc<str>,
+    paired: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "model-api")]
@@ -33,34 +34,75 @@ impl ModelApiAuthentication {
         // Two independent UUIDv4 values provide 244 random bits after UUID
         // version/variant bits. The prefix makes accidental credential-type
         // confusion visible without weakening the random portion.
-        let access_token = format!(
-            "talos3d_{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
+        let random_secret = || {
+            format!(
+                "talos3d_{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            )
+        };
         Self {
-            access_token: Arc::from(access_token),
+            pairing_code: Arc::from(random_secret()),
+            access_token: Arc::from(random_secret()),
+            paired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    pub(super) fn from_configured_token(access_token: String) -> Result<Self, String> {
-        if access_token.len() < 32 {
+    pub(super) fn from_configured_token(pairing_code: String) -> Result<Self, String> {
+        if pairing_code.len() < 32 {
             return Err("TALOS3D_MODEL_API_TOKEN must contain at least 32 characters".to_string());
         }
-        if access_token.chars().any(char::is_whitespace) {
+        if pairing_code.chars().any(char::is_whitespace) {
             return Err("TALOS3D_MODEL_API_TOKEN must not contain whitespace".to_string());
         }
+        let generated = Self::generate();
         Ok(Self {
-            access_token: Arc::from(access_token),
+            pairing_code: Arc::from(pairing_code),
+            ..generated
         })
     }
 
-    pub(crate) fn access_token_for_onboarding(&self) -> &str {
-        &self.access_token
+    pub(crate) fn pairing_code_for_onboarding(&self) -> &str {
+        &self.pairing_code
     }
 
-    pub(super) fn authorization_header_value(&self) -> String {
-        format!("Bearer {}", self.access_token)
+    pub(super) fn redeem_pairing_code(&self, provided: &str) -> Option<&str> {
+        if !super::runtime_transport::constant_time_bytes_equal(
+            provided.as_bytes(),
+            self.pairing_code.as_bytes(),
+        ) {
+            return None;
+        }
+        self.paired
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| self.access_token.as_ref())
+    }
+
+    pub(super) fn authorization_header_matches(&self, provided: &str) -> bool {
+        self.paired.load(std::sync::atomic::Ordering::Acquire)
+            && super::runtime_transport::constant_time_bytes_equal(
+                provided.as_bytes(),
+                format!("Bearer {}", self.access_token).as_bytes(),
+            )
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_test_credentials(
+        pairing_code: &str,
+        access_token: &str,
+        paired: bool,
+    ) -> Self {
+        Self {
+            pairing_code: Arc::from(pairing_code),
+            access_token: Arc::from(access_token),
+            paired: Arc::new(std::sync::atomic::AtomicBool::new(paired)),
+        }
     }
 }
 
@@ -69,7 +111,12 @@ impl std::fmt::Debug for ModelApiAuthentication {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ModelApiAuthentication")
+            .field("pairing_code", &"<redacted>")
             .field("access_token", &"<redacted>")
+            .field(
+                "paired",
+                &self.paired.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .finish()
     }
 }

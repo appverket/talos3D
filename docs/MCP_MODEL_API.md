@@ -175,32 +175,43 @@ repository-scoped endpoint config with the actual bound port:
 ```
 
 Those files are intentionally ignored so local ports and instance choices do not
-end up committed. They contain discovery facts only, never the bearer
-credential. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit config
+end up committed. They contain discovery facts only, never a pairing grant or
+bearer credential. Set `TALOS3D_MCP_CONFIG_PATHS` to an OS path-list of explicit config
 files when launching from a packaged app or another directory. Set
 `TALOS3D_WRITE_MCP_CONFIG=false` to disable writing local client configs.
 
 ### Access control
 
-The HTTP transport requires a random per-process bearer credential on every
-request. The credential is generated when the app starts, kept out of logs,
-runtime manifests, `InstanceInfo`, and repository-local discovery configs, and
-delivered only through the user-visible **Connect an AI Agent** prompt. Clients
-must send:
+The local HTTP transport uses a user-mediated, one-time pairing handoff. The
+user-visible **Connect an AI Agent** prompt contains a random single-use pairing
+code, never the MCP bearer. The intended agent sends the code once to
+`POST /mcp/pair`; Talos3D atomically consumes it and returns a separate random
+process-lifetime access token. Replaying the prompt fails. Clients then send:
 
 ```http
-Authorization: Bearer <ephemeral-instance-token>
+Authorization: Bearer <access-token-returned-by-pairing>
 ```
 
 Missing or invalid credentials receive `401 Unauthorized`. Restarting the app
-invalidates the credential. Possession authenticates the instance handoff; it
-does not establish a named user, delegated agent identity, or independent
-command authorization policy.
+invalidates both values. Pairing proves that a user with access to the local
+Talos3D desktop UX handed this running instance to the agent. It does not
+establish a named user, delegated agent identity, or independent command
+authorization policy; the local desktop/OS session is the user-presence trust
+boundary.
 
-Production defaults to a generated credential. A gateway or repeatable test
-harness may provision a token of at least 32 non-whitespace characters through
+The app defaults to a generated pairing code. A repeatable local test harness
+may provision a code of at least 32 non-whitespace characters through
 `TALOS3D_MODEL_API_TOKEN`; Talos3D still keeps that value out of logs,
 manifests, discovery configs, and `InstanceInfo`.
+
+This local pairing route is deliberately not presented as production OAuth.
+A shared or remotely reachable Talos3D resource must follow the MCP
+authorization specification: OAuth authorization-server and protected-resource
+metadata discovery, Authorization Code with PKCE for user-delegated access,
+resource/audience-bound tokens, least-privilege scopes, explicit consent,
+expiry, revocation, and audit binding to the authenticated Talos3D user and MCP
+client. A remote onboarding prompt carries discovery information only; it must
+not carry an access token, refresh token, client secret, or reusable API key.
 
 The bearer check complements the loopback access guard: the `Host` header must
 name the loopback authority actually bound (defeating DNS-rebinding), and any
@@ -222,8 +233,8 @@ The Agent Welcome returns:
 - the exact `InstanceInfo` for the running app;
 - the active and available profiles without silently switching them;
 - the security assurance known by this transport, including successful
-  instance-bound bearer authentication for HTTP without claiming delegated
-  user identity;
+  instance-bound bearer authentication derived from a single-use local pairing
+  handoff, without claiming delegated user identity;
 - a compact live capability snapshot and required guidance-card ids;
 - at most a small context-budget-aware set of task-relevant agent-skill
   summaries when the client supports skills;
@@ -240,10 +251,11 @@ knowledge store.
 
 Desktop apps expose this through **AI → Connect an AI Agent…**. The dialog shows
 the live instance and endpoint and generates a ready-to-paste onboarding prompt
-with one-click copy. The prompt carries the ephemeral bearer credential,
-rendezvous facts, and stable instructions; current Talos3D knowledge still
-comes from the welcome and its follow-up calls. Treat the copied prompt as a
-short-lived secret and share it only with the intended agent.
+with one-click copy. The local prompt carries a single-use pairing grant,
+rendezvous facts, and stable instructions; the bearer is returned only after
+redemption. Current Talos3D knowledge still comes from the welcome and its
+follow-up calls. Treat the copied local prompt as a short-lived secret and share
+it only with the intended agent.
 
 ## Capability Profiles (tool gating)
 

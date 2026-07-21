@@ -161,10 +161,8 @@ pub(super) fn spawn_model_api_server(
                     service
                 };
 
-                let guard = LocalAccessGuard::for_port(
-                    runtime_info.http_port,
-                    authentication.authorization_header_value(),
-                );
+                let guard =
+                    LocalAccessGuard::for_port(runtime_info.http_port, authentication.clone());
                 let mut router = axum::Router::new()
                     .route_service("/mcp", profile_service(default_profile_from_env()));
                 for profile in CapabilityProfile::ALL {
@@ -173,6 +171,10 @@ pub(super) fn spawn_model_api_server(
                         profile_service(profile),
                     );
                 }
+                let pairing_router = axum::Router::new()
+                    .route("/mcp/pair", axum::routing::post(redeem_local_pairing))
+                    .with_state(authentication);
+                let router = router.merge(pairing_router);
                 let router = router.layer(axum::middleware::from_fn_with_state(
                     guard,
                     enforce_local_access,
@@ -220,12 +222,12 @@ pub(super) fn spawn_model_api_server(
 struct LocalAccessGuard {
     allowed_hosts: std::sync::Arc<Vec<String>>,
     allowed_origins: std::sync::Arc<Vec<String>>,
-    expected_authorization: std::sync::Arc<str>,
+    authentication: ModelApiAuthentication,
 }
 
 #[cfg(feature = "model-api")]
 impl LocalAccessGuard {
-    fn for_port(port: u16, expected_authorization: String) -> Self {
+    fn for_port(port: u16, authentication: ModelApiAuthentication) -> Self {
         Self {
             allowed_hosts: std::sync::Arc::new(vec![
                 format!("127.0.0.1:{port}"),
@@ -237,13 +239,13 @@ impl LocalAccessGuard {
                 format!("http://localhost:{port}"),
                 format!("http://[::1]:{port}"),
             ]),
-            expected_authorization: std::sync::Arc::from(expected_authorization),
+            authentication,
         }
     }
 }
 
 #[cfg(feature = "model-api")]
-fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
+pub(super) fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -258,14 +260,47 @@ fn constant_time_bytes_equal(left: &[u8], right: &[u8]) -> bool {
 #[cfg(feature = "model-api")]
 fn bearer_authentication_allowed(
     headers: &axum::http::HeaderMap,
-    expected_authorization: &str,
+    authentication: &ModelApiAuthentication,
 ) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|provided| {
-            constant_time_bytes_equal(provided.as_bytes(), expected_authorization.as_bytes())
-        })
+        .is_some_and(|provided| authentication.authorization_header_matches(provided))
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, serde::Deserialize)]
+struct LocalPairingRequest {
+    pairing_code: String,
+    #[serde(default)]
+    agent_name: Option<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, serde::Serialize)]
+struct LocalPairingResponse {
+    access_token: String,
+    token_type: &'static str,
+    expires_when: &'static str,
+    authentication_assurance: &'static str,
+}
+
+#[cfg(feature = "model-api")]
+async fn redeem_local_pairing(
+    axum::extract::State(authentication): axum::extract::State<ModelApiAuthentication>,
+    axum::Json(request): axum::Json<LocalPairingRequest>,
+) -> Result<axum::Json<LocalPairingResponse>, axum::http::StatusCode> {
+    let _agent_name = request.agent_name;
+    let access_token = authentication
+        .redeem_pairing_code(&request.pairing_code)
+        .ok_or(axum::http::StatusCode::UNAUTHORIZED)?
+        .to_string();
+    Ok(axum::Json(LocalPairingResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_when: "talos3d_instance_process_exits",
+        authentication_assurance: "local_user_mediated_one_time_pairing",
+    }))
 }
 
 /// Pure access decision, factored out so it can be unit-tested without an HTTP
@@ -314,7 +349,9 @@ async fn enforce_local_access(
     ) {
         return Err(axum::http::StatusCode::FORBIDDEN);
     }
-    if !bearer_authentication_allowed(request.headers(), &guard.expected_authorization) {
+    if request.uri().path() != "/mcp/pair"
+        && !bearer_authentication_allowed(request.headers(), &guard.authentication)
+    {
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
@@ -462,9 +499,12 @@ fn write_instance_registry_manifest(
         "started_at_unix_ms": started_at_unix_ms,
         "requested_port": requested_port,
         "authentication": {
-            "type": "bearer",
+            "type": "local_one_time_pairing_then_bearer",
             "required": true,
-            "credential_delivery": "in_app_onboarding_prompt"
+            "pairing_endpoint": format!("http://{MODEL_API_DEFAULT_HTTP_HOST}:{http_port}/mcp/pair"),
+            "pairing_grant_delivery": "authenticated_in_app_onboarding_prompt",
+            "access_token_delivery": "one_time_pairing_response",
+            "remote_requirement": "oauth_2_1_authorization_code_pkce_with_mcp_discovery"
         }
     });
     let bytes = serde_json::to_vec_pretty(&manifest)
@@ -647,7 +687,14 @@ mod tests {
     use axum::http::{header, HeaderMap, HeaderValue};
 
     fn guard() -> LocalAccessGuard {
-        LocalAccessGuard::for_port(24842, "Bearer test-session-token".to_string())
+        LocalAccessGuard::for_port(
+            24842,
+            ModelApiAuthentication::from_test_credentials(
+                "test-pairing-code-that-is-long-enough",
+                "test-session-token",
+                true,
+            ),
+        )
     }
 
     fn allowed(headers: &HeaderMap) -> bool {
@@ -657,7 +704,7 @@ mod tests {
 
     fn authenticated(headers: &HeaderMap) -> bool {
         let g = guard();
-        bearer_authentication_allowed(headers, &g.expected_authorization)
+        bearer_authentication_allowed(headers, &g.authentication)
     }
 
     #[test]
@@ -690,11 +737,35 @@ mod tests {
         let first = ModelApiAuthentication::generate();
         let second = ModelApiAuthentication::generate();
         assert_ne!(
-            first.access_token_for_onboarding(),
-            second.access_token_for_onboarding()
+            first.pairing_code_for_onboarding(),
+            second.pairing_code_for_onboarding()
         );
-        assert!(first.access_token_for_onboarding().starts_with("talos3d_"));
-        assert!(!format!("{first:?}").contains(first.access_token_for_onboarding()));
+        assert!(first.pairing_code_for_onboarding().starts_with("talos3d_"));
+        assert!(!format!("{first:?}").contains(first.pairing_code_for_onboarding()));
+    }
+
+    #[test]
+    fn pairing_code_is_single_use_and_separate_from_access_token() {
+        let authentication = ModelApiAuthentication::from_test_credentials(
+            "test-pairing-code-that-is-long-enough",
+            "separate-access-token",
+            false,
+        );
+        assert!(!authentication.authorization_header_matches("Bearer separate-access-token"));
+        assert_eq!(
+            authentication.redeem_pairing_code("test-pairing-code-that-is-long-enough"),
+            Some("separate-access-token")
+        );
+        assert!(authentication.authorization_header_matches("Bearer separate-access-token"));
+        assert_eq!(
+            authentication.redeem_pairing_code("test-pairing-code-that-is-long-enough"),
+            None,
+            "the user-mediated handoff must not be replayable"
+        );
+        assert_eq!(
+            authentication.redeem_pairing_code("wrong-pairing-code"),
+            None
+        );
     }
 
     #[test]
