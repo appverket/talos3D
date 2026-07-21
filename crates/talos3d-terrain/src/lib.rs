@@ -115,10 +115,15 @@ fn terrain_conforming_foundation_skill() -> AgentSkill {
             \"surface_id\":<terrain surface id>, \"position\":[x,z], \"half_extents\":[hx,hz], \
             \"min_thickness\":0.5, \"max_depth\":3.0}`. Move/re-conform it with \
             `set_property {\"property_name\":\"position\",\"value\":[x,0,z]}` — Y re-derives.\n\n\
-            **Plant a semantic structure:** select one semantic `structure`, `house`, or `building` assembly (or its referenced \
-            building group) and one terrain surface, then run Plant Structure; over MCP call \
+            **Plant a semantic structure:** identify the semantic `structure`, `house`, or `building` assembly, its *complete* \
+            physical building group, and one terrain surface, then run Plant Structure; over MCP call \
             `invoke_command {\"command_id\":\"terrain.plant_structure\", \"parameters\": \
-            {\"structure_id\":<structure>, \"surface_id\":<terrain>}}`. \
+            {\"structure_id\":<structure>, \"group_id\":<complete physical group>, \
+            \"foundation_id\":<foundation body>, \"surface_id\":<terrain>}}`. When the structure was \
+            created by `create_assembly`, pass its returned `group_element_id` as `group_id`; the \
+            semantic assembly's first group-valued member may be only a slab/foundation branch and \
+            must never be inferred as the whole building. The group must cover every physical member \
+            of the structure or the command stops before planting. \
             The command establishes the planting contract, converts the structure's bottom \
             foundation body into a conforming foundation, keeps that foundation inside the \
             movable group, and records `structure_id`, `foundation_structure_id`, and \
@@ -146,7 +151,13 @@ fn terrain_conforming_foundation_skill() -> AgentSkill {
             the adaptive body. \
             `invoke_command {\"command_id\":\"terrain.unplant_on_surface\", \"parameters\": \
             {\"target_id\":<object>}}` reverses it.\n\n\
-            The geometry is grounded in the real terrain surface (not a stand-in)."
+            **Mandatory postcondition:** record representative pre-plant AABBs for foundation, \
+            walls, roof, openings, and trim. After the single plant call, every non-foundation \
+            representative must have moved vertically by `raised_by` (within tolerance) and its \
+            bottom must meet the returned `y_top`; the foundation stays at `y_top`. If only a \
+            foundation branch moved, stop and report a planting-contract defect — never repair \
+            the model by translating parts manually. The geometry is grounded in the real terrain \
+            surface (not a stand-in)."
             .to_string(),
         trust_level: AgentSkillTrustLevel::Shipped,
         source_path: None,
@@ -210,5 +221,12 @@ mod tests {
         assert!(skill
             .body_markdown
             .contains("\"command_id\":\"terrain.plant_on_surface\""));
+        assert!(skill.body_markdown.contains("group_element_id"));
+        assert!(skill
+            .body_markdown
+            .contains("\"group_id\":<complete physical group>"));
+        assert!(skill
+            .body_markdown
+            .contains("never repair the model by translating parts manually"));
     }
 }

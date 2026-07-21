@@ -98,7 +98,10 @@ impl Plugin for PlantingPlugin {
                 description:
                     "Establish the planting contract between a semantic structure and terrain: \
                               convert the structure's bottom foundation body into an adaptive \
-                              terrain-conforming foundation and seat the superstructure on it."
+                              terrain-conforming foundation and seat the superstructure on it. \
+                              For MCP-created assemblies, pass create_assembly.group_element_id \
+                              as group_id so the complete physical building moves; the command \
+                              rejects groups that do not cover every semantic structure member."
                         .to_string(),
                 category: CommandCategory::Edit,
                 parameters: Some(json!({
@@ -107,6 +110,7 @@ impl Plugin for PlantingPlugin {
                         "structure_id": {"type": "integer"},
                         "surface_id": {"type": "integer"},
                         "terrain_id": {"type": "integer"},
+                        "group_id": {"type": "integer"},
                         "foundation_id": {"type": "integer"},
                         "min_thickness": {"type": "number"},
                         "max_depth": {"type": "number"},
@@ -685,11 +689,26 @@ fn translate_members_excluding(
     excluded: ElementId,
     delta: Vec3,
 ) {
-    for member_id in root_ids {
-        if *member_id == excluded {
+    let mut leaf_ids = HashSet::new();
+    for root_id in root_ids {
+        if *root_id == excluded {
             continue;
         }
-        translate_target(world, *member_id, delta);
+        if is_group(world, *root_id) {
+            leaf_ids.extend(
+                collect_group_members_recursive(world, *root_id)
+                    .into_iter()
+                    .filter(|member_id| *member_id != excluded)
+                    .filter(|member_id| !is_group(world, *member_id)),
+            );
+        } else {
+            leaf_ids.insert(*root_id);
+        }
+    }
+    for member_id in leaf_ids {
+        if let Some(snapshot) = capture_by_id(world, member_id) {
+            snapshot.translate_by(delta).apply_to(world);
+        }
     }
 }
 
@@ -1155,18 +1174,50 @@ fn foundation_system_from_structure(
 fn movable_group_from_structure(
     world: &mut World,
     structure: &SemanticAssembly,
+    explicit_group_id: Option<ElementId>,
 ) -> Option<ElementId> {
-    structure
+    let covers_structure = |world: &World, group_id: ElementId| {
+        let mut covered = collect_group_members_recursive(world, group_id)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        covered.insert(group_id);
+        structure
+            .members
+            .iter()
+            .filter(|member| {
+                is_group(world, member.target)
+                    || capture_by_id(world, member.target)
+                        .and_then(|snapshot| snapshot.bounds())
+                        .is_some()
+            })
+            .all(|member| covered.contains(&member.target))
+    };
+    if let Some(group_id) = explicit_group_id {
+        return (is_group(world, group_id) && covers_structure(world, group_id))
+            .then_some(group_id);
+    }
+    if let Some(group_id) = structure
         .members
         .iter()
         .find(|member| member.role == "superstructure_group" && is_group(world, member.target))
-        .or_else(|| {
-            structure
-                .members
-                .iter()
-                .find(|member| is_group(world, member.target))
-        })
         .map(|member| member.target)
+    {
+        return Some(group_id);
+    }
+
+    // `create_assembly` emits a sibling physical group for the same member
+    // targets and returns it as `group_element_id`; that group is not itself a
+    // semantic member. Resolve it by coverage rather than falling back to the
+    // first group-valued member (which is often only the foundation branch).
+    let group_ids = {
+        let mut query = world.query::<(&ElementId, &GroupMembers)>();
+        query.iter(world).map(|(id, _)| *id).collect::<Vec<_>>()
+    };
+    let candidates = group_ids
+        .into_iter()
+        .filter(|group_id| covers_structure(world, *group_id))
+        .collect::<HashSet<_>>();
+    (candidates.len() == 1).then(|| *candidates.iter().next().expect("one candidate"))
 }
 
 fn ensure_structure_has_foundation_system_member(
@@ -1253,6 +1304,7 @@ fn resolve_structure_plant_target(
     world: &mut World,
     structure_id: ElementId,
     surface_id: ElementId,
+    explicit_group_id: Option<ElementId>,
     explicit_foundation_id: Option<ElementId>,
 ) -> Result<StructurePlantTarget, String> {
     let structure = semantic_assembly_by_id(world, structure_id)
@@ -1263,9 +1315,9 @@ fn resolve_structure_plant_target(
             structure_id.0, structure.assembly_type
         ));
     }
-    let group_id = movable_group_from_structure(world, &structure).ok_or_else(|| {
+    let group_id = movable_group_from_structure(world, &structure, explicit_group_id).ok_or_else(|| {
         format!(
-            "Plant Structure: structure {} needs a grouped superstructure member to move as one unit.",
+            "Plant Structure: structure {} needs exactly one complete physical building group, referenced with role 'superstructure_group'; alternatively pass group_id explicitly. Foundation-only groups are never selected as the superstructure.",
             structure_id.0
         )
     })?;
@@ -1467,7 +1519,7 @@ fn persisted_planted_structures(world: &mut World) -> Vec<PersistedPlantedStruct
 
     let mut planted = Vec::new();
     for (structure_id, structure) in structures {
-        let Some(group_id) = movable_group_from_structure(world, &structure) else {
+        let Some(group_id) = movable_group_from_structure(world, &structure, None) else {
             continue;
         };
         let foundation_structure_id = id_from_value(&structure.metadata, "foundation_structure_id")
@@ -1759,10 +1811,16 @@ fn execute_plant_structure(world: &mut World, params: &Value) -> Result<CommandR
     let max_depth =
         optional_f32(params, "max_depth", DEFAULT_MAX_DEPTH).max(min_thickness.max(0.01));
     let resolution = optional_f32(params, "resolution", 0.5).max(0.05);
+    let explicit_group_id = optional_id(params, "group_id");
     let explicit_foundation_id = optional_id(params, "foundation_id");
 
-    let target =
-        resolve_structure_plant_target(world, structure_id, surface_id, explicit_foundation_id)?;
+    let target = resolve_structure_plant_target(
+        world,
+        structure_id,
+        surface_id,
+        explicit_group_id,
+        explicit_foundation_id,
+    )?;
     let group_entity = find_entity_by_element_id(world, target.group_id).ok_or_else(|| {
         format!(
             "Plant Structure: group {} was not found.",
@@ -1827,7 +1885,17 @@ fn execute_plant_structure(world: &mut World, params: &Value) -> Result<CommandR
             target.foundation_body_id,
             Vec3::new(0.0, y_delta, 0.0),
         );
-        translate_group_frame(world, target.group_id, Vec3::new(0.0, y_delta, 0.0));
+        let mut group_frames = vec![target.group_id];
+        group_frames.extend(
+            collect_group_members_recursive(world, target.group_id)
+                .into_iter()
+                .filter(|member_id| is_group(world, *member_id))
+                .filter(|group_id| {
+                    !collect_group_members_recursive(world, *group_id)
+                        .contains(&target.foundation_body_id)
+                }),
+        );
+        translate_group_frames(world, &group_frames, Vec3::new(0.0, y_delta, 0.0));
     }
 
     let group_entity = find_entity_by_element_id(world, target.group_id).ok_or_else(|| {
@@ -2766,6 +2834,116 @@ mod tests {
                 .structure_id,
             ElementId(20)
         );
+    }
+
+    #[test]
+    fn plant_structure_resolves_create_assembly_sibling_group_not_foundation_group() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), flat_heightfield(8.5)));
+
+        for (element_id, centre, half_extents) in [
+            (2, Vec3::new(0.0, 1.25, 0.0), Vec3::new(3.0, 1.25, 0.1)),
+            (3, Vec3::new(0.0, -0.1, 0.0), Vec3::new(3.0, 0.1, 2.5)),
+            (4, Vec3::new(0.0, 3.0, 0.0), Vec3::new(3.2, 0.3, 2.7)),
+        ] {
+            PrimitiveSnapshot {
+                element_id: ElementId(element_id),
+                primitive: BoxPrimitive {
+                    centre,
+                    half_extents,
+                },
+                rotation: ShapeRotation::default(),
+                material_assignment: None,
+                opening_context: None,
+                subobject_display_overrides: None,
+            }
+            .apply_to(&mut world);
+        }
+        for (element_id, name, member_ids) in [
+            (9, "Foundation recipe group", vec![ElementId(3)]),
+            (6, "Wall recipe group", vec![ElementId(2)]),
+            (7, "Roof recipe group", vec![ElementId(4)]),
+            (
+                5,
+                "create_assembly physical group",
+                vec![ElementId(9), ElementId(6), ElementId(7)],
+            ),
+        ] {
+            GroupSnapshot {
+                element_id: ElementId(element_id),
+                name: name.to_string(),
+                member_ids,
+                frame: GroupFrame::default(),
+                composite: None,
+                linked_model: None,
+                cached_bounds: None,
+            }
+            .apply_to(&mut world);
+        }
+        AssemblySnapshot {
+            element_id: ElementId(20),
+            assembly: SemanticAssembly {
+                assembly_type: "house".to_string(),
+                label: "MCP-created cottage".to_string(),
+                members: vec![
+                    AssemblyMemberRef {
+                        target: ElementId(9),
+                        role: "foundation_base_footprint".to_string(),
+                    },
+                    AssemblyMemberRef {
+                        target: ElementId(6),
+                        role: "horizontal_cladding_wall".to_string(),
+                    },
+                    AssemblyMemberRef {
+                        target: ElementId(7),
+                        role: "framed_gable_roof".to_string(),
+                    },
+                ],
+                parameters: json!({}),
+                metadata: json!({}),
+            },
+            refinement_state: None,
+            obligations: None,
+            claim_grounding: None,
+            authoring_provenance: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_structure(
+            &mut world,
+            &json!({
+                "structure_id": 20,
+                "surface_id": 10,
+                "foundation_id": 3,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("resolve the complete sibling group emitted by create_assembly");
+        assert_eq!(
+            result
+                .output
+                .as_ref()
+                .and_then(|output| output.get("planted_group_id"))
+                .and_then(Value::as_u64),
+            Some(5),
+            "the foundation recipe group must never be mistaken for the whole building"
+        );
+        let y_top = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("y_top"))
+            .and_then(Value::as_f64)
+            .expect("y_top") as f32;
+        for (element_id, original_bottom) in [(2, 0.0), (4, 2.7)] {
+            let entity = find_entity_by_element_id(&mut world, ElementId(element_id))
+                .expect("superstructure member");
+            let primitive = world.get::<BoxPrimitive>(entity).expect("box primitive");
+            let moved_bottom = primitive.centre.y - primitive.half_extents.y;
+            assert!(
+                (moved_bottom - (y_top + original_bottom)).abs() < 0.05,
+                "member {element_id} should move with the complete physical building group"
+            );
+        }
     }
 
     #[test]
