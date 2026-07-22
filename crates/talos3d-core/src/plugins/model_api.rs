@@ -10032,7 +10032,18 @@ fn execute_model_api_transform_entities_command(
     let snapshots = handle_transform(world, request)?;
     let modified = snapshots
         .iter()
-        .filter_map(|snapshot| snapshot.get("element_id").and_then(Value::as_u64))
+        .filter_map(|snapshot| {
+            snapshot
+                .get("element_id")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    snapshot.as_object().and_then(|object| {
+                        object
+                            .values()
+                            .find_map(|value| value.get("element_id").and_then(Value::as_u64))
+                    })
+                })
+        })
         .collect();
     Ok(CommandResult {
         modified,

@@ -1367,18 +1367,26 @@ fn model_api_transform_uses_registered_plan_modifiers_for_dependents_and_rejecti
     .unwrap();
     assert_eq!(dependent, 1);
 
-    let result = handle_transform(
+    let result = execute_model_api_transform_entities_command(
         &mut world,
-        TransformToolRequest {
-            element_ids: vec![primary],
-            operation: "move".into(),
-            axis: Some("x".into()),
-            value: json!(2.0),
-            pivot: None,
-        },
+        &json!({
+            "element_ids": [primary],
+            "operation": "move",
+            "axis": "x",
+            "value": 2.0
+        }),
     )
     .unwrap();
-    assert_eq!(result.len(), 2, "dependent snapshot belongs to the plan");
+    assert_eq!(
+        result.modified,
+        vec![primary, dependent],
+        "dependent snapshots must be reported by command/API surfaces"
+    );
+    assert_eq!(
+        result.output.unwrap().as_array().unwrap().len(),
+        2,
+        "dependent snapshot belongs to the plan"
+    );
     assert_eq!(
         get_entity_snapshot(&world, ElementId(primary)).unwrap()["centre"],
         json!([2.0, 0.5, 0.0])
