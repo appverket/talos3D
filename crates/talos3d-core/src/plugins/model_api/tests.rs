@@ -11771,6 +11771,8 @@ mod capability_profiles {
             "resolve_obligation",
             "take_screenshot",
             "set_camera",
+            "get_render_settings",
+            "set_render_settings",
             // commands escape hatch
             "invoke_command",
             "list_commands",
@@ -11794,7 +11796,6 @@ mod capability_profiles {
             "quantity.set",
             "create_light",
             "get_perf_stats",
-            "set_render_settings",
             "definition.library.workspace.create",
             "procedural_session.create",
             "array_create_linear",

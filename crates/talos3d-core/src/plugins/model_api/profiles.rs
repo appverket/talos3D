@@ -417,9 +417,12 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("get_lighting_scene", ToolCategory::Presentation),
     ("set_ambient_light", ToolCategory::Presentation),
     ("restore_default_light_rig", ToolCategory::Presentation),
-    ("get_render_settings", ToolCategory::Presentation),
+    // Exposure/tonemapping are part of capture verification: authoring agents
+    // must be able to make requested finishes legible without receiving the
+    // broader light-authoring surface.
+    ("get_render_settings", ToolCategory::Capture),
     ("get_perf_stats", ToolCategory::Presentation),
-    ("set_render_settings", ToolCategory::Presentation),
+    ("set_render_settings", ToolCategory::Capture),
     // --- Drafting / 2D ---
     ("place_dimension_between_handles", ToolCategory::Drafting2d),
     ("place_dimension_line", ToolCategory::Drafting2d),
