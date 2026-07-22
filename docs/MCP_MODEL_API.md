@@ -182,6 +182,11 @@ files when launching from a packaged app or another directory. Set
 
 ### Access control
 
+For the implementation-specific protocol, trust-boundary analysis, threat
+model, known limitations, hardening backlog, remote OAuth requirements, and
+review checklist, see
+[MCP Authentication Security Review](./MCP_AUTH_SECURITY_REVIEW.md).
+
 The local HTTP transport uses a user-mediated, one-time pairing handoff. The
 user-visible **Connect an AI Agent** prompt contains a random single-use pairing
 code, never the MCP bearer. The intended agent sends the code once to

@@ -159,6 +159,7 @@ Start here:
 
 - [Docs Home](./docs/index.md)
 - [MCP Model API](./docs/MCP_MODEL_API.md)
+- [MCP Authentication Security Review](./docs/MCP_AUTH_SECURITY_REVIEW.md)
 - [Developer Onboarding](./docs/DEVELOPER_ONBOARDING.md)
 - [Engine Fork Workflow](./docs/ENGINE_FORK_WORKFLOW.md)
 - [Product Overview](./docs/PRODUCT.md)
