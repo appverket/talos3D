@@ -414,13 +414,16 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("delete_light", ToolCategory::Presentation),
     ("update_light", ToolCategory::Presentation),
     ("list_lights", ToolCategory::Presentation),
+    // Ambient illumination is part of capture verification: it lets an
+    // authoring agent prove dark/shaded finishes without granting authored
+    // light creation, mutation, or deletion.
     ("get_lighting_scene", ToolCategory::Presentation),
-    ("set_ambient_light", ToolCategory::Presentation),
+    ("set_ambient_light", ToolCategory::Capture),
     ("restore_default_light_rig", ToolCategory::Presentation),
     // Exposure/tonemapping are part of capture verification: authoring agents
     // must be able to make requested finishes legible without receiving the
     // broader light-authoring surface.
-    ("get_render_settings", ToolCategory::Capture),
+    ("get_render_settings", ToolCategory::Presentation),
     ("get_perf_stats", ToolCategory::Presentation),
     ("set_render_settings", ToolCategory::Capture),
     // --- Drafting / 2D ---

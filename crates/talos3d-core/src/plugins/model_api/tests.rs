@@ -11771,8 +11771,8 @@ mod capability_profiles {
             "resolve_obligation",
             "take_screenshot",
             "set_camera",
-            "get_render_settings",
             "set_render_settings",
+            "set_ambient_light",
             // commands escape hatch
             "invoke_command",
             "list_commands",
