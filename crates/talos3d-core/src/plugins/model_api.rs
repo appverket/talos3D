@@ -10029,28 +10029,12 @@ fn execute_model_api_transform_entities_command(
 ) -> Result<CommandResult, String> {
     let request: TransformToolRequest =
         serde_json::from_value(parameters.clone()).map_err(|e| e.to_string())?;
-    let snapshots = handle_transform(world, request)?;
-    let modified = snapshots
-        .iter()
-        .filter_map(authored_snapshot_element_id)
-        .collect();
+    let (modified, snapshots) = handle_transform_with_modified(world, request)?;
     Ok(CommandResult {
         modified,
         output: Some(Value::Array(snapshots)),
         ..CommandResult::default()
     })
-}
-
-#[cfg(feature = "model-api")]
-fn authored_snapshot_element_id(value: &Value) -> Option<u64> {
-    match value {
-        Value::Object(object) => object
-            .get("element_id")
-            .and_then(Value::as_u64)
-            .or_else(|| object.values().find_map(authored_snapshot_element_id)),
-        Value::Array(values) => values.iter().find_map(authored_snapshot_element_id),
-        _ => None,
-    }
 }
 
 #[cfg(feature = "model-api")]
@@ -10550,6 +10534,14 @@ pub fn handle_transform(
     world: &mut World,
     request: TransformToolRequest,
 ) -> Result<Vec<Value>, String> {
+    handle_transform_with_modified(world, request).map(|(_, snapshots)| snapshots)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_transform_with_modified(
+    world: &mut World,
+    request: TransformToolRequest,
+) -> Result<(Vec<u64>, Vec<Value>), String> {
     for element_id in &request.element_ids {
         ensure_user_editable_entity(world, ElementId(*element_id), "transformed")?;
     }
@@ -10596,6 +10588,10 @@ pub fn handle_transform(
         }
     };
     apply_transform_plan_modifiers(world, mode, &mut before, &mut after);
+    let modified = after
+        .iter()
+        .map(|snapshot| snapshot.element_id().0)
+        .collect();
 
     send_event(
         world,
@@ -10607,10 +10603,11 @@ pub fn handle_transform(
     );
     flush_model_api_write_pipeline(world);
 
-    after
+    let snapshots = after
         .into_iter()
-        .map(|snapshot| Ok(snapshot.to_json()))
-        .collect()
+        .map(|snapshot| snapshot.to_json())
+        .collect();
+    Ok((modified, snapshots))
 }
 
 #[cfg(feature = "model-api")]
