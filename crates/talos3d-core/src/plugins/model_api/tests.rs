@@ -9044,6 +9044,72 @@ fn register_hosted_opening_patterns(world: &mut World) {
 }
 
 #[cfg(feature = "model-api")]
+fn install_native_window_recipe_bridge_trap(world: &mut World) {
+    use crate::curation::authoring_script::{AuthoringScript, MutationScope};
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CuratedManifest, CuratedManifestRegistry, CurationMeta,
+        ManifestKindId, RecipeArtifact, RecipeArtifactRegistry, RecipeBody, RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let kind = ManifestKindId::new("assembly_pattern.v2");
+    let mut manifests = CuratedManifestRegistry::default();
+    manifests.insert(CuratedManifest {
+        meta: CurationMeta::new(
+            CuratedManifest::asset_id_for(&kind, "hosted_window_opening"),
+            CuratedManifest::asset_kind(),
+            Provenance {
+                author: AgentId("test".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: None,
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        manifest_kind: kind,
+        body: json!({
+            "label": "Hosted window opening",
+            "target_types": ["opening", "wall_assembly"],
+            "tags": ["window", "hosted"]
+        }),
+    });
+    world.insert_resource(manifests);
+
+    let mut recipes = RecipeArtifactRegistry::default();
+    recipes.insert(RecipeArtifact {
+        meta: CurationMeta::new(
+            AssetId("installed_recipe/window_unit".into()),
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test".into()),
+                confidence: Confidence::Medium,
+                lineage: Lineage::Freeform,
+                rationale: Some("Deliberately incompatible bridge candidate".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript {
+            script: AuthoringScript::stub(MutationScope::None),
+        },
+        parameter_schema: json!({ "type": "object" }),
+        target_class: "wall_assembly".into(),
+        supported_refinement_states: vec![RefinementState::Constructible],
+        tests: Vec::new(),
+    });
+    world.insert_resource(recipes);
+}
+
+#[cfg(feature = "model-api")]
 #[test]
 fn native_non_class_terms_agree_across_discovery_gap_and_annotation() {
     // Defect 1 (surfaces must agree): door/window are NOT element classes — they
@@ -9054,6 +9120,7 @@ fn native_non_class_terms_agree_across_discovery_gap_and_annotation() {
     //   - create_box semantic.element_class → rejected atomically (no geometry)
     let mut world = init_model_api_test_world();
     register_hosted_opening_patterns(&mut world);
+    install_native_window_recipe_bridge_trap(&mut world);
 
     // discover_curated_paths surfaces a native-term pointer, not a gap.
     let discovery = handle_discover_curated_paths(
@@ -9080,6 +9147,17 @@ fn native_non_class_terms_agree_across_discovery_gap_and_annotation() {
     assert!(
         discovery.no_curated_path.is_none(),
         "a native term must NOT be advertised as a corpus gap"
+    );
+    assert!(
+        discovery.recipe_rankings.is_empty(),
+        "a native hosted product must not bridge through a wall-assembly recipe: {:?}",
+        discovery.recipe_rankings
+    );
+    assert!(
+        non_class.message.contains("typed Definition")
+            && non_class.message.contains("unrelated recipe target"),
+        "native-term guidance must enforce the typed native path: {}",
+        non_class.message
     );
 
     // request_corpus_expansion rejects the same native term.

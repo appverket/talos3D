@@ -13772,6 +13772,12 @@ pub fn handle_discover_curated_paths(
         .filter(|kind| !kind.is_empty())
         .unwrap_or("recipe")
         .to_ascii_lowercase();
+    let request_is_native_non_class = request.element_class.as_deref().is_some_and(|term| {
+        matches!(
+            resolve_element_class_term(world, term),
+            ElementClassResolution::NativeNonClass { .. }
+        )
+    });
     let guidance_card_ids = guidance_card_ids_for_discovery(request.element_class.as_deref());
     let requested_jurisdiction = requested_jurisdiction(&request.context);
     let mut related_asset_ids = Vec::new();
@@ -13898,7 +13904,8 @@ pub fn handle_discover_curated_paths(
             // path (e.g. the gable roof system + its trusses for `roof_system`)
             // instead of reporting a bare no-curated-path that hides them.
             parametric_types = collect_parametric_types(request.element_class.as_deref());
-            if !recipe_rankings.iter().any(|ranking| ranking.executable)
+            if !request_is_native_non_class
+                && !recipe_rankings.iter().any(|ranking| ranking.executable)
                 && !query_specific_parametric_beats_recipes(
                     request.query.as_deref(),
                     &parametric_types,
@@ -13949,16 +13956,29 @@ pub fn handle_discover_curated_paths(
                             }) {
                                 continue;
                             }
+                            let how_to_instantiate = if definition
+                                .interface
+                                .void_declaration
+                                .is_some()
+                            {
+                                format!(
+                                    "Call definition.instantiate_hosted with definition_id {:?} and library_id {:?} after creating the native host and its opening; this Definition declares a void and must not be placed as an unhosted occurrence or substituted with boxes.",
+                                    definition.id.to_string(),
+                                    library.id.to_string(),
+                                )
+                            } else {
+                                format!(
+                                    "Call occurrence.create with definition_id {:?}; use definition.library.get first if parameters or hosted contracts must be inspected.",
+                                    definition.id.to_string()
+                                )
+                            };
                             assets.push(DefinitionPathInfo {
                                 library_id: library.id.to_string(),
                                 library_name: library.name.clone(),
                                 definition_id: definition.id.to_string(),
                                 name: definition.name.clone(),
                                 definition_kind,
-                                how_to_instantiate: format!(
-                                    "Call occurrence.create with definition_id {:?}; use definition.library.get first if parameters or hosted contracts must be inspected.",
-                                    definition.id.to_string()
-                                ),
+                                how_to_instantiate,
                             });
                         }
                     }
@@ -14027,7 +14047,7 @@ pub fn handle_discover_curated_paths(
                     ));
                 }
                 message.push_str(
-                    " Do not request_corpus_expansion for it and do not annotate a box with this element_class.",
+                    " Use the native entity and any typed Definition returned by the definition path; do not request_corpus_expansion, annotate a box with this element_class, or bridge through an unrelated recipe target.",
                 );
                 Some(NonClassTermInfo {
                     term: term.to_string(),
@@ -14045,6 +14065,11 @@ pub fn handle_discover_curated_paths(
         || !parametric_types.is_empty()
         || !definition_assets.is_empty()
         || !generation_priors.is_empty();
+    let has_hosted_definition_path = definition_assets.iter().any(|asset| {
+        asset
+            .how_to_instantiate
+            .starts_with("Call definition.instantiate_hosted")
+    });
     related_asset_ids.extend(curated_assets.iter().map(|asset| asset.asset_id.clone()));
     related_asset_ids.sort();
     related_asset_ids.dedup();
@@ -14065,7 +14090,11 @@ pub fn handle_discover_curated_paths(
             related_installed_or_learned_asset_ids: related_asset_ids.clone(),
         });
     let suggested_next_tool = if let Some(non_class_term) = &non_class_term {
-        if non_class_term.native_entity_types.is_empty() {
+        if path_kind == "definition" && has_hosted_definition_path {
+            "definition.instantiate_hosted"
+        } else if path_kind == "definition" && !definition_assets.is_empty() {
+            "occurrence.create"
+        } else if non_class_term.native_entity_types.is_empty() {
             "list_vocabulary"
         } else {
             "create_entity"
