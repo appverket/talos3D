@@ -5214,6 +5214,64 @@ fn no_curated_path_discovery_and_guidance_cards_are_explicit() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn prior_discovery_surfaces_parameter_defaulting_knowledge() {
+    use crate::capability_registry::{
+        CorpusProvenance, ElementClassId, GenerationPriorDescriptor, LicenseTag, PriorEvaluation,
+        PriorId, PriorScope,
+    };
+    use crate::plugins::refinement::ClaimPath;
+    use std::sync::Arc;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_generation_prior(GenerationPriorDescriptor {
+            id: PriorId("schematic_top_plate_bearing_datum".into()),
+            label: "Schematic top-plate bearing datum".into(),
+            description: "Use the load-bearing wall top plane as the Schematic bearing datum."
+                .into(),
+            scope: PriorScope::ParameterDefaulting {
+                element_class: ElementClassId("top_plate".into()),
+                claim_path: ClaimPath("bearing_datum".into()),
+            },
+            source_provenance: CorpusProvenance {
+                source: "test".into(),
+                source_version: "1".into(),
+                jurisdiction: None,
+                ingested_at: 0,
+                license: LicenseTag::Cc0,
+                backlink: None,
+                supersedes: Vec::new(),
+            },
+            prior_fn: Arc::new(|_| PriorEvaluation {
+                weight: 1.0,
+                suggestion: Some(serde_json::json!({"target_state_ceiling": "Schematic"})),
+                rationale: "Schematic datum knowledge".into(),
+            }),
+        });
+
+    let discovery = handle_discover_curated_paths(
+        &world,
+        CuratedPathDiscoveryRequest {
+            path_kind: Some("prior".into()),
+            element_class: Some("top_plate".into()),
+            query: Some("top plate bearing datum".into()),
+            context: serde_json::json!({"target_state": "Schematic"}),
+        },
+    )
+    .expect("prior discovery should succeed");
+
+    assert_eq!(discovery.generation_priors.len(), 1);
+    assert_eq!(
+        discovery.generation_priors[0].id,
+        "schematic_top_plate_bearing_datum"
+    );
+    assert!(discovery.no_curated_path.is_none());
+    assert_eq!(discovery.suggested_next_tool, "list_generation_priors");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn discover_curated_paths_blank_path_kind_defaults_to_recipe() {
     let world = init_model_api_test_world();
     let discovery = handle_discover_curated_paths(

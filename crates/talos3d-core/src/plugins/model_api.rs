@@ -13712,7 +13712,7 @@ pub fn handle_discover_curated_paths(
     world: &World,
     request: CuratedPathDiscoveryRequest,
 ) -> ApiResult<CuratedPathDiscoveryInfo> {
-    use crate::capability_registry::{CapabilityRegistry, ElementClassId, PriorScope};
+    use crate::capability_registry::{CapabilityRegistry, ElementClassId};
     use crate::curation::CuratedManifestRegistry;
     use crate::plugins::assembly_pattern_drafts::AssemblyPatternDraftRegistry;
     use crate::plugins::modeling::definition::DefinitionLibraryRegistry;
@@ -13936,7 +13936,6 @@ pub fn handle_discover_curated_paths(
                     registry
                         .generation_prior_descriptors(class_id.as_ref())
                         .into_iter()
-                        .filter(|prior| matches!(prior.scope, PriorScope::RecipeSelection { .. }))
                         .map(|prior| GenerationPriorInfo {
                             id: prior.id.0.clone(),
                             label: prior.label.clone(),
@@ -14039,6 +14038,7 @@ pub fn handle_discover_curated_paths(
             "recipe" if !recipe_rankings.is_empty() => "instantiate_recipe",
             "parametric" if !parametric_types.is_empty() => "parametric.create",
             "definition" if !definition_assets.is_empty() => "occurrence.create",
+            "prior" if !generation_priors.is_empty() => "list_generation_priors",
             _ => "get_guidance_card",
         }
     } else {
