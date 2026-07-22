@@ -74,6 +74,7 @@ use crate::plugins::{
     },
     dimension_line::constrained_box_edge_dimension_line_point,
     document_properties::DocumentProperties,
+    document_state::DocumentState,
     history::{apply_pending_history_commands, HistorySet},
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
@@ -3283,6 +3284,13 @@ fn parse_alpha_mode(s: &str) -> crate::plugins::materials::MaterialAlphaMode {
 #[cfg(feature = "model-api")]
 fn handle_get_instance_info(world: &World) -> InstanceInfo {
     let mut info = InstanceInfo::from(world.resource::<ModelApiRuntimeInfo>());
+    if let Some(document) = world.get_resource::<DocumentState>() {
+        info.current_document_path = document
+            .current_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        info.document_dirty = document.dirty;
+    }
     if let Some(guidance) = world.get_resource::<AuthoringGuidance>() {
         if !guidance.is_empty() {
             info.authoring_guidance_id = Some(guidance.guidance_id.clone());
@@ -4590,8 +4598,34 @@ fn handle_save_project(world: &mut World, path: &str) -> Result<String, String> 
 
 #[cfg(feature = "model-api")]
 fn handle_load_project(world: &mut World, path: &str) -> Result<String, String> {
-    load_project_from_path(world, std::path::PathBuf::from(path))
-        .map(|path| path.to_string_lossy().to_string())
+    let requested_path = std::path::PathBuf::from(path);
+    if world
+        .get_resource::<DocumentState>()
+        .is_some_and(|document| {
+            !document.dirty
+                && document
+                    .current_path
+                    .as_ref()
+                    .is_some_and(|current| paths_identify_same_document(current, &requested_path))
+        })
+    {
+        return Ok(requested_path.to_string_lossy().into_owned());
+    }
+    load_project_from_path(world, requested_path).map(|path| path.to_string_lossy().to_string())
+}
+
+#[cfg(feature = "model-api")]
+fn paths_identify_same_document(current: &std::path::Path, requested: &std::path::Path) -> bool {
+    if current == requested {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(current),
+        std::fs::canonicalize(requested),
+    ) {
+        (Ok(current), Ok(requested)) => current == requested,
+        _ => false,
+    }
 }
 
 #[cfg(feature = "model-api")]

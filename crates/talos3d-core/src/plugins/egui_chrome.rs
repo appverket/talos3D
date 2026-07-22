@@ -400,6 +400,10 @@ fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, pairing_code
          that its security.authentication_assurance is \
          `instance_bound_ephemeral_bearer_from_one_time_pairing`. Do not interpret a capability profile as \
          authentication or authorization.\n\n\
+         Agent Welcome also reports `instance.current_document_path` and \
+         `instance.document_dirty`. If the requested input path is already the current clean \
+         document, treat the open step as satisfied and do not reload it. If you call \
+         `load_project` with that same clean path anyway, the operation is idempotent.\n\n\
          When authoring, probe Talos3D's curated recipe, parametric, definition, and prior \
          paths before creating geometry. If no curated path exists, report the CorpusGap \
          instead of improvising construction knowledge. Validate with structured geometric \
@@ -536,6 +540,8 @@ mod chrome_input_capture_tests {
         assert!(prompt.contains("pairing code is not an access token"));
         assert!(prompt.contains("must fail if replayed"));
         assert!(prompt.contains("instance_bound_ephemeral_bearer_from_one_time_pairing"));
+        assert!(prompt.contains("instance.current_document_path"));
+        assert!(prompt.contains("do not reload it"));
         assert!(!prompt.contains("Do not verify"));
         assert!(prompt.contains("CorpusGap"));
         assert!(!prompt.contains("AWS"));

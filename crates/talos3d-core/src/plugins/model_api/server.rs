@@ -7128,7 +7128,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "load_project",
-        description = "Load a Talos3D project from a specific path on disk and return the resolved file path."
+        description = "Open a Talos3D project from a specific path and return the resolved file path. This call is idempotent when the same clean document is already open; inspect Agent Welcome / get_instance_info.current_document_path and document_dirty before requesting a redundant reload."
     )]
     pub(super) async fn load_project_tool(
         &self,

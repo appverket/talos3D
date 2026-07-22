@@ -4273,6 +4273,46 @@ fn primitive_round_trip_through_project_persistence() {
     let _ = fs::remove_file(path);
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn loading_the_same_clean_document_is_idempotent() {
+    let mut world = init_model_api_test_world();
+    handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.0, 0.0],
+            "half_extents": [1.0, 1.0, 1.0]
+        }),
+    )
+    .expect("box should be created");
+    let path = temp_json_path("talos3d-idempotent-load").with_extension("talos3d");
+    handle_save_project(&mut world, path.to_str().unwrap_or_default())
+        .expect("project should save");
+
+    let transient_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "sphere",
+            "centre": [3.0, 0.0, 0.0],
+            "radius": 0.5
+        }),
+    )
+    .expect("transient marker should be created");
+    world.resource_mut::<DocumentState>().dirty = false;
+
+    let opened = handle_load_project(&mut world, path.to_str().unwrap_or_default())
+        .expect("opening the same clean document should succeed as a no-op");
+
+    assert_eq!(opened, path.to_string_lossy());
+    assert!(
+        get_entity_snapshot(&world, ElementId(transient_id)).is_some(),
+        "a same-clean-path open must not rebuild the scene"
+    );
+
+    let _ = fs::remove_file(path);
+}
+
 /// A current-version project whose primitive entity record omits the
 /// newer `element_id` / `rotation` fields (a legacy-shaped record)
 /// still loads: `upgrade_legacy_entity_record` backfills them. Built
@@ -4956,6 +4996,37 @@ fn instance_info_reports_live_authoring_guidance_version() {
         .harness_drift_note
         .as_deref()
         .is_some_and(|note| note.contains("rebuild/restart")));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn instance_info_reports_current_document_identity_and_dirty_state() {
+    use crate::plugins::model_api::types::ModelApiRuntimeInfo;
+
+    let mut world = World::new();
+    world.insert_resource(ModelApiRuntimeInfo {
+        instance_id: "test-instance".into(),
+        app_name: "Talos3D Test".into(),
+        pid: 42,
+        http_host: "127.0.0.1".into(),
+        http_port: 24901,
+        http_url: "http://127.0.0.1:24901/mcp".into(),
+        registry_path: "/tmp/talos3d-instances/test-instance.json".into(),
+        started_at_unix_ms: 123,
+        requested_port: Some(24901),
+    });
+    world.insert_resource(DocumentState {
+        current_path: Some(std::path::PathBuf::from("/models/site.talos3d")),
+        dirty: true,
+    });
+
+    let info = handle_get_instance_info(&world);
+
+    assert_eq!(
+        info.current_document_path.as_deref(),
+        Some("/models/site.talos3d")
+    );
+    assert!(info.document_dirty);
 }
 
 #[cfg(feature = "model-api")]
@@ -11657,6 +11728,8 @@ mod capability_profiles {
             registry_path: "/tmp/talos3d-test-42.json".to_string(),
             started_at_unix_ms: 1,
             requested_port: Some(25020),
+            current_document_path: Some("/models/site.talos3d".to_string()),
+            document_dirty: false,
             world_length_unit: "m".to_string(),
             units_note: "metres".to_string(),
             authoring_guidance_id: Some("component-structure".to_string()),

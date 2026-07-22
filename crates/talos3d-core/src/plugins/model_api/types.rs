@@ -229,6 +229,14 @@ pub struct InstanceInfo {
     pub registry_path: String,
     pub started_at_unix_ms: u128,
     pub requested_port: Option<u16>,
+    /// Absolute path of the document already open in this instance, if any.
+    /// Agents should treat a matching clean document as satisfying an "open"
+    /// instruction instead of redundantly rebuilding the same scene.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_document_path: Option<String>,
+    /// Whether the open document contains unsaved changes.
+    #[serde(default)]
+    pub document_dirty: bool,
     /// Length unit of the world/scene coordinate system. Geometry primitives
     /// (`create_box` center/size, occurrence offsets, frame/bbox values) are in
     /// this unit (metres). Architectural recipe/parametric drivers named `*_mm`
@@ -262,6 +270,8 @@ impl From<&ModelApiRuntimeInfo> for InstanceInfo {
             registry_path: value.registry_path.clone(),
             started_at_unix_ms: value.started_at_unix_ms,
             requested_port: value.requested_port,
+            current_document_path: None,
+            document_dirty: false,
             world_length_unit: "m".to_string(),
             units_note: "World/scene geometry is in METRES (create_box, occurrence offsets, frame bboxes). Recipe/parametric drivers named *_mm are MILLIMETRES, converted internally.".to_string(),
             authoring_guidance_id: None,
