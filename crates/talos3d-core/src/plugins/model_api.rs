@@ -10032,24 +10032,25 @@ fn execute_model_api_transform_entities_command(
     let snapshots = handle_transform(world, request)?;
     let modified = snapshots
         .iter()
-        .filter_map(|snapshot| {
-            snapshot
-                .get("element_id")
-                .and_then(Value::as_u64)
-                .or_else(|| {
-                    snapshot.as_object().and_then(|object| {
-                        object
-                            .values()
-                            .find_map(|value| value.get("element_id").and_then(Value::as_u64))
-                    })
-                })
-        })
+        .filter_map(authored_snapshot_element_id)
         .collect();
     Ok(CommandResult {
         modified,
         output: Some(Value::Array(snapshots)),
         ..CommandResult::default()
     })
+}
+
+#[cfg(feature = "model-api")]
+fn authored_snapshot_element_id(value: &Value) -> Option<u64> {
+    match value {
+        Value::Object(object) => object
+            .get("element_id")
+            .and_then(Value::as_u64)
+            .or_else(|| object.values().find_map(authored_snapshot_element_id)),
+        Value::Array(values) => values.iter().find_map(authored_snapshot_element_id),
+        _ => None,
+    }
 }
 
 #[cfg(feature = "model-api")]
