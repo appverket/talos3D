@@ -219,6 +219,8 @@ fn configure_model_api_update_mode(app: &mut App) {
 pub(super) struct ModelApiRequestSender {
     sender: mpsc::Sender<ModelApiRequest>,
     wake_proxy: Arc<Mutex<Option<EventLoopProxy<WinitUserEvent>>>>,
+    #[cfg(test)]
+    wake_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(feature = "model-api")]
@@ -227,6 +229,8 @@ impl ModelApiRequestSender {
         Self {
             sender,
             wake_proxy: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            wake_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -250,11 +254,19 @@ impl ModelApiRequestSender {
     /// frames moving even when the app is unfocused and Winit is in its
     /// minute-long low-power wait mode.
     fn wake(&self) {
+        #[cfg(test)]
+        self.wake_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(guard) = self.wake_proxy.lock() {
             if let Some(proxy) = guard.as_ref() {
                 let _ = proxy.send_event(WinitUserEvent::WakeUp);
             }
         }
+    }
+
+    #[cfg(test)]
+    fn wake_count(&self) -> usize {
+        self.wake_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

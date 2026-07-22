@@ -247,13 +247,25 @@ impl ModelApiServer {
         &self,
         build: impl FnOnce(oneshot::Sender<T>) -> ModelApiRequest,
     ) -> Result<T, String> {
-        let (response, receiver) = oneshot::channel();
+        let (response, mut receiver) = oneshot::channel();
         self.sender
             .send(build(response))
             .map_err(|_| "model API request channel closed".to_string())?;
-        receiver
-            .await
-            .map_err(|_| "model API response channel closed".to_string())
+        loop {
+            tokio::select! {
+                result = &mut receiver => {
+                    return result.map_err(|_| "model API response channel closed".to_string());
+                }
+                _ = sleep(Duration::from_millis(100)) => {
+                    // A request normally needs one Bevy update. In an
+                    // unfocused desktop app Winit can return to low-power mode
+                    // before that update services the channel, making ordinary
+                    // inspection calls appear to hang for tens of seconds.
+                    // Keep waking until this request's oneshot response arrives.
+                    self.sender.wake();
+                }
+            }
+        }
     }
 
     /// Shared body for MCP tools that serialize their typed params and route

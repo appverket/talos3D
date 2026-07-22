@@ -1525,6 +1525,45 @@ fn model_api_configures_reactive_update_mode_for_explicit_wakeups() {
 }
 
 #[cfg(feature = "model-api")]
+#[tokio::test]
+async fn model_api_round_trip_keeps_waking_until_response_arrives() {
+    let (sender, receiver) = mpsc::channel();
+    let request_sender = ModelApiRequestSender::new(sender);
+    let wake_probe = request_sender.clone();
+    let worker = tokio::task::spawn_blocking(move || {
+        let request = receiver.recv().expect("request should arrive");
+        // Simulate an unfocused desktop event loop that did not service the
+        // first wake immediately.
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        let mut world = init_model_api_test_world();
+        world.insert_resource(ModelApiRuntimeInfo {
+            instance_id: "wake-loop-test".into(),
+            app_name: "talos3d-test".into(),
+            pid: 1,
+            http_host: "127.0.0.1".into(),
+            http_port: 24999,
+            http_url: "http://127.0.0.1:24999/mcp".into(),
+            registry_path: "/tmp/talos3d-instances/wake-loop-test.json".into(),
+            started_at_unix_ms: 1,
+            requested_port: Some(24999),
+        });
+        handle_model_api_request(&mut world, request);
+    });
+
+    let server = ModelApiServer::new(request_sender);
+    server
+        .get_instance_info_tool()
+        .await
+        .expect("delayed response should still complete");
+    worker.await.expect("worker should complete");
+
+    assert!(
+        wake_probe.wake_count() >= 3,
+        "ordinary round trips must keep the Winit event loop awake while awaiting their response"
+    );
+}
+
+#[cfg(feature = "model-api")]
 #[test]
 fn import_handlers_list_importers_and_create_triangle_meshes() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
