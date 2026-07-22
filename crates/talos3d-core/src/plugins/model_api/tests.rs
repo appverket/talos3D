@@ -41,7 +41,7 @@ use crate::plugins::{
         ToolbarSection,
     },
     tools::ActiveTool,
-    transform::TransformState,
+    transform::{TransformMode, TransformPreviewModifiers, TransformState},
 };
 use serde_json::json;
 #[cfg(feature = "model-api")]
@@ -1298,6 +1298,117 @@ fn write_handlers_create_transform_delete_and_list_handles() {
         handle_delete_entities(&mut world, vec![box_id]).expect("delete should remove the box");
     assert_eq!(deleted_count, 1);
     assert!(get_entity_snapshot(&world, ElementId(box_id)).is_none());
+}
+
+#[cfg(feature = "model-api")]
+fn mirrored_transform_plan_modifier(
+    world: &World,
+    state: &TransformState,
+    after: &mut Vec<BoxedEntity>,
+) {
+    if state.mode != TransformMode::Moving {
+        return;
+    }
+    let Some((_, original)) = state.initial_snapshots.first() else {
+        return;
+    };
+    let Some(primary) = after
+        .iter()
+        .find(|snapshot| snapshot.element_id() == original.element_id())
+        .cloned()
+    else {
+        return;
+    };
+    let delta = primary.center() - original.center();
+    if delta.x > 5.0 {
+        if let Some(index) = after
+            .iter()
+            .position(|snapshot| snapshot.element_id() == original.element_id())
+        {
+            after[index] = original.clone();
+        }
+        return;
+    }
+
+    let dependent_id = ElementId(1);
+    let Some(entity) = find_entity_by_element_id_readonly(world, dependent_id) else {
+        return;
+    };
+    let Ok(entity_ref) = world.get_entity(entity) else {
+        return;
+    };
+    let Some(dependent) = world
+        .resource::<CapabilityRegistry>()
+        .capture_snapshot(&entity_ref, world)
+    else {
+        return;
+    };
+    after.push(dependent.translate_by(delta));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn model_api_transform_uses_registered_plan_modifiers_for_dependents_and_rejection() {
+    let mut world = init_model_api_test_world();
+    world.insert_resource(TransformPreviewModifiers::default());
+    world
+        .resource_mut::<TransformPreviewModifiers>()
+        .register(mirrored_transform_plan_modifier);
+
+    let primary = handle_create_entity(
+        &mut world,
+        json!({"type":"box","centre":[0.0,0.5,0.0],"half_extents":[0.5,0.5,0.5]}),
+    )
+    .unwrap();
+    let dependent = handle_create_entity(
+        &mut world,
+        json!({"type":"box","centre":[0.0,1.5,0.0],"half_extents":[0.5,0.5,0.5]}),
+    )
+    .unwrap();
+    assert_eq!(dependent, 1);
+
+    let result = handle_transform(
+        &mut world,
+        TransformToolRequest {
+            element_ids: vec![primary],
+            operation: "move".into(),
+            axis: Some("x".into()),
+            value: json!(2.0),
+            pivot: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.len(), 2, "dependent snapshot belongs to the plan");
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(primary)).unwrap()["centre"],
+        json!([2.0, 0.5, 0.0])
+    );
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(dependent)).unwrap()["centre"],
+        json!([2.0, 1.5, 0.0])
+    );
+
+    handle_transform(
+        &mut world,
+        TransformToolRequest {
+            element_ids: vec![primary],
+            operation: "move".into(),
+            axis: Some("x".into()),
+            value: json!(10.0),
+            pivot: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(primary)).unwrap()["centre"],
+        json!([2.0, 0.5, 0.0]),
+        "modifier rejection must keep the authored primary unchanged"
+    );
+    assert_eq!(
+        get_entity_snapshot(&world, ElementId(dependent)).unwrap()["centre"],
+        json!([2.0, 1.5, 0.0]),
+        "rejected plans must not move dependents"
+    );
 }
 
 #[cfg(feature = "model-api")]

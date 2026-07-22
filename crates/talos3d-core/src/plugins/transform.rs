@@ -1078,6 +1078,61 @@ fn apply_transform_preview_modifiers(
     }
 }
 
+/// Apply the registered semantic transform modifiers to a command/API edit
+/// plan and expand its `before` side with any dependent snapshots introduced
+/// by those modifiers.
+///
+/// Viewport preview/commit already uses the same modifier registry. Command
+/// surfaces must call this helper before emitting `ApplyEntityChangesCommand`
+/// so hosting, placement, dependency, and reseating invariants cannot diverge
+/// between interactive and agent-authored edits.
+pub fn apply_transform_plan_modifiers(
+    world: &World,
+    mode: TransformMode,
+    before: &mut Vec<BoxedEntity>,
+    after: &mut Vec<BoxedEntity>,
+) {
+    let initial_snapshots = before
+        .iter()
+        .filter_map(|snapshot| {
+            find_entity_by_element_id_readonly(world, snapshot.element_id())
+                .map(|entity| (entity, snapshot.clone()))
+        })
+        .collect();
+    let state = TransformState {
+        mode,
+        initial_snapshots,
+        ..Default::default()
+    };
+    apply_transform_preview_modifiers(world, &state, after);
+
+    let mut before_ids = before
+        .iter()
+        .map(BoxedEntity::element_id)
+        .collect::<HashSet<_>>();
+    let dependent_ids = after
+        .iter()
+        .map(BoxedEntity::element_id)
+        .filter(|element_id| before_ids.insert(*element_id))
+        .collect::<Vec<_>>();
+    if dependent_ids.is_empty() {
+        return;
+    }
+
+    let registry = world.resource::<CapabilityRegistry>();
+    for element_id in dependent_ids {
+        let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
+            continue;
+        };
+        let Ok(entity_ref) = world.get_entity(entity) else {
+            continue;
+        };
+        if let Some(snapshot) = registry.capture_snapshot(&entity_ref, world) {
+            before.push(snapshot);
+        }
+    }
+}
+
 fn group_snapshot(snapshot: &BoxedEntity) -> Option<&GroupSnapshot> {
     snapshot.0.as_any().downcast_ref::<GroupSnapshot>()
 }

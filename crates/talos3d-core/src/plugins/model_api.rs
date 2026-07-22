@@ -62,6 +62,8 @@ use crate::plugins::modeling::{
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::{EdgeDisplayMode, RenderSettings, RenderTonemapping};
 #[cfg(feature = "model-api")]
+use crate::plugins::transform::{apply_transform_plan_modifiers, TransformMode};
+#[cfg(feature = "model-api")]
 use crate::plugins::{
     camera::{
         apply_orbit_state, focus_orbit_camera_on_bounds,
@@ -10027,8 +10029,11 @@ fn execute_model_api_transform_entities_command(
 ) -> Result<CommandResult, String> {
     let request: TransformToolRequest =
         serde_json::from_value(parameters.clone()).map_err(|e| e.to_string())?;
-    let modified = request.element_ids.clone();
     let snapshots = handle_transform(world, request)?;
+    let modified = snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.get("element_id").and_then(Value::as_u64))
+        .collect();
     Ok(CommandResult {
         modified,
         output: Some(Value::Array(snapshots)),
@@ -10567,6 +10572,18 @@ pub fn handle_transform(
     if before.is_empty() {
         return Err("No entities found for the given IDs".to_string());
     }
+
+    let mode = match normalized_transform_operation(&request.operation).as_str() {
+        "move" => TransformMode::Moving,
+        "rotate" => TransformMode::Rotating,
+        "scale" => TransformMode::Scaling,
+        operation => {
+            return Err(format!(
+                "Invalid transform operation '{operation}'. Valid operations: move, rotate, scale"
+            ))
+        }
+    };
+    apply_transform_plan_modifiers(world, mode, &mut before, &mut after);
 
     send_event(
         world,
