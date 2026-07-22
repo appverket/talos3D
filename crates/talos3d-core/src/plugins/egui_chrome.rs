@@ -26,8 +26,9 @@ use crate::plugins::{
         CAMERA_TOOLBAR_ID,
     },
     command_registry::{
-        ordered_menu_categories, queue_command_invocation_resource, CommandDescriptor,
-        CommandRegistry, IconRegistry, PendingCommandInvocations,
+        ordered_menu_categories, queue_command_invocation_resource, viewport_context_commands,
+        CommandDescriptor, CommandRegistry, IconRegistry, PendingCommandInvocations,
+        ViewportContextCommandRegistry,
     },
     commands::{
         ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
@@ -1302,6 +1303,7 @@ struct ChromeData<'w, 's> {
     commands: Commands<'w, 's>,
     camera_controls: ResMut<'w, CameraControlsState>,
     command_registry: Res<'w, CommandRegistry>,
+    viewport_context_commands: Res<'w, ViewportContextCommandRegistry>,
     icon_registry: Res<'w, IconRegistry>,
     toolbar_registry: Res<'w, ToolbarRegistry>,
     capability_registry: Res<'w, CapabilityRegistry>,
@@ -1875,6 +1877,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         selected_linked_group_count,
         &mut data.pending_command_invocations,
         &data.command_registry,
+        &data.viewport_context_commands,
     );
     publish_chrome_input_capture(
         &ctx,
@@ -3578,6 +3581,7 @@ fn draw_viewport_context_menu(
     selected_linked_group_count: usize,
     pending: &mut PendingCommandInvocations,
     registry: &CommandRegistry,
+    context_commands: &ViewportContextCommandRegistry,
 ) {
     if !menu.open {
         return;
@@ -3623,6 +3627,26 @@ fn draw_viewport_context_menu(
                     item!("Move", "modeling.move");
                     item!("Rotate", "modeling.rotate");
                     item!("Scale", "modeling.scale");
+                    let contributed =
+                        viewport_context_commands(registry, context_commands, selection_count);
+                    if !contributed.is_empty() {
+                        ui.separator();
+                        for descriptor in contributed {
+                            let label = append_command_shortcut(
+                                registry,
+                                &descriptor.label,
+                                &descriptor.id,
+                            );
+                            if menu_row_button(ui, label).clicked() {
+                                queue_command_invocation_resource(
+                                    pending,
+                                    descriptor.id.clone(),
+                                    serde_json::json!({}),
+                                );
+                                menu.open = false;
+                            }
+                        }
+                    }
                     ui.separator();
                     item!(
                         "Open Definition",

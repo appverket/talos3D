@@ -26,6 +26,7 @@ impl Plugin for CommandRegistryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CommandRegistry>()
             .init_resource::<IconRegistry>()
+            .init_resource::<ViewportContextCommandRegistry>()
             .init_resource::<PendingCommandInvocations>()
             .add_systems(Startup, setup_core_icons)
             .add_systems(
@@ -128,6 +129,30 @@ pub struct CommandRegistry {
     /// wins; later ones are rejected and recorded here so startup validation can
     /// fail fast. Command IDs are required to be globally unique.
     duplicate_ids: Vec<String>,
+}
+
+/// Ordered command ids contributed to the viewport's right-click menu.
+///
+/// Core owns presentation and command dispatch; capability plugins own the
+/// semantics of the contributed commands. Keeping this separate from
+/// [`CommandDescriptor`] avoids turning a viewport-specific presentation hint
+/// into part of the serialized command schema.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct ViewportContextCommandRegistry {
+    command_ids: Vec<String>,
+}
+
+impl ViewportContextCommandRegistry {
+    pub fn command_ids(&self) -> impl Iterator<Item = &str> {
+        self.command_ids.iter().map(String::as_str)
+    }
+
+    fn register(&mut self, command_id: impl Into<String>) {
+        let command_id = command_id.into();
+        if !self.command_ids.iter().any(|id| id == &command_id) {
+            self.command_ids.push(command_id);
+        }
+    }
 }
 
 impl CommandRegistry {
@@ -260,6 +285,9 @@ pub trait CommandRegistryAppExt {
         descriptor: CommandDescriptor,
         handler: CommandHandler,
     ) -> &mut Self;
+
+    /// Expose an already-registered command in the viewport context menu.
+    fn register_viewport_context_command(&mut self, command_id: impl Into<String>) -> &mut Self;
 }
 
 impl CommandRegistryAppExt for App {
@@ -276,6 +304,32 @@ impl CommandRegistryAppExt for App {
             .register(descriptor, handler);
         self
     }
+
+    fn register_viewport_context_command(&mut self, command_id: impl Into<String>) -> &mut Self {
+        if !self
+            .world()
+            .contains_resource::<ViewportContextCommandRegistry>()
+        {
+            self.init_resource::<ViewportContextCommandRegistry>();
+        }
+        self.world_mut()
+            .resource_mut::<ViewportContextCommandRegistry>()
+            .register(command_id);
+        self
+    }
+}
+
+/// Resolve contributed viewport-context commands in contribution order.
+pub fn viewport_context_commands<'a>(
+    commands: &'a CommandRegistry,
+    context_commands: &'a ViewportContextCommandRegistry,
+    selection_count: usize,
+) -> Vec<&'a CommandDescriptor> {
+    context_commands
+        .command_ids()
+        .filter_map(|id| commands.get(id))
+        .filter(|descriptor| !descriptor.requires_selection || selection_count > 0)
+        .collect()
 }
 
 pub fn queue_command_invocation(world: &mut World, id: impl Into<String>, parameters: Value) {
@@ -1171,6 +1225,28 @@ mod tests {
         assert_eq!(registry.commands().count(), 1);
         assert!(registry.get("dup").is_some());
         assert_eq!(registry.duplicate_ids(), &["dup".to_string()]);
+    }
+
+    #[test]
+    fn viewport_context_contributions_resolve_registered_enabled_commands_once() {
+        let mut app = App::new();
+        app.add_plugins(CommandRegistryPlugin);
+        let mut descriptor = minimal_descriptor("test.context");
+        descriptor.label = "Context Action".to_string();
+        descriptor.requires_selection = true;
+        app.register_command(descriptor, execute_noop)
+            .register_viewport_context_command("missing.command")
+            .register_viewport_context_command("test.context")
+            .register_viewport_context_command("test.context");
+
+        let commands = app.world().resource::<CommandRegistry>();
+        let context = app.world().resource::<ViewportContextCommandRegistry>();
+        assert!(viewport_context_commands(commands, context, 0).is_empty());
+
+        let resolved = viewport_context_commands(commands, context, 1);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].id, "test.context");
+        assert_eq!(context.command_ids().count(), 2);
     }
 
     #[test]

@@ -7,7 +7,7 @@ pub mod prelude {
     };
     pub use crate::commands::{
         activate_tool_command, CommandCategory, CommandDescriptor, CommandRegistryAppExt,
-        CommandResult, IconRegistry,
+        CommandResult, IconRegistry, ViewportContextCommandRegistry,
     };
     pub use crate::definitions::{
         BindingSide, ConstraintSeverity, OverridePolicy, ParamType, ParameterBinding, ParameterDef,
@@ -41,7 +41,7 @@ pub mod capabilities {
 pub mod commands {
     pub use talos3d_core::plugins::command_registry::{
         activate_tool_command, CommandCategory, CommandDescriptor, CommandRegistryAppExt,
-        CommandResult, IconRegistry,
+        CommandResult, IconRegistry, ViewportContextCommandRegistry,
     };
 }
 
