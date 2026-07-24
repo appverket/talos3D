@@ -119,12 +119,24 @@ pub type TransformPreviewModifier = fn(&World, &TransformState, &mut Vec<BoxedEn
 
 #[derive(Resource, Default, Clone)]
 pub struct TransformPreviewModifiers {
-    modifiers: Vec<TransformPreviewModifier>,
+    modifiers: Vec<(i32, TransformPreviewModifier)>,
 }
 
 impl TransformPreviewModifiers {
     pub fn register(&mut self, modifier: TransformPreviewModifier) {
-        self.modifiers.push(modifier);
+        self.register_with_priority(0, modifier);
+    }
+
+    /// Register a semantic transform modifier with an explicit ordering
+    /// priority. Higher-priority modifiers run first.
+    ///
+    /// More-specific child contracts (for example a window hosted by a wall)
+    /// must be able to rewrite the direct edit before broader aggregate
+    /// contracts (for example a building planted on terrain) interpret it.
+    pub fn register_with_priority(&mut self, priority: i32, modifier: TransformPreviewModifier) {
+        self.modifiers.push((priority, modifier));
+        self.modifiers
+            .sort_by(|(left, _), (right, _)| right.cmp(left));
     }
 }
 
@@ -1073,7 +1085,7 @@ fn apply_transform_preview_modifiers(
     let Some(modifiers) = world.get_resource::<TransformPreviewModifiers>() else {
         return;
     };
-    for modifier in &modifiers.modifiers {
+    for (_, modifier) in &modifiers.modifiers {
         modifier(world, state, after);
     }
 }
@@ -2247,6 +2259,53 @@ mod tests {
     use crate::plugins::modeling::group::{GroupFrame, GroupSnapshot};
     use crate::plugins::tools::Preview;
     use serde_json::Value;
+    use std::sync::Mutex;
+
+    #[derive(Resource, Default)]
+    struct ModifierOrder(Mutex<Vec<&'static str>>);
+
+    fn record_generic_modifier(
+        world: &World,
+        _state: &TransformState,
+        _after: &mut Vec<BoxedEntity>,
+    ) {
+        world
+            .resource::<ModifierOrder>()
+            .0
+            .lock()
+            .unwrap()
+            .push("generic");
+    }
+
+    fn record_specialized_modifier(
+        world: &World,
+        _state: &TransformState,
+        _after: &mut Vec<BoxedEntity>,
+    ) {
+        world
+            .resource::<ModifierOrder>()
+            .0
+            .lock()
+            .unwrap()
+            .push("specialized");
+    }
+
+    #[test]
+    fn transform_modifier_priority_runs_specialized_contract_first() {
+        let mut world = World::new();
+        world.insert_resource(ModifierOrder::default());
+        let mut modifiers = TransformPreviewModifiers::default();
+        modifiers.register(record_generic_modifier);
+        modifiers.register_with_priority(100, record_specialized_modifier);
+        world.insert_resource(modifiers);
+
+        apply_transform_preview_modifiers(&world, &TransformState::default(), &mut Vec::new());
+
+        assert_eq!(
+            *world.resource::<ModifierOrder>().0.lock().unwrap(),
+            vec!["specialized", "generic"]
+        );
+    }
 
     /// The vertical-lift plane (camera-facing, through the grab point) must turn
     /// vertical cursor movement into vertical world movement: aiming the ray higher

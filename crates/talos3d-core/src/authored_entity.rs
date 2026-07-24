@@ -287,6 +287,17 @@ pub trait AuthoredEntity: Send + Sync + 'static {
     }
 
     fn translate_by(&self, delta: Vec3) -> BoxedEntity;
+
+    /// Translate this snapshot as part of moving its semantic parent.
+    ///
+    /// The default is ordinary world-space translation. Child snapshots that
+    /// store parent-relative parameters can override this so an aggregate
+    /// move translates the embedded parent frame without corrupting those
+    /// local parameters.
+    fn translate_with_parent(&self, delta: Vec3) -> BoxedEntity {
+        self.translate_by(delta)
+    }
+
     fn rotate_by(&self, rotation: Quat) -> BoxedEntity;
     fn scale_by(&self, factor: Vec3, center: Vec3) -> BoxedEntity;
 
@@ -426,6 +437,10 @@ impl BoxedEntity {
 
     pub fn translate_by(&self, delta: Vec3) -> Self {
         self.0.translate_by(delta)
+    }
+
+    pub fn translate_with_parent(&self, delta: Vec3) -> Self {
+        self.0.translate_with_parent(delta)
     }
 
     pub fn rotate_by(&self, rotation: Quat) -> Self {

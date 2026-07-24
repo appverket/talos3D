@@ -870,12 +870,21 @@ fn ensure_planted_contract_in_preview(
         .iter()
         .map(BoxedEntity::element_id)
         .collect::<HashSet<_>>();
+    let member_ids = placement.recursive_member_set();
     for member_id in &placement.recursive_members {
         if after_ids.contains(member_id) || is_group(world, *member_id) {
             continue;
         }
         if let Some(snapshot) = capture_by_id(world, *member_id) {
-            after.push(snapshot.translate_by(direct_delta));
+            let translated = if snapshot
+                .transform_parent()
+                .is_some_and(|parent_id| member_ids.contains(&parent_id))
+            {
+                snapshot.translate_with_parent(direct_delta)
+            } else {
+                snapshot.translate_by(direct_delta)
+            };
+            after.push(translated);
             after_ids.insert(*member_id);
         }
     }
