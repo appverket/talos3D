@@ -26,7 +26,9 @@ use talos3d_core::{
         },
         history::HistorySet,
         identity::{ElementId, ElementIdAllocator},
-        modeling::assembly::{AssemblyMemberRef, AssemblySnapshot, SemanticAssembly},
+        modeling::assembly::{
+            AssemblyMemberRef, AssemblySnapshot, RelationSnapshot, SemanticAssembly,
+        },
         modeling::generic_snapshot::PrimitiveSnapshot,
         modeling::group::{
             collect_group_members_recursive, compute_group_bounds_in_frame_from_world,
@@ -830,6 +832,34 @@ fn direct_preview_delta(
     })
 }
 
+/// A previous, more-specific transform modifier can replace a direct child
+/// move with a semantic hosted edit (for example, moving a window within its
+/// wall and updating the opening/relation atomically). In that case planting
+/// must not reinterpret the same gesture as a request to move the whole
+/// terrain-seated structure.
+fn contains_specialized_hosted_edit(
+    initial_by_id: &HashMap<ElementId, &BoxedEntity>,
+    after: &[BoxedEntity],
+    contract_ids: &HashSet<ElementId>,
+) -> bool {
+    let directly_edited_contract_ids = initial_by_id
+        .keys()
+        .copied()
+        .filter(|id| contract_ids.contains(id))
+        .collect::<HashSet<_>>();
+    after.iter().any(|snapshot| {
+        snapshot
+            .0
+            .as_any()
+            .downcast_ref::<RelationSnapshot>()
+            .is_some_and(|relation| {
+                relation.relation.relation_type == "hosted_on"
+                    && directly_edited_contract_ids.contains(&relation.relation.source)
+                    && !initial_by_id.contains_key(&relation.element_id)
+            })
+    })
+}
+
 fn ensure_planted_contract_in_preview(
     world: &World,
     after: &mut Vec<BoxedEntity>,
@@ -921,6 +951,9 @@ fn adjust_planted_structure_transform_preview(
         };
         let member_set = placement.recursive_member_set();
         let contract_ids = placement.contract_id_set();
+        if contains_specialized_hosted_edit(&initial_by_id, after, &contract_ids) {
+            continue;
+        }
         let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &contract_ids) else {
             continue;
         };
@@ -2282,7 +2315,7 @@ mod tests {
         authored_entity::AuthoredEntity,
         capability_registry::{CapabilityRegistry, ElementClassAssignment, ElementClassId},
         plugins::modeling::{
-            assembly::SemanticAssembly,
+            assembly::{SemanticAssembly, SemanticRelation},
             generic_factory::PrimitiveFactory,
             generic_snapshot::PrimitiveSnapshot,
             group::{GroupFactory, GroupFrame, GroupMembers, GroupSnapshot},
@@ -3967,6 +4000,106 @@ mod tests {
             (bounds.min.y - moved_top).abs() < 0.05,
             "superstructure should preview on the moved conforming foundation top"
         );
+    }
+
+    #[test]
+    fn planted_structure_yields_to_specialized_hosted_child_edit() {
+        let mut world = test_world();
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        for (element_id, centre, half_extents) in [
+            (
+                ElementId(2),
+                Vec3::new(0.0, 0.5, 0.0),
+                Vec3::new(1.0, 0.5, 1.0),
+            ),
+            (
+                ElementId(4),
+                Vec3::new(0.0, 1.25, 0.0),
+                Vec3::new(1.1, 0.25, 1.1),
+            ),
+        ] {
+            PrimitiveSnapshot {
+                element_id,
+                primitive: BoxPrimitive {
+                    centre,
+                    half_extents,
+                },
+                rotation: ShapeRotation::default(),
+                material_assignment: None,
+                opening_context: None,
+                subobject_display_overrides: None,
+            }
+            .apply_to(&mut world);
+        }
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Planted cottage".to_string(),
+            member_ids: vec![ElementId(2), ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let result = execute_plant_on_surface(
+            &mut world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+
+        let hosted_entity = find_entity_by_element_id(&mut world, ElementId(4)).expect("hosted");
+        let hosted_before = capture_by_id(&world, ElementId(4)).expect("hosted snapshot");
+        let mut after = vec![
+            hosted_before.translate_by(Vec3::new(0.5, 0.0, 0.0)),
+            RelationSnapshot {
+                element_id: ElementId(99),
+                relation: SemanticRelation {
+                    source: ElementId(4),
+                    target: ElementId(2),
+                    relation_type: "hosted_on".to_string(),
+                    parameters: json!({"position_along_host": 0.6}),
+                },
+            }
+            .into(),
+        ];
+        let state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: vec![(hosted_entity, hosted_before)],
+            ..Default::default()
+        };
+
+        adjust_planted_structure_transform_preview(&world, &state, &mut after);
+
+        assert!(
+            after
+                .iter()
+                .all(|snapshot| snapshot.element_id() != foundation_id),
+            "a specialized hosted child edit must not pull in the planted foundation"
+        );
+        assert!(
+            after
+                .iter()
+                .all(|snapshot| snapshot.element_id() != ElementId(2)),
+            "a specialized hosted child edit must not translate other structure members"
+        );
+        let hosted = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == ElementId(4))
+            .expect("hosted child remains in the semantic edit plan");
+        assert!((hosted.center().x - 0.5).abs() < 0.001);
     }
 
     #[test]
