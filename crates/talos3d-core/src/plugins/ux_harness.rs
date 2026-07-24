@@ -38,9 +38,10 @@ impl Plugin for UxHarnessPlugin {
             process_ux_harness_step
                 .after(InputPhase::SyncOwnership)
                 // Pointer/button/key edges are valid for one frame. Inject them
-                // before the earliest viewport consumer so handle hover/press
-                // sees the same input that selection and tools see.
-                .before(InputPhase::HandleInput),
+                // before the earliest modal/viewport consumer so transform
+                // confirmation, handle hover/press, selection, and tools all
+                // see the same input.
+                .before(InputPhase::ModalInput),
         );
     }
 }
@@ -663,6 +664,16 @@ mod tests {
     #[derive(Resource, Default)]
     struct HandlePhasePressObserved(bool);
 
+    #[derive(Resource, Default)]
+    struct ModalPhaseReleaseObserved(bool);
+
+    fn observe_modal_phase_release(
+        buttons: Res<ButtonInput<MouseButton>>,
+        mut observed: ResMut<ModalPhaseReleaseObserved>,
+    ) {
+        observed.0 |= buttons.just_released(MouseButton::Left);
+    }
+
     fn observe_handle_phase_press(
         buttons: Res<ButtonInput<MouseButton>>,
         mut observed: ResMut<HandlePhasePressObserved>,
@@ -678,10 +689,12 @@ mod tests {
             .init_resource::<Messages<MouseMotion>>()
             .init_resource::<Messages<MouseButtonInput>>()
             .init_resource::<HandlePhasePressObserved>()
+            .init_resource::<ModalPhaseReleaseObserved>()
             .configure_sets(
                 Update,
                 (
                     InputPhase::SyncOwnership,
+                    InputPhase::ModalInput,
                     InputPhase::HandleInput,
                     InputPhase::ToolInput,
                 )
@@ -692,6 +705,10 @@ mod tests {
             .add_systems(
                 Update,
                 observe_handle_phase_press.in_set(InputPhase::HandleInput),
+            )
+            .add_systems(
+                Update,
+                observe_modal_phase_release.in_set(InputPhase::ModalInput),
             )
             .add_plugins(UxHarnessPlugin);
         app.world_mut().spawn((Window::default(), PrimaryWindow));
@@ -712,6 +729,11 @@ mod tests {
         assert!(
             app.world().resource::<HandlePhasePressObserved>().0,
             "the one-frame press edge must be visible to handle consumers"
+        );
+        app.update(); // mouse release
+        assert!(
+            app.world().resource::<ModalPhaseReleaseObserved>().0,
+            "the one-frame release edge must be visible to modal confirmation"
         );
     }
 }
