@@ -493,11 +493,30 @@ fn translated_target_snapshots(
     }
 
     let member_ids = collect_group_members_recursive(world, target_id);
+    let member_id_set: HashSet<ElementId> = member_ids.iter().copied().collect();
     let mut translated = member_ids
         .iter()
         .copied()
         .filter(|member_id| !is_group(world, *member_id))
         .filter_map(|member_id| capture_by_id(world, member_id))
+        // An entity whose `transform_parent()` (e.g. a hosted opening's host
+        // wall) is also being translated in this same batch must NOT get its
+        // own independent `translate_by`: the parent's own translate already
+        // carries it along (a hosted opening's fields are wall-relative, so
+        // moving the wall moves the opening with it for free). Translating
+        // both independently double-applies the same delta to the opening's
+        // wall-relative fields (e.g. `sill_height`), which for a large
+        // vertical delta — exactly what planting onto elevated terrain
+        // produces — can push the opening's clamped geometry to a degenerate
+        // zero-height rectangle. This mirrors the same guard the interactive
+        // selection-drag path already applies (`opening_parent_is_selected`
+        // in `talos3d-core`'s transform plugin) — the mechanism must not
+        // diverge between the two edit paths.
+        .filter(|snapshot| {
+            snapshot
+                .transform_parent()
+                .is_none_or(|parent_id| !member_id_set.contains(&parent_id))
+        })
         .map(|snapshot| snapshot.translate_by(delta))
         .collect::<Vec<_>>();
 
