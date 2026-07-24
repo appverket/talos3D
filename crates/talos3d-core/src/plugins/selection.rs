@@ -464,13 +464,9 @@ fn redirect_selection_proxy_to_target(world: &World, entity: Entity) -> Entity {
         let Some(proxy) = world.get::<SelectionProxy>(current) else {
             return current;
         };
-        let Some(target) = world
-            .iter_entities()
-            .find_map(|candidate| {
-                (candidate.get::<ElementId>().copied() == Some(proxy.0))
-                    .then_some(candidate.id())
-            })
-        else {
+        let Some(target) = world.iter_entities().find_map(|candidate| {
+            (candidate.get::<ElementId>().copied() == Some(proxy.0)).then_some(candidate.id())
+        }) else {
             return current;
         };
         if !visited.insert(target) {

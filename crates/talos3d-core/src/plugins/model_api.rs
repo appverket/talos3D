@@ -3328,9 +3328,12 @@ fn handle_set_selection(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<
 
     let target_ids: HashSet<ElementId> = element_ids.iter().copied().map(ElementId).collect();
 
-    // Verify all target entities exist and are part of the user-facing model.
+    // Verify every requested entity exists. User-facing eligibility is checked
+    // after selection redirection so an internal authored feature may proxy to
+    // the semantic product that users actually manipulate (for example, a
+    // native wall opening filled by an architectural window occurrence).
     for eid in &target_ids {
-        ensure_user_editable_entity(world, *eid, "selected")?;
+        ensure_entity_exists(world, *eid)?;
     }
 
     // Remove Selected from all currently selected entities
@@ -3347,6 +3350,13 @@ fn handle_set_selection(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<
     for eid in &target_ids {
         if let Some(entity) = find_entity_by_element_id(world, *eid) {
             if let Some(target) = resolve_entity_for_selection(world, entity) {
+                let Some(target_id) = world.get::<ElementId>(target).copied() else {
+                    return Err(format!(
+                        "Selection target for entity {} has no authored element ID",
+                        eid.0
+                    ));
+                };
+                ensure_user_editable_entity(world, target_id, "selected")?;
                 target_entities.insert(target);
             }
         }

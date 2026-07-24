@@ -4090,6 +4090,21 @@ fn hosted_definition_instantiation_derives_anchors_and_relation() {
     let selection_error = handle_set_selection(&mut world, vec![opening_id])
         .expect_err("internal opening proxy should not be selectable");
     assert!(selection_error.contains("internal wall opening proxy"));
+    world
+        .entity_mut(opening_entity)
+        .insert(crate::plugins::selection::SelectionProxy(ElementId(
+            instantiated.element_id,
+        )));
+    assert_eq!(
+        handle_set_selection(&mut world, vec![opening_id])
+            .expect("a selection proxy should redirect the internal opening to its filling"),
+        vec![instantiated.element_id]
+    );
+    assert_eq!(
+        handle_get_selection(&mut world),
+        vec![instantiated.element_id],
+        "the MCP selection surface must expose the semantic hosted product"
+    );
     let transform_error = handle_transform(
         &mut world,
         TransformToolRequest {
