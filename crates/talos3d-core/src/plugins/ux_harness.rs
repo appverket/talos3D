@@ -37,7 +37,10 @@ impl Plugin for UxHarnessPlugin {
             Update,
             process_ux_harness_step
                 .after(InputPhase::SyncOwnership)
-                .before(InputPhase::ToolInput),
+                // Pointer/button/key edges are valid for one frame. Inject them
+                // before the earliest viewport consumer so handle hover/press
+                // sees the same input that selection and tools see.
+                .before(InputPhase::HandleInput),
         );
     }
 }
@@ -651,4 +654,64 @@ fn bounds3(bounds: crate::authored_entity::EntityBounds) -> UxBounds3 {
 
 fn vec2_array(value: Vec2) -> [f32; 2] {
     [value.x, value.y]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct HandlePhasePressObserved(bool);
+
+    fn observe_handle_phase_press(
+        buttons: Res<ButtonInput<MouseButton>>,
+        mut observed: ResMut<HandlePhasePressObserved>,
+    ) {
+        observed.0 |= buttons.just_pressed(MouseButton::Left);
+    }
+
+    #[test]
+    fn injected_press_reaches_handle_phase_in_the_same_frame() {
+        let mut app = App::new();
+        app.init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Messages<CursorMoved>>()
+            .init_resource::<Messages<MouseMotion>>()
+            .init_resource::<Messages<MouseButtonInput>>()
+            .init_resource::<HandlePhasePressObserved>()
+            .configure_sets(
+                Update,
+                (
+                    InputPhase::SyncOwnership,
+                    InputPhase::HandleInput,
+                    InputPhase::ToolInput,
+                )
+                    .chain(),
+            )
+            // Register the consumer before the harness to prove the explicit
+            // phase edge, rather than relying on system insertion order.
+            .add_systems(
+                Update,
+                observe_handle_phase_press.in_set(InputPhase::HandleInput),
+            )
+            .add_plugins(UxHarnessPlugin);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+
+        enqueue_click(
+            app.world_mut(),
+            UxClickRequest {
+                x: 40.0,
+                y: 60.0,
+                button: None,
+            },
+        )
+        .expect("click should enqueue");
+
+        app.update(); // pointer move
+        assert!(!app.world().resource::<HandlePhasePressObserved>().0);
+        app.update(); // mouse press
+        assert!(
+            app.world().resource::<HandlePhasePressObserved>().0,
+            "the one-frame press edge must be visible to handle consumers"
+        );
+    }
 }
