@@ -153,6 +153,15 @@ struct SelectionPressCapture {
 #[derive(Component)]
 pub struct Selected;
 
+/// Marks an authored product that remains directly selectable even when it is
+/// nested inside physical groups.
+///
+/// Use this for independently editable semantic children whose own context
+/// commands and transform contracts must remain reachable without entering
+/// every aggregate group first.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct DirectSelection;
+
 /// Apply a list-panel row click to the ECS selection set, mirroring viewport
 /// selection semantics: exclusive by default, toggle when `additive` (the row
 /// was clicked with Cmd/Ctrl or Shift held). Shared by every panel that drives
@@ -393,6 +402,9 @@ pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Ent
     }
 
     let element_id = world.get::<ElementId>(entity).copied()?;
+    if world.get::<DirectSelection>(entity).is_some() {
+        return Some(entity);
+    }
     let edit_context = world
         .get_resource::<GroupEditContext>()
         .cloned()
@@ -1454,6 +1466,17 @@ mod tests {
         let target = resolve_selection_click_target(&mut world, Some(child));
 
         assert_eq!(target.entity, Some(group));
+        assert!(target.edit_context_after_click.is_none());
+    }
+
+    #[test]
+    fn direct_selection_child_bypasses_group_redirection() {
+        let (mut world, child, _, _, _) = selection_world_with_group();
+        world.entity_mut(child).insert(DirectSelection);
+
+        let target = resolve_selection_click_target(&mut world, Some(child));
+
+        assert_eq!(target.entity, Some(child));
         assert!(target.edit_context_after_click.is_none());
     }
 
