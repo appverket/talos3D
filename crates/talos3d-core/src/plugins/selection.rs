@@ -162,6 +162,17 @@ pub struct Selected;
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct DirectSelection;
 
+/// Redirects selection of one authored entity to another authored entity.
+///
+/// This is a runtime interaction contract, not model ownership or persistence.
+/// Capabilities use it when a lower-level authored feature is visibly covered
+/// by an independently editable semantic product. For example, an
+/// architectural opening can proxy selection to the window occurrence that
+/// fills it, keeping the product's hosting/context commands reachable without
+/// making the opening a generated occurrence part.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionProxy(pub ElementId);
+
 /// Apply a list-panel row click to the ECS selection set, mirroring viewport
 /// selection semantics: exclusive by default, toggle when `additive` (the row
 /// was clicked with Cmd/Ctrl or Shift held). Shared by every panel that drives
@@ -393,6 +404,7 @@ fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity
 }
 
 pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Entity> {
+    let entity = redirect_selection_proxy_to_target(world, entity);
     if world
         .get_resource::<crate::plugins::layers::LayerRegistry>()
         .is_some()
@@ -443,6 +455,31 @@ pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Ent
     ))
 }
 
+fn redirect_selection_proxy_to_target(world: &World, entity: Entity) -> Entity {
+    let mut current = entity;
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(current);
+
+    loop {
+        let Some(proxy) = world.get::<SelectionProxy>(current) else {
+            return current;
+        };
+        let Some(target) = world
+            .iter_entities()
+            .find_map(|candidate| {
+                (candidate.get::<ElementId>().copied() == Some(proxy.0))
+                    .then_some(candidate.id())
+            })
+        else {
+            return current;
+        };
+        if !visited.insert(target) {
+            return current;
+        }
+        current = target;
+    }
+}
+
 #[derive(Default)]
 struct SelectionClickTarget {
     entity: Option<Entity>,
@@ -457,6 +494,7 @@ fn resolve_selection_click_target(
         return SelectionClickTarget::default();
     };
     let mut entity = redirect_generated_occurrence_part_to_owner(world, hit_entity);
+    entity = redirect_selection_proxy_to_target(world, entity);
     let Some(element_id) = world.get::<ElementId>(entity).copied() else {
         return SelectionClickTarget::default();
     };
@@ -1478,6 +1516,52 @@ mod tests {
 
         assert_eq!(target.entity, Some(child));
         assert!(target.edit_context_after_click.is_none());
+    }
+
+    #[test]
+    fn selection_proxy_resolves_to_direct_semantic_product_inside_group() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        let opening_id = ElementId(10);
+        let product_id = ElementId(11);
+        let group_id = ElementId(20);
+        let opening = world.spawn((opening_id, SelectionProxy(product_id))).id();
+        let product = world.spawn((product_id, DirectSelection)).id();
+        world.spawn((
+            group_id,
+            GroupMembers {
+                name: "Hosted wall".to_string(),
+                member_ids: vec![opening_id, product_id],
+                frame: Default::default(),
+                linked_model: None,
+            },
+        ));
+        let mut context = GroupEditContext::default();
+        context.enter(group_id);
+        world.insert_resource(context);
+
+        let target = resolve_selection_click_target(&mut world, Some(opening));
+
+        assert_eq!(target.entity, Some(product));
+        assert!(target.edit_context_after_click.is_none());
+    }
+
+    #[test]
+    fn selection_normalization_remaps_selected_proxy_to_product() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+        let opening_id = ElementId(10);
+        let product_id = ElementId(11);
+        let opening = world
+            .spawn((opening_id, SelectionProxy(product_id), Selected))
+            .id();
+        let product = world.spawn((product_id, DirectSelection)).id();
+
+        normalize_selection_boundaries(&mut world);
+
+        assert!(world.get::<Selected>(opening).is_none());
+        assert!(world.get::<Selected>(product).is_some());
     }
 
     #[test]
