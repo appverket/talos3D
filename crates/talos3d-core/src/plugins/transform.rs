@@ -449,6 +449,7 @@ fn update_transform_preview(world: &mut World) {
 
     let live_snapshot_application = preview_requires_snapshot_application(&preview.after);
     remember_preview_extra_originals(world, &preview.after);
+    restore_live_snapshot_preview_on_transition(world, live_snapshot_application);
     {
         let mut active_preview = world.resource_mut::<ActiveTransformPreview>();
         active_preview.snapshots = preview.after.clone();
@@ -542,6 +543,44 @@ fn update_transform_preview(world: &mut World) {
         let elapsed = start.elapsed();
         let mut perf_stats = world.resource_mut::<PerfStats>();
         add_transform_preview_time(&mut perf_stats, elapsed);
+    }
+}
+
+/// A semantic modifier can make consecutive drag frames use different preview
+/// paths. For example, a valid hosted-window position adds non-rigid opening
+/// and relation snapshots, while an invalid position intentionally collapses
+/// back to the original rigid occurrence only. Before switching from live
+/// snapshot application to the rigid `Transform` path, restore every authored
+/// snapshot touched by the live preview. Otherwise the authored snapshots can
+/// look reverted while generated occurrence parts or dependent meshes remain
+/// at the last valid preview position.
+fn restore_live_snapshot_preview_on_transition(
+    world: &mut World,
+    next_live_snapshot_application: bool,
+) {
+    let was_live_snapshot_application = world
+        .resource::<ActiveTransformPreview>()
+        .live_snapshot_application;
+    if !was_live_snapshot_application || next_live_snapshot_application {
+        return;
+    }
+
+    let originals = world
+        .resource::<TransformState>()
+        .initial_snapshots
+        .iter()
+        .map(|(_, snapshot)| snapshot.clone())
+        .collect::<Vec<_>>();
+    for snapshot in &originals {
+        snapshot.apply_to(world);
+    }
+
+    let extra_originals = world
+        .resource::<ActiveTransformPreview>()
+        .extra_originals
+        .clone();
+    for snapshot in &extra_originals {
+        snapshot.apply_to(world);
     }
 }
 
@@ -2943,6 +2982,38 @@ mod tests {
             applied,
             &vec![ElementId(1), ElementId(2)],
             "rigid and non-rigid members must be applied through the same preview path"
+        );
+    }
+
+    #[test]
+    fn leaving_live_snapshot_preview_restores_originals_before_rigid_preview() {
+        let original_occurrence: BoxedEntity = TestRigidSnapshot {
+            element_id: ElementId(1),
+        }
+        .into();
+        let original_dependent: BoxedEntity = TestPreviewSnapshot {
+            element_id: ElementId(2),
+        }
+        .into();
+
+        let mut world = World::new();
+        world.insert_resource(AppliedSnapshotIds::default());
+        world.insert_resource(TransformState {
+            initial_snapshots: vec![(Entity::PLACEHOLDER, original_occurrence)],
+            ..Default::default()
+        });
+        world.insert_resource(ActiveTransformPreview {
+            live_snapshot_application: true,
+            extra_originals: vec![original_dependent],
+            ..Default::default()
+        });
+
+        restore_live_snapshot_preview_on_transition(&mut world, false);
+
+        assert_eq!(
+            world.resource::<AppliedSnapshotIds>().0,
+            vec![ElementId(1), ElementId(2)],
+            "switching to a rigid invalid-candidate preview must restore both the selected entity and every dependent snapshot touched by the previous live frame"
         );
     }
 
