@@ -966,6 +966,9 @@ fn adjust_planted_structure_transform_preview(
         let Some(direct_delta) = direct_preview_delta(&initial_by_id, after, &contract_ids) else {
             continue;
         };
+        if direct_delta.length_squared() <= f32::EPSILON {
+            continue;
+        }
 
         ensure_planted_contract_in_preview(world, after, &placement, direct_delta);
 
@@ -4109,6 +4112,15 @@ mod tests {
             .find(|snapshot| snapshot.element_id() == ElementId(4))
             .expect("hosted child remains in the semantic edit plan");
         assert!((hosted.center().x - 0.5).abs() < 0.001);
+
+        let mut rejected_after = vec![capture_by_id(&world, ElementId(4)).expect("hosted")];
+        adjust_planted_structure_transform_preview(&world, &state, &mut rejected_after);
+        assert_eq!(
+            rejected_after.len(),
+            1,
+            "a rejected child transform restored to its original snapshot must not expand into a no-op edit of the planted aggregate"
+        );
+        assert_eq!(rejected_after[0].element_id(), ElementId(4));
     }
 
     #[test]
