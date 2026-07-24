@@ -8171,7 +8171,26 @@ fn wall_opening_validation_result(
     for axis in axes.in_plane {
         let remaining_min = opening_bounds.min_axis(axis) - host_bounds.min_axis(axis);
         let remaining_max = host_bounds.max_axis(axis) - opening_bounds.max_axis(axis);
-        let remaining = remaining_min.min(remaining_max);
+        // A vertical (Y-axis) opening whose bottom is flush with the host's
+        // own bottom (remaining_min ~= 0 — a door with sill_height = 0
+        // reaching the floor) is a normal, universal architectural pattern,
+        // not a near-miss placement error. Exempt only that specific edge
+        // from the minimum-remaining-wall margin: the flushness itself
+        // (checked against the tight geometry tolerance, not the wider
+        // minimum-margin threshold) already tells apart "reaches the floor
+        // by design" from "left an ambiguous sliver of wall by mistake".
+        // Every other edge — the top of the same axis, and both sides of
+        // every other in-plane axis (e.g. left/right) — still requires the
+        // full margin, so an edge-to-edge opening on a non-vertical axis, or
+        // one that reaches only partway toward the bottom without actually
+        // being flush, is still rejected exactly as before.
+        let bottom_is_intentionally_flush =
+            axis == SpatialAxis::Y && remaining_min.abs() <= HOSTED_OPENING_GEOMETRY_TOLERANCE;
+        let remaining = if bottom_is_intentionally_flush {
+            remaining_max
+        } else {
+            remaining_min.min(remaining_max)
+        };
         let status =
             if remaining + HOSTED_OPENING_GEOMETRY_TOLERANCE >= HOSTED_OPENING_MIN_REMAINING_WALL {
                 HostingCheckStatus::Passed
@@ -8183,13 +8202,20 @@ fn wall_opening_validation_result(
             &format!("Remaining Wall {}", axis_name(axis).to_uppercase()),
             status,
             if status == HostingCheckStatus::Passed {
-                format!(
-                    "Opening leaves wall material on both sides along {}.",
-                    axis_name(axis)
-                )
+                if bottom_is_intentionally_flush {
+                    format!(
+                        "Opening is flush with the host's bottom edge along {} (e.g. a door reaching the floor) and leaves wall material above.",
+                        axis_name(axis)
+                    )
+                } else {
+                    format!(
+                        "Opening leaves wall material on both sides along {}.",
+                        axis_name(axis)
+                    )
+                }
             } else {
                 format!(
-                    "Opening must leave at least {:.2} model units of wall on both sides along {}.",
+                    "Opening must leave at least {:.2} model units of wall on both sides along {} (or be exactly flush with the bottom edge, e.g. a door).",
                     HOSTED_OPENING_MIN_REMAINING_WALL,
                     axis_name(axis)
                 )

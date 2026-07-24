@@ -4243,6 +4243,64 @@ fn hosted_definition_instantiation_requires_remaining_wall_around_opening() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn hosted_definition_instantiation_allows_opening_flush_with_host_bottom() {
+    // A door reaches the floor: its opening is flush with the host wall's
+    // own bottom edge (sill_height = 0), with normal margin on every other
+    // side. This must be accepted — flush-with-bottom is a universal,
+    // intentional architectural pattern (doors, floor-to-ceiling openings),
+    // not the same "insufficient remaining wall" error as an opening that
+    // merely comes too close to an edge by accident. This is deliberately
+    // NOT an edge-to-edge case on any other axis: X keeps a healthy 1.05 m
+    // margin on both sides, and the Y-axis TOP keeps a full 1.0 m margin —
+    // only the Y-axis BOTTOM is flush, so this does not relax the check that
+    // `hosted_definition_instantiation_requires_remaining_wall_around_opening`
+    // (immediately above) relies on for the edge-to-edge X case.
+    let mut world = init_model_api_test_world();
+    register_hosted_on_relation(&mut world);
+
+    let host_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [4.0, 1.5, 0.0],
+            "half_extents": [2.0, 1.5, 0.15]
+        }),
+    )
+    .expect("host should be created");
+    let floor_flush_opening_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [4.0, 1.0, 0.0],
+            "half_extents": [0.45, 1.0, 0.15]
+        }),
+    )
+    .expect("opening proxy should be created");
+
+    let child = handle_create_definition(&mut world, make_locked_member_request())
+        .expect("locked child definition should be created");
+    let compound = handle_create_definition(
+        &mut world,
+        make_compound_window_request(&child.definition_id),
+    )
+    .expect("compound definition should be created");
+
+    handle_instantiate_hosted_definition(
+        &mut world,
+        json!({
+            "definition_id": compound.definition_id,
+            "label": "FloorFlushDoor",
+            "hosting": {
+                "host_element_id": host_id,
+                "opening_element_id": floor_flush_opening_id
+            }
+        }),
+    )
+    .expect("opening flush with the host's bottom edge should be accepted, like a door reaching the floor");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn occurrence_validate_host_fit_uses_core_wall_opening_fallback() {
     let mut world = init_model_api_test_world();
     register_hosted_on_relation(&mut world);
