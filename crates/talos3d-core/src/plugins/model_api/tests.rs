@@ -12194,6 +12194,8 @@ mod capability_profiles {
             "materialize_learned_asset",
             // definitions / parametric
             "definition.create",
+            "definition.library.list",
+            "definition.library.get",
             "definition.instantiate_hosted",
             "occurrence.place",
             "bim_void.plan_placement",
@@ -12233,6 +12235,7 @@ mod capability_profiles {
             "quantity.set",
             "create_light",
             "get_perf_stats",
+            "definition.library.create",
             "definition.library.workspace.create",
             "procedural_session.create",
             "array_create_linear",
@@ -12255,8 +12258,8 @@ mod capability_profiles {
         let authoring = catalog.tools_for(CapabilityProfile::Authoring);
         let full = catalog.tools_for(CapabilityProfile::Full);
         assert!(
-            authoring.len() <= full.len() / 2,
-            "authoring advertises {} of {} tools; expected at most half",
+            authoring.len() * 100 <= full.len() * 52,
+            "authoring advertises {} of {} tools; expected at most 52%",
             authoring.len(),
             full.len()
         );

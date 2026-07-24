@@ -314,6 +314,12 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("definition.instantiate", ToolCategory::Definitions),
     ("definition.instantiate_hosted", ToolCategory::Definitions),
     ("definition.list", ToolCategory::Definitions),
+    // Read-only library discovery is part of ordinary product authoring:
+    // architecture guidance tells agents to find a bundled Definition before
+    // creating a substitute. Library mutation/workspaces remain curation-only
+    // through the prefix rule below.
+    ("definition.library.list", ToolCategory::Definitions),
+    ("definition.library.get", ToolCategory::Definitions),
     ("definition.update", ToolCategory::Definitions),
     ("definition.validate", ToolCategory::Definitions),
     (
