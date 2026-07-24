@@ -3673,6 +3673,76 @@ fn hosted_occurrence_resize_updates_opening_proxy_and_relation() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn hosted_instantiation_admission_rejects_before_creating_occurrence_or_relation() {
+    use std::sync::Arc;
+
+    use crate::plugins::hosting_contracts::{
+        HostedInstantiationValidatorDescriptor, HostingValidatorId,
+    };
+
+    let mut world = init_model_api_test_world();
+    register_hosted_on_relation(&mut world);
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_hosted_instantiation_validator(HostedInstantiationValidatorDescriptor {
+            id: HostingValidatorId("test.typed-hosted-product".to_string()),
+            relation_type: "hosted_on".to_string(),
+            validator: Arc::new(|request, _| {
+                Err(format!(
+                    "Definition '{}' is not an executable hosted product",
+                    request.definition_id.0
+                ))
+            }),
+        });
+
+    let host_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [4.0, 1.5, 0.0],
+            "half_extents": [2.0, 1.5, 0.15]
+        }),
+    )
+    .expect("host should be created");
+    let opening_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [4.0, 1.2, 0.0],
+            "half_extents": [0.6, 0.8, 0.15]
+        }),
+    )
+    .expect("opening proxy should be created");
+    let definition = handle_create_definition(&mut world, make_rect_extrusion_request())
+        .expect("definition should be created");
+
+    let error = handle_instantiate_hosted_definition(
+        &mut world,
+        json!({
+            "definition_id": definition.definition_id,
+            "hosting": {
+                "host_element_id": host_id,
+                "opening_element_id": opening_id
+            }
+        }),
+    )
+    .expect_err("capability admission must reject before authoring");
+
+    assert!(error.contains("test.typed-hosted-product"), "{error}");
+    assert!(
+        error.contains("not an executable hosted product"),
+        "{error}"
+    );
+    let occurrence_count = world
+        .query::<&crate::plugins::modeling::occurrence::OccurrenceIdentity>()
+        .iter(&world)
+        .count();
+    assert_eq!(occurrence_count, 0);
+    assert!(handle_query_relations(&world, None, None, Some("hosted_on".to_string())).is_empty());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn occurrence_make_unique_copies_definition_tree_and_repoints_only_target() {
     let mut world = init_model_api_test_world();
 

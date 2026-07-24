@@ -1386,6 +1386,9 @@ pub struct CapabilityRegistry {
     relation_type_descriptors: Vec<RelationTypeDescriptor>,
     hosting_contract_descriptors: Vec<HostingContractDescriptor>,
     hosting_contract_index: HashMap<String, usize>,
+    hosted_instantiation_validators:
+        Vec<crate::plugins::hosting_contracts::HostedInstantiationValidatorDescriptor>,
+    hosted_instantiation_validator_index: HashMap<String, usize>,
     // PP71
     element_class_descriptors: Vec<ElementClassDescriptor>,
     element_class_index: HashMap<String, usize>,
@@ -1612,6 +1615,23 @@ impl CapabilityRegistry {
         self.hosting_contract_descriptors.push(descriptor);
     }
 
+    pub fn register_hosted_instantiation_validator(
+        &mut self,
+        descriptor: crate::plugins::hosting_contracts::HostedInstantiationValidatorDescriptor,
+    ) {
+        assert!(
+            !self
+                .hosted_instantiation_validator_index
+                .contains_key(descriptor.id.0.as_str()),
+            "Hosted-instantiation validator '{}' was registered more than once",
+            descriptor.id.0
+        );
+        let index = self.hosted_instantiation_validators.len();
+        self.hosted_instantiation_validator_index
+            .insert(descriptor.id.0.clone(), index);
+        self.hosted_instantiation_validators.push(descriptor);
+    }
+
     pub fn assembly_type_descriptors(&self) -> &[AssemblyTypeDescriptor] {
         &self.assembly_type_descriptors
     }
@@ -1656,6 +1676,17 @@ impl CapabilityRegistry {
         self.hosting_contract_index
             .get(kind.0.as_str())
             .and_then(|&i| self.hosting_contract_descriptors.get(i))
+    }
+
+    pub fn hosted_instantiation_validators<'a>(
+        &'a self,
+        relation_type: &'a str,
+    ) -> impl Iterator<
+        Item = &'a crate::plugins::hosting_contracts::HostedInstantiationValidatorDescriptor,
+    > + 'a {
+        self.hosted_instantiation_validators
+            .iter()
+            .filter(move |descriptor| descriptor.relation_type == relation_type)
     }
 
     // --- PP71: Element class descriptors ---
@@ -1907,6 +1938,11 @@ pub trait CapabilityRegistryAppExt {
     /// `CapabilityRegistry` resource if it does not yet exist.
     fn register_hosting_contract(&mut self, descriptor: HostingContractDescriptor) -> &mut Self;
 
+    fn register_hosted_instantiation_validator(
+        &mut self,
+        descriptor: crate::plugins::hosting_contracts::HostedInstantiationValidatorDescriptor,
+    ) -> &mut Self;
+
     /// Register an `ElementClassDescriptor` (PP71). Initialises the
     /// `CapabilityRegistry` resource if it does not yet exist.
     fn register_element_class(&mut self, descriptor: ElementClassDescriptor) -> &mut Self;
@@ -2019,6 +2055,20 @@ impl CapabilityRegistryAppExt for App {
         self.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_hosting_contract(descriptor);
+        self
+    }
+
+    fn register_hosted_instantiation_validator(
+        &mut self,
+        descriptor: crate::plugins::hosting_contracts::HostedInstantiationValidatorDescriptor,
+    ) -> &mut Self {
+        if !self.world().contains_resource::<CapabilityRegistry>() {
+            self.init_resource::<CapabilityRegistry>();
+        }
+
+        self.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_hosted_instantiation_validator(descriptor);
         self
     }
 

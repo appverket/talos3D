@@ -18,7 +18,7 @@ use crate::{
     },
     plugins::{
         assembly_pattern_drafts::{AssemblyPatternDraftArtifact, AssemblyPatternDraftRegistry},
-        bundled_definition_libraries::apply_bundled_definition_libraries,
+        bundled_definition_libraries::apply_registered_bundled_definition_libraries,
         camera::focus_orbit_camera_on_bounds,
         commands::snapshot_dependency_order,
         corpus_gap::{CorpusGap, CorpusGapQueue},
@@ -517,10 +517,8 @@ pub fn new_document(world: &mut World) {
     }
     world.insert_resource(DefinitionRegistry::default());
     world.insert_resource(DefinitionLibraryRegistry::default());
-    if let Some(mut libraries) = world.get_resource_mut::<DefinitionLibraryRegistry>() {
-        if let Err(error) = apply_bundled_definition_libraries(&mut libraries) {
-            error!("Failed to restore bundled definition libraries for new document: {error}");
-        }
+    if let Err(error) = apply_registered_bundled_definition_libraries(world) {
+        error!("Failed to restore bundled definition libraries for new document: {error}");
     }
     world.insert_resource(NamedViewRegistry::default());
     world.insert_resource(SceneLightingSettings::default());
@@ -1336,10 +1334,8 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
         );
     }
     world.insert_resource(definition_library_registry);
-    if let Some(mut libraries) = world.get_resource_mut::<DefinitionLibraryRegistry>() {
-        if let Err(error) = apply_bundled_definition_libraries(&mut libraries) {
-            error!("Failed to restore bundled definition libraries after project load: {error}");
-        }
+    if let Err(error) = apply_registered_bundled_definition_libraries(world) {
+        error!("Failed to restore bundled definition libraries after project load: {error}");
     }
     world.insert_resource(named_views.unwrap_or_default());
     if let Some(lighting) = lighting {
@@ -1760,6 +1756,80 @@ mod tests {
         assert_eq!(
             libraries.list()[0].id,
             DefinitionLibraryId("test.document-library".to_string())
+        );
+    }
+
+    #[test]
+    fn project_load_reseeds_capability_bundled_definition_libraries() {
+        use std::sync::Arc;
+
+        use crate::plugins::bundled_definition_libraries::BundledDefinitionLibraryProviderRegistry;
+
+        let bundled_id = DefinitionLibraryId("test.architecture-products".to_string());
+        let mut providers = BundledDefinitionLibraryProviderRegistry::default();
+        providers.register(
+            "test.architecture",
+            Arc::new(|| {
+                Ok(vec![DefinitionLibrary {
+                    id: DefinitionLibraryId("test.architecture-products".to_string()),
+                    name: "Architecture Products".to_string(),
+                    scope: DefinitionLibraryScope::Bundled,
+                    source_path: None,
+                    tags: vec!["window".to_string()],
+                    definitions: default(),
+                    draft_status: default(),
+                }])
+            }),
+        );
+
+        let mut world = World::new();
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(MaterialRegistry::default());
+        world.insert_resource(TextureRegistry::default());
+        world.insert_resource(DefinitionRegistry::default());
+        world.insert_resource(DefinitionLibraryRegistry::default());
+        world.insert_resource(NamedViewRegistry::default());
+        world.insert_resource(ElementIdAllocator::default());
+        world.insert_resource(OpaquePersistedEntities::default());
+        world.insert_resource(History::default());
+        world.insert_resource(PendingCommandQueue::default());
+        world.insert_resource(PropertyEditState::default());
+        world.insert_resource(TransformState::default());
+        world.insert_resource(State::new(ActiveTool::Select));
+        world.insert_resource(NextState::<ActiveTool>::default());
+        world.insert_resource(providers);
+
+        load_project(
+            &mut world,
+            ProjectFile {
+                version: PROJECT_FILE_VERSION,
+                created_by: Some(current_project_created_by()),
+                next_element_id: 1,
+                document_properties: Some(DocumentProperties::default()),
+                layers: None,
+                materials: None,
+                textures: None,
+                definitions: None,
+                definition_libraries: None,
+                named_views: None,
+                lighting: Some(SceneLightingSettings::default()),
+                sources: None,
+                nominations: None,
+                material_specs: None,
+                knowledge_recipe_drafts: None,
+                knowledge_assembly_pattern_drafts: None,
+                corpus_gaps: None,
+                entities: Vec::new(),
+            },
+        )
+        .expect("project should load");
+
+        assert!(
+            world
+                .resource::<DefinitionLibraryRegistry>()
+                .get(&bundled_id)
+                .is_some(),
+            "loading a project must not erase capability-bundled product knowledge"
         );
     }
 

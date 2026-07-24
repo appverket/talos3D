@@ -35,9 +35,9 @@ use crate::plugins::command_registry::{
 use crate::plugins::commands::find_entity_by_element_id_readonly;
 #[cfg(feature = "model-api")]
 use crate::plugins::hosting_contracts::{
-    HostAffectedRegion, HostingCheckId, HostingCheckStatus, HostingContractKindId,
-    HostingValidationCheck, HostingValidationRequest, HostingValidationResult,
-    HostingValidationStatus, MeasuredValue,
+    HostAffectedRegion, HostedInstantiationValidationRequest, HostingCheckId, HostingCheckStatus,
+    HostingContractKindId, HostingValidationCheck, HostingValidationRequest,
+    HostingValidationResult, HostingValidationStatus, MeasuredValue,
 };
 use crate::plugins::identity::ElementId;
 #[cfg(feature = "model-api")]
@@ -8639,6 +8639,27 @@ pub fn handle_instantiate_hosted_definition(
             serde_json::from_value(value)
                 .map_err(|error| format!("Invalid hosting context: {error}"))
         })?;
+    if let Some(relation_type) = relation_type.as_deref() {
+        let validators = world
+            .resource::<CapabilityRegistry>()
+            .hosted_instantiation_validators(relation_type)
+            .cloned()
+            .collect::<Vec<_>>();
+        let validation_request = HostedInstantiationValidationRequest {
+            relation_type: relation_type.to_string(),
+            definition_id: DefinitionId(definition_id.clone()),
+            host_element_id: hosted_context.host_element_id,
+            opening_element_id: hosted_context.opening_element_id,
+        };
+        for descriptor in validators {
+            (descriptor.validator)(validation_request.clone(), world).map_err(|error| {
+                format!(
+                    "Hosted instantiation rejected by '{}': {error}",
+                    descriptor.id.0
+                )
+            })?;
+        }
+    }
     validate_preflight_hosted_wall_opening(world, &hosted_request, &hosted_context)?;
     let (element_id, occurrence_snapshot) =
         build_occurrence_snapshot_for_place(world, hosted_request)?;

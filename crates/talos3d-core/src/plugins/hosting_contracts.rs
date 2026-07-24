@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::plugins::identity::ElementId;
-use crate::plugins::modeling::definition::{ConstraintSeverity, ParameterSchema};
+use crate::plugins::modeling::definition::{ConstraintSeverity, DefinitionId, ParameterSchema};
 
 /// Stable identifier for a hosting contract kind.
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
@@ -270,6 +270,39 @@ pub struct HostingValidationRequest {
 pub type HostingValidatorFn = std::sync::Arc<
     dyn Fn(HostingValidationRequest, &World) -> HostingValidationResult + Send + Sync,
 >;
+
+/// Pre-creation request passed to capability-owned admission validators for a
+/// hosted Definition. Unlike geometry-only host-fit validation, this hook can
+/// reject a Definition whose domain type cannot provide the behavior promised
+/// by the relation (for example an untyped solid presented as a movable
+/// architectural window).
+#[derive(Debug, Clone)]
+pub struct HostedInstantiationValidationRequest {
+    pub relation_type: String,
+    pub definition_id: DefinitionId,
+    pub host_element_id: Option<ElementId>,
+    pub opening_element_id: Option<ElementId>,
+}
+
+pub type HostedInstantiationValidatorFn = std::sync::Arc<
+    dyn Fn(HostedInstantiationValidationRequest, &World) -> Result<(), String> + Send + Sync,
+>;
+
+#[derive(Clone)]
+pub struct HostedInstantiationValidatorDescriptor {
+    pub id: HostingValidatorId,
+    pub relation_type: String,
+    pub validator: HostedInstantiationValidatorFn,
+}
+
+impl std::fmt::Debug for HostedInstantiationValidatorDescriptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostedInstantiationValidatorDescriptor")
+            .field("id", &self.id)
+            .field("relation_type", &self.relation_type)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Capability-registered hosting contract descriptor.
 pub struct HostingContractDescriptor {
