@@ -416,6 +416,18 @@ pub(super) enum ModelApiRequest {
     },
     // --- Semantic Assembly / Relation ---
     ListVocabulary(oneshot::Sender<VocabularyInfo>),
+    ResolveDomainTerm {
+        request: super::concept_tools::ResolveDomainTermRequest,
+        response: oneshot::Sender<super::concept_tools::ResolveDomainTermResult>,
+    },
+    AssignConcept {
+        request: super::concept_tools::AssignConceptRequest,
+        response: oneshot::Sender<ApiResult<super::concept_tools::AssignConceptResult>>,
+    },
+    PublishAnchors {
+        request: super::concept_tools::PublishAnchorsRequest,
+        response: oneshot::Sender<ApiResult<super::concept_tools::PublishAnchorsResult>>,
+    },
     CreateAssembly {
         request: CreateAssemblyRequest,
         response: oneshot::Sender<ApiResult<CreateAssemblyResult>>,
@@ -1682,6 +1694,17 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             let _ = response.send(handle_load_project(world, &path));
         }
         // --- Semantic Assembly / Relation ---
+        ModelApiRequest::ResolveDomainTerm { request, response } => {
+            let _ = response.send(super::concept_tools::handle_resolve_domain_term(
+                world, request,
+            ));
+        }
+        ModelApiRequest::AssignConcept { request, response } => {
+            let _ = response.send(super::concept_tools::handle_assign_concept(world, request));
+        }
+        ModelApiRequest::PublishAnchors { request, response } => {
+            let _ = response.send(super::concept_tools::handle_publish_anchors(world, request));
+        }
         ModelApiRequest::ListVocabulary(response) => {
             let _ = response.send(handle_list_vocabulary(world));
         }

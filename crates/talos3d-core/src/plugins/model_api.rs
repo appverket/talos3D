@@ -1,3 +1,6 @@
+#[cfg(feature = "model-api")]
+pub mod concept_tools;
+
 use std::collections::{HashMap, HashSet};
 
 #[cfg(feature = "model-api")]

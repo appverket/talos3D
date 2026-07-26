@@ -236,6 +236,9 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_constraints", ToolCategory::Inspection),
     ("list_element_classes", ToolCategory::Inspection),
     ("list_vocabulary", ToolCategory::Inspection),
+    ("resolve_domain_term", ToolCategory::Discovery),
+    ("assign_concept", ToolCategory::Editing),
+    ("publish_anchors", ToolCategory::Editing),
     (
         "preview_semantic_assembly_from_selection",
         ToolCategory::Inspection,

@@ -1289,6 +1289,30 @@ impl ModelApiServer {
 
     // --- Semantic Assembly / Relation requests ---
 
+    async fn request_resolve_domain_term(
+        &self,
+        request: super::concept_tools::ResolveDomainTermRequest,
+    ) -> Result<super::concept_tools::ResolveDomainTermResult, String> {
+        self.round_trip(|response| ModelApiRequest::ResolveDomainTerm { request, response })
+            .await
+    }
+
+    async fn request_assign_concept(
+        &self,
+        request: super::concept_tools::AssignConceptRequest,
+    ) -> ApiResult<super::concept_tools::AssignConceptResult> {
+        self.round_trip(|response| ModelApiRequest::AssignConcept { request, response })
+            .await?
+    }
+
+    async fn request_publish_anchors(
+        &self,
+        request: super::concept_tools::PublishAnchorsRequest,
+    ) -> ApiResult<super::concept_tools::PublishAnchorsResult> {
+        self.round_trip(|response| ModelApiRequest::PublishAnchors { request, response })
+            .await?
+    }
+
     async fn request_list_vocabulary(&self) -> Result<VocabularyInfo, String> {
         self.round_trip(ModelApiRequest::ListVocabulary).await
     }
@@ -7142,6 +7166,51 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     // --- Semantic Assembly / Relation tools ---
+
+    #[tool(
+        name = "resolve_domain_term",
+        description = "Resolve a word (any locale, e.g. 'bargeboard', 'vindskiva') to concepts. Returns EVERY candidate, never a nearest guess; two matches mean real ambiguity you must resolve. Each reports its contrasts, system, and the anchor kinds it must attach to plus who publishes them. Empty result = CorpusGap, not permission to improvise."
+    )]
+    pub(super) async fn resolve_domain_term_tool(
+        &self,
+        params: Parameters<super::concept_tools::ResolveDomainTermRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_resolve_domain_term(params.0)
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "assign_concept",
+        description = "Claim a concept for an entity. This arms the admissibility kernel: its relations are then checked on every mutation path, interactive and MCP alike. Returns the anchor obligations it now carries. Removing a concept is an explicit downgrade, not a way around a refusal."
+    )]
+    pub(super) async fn assign_concept_tool(
+        &self,
+        params: Parameters<super::concept_tools::AssignConceptRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_assign_concept(params.0)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "publish_anchors",
+        description = "Declare the anchors a host offers (e.g. a gable roof publishing arch.anchor.roof.rake_edge per gable end). Guests resolve against these; a host publishing no matching anchor offers nothing to attach to. Identity is publisher+kind+role, excluding coordinates, so regeneration invalidates dependents rather than detaching them."
+    )]
+    pub(super) async fn publish_anchors_tool(
+        &self,
+        params: Parameters<super::concept_tools::PublishAnchorsRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_publish_anchors(params.0)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
 
     #[tool(
         name = "list_vocabulary",
