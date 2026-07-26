@@ -8,4 +8,5 @@ pub mod curation;
 pub mod importers;
 pub mod plugins;
 pub mod relational;
+pub mod semantics;
 pub mod storage;
