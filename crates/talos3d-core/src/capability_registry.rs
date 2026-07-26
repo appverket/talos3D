@@ -412,6 +412,20 @@ pub struct AssemblyPatternRelationRule {
     pub target_layer_id: String,
     pub required: bool,
     pub rationale: String,
+    /// ADR-064 §5: the concept-level `AdmissibilityProposition` this
+    /// pattern-local rule realises, when one exists.
+    ///
+    /// Pattern rules reference *layer ids local to one pattern*, so a rule that
+    /// is correct inside its pattern says nothing anywhere else — which is how
+    /// the bargeboard/rake relationship came to be true in exactly one place.
+    /// Linking the rule to the general proposition lets corpus lint prove the
+    /// two cannot drift: patterns may **add** arrangement-specific
+    /// obligations, but may not **contradict** an applicable proposition.
+    ///
+    /// `None` means the rule is arrangement-specific and has no general
+    /// counterpart, which is legitimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derives_from_proposition: Option<String>,
 }
 
 /// Describes a reusable, capability-contributed assembly pattern.

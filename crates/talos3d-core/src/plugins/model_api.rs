@@ -16675,6 +16675,9 @@ pub fn handle_save_assembly_pattern_draft(
                         target_layer_id: rule.target_layer_id,
                         required: rule.required,
                         rationale: rule.rationale,
+                        // Agent-drafted patterns declare no general
+                        // counterpart; a curator links one during promotion.
+                        derives_from_proposition: None,
                     })
                     .collect(),
                 root_layer_ids: request.root_layer_ids,
