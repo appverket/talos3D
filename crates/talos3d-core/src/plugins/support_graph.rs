@@ -89,6 +89,22 @@ pub fn register_support_graph_relations(app: &mut App) {
         host_contract_kind: None,
     });
     app.register_relation_type(RelationTypeDescriptor {
+        relation_type: "follows".to_string(),
+        label: "Follows".to_string(),
+        description:
+            "Path relation: the source member's extent is derived from, and coincident with, \
+             the target anchor's path. Domain-neutral by construction — it says nothing about \
+             what either party is, only that one traces the other. Admissibility propositions \
+             narrow it per concept (ADR-064 §2)."
+                .to_string(),
+        valid_source_types: Vec::new(),
+        valid_target_types: Vec::new(),
+        parameter_schema: serde_json::json!({}),
+        participates_in_dependency_graph: true,
+        external_classification: None,
+        host_contract_kind: None,
+    });
+    app.register_relation_type(RelationTypeDescriptor {
         relation_type: "braced_by".to_string(),
         label: "Braced By".to_string(),
         description: "Stability relation: the source member or assembly is laterally stabilized by the target."

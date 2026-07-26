@@ -34,22 +34,31 @@
 //!
 //! [ADR-064]: https://github.com/appverket/talos3d-workspace/blob/main/decisions/ADR-064-Talos-Design-Runtime.md
 
+pub mod components;
 pub mod graph;
 pub mod ids;
 pub mod kernel;
+pub mod lint;
 pub mod plan;
 pub mod registry;
 
 #[cfg(test)]
+mod enforcement_tests;
+#[cfg(test)]
 pub(crate) mod test_fixtures;
 
+pub use components::{
+    ActiveJurisdiction, ConceptAssignment, PublishedAnchor, PublishedAnchors, SemanticBinding,
+    SemanticBindings, SemanticGraph, WorldSemanticContext,
+};
 pub use graph::{
     AdmissibilityProposition, AnchorCardinality, AnchorGeometry, AnchorKindDescriptor, Cardinality,
     Concept, ConceptStatus, LexicalEntry, PropositionObject, PublishedAnchorContract,
 };
 pub use ids::{AnchorKindId, AnchorRoleId, ConceptId, PredicateId, PropositionId};
 pub use kernel::{evaluate, PendingObligation, Refusal, Verdict};
-pub use plan::{AnchorInstanceId, BindTarget, SemanticContext, SemanticIntent, SemanticPlan};
+pub use lint::{lint_corpus, CorpusFinding, CorpusFindingKind};
+pub use plan::{AnchorInstanceId, BindTarget, PlanIntent, SemanticContext, SemanticPlan};
 pub use registry::SemanticRegistry;
 
 #[cfg(test)]
@@ -130,7 +139,7 @@ mod tests {
     }
 
     fn bind(subject: u64, target: BindTarget) -> SemanticPlan {
-        SemanticPlan::none().with(SemanticIntent::Bind {
+        SemanticPlan::none().with(PlanIntent::Bind {
             subject: ElementId(subject),
             predicate: PredicateId::new(FOLLOWS),
             target,
@@ -225,7 +234,7 @@ mod tests {
         let verdict = evaluate(
             &roof_edge_fixture(),
             &world().at_state(RefinementState::Conceptual),
-            &SemanticPlan::none().with(SemanticIntent::AssignConcept {
+            &SemanticPlan::none().with(PlanIntent::AssignConcept {
                 entity: ElementId(511),
                 concept: ConceptId::new(BARGEBOARD),
             }),
@@ -265,11 +274,11 @@ mod tests {
         // Assign then bind, in a single command: the assignment must be visible
         // to the binding or "make semantic" would bypass enforcement.
         let plan = SemanticPlan::none()
-            .with(SemanticIntent::AssignConcept {
+            .with(PlanIntent::AssignConcept {
                 entity: ElementId(999),
                 concept: ConceptId::new(BARGEBOARD),
             })
-            .with(SemanticIntent::Bind {
+            .with(PlanIntent::Bind {
                 subject: ElementId(999),
                 predicate: PredicateId::new(FOLLOWS),
                 target: BindTarget::Entity(ElementId(412)),
@@ -283,7 +292,7 @@ mod tests {
         let verdict = evaluate(
             &roof_edge_fixture(),
             &world(),
-            &SemanticPlan::none().with(SemanticIntent::RemoveConcept {
+            &SemanticPlan::none().with(PlanIntent::RemoveConcept {
                 entity: ElementId(388),
                 concept: ConceptId::new(ROOF_SYSTEM),
             }),
@@ -359,7 +368,7 @@ mod tests {
         let verdict = evaluate(
             &roof_edge_fixture(),
             &world(),
-            &SemanticPlan::none().with(SemanticIntent::AssignConcept {
+            &SemanticPlan::none().with(PlanIntent::AssignConcept {
                 entity: ElementId(1),
                 concept: ConceptId::new("arch.concept.not_registered"),
             }),

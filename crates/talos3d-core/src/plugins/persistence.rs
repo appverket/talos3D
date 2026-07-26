@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::semantics::{ConceptAssignment, PublishedAnchors, SemanticBindings};
 use crate::{
     authored_entity::{BoxedEntity, EntityBounds},
     capability_registry::{CapabilityRegistry, DefaultsRegistry, ElementClassAssignment},
@@ -213,6 +214,18 @@ pub struct PersistedSemanticSidecars {
     pub semantic_intent: Option<SemanticIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authoring_provenance: Option<AuthoringProvenance>,
+    /// ADR-064: the concept an entity claims. Persisted because an entity that
+    /// loses its concept on reload silently loses every domain claim it made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concept: Option<ConceptAssignment>,
+    /// ADR-064 §1: anchor instances this entity publishes. Persisted
+    /// explicitly — an anchor instance that does not survive reload detaches
+    /// every dependent on load, which is worse than having no anchors at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_anchors: Option<PublishedAnchors>,
+    /// Bindings this entity holds against other entities' anchors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_bindings: Option<SemanticBindings>,
 }
 
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
@@ -290,11 +303,17 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
         refinement_state: entity_ref.get::<RefinementStateComponent>().cloned(),
         semantic_intent: entity_ref.get::<SemanticIntent>().cloned(),
         authoring_provenance: entity_ref.get::<AuthoringProvenance>().cloned(),
+        concept: entity_ref.get::<ConceptAssignment>().cloned(),
+        published_anchors: entity_ref.get::<PublishedAnchors>().cloned(),
+        semantic_bindings: entity_ref.get::<SemanticBindings>().cloned(),
     };
     (sidecars.element_class.is_some()
         || sidecars.refinement_state.is_some()
         || sidecars.semantic_intent.is_some()
-        || sidecars.authoring_provenance.is_some())
+        || sidecars.authoring_provenance.is_some()
+        || sidecars.concept.is_some()
+        || sidecars.published_anchors.is_some()
+        || sidecars.semantic_bindings.is_some())
     .then_some(sidecars)
 }
 
@@ -317,6 +336,15 @@ fn apply_semantic_sidecars(
         entity_mut.insert(component.clone());
     }
     if let Some(component) = &sidecars.authoring_provenance {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.concept {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.published_anchors {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.semantic_bindings {
         entity_mut.insert(component.clone());
     }
 }

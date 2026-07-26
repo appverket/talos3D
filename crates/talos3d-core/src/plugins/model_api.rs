@@ -4949,6 +4949,15 @@ pub fn handle_create_assembly(
     for rel in &request.relations {
         ensure_entity_exists(world, ElementId(rel.source))?;
         ensure_entity_exists(world, ElementId(rel.target))?;
+        // ADR-064 §5: previously this path validated only that the relation
+        // *type name* was registered, never the endpoints. That is what made
+        // an invalid semantic attachment acceptable through create_assembly.
+        validate_relation_endpoints(
+            world,
+            &rel.relation_type,
+            ElementId(rel.source),
+            ElementId(rel.target),
+        )?;
     }
 
     let assembly_id = world.resource::<ElementIdAllocator>().next_id();
@@ -8365,6 +8374,56 @@ fn validate_preflight_hosted_wall_opening(
     }
 
     Ok(())
+}
+
+/// Validate one relation's endpoints against its registered descriptor.
+///
+/// ADR-064 §5: this compares **concepts** when both endpoints carry them, and
+/// falls back to coarse entity type names when they do not. Comparing only
+/// type names is what let `bargeboard attached_to wall_cladding` reduce to
+/// `occurrence attached_to occurrence` and pass unconditionally.
+#[cfg(feature = "model-api")]
+fn validate_relation_endpoints(
+    world: &World,
+    relation_type: &str,
+    source: ElementId,
+    target: ElementId,
+) -> ApiResult<()> {
+    use crate::semantics::{evaluate, PlanIntent, SemanticGraph, SemanticPlan, Verdict};
+    use crate::semantics::{BindTarget, PredicateId, WorldSemanticContext};
+
+    // Coarse descriptor check first: cheap, and it still catches type-level
+    // mistakes on unclassified geometry.
+    let source_snapshot = capture_entity_snapshot(world, source);
+    let target_snapshot = capture_entity_snapshot(world, target);
+    if let (Some(source_snapshot), Some(target_snapshot)) = (&source_snapshot, &target_snapshot) {
+        validate_relation_descriptor(
+            world,
+            relation_type,
+            source_snapshot.type_name(),
+            target_snapshot,
+        )?;
+    }
+
+    // Concept-level admissibility. Skipped when no graph is installed or
+    // neither endpoint claims a concept — unclassified geometry makes no
+    // domain claim and is not governed.
+    let Some(graph) = world.get_resource::<SemanticGraph>() else {
+        return Ok(());
+    };
+    let context = WorldSemanticContext::new(world);
+    let plan = SemanticPlan::none().with(PlanIntent::Bind {
+        subject: source,
+        predicate: PredicateId::new(relation_type),
+        target: BindTarget::Entity(target),
+    });
+    match evaluate(graph, &context, &plan) {
+        Verdict::Refuse(refusals) => Err(refusals
+            .first()
+            .map(|refusal| refusal.summary())
+            .unwrap_or_else(|| "Relation refused by admissibility kernel.".to_string())),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(feature = "model-api")]

@@ -18,7 +18,7 @@ use crate::plugins::refinement::RefinementState;
 
 use super::graph::{AdmissibilityProposition, PropositionObject};
 use super::ids::{AnchorKindId, ConceptId, PredicateId, PropositionId};
-use super::plan::{BindTarget, SemanticContext, SemanticIntent, SemanticPlan};
+use super::plan::{BindTarget, PlanIntent, SemanticContext, SemanticPlan};
 use super::registry::SemanticRegistry;
 
 /// An obligation the plan may proceed under, to be discharged by a later state.
@@ -103,7 +103,7 @@ pub fn evaluate(
 
     for intent in &plan.intents {
         match intent {
-            SemanticIntent::AssignConcept { entity, concept } => {
+            PlanIntent::AssignConcept { entity, concept } => {
                 evaluate_assignment(
                     registry,
                     context,
@@ -114,10 +114,10 @@ pub fn evaluate(
                     jurisdiction.as_ref(),
                 );
             }
-            SemanticIntent::RemoveConcept { entity, concept } => {
+            PlanIntent::RemoveConcept { entity, concept } => {
                 obligations.push(downgrade_obligation(registry, *entity, concept));
             }
-            SemanticIntent::Bind {
+            PlanIntent::Bind {
                 subject,
                 predicate,
                 target,
@@ -425,7 +425,7 @@ fn concept_for(
         .iter()
         .rev()
         .find_map(|intent| match intent {
-            SemanticIntent::AssignConcept {
+            PlanIntent::AssignConcept {
                 entity: assigned,
                 concept,
             } if *assigned == entity => Some(concept.clone()),

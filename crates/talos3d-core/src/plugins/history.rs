@@ -3,6 +3,10 @@ use std::mem;
 use bevy::prelude::*;
 
 use crate::plugins::ui::StatusBarData;
+use crate::semantics::{
+    components::{SemanticGraph, WorldSemanticContext},
+    evaluate, Refusal, SemanticPlan, Verdict,
+};
 
 const STATUS_MESSAGE_DURATION_SECONDS: f32 = 2.0;
 
@@ -13,6 +17,7 @@ impl Plugin for HistoryPlugin {
         app.configure_sets(Update, (HistorySet::Queue, HistorySet::Apply).chain())
             .init_resource::<History>()
             .init_resource::<PendingCommandQueue>()
+            .init_resource::<SemanticEnforcement>()
             .add_systems(
                 Update,
                 apply_pending_history_commands.in_set(HistorySet::Apply),
@@ -34,6 +39,21 @@ pub trait EditorCommand: Send + Sync + 'static {
     fn redo(&mut self, world: &mut World) {
         self.apply(world);
     }
+
+    /// This command's semantic intent, evaluated by the admissibility kernel
+    /// before [`apply`](Self::apply) runs (ADR-064 §3.1).
+    ///
+    /// The default declares nothing, so the kernel stays disarmed and
+    /// geometry-only commands remain geometry-only. Override this in any
+    /// command that assigns, changes, or removes a concept, or that binds a
+    /// concept-bearing entity through a registered predicate.
+    ///
+    /// Because this sits at `PendingCommandQueue` — the one point every
+    /// interactive, command, recipe, import, and MCP mutation converges on —
+    /// a plan declared here is enforced identically on all of them.
+    fn semantic_plan(&self, _world: &World) -> SemanticPlan {
+        SemanticPlan::none()
+    }
 }
 
 struct GroupedCommand {
@@ -44,6 +64,16 @@ struct GroupedCommand {
 impl EditorCommand for GroupedCommand {
     fn label(&self) -> &'static str {
         self.label
+    }
+
+    /// A group is evaluated as one plan, so a refusal anywhere in the group
+    /// refuses the whole group and atomicity is preserved (ADR-064 §3.2).
+    fn semantic_plan(&self, world: &World) -> SemanticPlan {
+        self.commands
+            .iter()
+            .fold(SemanticPlan::none(), |plan, command| {
+                plan.merge(command.semantic_plan(world))
+            })
     }
 
     fn apply(&mut self, world: &mut World) {
@@ -80,6 +110,12 @@ pub struct History {
 }
 
 impl History {
+    /// Undo-stack depth. Used by enforcement tests to assert that a refused
+    /// command never entered history.
+    pub fn undo_stack_len(&self) -> usize {
+        self.undo_stack.len()
+    }
+
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -161,6 +197,13 @@ enum HistoryAction {
     Redo,
 }
 
+/// Test-only entry point into the drain, so enforcement tests exercise the
+/// real gate rather than a reimplementation of it.
+#[cfg(test)]
+pub(crate) fn apply_pending_history_commands_for_test(world: &mut World) {
+    apply_pending_history_commands(world);
+}
+
 pub(crate) fn apply_pending_history_commands(world: &mut World) {
     let (pending_commands, pending_actions) = {
         let mut pending_command_queue = world.resource_mut::<PendingCommandQueue>();
@@ -173,6 +216,23 @@ pub(crate) fn apply_pending_history_commands(world: &mut World) {
     let had_work = !pending_commands.is_empty() || !pending_actions.is_empty();
 
     for mut command in pending_commands {
+        // ADR-064 §3.2: the kernel evaluates before `apply`. On `Refuse`
+        // nothing is applied, nothing enters history, and the world is left
+        // untouched — a refusal must not leave partial state behind.
+        match evaluate_command_admissibility(world, command.as_ref()) {
+            Verdict::Refuse(refusals) => {
+                record_refusals(world, command.label(), refusals);
+                continue;
+            }
+            Verdict::AdmitWithObligation(obligations) => {
+                world
+                    .resource_mut::<SemanticEnforcement>()
+                    .obligations
+                    .extend(obligations);
+            }
+            Verdict::Admit => {}
+        }
+
         command.apply(world);
 
         let mut history = world.resource_mut::<History>();
@@ -194,6 +254,60 @@ pub(crate) fn apply_pending_history_commands(world: &mut World) {
         {
             doc_state.dirty = !at_save;
         }
+    }
+}
+
+/// Evaluate one command's declared plan against the compiled concept graph.
+///
+/// Admits unconditionally when no graph is installed: a build without a domain
+/// pack must keep authoring, not refuse everything.
+fn evaluate_command_admissibility(world: &World, command: &dyn EditorCommand) -> Verdict {
+    let Some(graph) = world.get_resource::<SemanticGraph>() else {
+        return Verdict::Admit;
+    };
+    let plan = command.semantic_plan(world);
+    if plan.is_empty() {
+        return Verdict::Admit;
+    }
+    evaluate(graph, &WorldSemanticContext::new(world), &plan)
+}
+
+/// Record a refusal for the caller and surface it in the status bar.
+///
+/// The kernel never repairs; it refuses and hands back what would satisfy it,
+/// so the full diagnostic is retained on the resource for MCP and UI to read.
+fn record_refusals(world: &mut World, label: &str, refusals: Vec<Refusal>) {
+    let message = refusals
+        .first()
+        .map(|refusal| format!("{label} refused: {}", refusal.summary()))
+        .unwrap_or_else(|| format!("{label} refused."));
+
+    if let Some(mut enforcement) = world.get_resource_mut::<SemanticEnforcement>() {
+        enforcement.refusals.extend(refusals);
+    }
+    set_feedback(world, message);
+}
+
+/// Verdict output from the most recent drain.
+///
+/// Preview reads the same kernel through the same [`evaluate`] call without
+/// pushing a command, so preview and commit cannot diverge (ADR-064 §3.3).
+#[derive(Resource, Debug, Default)]
+pub struct SemanticEnforcement {
+    /// Refusals from the last drain. Cleared by whoever presents them.
+    pub refusals: Vec<Refusal>,
+    /// Obligations admitted during the last drain.
+    pub obligations: Vec<crate::semantics::PendingObligation>,
+}
+
+impl SemanticEnforcement {
+    pub fn clear(&mut self) {
+        self.refusals.clear();
+        self.obligations.clear();
+    }
+
+    pub fn last_refusal(&self) -> Option<&Refusal> {
+        self.refusals.last()
     }
 }
 

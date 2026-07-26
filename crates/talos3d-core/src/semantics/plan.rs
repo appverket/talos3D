@@ -50,7 +50,7 @@ pub enum BindTarget {
 
 /// One unit of semantic intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SemanticIntent {
+pub enum PlanIntent {
     /// Claiming a concept is what arms the kernel (agreement §7).
     AssignConcept {
         entity: ElementId,
@@ -76,7 +76,7 @@ pub enum SemanticIntent {
 /// untouched and geometry-only commands geometry-only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SemanticPlan {
-    pub intents: Vec<SemanticIntent>,
+    pub intents: Vec<PlanIntent>,
 }
 
 impl SemanticPlan {
@@ -89,7 +89,7 @@ impl SemanticPlan {
         self.intents.is_empty()
     }
 
-    pub fn with(mut self, intent: SemanticIntent) -> Self {
+    pub fn with(mut self, intent: PlanIntent) -> Self {
         self.intents.push(intent);
         self
     }
@@ -102,8 +102,8 @@ impl SemanticPlan {
     }
 }
 
-impl FromIterator<SemanticIntent> for SemanticPlan {
-    fn from_iter<T: IntoIterator<Item = SemanticIntent>>(iter: T) -> Self {
+impl FromIterator<PlanIntent> for SemanticPlan {
+    fn from_iter<T: IntoIterator<Item = PlanIntent>>(iter: T) -> Self {
         Self {
             intents: iter.into_iter().collect(),
         }
@@ -151,11 +151,11 @@ mod tests {
 
     #[test]
     fn plans_merge_for_grouped_commands() {
-        let a = SemanticPlan::none().with(SemanticIntent::AssignConcept {
+        let a = SemanticPlan::none().with(PlanIntent::AssignConcept {
             entity: ElementId(1),
             concept: ConceptId::new("c"),
         });
-        let b = SemanticPlan::none().with(SemanticIntent::RemoveConcept {
+        let b = SemanticPlan::none().with(PlanIntent::RemoveConcept {
             entity: ElementId(2),
             concept: ConceptId::new("c"),
         });
