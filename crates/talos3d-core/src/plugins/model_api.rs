@@ -1007,6 +1007,10 @@ struct LiveCameraSnapshot {
     pitch: f32,
     projection_mode: CameraProjectionMode,
     focal_length_mm: f32,
+    view_position: Option<bevy::math::Vec3>,
+    view_forward: Option<bevy::math::Vec3>,
+    view_up: Option<bevy::math::Vec3>,
+    view_right: Option<bevy::math::Vec3>,
 }
 
 #[cfg(feature = "model-api")]
@@ -1019,13 +1023,19 @@ fn camera_state_info_from_live(snapshot: &LiveCameraSnapshot) -> CameraStateInfo
         pitch: snapshot.pitch,
         projection: camera_projection_name(snapshot.projection_mode),
         focal_length_mm: snapshot.focal_length_mm,
+        view_position: snapshot.view_position.map(Into::into),
+        view_forward: snapshot.view_forward.map(Into::into),
+        view_up: snapshot.view_up.map(Into::into),
+        view_right: snapshot.view_right.map(Into::into),
     }
 }
 
 #[cfg(feature = "model-api")]
 fn live_camera_snapshot(world: &World) -> LiveCameraSnapshot {
-    let mut q = world.try_query::<&OrbitCamera>().unwrap();
-    if let Some(orbit) = q.iter(world).next() {
+    let mut q = world
+        .try_query::<(&OrbitCamera, Option<&Transform>)>()
+        .unwrap();
+    if let Some((orbit, transform)) = q.iter(world).next() {
         LiveCameraSnapshot {
             focus: orbit.focus,
             radius: orbit.radius,
@@ -1034,6 +1044,10 @@ fn live_camera_snapshot(world: &World) -> LiveCameraSnapshot {
             pitch: orbit.pitch,
             projection_mode: orbit.projection_mode,
             focal_length_mm: orbit.focal_length_mm,
+            view_position: transform.map(|value| value.translation),
+            view_forward: transform.map(|value| *value.forward()),
+            view_up: transform.map(|value| *value.up()),
+            view_right: transform.map(|value| *value.right()),
         }
     } else {
         let default = OrbitCamera::default();
@@ -1045,6 +1059,10 @@ fn live_camera_snapshot(world: &World) -> LiveCameraSnapshot {
             pitch: default.pitch,
             projection_mode: default.projection_mode,
             focal_length_mm: default.focal_length_mm,
+            view_position: None,
+            view_forward: None,
+            view_up: None,
+            view_right: None,
         }
     }
 }
@@ -3201,12 +3219,15 @@ fn handle_get_camera(world: &World) -> CameraStateInfo {
 #[cfg(feature = "model-api")]
 fn handle_set_camera(world: &mut World, params: CameraParams) -> Result<CameraStateInfo, String> {
     let orbit = orbit_from_camera_params(world, Some(&params))?;
-    let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
-    let Some((mut live_orbit, mut transform, mut projection)) = q.iter_mut(world).next() else {
-        return Err("No orbit camera is available".to_string());
-    };
-    *live_orbit = orbit;
-    apply_orbit_state(&live_orbit, &mut transform, &mut projection);
+    {
+        let mut q = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
+        let Some((mut live_orbit, mut transform, mut projection)) = q.iter_mut(world).next() else {
+            return Err("No orbit camera is available".to_string());
+        };
+        *live_orbit = orbit;
+        apply_orbit_state(&live_orbit, &mut transform, &mut projection);
+    }
+    crate::plugins::drafting::workspace::apply_active_draft_camera(world);
     Ok(camera_state_info_from_live(&live_camera_snapshot(world)))
 }
 

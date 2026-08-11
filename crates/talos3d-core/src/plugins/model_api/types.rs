@@ -385,6 +385,17 @@ pub struct CameraStateInfo {
     /// `"perspective"` or `"orthographic"`.
     pub projection: String,
     pub focal_length_mm: f32,
+    /// Actual live camera transform after presentation constraints such as an
+    /// active Draft plane have been applied. Orbit yaw/pitch remain available
+    /// as navigation-controller state but cannot represent arbitrary roll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_position: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_forward: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_up: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_right: Option<[f32; 3]>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]

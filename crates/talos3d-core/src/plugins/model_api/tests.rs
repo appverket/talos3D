@@ -1046,10 +1046,16 @@ fn agent_workflow_create_box_dimension_camera_and_screenshot_is_supported() {
     assert_eq!(camera.focus, [0.0, 1.0, 0.0]);
     assert_eq!(camera.projection, "orthographic");
     assert_eq!(camera.orthographic_scale, 3.0);
+    assert!(camera.view_position.is_some());
+    assert!(camera.view_forward.is_some());
+    assert!(camera.view_up.is_some());
+    assert!(camera.view_right.is_some());
 
     let camera_snapshot = handle_get_camera(&world);
     assert_eq!(camera_snapshot.yaw, 0.75);
     assert_eq!(camera_snapshot.pitch, -0.4);
+    assert_eq!(camera_snapshot.view_position, camera.view_position);
+    assert_eq!(camera_snapshot.view_forward, camera.view_forward);
 
     let screenshot_path = std::env::temp_dir().join(format!(
         "talos3d-model-api-workflow-{}.png",

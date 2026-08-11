@@ -69,6 +69,13 @@ while `DrawingScene` projections and export bytes remain derived. The Draft's
 plane reuses the same `DrawingPlane` consumed by interactive tools, so agent and
 UI creation share one coordinate-frame contract.
 
+`get_camera` reports both the orbit controller's navigation values and the
+actual live `view_position`, `view_forward`, `view_up`, and `view_right` axes.
+The latter are authoritative while a Draft plane constrains orientation,
+because yaw/pitch alone cannot express arbitrary Draft roll. `set_camera` may
+still change focus and zoom during Drafting, but the active Draft constraint is
+reapplied before the command response is returned.
+
 Built-in definition libraries are also loaded at startup and show up through
 the same definition-library inspection tools as project-local libraries. Their
 reported scope is `Bundled`, which distinguishes shipped catalogs from
