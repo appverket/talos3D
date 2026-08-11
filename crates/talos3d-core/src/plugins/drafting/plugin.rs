@@ -1,6 +1,7 @@
 //! [`DraftingPlugin`] — Bevy plugin that registers the drafting capability,
-//! the `DimensionAnnotationFactory` authored-entity factory, the two toggle
-//! commands, and the persistence sync system.
+//! the `DimensionAnnotationFactory` authored-entity factory, the one Drafting
+//! workspace transition/inspection commands, style commands, and the
+//! persistence sync system.
 //!
 //! Follows the pattern established by `dimension_line.rs` but for the new
 //! dimension type. Runs alongside the legacy plugin; legacy dims are
@@ -54,6 +55,7 @@ impl Plugin for DraftingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DimensionStyleRegistry>()
             .init_resource::<DraftingVisibility>()
+            .init_resource::<super::workspace::DraftingWorkspaceState>()
             .init_resource::<DraftingAnnotationSyncState>()
             .register_authored_entity_factory(DimensionAnnotationFactory)
             // The "drafting" capability descriptor is owned by
@@ -62,21 +64,50 @@ impl Plugin for DraftingPlugin {
             // panic at startup.
             .register_command(
                 CommandDescriptor {
-                    id: "drafting.toggle_visibility".to_string(),
+                    id: "drafting.toggle".to_string(),
                     label: "Drafting".to_string(),
-                    description: "Show or hide all drafting dimensions".to_string(),
+                    description: "Enter or exit the unified Drafting workspace".to_string(),
                     category: CommandCategory::View,
-                    parameters: None,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "enabled": {
+                                "type": "boolean",
+                                "description": "Set Drafting active or inactive. Omit to toggle."
+                            }
+                        },
+                        "additionalProperties": false
+                    })),
                     default_shortcut: None,
                     icon: Some("icon.dimensions".to_string()),
-                    hint: Some("Toggle visibility of drafting dimensions".to_string()),
+                    hint: Some(
+                        "Toggle the orthographic black-on-white Drafting workspace".to_string(),
+                    ),
                     requires_selection: false,
                     show_in_menu: true,
                     version: 1,
                     activates_tool: None,
                     capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
                 },
-                execute_toggle_drafting_visibility,
+                super::workspace::execute_toggle_drafting_workspace,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "drafting.inspect".to_string(),
+                    label: "Inspect Drafting".to_string(),
+                    description: "Inspect the authoritative Drafting workspace state".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: None,
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                super::workspace::execute_inspect_drafting_workspace,
             )
             .register_command(
                 CommandDescriptor {
@@ -164,17 +195,12 @@ impl Plugin for DraftingPlugin {
                     sync_drafting_annotations,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                super::workspace::enforce_drafting_workspace_invariants,
             );
     }
-}
-
-fn execute_toggle_drafting_visibility(
-    world: &mut World,
-    _params: &Value,
-) -> Result<CommandResult, String> {
-    let mut v = world.resource_mut::<DraftingVisibility>();
-    v.toggle_all();
-    Ok(CommandResult::empty())
 }
 
 fn execute_set_preset(world: &mut World, preset: &str) -> Result<CommandResult, String> {

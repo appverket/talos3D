@@ -32,7 +32,6 @@ use talos3d_core::plugins::{
     document_properties::DocumentProperties,
     document_state::DocumentStatePlugin,
     drafting::DraftingPlugin,
-    drafting_sheet::DraftingSheetPreviewPlugin,
     drawing_export::DrawingExportPlugin,
     egui_chrome::EguiChromePlugin,
     face_edit::FaceEditPlugin,
@@ -66,14 +65,6 @@ use talos3d_core::plugins::{
 #[cfg(feature = "terrain")]
 use talos3d_terrain::TerrainPlugin;
 
-#[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum AppMode {
-    #[default]
-    Idle,
-    Drafting,
-    Viewing,
-}
-
 fn main() {
     #[cfg(feature = "model-api")]
     configure_model_api_launch_from_args();
@@ -105,7 +96,6 @@ fn main() {
             }),
     )
     .insert_resource(Storage(Box::new(LocalFileBackend)))
-    .init_state::<AppMode>()
     .add_plugins(AssistantChatPlugin)
     .add_plugins(AuthoringGuidancePlugin)
     .add_plugins(CameraPlugin)
@@ -126,7 +116,6 @@ fn main() {
     .add_plugins(GuideLinePlugin)
     .add_plugins(DimensionLinePlugin)
     .add_plugins(DraftingPlugin)
-    .add_plugins(DraftingSheetPreviewPlugin)
     .add_plugins(LightingPlugin)
     .add_plugins(ModelingPlugin)
     .add_plugins(BundledDefinitionLibrariesPlugin)

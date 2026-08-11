@@ -39,6 +39,7 @@ pub mod plugin;
 pub mod render;
 pub mod style;
 pub mod visibility;
+pub mod workspace;
 
 pub use annotation::{
     render_annotation, DimensionAnnotationFactory, DimensionAnnotationNode,
@@ -54,6 +55,7 @@ pub use plugin::{
 pub use render::{render_dimension, DimPrimitive, DimensionInput, TextAnchor};
 pub use style::{DimensionStyle, DimensionStyleRegistry, Terminator, TextPlacement};
 pub use visibility::DraftingVisibility;
+pub use workspace::DraftingWorkspaceState;
 
 #[cfg(test)]
 mod reference_test;

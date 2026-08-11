@@ -21,13 +21,8 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-use serde_json::Value;
 
-use crate::plugins::{
-    command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
-    drafting::DraftingVisibility,
-    drawing_export::DRAFTING_CAPABILITY_ID,
-};
+use crate::plugins::drafting::DraftingVisibility;
 
 use super::{
     capture::{capture_sheet, sheet_view_from_active_camera},
@@ -60,41 +55,14 @@ pub struct DraftingSheetPreviewPlugin;
 impl Plugin for DraftingSheetPreviewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SheetPreviewState>()
-            .register_command(
-                CommandDescriptor {
-                    id: "drafting.toggle_sheet_preview".to_string(),
-                    label: "Sheet preview".to_string(),
-                    description: "Toggle a live 2D preview of the current \
-                                  drafting sheet derived from the active \
-                                  orthographic view."
-                        .to_string(),
-                    category: CommandCategory::View,
-                    parameters: None,
-                    default_shortcut: None,
-                    icon: Some("icon.dimensions".to_string()),
-                    hint: Some(
-                        "Show a floating window with the captured drafting sheet".to_string(),
-                    ),
-                    requires_selection: false,
-                    show_in_menu: true,
-                    version: 1,
-                    activates_tool: None,
-                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
-                },
-                execute_toggle_sheet_preview,
-            )
+            // Compatibility only: legacy app compositions may still add this
+            // plugin, but it no longer registers a command or owns a visible
+            // modality. The unified Drafting workspace uses the main viewport.
             .add_systems(
                 Update,
                 (refresh_preview_sheet, show_preview_egui_window).chain(),
             );
     }
-}
-
-fn execute_toggle_sheet_preview(world: &mut World, _args: &Value) -> Result<CommandResult, String> {
-    if let Some(mut state) = world.get_resource_mut::<SheetPreviewState>() {
-        state.enabled = !state.enabled;
-    }
-    Ok(CommandResult::empty())
 }
 
 /// Latest rasterised sheet, plus the egui texture it's uploaded to.

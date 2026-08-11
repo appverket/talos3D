@@ -24,7 +24,7 @@ use crate::capability_registry::{
 use crate::plugins::document_state::DocumentState;
 use crate::plugins::{
     command_registry::{CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult},
-    render_pipeline::{paper_drawing_active, RenderSettings},
+    drafting::DraftingWorkspaceState,
     ui::StatusBarData,
 };
 
@@ -180,14 +180,14 @@ pub(crate) enum ViewportExportFormat {
     Dxf,
 }
 
-pub(crate) fn pdf_export_available_for_settings(settings: &RenderSettings) -> bool {
-    paper_drawing_active(settings)
+pub(crate) fn pdf_export_available_for_drafting(state: &DraftingWorkspaceState) -> bool {
+    state.is_active()
 }
 
 pub(crate) fn pdf_export_available(world: &World) -> bool {
     world
-        .get_resource::<RenderSettings>()
-        .map(pdf_export_available_for_settings)
+        .get_resource::<DraftingWorkspaceState>()
+        .map(pdf_export_available_for_drafting)
         .unwrap_or(false)
 }
 
@@ -196,7 +196,7 @@ fn require_pdf_export_available(world: &World) -> Result<(), String> {
         Ok(())
     } else {
         Err(
-            "PDF blueprint export is only available in Paper Drawing mode. Enable View > Paper Drawing, then export again."
+            "PDF drawing export is only available in Drafting. Enable View > Drafting, then export again."
                 .to_string(),
         )
     }
@@ -1141,24 +1141,32 @@ mod tests {
     }
 
     #[test]
-    fn pdf_export_requires_paper_drawing_mode() {
-        let mut settings = RenderSettings::default();
-        assert!(!pdf_export_available_for_settings(&settings));
+    fn pdf_export_requires_drafting_workspace() {
+        let mut app = App::new();
+        app.init_resource::<DraftingWorkspaceState>()
+            .init_resource::<crate::plugins::drafting::DraftingVisibility>()
+            .insert_resource(crate::plugins::camera::CameraControlsState::default())
+            .insert_resource(crate::plugins::render_pipeline::RenderSettings::default());
+        assert!(!pdf_export_available(app.world()));
 
-        crate::plugins::render_pipeline::apply_paper_drawing_preset(&mut settings);
-        assert!(pdf_export_available_for_settings(&settings));
+        crate::plugins::drafting::workspace::execute_toggle_drafting_workspace(
+            app.world_mut(),
+            &serde_json::json!({ "enabled": true }),
+        )
+        .expect("enter Drafting");
+        assert!(pdf_export_available(app.world()));
     }
 
     #[test]
-    fn direct_pdf_path_export_rejects_non_paper_mode() {
+    fn direct_pdf_path_export_rejects_non_drafting_mode() {
         let mut app = App::new();
-        app.insert_resource(RenderSettings::default())
+        app.init_resource::<DraftingWorkspaceState>()
             .init_resource::<ViewportExportState>();
 
         let err = export_drawing_to_path(app.world_mut(), PathBuf::from("/tmp/drawing.pdf"))
-            .expect_err("pdf export should require paper drawing mode");
+            .expect_err("pdf export should require Drafting");
 
-        assert!(err.contains("Paper Drawing mode"));
+        assert!(err.contains("available in Drafting"));
         assert!(app
             .world()
             .resource::<ViewportExportState>()

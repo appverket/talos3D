@@ -43,6 +43,7 @@ use crate::plugins::{
         DefinitionPreviewScene, DefinitionPreviewTarget, PendingPreviewClick,
     },
     document_properties::DocumentProperties,
+    drafting::DraftingWorkspaceState,
     drawing_export::ViewportExportState,
     identity::{ElementId, ElementIdAllocator},
     import::{
@@ -67,10 +68,7 @@ use crate::plugins::{
         parse_property_value, property_panel_selection_signature, shared_property_value,
         PropertyEditState, PropertyPanelData, PropertyPanelState, SelectionSemanticKind,
     },
-    render_pipeline::{
-        paper_drawing_active, paper_drawing_toggle_active, toggle_paper_drawing_mode,
-        EdgeDisplayMode, PaperDrawingState, RenderSettings, RenderTonemapping,
-    },
+    render_pipeline::{EdgeDisplayMode, RenderSettings, RenderTonemapping},
     selection::Selected,
     toolbar::{
         apply_toolbar_float, redock_toolbar, serialize_floating_states, set_toolbar_visibility,
@@ -247,16 +245,12 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
     MenuSubmenuSpec {
         label: "Sections",
-        command_ids: &[
-            "modeling.clip_plane_create",
-            "drafting.toggle_sheet_preview",
-        ],
+        command_ids: &["modeling.clip_plane_create"],
     },
     MenuSubmenuSpec {
         label: "Drafting",
         command_ids: &[
-            "view.apply_paper_preset",
-            "drafting.toggle_visibility",
+            "drafting.toggle",
             "drafting.set_preset_arch_imperial",
             "drafting.set_preset_arch_metric",
             "drafting.set_preset_eng_mm",
@@ -667,10 +661,13 @@ fn command_capability_enabled(
 
 fn command_context_available(
     descriptor: &CommandDescriptor,
-    render_settings: &RenderSettings,
+    drafting_state: &DraftingWorkspaceState,
 ) -> bool {
     if descriptor.id == "core.export_drawing_pdf" {
-        return crate::plugins::drawing_export::pdf_export_available_for_settings(render_settings);
+        return crate::plugins::drawing_export::pdf_export_available_for_drafting(drafting_state);
+    }
+    if drafting_state.is_active() && descriptor.id == "view.projection_perspective" {
+        return false;
     }
     true
 }
@@ -725,7 +722,7 @@ fn visible_menu_commands_for_category<'a>(
     registry: &'a CommandRegistry,
     category: &crate::plugins::command_registry::CommandCategory,
     activation: &CapabilityActivation,
-    render_settings: &RenderSettings,
+    drafting_state: &DraftingWorkspaceState,
 ) -> Vec<&'a CommandDescriptor> {
     registry
         .commands()
@@ -733,7 +730,7 @@ fn visible_menu_commands_for_category<'a>(
             descriptor.show_in_menu
                 && descriptor.category == *category
                 && command_capability_enabled(descriptor, activation)
-                && command_context_available(descriptor, render_settings)
+                && command_context_available(descriptor, drafting_state)
         })
         .collect()
 }
@@ -1345,7 +1342,7 @@ struct ChromeData<'w, 's> {
     source_registry: ResMut<'w, SourceRegistry>,
     nomination_queue: ResMut<'w, NominationQueue>,
     render_settings: ResMut<'w, RenderSettings>,
-    paper_drawing_state: ResMut<'w, PaperDrawingState>,
+    drafting_workspace_state: Res<'w, DraftingWorkspaceState>,
     render_settings_window_state: ResMut<'w, RenderSettingsWindowState>,
     project_settings_window_state: ResMut<'w, ProjectSettingsWindowState>,
     element_id_allocator: Res<'w, ElementIdAllocator>,
@@ -1459,7 +1456,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                         &data.command_registry,
                         &category,
                         &data.capability_activation,
-                        &data.render_settings,
+                        &data.drafting_workspace_state,
                     );
                     ui.menu_button(category.label(), |ui| {
                         draw_category_menu_contents(
@@ -1717,7 +1714,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
         &ctx,
         &mut data.render_settings_window_state,
         &mut data.render_settings,
-        &mut data.paper_drawing_state,
+        &data.drafting_workspace_state,
     );
     draw_project_settings_window(
         &ctx,
@@ -3954,7 +3951,7 @@ fn draw_render_settings_window(
     ctx: &egui::Context,
     state: &mut RenderSettingsWindowState,
     settings: &mut RenderSettings,
-    paper_state: &mut PaperDrawingState,
+    drafting_state: &DraftingWorkspaceState,
 ) {
     if !state.visible {
         return;
@@ -4101,49 +4098,50 @@ fn draw_render_settings_window(
             });
 
             ui.collapsing("Drawing Views", |ui| {
-                if ui.button("Toggle Paper Drawing").clicked() {
-                    toggle_paper_drawing_mode(settings, paper_state);
-                }
-                let paper_mode_status = if paper_drawing_toggle_active(paper_state) {
-                    "Paper drawing toggle is active."
-                } else if paper_drawing_active(settings) {
-                    "Paper-style settings are active."
+                let drafting_status = if drafting_state.is_active() {
+                    "Drafting workspace is active (orthographic, black on white)."
                 } else {
-                    "Paper drawing is inactive."
+                    "Drafting workspace is inactive. Use View > Drafting to enter."
                 };
-                ui.label(egui::RichText::new(paper_mode_status).small().color(CHROME_MUTED));
-                ui.checkbox(&mut settings.grid_enabled, "Show Grid");
-                if ui
-                    .checkbox(&mut settings.xray_enabled, "X-Ray")
-                    .changed()
-                    && settings.xray_enabled
-                {
-                    settings.paper_fill_enabled = false;
-                }
-                ui.add_enabled_ui(settings.xray_enabled, |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut settings.xray_surface_alpha, 0.05..=0.9)
-                            .text("Face Alpha"),
-                    );
-                });
-                if ui
-                    .checkbox(&mut settings.paper_fill_enabled, "White Paper Fill")
-                    .changed()
-                    && settings.paper_fill_enabled
-                {
-                    settings.xray_enabled = false;
-                }
-                ui.label("Edge Display");
-                let mut edge_mode = settings.edge_display_mode();
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut edge_mode, EdgeDisplayMode::Shaded, "Shaded");
-                    ui.radio_value(&mut edge_mode, EdgeDisplayMode::Outline, "Outline");
-                    ui.radio_value(&mut edge_mode, EdgeDisplayMode::Wireframe, "Wireframe");
-                });
-                settings.set_edge_display_mode(edge_mode);
-                ui.horizontal(|ui| {
-                    ui.label("Background");
-                    ui.color_edit_button_rgb(&mut settings.background_rgb);
+                ui.label(
+                    egui::RichText::new(drafting_status)
+                        .small()
+                        .color(CHROME_MUTED),
+                );
+                ui.add_enabled_ui(!drafting_state.is_active(), |ui| {
+                    ui.checkbox(&mut settings.grid_enabled, "Show Grid");
+                    if ui
+                        .checkbox(&mut settings.xray_enabled, "X-Ray")
+                        .changed()
+                        && settings.xray_enabled
+                    {
+                        settings.paper_fill_enabled = false;
+                    }
+                    ui.add_enabled_ui(settings.xray_enabled, |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut settings.xray_surface_alpha, 0.05..=0.9)
+                                .text("Face Alpha"),
+                        );
+                    });
+                    if ui
+                        .checkbox(&mut settings.paper_fill_enabled, "White Paper Fill")
+                        .changed()
+                        && settings.paper_fill_enabled
+                    {
+                        settings.xray_enabled = false;
+                    }
+                    ui.label("Edge Display");
+                    let mut edge_mode = settings.edge_display_mode();
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut edge_mode, EdgeDisplayMode::Shaded, "Shaded");
+                        ui.radio_value(&mut edge_mode, EdgeDisplayMode::Outline, "Outline");
+                        ui.radio_value(&mut edge_mode, EdgeDisplayMode::Wireframe, "Wireframe");
+                    });
+                    settings.set_edge_display_mode(edge_mode);
+                    ui.horizontal(|ui| {
+                        ui.label("Background");
+                        ui.color_edit_button_rgb(&mut settings.background_rgb);
+                    });
                 });
                 ui.label(
                     egui::RichText::new(

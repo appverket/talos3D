@@ -295,11 +295,6 @@ struct OutlineMeshOverlayMaterial {
 }
 
 #[derive(Resource, Debug, Clone, Default)]
-pub(crate) struct PaperDrawingState {
-    baseline: Option<RenderSettings>,
-}
-
-#[derive(Resource, Debug, Clone, Default)]
 struct RenderPipelineSetupState {
     configured: bool,
     warned_missing_camera: bool,
@@ -314,7 +309,6 @@ impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RenderSettings>()
             .init_resource::<RenderPipelineSetupState>()
-            .init_resource::<PaperDrawingState>()
             .init_resource::<SurfaceMaterialOverrideCache>()
             .init_resource::<OutlineMeshOverlayMaterial>()
             .register_toolbar(ToolbarDescriptor {
@@ -325,7 +319,7 @@ impl Plugin for RenderPipelinePlugin {
                 sections: vec![ToolbarSection {
                     label: "Drawing".to_string(),
                     command_ids: vec![
-                        "view.apply_paper_preset".to_string(),
+                        "drafting.toggle".to_string(),
                         "view.toggle_grid".to_string(),
                         "view.toggle_xray".to_string(),
                         "view.toggle_outline".to_string(),
@@ -333,27 +327,6 @@ impl Plugin for RenderPipelinePlugin {
                     ],
                 }],
             })
-            .register_command(
-                CommandDescriptor {
-                    id: "view.apply_paper_preset".to_string(),
-                    label: "Paper Drawing".to_string(),
-                    description: "Toggle the paper drawing presentation mode.".to_string(),
-                    category: CommandCategory::View,
-                    parameters: None,
-                    default_shortcut: None,
-                    icon: Some("icon.view_paper".to_string()),
-                    hint: Some(
-                        "Toggle white paper drawing mode with reversible renderer state"
-                            .to_string(),
-                    ),
-                    requires_selection: false,
-                    show_in_menu: true,
-                    version: 1,
-                    activates_tool: None,
-                    capability_id: None,
-                },
-                execute_apply_paper_preset,
-            )
             .register_command(
                 CommandDescriptor {
                     id: "view.toggle_grid".to_string(),
@@ -464,26 +437,6 @@ impl Plugin for RenderPipelinePlugin {
     }
 }
 
-fn execute_apply_paper_preset(world: &mut World, _: &Value) -> Result<CommandResult, String> {
-    if !world.contains_resource::<RenderSettings>() {
-        return Err("Render settings are unavailable".to_string());
-    }
-    if !world.contains_resource::<PaperDrawingState>() {
-        return Err("Paper drawing state is unavailable".to_string());
-    }
-    let message = world.resource_scope(|world, mut settings: Mut<RenderSettings>| {
-        let mut paper_state = world.resource_mut::<PaperDrawingState>();
-        if toggle_paper_drawing_mode(&mut settings, &mut paper_state) {
-            "Paper drawing enabled".to_string()
-        } else {
-            "Paper drawing disabled".to_string()
-        }
-    });
-
-    set_render_feedback(world, &message);
-    Ok(CommandResult::empty())
-}
-
 fn execute_toggle_grid(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     update_render_settings(world, "", |settings| {
         settings.grid_enabled = !settings.grid_enabled;
@@ -577,7 +530,7 @@ fn live_depth_tested_outline_active(settings: &RenderSettings) -> bool {
     settings.visible_edge_overlay_enabled && !settings.paper_fill_enabled
 }
 
-pub(crate) fn apply_paper_drawing_preset(settings: &mut RenderSettings) {
+pub(crate) fn apply_drafting_render_preset(settings: &mut RenderSettings) {
     settings.tonemapping = RenderTonemapping::None;
     settings.ssao_enabled = false;
     settings.bloom_enabled = false;
@@ -589,28 +542,6 @@ pub(crate) fn apply_paper_drawing_preset(settings: &mut RenderSettings) {
     settings.visible_edge_overlay_enabled = false;
     settings.contour_overlay_enabled = false;
     settings.wireframe_overlay_enabled = false;
-}
-
-pub(crate) fn paper_drawing_active(settings: &RenderSettings) -> bool {
-    settings.paper_fill_enabled
-}
-
-pub(crate) fn paper_drawing_toggle_active(paper_state: &PaperDrawingState) -> bool {
-    paper_state.baseline.is_some()
-}
-
-pub(crate) fn toggle_paper_drawing_mode(
-    settings: &mut RenderSettings,
-    paper_state: &mut PaperDrawingState,
-) -> bool {
-    if paper_drawing_toggle_active(paper_state) {
-        *settings = paper_state.baseline.take().unwrap_or_default();
-        return false;
-    }
-
-    paper_state.baseline = Some(settings.clone());
-    apply_paper_drawing_preset(settings);
-    true
 }
 
 // ─── Camera render setup ─────────────────────────────────────────────────────
@@ -1768,16 +1699,10 @@ mod tests {
     }
 
     #[test]
-    fn paper_preset_enables_white_background_without_live_hidden_line() {
-        let mut app = App::new();
-        app.insert_resource(RenderSettings::default())
-            .insert_resource(PaperDrawingState::default())
-            .insert_resource(StatusBarData::default());
+    fn drafting_preset_enables_white_background_without_live_hidden_line() {
+        let mut settings = RenderSettings::default();
+        apply_drafting_render_preset(&mut settings);
 
-        execute_apply_paper_preset(app.world_mut(), &Value::Null)
-            .expect("paper preset should apply");
-
-        let settings = app.world().resource::<RenderSettings>();
         assert_eq!(settings.background_rgb, PAPER_BACKGROUND_RGB);
         assert_eq!(settings.tonemapping, RenderTonemapping::None);
         assert!(!settings.ssao_enabled);
@@ -2228,40 +2153,21 @@ mod tests {
     }
 
     #[test]
-    fn paper_preset_command_restores_previous_render_state() {
-        let previous = RenderSettings {
-            grid_enabled: false,
-            wireframe_overlay_enabled: true,
-            background_rgb: [0.2, 0.3, 0.4],
-            ..RenderSettings::default()
-        };
-        let mut app = App::new();
-        app.insert_resource(previous.clone())
-            .insert_resource(PaperDrawingState::default())
-            .insert_resource(StatusBarData::default());
-
-        execute_apply_paper_preset(app.world_mut(), &Value::Null)
-            .expect("paper preset should enable");
-        execute_apply_paper_preset(app.world_mut(), &Value::Null)
-            .expect("paper preset should disable");
-
-        let restored = app.world().resource::<RenderSettings>();
-        assert_eq!(*restored, previous);
-    }
-
-    #[test]
-    fn paper_toggle_uses_baseline_state_instead_of_paper_fill_flag() {
+    fn drafting_preset_enforces_black_on_white_linework() {
         let mut settings = RenderSettings {
-            paper_fill_enabled: true,
-            visible_edge_overlay_enabled: false,
+            background_rgb: [0.2, 0.3, 0.4],
+            grid_enabled: true,
+            bloom_enabled: true,
+            ssao_enabled: true,
             ..RenderSettings::default()
         };
-        let mut paper_state = PaperDrawingState::default();
+        apply_drafting_render_preset(&mut settings);
 
-        let enabled = toggle_paper_drawing_mode(&mut settings, &mut paper_state);
-
-        assert!(enabled);
-        assert!(paper_drawing_toggle_active(&paper_state));
+        assert_eq!(settings.background_rgb, PAPER_BACKGROUND_RGB);
+        assert!(settings.paper_fill_enabled);
+        assert!(!settings.grid_enabled);
+        assert!(!settings.bloom_enabled);
+        assert!(!settings.ssao_enabled);
         assert!(!settings.visible_edge_overlay_enabled);
     }
 
