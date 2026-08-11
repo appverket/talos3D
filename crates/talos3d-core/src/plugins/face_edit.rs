@@ -16,6 +16,9 @@ use crate::{
             cursor_viewport_position as mapped_cursor_viewport_position, CursorWorldPos,
             DrawingPlane,
         },
+        drafting::{
+            authoring::drafting_plane, draft::DraftNode, workspace::DraftingWorkspaceState,
+        },
         egui_chrome::{ChromeInputCapture, EguiWantsInput},
         identity::{ElementId, ElementIdAllocator},
         input_ownership::{InputOwnership, InputPhase},
@@ -1042,12 +1045,21 @@ fn handle_push_pull_shortcut(world: &mut World) {
 }
 
 /// Sync the DrawingPlane resource to the selected face.
-/// When a face is selected, tools project onto it. When deselected, revert to ground.
+///
+/// When a face is selected, tools project onto it. When deselected, revert to
+/// the plane the client is otherwise drawing on: the active Draft's plane
+/// inside Drafting, and the ground plane outside it. Reverting unconditionally
+/// to ground would silently overwrite the Draft plane one frame after the
+/// Drafting controller installed it, leaving the cursor and every tool
+/// projecting against the ground while an elevation or section Draft is active.
+///
 /// During push/pull, the frozen drag plane takes priority — don't overwrite it.
-fn sync_drawing_plane_to_face(
+pub(crate) fn sync_drawing_plane_to_face(
     face_context: Res<FaceEditContext>,
     push_pull: Res<PushPullContext>,
     mut drawing_plane: ResMut<DrawingPlane>,
+    drafting_workspace: Option<Res<DraftingWorkspaceState>>,
+    drafts: Query<(&ElementId, &DraftNode)>,
 ) {
     // During push/pull, the drag plane is frozen — don't interfere.
     if let Some(pp) = &push_pull.active_face {
@@ -1067,8 +1079,17 @@ fn sync_drawing_plane_to_face(
         {
             *drawing_plane = new_plane;
         }
-    } else if !drawing_plane.is_ground() {
-        *drawing_plane = DrawingPlane::ground();
+    } else {
+        let resting = drafting_plane(drafting_workspace.as_deref(), |draft_id| {
+            drafts
+                .iter()
+                .find(|(id, _)| **id == draft_id)
+                .map(|(_, draft)| draft.plane.clone())
+        })
+        .unwrap_or_else(DrawingPlane::ground);
+        if *drawing_plane != resting {
+            *drawing_plane = resting;
+        }
     }
 }
 

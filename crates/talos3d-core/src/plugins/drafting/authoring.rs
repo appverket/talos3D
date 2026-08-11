@@ -31,21 +31,31 @@ use super::{
     workspace::DraftingWorkspaceState,
 };
 
-/// The plane authored coordinates are currently expressed in, or `None` when
-/// Drafting is not active.
+/// The plane authored coordinates are expressed in, given already-borrowed
+/// state. `None` when the workspace is inactive or no Draft is selected.
 ///
-/// This is deliberately the shared [`DrawingPlane`] resource rather than a
-/// second read of the durable Draft. The workspace controller already copies
-/// the selected Draft plane into `DrawingPlane` on every selection or Draft
-/// change, and face-edit tools are allowed to retarget it between those
-/// transitions. Reading it here means 3D creation, 2D annotation authoring,
-/// and the cursor all resolve against exactly one plane authority.
+/// The durable Draft is the authority, not the shared [`DrawingPlane`]
+/// resource. `DrawingPlane` is a derived, per-frame runtime value that
+/// face-edit owns and resets to ground whenever no face is selected, so a
+/// plane read from it is only valid until the next frame. Draft authoring
+/// reads the Draft itself, exactly as plane-coordinate Draft annotations do.
+pub fn drafting_plane(
+    workspace: Option<&DraftingWorkspaceState>,
+    mut plane_of: impl FnMut(ElementId) -> Option<DrawingPlane>,
+) -> Option<DrawingPlane> {
+    let workspace = workspace.filter(|state| state.is_active())?;
+    plane_of(workspace.active_draft_id()?)
+}
+
+/// The plane authored coordinates are currently expressed in, or `None` when
+/// Drafting is not active. See [`drafting_plane`].
 #[must_use]
 pub fn active_drafting_plane(world: &World) -> Option<DrawingPlane> {
-    world
-        .get_resource::<DraftingWorkspaceState>()
-        .filter(|state| state.is_active())?;
-    world.get_resource::<DrawingPlane>().cloned()
+    drafting_plane(world.get_resource::<DraftingWorkspaceState>(), |draft_id| {
+        find_entity_by_element_id_readonly(world, draft_id)
+            .and_then(|entity| world.get::<DraftNode>(entity))
+            .map(|node| node.plane.clone())
+    })
 }
 
 /// The rigid local→world frame implied by a drawing plane.
@@ -488,6 +498,81 @@ mod tests {
         assert!(in_plane.abs_diff_eq(surface.tangent * 2.0 - surface.bitangent * 3.0, 1e-5));
         // Local +Y is the one direction a drag cannot reach: out of the sheet.
         assert!(free(json!([0.0, 1.0, 0.0])).abs_diff_eq(-surface.normal, 1e-5));
+    }
+
+    /// A live MCP session caught this: `sync_drawing_plane_to_face` reverted the
+    /// shared DrawingPlane to ground on every frame with no face selected, one
+    /// frame after the Drafting controller installed the Draft plane. Authoring
+    /// therefore drifted back to the world ground plane while an elevation Draft
+    /// was still active, and the cursor projected against ground too.
+    #[test]
+    fn the_draft_plane_survives_the_face_edit_sync_and_keeps_authoring_seated() {
+        use crate::plugins::face_edit::{
+            sync_drawing_plane_to_face, FaceEditContext, PushPullContext,
+        };
+
+        let elevation = plane(Vec3::new(0.0, 0.0, -4.0), Vec3::NEG_Z, Vec3::X);
+        let mut app = drafting_app();
+        let draft_id = enter_drafting_on(&mut app, &elevation);
+        app.init_resource::<FaceEditContext>()
+            .init_resource::<PushPullContext>()
+            .add_systems(Update, sync_drawing_plane_to_face);
+
+        // Several frames of ordinary idle running, exactly as the live app does.
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert_eq!(
+            *app.world().resource::<DrawingPlane>(),
+            elevation,
+            "the shared drawing plane must stay on the active Draft while Drafting"
+        );
+        assert_eq!(
+            active_drafting_plane(app.world()).as_ref(),
+            Some(&elevation),
+            "the authoring plane must not depend on a per-frame runtime resource"
+        );
+
+        let element_id = ElementId(500);
+        crate::plugins::commands::enqueue_create_boxed_entity(
+            app.world_mut(),
+            unit_box(element_id, Vec3::new(2.0, 1.0, 0.0)),
+        );
+        app.update();
+        let (primitive, _) = authored_box(app.world(), element_id);
+        assert!(
+            primitive
+                .centre
+                .abs_diff_eq(Vec3::new(2.0, 0.0, -3.0), 1e-5),
+            "authoring drifted off the Draft plane to {:?}",
+            primitive.centre
+        );
+        assert_eq!(draft_members(app.world(), draft_id), vec![element_id]);
+    }
+
+    #[test]
+    fn leaving_drafting_returns_the_resting_plane_to_ground() {
+        use crate::plugins::face_edit::{
+            sync_drawing_plane_to_face, FaceEditContext, PushPullContext,
+        };
+
+        let mut app = drafting_app();
+        enter_drafting_on(
+            &mut app,
+            &plane(Vec3::new(0.0, 0.0, -4.0), Vec3::NEG_Z, Vec3::X),
+        );
+        app.init_resource::<FaceEditContext>()
+            .init_resource::<PushPullContext>()
+            .add_systems(Update, sync_drawing_plane_to_face);
+        app.update();
+
+        execute_toggle_drafting_workspace(app.world_mut(), &json!({"enabled": false}))
+            .expect("leave Drafting");
+        app.update();
+
+        assert!(app.world().resource::<DrawingPlane>().is_ground());
+        assert!(active_drafting_plane(app.world()).is_none());
     }
 
     #[test]
