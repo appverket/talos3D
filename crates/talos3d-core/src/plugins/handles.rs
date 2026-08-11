@@ -15,6 +15,7 @@ use crate::{
         cursor::{cursor_window_position, CursorWorldPos},
         face_edit::FaceEditContext,
         input_ownership::{InputOwnership, InputPhase},
+        modeling::group::{compute_group_bounds_in_frame_from_world, GroupFrame, GroupMembers},
         selection::Selected,
         snap::SnapResult,
         tools::ActiveTool,
@@ -705,11 +706,11 @@ fn draw_rotate_ring(
         return;
     };
 
-    let snapshots = rotate_ring
-        .selected_query
+    let selected_entities = rotate_ring.selected_query.iter().collect::<Vec<_>>();
+    let snapshots = selected_entities
         .iter()
         .filter_map(|entity| {
-            let entity_ref = world.get_entity(entity).ok()?;
+            let entity_ref = world.get_entity(*entity).ok()?;
             rotate_ring.registry.capture_snapshot(&entity_ref, world)
         })
         .collect::<Vec<_>>();
@@ -717,13 +718,23 @@ fn draw_rotate_ring(
     // Combined gizmo: draw the yaw ring around the selection footprint at the same
     // radius the rotate grip sits on, so ring + grip read as one rotate affordance.
     if rotate_ring.handle_context.display_mode == HandleDisplayMode::Combined {
-        if let Some(bounds) = union_bounds(&snapshots) {
-            draw_ring(
-                &mut gizmos,
-                bounds.center(),
-                yaw_ring_radius(&bounds),
-                ROTATE_RING_COLOR,
-            );
+        let ring = if selected_entities.len() == 1 {
+            let entity = selected_entities[0];
+            world
+                .get_entity(entity)
+                .ok()
+                .and_then(|entity_ref| {
+                    rotate_ring
+                        .registry
+                        .capture_snapshot(&entity_ref, world)
+                        .and_then(|snapshot| transform_handle_bounds(world, &entity_ref, &snapshot))
+                })
+                .map(|bounds| (bounds.world_center(), yaw_ring_radius(&bounds.local)))
+        } else {
+            union_bounds(&snapshots).map(|bounds| (bounds.center(), yaw_ring_radius(&bounds)))
+        };
+        if let Some((center, radius)) = ring {
+            draw_ring(&mut gizmos, center, radius, ROTATE_RING_COLOR);
         }
         return;
     }
@@ -835,14 +846,21 @@ fn resolve_entity_handles(
 ) -> Option<Vec<ResolvedHandle>> {
     let entity_ref = world.get_entity(entity).ok()?;
     let snapshot = registry.capture_snapshot(&entity_ref, world)?;
+    let transform_bounds = transform_handle_bounds(world, &entity_ref, &snapshot);
     let viewport_offset = camera
         .logical_viewport_rect()
         .map(|rect| rect.min)
         .unwrap_or(Vec2::ZERO);
-    let handles = build_display_handles(entity, &snapshot, display_mode, pivot_position)?
-        .into_iter()
-        .filter_map(|handle| project_handle(camera, camera_transform, viewport_offset, handle))
-        .collect::<Vec<_>>();
+    let handles = build_display_handles(
+        entity,
+        &snapshot,
+        display_mode,
+        pivot_position,
+        transform_bounds,
+    )?
+    .into_iter()
+    .filter_map(|handle| project_handle(camera, camera_transform, viewport_offset, handle))
+    .collect::<Vec<_>>();
     Some(handles)
 }
 
@@ -932,6 +950,7 @@ fn build_display_handles(
     snapshot: &BoxedEntity,
     display_mode: HandleDisplayMode,
     pivot_position: Option<Vec3>,
+    transform_bounds: Option<TransformHandleBounds>,
 ) -> Option<Vec<ResolvedHandle>> {
     let mut handles = snapshot
         .handles()
@@ -950,39 +969,112 @@ fn build_display_handles(
         })
         .collect::<Vec<_>>();
 
-    let Some(bounds) = snapshot.bounds() else {
+    let Some(transform_bounds) = transform_bounds else {
         return Some(handles);
     };
+    let bounds = transform_bounds.local;
 
     match display_mode {
         HandleDisplayMode::Combined => {
             // Unified manipulator: ground-plane move corners + a vertical-lift grip
             // + a yaw rotate grip on the ring, all grabbable without switching modes.
-            handles.extend(move_handles(entity, snapshot, bounds));
-            handles.push(vertical_lift_handle(entity, snapshot, bounds));
-            handles.push(rotate_ring_grip(
+            handles.extend(transform_bounds.map_handles(move_handles(entity, snapshot, bounds)));
+            handles
+                .push(transform_bounds.map_handle(vertical_lift_handle(entity, snapshot, bounds)));
+            let mut rotate_grip = transform_bounds.map_handle(rotate_ring_grip(
                 entity,
                 snapshot,
                 bounds,
-                pivot_position.unwrap_or(bounds.center()),
+                bounds.center(),
             ));
+            set_transform_handle_pivot(
+                &mut rotate_grip,
+                pivot_position.unwrap_or_else(|| transform_bounds.world_center()),
+            );
+            handles.push(rotate_grip);
         }
         HandleDisplayMode::Move => {
-            handles.extend(move_handles(entity, snapshot, bounds));
+            handles.extend(transform_bounds.map_handles(move_handles(entity, snapshot, bounds)));
         }
         HandleDisplayMode::Scale => {
-            handles.extend(scale_handles(entity, snapshot, bounds));
+            // Scaling remains world-axis aligned until the semantic transform plan
+            // can express scaling in an arbitrary group frame. Rotating only the
+            // scale presentation would make a local-looking grip perform a different
+            // world-space edit.
+            if let Some(world_bounds) = snapshot.bounds() {
+                handles.extend(scale_handles(entity, snapshot, world_bounds));
+            }
         }
         HandleDisplayMode::Rotate => {
             handles.extend(rotate_handles(
                 entity,
                 snapshot,
-                pivot_position.unwrap_or(bounds.center()),
+                pivot_position.unwrap_or_else(|| transform_bounds.world_center()),
             ));
         }
     }
 
     Some(handles)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransformHandleBounds {
+    /// Bounds in the coordinate system described by `frame`.
+    local: EntityBounds,
+    frame: GroupFrame,
+}
+
+impl TransformHandleBounds {
+    fn world_center(&self) -> Vec3 {
+        self.frame.point_to_world(self.local.center())
+    }
+
+    fn map_handles(&self, handles: Vec<ResolvedHandle>) -> Vec<ResolvedHandle> {
+        handles
+            .into_iter()
+            .map(|handle| self.map_handle(handle))
+            .collect()
+    }
+
+    fn map_handle(&self, mut handle: ResolvedHandle) -> ResolvedHandle {
+        handle.position = self.frame.point_to_world(handle.position);
+        if let HandleInteraction::Transform { pivot_override, .. } = &mut handle.interaction {
+            if let Some(pivot) = pivot_override {
+                *pivot = self.frame.point_to_world(*pivot);
+            }
+        }
+        handle
+    }
+}
+
+fn transform_handle_bounds(
+    world: &World,
+    entity_ref: &EntityRef<'_>,
+    snapshot: &BoxedEntity,
+) -> Option<TransformHandleBounds> {
+    if let Some(group) = entity_ref.get::<GroupMembers>() {
+        if !group.frame.is_identity() {
+            if let Some(local) =
+                compute_group_bounds_in_frame_from_world(world, &group.member_ids, &group.frame)
+            {
+                return Some(TransformHandleBounds {
+                    local,
+                    frame: group.frame,
+                });
+            }
+        }
+    }
+
+    snapshot.bounds().map(|local| TransformHandleBounds {
+        local,
+        frame: GroupFrame::identity(),
+    })
+}
+
+fn set_transform_handle_pivot(handle: &mut ResolvedHandle, pivot: Vec3) {
+    if let HandleInteraction::Transform { pivot_override, .. } = &mut handle.interaction {
+        *pivot_override = Some(pivot);
+    }
 }
 
 fn move_handles(
@@ -1374,9 +1466,16 @@ fn draw_ring(gizmos: &mut Gizmos<HandleGizmos>, center: Vec3, radius: f32, color
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::{
-        identity::ElementId,
-        modeling::{primitives::Polyline, snapshots::PolylineSnapshot},
+    use crate::{
+        capability_registry::CapabilityRegistry,
+        plugins::{
+            identity::ElementId,
+            modeling::{
+                group::GroupSnapshot,
+                primitives::Polyline,
+                snapshots::{PolylineFactory, PolylineSnapshot},
+            },
+        },
     };
 
     fn boxed_polyline(id: u64, a: Vec3, b: Vec3) -> BoxedEntity {
@@ -1432,5 +1531,108 @@ mod tests {
         assert_eq!(entity, Entity::from_bits(10));
         assert_eq!(bounds.min, Vec3::new(0.0, -1.0, 0.0));
         assert_eq!(bounds.max, Vec3::new(5.0, 3.0, 6.0));
+    }
+
+    #[test]
+    fn group_handles_follow_the_same_oriented_frame_as_the_selection_box() {
+        let snapshot = boxed_polyline(1, Vec3::ZERO, Vec3::new(2.0, 1.0, 4.0));
+        let local = snapshot.bounds().unwrap();
+        let frame = GroupFrame {
+            translation: Vec3::new(10.0, 0.0, -3.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        };
+        let transform_bounds = TransformHandleBounds { local, frame };
+
+        let handles = build_display_handles(
+            Entity::from_bits(10),
+            &snapshot,
+            HandleDisplayMode::Combined,
+            None,
+            Some(transform_bounds),
+        )
+        .unwrap();
+        let move_handles = handles
+            .iter()
+            .filter(|handle| handle.id.starts_with("move_corner_"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(move_handles.len(), 8);
+        for (handle, local_corner) in move_handles.iter().zip(local.corners()) {
+            assert!(handle
+                .position
+                .abs_diff_eq(frame.point_to_world(local_corner), 1e-5));
+        }
+
+        let rotate_grip = handles
+            .iter()
+            .find(|handle| handle.id == "rotate_yaw")
+            .unwrap();
+        let expected_grip =
+            frame.point_to_world(local.center() + Vec3::X * yaw_ring_radius(&local));
+        assert!(rotate_grip.position.abs_diff_eq(expected_grip, 1e-5));
+        match rotate_grip.interaction {
+            HandleInteraction::Transform {
+                pivot_override: Some(pivot),
+                ..
+            } => assert!(pivot.abs_diff_eq(frame.point_to_world(local.center()), 1e-5)),
+            _ => panic!("rotate grip must retain a world-space group pivot"),
+        }
+    }
+
+    #[test]
+    fn rotated_group_resolves_transform_bounds_in_its_selection_frame() {
+        let mut world = World::new();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(PolylineFactory);
+        world.insert_resource(registry);
+
+        let local = EntityBounds {
+            min: Vec3::ZERO,
+            max: Vec3::new(2.0, 1.0, 4.0),
+        };
+        let frame = GroupFrame {
+            translation: Vec3::new(10.0, 0.0, -3.0),
+            rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+        };
+        world.spawn((
+            ElementId(1),
+            Polyline {
+                points: vec![
+                    frame.point_to_world(local.min),
+                    frame.point_to_world(local.max),
+                ],
+            },
+        ));
+        let group_entity = world
+            .spawn((
+                ElementId(2),
+                GroupMembers {
+                    name: "Cottage".into(),
+                    member_ids: vec![ElementId(1)],
+                    frame,
+                    linked_model: None,
+                },
+            ))
+            .id();
+        let snapshot: BoxedEntity = GroupSnapshot {
+            element_id: ElementId(2),
+            name: "Cottage".into(),
+            member_ids: vec![ElementId(1)],
+            frame,
+            composite: None,
+            linked_model: None,
+            cached_bounds: Some(EntityBounds {
+                min: Vec3::new(10.0, 0.0, -5.0),
+                max: Vec3::new(14.0, 1.0, -3.0),
+            }),
+        }
+        .into();
+
+        let entity_ref = world.entity(group_entity);
+        let resolved = transform_handle_bounds(&world, &entity_ref, &snapshot).unwrap();
+
+        assert!(resolved.local.min.abs_diff_eq(local.min, 1e-5));
+        assert!(resolved.local.max.abs_diff_eq(local.max, 1e-5));
+        assert_eq!(resolved.frame, frame);
     }
 }
