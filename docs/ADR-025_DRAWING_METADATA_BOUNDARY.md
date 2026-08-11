@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; amended by ADR-026
 
 ## Context
 
@@ -63,5 +63,17 @@ Tradeoffs:
 - add dedicated drawing settings UI beyond the renderer window section
 - extend the metadata model to richer section graphics, callouts, and hatch
   behavior
-- introduce a first-class drawing sheet/view model when paper-mode output moves
-  beyond cropped viewport export
+- implement the first-class `Draft` metadata container, plane, membership, and
+  generic annotation primitives specified by ADR-026
+
+## Amendment: Draft container and derived DrawingScene
+
+ADR-026 makes the previously deferred drawing view first-class. `Draft` is the
+durable drawing-metadata container and may reference ordinary authored 3D model
+entities without cloning or owning their geometry. Lines, rectangles, circles,
+text, dimensions, and related 2D annotations persist as drawing metadata.
+
+The normalized `DrawingScene`, paper-layout `DraftingSheet`, raster previews,
+projected silhouettes, and export bytes are derived artifacts. They are rebuilt
+from the authored model plus `Draft`; none is a second persistence source or
+authoring document.

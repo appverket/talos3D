@@ -2,6 +2,11 @@
 
 Date: 2026-04-12
 
+> **2026-08-11:** ADR-026 supersedes the renderer-only Paper Drawing concept
+> used by this historical stabilization plan. Its reversible render-state work
+> remains valid, but it is now subordinate to the single Drafting workspace and
+> toggle. The active acceptance contract is ADR-026.
+
 ## Context
 
 The current Talos3D core runtime exposes a clean public architecture on paper:

@@ -24,6 +24,7 @@ The platform is designed so that:
 - [ADR 024: Render/View State Coordination](./ADR-024_RENDER_VIEW_STATE_COORDINATION.md)
 - [Drawing Metadata and Section Views Plan](./PLAN_DRAWING_METADATA_AND_SECTION_VIEWS.md)
 - [ADR 025: Drawing Metadata Boundary](./ADR-025_DRAWING_METADATA_BOUNDARY.md)
+- [ADR 026: Unified Drafting Workspace](./ADR-026_UNIFIED_DRAFTING_WORKSPACE.md)
 - [MCP Model API](./MCP_MODEL_API.md)
 - [MCP Authentication Security Review](./MCP_AUTH_SECURITY_REVIEW.md)
 - [Developer Onboarding](./DEVELOPER_ONBOARDING.md)

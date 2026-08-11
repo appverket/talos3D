@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; amended by ADR-026
 
 ## Date
 
@@ -69,3 +69,12 @@ Talos3D core will coordinate these concerns explicitly:
   instead of ad hoc command-local flag mutations
 - public API structures should expose state that matters for behavior, not just
   whichever internal field happened to be reused at the time
+
+## Amendment: unified Drafting workspace
+
+ADR-026 replaces Paper Drawing as an independent presentation mode. Its
+reversible renderer baseline becomes an implementation detail of the sole
+`DraftingWorkspaceState` enter/exit lifecycle. Drafting entry additionally owns
+orthographic camera enforcement, active draft/plane identity, annotation
+filters, and live projection. No Paper Drawing command or state may remain an
+alternate authority.
