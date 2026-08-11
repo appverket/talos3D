@@ -8,10 +8,9 @@
 //!
 //! See PROOF_POINT_69.md for context.
 //!
-//! Sheets are *derived* — captured from a 3D [`SheetView`] of the current
-//! world, not authored directly. Annotations stay 3D-world-anchored on the
-//! source side; the capture pass projects them into paper-mm before
-//! calling the drafting renderer.
+//! Sheets are *derived* layout values — [`super::scene::DrawingScene`] is the
+//! sole semantic projection result. A sheet maps its normalized positions to
+//! paper millimetres and adds margin for serialization.
 
 use bevy::math::{Vec2, Vec3};
 
@@ -227,6 +226,52 @@ impl DraftingSheet {
         }
     }
 
+    /// Lay out a normalized [`super::scene::DrawingScene`] in paper
+    /// millimetres. This is deliberately a pure adapter: it does not inspect
+    /// the ECS world or project model geometry.
+    #[must_use]
+    pub fn from_scene(scene: super::scene::DrawingScene, margin_mm: f32) -> Self {
+        let paper_size = Vec2::new(
+            scene.view.frustum_width_mm(),
+            scene.view.frustum_height_mm(),
+        );
+        let mut sheet = Self::new(scene.view.scale_denominator);
+        sheet.lines = scene
+            .lines
+            .into_iter()
+            .map(|line| SheetLine {
+                a: normalized_to_paper(line.a, paper_size),
+                b: normalized_to_paper(line.b, paper_size),
+                stroke: line.stroke,
+            })
+            .collect();
+        sheet.hatches = scene
+            .hatches
+            .into_iter()
+            .map(|hatch| SheetHatch {
+                polygon: hatch
+                    .polygon
+                    .into_iter()
+                    .map(|point| normalized_to_paper(point, paper_size))
+                    .collect(),
+                pattern: hatch.pattern,
+            })
+            .collect();
+        sheet.annotations = scene
+            .annotations
+            .into_iter()
+            .map(|annotation| {
+                annotation
+                    .primitives
+                    .into_iter()
+                    .map(|primitive| primitive_to_paper(primitive, paper_size))
+                    .collect()
+            })
+            .collect();
+        sheet.recompute_bounds(margin_mm);
+        sheet
+    }
+
     /// Fold all primitive extents into `self.bounds`. Writers call this
     /// once at the end of a capture pass (`capture_sheet` already does).
     pub fn recompute_bounds(&mut self, margin_mm: f32) {
@@ -251,6 +296,65 @@ impl DraftingSheet {
             bounds = bounds.inflated(margin_mm);
         }
         self.bounds = bounds;
+    }
+}
+
+fn normalized_to_paper(point: Vec2, paper_size: Vec2) -> Vec2 {
+    point * paper_size
+}
+
+fn primitive_to_paper(primitive: DimPrimitive, paper_size: Vec2) -> DimPrimitive {
+    match primitive {
+        DimPrimitive::LineSegment { a, b, stroke_mm } => DimPrimitive::LineSegment {
+            a: normalized_to_paper(a, paper_size),
+            b: normalized_to_paper(b, paper_size),
+            stroke_mm,
+        },
+        DimPrimitive::Tick {
+            pos,
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        } => DimPrimitive::Tick {
+            pos: normalized_to_paper(pos, paper_size),
+            rotation_rad,
+            length_mm,
+            stroke_mm,
+        },
+        DimPrimitive::Arrow {
+            tip,
+            tail,
+            width_mm,
+            filled,
+            stroke_mm,
+        } => DimPrimitive::Arrow {
+            tip: normalized_to_paper(tip, paper_size),
+            tail: normalized_to_paper(tail, paper_size),
+            width_mm,
+            filled,
+            stroke_mm,
+        },
+        DimPrimitive::Dot { pos, radius_mm } => DimPrimitive::Dot {
+            pos: normalized_to_paper(pos, paper_size),
+            radius_mm,
+        },
+        DimPrimitive::Text {
+            anchor,
+            content,
+            height_mm,
+            rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        } => DimPrimitive::Text {
+            anchor: normalized_to_paper(anchor, paper_size),
+            content,
+            height_mm,
+            rotation_rad,
+            anchor_mode,
+            font_family,
+            color_hex,
+        },
     }
 }
 
@@ -321,6 +425,46 @@ mod tests {
     fn bounds_empty_is_invalid_and_fold_detects_no_content() {
         let b = SheetBounds::empty();
         assert!(!b.is_valid());
+    }
+
+    #[test]
+    fn scene_layout_scales_positions_but_preserves_paper_style_sizes() {
+        use crate::plugins::{drafting::DimPrimitive, identity::ElementId};
+
+        let view = SheetView {
+            eye: Vec3::Z,
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            ortho_height_m: 1.0,
+            aspect: 2.0,
+            scale_denominator: 10.0,
+            margin_mm: 0.0,
+        };
+        let owner = ElementId(7);
+        let mut scene = super::super::scene::DrawingScene::new(view);
+        scene
+            .annotations
+            .push(super::super::scene::DrawingSceneAnnotation {
+                id: super::super::scene::DrawingPrimitiveId {
+                    owner,
+                    role: super::super::scene::DrawingPrimitiveRole::Annotation,
+                    ordinal: 0,
+                },
+                owner,
+                primitives: vec![DimPrimitive::LineSegment {
+                    a: Vec2::new(0.25, 0.5),
+                    b: Vec2::new(0.75, 0.5),
+                    stroke_mm: 0.18,
+                }],
+            });
+
+        let sheet = DraftingSheet::from_scene(scene, 0.0);
+        let DimPrimitive::LineSegment { a, b, stroke_mm } = &sheet.annotations[0][0] else {
+            panic!("expected line segment")
+        };
+        assert!((*a - Vec2::new(50.0, 50.0)).length() < 1e-6);
+        assert!((*b - Vec2::new(150.0, 50.0)).length() < 1e-6);
+        assert!((*stroke_mm - 0.18).abs() < 1e-6);
     }
 
     #[test]

@@ -429,11 +429,12 @@ impl Plugin for RenderPipelinePlugin {
             )
             .add_systems(
                 Update,
-                (
-                    draw_model_edge_overlays.after(sync_wireframe_surface_visibility),
-                    draw_section_fill_overlays.after(MeshGenerationSet::Generate),
-                ),
+                draw_model_edge_overlays.after(sync_wireframe_surface_visibility),
             );
+        // Exact section-fill extraction remains available to the offline
+        // DrawingScene/export builder. It is intentionally not registered as
+        // an Update system: plane/mesh intersection must return through a
+        // bounded invalidation cache before it can ship in the live backend.
     }
 }
 
@@ -1314,46 +1315,6 @@ fn draw_model_edge_overlays(
         // Live outline uses the fast authored linework path above. The older
         // mesh feature-edge classifier remains for tests/offline use, but not
         // as a per-frame viewport path.
-    }
-}
-
-/// Draw section fill cut edges and hatch lines in the viewport when paper mode
-/// is active and clip planes are cutting geometry.
-fn draw_section_fill_overlays(
-    world: &World,
-    settings: Res<RenderSettings>,
-    mesh_assets: Res<Assets<Mesh>>,
-    mut gizmos: Gizmos,
-) {
-    // Only draw section fills when visible-edge overlay is enabled (paper mode)
-    if !settings.visible_edge_overlay_enabled {
-        return;
-    }
-
-    let fills = crate::plugins::section_fill::extract_section_fills(world, &mesh_assets);
-    if fills.is_empty() {
-        return;
-    }
-
-    for fill in &fills {
-        if fill.polygon_3d.len() < 3 {
-            continue;
-        }
-
-        // Draw section cut outline (heavy)
-        let color = if settings.paper_fill_enabled {
-            Color::BLACK
-        } else {
-            Color::srgba(0.2, 0.6, 1.0, 0.9)
-        };
-        for i in 0..fill.polygon_3d.len() {
-            let j = (i + 1) % fill.polygon_3d.len();
-            gizmos.line(fill.polygon_3d[i], fill.polygon_3d[j], color);
-        }
-
-        // Draw hatch lines in 3D (project hatch from 2D back onto the clip plane)
-        // For live preview we use a simplified approach: draw the cut polygon edges
-        // in the heavy section-cut weight. Full hatch rendering is in vector export.
     }
 }
 
