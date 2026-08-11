@@ -10700,15 +10700,20 @@ fn handle_transform_with_modified(
     let mut before: Vec<BoxedEntity> = Vec::new();
     let mut after: Vec<BoxedEntity> = Vec::new();
 
+    // The frame the request's free deltas and unconstrained rotations are read
+    // in. Identity outside Drafting, so world-space requests are unchanged.
+    let authoring =
+        crate::plugins::drafting::authoring::active_drafting_frame(world).unwrap_or_default();
+
     if !plain_ids.is_empty() {
         let snapshots = capture_snapshots_by_ids(world, &plain_ids)?;
-        let plain_after = apply_transform_request(&snapshots, &request)?;
+        let plain_after = apply_transform_request(&snapshots, &request, &authoring)?;
         before.extend(snapshots.into_iter().map(|(_, snapshot)| snapshot));
         after.extend(plain_after);
     }
     for group_id in &group_ids {
         let (group_before, group_after) =
-            transform_group_as_unit(world, ElementId(*group_id), &request)?;
+            transform_group_as_unit(world, ElementId(*group_id), &request, &authoring)?;
         before.extend(group_before);
         after.extend(group_after);
     }
@@ -11291,31 +11296,61 @@ fn ensure_refinable_entity_exists(world: &World, element_id: ElementId) -> ApiRe
     }
 }
 
+/// World-space translation for a transform request, read in the authoring frame.
+///
+/// A free `[x, y, z]` delta is authored in whatever frame the client is drawing
+/// in, exactly like an unconstrained viewport drag: inside Drafting that is the
+/// active Draft plane, so `[2, 0, 0]` runs along the plane's tangent and
+/// `[0, 1, 0]` lifts out of the sheet. An explicit `axis` stays a world axis,
+/// matching the viewport's X/Y/Z constraints. Outside Drafting the frame is the
+/// identity and this is the long-standing world-space behaviour.
+#[cfg(feature = "model-api")]
+pub(crate) fn transform_move_delta(
+    request: &TransformToolRequest,
+    authoring: &GroupFrame,
+) -> ApiResult<Vec3> {
+    Ok(match parse_axis(request.axis.as_deref())? {
+        Some(axis) => axis.unit_vector() * scalar_from_value(&request.value)?,
+        None => authoring.rotation * vec3_from_value(&request.value)?,
+    })
+}
+
+/// Rotation for a transform request, read in the authoring frame.
+///
+/// An unconstrained rotation turns about the drawing plane's view-facing
+/// normal, which is the authoring frame's local `+Y` — the same axis the
+/// viewport's unconstrained rotate gesture uses. That reduces to
+/// [`Quat::from_rotation_y`] outside Drafting and on a plan Draft.
+#[cfg(feature = "model-api")]
+pub(crate) fn transform_rotation(
+    request: &TransformToolRequest,
+    authoring: &GroupFrame,
+) -> ApiResult<Quat> {
+    let radians = scalar_from_value(&request.value)?.to_radians();
+    Ok(match parse_axis(request.axis.as_deref())? {
+        Some(AxisName::X) => Quat::from_rotation_x(radians),
+        Some(AxisName::Z) => Quat::from_rotation_z(radians),
+        _ => Quat::from_axis_angle(authoring.rotation * Vec3::Y, radians),
+    })
+}
+
 #[cfg(feature = "model-api")]
 fn apply_transform_request(
     snapshots: &[(ElementId, BoxedEntity)],
     request: &TransformToolRequest,
+    authoring: &GroupFrame,
 ) -> ApiResult<Vec<BoxedEntity>> {
     let axis = parse_axis(request.axis.as_deref())?;
     match normalized_transform_operation(&request.operation).as_str() {
         "move" => {
-            let delta = if let Some(axis) = axis {
-                axis.unit_vector() * scalar_from_value(&request.value)?
-            } else {
-                vec3_from_value(&request.value)?
-            };
+            let delta = transform_move_delta(request, authoring)?;
             Ok(snapshots
                 .iter()
                 .map(|(_, snapshot)| snapshot.translate_by(delta))
                 .collect())
         }
         "rotate" => {
-            let delta_radians = scalar_from_value(&request.value)?.to_radians();
-            let rotation = match axis {
-                Some(AxisName::X) => Quat::from_rotation_x(delta_radians),
-                Some(AxisName::Z) => Quat::from_rotation_z(delta_radians),
-                _ => Quat::from_rotation_y(delta_radians),
-            };
+            let rotation = transform_rotation(request, authoring)?;
             match request.pivot {
                 // Rotate rigidly about an explicit pivot so a multi-element
                 // selection orients in place. rotate_by rotates the centre about
@@ -11475,6 +11510,7 @@ fn transform_group_as_unit(
     world: &World,
     group_id: ElementId,
     request: &TransformToolRequest,
+    authoring: &GroupFrame,
 ) -> ApiResult<(Vec<BoxedEntity>, Vec<BoxedEntity>)> {
     let frame = group_frame(world, group_id).unwrap_or_default();
     let all_member_ids = collect_group_members_recursive(world, group_id);
@@ -11499,7 +11535,7 @@ fn transform_group_as_unit(
     let mut pivoted = request.clone();
     pivoted.pivot = Some([pivot.x as f64, pivot.y as f64, pivot.z as f64]);
     let leaf_snaps = capture_snapshots_by_ids(world, &leaf_ids)?;
-    let leaf_after = apply_transform_request(&leaf_snaps, &pivoted)?;
+    let leaf_after = apply_transform_request(&leaf_snaps, &pivoted, authoring)?;
 
     let mut before: Vec<BoxedEntity> = leaf_snaps.into_iter().map(|(_, s)| s).collect();
     let mut after: Vec<BoxedEntity> = leaf_after;
@@ -11514,7 +11550,7 @@ fn transform_group_as_unit(
     );
     for gid in group_targets {
         let old = group_frame(world, gid).unwrap_or_default();
-        let new = transform_group_frame(&old, request, pivot)?;
+        let new = transform_group_frame(&old, request, pivot, authoring)?;
         if let Some((b, a)) = group_frame_change_snapshots(world, gid, new) {
             before.push(b);
             after.push(a);
@@ -11529,27 +11565,21 @@ fn transform_group_frame(
     old: &GroupFrame,
     request: &TransformToolRequest,
     pivot: Vec3,
+    authoring: &GroupFrame,
 ) -> ApiResult<GroupFrame> {
-    let axis = parse_axis(request.axis.as_deref())?;
+    // Reject a malformed axis for every operation, including the scale branch
+    // below, which does not otherwise consult it.
+    parse_axis(request.axis.as_deref())?;
     match normalized_transform_operation(&request.operation).as_str() {
         "move" => {
-            let delta = if let Some(axis) = axis {
-                axis.unit_vector() * scalar_from_value(&request.value)?
-            } else {
-                vec3_from_value(&request.value)?
-            };
+            let delta = transform_move_delta(request, authoring)?;
             Ok(GroupFrame {
                 translation: old.translation + delta,
                 rotation: old.rotation,
             })
         }
         "rotate" => {
-            let radians = scalar_from_value(&request.value)?.to_radians();
-            let rotation = match axis {
-                Some(AxisName::X) => Quat::from_rotation_x(radians),
-                Some(AxisName::Z) => Quat::from_rotation_z(radians),
-                _ => Quat::from_rotation_y(radians),
-            };
+            let rotation = transform_rotation(request, authoring)?;
             Ok(GroupFrame {
                 translation: pivot + rotation * (old.translation - pivot),
                 rotation: rotation * old.rotation,
