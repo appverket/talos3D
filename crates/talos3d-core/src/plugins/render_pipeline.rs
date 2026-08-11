@@ -26,6 +26,8 @@ use crate::{
         command_registry::{
             CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
         },
+        drafting::DraftingWorkspaceState,
+        drafting_sheet::DrawingSceneLivePlugin,
         identity::ElementId,
         materials::MaterialSyncSet,
         modeling::mesh_generation::MeshGenerationSet,
@@ -307,7 +309,8 @@ pub struct RenderPipelinePlugin;
 
 impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RenderSettings>()
+        app.add_plugins(DrawingSceneLivePlugin)
+            .init_resource::<RenderSettings>()
             .init_resource::<RenderPipelineSetupState>()
             .init_resource::<SurfaceMaterialOverrideCache>()
             .init_resource::<OutlineMeshOverlayMaterial>()
@@ -429,11 +432,12 @@ impl Plugin for RenderPipelinePlugin {
             )
             .add_systems(
                 Update,
-                (
-                    draw_model_edge_overlays.after(sync_wireframe_surface_visibility),
-                    draw_section_fill_overlays.after(MeshGenerationSet::Generate),
-                ),
+                draw_model_edge_overlays.after(sync_wireframe_surface_visibility),
             );
+        // Exact section-fill extraction remains available to the offline
+        // DrawingScene/export builder. It is intentionally not registered as
+        // an Update system: plane/mesh intersection must return through a
+        // bounded invalidation cache before it can ship in the live backend.
     }
 }
 
@@ -542,6 +546,55 @@ pub(crate) fn apply_drafting_render_preset(settings: &mut RenderSettings) {
     settings.visible_edge_overlay_enabled = false;
     settings.contour_overlay_enabled = false;
     settings.wireframe_overlay_enabled = false;
+}
+
+/// Agent-inspectable evidence that authored renderables are actually using the
+/// paper-fill presentation requested by Drafting. This stays beside the
+/// private override implementation so the workspace controller does not grow a
+/// second understanding of render materials.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DraftingSurfaceEvidence {
+    pub renderable_count: usize,
+    pub paper_override_count: usize,
+    pub valid_white_override_count: usize,
+}
+
+pub(crate) fn drafting_surface_evidence(world: &World) -> DraftingSurfaceEvidence {
+    let materials = world.get_resource::<Assets<StandardMaterial>>();
+    let mut evidence = DraftingSurfaceEvidence::default();
+    for entity in world.iter_entities() {
+        if !entity.contains::<ElementId>() || !entity.contains::<Mesh3d>() {
+            continue;
+        }
+        evidence.renderable_count += 1;
+        let Some(state) = entity.get::<SurfaceMaterialOverride>() else {
+            continue;
+        };
+        if state.mode != SurfaceMaterialMode::PaperFill {
+            continue;
+        }
+        evidence.paper_override_count += 1;
+        let current_handle = entity.get::<MeshMaterial3d<StandardMaterial>>();
+        let material = materials
+            .as_ref()
+            .and_then(|materials| materials.get(&state.override_handle));
+        if current_handle.is_some_and(|current| current.0 == state.override_handle)
+            && material.is_some_and(is_valid_white_paper_material)
+        {
+            evidence.valid_white_override_count += 1;
+        }
+    }
+    evidence
+}
+
+fn is_valid_white_paper_material(material: &StandardMaterial) -> bool {
+    let color = material.base_color.to_srgba();
+    material.unlit
+        && color.red >= 0.999
+        && color.green >= 0.999
+        && color.blue >= 0.999
+        && color.alpha >= 0.999
+        && material.base_color_texture.is_none()
 }
 
 // ─── Camera render setup ─────────────────────────────────────────────────────
@@ -1230,11 +1283,21 @@ struct MeshOverlaySubject {
 fn draw_model_edge_overlays(
     world: &World,
     settings: Res<RenderSettings>,
+    drafting_workspace: Option<Res<DraftingWorkspaceState>>,
     registry: Res<CapabilityRegistry>,
     mesh_assets: Res<Assets<Mesh>>,
     camera_query: Query<(&GlobalTransform, &Projection), With<OrbitCamera>>,
     mut gizmos: Gizmos,
 ) {
+    // Drafting consumes the canonical cached DrawingScene through its own
+    // batched backend. Keeping this projector active would create a second
+    // linework authority and make live/export parity accidental.
+    if drafting_workspace
+        .as_ref()
+        .is_some_and(|state| state.is_active())
+    {
+        return;
+    }
     if !settings.wireframe_overlay_enabled && !settings.contour_overlay_enabled {
         return;
     }
@@ -1314,46 +1377,6 @@ fn draw_model_edge_overlays(
         // Live outline uses the fast authored linework path above. The older
         // mesh feature-edge classifier remains for tests/offline use, but not
         // as a per-frame viewport path.
-    }
-}
-
-/// Draw section fill cut edges and hatch lines in the viewport when paper mode
-/// is active and clip planes are cutting geometry.
-fn draw_section_fill_overlays(
-    world: &World,
-    settings: Res<RenderSettings>,
-    mesh_assets: Res<Assets<Mesh>>,
-    mut gizmos: Gizmos,
-) {
-    // Only draw section fills when visible-edge overlay is enabled (paper mode)
-    if !settings.visible_edge_overlay_enabled {
-        return;
-    }
-
-    let fills = crate::plugins::section_fill::extract_section_fills(world, &mesh_assets);
-    if fills.is_empty() {
-        return;
-    }
-
-    for fill in &fills {
-        if fill.polygon_3d.len() < 3 {
-            continue;
-        }
-
-        // Draw section cut outline (heavy)
-        let color = if settings.paper_fill_enabled {
-            Color::BLACK
-        } else {
-            Color::srgba(0.2, 0.6, 1.0, 0.9)
-        };
-        for i in 0..fill.polygon_3d.len() {
-            let j = (i + 1) % fill.polygon_3d.len();
-            gizmos.line(fill.polygon_3d[i], fill.polygon_3d[j], color);
-        }
-
-        // Draw hatch lines in 3D (project hatch from 2D back onto the clip plane)
-        // For live preview we use a simplified approach: draw the cut polygon edges
-        // in the heavy section-cut weight. Full hatch rendering is in vector export.
     }
 }
 
@@ -1804,6 +1827,38 @@ mod tests {
         assert_eq!(
             active_surface_material_mode(&settings),
             Some(SurfaceMaterialMode::PaperFill)
+        );
+    }
+
+    #[test]
+    fn drafting_surface_evidence_requires_the_live_white_override() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings {
+            paper_fill_enabled: true,
+            ..RenderSettings::default()
+        })
+        .insert_resource(Assets::<StandardMaterial>::default())
+        .init_resource::<SurfaceMaterialOverrideCache>()
+        .add_systems(Update, sync_surface_display_materials);
+        let source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        app.world_mut().spawn((
+            ElementId(1),
+            Mesh3d(Handle::default()),
+            MeshMaterial3d(source),
+        ));
+
+        app.update();
+
+        assert_eq!(
+            drafting_surface_evidence(app.world()),
+            DraftingSurfaceEvidence {
+                renderable_count: 1,
+                paper_override_count: 1,
+                valid_white_override_count: 1,
+            }
         );
     }
 

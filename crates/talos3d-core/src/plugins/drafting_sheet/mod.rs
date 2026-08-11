@@ -8,7 +8,9 @@
 //! - [`DraftingSheet`], [`SheetView`], [`SheetBounds`], [`SheetLine`],
 //!   [`SheetHatch`], [`SheetStroke`] — the sheet data model, all in
 //!   paper millimetres.
-//! - [`capture_sheet`] — flatten a 3D world into a paper-mm sheet.
+//! - [`build_drawing_scene`] — the sole normalized semantic projector.
+//! - [`capture_sheet`] — compatibility wrapper that lays out that scene in
+//!   paper millimetres.
 //! - [`sheet_to_svg`], [`sheet_to_pdf`], [`sheet_to_dxf`],
 //!   [`sheet_to_png`] — writers that consume a sheet.
 //! - [`export_sheet_to_path`] — convenience: capture current camera,
@@ -24,15 +26,26 @@ pub mod export_dxf;
 pub mod export_pdf;
 pub mod export_png;
 pub mod export_svg;
+pub mod live;
 pub mod preview;
+pub mod scene;
 pub mod sheet;
 
-pub use capture::{capture_sheet, sheet_paper_to_world, sheet_view_from_active_camera};
+pub use capture::{
+    build_drawing_scene, capture_sheet, drawing_normalized_to_world, sheet_paper_to_world,
+    sheet_view_from_active_camera,
+};
 pub use export_dxf::sheet_to_dxf;
 pub use export_pdf::sheet_to_pdf;
 pub use export_png::sheet_to_png;
 pub use export_svg::sheet_to_svg;
+pub use live::{DrawingSceneLiveCache, DrawingSceneLivePlugin, DrawingSceneLiveStats};
 pub use preview::{DraftingSheetPreviewPlugin, SheetPreviewState};
+pub use scene::{
+    DrawingPrimitiveId, DrawingPrimitiveRole, DrawingScene, DrawingSceneAnnotation,
+    DrawingSceneFinding, DrawingSceneHatch, DrawingSceneLine, DrawingSceneLineBatch,
+    DrawingSceneLineSpan,
+};
 pub use sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke, SheetView};
 
 /// Default architectural drawing scale used by [`export_sheet_to_path`]
@@ -111,10 +124,8 @@ mod tests {
         assert_eq!(p.extension().and_then(|e| e.to_str()), Some("pdf"));
     }
 
-    /// First direct test of `capture_sheet` itself (previously only its
-    /// projection-math helpers and hand-built `DraftingSheet` literals were
-    /// covered). Characterizes the LIVE drawing contract — `capture_sheet` →
-    /// `DraftingSheet` → the four `sheet_to_*` writers — not the dead
+    /// Characterizes the live drawing contract — `build_drawing_scene` → pure
+    /// `DraftingSheet` layout → the four `sheet_to_*` writers — not the dead
     /// `extract_drawing_geometry`/`DrawingGeometry` path in
     /// `vector_drawing.rs`, which has zero callers outside its own tests.
     ///
@@ -185,8 +196,30 @@ mod tests {
             margin_mm: 5.0,
         };
 
-        let sheet = capture_sheet(&world, &view)
-            .expect("capture_sheet should produce a sheet for a visible triangle");
+        let scene = build_drawing_scene(&world, &view)
+            .expect("scene builder should project a visible triangle");
+        assert!(!scene.lines.is_empty());
+        assert!(scene
+            .lines
+            .iter()
+            .all(|line| line.owner == ElementId(1) && line.id.owner == ElementId(1)));
+        assert!(scene.lines.iter().all(|line| {
+            [line.a, line.b].into_iter().all(|point| {
+                point.cmpge(bevy::prelude::Vec2::ZERO).all()
+                    && point.cmple(bevy::prelude::Vec2::ONE).all()
+            })
+        }));
+        assert_ne!(scene.source_model_revision, 0);
+        let repeated = build_drawing_scene(&world, &view).expect("repeat projection should work");
+        assert_eq!(scene.source_model_revision, repeated.source_model_revision);
+        assert_eq!(scene.lines[0].id, repeated.lines[0].id);
+
+        let sheet = DraftingSheet::from_scene(scene.clone(), view.margin_mm);
+        let compatibility_sheet = capture_sheet(&world, &view)
+            .expect("capture_sheet should delegate to the normalized scene");
+        assert_eq!(sheet.lines.len(), compatibility_sheet.lines.len());
+        assert!((sheet.bounds.min - compatibility_sheet.bounds.min).length() < 1e-4);
+        assert!((sheet.bounds.max - compatibility_sheet.bounds.max).length() < 1e-4);
         assert!(
             !sheet.lines.is_empty(),
             "captured sheet should contain the triangle's boundary edges"

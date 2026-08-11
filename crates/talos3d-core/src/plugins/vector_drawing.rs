@@ -1,8 +1,10 @@
-/// Vector drawing geometry extraction for architectural-quality SVG/PDF export.
+/// Legacy vector-projection oracle retained for focused regression tests.
 ///
-/// Projects visible 3D edges and dimension annotations into 2D line segments
-/// classified by edge type, enabling true vector output with proper line weights.
-/// See ADR-036 for architectural context.
+/// Production Drafting and sheet export use
+/// `drafting_sheet::build_drawing_scene`; this module's `DrawingGeometry`
+/// extractor has no production callers and must not become a second semantic
+/// projector. Its lower-level visibility helpers remain shared by the
+/// normalized scene builder. See ADR-026 and ADR-036.
 use bevy::{
     camera::CameraProjection,
     mesh::{Indices, VertexAttributeValues},

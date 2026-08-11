@@ -23,8 +23,12 @@ use crate::curation::MaterialSpecRegistry;
 use crate::plugins::{
     clipping_planes::ClipPlaneNode,
     definition_preview_scene::PreviewOnly,
+    identity::ElementId,
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
 };
+
+/// Shared paper-space density used by live Drafting and vector export.
+pub const DRAWING_HATCH_DENSITY: f32 = 0.333;
 
 // ─── Hatch pattern types ─────────────────────────────────────────────────────
 
@@ -55,6 +59,8 @@ impl Default for HatchPattern {
 /// A resolved section fill for one cut region.
 #[derive(Debug, Clone)]
 pub struct SectionFillRegion {
+    /// Stable semantic owner of the cut geometry.
+    pub owner: ElementId,
     /// Closed polygon in 3D world space (on the clip plane).
     pub polygon_3d: Vec<Vec3>,
     /// The hatch pattern to apply.
@@ -389,6 +395,7 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
 
     let mesh_query = world.try_query_filtered::<(
         Entity,
+        &ElementId,
         &Mesh3d,
         &GlobalTransform,
         Option<&Visibility>,
@@ -400,7 +407,9 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
 
     let mut fills = Vec::new();
 
-    for (_entity, mesh_handle, mesh_transform, visibility, mat_assign) in mesh_query.iter(world) {
+    for (_entity, owner, mesh_handle, mesh_transform, visibility, mat_assign) in
+        mesh_query.iter(world)
+    {
         if visibility.is_some_and(|v| *v == Visibility::Hidden) {
             continue;
         }
@@ -422,6 +431,7 @@ pub fn extract_section_fills(world: &World, mesh_assets: &Assets<Mesh>) -> Vec<S
             for polygon in loops {
                 if polygon.len() >= 3 {
                     fills.push(SectionFillRegion {
+                        owner: *owner,
                         polygon_3d: polygon,
                         pattern,
                         fill_color,

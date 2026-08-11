@@ -1,10 +1,11 @@
 //! Clipping plane entities for architectural section views.
 //!
 //! A [`ClipPlaneNode`] is an authored entity that defines a half-space in world
-//! space.  Each frame the [`ClippingPlanesPlugin`] hides any renderable mesh
-//! whose Transform origin lies on the *negative-normal* side of every active
-//! plane.  Geometry that straddles a plane is left visible (approximate but
-//! correct for whole-room architectural cuts).
+//! space. The [`ClippingPlanesPlugin`] hides any renderable mesh whose
+//! Transform origin lies on the *negative-normal* side of every active plane.
+//! It recomputes all renderables only when the plane set changes and otherwise
+//! visits only moved or newly-meshed entities. Geometry that straddles a plane
+//! is left visible (approximate but correct for whole-room architectural cuts).
 
 use std::{any::Any, collections::HashMap};
 
@@ -81,7 +82,7 @@ struct SectionViewSyncState {
 // Plugin
 // ---------------------------------------------------------------------------
 
-/// Bevy plugin that drives clip-plane visibility culling each frame.
+/// Bevy plugin that drives invalidation-bounded clip-plane visibility culling.
 pub struct ClippingPlanesPlugin;
 
 impl Plugin for ClippingPlanesPlugin {
@@ -101,35 +102,69 @@ impl Plugin for ClippingPlanesPlugin {
 // Systems
 // ---------------------------------------------------------------------------
 
-/// Each frame: hide or show renderable mesh entities based on active clip planes.
+/// Hide or show renderable mesh entities based on active clip planes.
 ///
 /// Entities that are [`CsgOperand`] (already hidden by the CSG pipeline) are
 /// skipped so we never fight with CSG visibility.
 fn apply_clip_plane_visibility(
-    clip_planes: Query<&ClipPlaneNode>,
-    renderables: Query<
-        (Entity, &Transform),
-        (With<Mesh3d>, Without<ClipPlaneNode>, Without<CsgOperand>),
-    >,
+    clip_planes: Query<Ref<ClipPlaneNode>>,
+    mut renderables: ParamSet<(
+        Query<(Entity, &Transform), (With<Mesh3d>, Without<ClipPlaneNode>, Without<CsgOperand>)>,
+        Query<
+            (Entity, &Transform),
+            (
+                With<Mesh3d>,
+                Without<ClipPlaneNode>,
+                Without<CsgOperand>,
+                Or<(Changed<Transform>, Added<Mesh3d>)>,
+            ),
+        >,
+    )>,
+    mut removed_clip_planes: RemovedComponents<ClipPlaneNode>,
     mut visibility: Query<&mut Visibility>,
 ) {
-    let active_planes: Vec<&ClipPlaneNode> = clip_planes.iter().filter(|p| p.active).collect();
+    let plane_set_changed = clip_planes.iter().any(|plane| plane.is_changed())
+        || removed_clip_planes.read().count() > 0;
+    let active_planes: Vec<ClipPlaneNode> = clip_planes
+        .iter()
+        .filter(|plane| plane.active)
+        .map(|plane| (*plane).clone())
+        .collect();
 
-    for (entity, transform) in &renderables {
-        let pos = transform.translation;
-        let clipped = active_planes
-            .iter()
-            .any(|plane| (pos - plane.origin).dot(plane.normal) < 0.0);
+    if plane_set_changed {
+        for (entity, transform) in renderables.p0().iter() {
+            apply_visibility_for_entity(entity, transform, &active_planes, &mut visibility);
+        }
+    } else if !active_planes.is_empty() {
+        for (entity, transform) in renderables.p1().iter() {
+            apply_visibility_for_entity(entity, transform, &active_planes, &mut visibility);
+        }
+    }
+}
 
-        if let Ok(mut vis) = visibility.get_mut(entity) {
-            // Only overwrite Visible/Hidden; never un-hide a CsgOperand-hidden
-            // entity (those use Visibility::Hidden for other reasons but are
-            // excluded by the query above anyway).
-            *vis = if clipped {
-                Visibility::Hidden
-            } else {
-                Visibility::Visible
-            };
+fn apply_visibility_for_entity(
+    entity: Entity,
+    transform: &Transform,
+    active_planes: &[ClipPlaneNode],
+    visibility: &mut Query<&mut Visibility>,
+) {
+    let pos = transform.translation;
+    let clipped = active_planes
+        .iter()
+        .any(|plane| (pos - plane.origin).dot(plane.normal) < 0.0);
+    let desired = if clipped {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
+    };
+
+    if let Ok(mut current) = visibility.get_mut(entity) {
+        // Only overwrite Visible/Hidden; never un-hide a CsgOperand-hidden
+        // entity (those use Visibility::Hidden for other reasons but are
+        // excluded by the query above anyway). Equality matters: identical
+        // writes would wake every Changed<Visibility> consumer downstream.
+        if *current != desired {
+            *current = desired;
         }
     }
 }
@@ -665,6 +700,56 @@ fn parse_normal_field(request: &Value) -> Option<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Resource, Default)]
+    struct VisibilityChangeCount(usize);
+
+    fn count_visibility_changes(
+        changed: Query<(), Changed<Visibility>>,
+        mut count: ResMut<VisibilityChangeCount>,
+    ) {
+        count.0 += changed.iter().count();
+    }
+
+    #[test]
+    fn clip_visibility_writes_only_when_the_result_changes() {
+        let mut app = App::new();
+        app.init_resource::<VisibilityChangeCount>().add_systems(
+            Update,
+            (apply_clip_plane_visibility, count_visibility_changes).chain(),
+        );
+        app.world_mut().spawn(ClipPlaneNode::at_y(0.0));
+        let renderable = app
+            .world_mut()
+            .spawn((
+                Mesh3d(Handle::default()),
+                Transform::from_xyz(0.0, -1.0, 0.0),
+                Visibility::Visible,
+            ))
+            .id();
+
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(renderable).unwrap(),
+            Visibility::Hidden
+        );
+
+        app.world_mut().resource_mut::<VisibilityChangeCount>().0 = 0;
+        app.update();
+        assert_eq!(app.world().resource::<VisibilityChangeCount>().0, 0);
+
+        app.world_mut()
+            .entity_mut(renderable)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::Y;
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(renderable).unwrap(),
+            Visibility::Visible
+        );
+        assert_eq!(app.world().resource::<VisibilityChangeCount>().0, 1);
+    }
 
     #[test]
     fn section_views_restore_from_document_metadata() {

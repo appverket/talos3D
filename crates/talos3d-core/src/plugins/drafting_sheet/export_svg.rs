@@ -14,7 +14,7 @@ use std::fmt::Write;
 use bevy::math::Vec2;
 
 use crate::plugins::drafting::{DimPrimitive, TextAnchor};
-use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern};
+use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern, DRAWING_HATCH_DENSITY};
 
 use super::sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke};
 
@@ -162,7 +162,7 @@ fn write_hatch_pattern(out: &mut String, hatch: &SheetHatch, i: usize, clip_id: 
     // mm, so 1.0 produces ~1 hatch line per mm. Scale to 0.33 → hatch
     // spacing ~3 mm (classic arch).
     let polygon: Vec<[f32; 2]> = hatch.polygon.iter().map(|p| [p.x, p.y]).collect();
-    let hatch_lines = generate_hatch_lines(&polygon, hatch.pattern, 0.333);
+    let hatch_lines = generate_hatch_lines(&polygon, hatch.pattern, DRAWING_HATCH_DENSITY);
     if hatch_lines.is_empty() {
         return;
     }

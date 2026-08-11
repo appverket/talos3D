@@ -338,6 +338,8 @@ fn orbit_camera(mut input: OrbitCameraInput) {
     let Ok((mut orbit, mut transform, mut projection)) = input.query.single_mut() else {
         return;
     };
+    let orbit_was_changed = orbit.is_changed();
+    let view_before_input = OrbitViewSignature::from(&*orbit);
 
     // --- Three-finger trackpad orbit ---
     // Consume touch events to detect phase changes (ended/cancelled resets state).
@@ -467,7 +469,38 @@ fn orbit_camera(mut input: OrbitCameraInput) {
         }
     }
 
-    apply_orbit_state(&orbit, &mut transform, &mut projection);
+    if orbit_was_changed || OrbitViewSignature::from(&*orbit) != view_before_input {
+        apply_orbit_state(&orbit, &mut transform, &mut projection);
+    }
+}
+
+/// The authored camera fields that determine the render transform and
+/// projection. Keeping this comparison explicit prevents the input system from
+/// poisoning Bevy change detection by rewriting identical camera components on
+/// every idle frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OrbitViewSignature {
+    focus: Vec3,
+    radius: f32,
+    orthographic_scale: f32,
+    yaw: f32,
+    pitch: f32,
+    projection_mode: CameraProjectionMode,
+    focal_length_mm: f32,
+}
+
+impl From<&OrbitCamera> for OrbitViewSignature {
+    fn from(orbit: &OrbitCamera) -> Self {
+        Self {
+            focus: orbit.focus,
+            radius: orbit.radius,
+            orthographic_scale: orbit.orthographic_scale,
+            yaw: orbit.yaw,
+            pitch: orbit.pitch,
+            projection_mode: orbit.projection_mode,
+            focal_length_mm: orbit.focal_length_mm,
+        }
+    }
 }
 
 pub fn orbit_modifier_pressed(keys: &ButtonInput<KeyCode>) -> bool {
