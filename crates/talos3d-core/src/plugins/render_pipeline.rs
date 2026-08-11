@@ -548,6 +548,55 @@ pub(crate) fn apply_drafting_render_preset(settings: &mut RenderSettings) {
     settings.wireframe_overlay_enabled = false;
 }
 
+/// Agent-inspectable evidence that authored renderables are actually using the
+/// paper-fill presentation requested by Drafting. This stays beside the
+/// private override implementation so the workspace controller does not grow a
+/// second understanding of render materials.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DraftingSurfaceEvidence {
+    pub renderable_count: usize,
+    pub paper_override_count: usize,
+    pub valid_white_override_count: usize,
+}
+
+pub(crate) fn drafting_surface_evidence(world: &World) -> DraftingSurfaceEvidence {
+    let materials = world.get_resource::<Assets<StandardMaterial>>();
+    let mut evidence = DraftingSurfaceEvidence::default();
+    for entity in world.iter_entities() {
+        if !entity.contains::<ElementId>() || !entity.contains::<Mesh3d>() {
+            continue;
+        }
+        evidence.renderable_count += 1;
+        let Some(state) = entity.get::<SurfaceMaterialOverride>() else {
+            continue;
+        };
+        if state.mode != SurfaceMaterialMode::PaperFill {
+            continue;
+        }
+        evidence.paper_override_count += 1;
+        let current_handle = entity.get::<MeshMaterial3d<StandardMaterial>>();
+        let material = materials
+            .as_ref()
+            .and_then(|materials| materials.get(&state.override_handle));
+        if current_handle.is_some_and(|current| current.0 == state.override_handle)
+            && material.is_some_and(is_valid_white_paper_material)
+        {
+            evidence.valid_white_override_count += 1;
+        }
+    }
+    evidence
+}
+
+fn is_valid_white_paper_material(material: &StandardMaterial) -> bool {
+    let color = material.base_color.to_srgba();
+    material.unlit
+        && color.red >= 0.999
+        && color.green >= 0.999
+        && color.blue >= 0.999
+        && color.alpha >= 0.999
+        && material.base_color_texture.is_none()
+}
+
 // ─── Camera render setup ─────────────────────────────────────────────────────
 
 fn setup_render_pipeline_once(
@@ -1778,6 +1827,38 @@ mod tests {
         assert_eq!(
             active_surface_material_mode(&settings),
             Some(SurfaceMaterialMode::PaperFill)
+        );
+    }
+
+    #[test]
+    fn drafting_surface_evidence_requires_the_live_white_override() {
+        let mut app = App::new();
+        app.insert_resource(RenderSettings {
+            paper_fill_enabled: true,
+            ..RenderSettings::default()
+        })
+        .insert_resource(Assets::<StandardMaterial>::default())
+        .init_resource::<SurfaceMaterialOverrideCache>()
+        .add_systems(Update, sync_surface_display_materials);
+        let source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        app.world_mut().spawn((
+            ElementId(1),
+            Mesh3d(Handle::default()),
+            MeshMaterial3d(source),
+        ));
+
+        app.update();
+
+        assert_eq!(
+            drafting_surface_evidence(app.world()),
+            DraftingSurfaceEvidence {
+                renderable_count: 1,
+                paper_override_count: 1,
+                valid_white_override_count: 1,
+            }
         );
     }
 

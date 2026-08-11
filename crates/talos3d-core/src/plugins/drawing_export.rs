@@ -583,11 +583,17 @@ fn queue_offscreen_viewport_screenshot(
     let size = offscreen_screenshot_size(viewport_capture);
     let (camera, transform, projection) = active_orbit_camera_snapshot(world)?;
     let render_target = create_offscreen_render_target(world, size)?;
+    let clear_color = world
+        .get_resource::<ClearColor>()
+        .map_or(Color::BLACK, |clear_color| clear_color.0);
 
     let mut camera = camera;
     camera.viewport = None;
     camera.order = camera.order.saturating_sub(100);
-    camera.clear_color = ClearColorConfig::Custom(Color::srgb(0.78, 0.80, 0.72));
+    // The export camera is another presentation of the active viewport, not a
+    // second styling authority. In particular, Drafting's white paper surface
+    // must survive screenshot/PDF proof capture unchanged.
+    camera.clear_color = ClearColorConfig::Custom(clear_color);
 
     let camera_entity = world
         .spawn((

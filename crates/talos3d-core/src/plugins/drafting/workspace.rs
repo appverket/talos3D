@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 use crate::plugins::{
     camera::{apply_orbit_state, CameraControlsState, CameraProjectionMode, OrbitCamera},
     command_registry::CommandResult,
+    compass::CompassSettings,
     drafting_sheet::DrawingSceneLiveCache,
-    render_pipeline::{apply_drafting_render_preset, RenderSettings},
+    render_pipeline::{apply_drafting_render_preset, drafting_surface_evidence, RenderSettings},
     ui::StatusBarData,
 };
 
@@ -60,6 +61,7 @@ struct DraftingWorkspaceBaseline {
     camera_controls: CameraControlsState,
     orbit: Option<OrbitCameraBaseline>,
     annotation_visibility: DraftingVisibility,
+    compass_enabled: Option<bool>,
 }
 
 /// The single authority for whether the main viewport is in Drafting.
@@ -124,15 +126,23 @@ fn workspace_result(world: &World, active: bool) -> CommandResult {
             "dirty": cache.is_dirty(),
             "source_model_revision": stats.source_model_revision,
             "rebuild_count": stats.rebuild_count,
+            "invalidation_count": stats.invalidation_count,
+            "last_invalidation_reasons": cache.last_invalidation_reasons(),
             "last_rebuild_micros": stats.last_rebuild_micros,
             "line_count": stats.last_line_count
         })
     });
+    let surface_evidence = drafting_surface_evidence(world);
     CommandResult {
         output: Some(json!({
             "active": active,
             "projection": if active { "orthographic" } else { "restored" },
             "surface": if active { "black_on_white" } else { "restored" },
+            "surface_evidence": {
+                "renderable_count": surface_evidence.renderable_count,
+                "paper_override_count": surface_evidence.paper_override_count,
+                "valid_white_override_count": surface_evidence.valid_white_override_count,
+            },
             "drawing_scene": drawing_scene
         })),
         ..CommandResult::default()
@@ -156,6 +166,9 @@ fn enter_drafting(world: &mut World) -> Result<(), String> {
         let mut query = world.query::<&OrbitCamera>();
         query.iter(world).next().map(OrbitCameraBaseline::from)
     };
+    let compass_enabled = world
+        .get_resource::<CompassSettings>()
+        .map(|settings| settings.enabled);
 
     let mut state = world
         .get_resource_mut::<DraftingWorkspaceState>()
@@ -168,6 +181,7 @@ fn enter_drafting(world: &mut World) -> Result<(), String> {
         camera_controls,
         orbit,
         annotation_visibility,
+        compass_enabled,
     });
 
     apply_active_invariants(world);
@@ -204,6 +218,12 @@ fn exit_drafting(world: &mut World) -> Result<(), String> {
         .get_resource_mut::<DraftingVisibility>()
         .ok_or_else(|| "Drafting annotation visibility is unavailable".to_string())? =
         baseline.annotation_visibility;
+    if let (Some(enabled), Some(mut compass)) = (
+        baseline.compass_enabled,
+        world.get_resource_mut::<CompassSettings>(),
+    ) {
+        compass.enabled = enabled;
+    }
 
     if let Some(orbit_baseline) = baseline.orbit {
         let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
@@ -226,6 +246,9 @@ fn apply_active_invariants(world: &mut World) {
     if let Some(mut visibility) = world.get_resource_mut::<DraftingVisibility>() {
         visibility.show_all = true;
     }
+    if let Some(mut compass) = world.get_resource_mut::<CompassSettings>() {
+        compass.enabled = false;
+    }
 }
 
 /// Reasserts invariants if another presentation control is changed while the
@@ -235,18 +258,32 @@ pub(crate) fn enforce_drafting_workspace_invariants(
     render: Option<ResMut<RenderSettings>>,
     camera: Option<ResMut<CameraControlsState>>,
     visibility: Option<ResMut<DraftingVisibility>>,
+    compass: Option<ResMut<CompassSettings>>,
 ) {
     if !state.is_active() {
         return;
     }
     if let Some(mut render) = render {
-        apply_drafting_render_preset(&mut render);
+        let mut desired = render.clone();
+        apply_drafting_render_preset(&mut desired);
+        if *render != desired {
+            *render = desired;
+        }
     }
     if let Some(mut camera) = camera {
-        camera.projection_mode = CameraProjectionMode::Isometric;
+        if camera.projection_mode != CameraProjectionMode::Isometric {
+            camera.projection_mode = CameraProjectionMode::Isometric;
+        }
     }
     if let Some(mut visibility) = visibility {
-        visibility.show_all = true;
+        if !visibility.show_all {
+            visibility.show_all = true;
+        }
+    }
+    if let Some(mut compass) = compass {
+        if compass.enabled {
+            compass.enabled = false;
+        }
     }
 }
 
@@ -266,6 +303,7 @@ mod tests {
         app.init_resource::<DraftingWorkspaceState>()
             .init_resource::<DraftingVisibility>()
             .init_resource::<DrawingSceneLiveCache>()
+            .init_resource::<CompassSettings>()
             .insert_resource(CameraControlsState::default())
             .insert_resource(RenderSettings {
                 background_rgb: [0.2, 0.3, 0.4],
@@ -305,6 +343,7 @@ mod tests {
             CameraProjectionMode::Isometric
         );
         assert!(app.world().resource::<DraftingVisibility>().show_all);
+        assert!(!app.world().resource::<CompassSettings>().enabled);
 
         {
             let mut query = app.world_mut().query::<&mut OrbitCamera>();
@@ -329,6 +368,7 @@ mod tests {
             CameraProjectionMode::Perspective
         );
         assert!(!app.world().resource::<DraftingVisibility>().show_all);
+        assert!(app.world().resource::<CompassSettings>().enabled);
         let mut query = app.world_mut().query::<&OrbitCamera>();
         let orbit = query.single(app.world()).expect("restored orbit camera");
         assert_eq!(orbit.focus, Vec3::ZERO);

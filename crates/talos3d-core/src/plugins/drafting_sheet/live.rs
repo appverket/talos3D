@@ -6,10 +6,13 @@
 //! through Bevy's batched gizmo renderer. Idle frames never inspect meshes or
 //! reclassify edges.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use bevy::{
-    asset::AssetEvent,
+    asset::{AssetEvent, AssetId},
     gizmos::config::{GizmoConfigGroup, GizmoConfigStore},
     prelude::*,
     transform::TransformSystems,
@@ -27,6 +30,7 @@ use crate::{
         },
         identity::ElementId,
         materials::{MaterialAssignment, MaterialRegistry},
+        registry_generation::RegistryGeneration,
     },
 };
 
@@ -38,6 +42,24 @@ use super::{
 /// Full-scene rebuilds are coalesced during continuous camera/model gestures.
 /// This is a hard upper bound, not a target frame rate for CPU projection.
 const MIN_REBUILD_INTERVAL: Duration = Duration::from_millis(33);
+const INVALIDATE_WORKSPACE: u32 = 1 << 0;
+const INVALIDATE_DRAFTING_VISIBILITY: u32 = 1 << 1;
+const INVALIDATE_DIMENSION_VISIBILITY: u32 = 1 << 2;
+const INVALIDATE_STYLES: u32 = 1 << 3;
+const INVALIDATE_MATERIALS: u32 = 1 << 4;
+const INVALIDATE_MATERIAL_SPECS: u32 = 1 << 5;
+const INVALIDATE_CAMERA_TRANSFORM: u32 = 1 << 6;
+const INVALIDATE_CAMERA_PROJECTION: u32 = 1 << 7;
+const INVALIDATE_MESH_ADDED: u32 = 1 << 8;
+const INVALIDATE_MESH_HANDLE: u32 = 1 << 9;
+const INVALIDATE_MESH_TRANSFORM: u32 = 1 << 10;
+const INVALIDATE_MESH_VISIBILITY: u32 = 1 << 11;
+const INVALIDATE_MESH_IDENTITY: u32 = 1 << 12;
+const INVALIDATE_MESH_MATERIAL: u32 = 1 << 13;
+const INVALIDATE_ANNOTATION: u32 = 1 << 14;
+const INVALIDATE_CLIP: u32 = 1 << 15;
+const INVALIDATE_REMOVAL: u32 = 1 << 16;
+const INVALIDATE_MESH_ASSET: u32 = 1 << 17;
 
 /// Dedicated live line group. Bevy collects calls into one GPU submission and
 /// the negative depth bias keeps exact black drafting linework above surfaces.
@@ -54,6 +76,7 @@ struct DrawingSceneWorldLineBatch {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DrawingSceneLiveStats {
     pub rebuild_count: u64,
+    pub invalidation_count: u64,
     pub last_rebuild_micros: u64,
     pub last_line_count: usize,
     pub source_model_revision: u64,
@@ -65,6 +88,9 @@ pub struct DrawingSceneLiveCache {
     scene: Option<DrawingScene>,
     world_lines: Option<DrawingSceneWorldLineBatch>,
     dirty: bool,
+    last_invalidation_mask: u32,
+    observed_material_generation: Option<RegistryGeneration>,
+    observed_mesh_handles: HashMap<Entity, AssetId<Mesh>>,
     last_rebuild_at: Option<Instant>,
     stats: DrawingSceneLiveStats,
 }
@@ -75,6 +101,9 @@ impl Default for DrawingSceneLiveCache {
             scene: None,
             world_lines: None,
             dirty: true,
+            last_invalidation_mask: 0,
+            observed_material_generation: None,
+            observed_mesh_handles: HashMap::new(),
             last_rebuild_at: None,
             stats: DrawingSceneLiveStats::default(),
         }
@@ -92,8 +121,37 @@ impl DrawingSceneLiveCache {
         self.dirty
     }
 
-    fn invalidate(&mut self) {
+    #[must_use]
+    pub fn last_invalidation_reasons(&self) -> Vec<&'static str> {
+        [
+            (INVALIDATE_WORKSPACE, "workspace"),
+            (INVALIDATE_DRAFTING_VISIBILITY, "drafting_visibility"),
+            (INVALIDATE_DIMENSION_VISIBILITY, "dimension_visibility"),
+            (INVALIDATE_STYLES, "dimension_styles"),
+            (INVALIDATE_MATERIALS, "materials"),
+            (INVALIDATE_MATERIAL_SPECS, "material_specs"),
+            (INVALIDATE_CAMERA_TRANSFORM, "camera_transform"),
+            (INVALIDATE_CAMERA_PROJECTION, "camera_projection"),
+            (INVALIDATE_MESH_ADDED, "mesh_added"),
+            (INVALIDATE_MESH_HANDLE, "mesh_handle"),
+            (INVALIDATE_MESH_TRANSFORM, "mesh_transform"),
+            (INVALIDATE_MESH_VISIBILITY, "mesh_visibility"),
+            (INVALIDATE_MESH_IDENTITY, "mesh_identity"),
+            (INVALIDATE_MESH_MATERIAL, "mesh_material"),
+            (INVALIDATE_ANNOTATION, "annotation"),
+            (INVALIDATE_CLIP, "clip"),
+            (INVALIDATE_REMOVAL, "removal"),
+            (INVALIDATE_MESH_ASSET, "mesh_asset"),
+        ]
+        .into_iter()
+        .filter_map(|(flag, label)| (self.last_invalidation_mask & flag != 0).then_some(label))
+        .collect()
+    }
+
+    fn invalidate(&mut self, reasons: u32) {
         self.dirty = true;
+        self.last_invalidation_mask = reasons;
+        self.stats.invalidation_count = self.stats.invalidation_count.saturating_add(1);
     }
 
     fn clear(&mut self) {
@@ -101,6 +159,9 @@ impl DrawingSceneLiveCache {
         self.world_lines = None;
         self.dirty = true;
         self.last_rebuild_at = None;
+        self.last_invalidation_mask = 0;
+        self.observed_material_generation = None;
+        self.observed_mesh_handles.clear();
         self.stats.last_line_count = 0;
         self.stats.source_model_revision = 0;
     }
@@ -110,6 +171,12 @@ impl DrawingSceneLiveCache {
             && self
                 .last_rebuild_at
                 .is_none_or(|last| now.duration_since(last) >= MIN_REBUILD_INTERVAL)
+    }
+
+    fn observe_mesh_handle(&mut self, entity: Entity, handle: AssetId<Mesh>) -> bool {
+        self.observed_mesh_handles
+            .insert(entity, handle)
+            .is_none_or(|previous| previous != handle)
     }
 
     fn record_rebuild(
@@ -165,27 +232,16 @@ fn invalidate_live_drawing_scene(
     styles: Option<Res<DimensionStyleRegistry>>,
     materials: Option<Res<MaterialRegistry>>,
     material_specs: Option<Res<MaterialSpecRegistry>>,
-    camera_changes: Query<
-        (),
-        (
-            With<OrbitCamera>,
-            Or<(Changed<GlobalTransform>, Changed<Projection>)>,
-        ),
-    >,
-    mesh_changes: Query<
-        (),
-        (
-            With<ElementId>,
-            Or<(
-                Added<Mesh3d>,
-                Changed<Mesh3d>,
-                Changed<GlobalTransform>,
-                Changed<Visibility>,
-                Changed<ElementId>,
-                Changed<MaterialAssignment>,
-            )>,
-        ),
-    >,
+    mut scene_changes: ParamSet<(
+        Query<(), (With<OrbitCamera>, Changed<GlobalTransform>)>,
+        Query<(), (With<OrbitCamera>, Changed<Projection>)>,
+        Query<(), (With<ElementId>, Added<Mesh3d>)>,
+        Query<(Entity, &Mesh3d), (With<ElementId>, Changed<Mesh3d>)>,
+        Query<(), (With<ElementId>, Changed<GlobalTransform>)>,
+        Query<(), (With<ElementId>, Changed<Visibility>)>,
+        Query<(), (With<Mesh3d>, Changed<ElementId>)>,
+        Query<(), (With<ElementId>, Changed<MaterialAssignment>)>,
+    )>,
     annotation_changes: Query<
         (),
         Or<(
@@ -205,26 +261,51 @@ fn invalidate_live_drawing_scene(
 ) {
     let active = workspace.as_ref().is_some_and(|state| state.is_active());
     let workspace_changed = workspace.as_ref().is_some_and(|state| state.is_changed());
-    let resource_changed = drafting_visibility
+    let drafting_visibility_changed = drafting_visibility
         .as_ref()
-        .is_some_and(|value| value.is_changed())
-        || dimension_visibility
-            .as_ref()
-            .is_some_and(|value| value.is_changed())
-        || styles.as_ref().is_some_and(|value| value.is_changed())
-        || materials.as_ref().is_some_and(|value| value.is_changed())
-        || material_specs
-            .as_ref()
-            .is_some_and(|value| value.is_changed());
-    let component_changed = !camera_changes.is_empty()
-        || !mesh_changes.is_empty()
-        || !annotation_changes.is_empty()
-        || !clip_changes.is_empty();
-    let removed = removed_meshes.read().next().is_some()
-        || removed_annotations.read().next().is_some()
-        || removed_legacy_dimensions.read().next().is_some()
-        || removed_clip_planes.read().next().is_some();
-    let mesh_asset_changed = mesh_events.read().next().is_some();
+        .is_some_and(|value| value.is_changed());
+    let dimension_visibility_changed = dimension_visibility
+        .as_ref()
+        .is_some_and(|value| value.is_changed());
+    let styles_changed = styles.as_ref().is_some_and(|value| value.is_changed());
+    // MaterialRegistry already exposes a process-unique semantic generation.
+    // Use it instead of Bevy's coarse resource change tick: UI systems may
+    // borrow the registry mutably without changing its contents.
+    let material_generation = materials.as_ref().map(|value| value.generation());
+    let materials_changed = material_generation != cache.observed_material_generation;
+    cache.observed_material_generation = material_generation;
+    let material_specs_changed = material_specs
+        .as_ref()
+        .is_some_and(|value| value.is_changed());
+    let camera_transform_changed = !scene_changes.p0().is_empty();
+    let camera_projection_changed = !scene_changes.p1().is_empty();
+    let mesh_added = !scene_changes.p2().is_empty();
+    // Bevy intentionally marks Mesh3d changed when the referenced mesh asset or
+    // render material changes, even though the handle itself is identical.
+    // DrawingScene already observes semantic mesh/material inputs separately,
+    // so only a real handle identity change belongs on this invalidation path.
+    let mesh_handle_changed = scene_changes
+        .p3()
+        .iter()
+        .any(|(entity, mesh)| cache.observe_mesh_handle(entity, mesh.id()));
+    let mesh_transform_changed = !scene_changes.p4().is_empty();
+    let mesh_visibility_changed = !scene_changes.p5().is_empty();
+    let mesh_identity_changed = !scene_changes.p6().is_empty();
+    let mesh_material_changed = !scene_changes.p7().is_empty();
+    let annotation_changed = !annotation_changes.is_empty();
+    let clip_changed = !clip_changes.is_empty();
+    let removed_mesh_entities: Vec<Entity> = removed_meshes.read().collect();
+    for entity in &removed_mesh_entities {
+        cache.observed_mesh_handles.remove(entity);
+    }
+    let removed_annotations = removed_annotations.read().count() > 0;
+    let removed_legacy_dimensions = removed_legacy_dimensions.read().count() > 0;
+    let removed_clip_planes = removed_clip_planes.read().count() > 0;
+    let removed = !removed_mesh_entities.is_empty()
+        || removed_annotations
+        || removed_legacy_dimensions
+        || removed_clip_planes;
+    let mesh_asset_changed = mesh_events.read().count() > 0;
 
     if !active {
         if cache.scene.is_some() || !cache.dirty {
@@ -232,8 +313,63 @@ fn invalidate_live_drawing_scene(
         }
         return;
     }
-    if workspace_changed || resource_changed || component_changed || removed || mesh_asset_changed {
-        cache.invalidate();
+    let mut reasons = 0;
+    if workspace_changed {
+        reasons |= INVALIDATE_WORKSPACE;
+    }
+    if drafting_visibility_changed {
+        reasons |= INVALIDATE_DRAFTING_VISIBILITY;
+    }
+    if dimension_visibility_changed {
+        reasons |= INVALIDATE_DIMENSION_VISIBILITY;
+    }
+    if styles_changed {
+        reasons |= INVALIDATE_STYLES;
+    }
+    if materials_changed {
+        reasons |= INVALIDATE_MATERIALS;
+    }
+    if material_specs_changed {
+        reasons |= INVALIDATE_MATERIAL_SPECS;
+    }
+    if camera_transform_changed {
+        reasons |= INVALIDATE_CAMERA_TRANSFORM;
+    }
+    if camera_projection_changed {
+        reasons |= INVALIDATE_CAMERA_PROJECTION;
+    }
+    if mesh_added {
+        reasons |= INVALIDATE_MESH_ADDED;
+    }
+    if mesh_handle_changed {
+        reasons |= INVALIDATE_MESH_HANDLE;
+    }
+    if mesh_transform_changed {
+        reasons |= INVALIDATE_MESH_TRANSFORM;
+    }
+    if mesh_visibility_changed {
+        reasons |= INVALIDATE_MESH_VISIBILITY;
+    }
+    if mesh_identity_changed {
+        reasons |= INVALIDATE_MESH_IDENTITY;
+    }
+    if mesh_material_changed {
+        reasons |= INVALIDATE_MESH_MATERIAL;
+    }
+    if annotation_changed {
+        reasons |= INVALIDATE_ANNOTATION;
+    }
+    if clip_changed {
+        reasons |= INVALIDATE_CLIP;
+    }
+    if removed {
+        reasons |= INVALIDATE_REMOVAL;
+    }
+    if mesh_asset_changed {
+        reasons |= INVALIDATE_MESH_ASSET;
+    }
+    if reasons != 0 {
+        cache.invalidate(reasons);
     }
 }
 
@@ -318,9 +454,21 @@ mod tests {
         assert!(cache.rebuild_due(now));
         cache.record_rebuild(None, None, Duration::from_micros(50), now);
         assert!(!cache.rebuild_due(now + MIN_REBUILD_INTERVAL));
-        cache.invalidate();
+        cache.invalidate(INVALIDATE_CAMERA_TRANSFORM);
         assert!(!cache.rebuild_due(now + MIN_REBUILD_INTERVAL / 2));
         assert!(cache.rebuild_due(now + MIN_REBUILD_INTERVAL));
+    }
+
+    #[test]
+    fn renderer_change_ticks_do_not_masquerade_as_handle_changes() {
+        let mut cache = DrawingSceneLiveCache::default();
+        let entity = Entity::from_bits(7);
+        let first = Handle::<Mesh>::default().id();
+        let second = AssetId::<Mesh>::invalid();
+
+        assert!(cache.observe_mesh_handle(entity, first));
+        assert!(!cache.observe_mesh_handle(entity, first));
+        assert!(cache.observe_mesh_handle(entity, second));
     }
 
     #[test]
