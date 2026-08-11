@@ -14,8 +14,10 @@ use std::{
 use bevy::{
     asset::{AssetEvent, AssetId},
     gizmos::config::{GizmoConfigGroup, GizmoConfigStore},
+    math::Rot2,
     prelude::*,
     transform::TransformSystems,
+    window::PrimaryWindow,
 };
 
 use crate::{
@@ -23,10 +25,11 @@ use crate::{
     plugins::{
         camera::OrbitCamera,
         clipping_planes::ClipPlaneNode,
+        cursor::ViewportUiInset,
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         drafting::{
-            DimensionAnnotationNode, DimensionStyleRegistry, DraftNode, DraftingVisibility,
-            DraftingWorkspaceState,
+            DimensionAnnotationNode, DimensionStyleRegistry, DraftNode, DraftPrimitiveNode,
+            DraftingVisibility, DraftingWorkspaceState,
         },
         identity::ElementId,
         materials::{MaterialAssignment, MaterialRegistry},
@@ -61,6 +64,7 @@ const INVALIDATE_CLIP: u32 = 1 << 15;
 const INVALIDATE_REMOVAL: u32 = 1 << 16;
 const INVALIDATE_MESH_ASSET: u32 = 1 << 17;
 const INVALIDATE_DRAFT: u32 = 1 << 18;
+const INVALIDATE_VIEWPORT: u32 = 1 << 19;
 
 /// Dedicated live line group. Bevy collects calls into one GPU submission and
 /// the negative depth bias keeps exact black drafting linework above surfaces.
@@ -73,6 +77,22 @@ struct DrawingSceneWorldLineBatch {
     spans: Vec<DrawingSceneLineSpan>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct DrawingSceneViewportText {
+    position_px: Vec2,
+    content: String,
+    font_size_px: f32,
+    rotation_rad: f32,
+}
+
+/// Transient Bevy-native presentation of DrawingScene text. Authored text
+/// remains owned by DraftPrimitiveNode and the canonical DrawingScene.
+#[derive(Component)]
+struct DrawingSceneLiveText;
+
+#[derive(Component)]
+struct DrawingSceneLiveTextRoot;
+
 /// Inspectable evidence that the live backend is invalidation-bounded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DrawingSceneLiveStats {
@@ -80,6 +100,7 @@ pub struct DrawingSceneLiveStats {
     pub invalidation_count: u64,
     pub last_rebuild_micros: u64,
     pub last_line_count: usize,
+    pub last_text_count: usize,
     pub source_model_revision: u64,
 }
 
@@ -88,6 +109,8 @@ pub struct DrawingSceneLiveStats {
 pub struct DrawingSceneLiveCache {
     scene: Option<DrawingScene>,
     world_lines: Option<DrawingSceneWorldLineBatch>,
+    text_root: Option<Entity>,
+    text_entities: Vec<Entity>,
     dirty: bool,
     last_invalidation_mask: u32,
     observed_material_generation: Option<RegistryGeneration>,
@@ -101,6 +124,8 @@ impl Default for DrawingSceneLiveCache {
         Self {
             scene: None,
             world_lines: None,
+            text_root: None,
+            text_entities: Vec::new(),
             dirty: true,
             last_invalidation_mask: 0,
             observed_material_generation: None,
@@ -144,6 +169,7 @@ impl DrawingSceneLiveCache {
             (INVALIDATE_REMOVAL, "removal"),
             (INVALIDATE_MESH_ASSET, "mesh_asset"),
             (INVALIDATE_DRAFT, "draft"),
+            (INVALIDATE_VIEWPORT, "viewport"),
         ]
         .into_iter()
         .filter_map(|(flag, label)| (self.last_invalidation_mask & flag != 0).then_some(label))
@@ -165,6 +191,7 @@ impl DrawingSceneLiveCache {
         self.observed_material_generation = None;
         self.observed_mesh_handles.clear();
         self.stats.last_line_count = 0;
+        self.stats.last_text_count = 0;
         self.stats.source_model_revision = 0;
     }
 
@@ -185,12 +212,14 @@ impl DrawingSceneLiveCache {
         &mut self,
         scene: Option<DrawingScene>,
         world_lines: Option<DrawingSceneWorldLineBatch>,
+        text_count: usize,
         elapsed: Duration,
         now: Instant,
     ) {
         self.stats.rebuild_count = self.stats.rebuild_count.saturating_add(1);
         self.stats.last_rebuild_micros = elapsed.as_micros().min(u64::MAX as u128) as u64;
         self.stats.last_line_count = world_lines.as_ref().map_or(0, |batch| batch.spans.len());
+        self.stats.last_text_count = text_count;
         self.stats.source_model_revision = scene
             .as_ref()
             .map_or(0, |scene| scene.source_model_revision);
@@ -252,14 +281,18 @@ fn invalidate_live_drawing_scene(
                 Changed<DimensionAnnotationNode>,
                 Added<DimensionLineNode>,
                 Changed<DimensionLineNode>,
+                Added<DraftPrimitiveNode>,
+                Changed<DraftPrimitiveNode>,
             )>,
         >,
         Query<(), Or<(Added<ClipPlaneNode>, Changed<ClipPlaneNode>)>>,
         Query<(), Or<(Added<DraftNode>, Changed<DraftNode>)>>,
+        Option<Res<ViewportUiInset>>,
     )>,
     mut removed_meshes: RemovedComponents<Mesh3d>,
     mut removed_annotations: RemovedComponents<DimensionAnnotationNode>,
     mut removed_legacy_dimensions: RemovedComponents<DimensionLineNode>,
+    mut removed_draft_primitives: RemovedComponents<DraftPrimitiveNode>,
     mut removed_clip_planes: RemovedComponents<ClipPlaneNode>,
     mut removed_drafts: RemovedComponents<DraftNode>,
     mut mesh_events: MessageReader<AssetEvent<Mesh>>,
@@ -301,17 +334,23 @@ fn invalidate_live_drawing_scene(
     let annotation_changed = !semantic_changes.p0().is_empty();
     let clip_changed = !semantic_changes.p1().is_empty();
     let draft_changed = !semantic_changes.p2().is_empty();
+    let viewport_changed = semantic_changes
+        .p3()
+        .as_ref()
+        .is_some_and(|value| value.is_changed());
     let removed_mesh_entities: Vec<Entity> = removed_meshes.read().collect();
     for entity in &removed_mesh_entities {
         cache.observed_mesh_handles.remove(entity);
     }
     let removed_annotations = removed_annotations.read().count() > 0;
     let removed_legacy_dimensions = removed_legacy_dimensions.read().count() > 0;
+    let removed_draft_primitives = removed_draft_primitives.read().count() > 0;
     let removed_clip_planes = removed_clip_planes.read().count() > 0;
     let removed_drafts = removed_drafts.read().count() > 0;
     let removed = !removed_mesh_entities.is_empty()
         || removed_annotations
         || removed_legacy_dimensions
+        || removed_draft_primitives
         || removed_clip_planes
         || removed_drafts;
     let mesh_asset_changed = mesh_events.read().count() > 0;
@@ -380,6 +419,9 @@ fn invalidate_live_drawing_scene(
     if draft_changed || removed_drafts {
         reasons |= INVALIDATE_DRAFT;
     }
+    if viewport_changed {
+        reasons |= INVALIDATE_VIEWPORT;
+    }
     if reasons != 0 {
         cache.invalidate(reasons);
     }
@@ -390,6 +432,7 @@ fn rebuild_live_drawing_scene(world: &mut World) {
         .get_resource::<DraftingWorkspaceState>()
         .is_some_and(DraftingWorkspaceState::is_active);
     if !active {
+        clear_live_text_entities(world);
         return;
     }
 
@@ -412,11 +455,170 @@ fn rebuild_live_drawing_scene(world: &mut World) {
     let scene = sheet_view_from_active_camera(world, scale, margin)
         .and_then(|view| build_drawing_scene(world, &view));
     let world_lines = scene.as_ref().and_then(scene_world_line_batch);
+    let text_count = sync_live_text_entities(world, scene.as_ref());
     let elapsed = started.elapsed();
 
     if let Some(mut cache) = world.get_resource_mut::<DrawingSceneLiveCache>() {
-        cache.record_rebuild(scene, world_lines, elapsed, now);
+        cache.record_rebuild(scene, world_lines, text_count, elapsed, now);
     }
+}
+
+fn clear_live_text_entities(world: &mut World) {
+    let (root, entities) = {
+        let Some(mut cache) = world.get_resource_mut::<DrawingSceneLiveCache>() else {
+            return;
+        };
+        (
+            cache.text_root.take(),
+            std::mem::take(&mut cache.text_entities),
+        )
+    };
+    for entity in entities {
+        let _ = world.despawn(entity);
+    }
+    if let Some(root) = root {
+        let _ = world.despawn(root);
+    }
+}
+
+/// Adapt DrawingScene text into a pooled Bevy UI presentation only when the
+/// canonical scene is rebuilt. Idle frames perform no text traversal or entity
+/// churn, and this adapter owns no authoring semantics.
+fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> usize {
+    let Some(scene) = scene else {
+        clear_live_text_entities(world);
+        return 0;
+    };
+    let Some((viewport_origin, viewport_size)) = live_viewport_rect(world) else {
+        clear_live_text_entities(world);
+        return 0;
+    };
+    let specs = scene_viewport_texts(scene, viewport_size);
+
+    let (existing_root, mut existing_entities) = {
+        let mut cache = world.resource_mut::<DrawingSceneLiveCache>();
+        (
+            cache.text_root.take(),
+            std::mem::take(&mut cache.text_entities),
+        )
+    };
+    let root = existing_root
+        .filter(|entity| world.get_entity(*entity).is_ok())
+        .unwrap_or_else(|| {
+            world
+                .spawn((
+                    DrawingSceneLiveTextRoot,
+                    Pickable::IGNORE,
+                    GlobalZIndex(i32::MAX - 32),
+                ))
+                .id()
+        });
+    world.entity_mut(root).insert(Node {
+        position_type: PositionType::Absolute,
+        left: px(viewport_origin.x),
+        top: px(viewport_origin.y),
+        width: px(viewport_size.x),
+        height: px(viewport_size.y),
+        overflow: Overflow::clip(),
+        ..default()
+    });
+
+    let mut next_entities = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let entity = existing_entities
+            .pop()
+            .filter(|entity| world.get_entity(*entity).is_ok())
+            .unwrap_or_else(|| world.spawn_empty().id());
+        world.entity_mut(entity).insert((
+            DrawingSceneLiveText,
+            Text::new(spec.content),
+            TextFont {
+                font_size: FontSize::Px(spec.font_size_px),
+                ..default()
+            },
+            TextColor(Color::BLACK),
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(spec.position_px.x),
+                top: px(spec.position_px.y),
+                ..default()
+            },
+            UiTransform {
+                translation: Val2::new(percent(-50.0), percent(-50.0)),
+                rotation: Rot2::radians(-spec.rotation_rad),
+                ..default()
+            },
+            Pickable::IGNORE,
+            ChildOf(root),
+        ));
+        next_entities.push(entity);
+    }
+    for entity in existing_entities {
+        let _ = world.despawn(entity);
+    }
+    let count = next_entities.len();
+    let mut cache = world.resource_mut::<DrawingSceneLiveCache>();
+    cache.text_root = Some(root);
+    cache.text_entities = next_entities;
+    count
+}
+
+fn live_viewport_rect(world: &mut World) -> Option<(Vec2, Vec2)> {
+    let inset = world
+        .get_resource::<ViewportUiInset>()
+        .map(|inset| Vec4::new(inset.left, inset.top, inset.right, inset.bottom))
+        .unwrap_or(Vec4::ZERO);
+    let mut windows = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
+    let window = windows.single(world).ok()?;
+    let origin = Vec2::new(inset.x, inset.y);
+    let size = Vec2::new(
+        window.width() - inset.x - inset.z,
+        window.height() - inset.y - inset.w,
+    );
+    (size.cmpgt(Vec2::ZERO).all()).then_some((origin, size))
+}
+
+fn scene_viewport_texts(
+    scene: &DrawingScene,
+    viewport_size: Vec2,
+) -> Vec<DrawingSceneViewportText> {
+    let paper_height = scene.view.frustum_height_mm();
+    if !paper_height.is_finite() || paper_height <= 0.0 {
+        return Vec::new();
+    }
+    scene
+        .annotations
+        .iter()
+        .flat_map(|annotation| annotation.primitives.iter())
+        .filter_map(|primitive| {
+            let crate::plugins::drafting::DimPrimitive::Text {
+                anchor,
+                content,
+                height_mm,
+                rotation_rad,
+                ..
+            } = primitive
+            else {
+                return None;
+            };
+            if !anchor.is_finite()
+                || !height_mm.is_finite()
+                || *height_mm <= 0.0
+                || !rotation_rad.is_finite()
+            {
+                return None;
+            }
+            Some(DrawingSceneViewportText {
+                position_px: Vec2::new(
+                    anchor.x * viewport_size.x,
+                    (1.0 - anchor.y) * viewport_size.y,
+                ),
+                content: content.clone(),
+                font_size_px: (*height_mm / paper_height * viewport_size.y).max(1.0),
+                rotation_rad: *rotation_rad,
+            })
+        })
+        .collect()
 }
 
 fn scene_world_line_batch(scene: &DrawingScene) -> Option<DrawingSceneWorldLineBatch> {
@@ -462,8 +664,12 @@ fn draw_live_drawing_scene(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::drafting_sheet::{
-        DrawingPrimitiveId, DrawingPrimitiveRole, DrawingSceneLine, SheetStroke, SheetView,
+    use crate::plugins::{
+        drafting::{DimPrimitive, TextAnchor},
+        drafting_sheet::{
+            DrawingPrimitiveId, DrawingPrimitiveRole, DrawingSceneAnnotation, DrawingSceneLine,
+            SheetStroke, SheetView,
+        },
     };
 
     #[test]
@@ -471,7 +677,7 @@ mod tests {
         let now = Instant::now();
         let mut cache = DrawingSceneLiveCache::default();
         assert!(cache.rebuild_due(now));
-        cache.record_rebuild(None, None, Duration::from_micros(50), now);
+        cache.record_rebuild(None, None, 0, Duration::from_micros(50), now);
         assert!(!cache.rebuild_due(now + MIN_REBUILD_INTERVAL));
         cache.invalidate(INVALIDATE_CAMERA_TRANSFORM);
         assert!(!cache.rebuild_due(now + MIN_REBUILD_INTERVAL / 2));
@@ -520,5 +726,44 @@ mod tests {
         assert_eq!(batch.spans[0].id, id);
         assert!((batch.vertices[0] - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5);
         assert!((batch.vertices[1] - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn live_text_adapter_maps_canonical_scene_without_reauthoring() {
+        let view = SheetView {
+            eye: Vec3::new(0.0, 0.0, 10.0),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            ortho_height_m: 2.0,
+            aspect: 2.0,
+            scale_denominator: 50.0,
+            margin_mm: 0.0,
+        };
+        let owner = ElementId(10);
+        let mut scene = DrawingScene::new(view);
+        scene.annotations.push(DrawingSceneAnnotation {
+            id: DrawingPrimitiveId {
+                owner,
+                role: DrawingPrimitiveRole::Annotation,
+                ordinal: 0,
+            },
+            owner,
+            primitives: vec![DimPrimitive::Text {
+                anchor: Vec2::new(0.25, 0.75),
+                content: "Shared DrawingScene".to_string(),
+                height_mm: 2.5,
+                rotation_rad: 0.2,
+                anchor_mode: TextAnchor::CenterBaseline,
+                font_family: "sans-serif".to_string(),
+                color_hex: "000000".to_string(),
+            }],
+        });
+
+        let texts = scene_viewport_texts(&scene, Vec2::new(1000.0, 800.0));
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].content, "Shared DrawingScene");
+        assert_eq!(texts[0].position_px, Vec2::new(250.0, 200.0));
+        assert!((texts[0].font_size_px - 50.0).abs() < 1e-5);
+        assert!((texts[0].rotation_rad - 0.2).abs() < 1e-5);
     }
 }
