@@ -26,17 +26,20 @@ pub mod export_dxf;
 pub mod export_pdf;
 pub mod export_png;
 pub mod export_svg;
+pub mod live;
 pub mod preview;
 pub mod scene;
 pub mod sheet;
 
 pub use capture::{
-    build_drawing_scene, capture_sheet, sheet_paper_to_world, sheet_view_from_active_camera,
+    build_drawing_scene, capture_sheet, drawing_normalized_to_world, sheet_paper_to_world,
+    sheet_view_from_active_camera,
 };
 pub use export_dxf::sheet_to_dxf;
 pub use export_pdf::sheet_to_pdf;
 pub use export_png::sheet_to_png;
 pub use export_svg::sheet_to_svg;
+pub use live::{DrawingSceneLiveCache, DrawingSceneLivePlugin, DrawingSceneLiveStats};
 pub use preview::{DraftingSheetPreviewPlugin, SheetPreviewState};
 pub use scene::{
     DrawingPrimitiveId, DrawingPrimitiveRole, DrawingScene, DrawingSceneAnnotation,

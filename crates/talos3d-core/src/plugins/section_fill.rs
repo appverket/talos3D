@@ -27,6 +27,9 @@ use crate::plugins::{
     materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
 };
 
+/// Shared paper-space density used by live Drafting and vector export.
+pub const DRAWING_HATCH_DENSITY: f32 = 0.333;
+
 // ─── Hatch pattern types ─────────────────────────────────────────────────────
 
 /// Architectural section hatch pattern.

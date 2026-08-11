@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::plugins::{
     camera::{apply_orbit_state, CameraControlsState, CameraProjectionMode, OrbitCamera},
     command_registry::CommandResult,
+    drafting_sheet::DrawingSceneLiveCache,
     render_pipeline::{apply_drafting_render_preset, RenderSettings},
     ui::StatusBarData,
 };
@@ -91,7 +92,7 @@ pub(crate) fn execute_toggle_drafting_workspace(
         .unwrap_or(!active);
 
     if requested == active {
-        return Ok(workspace_result(active));
+        return Ok(workspace_result(world, active));
     }
 
     if requested {
@@ -102,7 +103,7 @@ pub(crate) fn execute_toggle_drafting_workspace(
         set_feedback(world, "Drafting disabled");
     }
 
-    Ok(workspace_result(requested))
+    Ok(workspace_result(world, requested))
 }
 
 /// Read-only command handler for agent/UI state inspection.
@@ -113,15 +114,26 @@ pub(crate) fn execute_inspect_drafting_workspace(
     let state = world
         .get_resource::<DraftingWorkspaceState>()
         .ok_or_else(|| "Drafting workspace state is unavailable".to_string())?;
-    Ok(workspace_result(state.is_active()))
+    Ok(workspace_result(world, state.is_active()))
 }
 
-fn workspace_result(active: bool) -> CommandResult {
+fn workspace_result(world: &World, active: bool) -> CommandResult {
+    let drawing_scene = world.get_resource::<DrawingSceneLiveCache>().map(|cache| {
+        let stats = cache.stats();
+        json!({
+            "dirty": cache.is_dirty(),
+            "source_model_revision": stats.source_model_revision,
+            "rebuild_count": stats.rebuild_count,
+            "last_rebuild_micros": stats.last_rebuild_micros,
+            "line_count": stats.last_line_count
+        })
+    });
     CommandResult {
         output: Some(json!({
             "active": active,
             "projection": if active { "orthographic" } else { "restored" },
-            "surface": if active { "black_on_white" } else { "restored" }
+            "surface": if active { "black_on_white" } else { "restored" },
+            "drawing_scene": drawing_scene
         })),
         ..CommandResult::default()
     }
@@ -253,6 +265,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<DraftingWorkspaceState>()
             .init_resource::<DraftingVisibility>()
+            .init_resource::<DrawingSceneLiveCache>()
             .insert_resource(CameraControlsState::default())
             .insert_resource(RenderSettings {
                 background_rgb: [0.2, 0.3, 0.4],
@@ -342,22 +355,20 @@ mod tests {
     #[test]
     fn inspect_reports_the_same_authoritative_state_without_mutation() {
         let mut app = test_app();
-        assert_eq!(
-            execute_inspect_drafting_workspace(app.world_mut(), &Value::Null)
-                .expect("inspect inactive")
-                .output
-                .unwrap()["active"],
-            false
-        );
+        let inactive = execute_inspect_drafting_workspace(app.world_mut(), &Value::Null)
+            .expect("inspect inactive")
+            .output
+            .unwrap();
+        assert_eq!(inactive["active"], false);
+        assert_eq!(inactive["drawing_scene"]["dirty"], true);
 
         execute_toggle_drafting_workspace(app.world_mut(), &json!({ "enabled": true }))
             .expect("enter Drafting");
-        assert_eq!(
-            execute_inspect_drafting_workspace(app.world_mut(), &Value::Null)
-                .expect("inspect active")
-                .output
-                .unwrap()["active"],
-            true
-        );
+        let active = execute_inspect_drafting_workspace(app.world_mut(), &Value::Null)
+            .expect("inspect active")
+            .output
+            .unwrap();
+        assert_eq!(active["active"], true);
+        assert_eq!(active["drawing_scene"]["rebuild_count"], 0);
     }
 }

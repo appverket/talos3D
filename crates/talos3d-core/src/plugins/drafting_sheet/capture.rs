@@ -853,8 +853,15 @@ pub fn sheet_paper_to_world(view: &SheetView, paper: Vec2) -> Option<Vec3> {
     if paper_w <= 0.0 || paper_h <= 0.0 {
         return None;
     }
-    // Paper → NDC (same +y-up convention the capture uses).
-    let ndc = Vec2::new(paper.x / paper_w * 2.0 - 1.0, paper.y / paper_h * 2.0 - 1.0);
+    drawing_normalized_to_world(view, paper / Vec2::new(paper_w, paper_h))
+}
+
+/// Map normalized drawing coordinates back onto the focal plane captured by
+/// [`SheetView`]. This is the sole inverse used by paper picking and the live
+/// DrawingScene backend until durable `DraftPlane` takes ownership in DRAFT
+/// 2.1.
+pub fn drawing_normalized_to_world(view: &SheetView, drawing: Vec2) -> Option<Vec3> {
+    let ndc = drawing * 2.0 - Vec2::ONE;
 
     let forward = (view.target - view.eye).try_normalize()?;
     let right = forward.cross(view.up).try_normalize()?;

@@ -26,6 +26,8 @@ use crate::{
         command_registry::{
             CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
         },
+        drafting::DraftingWorkspaceState,
+        drafting_sheet::DrawingSceneLivePlugin,
         identity::ElementId,
         materials::MaterialSyncSet,
         modeling::mesh_generation::MeshGenerationSet,
@@ -307,7 +309,8 @@ pub struct RenderPipelinePlugin;
 
 impl Plugin for RenderPipelinePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RenderSettings>()
+        app.add_plugins(DrawingSceneLivePlugin)
+            .init_resource::<RenderSettings>()
             .init_resource::<RenderPipelineSetupState>()
             .init_resource::<SurfaceMaterialOverrideCache>()
             .init_resource::<OutlineMeshOverlayMaterial>()
@@ -1231,11 +1234,21 @@ struct MeshOverlaySubject {
 fn draw_model_edge_overlays(
     world: &World,
     settings: Res<RenderSettings>,
+    drafting_workspace: Option<Res<DraftingWorkspaceState>>,
     registry: Res<CapabilityRegistry>,
     mesh_assets: Res<Assets<Mesh>>,
     camera_query: Query<(&GlobalTransform, &Projection), With<OrbitCamera>>,
     mut gizmos: Gizmos,
 ) {
+    // Drafting consumes the canonical cached DrawingScene through its own
+    // batched backend. Keeping this projector active would create a second
+    // linework authority and make live/export parity accidental.
+    if drafting_workspace
+        .as_ref()
+        .is_some_and(|state| state.is_active())
+    {
+        return;
+    }
     if !settings.wireframe_overlay_enabled && !settings.contour_overlay_enabled {
         return;
     }

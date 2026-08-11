@@ -691,6 +691,7 @@ fn draw_dimension_line_overlay(
     visibility: Res<DimensionLineVisibility>,
     viewport_export_state: Res<crate::plugins::drawing_export::ViewportExportState>,
     render_settings: Res<RenderSettings>,
+    drafting_workspace: Option<Res<crate::plugins::drafting::DraftingWorkspaceState>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<OrbitCamera>>,
     dimensions: Query<(
         &DimensionLineNode,
@@ -704,12 +705,24 @@ fn draw_dimension_line_overlay(
         return;
     };
     let paper_style = drawing_annotation_paper_style(&render_settings);
+    let drafting_active = drafting_workspace
+        .as_ref()
+        .is_some_and(|workspace| workspace.is_active());
     for (node, selected) in &dimensions {
         if !node.visible {
             continue;
         }
-        let color = dimension_overlay_color(selected.is_some(), paper_style);
-        draw_dimension_world_lines(&mut gizmos, node, color);
+        let color = if drafting_active && selected.is_none() {
+            Color::BLACK
+        } else {
+            dimension_overlay_color(selected.is_some(), paper_style)
+        };
+        // The canonical DrawingScene live batch owns dimension line geometry
+        // in Drafting. This compatibility renderer retains glyph presentation
+        // only until DraftText moves into the shared annotation backend.
+        if !drafting_active {
+            draw_dimension_world_lines(&mut gizmos, node, color);
+        }
         draw_dimension_world_text(
             &mut gizmos,
             node,
