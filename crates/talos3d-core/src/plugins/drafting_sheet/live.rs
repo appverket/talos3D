@@ -90,9 +90,6 @@ struct DrawingSceneViewportText {
 #[derive(Component)]
 struct DrawingSceneLiveText;
 
-#[derive(Component)]
-struct DrawingSceneLiveTextRoot;
-
 /// Inspectable evidence that the live backend is invalidation-bounded.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DrawingSceneLiveStats {
@@ -109,7 +106,6 @@ pub struct DrawingSceneLiveStats {
 pub struct DrawingSceneLiveCache {
     scene: Option<DrawingScene>,
     world_lines: Option<DrawingSceneWorldLineBatch>,
-    text_root: Option<Entity>,
     text_entities: Vec<Entity>,
     dirty: bool,
     last_invalidation_mask: u32,
@@ -124,7 +120,6 @@ impl Default for DrawingSceneLiveCache {
         Self {
             scene: None,
             world_lines: None,
-            text_root: None,
             text_entities: Vec::new(),
             dirty: true,
             last_invalidation_mask: 0,
@@ -464,20 +459,14 @@ fn rebuild_live_drawing_scene(world: &mut World) {
 }
 
 fn clear_live_text_entities(world: &mut World) {
-    let (root, entities) = {
+    let entities = {
         let Some(mut cache) = world.get_resource_mut::<DrawingSceneLiveCache>() else {
             return;
         };
-        (
-            cache.text_root.take(),
-            std::mem::take(&mut cache.text_entities),
-        )
+        std::mem::take(&mut cache.text_entities)
     };
     for entity in entities {
         let _ = world.despawn(entity);
-    }
-    if let Some(root) = root {
-        let _ = world.despawn(root);
     }
 }
 
@@ -495,33 +484,10 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
     };
     let specs = scene_viewport_texts(scene, viewport_size);
 
-    let (existing_root, mut existing_entities) = {
+    let mut existing_entities = {
         let mut cache = world.resource_mut::<DrawingSceneLiveCache>();
-        (
-            cache.text_root.take(),
-            std::mem::take(&mut cache.text_entities),
-        )
+        std::mem::take(&mut cache.text_entities)
     };
-    let root = existing_root
-        .filter(|entity| world.get_entity(*entity).is_ok())
-        .unwrap_or_else(|| {
-            world
-                .spawn((
-                    DrawingSceneLiveTextRoot,
-                    Pickable::IGNORE,
-                    GlobalZIndex(i32::MAX - 32),
-                ))
-                .id()
-        });
-    world.entity_mut(root).insert(Node {
-        position_type: PositionType::Absolute,
-        left: px(viewport_origin.x),
-        top: px(viewport_origin.y),
-        width: px(viewport_size.x),
-        height: px(viewport_size.y),
-        overflow: Overflow::clip(),
-        ..default()
-    });
 
     let mut next_entities = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -539,8 +505,8 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
             TextColor(Color::BLACK),
             Node {
                 position_type: PositionType::Absolute,
-                left: px(spec.position_px.x),
-                top: px(spec.position_px.y),
+                left: px(viewport_origin.x + spec.position_px.x),
+                top: px(viewport_origin.y + spec.position_px.y),
                 ..default()
             },
             UiTransform {
@@ -549,7 +515,7 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
                 ..default()
             },
             Pickable::IGNORE,
-            ChildOf(root),
+            GlobalZIndex(i32::MAX - 32),
         ));
         next_entities.push(entity);
     }
@@ -558,7 +524,6 @@ fn sync_live_text_entities(world: &mut World, scene: Option<&DrawingScene>) -> u
     }
     let count = next_entities.len();
     let mut cache = world.resource_mut::<DrawingSceneLiveCache>();
-    cache.text_root = Some(root);
     cache.text_entities = next_entities;
     count
 }
@@ -602,6 +567,8 @@ fn scene_viewport_texts(
                 return None;
             };
             if !anchor.is_finite()
+                || !anchor.cmpge(Vec2::ZERO).all()
+                || !anchor.cmple(Vec2::ONE).all()
                 || !height_mm.is_finite()
                 || *height_mm <= 0.0
                 || !rotation_rad.is_finite()
