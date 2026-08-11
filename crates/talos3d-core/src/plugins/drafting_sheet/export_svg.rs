@@ -18,7 +18,7 @@ use crate::plugins::section_fill::{generate_hatch_lines, HatchPattern, DRAWING_H
 
 use super::sheet::{DraftingSheet, SheetBounds, SheetHatch, SheetLine, SheetStroke};
 
-const DIMENSION_STROKE_HEX: &str = "#4A4A4E";
+const DIMENSION_STROKE_HEX: &str = "#000000";
 
 /// Render a [`DraftingSheet`] as a self-contained SVG document. Output
 /// bytes are UTF-8; caller owns the bytes.

@@ -315,6 +315,8 @@ impl Plugin for DraftingPlugin {
             Update,
             super::workspace::sync_active_draft_plane_on_change.after(super::draft::sync_drafts),
         );
+        super::primitive::register_draft_primitive_support(app);
+        app.add_plugins(super::primitive_tool::DraftPrimitiveToolPlugin);
     }
 }
 
@@ -516,14 +518,23 @@ mod tests {
             "drafting.select_draft",
             "drafting.update_membership",
             "drafting.inspect_drafts",
+            "drafting.create_line",
+            "drafting.create_polyline",
+            "drafting.create_rectangle",
+            "drafting.create_circle",
+            "drafting.create_text",
+            "drafting.inspect_primitives",
         ] {
             let descriptor = registry.get(id).unwrap_or_else(|| panic!("missing {id}"));
             assert_eq!(
                 descriptor.capability_id.as_deref(),
                 Some(DRAFTING_CAPABILITY_ID)
             );
-            if id != "drafting.inspect_drafts" {
+            if !id.starts_with("drafting.inspect") {
                 assert!(descriptor.parameters.is_some(), "{id} needs a typed schema");
+            }
+            if id.starts_with("drafting.create_") && id != "drafting.create_draft" {
+                assert!(descriptor.activates_tool.is_some(), "{id} needs a UI tool");
             }
         }
         assert!(registry.duplicate_ids().is_empty());

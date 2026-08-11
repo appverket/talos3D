@@ -37,6 +37,8 @@ pub mod format;
 pub mod kind;
 pub mod migration;
 pub mod plugin;
+pub mod primitive;
+mod primitive_tool;
 pub mod render;
 pub mod style;
 pub mod visibility;
@@ -56,6 +58,12 @@ pub use format::NumberFormat;
 pub use kind::{DimensionKind, DimensionKindTag};
 pub use plugin::{
     visible_annotations, DraftingPlugin, DRAFTING_ANNOTATIONS_KEY, DRAFTING_CAPABILITY_ID,
+};
+pub use primitive::{
+    DraftCircle, DraftLine, DraftPolyline, DraftPrimitiveGeometry, DraftPrimitiveKind,
+    DraftPrimitiveNode, DraftPrimitiveSnapshot, DraftRectangle, DraftText, DRAFT_CIRCLE_TYPE,
+    DRAFT_LINE_TYPE, DRAFT_POLYLINE_TYPE, DRAFT_PRIMITIVES_METADATA_KEY, DRAFT_RECTANGLE_TYPE,
+    DRAFT_TEXT_TYPE,
 };
 pub use render::{render_dimension, DimPrimitive, DimensionInput, TextAnchor};
 pub use style::{DimensionStyle, DimensionStyleRegistry, Terminator, TextPlacement};

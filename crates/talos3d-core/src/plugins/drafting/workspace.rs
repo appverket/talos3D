@@ -149,7 +149,8 @@ fn workspace_result(world: &World, active: bool) -> CommandResult {
             "invalidation_count": stats.invalidation_count,
             "last_invalidation_reasons": cache.last_invalidation_reasons(),
             "last_rebuild_micros": stats.last_rebuild_micros,
-            "line_count": stats.last_line_count
+            "line_count": stats.last_line_count,
+            "text_count": stats.last_text_count
         })
     });
     let surface_evidence = drafting_surface_evidence(world);
