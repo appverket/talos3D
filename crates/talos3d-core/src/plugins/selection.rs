@@ -36,7 +36,10 @@ use crate::{
         },
         render_pipeline::WireframeSurfaceVisibilityOverride,
         tools::ActiveTool,
-        transform::{PivotPoint, TransformMode, TransformState, TransformVisualSystems},
+        transform::{
+            ActiveTransformPreview, PivotPoint, TransformMode, TransformState,
+            TransformVisualSystems,
+        },
         ui::StatusBarData,
     },
 };
@@ -727,6 +730,7 @@ fn draw_selected_outlines(
     selected_query: Query<Entity, With<Selected>>,
     registry: Res<CapabilityRegistry>,
     transform_state: Res<TransformState>,
+    active_transform_preview: Res<ActiveTransformPreview>,
     occurrence_edit_context: Res<OccurrenceEditContext>,
     mut gizmos: Gizmos,
 ) {
@@ -742,6 +746,22 @@ fn draw_selected_outlines(
                 }
             }
         }
+    }
+
+    // A move can mix transient `Transform` presentation with authored-snapshot
+    // application for derived members. Recomputing a selected aggregate's bounds
+    // from that mixed runtime state unions the old and new positions, making the
+    // yellow extent stretch across the drag. The transform preview is the shared
+    // semantic edit plan, so use its direct before/after members as the single
+    // source of move feedback instead of asking each selection factory to infer it
+    // again from the partially-presented world.
+    if active_mode == TransformMode::Moving {
+        if let Some(bounds) =
+            moving_transform_feedback_bounds(&transform_state, &active_transform_preview)
+        {
+            draw_bounds_wireframe(&mut gizmos, &bounds, ACTIVE_TRANSFORM_HIGHLIGHT_COLOR);
+        }
+        return;
     }
 
     for entity in &selected_query {
@@ -777,6 +797,37 @@ fn draw_selected_outlines(
         };
         factory.draw_selection(world, entity, &mut gizmos, color);
     }
+}
+
+fn moving_transform_feedback_bounds(
+    transform_state: &TransformState,
+    active_preview: &ActiveTransformPreview,
+) -> Option<EntityBounds> {
+    if transform_state.mode != TransformMode::Moving {
+        return None;
+    }
+
+    let direct_ids = transform_state
+        .initial_snapshots
+        .iter()
+        .filter(|(_, snapshot)| snapshot.type_name() != "group")
+        .map(|(_, snapshot)| snapshot.element_id())
+        .collect::<std::collections::HashSet<_>>();
+
+    active_preview
+        .snapshots
+        .iter()
+        .filter(|snapshot| direct_ids.contains(&snapshot.element_id()))
+        .filter_map(|snapshot| snapshot.bounds())
+        .fold(None, |acc, bounds| {
+            Some(match acc {
+                Some(current) => EntityBounds {
+                    min: current.min.min(bounds.min),
+                    max: current.max.max(bounds.max),
+                },
+                None => bounds,
+            })
+        })
 }
 
 fn occurrence_generated_part_bounds(
@@ -1319,12 +1370,15 @@ fn clear_pending_box_select_click(box_state: &mut BoxSelectState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authored_entity::BoxedEntity;
     use crate::plugins::{
         layers::{LayerAssignment, LayerRegistry},
         modeling::{
             definition::DefinitionId,
-            group::{GroupEditContext, GroupMembers},
+            group::{GroupEditContext, GroupFrame, GroupMembers, GroupSnapshot},
             occurrence::GeneratedOccurrencePart,
+            primitives::Polyline,
+            snapshots::PolylineSnapshot,
         },
     };
 
@@ -1381,6 +1435,71 @@ mod tests {
 
         assert!(state.drag_start.is_none());
         assert!(!state.is_dragging);
+    }
+
+    #[test]
+    fn moving_feedback_follows_preview_without_stale_group_or_dependent_bounds() {
+        let original_bounds = EntityBounds {
+            min: Vec3::ZERO,
+            max: Vec3::new(10.0, 5.0, 8.0),
+        };
+        let group: BoxedEntity = GroupSnapshot {
+            element_id: ElementId(100),
+            name: "Cottage".to_string(),
+            member_ids: vec![ElementId(1)],
+            frame: GroupFrame::identity(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: Some(original_bounds),
+        }
+        .into();
+        let member: BoxedEntity = PolylineSnapshot {
+            element_id: ElementId(1),
+            primitive: Polyline {
+                points: vec![original_bounds.min, original_bounds.max],
+            },
+            layer: None,
+            elevation_metadata: None,
+            material_assignment: None,
+        }
+        .into();
+        let moved_member = member.translate_by(Vec3::new(20.0, 0.0, 0.0));
+        let unrelated_dependent: BoxedEntity = PolylineSnapshot {
+            element_id: ElementId(999),
+            primitive: Polyline {
+                points: vec![Vec3::splat(-100.0), Vec3::splat(-90.0)],
+            },
+            layer: None,
+            elevation_metadata: None,
+            material_assignment: None,
+        }
+        .into();
+
+        let transform_state = TransformState {
+            mode: TransformMode::Moving,
+            initial_snapshots: vec![
+                (Entity::PLACEHOLDER, group.clone()),
+                (Entity::PLACEHOLDER, member),
+            ],
+            ..Default::default()
+        };
+        let active_preview = ActiveTransformPreview {
+            // Group preview frames move, but their capture-time cached bounds are
+            // intentionally stale. Including this snapshot recreates the old/new
+            // stretched extent reported for the cottage.
+            snapshots: vec![group, moved_member, unrelated_dependent],
+            ..Default::default()
+        };
+
+        let feedback = moving_transform_feedback_bounds(&transform_state, &active_preview)
+            .expect("the moved cottage member should provide preview bounds");
+
+        assert_eq!(feedback.min, Vec3::new(20.0, 0.0, 0.0));
+        assert_eq!(feedback.max, Vec3::new(30.0, 5.0, 8.0));
+        assert_eq!(
+            feedback.max - feedback.min,
+            original_bounds.max - original_bounds.min
+        );
     }
 
     #[test]

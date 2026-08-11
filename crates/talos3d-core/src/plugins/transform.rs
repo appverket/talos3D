@@ -983,10 +983,7 @@ fn draw_transform_preview(world: &World, mut gizmos: Gizmos) {
     let live_transform_preview = mode != TransformMode::Idle;
 
     for snapshot in preview.after {
-        if live_transform_preview
-            && snapshot.preview_transform().is_some()
-            && snapshot.type_name() != "occurrence"
-        {
+        if live_transform_preview && snapshot.preview_transform().is_some() {
             continue;
         }
         snapshot.draw_preview(&mut gizmos, TRANSFORM_PREVIEW_COLOR);
