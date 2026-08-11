@@ -739,6 +739,11 @@ mod server;
 pub use server::*;
 
 #[cfg(feature = "model-api")]
+use crate::plugins::drafting::authoring::{
+    active_drafting_frame, authoring_delta_to_world, authoring_rotation_axis,
+};
+
+#[cfg(feature = "model-api")]
 fn handle_enter_group(world: &mut World, element_id: u64) -> Result<EditingContextInfo, String> {
     let eid = ElementId(element_id);
     // Verify the entity is a group
@@ -10702,8 +10707,7 @@ fn handle_transform_with_modified(
 
     // The frame the request's free deltas and unconstrained rotations are read
     // in. Identity outside Drafting, so world-space requests are unchanged.
-    let authoring =
-        crate::plugins::drafting::authoring::active_drafting_frame(world).unwrap_or_default();
+    let authoring = active_drafting_frame(world).unwrap_or_default();
 
     if !plain_ids.is_empty() {
         let snapshots = capture_snapshots_by_ids(world, &plain_ids)?;
@@ -11311,7 +11315,7 @@ pub(crate) fn transform_move_delta(
 ) -> ApiResult<Vec3> {
     Ok(match parse_axis(request.axis.as_deref())? {
         Some(axis) => axis.unit_vector() * scalar_from_value(&request.value)?,
-        None => authoring.rotation * vec3_from_value(&request.value)?,
+        None => authoring_delta_to_world(authoring, vec3_from_value(&request.value)?),
     })
 }
 
@@ -11330,7 +11334,7 @@ pub(crate) fn transform_rotation(
     Ok(match parse_axis(request.axis.as_deref())? {
         Some(AxisName::X) => Quat::from_rotation_x(radians),
         Some(AxisName::Z) => Quat::from_rotation_z(radians),
-        _ => Quat::from_axis_angle(authoring.rotation * Vec3::Y, radians),
+        _ => Quat::from_axis_angle(authoring_rotation_axis(authoring), radians),
     })
 }
 

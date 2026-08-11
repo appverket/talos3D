@@ -21,7 +21,10 @@ use crate::{
             find_entity_by_element_id_readonly, ApplyEntityChangesCommand, CreateEntityCommand,
         },
         cursor::{cursor_viewport_position, CursorWorldPos},
-        drafting::authoring::active_drafting_plane,
+        drafting::authoring::{
+            active_drafting_frame, active_drafting_plane, authoring_drag_plane_normal,
+            authoring_rotation_axis,
+        },
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
         identity::ElementId,
         inference::InferenceEngine,
@@ -1303,7 +1306,7 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
 /// [`DrawingPlane`](crate::plugins::cursor::DrawingPlane) the cursor, the
 /// snapping stack, and 2D authoring already project against.
 pub(crate) fn drafting_move_plane_normal(world: &World) -> Vec3 {
-    active_drafting_plane(world).map_or(Vec3::Y, |plane| plane.normal)
+    active_drafting_frame(world).map_or(Vec3::Y, |frame| authoring_drag_plane_normal(&frame))
 }
 
 /// Origin the grab offset is measured from, matching `drafting_move_plane_normal`.
@@ -1326,8 +1329,8 @@ pub(crate) fn drafting_rotation_axis(
     if mode != TransformMode::Rotating || requested != AxisConstraint::None {
         return requested;
     }
-    match active_drafting_plane(world) {
-        Some(plane) => AxisConstraint::Custom(-plane.normal),
+    match active_drafting_frame(world) {
+        Some(frame) => AxisConstraint::Custom(authoring_rotation_axis(&frame)),
         None => requested,
     }
 }

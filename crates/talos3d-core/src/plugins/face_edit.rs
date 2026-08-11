@@ -17,7 +17,7 @@ use crate::{
             DrawingPlane,
         },
         drafting::{
-            authoring::drafting_plane, draft::DraftNode, workspace::DraftingWorkspaceState,
+            authoring::resting_draft_plane, draft::DraftNode, workspace::DraftingWorkspaceState,
         },
         egui_chrome::{ChromeInputCapture, EguiWantsInput},
         identity::{ElementId, ElementIdAllocator},
@@ -1080,7 +1080,7 @@ pub(crate) fn sync_drawing_plane_to_face(
             *drawing_plane = new_plane;
         }
     } else {
-        let resting = drafting_plane(drafting_workspace.as_deref(), |draft_id| {
+        let resting = resting_draft_plane(drafting_workspace.as_deref(), |draft_id| {
             drafts
                 .iter()
                 .find(|(id, _)| **id == draft_id)

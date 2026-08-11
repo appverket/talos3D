@@ -31,15 +31,14 @@ use super::{
     workspace::DraftingWorkspaceState,
 };
 
-/// The plane authored coordinates are expressed in, given already-borrowed
-/// state. `None` when the workspace is inactive or no Draft is selected.
+/// The active Draft's own plane, given already-borrowed state.
 ///
-/// The durable Draft is the authority, not the shared [`DrawingPlane`]
-/// resource. `DrawingPlane` is a derived, per-frame runtime value that
-/// face-edit owns and resets to ground whenever no face is selected, so a
-/// plane read from it is only valid until the next frame. Draft authoring
-/// reads the Draft itself, exactly as plane-coordinate Draft annotations do.
-pub fn drafting_plane(
+/// This is the *derivation* used to seed and restore the shared coordinate
+/// authority — the Drafting controller uses it on a selection transition and
+/// face-edit uses it to decide what the cursor plane rests on. Authoring code
+/// must not call it: read [`active_drafting_plane`] instead, so there is one
+/// plane every surface agrees on.
+pub fn resting_draft_plane(
     workspace: Option<&DraftingWorkspaceState>,
     mut plane_of: impl FnMut(ElementId) -> Option<DrawingPlane>,
 ) -> Option<DrawingPlane> {
@@ -48,14 +47,22 @@ pub fn drafting_plane(
 }
 
 /// The plane authored coordinates are currently expressed in, or `None` when
-/// Drafting is not active. See [`drafting_plane`].
+/// Drafting is not active.
+///
+/// This is deliberately the shared [`DrawingPlane`] resource rather than a
+/// second read of the durable Draft. The ratified boundary is that a Draft is
+/// the membership and container authority while `DrawingPlane` is the
+/// coordinate authority: the Drafting controller writes the selected Draft's
+/// plane into it on every selection or Draft change, face-edit restores that
+/// same resting plane whenever no face owns the cursor, and a selected face may
+/// deliberately retarget it. Reading it here means 3D creation, 2D annotation
+/// authoring, transforms, and the cursor all resolve against exactly one plane.
 #[must_use]
 pub fn active_drafting_plane(world: &World) -> Option<DrawingPlane> {
-    drafting_plane(world.get_resource::<DraftingWorkspaceState>(), |draft_id| {
-        find_entity_by_element_id_readonly(world, draft_id)
-            .and_then(|entity| world.get::<DraftNode>(entity))
-            .map(|node| node.plane.clone())
-    })
+    world
+        .get_resource::<DraftingWorkspaceState>()
+        .filter(|state| state.is_active())?;
+    world.get_resource::<DrawingPlane>().cloned()
 }
 
 /// The rigid local→world frame implied by a drawing plane.
@@ -93,6 +100,44 @@ pub fn plane_authoring_frame(plane: &DrawingPlane) -> GroupFrame {
 #[must_use]
 pub fn active_drafting_frame(world: &World) -> Option<GroupFrame> {
     active_drafting_plane(world).map(|plane| plane_authoring_frame(&plane))
+}
+
+// ---------------------------------------------------------------------------
+// The plane-relative transform rules.
+//
+// Each rule is defined exactly once here and consumed by both the viewport and
+// the model API, so a drag and the equivalent agent call cannot drift apart.
+// The viewport reaches them through `TransformState`'s axis constraint and
+// cursor plane; the model API reaches them through the request's free value.
+// ---------------------------------------------------------------------------
+
+/// The axis an unconstrained rotation turns about: the frame's local `+Y`,
+/// which is the drawing plane's view-facing normal. Reduces to world `+Y`
+/// outside Drafting and on a plan Draft.
+///
+/// Normalized on the way out. Rotating a basis vector through the frame's
+/// quaternion accumulates enough float error to leave the axis a few `1e-7`
+/// off unit length, and both consumers — `Quat::from_axis_angle` and the
+/// viewport's custom-axis constraint — require a genuine unit axis.
+#[must_use]
+pub fn authoring_rotation_axis(frame: &GroupFrame) -> Vec3 {
+    (frame.rotation * Vec3::Y).normalize()
+}
+
+/// The normal of the plane an unconstrained move resolves on. A drag tracks the
+/// cursor against this plane through the grab point, so the delta it produces
+/// always lies in the drawing surface.
+#[must_use]
+pub fn authoring_drag_plane_normal(frame: &GroupFrame) -> Vec3 {
+    -authoring_rotation_axis(frame)
+}
+
+/// Map a free, unconstrained translation authored in this frame to world space.
+/// `[x, 0, z]` spans exactly the deltas a drag can reach; `[0, y, 0]` is the one
+/// direction it cannot, out of the sheet toward the viewer.
+#[must_use]
+pub fn authoring_delta_to_world(frame: &GroupFrame, delta: Vec3) -> Vec3 {
+    frame.rotation * delta
 }
 
 /// The Draft that newly authored model entities should join, if any.
@@ -433,7 +478,14 @@ mod tests {
 
             let axis =
                 drafting_rotation_axis(app.world(), TransformMode::Rotating, AxisConstraint::None);
-            assert_eq!(axis, AxisConstraint::Custom(-surface.normal));
+            let AxisConstraint::Custom(direction) = axis else {
+                panic!("Drafting must resolve an unconstrained rotation to a plane axis");
+            };
+            assert!(direction.abs_diff_eq(-surface.normal, 1e-5));
+            assert!(
+                direction.is_normalized(),
+                "rotation axis must be unit length"
+            );
             let viewport = rotation_quat(axis, 30f32.to_radians());
 
             let request = TransformToolRequest {
@@ -531,7 +583,7 @@ mod tests {
         assert_eq!(
             active_drafting_plane(app.world()).as_ref(),
             Some(&elevation),
-            "the authoring plane must not depend on a per-frame runtime resource"
+            "authoring must resolve against that same shared coordinate authority"
         );
 
         let element_id = ElementId(500);
@@ -549,6 +601,62 @@ mod tests {
             primitive.centre
         );
         assert_eq!(draft_members(app.world(), draft_id), vec![element_id]);
+    }
+
+    /// The Draft is the membership/container authority and `DrawingPlane` is the
+    /// coordinate authority. A face may deliberately retarget the cursor plane;
+    /// deselecting it must return to the Draft's plane, not to ground, and every
+    /// authoring and transform path must follow that one resource throughout.
+    #[test]
+    fn a_non_plan_draft_is_the_resting_plane_across_frames_and_face_retargeting() {
+        use crate::plugins::face_edit::{
+            sync_drawing_plane_to_face, FaceEditContext, PushPullContext, SelectedFace,
+        };
+        use crate::plugins::transform::drafting_move_plane_normal;
+
+        let elevation = plane(Vec3::new(0.0, 0.0, -4.0), Vec3::NEG_Z, Vec3::X);
+        let mut app = drafting_app();
+        enter_drafting_on(&mut app, &elevation);
+        app.init_resource::<FaceEditContext>()
+            .init_resource::<PushPullContext>()
+            .add_systems(Update, sync_drawing_plane_to_face);
+
+        let follows_one_resource = |app: &App, expected: &DrawingPlane| {
+            assert_eq!(app.world().resource::<DrawingPlane>(), expected);
+            assert_eq!(active_drafting_plane(app.world()).as_ref(), Some(expected));
+            assert_eq!(
+                active_drafting_frame(app.world()),
+                Some(plane_authoring_frame(expected))
+            );
+            assert!(drafting_move_plane_normal(app.world()).abs_diff_eq(expected.normal, 1e-5));
+        };
+
+        for _ in 0..3 {
+            app.update();
+        }
+        follows_one_resource(&app, &elevation);
+
+        // A selected face intentionally retargets the shared coordinate authority.
+        let face = DrawingPlane::from_face(Vec3::new(0.0, 2.0, 0.0), Vec3::Y);
+        app.world_mut()
+            .resource_mut::<FaceEditContext>()
+            .selected_face = Some(SelectedFace {
+            face_id: crate::capability_registry::FaceId(0),
+            generated_face_ref: None,
+            normal: face.normal,
+            centroid: face.origin,
+        });
+        app.update();
+        follows_one_resource(&app, &face);
+
+        // Deselecting returns to the Draft's plane, never to ground.
+        app.world_mut()
+            .resource_mut::<FaceEditContext>()
+            .selected_face = None;
+        for _ in 0..3 {
+            app.update();
+        }
+        follows_one_resource(&app, &elevation);
     }
 
     #[test]

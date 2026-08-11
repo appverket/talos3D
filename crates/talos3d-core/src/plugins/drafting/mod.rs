@@ -51,7 +51,8 @@ pub use annotation::{
 };
 pub use authoring::{
     active_draft_membership_target, active_drafting_frame, active_drafting_plane,
-    draft_membership_add_snapshots, plane_authoring_frame,
+    authoring_delta_to_world, authoring_drag_plane_normal, authoring_rotation_axis,
+    draft_membership_add_snapshots, plane_authoring_frame, resting_draft_plane,
 };
 pub use draft::{
     active_draft_layout, active_draft_snapshot, DraftDefaults, DraftFactory, DraftLayout,
