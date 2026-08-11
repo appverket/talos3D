@@ -165,10 +165,46 @@ fn workspace_result(world: &World, active: bool) -> CommandResult {
                 "valid_white_override_count": surface_evidence.valid_white_override_count,
             },
             "active_draft": super::draft::inspect_active_draft(world),
+            "authoring": inspect_authoring_contract(world),
             "drawing_scene": drawing_scene
         })),
         ..CommandResult::default()
     }
+}
+
+/// Publish what Drafting currently contributes to ordinary 3D model edits, so
+/// an agent can see the frame its coordinates are read in instead of inferring
+/// it. Reports the world frame verbatim when Drafting is inactive.
+fn inspect_authoring_contract(world: &World) -> Value {
+    let Some(plane) = super::authoring::active_drafting_plane(world) else {
+        return json!({
+            "frame": "world",
+            "membership_target_draft_id": Value::Null,
+            "contract": "3D creation and transforms use world coordinates."
+        });
+    };
+    let frame = super::authoring::plane_authoring_frame(&plane);
+    let point = |value: Vec3| json!([value.x, value.y, value.z]);
+    // Report unit axes: the raw quaternion rotation of a basis vector carries a
+    // few 1e-7 of float error, which reads as noise in an agent-facing contract.
+    // The origin is a position, not a direction — never normalize it.
+    let axis = |direction: Vec3| point(direction.normalize_or_zero());
+    json!({
+        "frame": "draft_plane",
+        "origin": point(frame.translation),
+        "x_axis": axis(frame.rotation * Vec3::X),
+        "y_axis": axis(frame.rotation * Vec3::Y),
+        "z_axis": axis(frame.rotation * Vec3::Z),
+        "membership_target_draft_id": super::authoring::active_draft_membership_target(world)
+            .map(|id| id.0),
+        "contract": concat!(
+            "Authored 3D coordinates, free transform deltas, and unconstrained ",
+            "rotations are read in this frame: x_axis spans the drawing surface, ",
+            "y_axis grows out of it toward the viewer, z_axis is screen-down. ",
+            "Explicit world axis constraints are unaffected. New authored model ",
+            "entities join membership_target_draft_id in the same undo step."
+        )
+    })
 }
 
 fn enter_drafting(world: &mut World) -> Result<(), String> {

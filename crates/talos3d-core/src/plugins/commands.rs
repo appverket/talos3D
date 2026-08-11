@@ -23,9 +23,12 @@ use crate::{
     },
 };
 
+use crate::plugins::drafting::authoring::{
+    active_draft_membership_target, active_drafting_frame, draft_membership_add_snapshots,
+};
 use crate::plugins::modeling::group::{
-    compose_snapshot_into_frame, group_membership_add_snapshots, GroupEditContext, GroupMembers,
-    GroupSnapshot,
+    compose_snapshot_into_frame, group_membership_add_snapshots, GroupEditContext, GroupFrame,
+    GroupMembers, GroupSnapshot,
 };
 #[cfg(feature = "model-api")]
 use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink, VoidPlacementOutcome};
@@ -647,11 +650,6 @@ pub(crate) fn enqueue_create_triangle_mesh(
 }
 
 pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
-    // Local-frame authoring (ADR-058): if the client has entered a group whose
-    // local frame is non-identity, the coordinates just authored are in that
-    // rectified local frame — compose them to world so the geometry inherits the
-    // group's orientation (e.g. an angled wing's walls/roof get the wing angle
-    // automatically). At root the frame is identity and this is a no-op.
     // The edit-context resource is absent in minimal worlds (e.g. unit tests that
     // don't add the selection plugin); treat that as "at root" (identity frame).
     let edit_context = world
@@ -665,10 +663,26 @@ pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
     let snapshot = if is_drawing_metadata {
         snapshot
     } else {
-        let frame = edit_context.active_frame(world);
+        let frame = active_authoring_frame(world, &edit_context);
         compose_snapshot_into_frame(snapshot, &frame)
     };
     let new_id = snapshot.element_id();
+
+    // Creation and the membership edits it implies are one user-visible action,
+    // so they undo and redo together instead of leaving a member referencing a
+    // deleted entity (or an orphan entity outside its container).
+    let draft_id = (!is_drawing_metadata)
+        .then(|| active_draft_membership_target(world))
+        .flatten();
+    let group_id = (!is_drawing_metadata)
+        .then(|| edit_context.current_group())
+        .flatten();
+    let atomic = draft_id.is_some() || group_id.is_some();
+    if atomic {
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .begin_group("Create in container");
+    }
 
     world
         .resource_mut::<PendingCommandQueue>()
@@ -676,20 +690,63 @@ pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
 
     // Auto-add the new entity to the active group, through the command/history
     // pipeline (ADR-002), so the assembly can later be moved/rotated as a unit.
-    if !is_drawing_metadata {
-        if let Some(group_id) = edit_context.current_group() {
-            if let Some((before, after)) = group_membership_add_snapshots(world, group_id, new_id) {
-                enqueue_apply_entity_changes(
-                    world,
-                    ApplyEntityChangesCommand {
-                        label: "Add to group",
-                        before: vec![before],
-                        after: vec![after],
-                    },
-                );
-            }
+    if let Some(group_id) = group_id {
+        if let Some((before, after)) = group_membership_add_snapshots(world, group_id, new_id) {
+            enqueue_apply_entity_changes(
+                world,
+                ApplyEntityChangesCommand {
+                    label: "Add to group",
+                    before: vec![before],
+                    after: vec![after],
+                },
+            );
         }
     }
+
+    // Scope the new model entity to the active Draft the same way, so it is
+    // projected into that Draft's drawing without the Draft owning geometry.
+    // 2D annotation membership stays with the drawing-metadata surfaces that
+    // author plane coordinates directly.
+    if let Some(draft_id) = draft_id {
+        if let Some((before, after)) = draft_membership_add_snapshots(world, draft_id, new_id) {
+            enqueue_apply_entity_changes(
+                world,
+                ApplyEntityChangesCommand {
+                    label: "Add to Draft",
+                    before: vec![before],
+                    after: vec![after],
+                },
+            );
+        }
+    }
+
+    if atomic {
+        world.resource_mut::<PendingCommandQueue>().end_group();
+    }
+}
+
+/// The one local→world frame freshly authored coordinates are expressed in.
+///
+/// Local-frame authoring (ADR-058): if the client has entered a group whose
+/// local frame is non-identity, the coordinates just authored are in that
+/// rectified local frame — compose them to world so the geometry inherits the
+/// group's orientation (e.g. an angled wing's walls/roof get the wing angle
+/// automatically).
+///
+/// Otherwise, if Drafting is active, coordinates are expressed on the plane the
+/// user is drawing on, so a box authored while a storey or elevation Draft is
+/// selected is seated and oriented on that Draft's plane instead of the world
+/// ground plane. An explicitly entered group frame stays authoritative because
+/// it is the more specific container the client asked to author inside; the
+/// default plan Draft is the identity frame either way.
+///
+/// At root outside Drafting the frame is identity and composition is a no-op.
+fn active_authoring_frame(world: &World, edit_context: &GroupEditContext) -> GroupFrame {
+    let group_frame = edit_context.active_frame(world);
+    if !group_frame.is_identity() {
+        return group_frame;
+    }
+    active_drafting_frame(world).unwrap_or(group_frame)
 }
 
 pub(crate) fn enqueue_apply_entity_changes(world: &mut World, command: ApplyEntityChangesCommand) {

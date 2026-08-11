@@ -30,6 +30,7 @@
 //! running app.
 
 pub mod annotation;
+pub mod authoring;
 pub mod draft;
 pub mod export_dxf;
 pub mod export_svg;
@@ -47,6 +48,11 @@ pub mod workspace;
 pub use annotation::{
     render_annotation, DimensionAnnotationFactory, DimensionAnnotationNode,
     DimensionAnnotationSnapshot, DRAFTING_DIMENSION_TYPE,
+};
+pub use authoring::{
+    active_draft_membership_target, active_drafting_frame, active_drafting_plane,
+    authoring_delta_to_world, authoring_drag_plane_normal, authoring_rotation_axis,
+    draft_membership_add_snapshots, plane_authoring_frame, resting_draft_plane,
 };
 pub use draft::{
     active_draft_layout, active_draft_snapshot, DraftDefaults, DraftFactory, DraftLayout,

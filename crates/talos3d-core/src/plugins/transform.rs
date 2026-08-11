@@ -21,6 +21,10 @@ use crate::{
             find_entity_by_element_id_readonly, ApplyEntityChangesCommand, CreateEntityCommand,
         },
         cursor::{cursor_viewport_position, CursorWorldPos},
+        drafting::authoring::{
+            active_drafting_frame, active_drafting_plane, authoring_drag_plane_normal,
+            authoring_rotation_axis,
+        },
         face_edit::{FaceEditContext, PushPullContext, PushPullFace},
         identity::ElementId,
         inference::InferenceEngine,
@@ -258,14 +262,16 @@ pub fn start_transform_mode_with_options(
         return Err("No selection to transform".to_string());
     }
 
+    // An unconstrained rotation inside Drafting turns in the Draft plane, so the
+    // gesture, the measured angle, and the committed edit all agree on one axis.
+    let axis = drafting_rotation_axis(world, mode, options.axis);
+
     let start_pivot = options
         .pivot_override
         .or_else(|| world.resource::<PivotPoint>().position)
         .or_else(|| selection_center(&initial_snapshots));
     let rotation_plane_cursor = (mode == TransformMode::Rotating)
-        .then(|| {
-            start_pivot.and_then(|center| rotation_cursor_on_plane(world, center, options.axis))
-        })
+        .then(|| start_pivot.and_then(|center| rotation_cursor_on_plane(world, center, axis)))
         .flatten();
     let Some(initial_cursor) = initial_transform_cursor_for_mode(
         mode,
@@ -278,7 +284,7 @@ pub fn start_transform_mode_with_options(
 
     let mut transform_state = world.resource_mut::<TransformState>();
     transform_state.mode = mode;
-    transform_state.axis = options.axis;
+    transform_state.axis = axis;
     transform_state.numeric_buffer = None;
     transform_state.initial_cursor = Some(initial_cursor);
     transform_state.initial_snapshots = initial_snapshots;
@@ -1264,14 +1270,23 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
         let cursor_y = vertical_axis_cursor_y(world, initial_cursor)?;
         Vec3::new(0.0, cursor_y - initial_cursor.y, 0.0)
     } else {
-        // Track the cursor on the horizontal plane through the GRAB height, not the
-        // y=0 drawing plane. Grabbing a handle on an object planted high above y=0
-        // (e.g. a building on terrain) otherwise jumps it by the large horizontal
-        // offset between the elevated handle and where its screen ray crosses the
-        // ground. For objects essentially on the drawing plane we keep the original
-        // snap-aware cursor so grid/marker snapping during a ground move is unchanged.
-        let current_cursor = if initial_cursor.y.abs() > 0.05 {
-            horizontal_cursor_at(world, initial_cursor.y)
+        // Track the cursor on the plane parallel to the active drawing surface
+        // through the GRAB point, not through the surface itself. Grabbing a
+        // handle on an object planted well off the drawing plane (e.g. a
+        // building on terrain) otherwise jumps it by the large in-plane offset
+        // between the elevated handle and where its screen ray crosses the
+        // surface. For objects essentially on the drawing plane we keep the
+        // original snap-aware cursor so grid/marker snapping is unchanged.
+        //
+        // Outside Drafting the surface is the world ground plane, which is the
+        // long-standing behaviour. Inside Drafting it is the Draft plane, so a
+        // drag in an elevation or section Draft resolves in that Draft's plane
+        // instead of against a near-parallel horizontal plane the view ray
+        // barely intersects.
+        let surface_normal = drafting_move_plane_normal(world);
+        let grab_offset = (initial_cursor - moving_plane_origin(world)).dot(surface_normal);
+        let current_cursor = if grab_offset.abs() > 0.05 {
+            cursor_on_parallel_plane(world, initial_cursor, surface_normal)
                 .or_else(|| current_transform_cursor(world))?
         } else {
             current_transform_cursor(world)?
@@ -1284,10 +1299,47 @@ fn move_delta(world: &World, state: &TransformState, numeric_value: Option<f32>)
         .or(Some(constrained_delta))
 }
 
-/// World point where the cursor ray crosses the horizontal plane at height `plane_y`.
-/// Lets a Moving drag track the cursor at the grab height so handles on elevated
-/// objects don't teleport the object to where their screen ray would hit the ground.
-fn horizontal_cursor_at(world: &World, plane_y: f32) -> Option<Vec3> {
+/// Normal of the surface an unconstrained Moving drag resolves against.
+///
+/// The world ground plane outside Drafting; the plane the user is drawing on
+/// inside it. There is no second plane authority: this is the same
+/// [`DrawingPlane`](crate::plugins::cursor::DrawingPlane) the cursor, the
+/// snapping stack, and 2D authoring already project against.
+pub(crate) fn drafting_move_plane_normal(world: &World) -> Vec3 {
+    active_drafting_frame(world).map_or(Vec3::Y, |frame| authoring_drag_plane_normal(&frame))
+}
+
+/// Origin the grab offset is measured from, matching `drafting_move_plane_normal`.
+fn moving_plane_origin(world: &World) -> Vec3 {
+    active_drafting_plane(world).map_or(Vec3::ZERO, |plane| plane.origin)
+}
+
+/// The rotation axis an unconstrained Rotating drag should use inside Drafting.
+///
+/// `-normal` points out of the sheet toward the viewer, so a screen-space
+/// rotation gesture reads the same way on any Draft plane and reduces to the
+/// existing `+Y` default for a plan Draft. Returning an
+/// [`AxisConstraint::Custom`] keeps every downstream path — angle measurement,
+/// quaternion construction, protractor drawing — on the code it already uses.
+pub(crate) fn drafting_rotation_axis(
+    world: &World,
+    mode: TransformMode,
+    requested: AxisConstraint,
+) -> AxisConstraint {
+    if mode != TransformMode::Rotating || requested != AxisConstraint::None {
+        return requested;
+    }
+    match active_drafting_frame(world) {
+        Some(frame) => AxisConstraint::Custom(authoring_rotation_axis(&frame)),
+        None => requested,
+    }
+}
+
+/// World point where the cursor ray crosses the plane through `anchor` with
+/// `normal`. Lets a Moving drag track the cursor at the grab depth so handles on
+/// objects sitting off the drawing surface don't teleport the object to where
+/// their screen ray would hit that surface.
+fn cursor_on_parallel_plane(world: &World, anchor: Vec3, normal: Vec3) -> Option<Vec3> {
     let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
     let window = window_query.single(world).ok()?;
     let mut camera_query =
@@ -1300,7 +1352,7 @@ fn horizontal_cursor_at(world: &World, plane_y: f32) -> Option<Vec3> {
     let ray = camera
         .viewport_to_world(camera_transform, viewport_cursor)
         .ok()?;
-    scene_ray::project_ray_to_plane(ray, Vec3::new(0.0, plane_y, 0.0), Vec3::Y)
+    scene_ray::project_ray_to_plane(ray, anchor, normal)
 }
 
 /// World-space Y the cursor "points at" on a vertical plane through `anchor` that
@@ -1393,7 +1445,7 @@ fn rotation_delta(
 }
 
 /// Builds the rotation quaternion for the given axis constraint and angle.
-fn rotation_quat(axis: AxisConstraint, delta_radians: f32) -> Quat {
+pub(crate) fn rotation_quat(axis: AxisConstraint, delta_radians: f32) -> Quat {
     match axis {
         AxisConstraint::X | AxisConstraint::PlaneYZ => Quat::from_rotation_x(delta_radians),
         AxisConstraint::Z | AxisConstraint::PlaneXY => Quat::from_rotation_z(delta_radians),
