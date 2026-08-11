@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use bevy::{ecs::world::EntityRef, prelude::*};
 
 use crate::{
-    authored_entity::BoxedEntity,
+    authored_entity::{BoxedEntity, EntityScope},
     capability_registry::CapabilityRegistry,
     plugins::{
         history::{EditorCommand, HistorySet, PendingCommandQueue},
@@ -658,8 +658,16 @@ pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
         .get_resource::<GroupEditContext>()
         .cloned()
         .unwrap_or_default();
-    let frame = edit_context.active_frame(world);
-    let snapshot = compose_snapshot_into_frame(snapshot, &frame);
+    let is_drawing_metadata = snapshot.scope() == EntityScope::DrawingMetadata;
+    // Drawing metadata may reference model entities but never participates in
+    // model/group transforms or geometry ownership. This also fixes the same
+    // latent boundary violation for dimensions and section planes.
+    let snapshot = if is_drawing_metadata {
+        snapshot
+    } else {
+        let frame = edit_context.active_frame(world);
+        compose_snapshot_into_frame(snapshot, &frame)
+    };
     let new_id = snapshot.element_id();
 
     world
@@ -668,16 +676,18 @@ pub fn enqueue_create_boxed_entity(world: &mut World, snapshot: BoxedEntity) {
 
     // Auto-add the new entity to the active group, through the command/history
     // pipeline (ADR-002), so the assembly can later be moved/rotated as a unit.
-    if let Some(group_id) = edit_context.current_group() {
-        if let Some((before, after)) = group_membership_add_snapshots(world, group_id, new_id) {
-            enqueue_apply_entity_changes(
-                world,
-                ApplyEntityChangesCommand {
-                    label: "Add to group",
-                    before: vec![before],
-                    after: vec![after],
-                },
-            );
+    if !is_drawing_metadata {
+        if let Some(group_id) = edit_context.current_group() {
+            if let Some((before, after)) = group_membership_add_snapshots(world, group_id, new_id) {
+                enqueue_apply_entity_changes(
+                    world,
+                    ApplyEntityChangesCommand {
+                        label: "Add to group",
+                        before: vec![before],
+                        after: vec![after],
+                    },
+                );
+            }
         }
     }
 }

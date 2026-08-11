@@ -25,7 +25,7 @@ use crate::{
         clipping_planes::ClipPlaneNode,
         dimension_line::{DimensionLineNode, DimensionLineVisibility},
         drafting::{
-            DimensionAnnotationNode, DimensionStyleRegistry, DraftingVisibility,
+            DimensionAnnotationNode, DimensionStyleRegistry, DraftNode, DraftingVisibility,
             DraftingWorkspaceState,
         },
         identity::ElementId,
@@ -60,6 +60,7 @@ const INVALIDATE_ANNOTATION: u32 = 1 << 14;
 const INVALIDATE_CLIP: u32 = 1 << 15;
 const INVALIDATE_REMOVAL: u32 = 1 << 16;
 const INVALIDATE_MESH_ASSET: u32 = 1 << 17;
+const INVALIDATE_DRAFT: u32 = 1 << 18;
 
 /// Dedicated live line group. Bevy collects calls into one GPU submission and
 /// the negative depth bias keeps exact black drafting linework above surfaces.
@@ -142,6 +143,7 @@ impl DrawingSceneLiveCache {
             (INVALIDATE_CLIP, "clip"),
             (INVALIDATE_REMOVAL, "removal"),
             (INVALIDATE_MESH_ASSET, "mesh_asset"),
+            (INVALIDATE_DRAFT, "draft"),
         ]
         .into_iter()
         .filter_map(|(flag, label)| (self.last_invalidation_mask & flag != 0).then_some(label))
@@ -242,20 +244,24 @@ fn invalidate_live_drawing_scene(
         Query<(), (With<Mesh3d>, Changed<ElementId>)>,
         Query<(), (With<ElementId>, Changed<MaterialAssignment>)>,
     )>,
-    annotation_changes: Query<
-        (),
-        Or<(
-            Added<DimensionAnnotationNode>,
-            Changed<DimensionAnnotationNode>,
-            Added<DimensionLineNode>,
-            Changed<DimensionLineNode>,
-        )>,
-    >,
-    clip_changes: Query<(), Or<(Added<ClipPlaneNode>, Changed<ClipPlaneNode>)>>,
+    mut semantic_changes: ParamSet<(
+        Query<
+            (),
+            Or<(
+                Added<DimensionAnnotationNode>,
+                Changed<DimensionAnnotationNode>,
+                Added<DimensionLineNode>,
+                Changed<DimensionLineNode>,
+            )>,
+        >,
+        Query<(), Or<(Added<ClipPlaneNode>, Changed<ClipPlaneNode>)>>,
+        Query<(), Or<(Added<DraftNode>, Changed<DraftNode>)>>,
+    )>,
     mut removed_meshes: RemovedComponents<Mesh3d>,
     mut removed_annotations: RemovedComponents<DimensionAnnotationNode>,
     mut removed_legacy_dimensions: RemovedComponents<DimensionLineNode>,
     mut removed_clip_planes: RemovedComponents<ClipPlaneNode>,
+    mut removed_drafts: RemovedComponents<DraftNode>,
     mut mesh_events: MessageReader<AssetEvent<Mesh>>,
     mut cache: ResMut<DrawingSceneLiveCache>,
 ) {
@@ -292,8 +298,9 @@ fn invalidate_live_drawing_scene(
     let mesh_visibility_changed = !scene_changes.p5().is_empty();
     let mesh_identity_changed = !scene_changes.p6().is_empty();
     let mesh_material_changed = !scene_changes.p7().is_empty();
-    let annotation_changed = !annotation_changes.is_empty();
-    let clip_changed = !clip_changes.is_empty();
+    let annotation_changed = !semantic_changes.p0().is_empty();
+    let clip_changed = !semantic_changes.p1().is_empty();
+    let draft_changed = !semantic_changes.p2().is_empty();
     let removed_mesh_entities: Vec<Entity> = removed_meshes.read().collect();
     for entity in &removed_mesh_entities {
         cache.observed_mesh_handles.remove(entity);
@@ -301,10 +308,12 @@ fn invalidate_live_drawing_scene(
     let removed_annotations = removed_annotations.read().count() > 0;
     let removed_legacy_dimensions = removed_legacy_dimensions.read().count() > 0;
     let removed_clip_planes = removed_clip_planes.read().count() > 0;
+    let removed_drafts = removed_drafts.read().count() > 0;
     let removed = !removed_mesh_entities.is_empty()
         || removed_annotations
         || removed_legacy_dimensions
-        || removed_clip_planes;
+        || removed_clip_planes
+        || removed_drafts;
     let mesh_asset_changed = mesh_events.read().count() > 0;
 
     if !active {
@@ -368,6 +377,9 @@ fn invalidate_live_drawing_scene(
     if mesh_asset_changed {
         reasons |= INVALIDATE_MESH_ASSET;
     }
+    if draft_changed || removed_drafts {
+        reasons |= INVALIDATE_DRAFT;
+    }
     if reasons != 0 {
         cache.invalidate(reasons);
     }
@@ -390,7 +402,14 @@ fn rebuild_live_drawing_scene(world: &mut World) {
     }
 
     let started = Instant::now();
-    let scene = sheet_view_from_active_camera(world, DEFAULT_SCALE_DENOMINATOR, DEFAULT_MARGIN_MM)
+    let layout = crate::plugins::drafting::active_draft_layout(world);
+    let scale = layout
+        .as_ref()
+        .map_or(DEFAULT_SCALE_DENOMINATOR, |layout| layout.scale_denominator);
+    let margin = layout
+        .as_ref()
+        .map_or(DEFAULT_MARGIN_MM, |layout| layout.margin_mm);
+    let scene = sheet_view_from_active_camera(world, scale, margin)
         .and_then(|view| build_drawing_scene(world, &view));
     let world_lines = scene.as_ref().and_then(scene_world_line_batch);
     let elapsed = started.elapsed();

@@ -9,7 +9,10 @@
 use bevy::math::Vec2;
 
 use crate::plugins::section_fill::{generate_hatch_lines, DRAWING_HATCH_DENSITY};
-use crate::plugins::{drafting::DimPrimitive, identity::ElementId};
+use crate::plugins::{
+    drafting::{DimPrimitive, DraftPlane},
+    identity::ElementId,
+};
 
 use super::sheet::{SheetBounds, SheetStroke, SheetView};
 
@@ -89,6 +92,11 @@ pub struct DrawingSceneLineBatch {
 /// and live presentation must not recapture the model independently.
 #[derive(Debug, Clone)]
 pub struct DrawingScene {
+    /// Selected durable Draft whose referenced membership scoped this scene.
+    /// `None` preserves the legacy all-authored-content projection.
+    pub draft_id: Option<ElementId>,
+    /// Shared canonical drawing-tool plane, copied only as derived scene input.
+    pub draft_plane: Option<DraftPlane>,
     /// Deterministic fingerprint of normalized emitted content and its view.
     pub source_model_revision: u64,
     pub view: SheetView,
@@ -102,6 +110,8 @@ pub struct DrawingScene {
 impl DrawingScene {
     pub fn new(view: SheetView) -> Self {
         Self {
+            draft_id: None,
+            draft_plane: None,
             source_model_revision: 0,
             view,
             lines: Vec::new(),

@@ -11,7 +11,9 @@ use crate::plugins::{
     camera::{apply_orbit_state, CameraControlsState, CameraProjectionMode, OrbitCamera},
     command_registry::CommandResult,
     compass::CompassSettings,
+    cursor::DrawingPlane,
     drafting_sheet::DrawingSceneLiveCache,
+    identity::ElementId,
     render_pipeline::{apply_drafting_render_preset, drafting_surface_evidence, RenderSettings},
     ui::StatusBarData,
 };
@@ -62,18 +64,36 @@ struct DraftingWorkspaceBaseline {
     orbit: Option<OrbitCameraBaseline>,
     annotation_visibility: DraftingVisibility,
     compass_enabled: Option<bool>,
+    drawing_plane: Option<DrawingPlane>,
 }
 
 /// The single authority for whether the main viewport is in Drafting.
 #[derive(Resource, Debug, Default)]
 pub struct DraftingWorkspaceState {
     baseline: Option<DraftingWorkspaceBaseline>,
+    active_draft_id: Option<ElementId>,
 }
 
 impl DraftingWorkspaceState {
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.baseline.is_some()
+    }
+
+    #[must_use]
+    pub fn active_draft_id(&self) -> Option<ElementId> {
+        self.active_draft_id
+    }
+
+    /// Select the durable Draft consumed by the one workspace controller.
+    /// Returns whether the selection actually changed, preserving bounded
+    /// Bevy invalidation on idempotent agent calls.
+    pub(crate) fn select_draft(&mut self, draft_id: Option<ElementId>) -> bool {
+        if self.active_draft_id == draft_id {
+            return false;
+        }
+        self.active_draft_id = draft_id;
+        true
     }
 }
 
@@ -143,6 +163,7 @@ fn workspace_result(world: &World, active: bool) -> CommandResult {
                 "paper_override_count": surface_evidence.paper_override_count,
                 "valid_white_override_count": surface_evidence.valid_white_override_count,
             },
+            "active_draft": super::draft::inspect_active_draft(world),
             "drawing_scene": drawing_scene
         })),
         ..CommandResult::default()
@@ -169,6 +190,8 @@ fn enter_drafting(world: &mut World) -> Result<(), String> {
     let compass_enabled = world
         .get_resource::<CompassSettings>()
         .map(|settings| settings.enabled);
+    let drawing_plane = world.get_resource::<DrawingPlane>().cloned();
+    let default_draft = super::draft::first_draft_id(world);
 
     let mut state = world
         .get_resource_mut::<DraftingWorkspaceState>()
@@ -182,7 +205,11 @@ fn enter_drafting(world: &mut World) -> Result<(), String> {
         orbit,
         annotation_visibility,
         compass_enabled,
+        drawing_plane,
     });
+    if state.active_draft_id.is_none() {
+        state.active_draft_id = default_draft;
+    }
 
     apply_active_invariants(world);
     Ok(())
@@ -224,6 +251,14 @@ fn exit_drafting(world: &mut World) -> Result<(), String> {
     ) {
         compass.enabled = enabled;
     }
+    if let (Some(saved_plane), Some(mut drawing_plane)) = (
+        baseline.drawing_plane,
+        world.get_resource_mut::<DrawingPlane>(),
+    ) {
+        if *drawing_plane != saved_plane {
+            *drawing_plane = saved_plane;
+        }
+    }
 
     if let Some(orbit_baseline) = baseline.orbit {
         let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
@@ -249,6 +284,127 @@ fn apply_active_invariants(world: &mut World) {
     if let Some(mut compass) = world.get_resource_mut::<CompassSettings>() {
         compass.enabled = false;
     }
+    apply_active_draft_plane(world);
+    apply_active_draft_camera(world);
+}
+
+/// Copy the selected durable Draft plane into the canonical interactive tool
+/// plane. This is a semantic-state transition, not a per-frame overwrite.
+pub(crate) fn apply_active_draft_plane(world: &mut World) {
+    let active = world
+        .get_resource::<DraftingWorkspaceState>()
+        .is_some_and(DraftingWorkspaceState::is_active);
+    if !active {
+        return;
+    }
+    let Some(snapshot) = super::draft::active_draft_snapshot(world) else {
+        return;
+    };
+    if let Some(mut drawing_plane) = world.get_resource_mut::<DrawingPlane>() {
+        if *drawing_plane != snapshot.node.plane {
+            *drawing_plane = snapshot.node.plane;
+        }
+    }
+}
+
+/// Align the existing orbit camera to the selected Draft's exact frame while
+/// retaining the camera controller's focus, pan, zoom, and projection logic.
+/// The camera looks along the plane normal; its screen-right and screen-up axes
+/// are the plane tangent and bitangent respectively. This matches the existing
+/// `DrawingPlane` handedness (`tangent × normal = bitangent`) exactly.
+pub(crate) fn apply_active_draft_camera(world: &mut World) {
+    let active = world
+        .get_resource::<DraftingWorkspaceState>()
+        .is_some_and(DraftingWorkspaceState::is_active);
+    if !active {
+        return;
+    }
+    let Some(snapshot) = super::draft::active_draft_snapshot(world) else {
+        return;
+    };
+    let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
+    let Some((mut orbit, mut transform, mut projection)) = query.iter_mut(world).next() else {
+        return;
+    };
+    align_camera_to_draft_plane(
+        &mut orbit,
+        &mut transform,
+        &mut projection,
+        &snapshot.node.plane,
+    );
+}
+
+fn align_camera_to_draft_plane(
+    orbit: &mut OrbitCamera,
+    transform: &mut Transform,
+    projection: &mut Projection,
+    plane: &DrawingPlane,
+) {
+    if orbit.projection_mode != CameraProjectionMode::Isometric {
+        orbit.transition_projection_mode(CameraProjectionMode::Isometric);
+        apply_orbit_state(orbit, transform, projection);
+    } else if !matches!(projection, Projection::Orthographic(_)) {
+        apply_orbit_state(orbit, transform, projection);
+    }
+
+    let distance = orbit.radius.max(0.001);
+    let desired = Transform::from_translation(orbit.focus - plane.normal * distance)
+        .looking_at(orbit.focus, plane.bitangent);
+    let translation_matches = transform.translation.abs_diff_eq(desired.translation, 1e-5);
+    let rotation_matches = transform.rotation.dot(desired.rotation).abs() >= 1.0 - 1e-5;
+    if !translation_matches || !rotation_matches {
+        *transform = desired;
+    }
+}
+
+/// React only to a changed Draft selection or changed durable Draft. Face-edit
+/// tools remain free to use the shared DrawingPlane between those transitions.
+pub(crate) fn sync_active_draft_plane_on_change(
+    workspace: Res<DraftingWorkspaceState>,
+    drafts: Query<(&ElementId, Ref<super::draft::DraftNode>)>,
+    drawing_plane: Option<ResMut<DrawingPlane>>,
+) {
+    if !workspace.is_active() {
+        return;
+    }
+    let Some(active_id) = workspace.active_draft_id() else {
+        return;
+    };
+    let Some((_, draft)) = drafts.iter().find(|(id, _)| **id == active_id) else {
+        return;
+    };
+    if !workspace.is_changed() && !draft.is_changed() {
+        return;
+    }
+    let Some(mut drawing_plane) = drawing_plane else {
+        return;
+    };
+    if *drawing_plane != draft.plane {
+        *drawing_plane = draft.plane.clone();
+    }
+}
+
+/// Reassert exact Draft-plane camera orientation after the ordinary camera
+/// controller has processed input. This prevents orbit gestures or view preset
+/// commands from breaking Drafting while preserving the shared pan/zoom path.
+pub(crate) fn enforce_active_draft_camera_alignment(
+    workspace: Res<DraftingWorkspaceState>,
+    drafts: Query<(&ElementId, &super::draft::DraftNode)>,
+    mut cameras: Query<(&mut OrbitCamera, &mut Transform, &mut Projection)>,
+) {
+    if !workspace.is_active() {
+        return;
+    }
+    let Some(active_id) = workspace.active_draft_id() else {
+        return;
+    };
+    let Some((_, draft)) = drafts.iter().find(|(id, _)| **id == active_id) else {
+        return;
+    };
+    let Some((mut orbit, mut transform, mut projection)) = cameras.iter_mut().next() else {
+        return;
+    };
+    align_camera_to_draft_plane(&mut orbit, &mut transform, &mut projection, &draft.plane);
 }
 
 /// Reasserts invariants if another presentation control is changed while the
@@ -304,6 +460,7 @@ mod tests {
             .init_resource::<DraftingVisibility>()
             .init_resource::<DrawingSceneLiveCache>()
             .init_resource::<CompassSettings>()
+            .init_resource::<DrawingPlane>()
             .insert_resource(CameraControlsState::default())
             .insert_resource(RenderSettings {
                 background_rgb: [0.2, 0.3, 0.4],
@@ -390,6 +547,40 @@ mod tests {
             app.world().resource::<RenderSettings>().background_rgb,
             [0.2, 0.3, 0.4]
         );
+    }
+
+    #[test]
+    fn selected_draft_reuses_and_reversibly_restores_tool_drawing_plane() {
+        let mut app = test_app();
+        let baseline = DrawingPlane::from_face(Vec3::new(1.0, 0.0, 0.0), Vec3::Y);
+        *app.world_mut().resource_mut::<DrawingPlane>() = baseline.clone();
+
+        let mut node = super::super::draft::DraftNode::new("Elevation");
+        node.plane = DrawingPlane::try_from_origin_normal_tangent(
+            Vec3::new(0.0, 0.0, 4.0),
+            Vec3::Z,
+            Vec3::X,
+        )
+        .unwrap();
+        let expected = node.plane.clone();
+        app.world_mut().spawn((ElementId(7), node));
+
+        execute_toggle_drafting_workspace(app.world_mut(), &json!({"enabled": true})).unwrap();
+        assert_eq!(
+            app.world()
+                .resource::<DraftingWorkspaceState>()
+                .active_draft_id(),
+            Some(ElementId(7))
+        );
+        assert_eq!(*app.world().resource::<DrawingPlane>(), expected);
+        let mut camera_query = app.world_mut().query::<&Transform>();
+        let camera = camera_query.single(app.world()).expect("Draft camera");
+        assert!((camera.rotation * Vec3::X).dot(expected.tangent) > 0.9999);
+        assert!((camera.rotation * Vec3::Y).dot(expected.bitangent) > 0.9999);
+        assert!((camera.rotation * Vec3::NEG_Z).dot(expected.normal) > 0.9999);
+
+        execute_toggle_drafting_workspace(app.world_mut(), &json!({"enabled": false})).unwrap();
+        assert_eq!(*app.world().resource::<DrawingPlane>(), baseline);
     }
 
     #[test]

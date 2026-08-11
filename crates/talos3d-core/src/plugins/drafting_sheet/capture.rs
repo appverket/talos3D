@@ -21,7 +21,7 @@
 //!    If something is wrong, it's wrong here — never deep inside a writer.
 
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashSet},
     hash::{Hash, Hasher},
 };
 
@@ -30,6 +30,7 @@ use bevy::prelude::*;
 
 use crate::capability_registry::CapabilityRegistry;
 use crate::plugins::{
+    commands::find_entity_by_element_id_readonly,
     definition_preview_scene::PreviewOnly,
     dimension_line::{
         dimension_line_midpoint, dimension_line_offset_vector,
@@ -83,6 +84,10 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
 
     let mesh_assets = world.get_resource::<Assets<Mesh>>()?;
     let registry = world.get_resource::<CapabilityRegistry>()?;
+    let active_draft = drafting::active_draft_snapshot(world);
+    let member_filter = active_draft
+        .as_ref()
+        .map(|draft| draft.node.members.iter().copied().collect::<HashSet<_>>());
 
     // Camera frames.
     let (view_proj, camera_position, camera_forward) = build_view_proj(view);
@@ -100,6 +105,12 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
     ), Without<PreviewOnly>>()?;
     let mut subjects = Vec::new();
     for (entity, element_id, mesh_handle, mesh_transform, visibility) in subject_query.iter(world) {
+        if member_filter
+            .as_ref()
+            .is_some_and(|members| !members.contains(element_id))
+        {
+            continue;
+        }
         if visibility.is_some_and(|v| *v == Visibility::Hidden) {
             continue;
         }
@@ -137,6 +148,21 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
     let clip_planes = collect_active_clip_planes(world);
 
     let mut scene = DrawingScene::new(view.clone());
+    if let Some(draft) = &active_draft {
+        scene.draft_id = Some(draft.element_id);
+        scene.draft_plane = Some(draft.node.plane.clone());
+        for member in &draft.node.members {
+            if find_entity_by_element_id_readonly(world, *member).is_none() {
+                scene.findings.push(super::scene::DrawingSceneFinding {
+                    code: "draft.member_missing",
+                    message: format!(
+                        "Draft {} references missing element {}",
+                        draft.element_id.0, member.0
+                    ),
+                });
+            }
+        }
+    }
 
     // 2) Visible edges → paper-mm line segments, classified.
     for (owner, subject) in &subjects {
@@ -176,6 +202,12 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
     // 3) Clip-plane section fills → paper-mm polygons + section-cut outlines.
     let fill_regions = extract_section_fills(world, mesh_assets);
     for (fill_ordinal, region) in fill_regions.iter().enumerate() {
+        if member_filter
+            .as_ref()
+            .is_some_and(|members| !members.contains(&region.owner))
+        {
+            continue;
+        }
         if let Some(polygon) = project_polygon(region, &view_proj, &ndc_to_drawing) {
             // Outline the cut polygon with section-cut weight — heaviest
             // on the page by convention.
@@ -208,7 +240,8 @@ pub fn build_drawing_scene(world: &World, view: &SheetView) -> Option<DrawingSce
 
     // 4) Rich drafting annotations — project to paper-mm 2D, then the
     //    renderer emits paper-mm primitives directly.
-    scene.annotations = capture_annotations(world, &view_proj, &ndc_to_drawing);
+    scene.annotations =
+        capture_annotations(world, &view_proj, &ndc_to_drawing, member_filter.as_ref());
 
     // 5) Finalise bounds (content bbox + view margin).
     canonicalize_scene(&mut scene);
@@ -348,23 +381,27 @@ fn capture_annotations(
     world: &World,
     view_proj: &Mat4,
     map: &NdcToDrawing,
+    member_filter: Option<&HashSet<ElementId>>,
 ) -> Vec<DrawingSceneAnnotation> {
     let mut out = Vec::new();
 
     let Some(registry) = world.get_resource::<DimensionStyleRegistry>() else {
-        return capture_legacy_dimension_lines(world, view_proj, map, out);
+        return capture_legacy_dimension_lines(world, view_proj, map, member_filter, out);
     };
     let visibility = world
         .get_resource::<DraftingVisibility>()
         .cloned()
         .unwrap_or_default();
     if !visibility.show_all {
-        return capture_legacy_dimension_lines(world, view_proj, map, out);
+        return capture_legacy_dimension_lines(world, view_proj, map, member_filter, out);
     }
     let Some(mut q) = world.try_query::<(&ElementId, &DimensionAnnotationNode)>() else {
-        return capture_legacy_dimension_lines(world, view_proj, map, out);
+        return capture_legacy_dimension_lines(world, view_proj, map, member_filter, out);
     };
     for (element_id, node) in q.iter(world) {
+        if member_filter.is_some_and(|members| !members.contains(element_id)) {
+            continue;
+        }
         if !node.visible || !visibility.is_visible(&node.style_name, node.kind.tag()) {
             continue;
         }
@@ -434,13 +471,14 @@ fn capture_annotations(
             primitives: normalize_primitives(prims, map),
         });
     }
-    capture_legacy_dimension_lines(world, view_proj, map, out)
+    capture_legacy_dimension_lines(world, view_proj, map, member_filter, out)
 }
 
 fn capture_legacy_dimension_lines(
     world: &World,
     view_proj: &Mat4,
     map: &NdcToDrawing,
+    member_filter: Option<&HashSet<ElementId>>,
     mut out: Vec<DrawingSceneAnnotation>,
 ) -> Vec<DrawingSceneAnnotation> {
     let visible = world
@@ -457,6 +495,9 @@ fn capture_legacy_dimension_lines(
         return out;
     };
     for (element_id, node) in q.iter(world) {
+        if member_filter.is_some_and(|members| !members.contains(element_id)) {
+            continue;
+        }
         if !node.visible {
             continue;
         }
@@ -697,6 +738,25 @@ fn stroke_rank(stroke: SheetStroke) -> u8 {
 
 fn drawing_scene_revision(scene: &DrawingScene) -> u64 {
     let mut hasher = DefaultHasher::new();
+    scene.draft_id.hash(&mut hasher);
+    if let Some(plane) = &scene.draft_plane {
+        for value in [
+            plane.origin.x,
+            plane.origin.y,
+            plane.origin.z,
+            plane.normal.x,
+            plane.normal.y,
+            plane.normal.z,
+            plane.tangent.x,
+            plane.tangent.y,
+            plane.tangent.z,
+            plane.bitangent.x,
+            plane.bitangent.y,
+            plane.bitangent.z,
+        ] {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
     for value in [
         scene.view.eye.x,
         scene.view.eye.y,
@@ -993,5 +1053,69 @@ mod tests {
             "ground y = {}",
             ground.y
         );
+    }
+
+    #[test]
+    fn active_draft_membership_scopes_annotations_and_reports_stale_references() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(CapabilityRegistry::default());
+        world.insert_resource(DocumentProperties::default());
+        world.insert_resource(DimensionStyleRegistry::default());
+        world.insert_resource(DraftingVisibility::default());
+        // Register the render-query component types without contributing an
+        // authored subject to the scene.
+        world.spawn((
+            Mesh3d::default(),
+            GlobalTransform::default(),
+            Visibility::Hidden,
+            PreviewOnly,
+        ));
+
+        let mut draft = drafting::DraftNode::new("Scoped");
+        draft.members = vec![ElementId(10), ElementId(999)];
+        draft.normalize_and_validate().unwrap();
+        world.spawn((ElementId(1), draft));
+        for (id, y) in [(10, 0.0), (11, 1.0)] {
+            world.spawn((
+                ElementId(id),
+                DimensionAnnotationNode {
+                    kind: DimensionKind::Aligned,
+                    a: Vec3::new(0.0, y, 0.0),
+                    b: Vec3::new(1.0, y, 0.0),
+                    offset: Vec3::new(0.0, 0.2, 0.0),
+                    style_name: "architectural_metric".to_string(),
+                    text_override: None,
+                    visible: true,
+                },
+            ));
+        }
+        let mut workspace = drafting::DraftingWorkspaceState::default();
+        workspace.select_draft(Some(ElementId(1)));
+        world.insert_resource(workspace);
+
+        let view = SheetView {
+            eye: Vec3::new(0.0, 0.0, 10.0),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            ortho_height_m: 4.0,
+            aspect: 1.0,
+            scale_denominator: 50.0,
+            margin_mm: 10.0,
+        };
+        let scene = build_drawing_scene(&world, &view).expect("drawing scene");
+        assert_eq!(scene.draft_id, Some(ElementId(1)));
+        assert_eq!(
+            scene
+                .annotations
+                .iter()
+                .map(|annotation| annotation.owner)
+                .collect::<Vec<_>>(),
+            vec![ElementId(10)]
+        );
+        assert!(scene
+            .findings
+            .iter()
+            .any(|finding| finding.code == "draft.member_missing"));
     }
 }

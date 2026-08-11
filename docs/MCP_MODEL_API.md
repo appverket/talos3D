@@ -59,6 +59,16 @@ points, `place_dimension_between_handles` resolves stable handle ids such as
 box `corner_0` … `corner_7` through the same public handle surface exposed by
 `list_handles`.
 
+Draft documents are agent-addressable through the registered command surface.
+Use `list_commands` to discover the typed schemas for
+`drafting.create_draft`, `drafting.select_draft`,
+`drafting.update_membership`, and `drafting.inspect_drafts`, then invoke them
+with `invoke_command`. A Draft is a semantic drawing-metadata container: it
+references existing 3D model entities and 2D annotations by stable element id,
+while `DrawingScene` projections and export bytes remain derived. The Draft's
+plane reuses the same `DrawingPlane` consumed by interactive tools, so agent and
+UI creation share one coordinate-frame contract.
+
 Built-in definition libraries are also loaded at startup and show up through
 the same definition-library inspection tools as project-local libraries. Their
 reported scope is `Bundled`, which distinguishes shipped catalogs from

@@ -68,8 +68,18 @@ pub fn export_sheet_to_path(
     scale_denominator: Option<f32>,
 ) -> Result<PathBuf, String> {
     let path = normalize_path(path);
-    let scale = scale_denominator.unwrap_or(DEFAULT_SCALE_DENOMINATOR);
-    let view = sheet_view_from_active_camera(world, scale, DEFAULT_MARGIN_MM).ok_or_else(|| {
+    let active_layout = crate::plugins::drafting::active_draft_layout(world);
+    let scale = scale_denominator
+        .or_else(|| {
+            active_layout
+                .as_ref()
+                .map(|layout| layout.scale_denominator)
+        })
+        .unwrap_or(DEFAULT_SCALE_DENOMINATOR);
+    let margin = active_layout
+        .as_ref()
+        .map_or(DEFAULT_MARGIN_MM, |layout| layout.margin_mm);
+    let view = sheet_view_from_active_camera(world, scale, margin).ok_or_else(|| {
         "no active orthographic camera — drafting requires an ortho view".to_string()
     })?;
     let sheet = capture_sheet(world, &view)
