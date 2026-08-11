@@ -323,28 +323,28 @@ pub(crate) fn apply_active_draft_camera(world: &mut World) {
         return;
     };
     let mut query = world.query::<(&mut OrbitCamera, &mut Transform, &mut Projection)>();
-    let Some((mut orbit, mut transform, mut projection)) = query.iter_mut(world).next() else {
+    let Some((orbit, transform, projection)) = query.iter_mut(world).next() else {
         return;
     };
-    align_camera_to_draft_plane(
-        &mut orbit,
-        &mut transform,
-        &mut projection,
-        &snapshot.node.plane,
-    );
+    align_camera_to_draft_plane(orbit, transform, projection, &snapshot.node.plane);
 }
 
 fn align_camera_to_draft_plane(
-    orbit: &mut OrbitCamera,
-    transform: &mut Transform,
-    projection: &mut Projection,
+    mut orbit: Mut<OrbitCamera>,
+    mut transform: Mut<Transform>,
+    mut projection: Mut<Projection>,
     plane: &DrawingPlane,
 ) {
+    // Keep Bevy's change ticks semantic. Accepting `&mut T` here would mark
+    // all three components changed through `Mut<T>` deref coercion even when
+    // the constrained view was already exact, causing DrawingScene to rebuild
+    // continuously at idle. Only take a mutable dereference in a branch that
+    // actually changes controller or presentation state.
     if orbit.projection_mode != CameraProjectionMode::Isometric {
         orbit.transition_projection_mode(CameraProjectionMode::Isometric);
-        apply_orbit_state(orbit, transform, projection);
-    } else if !matches!(projection, Projection::Orthographic(_)) {
-        apply_orbit_state(orbit, transform, projection);
+        apply_orbit_state(&orbit, &mut transform, &mut projection);
+    } else if !matches!(*projection, Projection::Orthographic(_)) {
+        apply_orbit_state(&orbit, &mut transform, &mut projection);
     }
 
     let distance = orbit.radius.max(0.001);
@@ -401,10 +401,10 @@ pub(crate) fn enforce_active_draft_camera_alignment(
     let Some((_, draft)) = drafts.iter().find(|(id, _)| **id == active_id) else {
         return;
     };
-    let Some((mut orbit, mut transform, mut projection)) = cameras.iter_mut().next() else {
+    let Some((orbit, transform, projection)) = cameras.iter_mut().next() else {
         return;
     };
-    align_camera_to_draft_plane(&mut orbit, &mut transform, &mut projection, &draft.plane);
+    align_camera_to_draft_plane(orbit, transform, projection, &draft.plane);
 }
 
 /// Reasserts invariants if another presentation control is changed while the
@@ -581,6 +581,25 @@ mod tests {
 
         execute_toggle_drafting_workspace(app.world_mut(), &json!({"enabled": false})).unwrap();
         assert_eq!(*app.world().resource::<DrawingPlane>(), baseline);
+    }
+
+    #[test]
+    fn exact_draft_camera_alignment_does_not_poison_change_detection_at_idle() {
+        let mut app = test_app();
+        app.world_mut()
+            .spawn((ElementId(7), super::super::draft::DraftNode::new("Plan")));
+        execute_toggle_drafting_workspace(app.world_mut(), &json!({"enabled": true})).unwrap();
+
+        app.world_mut().clear_trackers();
+        apply_active_draft_camera(app.world_mut());
+
+        let mut query = app
+            .world_mut()
+            .query::<(Ref<OrbitCamera>, Ref<Transform>, Ref<Projection>)>();
+        let (orbit, transform, projection) = query.single(app.world()).expect("Draft camera");
+        assert!(!orbit.is_changed());
+        assert!(!transform.is_changed());
+        assert!(!projection.is_changed());
     }
 
     #[test]
