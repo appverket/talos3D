@@ -142,6 +142,7 @@ fn architectural_write_handlers_preserve_parent_child_behavior() {
             operation: "move".to_string(),
             axis: Some("X".to_string()),
             value: json!(2.5),
+            pivot: None,
         },
     )
     .expect("wall transform should succeed");
@@ -162,6 +163,7 @@ fn architectural_write_handlers_preserve_parent_child_behavior() {
             operation: "move".to_string(),
             axis: Some("X".to_string()),
             value: json!(2.0),
+            pivot: None,
         },
     )
     .expect("combined transform should succeed");

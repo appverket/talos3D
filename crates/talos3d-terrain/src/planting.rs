@@ -2323,9 +2323,13 @@ fn execute_unplant_on_surface(world: &mut World, params: &Value) -> Result<Comma
 mod tests {
     use super::*;
     use crate::conforming::ConformingSolidFactory;
+    use bevy::ecs::world::EntityRef;
+    use std::any::Any;
     use talos3d_core::{
-        authored_entity::AuthoredEntity,
-        capability_registry::{CapabilityRegistry, ElementClassAssignment, ElementClassId},
+        authored_entity::{AuthoredEntity, HandleInfo, PropertyFieldDef},
+        capability_registry::{
+            AuthoredEntityFactory, CapabilityRegistry, ElementClassAssignment, ElementClassId,
+        },
         plugins::modeling::{
             assembly::{SemanticAssembly, SemanticRelation},
             generic_factory::PrimitiveFactory,
@@ -2334,7 +2338,186 @@ mod tests {
             primitives::{BoxPrimitive, ShapeRotation},
             snapshots::TriangleMeshFactory,
         },
+        plugins::transform::{apply_transform_plan_modifiers, TransformPlugin},
     };
+
+    /// Test-only hosted-child fixture mirroring the shape of
+    /// `talos3d-architecture-elements::snapshots::OpeningSnapshot`: a
+    /// `transform_parent()`-carrying snapshot with one field that only a
+    /// plain `translate_by` should touch (`parent_relative_offset`), so the
+    /// two `transform_parent()`-aware branches in this file
+    /// (`translated_target_snapshots`, `ensure_planted_contract_in_preview`)
+    /// have a fixture to exercise without `talos3d-terrain` depending on the
+    /// architecture crate.
+    #[derive(Component, Debug, Clone, Copy)]
+    struct HostedChildFixture {
+        parent_id: ElementId,
+        center: Vec3,
+        parent_relative_offset: Vec3,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct HostedChildSnapshot {
+        element_id: ElementId,
+        parent_id: ElementId,
+        center: Vec3,
+        parent_relative_offset: Vec3,
+    }
+
+    impl From<HostedChildSnapshot> for BoxedEntity {
+        fn from(snapshot: HostedChildSnapshot) -> Self {
+            Self(Box::new(snapshot))
+        }
+    }
+
+    impl AuthoredEntity for HostedChildSnapshot {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn type_name(&self) -> &'static str {
+            "test_hosted_child_fixture"
+        }
+
+        fn element_id(&self) -> ElementId {
+            self.element_id
+        }
+
+        fn label(&self) -> String {
+            format!("hosted child fixture {}", self.element_id.0)
+        }
+
+        fn center(&self) -> Vec3 {
+            self.center
+        }
+
+        fn translate_by(&self, delta: Vec3) -> BoxedEntity {
+            // Plain translate mutates the parent-relative field too — the
+            // "double apply" the transform_parent() guards exist to avoid.
+            Self {
+                center: self.center + delta,
+                parent_relative_offset: self.parent_relative_offset + delta,
+                ..self.clone()
+            }
+            .into()
+        }
+
+        fn translate_with_parent(&self, delta: Vec3) -> BoxedEntity {
+            // Moves with the parent but leaves the child-relative field
+            // untouched, mirroring `OpeningSnapshot::translate_with_parent`.
+            Self {
+                center: self.center + delta,
+                ..self.clone()
+            }
+            .into()
+        }
+
+        fn rotate_by(&self, _rotation: Quat) -> BoxedEntity {
+            self.clone().into()
+        }
+
+        fn scale_by(&self, _factor: Vec3, _center: Vec3) -> BoxedEntity {
+            self.clone().into()
+        }
+
+        fn transform_parent(&self) -> Option<ElementId> {
+            Some(self.parent_id)
+        }
+
+        fn property_fields(&self) -> Vec<PropertyFieldDef> {
+            Vec::new()
+        }
+
+        fn set_property_json(
+            &self,
+            _property_name: &str,
+            _value: &Value,
+        ) -> Result<BoxedEntity, String> {
+            Err("test_hosted_child_fixture snapshots do not support properties".to_string())
+        }
+
+        fn handles(&self) -> Vec<HandleInfo> {
+            Vec::new()
+        }
+
+        fn to_json(&self) -> Value {
+            json!({
+                "type": "test_hosted_child_fixture",
+                "element_id": self.element_id.0,
+                "parent_id": self.parent_id.0,
+                "center": [self.center.x, self.center.y, self.center.z],
+                "parent_relative_offset": [
+                    self.parent_relative_offset.x,
+                    self.parent_relative_offset.y,
+                    self.parent_relative_offset.z,
+                ],
+            })
+        }
+
+        fn apply_to(&self, world: &mut World) {
+            let fixture = HostedChildFixture {
+                parent_id: self.parent_id,
+                center: self.center,
+                parent_relative_offset: self.parent_relative_offset,
+            };
+            if let Some(entity) = find_entity_by_element_id(world, self.element_id) {
+                world.entity_mut(entity).insert(fixture);
+            } else {
+                world.spawn((self.element_id, fixture));
+            }
+        }
+
+        fn remove_from(&self, world: &mut World) {
+            despawn_by_element_id(world, self.element_id);
+        }
+
+        fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {}
+
+        fn box_clone(&self) -> BoxedEntity {
+            self.clone().into()
+        }
+
+        fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|other| self == other)
+        }
+    }
+
+    struct HostedChildFixtureFactory;
+
+    impl AuthoredEntityFactory for HostedChildFixtureFactory {
+        fn type_name(&self) -> &'static str {
+            "test_hosted_child_fixture"
+        }
+
+        fn capture_snapshot(&self, entity_ref: &EntityRef, _world: &World) -> Option<BoxedEntity> {
+            let element_id = *entity_ref.get::<ElementId>()?;
+            let fixture = entity_ref.get::<HostedChildFixture>()?;
+            Some(
+                HostedChildSnapshot {
+                    element_id,
+                    parent_id: fixture.parent_id,
+                    center: fixture.center,
+                    parent_relative_offset: fixture.parent_relative_offset,
+                }
+                .into(),
+            )
+        }
+
+        fn from_persisted_json(&self, _data: &Value) -> Result<BoxedEntity, String> {
+            Err("test_hosted_child_fixture does not support persistence".to_string())
+        }
+
+        fn from_create_request(
+            &self,
+            _world: &World,
+            _request: &Value,
+        ) -> Result<BoxedEntity, String> {
+            Err("test_hosted_child_fixture does not support creation requests".to_string())
+        }
+    }
 
     fn flat_heightfield(height: f32) -> TerrainHeightfield {
         let points = [
@@ -2363,6 +2546,7 @@ mod tests {
         registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
         registry.register_factory(TriangleMeshFactory);
         registry.register_factory(ConformingSolidFactory);
+        registry.register_factory(HostedChildFixtureFactory);
         world.insert_resource(registry);
 
         let mut allocator = ElementIdAllocator::default();
@@ -4014,6 +4198,131 @@ mod tests {
         );
     }
 
+    /// Same fixture and assertions as
+    /// `planted_structure_transform_preview_moves_roof_and_reseats_group_from_child_drag`,
+    /// but driven through `apply_transform_plan_modifiers` against a real
+    /// `App` composing `TransformPlugin` + `PlantingPlugin` — the actual
+    /// production entry point `model_api::handle_transform` uses, and the
+    /// one viewport preview/commit shares — instead of calling
+    /// `adjust_planted_structure_transform_preview` directly against a
+    /// hand-registered `TransformPreviewModifiers`. Pins that the real
+    /// registered-modifier pipeline (not just the bare function) produces
+    /// the same reseat/follow outcome.
+    #[test]
+    fn planted_structure_transform_plan_modifiers_moves_roof_through_real_plugin_pipeline() {
+        let mut app = App::new();
+        app.add_plugins((TransformPlugin, PlantingPlugin));
+
+        let world = app.world_mut();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(GroupFactory);
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        registry.register_factory(TriangleMeshFactory);
+        registry.register_factory(ConformingSolidFactory);
+        world.insert_resource(registry);
+        let mut allocator = ElementIdAllocator::default();
+        allocator.set_next(1000);
+        world.insert_resource(allocator);
+
+        world.spawn((ElementId(10), ramp_heightfield()));
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(world);
+        PrimitiveSnapshot {
+            element_id: ElementId(4),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 1.25, 0.0),
+                half_extents: Vec3::new(1.1, 0.25, 1.1),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Planted cottage".to_string(),
+            member_ids: vec![ElementId(2), ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(world);
+
+        let result = execute_plant_on_surface(
+            world,
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant grouped target");
+        let foundation_id = result
+            .output
+            .as_ref()
+            .and_then(|output| output.get("foundation_id"))
+            .and_then(Value::as_u64)
+            .map(ElementId)
+            .expect("foundation_id");
+
+        let roof_before = capture_by_id(world, ElementId(4)).expect("roof snapshot");
+        let mut before = vec![roof_before.clone()];
+        let mut after = vec![roof_before.translate_by(Vec3::new(2.0, 0.0, 0.0))];
+
+        apply_transform_plan_modifiers(world, TransformMode::Moving, &mut before, &mut after);
+
+        assert!(
+            after
+                .iter()
+                .any(|snapshot| snapshot.element_id() == foundation_id),
+            "preview plan should include the terrain-following foundation"
+        );
+        let body = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == ElementId(2))
+            .expect("preview plan should include the body");
+        let roof = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == ElementId(4))
+            .expect("preview plan should include the roof");
+        assert!(
+            (body.center().x - 2.0).abs() < 0.05,
+            "body should move with a child drag through the real plugin pipeline"
+        );
+        assert!(
+            (roof.center().x - 2.0).abs() < 0.05,
+            "roof should move with the planted structure through the real plugin pipeline"
+        );
+
+        let foundation = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == foundation_id)
+            .expect("foundation snapshot");
+        let moved_top =
+            preview_foundation_top(world, foundation, ElementId(10)).expect("moved top");
+        let member_set = [ElementId(2), ElementId(4)]
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let bounds = preview_member_bounds(&after, &member_set).expect("member bounds");
+        assert!(
+            (bounds.min.y - moved_top).abs() < 0.05,
+            "superstructure should preview on the moved conforming foundation top via the real pipeline"
+        );
+    }
+
     #[test]
     fn planted_structure_yields_to_specialized_hosted_child_edit() {
         let mut world = test_world();
@@ -4223,6 +4532,127 @@ mod tests {
             (group.frame.translation.y - moved_top).abs() < 0.05,
             "group frame should follow the reseated superstructure datum; got {}",
             group.frame.translation.y
+        );
+    }
+
+    /// Pins the `transform_parent()` guard in `translated_target_snapshots`
+    /// (skip a member whose parent is also in the same translated batch) with
+    /// a fixture that actually overrides `transform_parent()` — every prior
+    /// fixture in this file stays at the trait default (`None`), so this
+    /// branch previously had zero coverage.
+    #[test]
+    fn translated_target_snapshots_skips_member_whose_transform_parent_is_in_batch() {
+        let mut world = test_world();
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        HostedChildSnapshot {
+            element_id: ElementId(4),
+            parent_id: ElementId(2),
+            center: Vec3::new(0.0, 1.0, 0.0),
+            parent_relative_offset: Vec3::new(0.1, 0.2, 0.3),
+        }
+        .apply_to(&mut world);
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Host and hosted child".to_string(),
+            member_ids: vec![ElementId(2), ElementId(4)],
+            frame: GroupFrame::default(),
+            composite: None,
+            linked_model: None,
+            cached_bounds: None,
+        }
+        .apply_to(&mut world);
+
+        let translated =
+            translated_target_snapshots(&world, ElementId(1), Vec3::new(2.0, 0.0, 0.0));
+
+        let host = translated
+            .iter()
+            .find(|snapshot| snapshot.element_id() == ElementId(2))
+            .expect("host member should be translated independently");
+        assert!(
+            (host.center().x - 2.0).abs() < 1e-4,
+            "host should move by the full delta"
+        );
+        assert!(
+            translated
+                .iter()
+                .all(|snapshot| snapshot.element_id() != ElementId(4)),
+            "hosted child whose transform_parent() is the host in the same batch \
+             must be skipped, not independently translated"
+        );
+    }
+
+    /// Pins the `transform_parent()` guard in `ensure_planted_contract_in_preview`
+    /// (use `translate_with_parent` instead of `translate_by` for a member
+    /// hosted by another member of the same planted aggregate) with the same
+    /// kind of fixture — no existing test exercised this branch either.
+    #[test]
+    fn ensure_planted_contract_in_preview_uses_translate_with_parent_for_hosted_member() {
+        let mut world = test_world();
+
+        PrimitiveSnapshot {
+            element_id: ElementId(2),
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, 0.5, 0.0),
+                half_extents: Vec3::new(1.0, 0.5, 1.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut world);
+        let original_offset = Vec3::new(0.1, 0.2, 0.3);
+        HostedChildSnapshot {
+            element_id: ElementId(4),
+            parent_id: ElementId(2),
+            center: Vec3::new(0.0, 1.0, 0.0),
+            parent_relative_offset: original_offset,
+        }
+        .apply_to(&mut world);
+
+        let placement = PlantedPlacement {
+            foundation_id: ElementId(999),
+            surface_id: ElementId(998),
+            base_offset_from_foundation_top: 0.0,
+            immediate_members: vec![ElementId(2), ElementId(4)],
+            recursive_members: vec![ElementId(2), ElementId(4)],
+            group_frames: Vec::new(),
+        };
+        let direct_delta = Vec3::new(1.5, 0.0, 0.0);
+        let mut after = Vec::new();
+        ensure_planted_contract_in_preview(&world, &mut after, &placement, direct_delta);
+
+        let child = after
+            .iter()
+            .find(|snapshot| snapshot.element_id() == ElementId(4))
+            .expect("hosted child should be backfilled into the preview plan");
+        let child = child
+            .0
+            .as_any()
+            .downcast_ref::<HostedChildSnapshot>()
+            .expect("hosted child snapshot type");
+        assert!(
+            (child.center.x - 1.5).abs() < 1e-4,
+            "hosted child should still move with the aggregate"
+        );
+        assert_eq!(
+            child.parent_relative_offset, original_offset,
+            "hosted member's parent-relative field must be untouched by \
+             translate_with_parent, proving the parent-aware branch (not \
+             plain translate_by) was taken"
         );
     }
 }

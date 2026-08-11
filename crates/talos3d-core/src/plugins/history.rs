@@ -348,3 +348,113 @@ fn set_feedback(world: &mut World, message: String) {
 
     status_bar_data.set_feedback(message, STATUS_MESSAGE_DURATION_SECONDS);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct CounterA(i32);
+
+    #[derive(Resource, Default)]
+    struct LogB(Vec<&'static str>);
+
+    /// Test-double command mutating one resource, distinct from `AppendLogCommand`.
+    struct IncrementCounterCommand;
+
+    impl EditorCommand for IncrementCounterCommand {
+        fn label(&self) -> &'static str {
+            "Increment counter"
+        }
+
+        fn apply(&mut self, world: &mut World) {
+            world.resource_mut::<CounterA>().0 += 1;
+        }
+
+        fn undo(&mut self, world: &mut World) {
+            world.resource_mut::<CounterA>().0 -= 1;
+        }
+    }
+
+    /// Test-double command mutating a different resource than `IncrementCounterCommand`,
+    /// so a group of the two is heterogeneous.
+    struct AppendLogCommand(&'static str);
+
+    impl EditorCommand for AppendLogCommand {
+        fn label(&self) -> &'static str {
+            "Append log"
+        }
+
+        fn apply(&mut self, world: &mut World) {
+            world.resource_mut::<LogB>().0.push(self.0);
+        }
+
+        fn undo(&mut self, world: &mut World) {
+            world.resource_mut::<LogB>().0.pop();
+        }
+    }
+
+    fn world_with_history() -> World {
+        let mut world = World::new();
+        world.init_resource::<History>();
+        world.init_resource::<PendingCommandQueue>();
+        world.init_resource::<SemanticEnforcement>();
+        world.insert_resource(CounterA::default());
+        world.insert_resource(LogB::default());
+        world
+    }
+
+    /// Pins `begin_group`/`end_group` atomicity: 2+ heterogeneous sub-commands
+    /// collapse into a single `GroupedCommand` history entry, and undo/redo
+    /// affect both sub-commands together rather than one at a time.
+    #[test]
+    fn grouped_commands_apply_undo_redo_as_one_atomic_history_entry() {
+        let mut world = world_with_history();
+
+        {
+            let mut queue = world.resource_mut::<PendingCommandQueue>();
+            queue.begin_group("test group");
+            queue.push_command(Box::new(IncrementCounterCommand));
+            queue.push_command(Box::new(AppendLogCommand("first")));
+            queue.end_group();
+        }
+        apply_pending_history_commands_for_test(&mut world);
+
+        assert_eq!(
+            world.resource::<History>().undo_stack_len(),
+            1,
+            "two heterogeneous sub-commands must collapse into one grouped entry"
+        );
+        assert_eq!(world.resource::<CounterA>().0, 1);
+        assert_eq!(world.resource::<LogB>().0, vec!["first"]);
+
+        world.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut world);
+
+        assert_eq!(
+            world.resource::<History>().undo_stack_len(),
+            0,
+            "one undo action must pop the whole group as a single history entry"
+        );
+        assert_eq!(
+            world.resource::<CounterA>().0,
+            0,
+            "atomic undo must revert both sub-command effects together"
+        );
+        assert!(
+            world.resource::<LogB>().0.is_empty(),
+            "atomic undo must revert both sub-command effects together"
+        );
+
+        world.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut world);
+
+        assert_eq!(
+            world.resource::<History>().undo_stack_len(),
+            1,
+            "redo must restore the single grouped entry, not split it"
+        );
+        assert_eq!(world.resource::<CounterA>().0, 1);
+        assert_eq!(world.resource::<LogB>().0, vec!["first"]);
+    }
+}
