@@ -97,6 +97,11 @@ pub enum ActiveTool {
     PlaceSphere,
     PlacePlane,
     PlacePolyline,
+    PlaceDraftLine,
+    PlaceDraftPolyline,
+    PlaceDraftRectangle,
+    PlaceDraftCircle,
+    PlaceDraftText,
     PlaceTerrainElevationCurve,
     PlaceTerrainSpotElevation,
 }

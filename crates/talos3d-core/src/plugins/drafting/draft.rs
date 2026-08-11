@@ -613,6 +613,27 @@ pub fn active_draft_snapshot(world: &World) -> Option<DraftSnapshot> {
     })
 }
 
+/// Resolve the one Draft that owns an annotation's coordinate context.
+///
+/// Draft membership is the authority: annotations deliberately do not persist
+/// a second copy of the plane. Ambiguous membership is rejected rather than
+/// selecting an arbitrary coordinate frame.
+pub fn draft_snapshot_for_member(world: &World, member: ElementId) -> Option<DraftSnapshot> {
+    let mut query = world.try_query::<(&ElementId, &DraftNode)>()?;
+    let mut matches = query
+        .iter(world)
+        .filter(|(_, node)| node.contains(member))
+        .map(|(element_id, node)| DraftSnapshot {
+            element_id: *element_id,
+            node: node.clone(),
+        });
+    let resolved = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(resolved)
+}
+
 pub fn active_draft_layout(world: &World) -> Option<DraftLayout> {
     active_draft_snapshot(world).map(|snapshot| snapshot.node.layout)
 }
@@ -653,6 +674,23 @@ fn validate_member(world: &World, draft_id: ElementId, member: ElementId) -> Res
         .ok_or_else(|| format!("member {} does not exist", member.0))?;
     if world.get::<DraftNode>(entity).is_some() {
         return Err("Drafts cannot contain other Draft containers".to_string());
+    }
+    if world
+        .get::<super::primitive::DraftPrimitiveNode>(entity)
+        .is_some()
+    {
+        let mut drafts = world
+            .try_query::<(&ElementId, &DraftNode)>()
+            .ok_or_else(|| "Draft membership query is unavailable".to_string())?;
+        if let Some((owner, _)) = drafts
+            .iter(world)
+            .find(|(owner, node)| **owner != draft_id && node.contains(member))
+        {
+            return Err(format!(
+                "plane-coordinate Draft primitive {} already belongs to Draft {}; move it instead of creating a second plane authority",
+                member.0, owner.0
+            ));
+        }
     }
     let registry = world
         .get_resource::<CapabilityRegistry>()
@@ -1092,6 +1130,7 @@ mod tests {
             let mut registry = app.world_mut().resource_mut::<CapabilityRegistry>();
             registry.register_factory(DraftFactory);
             registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+            registry.register_factory(super::super::primitive::DraftLineFactory);
         }
         let mut draft = DraftNode::new("Mixed");
         draft.normalize_and_validate().unwrap();
@@ -1106,6 +1145,20 @@ mod tests {
         ));
         app.world_mut()
             .spawn((ElementId(30), DraftNode::new("Other")));
+        app.world_mut().spawn((
+            ElementId(40),
+            super::super::primitive::DraftPrimitiveNode {
+                geometry: super::super::primitive::DraftPrimitiveGeometry::Line(
+                    super::super::primitive::DraftLine {
+                        a: Vec2::ZERO,
+                        b: Vec2::X,
+                    },
+                ),
+                layer: "Default".into(),
+                style_name: "architectural_metric".into(),
+                visible: true,
+            },
+        ));
         app.world_mut()
             .resource_mut::<DraftingWorkspaceState>()
             .select_draft(Some(ElementId(10)));
@@ -1131,6 +1184,18 @@ mod tests {
         assert!(execute_update_membership(
             app.world_mut(),
             &json!({"mode": "add", "member_ids": [10]})
+        )
+        .is_err());
+
+        execute_update_membership(app.world_mut(), &json!({"mode": "add", "member_ids": [40]}))
+            .expect("first Draft owns the plane-coordinate primitive");
+        app.update();
+        app.world_mut()
+            .resource_mut::<DraftingWorkspaceState>()
+            .select_draft(Some(ElementId(30)));
+        assert!(execute_update_membership(
+            app.world_mut(),
+            &json!({"mode": "add", "member_ids": [40]})
         )
         .is_err());
     }

@@ -39,7 +39,7 @@ use crate::plugins::{
     document_properties::DocumentProperties,
     drafting::{
         self, DimPrimitive, DimensionAnnotationNode, DimensionInput, DimensionKind,
-        DimensionStyleRegistry, DraftingVisibility,
+        DimensionStyleRegistry, DraftPrimitiveNode, DraftPrimitiveSnapshot, DraftingVisibility,
     },
     identity::ElementId,
     section_fill::{extract_section_fills, SectionFillRegion},
@@ -383,7 +383,7 @@ fn capture_annotations(
     map: &NdcToDrawing,
     member_filter: Option<&HashSet<ElementId>>,
 ) -> Vec<DrawingSceneAnnotation> {
-    let mut out = Vec::new();
+    let mut out = capture_draft_primitives(world, view_proj, map, member_filter);
 
     let Some(registry) = world.get_resource::<DimensionStyleRegistry>() else {
         return capture_legacy_dimension_lines(world, view_proj, map, member_filter, out);
@@ -472,6 +472,52 @@ fn capture_annotations(
         });
     }
     capture_legacy_dimension_lines(world, view_proj, map, member_filter, out)
+}
+
+fn capture_draft_primitives(
+    world: &World,
+    view_proj: &Mat4,
+    map: &NdcToDrawing,
+    member_filter: Option<&HashSet<ElementId>>,
+) -> Vec<DrawingSceneAnnotation> {
+    let Some(styles) = world.get_resource::<DimensionStyleRegistry>() else {
+        return Vec::new();
+    };
+    let Some(mut query) = world.try_query::<(&ElementId, &DraftPrimitiveNode)>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (element_id, node) in query.iter(world) {
+        if member_filter.is_some_and(|members| !members.contains(element_id)) || !node.visible {
+            continue;
+        }
+        let Some(draft) = drafting::draft::draft_snapshot_for_member(world, *element_id) else {
+            continue;
+        };
+        let snapshot = DraftPrimitiveSnapshot {
+            element_id: *element_id,
+            node: node.clone(),
+            plane: draft.node.plane.clone(),
+            draft_id: Some(draft.element_id),
+        };
+        let style = styles.resolve(Some(&node.style_name));
+        let primitives = snapshot.to_scene_primitives(&style, |local| {
+            project_world_to_normalized(draft.node.plane.to_world(local), view_proj, map)
+        });
+        if primitives.is_empty() {
+            continue;
+        }
+        out.push(DrawingSceneAnnotation {
+            id: DrawingPrimitiveId {
+                owner: *element_id,
+                role: DrawingPrimitiveRole::Annotation,
+                ordinal: 0,
+            },
+            owner: *element_id,
+            primitives,
+        });
+    }
+    out
 }
 
 fn capture_legacy_dimension_lines(
@@ -1073,7 +1119,7 @@ mod tests {
         ));
 
         let mut draft = drafting::DraftNode::new("Scoped");
-        draft.members = vec![ElementId(10), ElementId(999)];
+        draft.members = vec![ElementId(10), ElementId(12), ElementId(999)];
         draft.normalize_and_validate().unwrap();
         world.spawn((ElementId(1), draft));
         for (id, y) in [(10, 0.0), (11, 1.0)] {
@@ -1090,6 +1136,18 @@ mod tests {
                 },
             ));
         }
+        world.spawn((
+            ElementId(12),
+            drafting::DraftPrimitiveNode {
+                geometry: drafting::DraftPrimitiveGeometry::Line(drafting::DraftLine {
+                    a: Vec2::new(-1.0, 0.0),
+                    b: Vec2::new(1.0, 0.0),
+                }),
+                layer: "Default".to_string(),
+                style_name: "architectural_metric".to_string(),
+                visible: true,
+            },
+        ));
         let mut workspace = drafting::DraftingWorkspaceState::default();
         workspace.select_draft(Some(ElementId(1)));
         world.insert_resource(workspace);
@@ -1111,8 +1169,16 @@ mod tests {
                 .iter()
                 .map(|annotation| annotation.owner)
                 .collect::<Vec<_>>(),
-            vec![ElementId(10)]
+            vec![ElementId(10), ElementId(12)]
         );
+        assert!(scene
+            .annotations
+            .iter()
+            .find(|annotation| annotation.owner == ElementId(12))
+            .is_some_and(|annotation| matches!(
+                annotation.primitives.as_slice(),
+                [DimPrimitive::LineSegment { .. }]
+            )));
         assert!(scene
             .findings
             .iter()
