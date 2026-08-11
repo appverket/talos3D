@@ -184,7 +184,7 @@ pub fn draft_membership_add_snapshots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use bevy::camera::Projection;
 
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(drag_normal, surface.normal);
         let frame = active_drafting_frame(app.world()).expect("Drafting is active");
 
-        let free = |value: serde_json::Value| {
+        let free = |value: Value| {
             transform_move_delta(
                 &TransformToolRequest {
                     element_ids: vec![1],
@@ -657,6 +657,69 @@ mod tests {
             app.update();
         }
         follows_one_resource(&app, &elevation);
+    }
+
+    /// The published frame is what an agent authors against, so it must be the
+    /// frame geometry actually lands in — not merely close to it. A live MCP
+    /// session caught the report normalizing the frame origin along with the
+    /// axes, which described a z = -4 elevation Draft as sitting at z = -1.
+    #[test]
+    fn the_published_authoring_contract_is_the_frame_geometry_lands_in() {
+        use super::super::workspace::execute_inspect_drafting_workspace;
+
+        let elevation = plane(Vec3::new(0.0, 0.0, -4.0), Vec3::NEG_Z, Vec3::X);
+        let mut app = drafting_app();
+        let draft_id = enter_drafting_on(&mut app, &elevation);
+
+        let reported = execute_inspect_drafting_workspace(app.world_mut(), &Value::Null)
+            .expect("inspect")
+            .output
+            .expect("output")["authoring"]
+            .clone();
+        let vec3_at = |key: &str| {
+            let v = reported[key].as_array().expect("vec3");
+            Vec3::new(
+                v[0].as_f64().unwrap() as f32,
+                v[1].as_f64().unwrap() as f32,
+                v[2].as_f64().unwrap() as f32,
+            )
+        };
+
+        assert_eq!(reported["frame"], "draft_plane");
+        assert_eq!(
+            reported["membership_target_draft_id"].as_u64(),
+            Some(draft_id.0)
+        );
+        let frame = GroupFrame {
+            translation: vec3_at("origin"),
+            rotation: Quat::from_mat3(&Mat3::from_cols(
+                vec3_at("x_axis"),
+                vec3_at("y_axis"),
+                vec3_at("z_axis"),
+            )),
+        };
+        for axis in ["x_axis", "y_axis", "z_axis"] {
+            assert!(vec3_at(axis).is_normalized(), "{axis} must be unit length");
+        }
+
+        // Author through the real funnel and require the published frame to
+        // predict exactly where the solid lands.
+        let local = Vec3::new(2.0, 1.0, 3.0);
+        let element_id = ElementId(500);
+        crate::plugins::commands::enqueue_create_boxed_entity(
+            app.world_mut(),
+            unit_box(element_id, local),
+        );
+        app.update();
+        let (primitive, _) = authored_box(app.world(), element_id);
+        assert!(
+            primitive
+                .centre
+                .abs_diff_eq(frame.point_to_world(local), 1e-4),
+            "published frame predicted {:?} but the solid landed at {:?}",
+            frame.point_to_world(local),
+            primitive.centre
+        );
     }
 
     #[test]

@@ -184,15 +184,14 @@ fn inspect_authoring_contract(world: &World) -> Value {
         });
     };
     let frame = super::authoring::plane_authoring_frame(&plane);
+    let point = |value: Vec3| json!([value.x, value.y, value.z]);
     // Report unit axes: the raw quaternion rotation of a basis vector carries a
     // few 1e-7 of float error, which reads as noise in an agent-facing contract.
-    let axis = |direction: Vec3| {
-        let direction = direction.normalize_or_zero();
-        json!([direction.x, direction.y, direction.z])
-    };
+    // The origin is a position, not a direction — never normalize it.
+    let axis = |direction: Vec3| point(direction.normalize_or_zero());
     json!({
         "frame": "draft_plane",
-        "origin": axis(frame.translation),
+        "origin": point(frame.translation),
         "x_axis": axis(frame.rotation * Vec3::X),
         "y_axis": axis(frame.rotation * Vec3::Y),
         "z_axis": axis(frame.rotation * Vec3::Z),
