@@ -30,6 +30,7 @@
 //! running app.
 
 pub mod annotation;
+pub mod draft;
 pub mod export_dxf;
 pub mod export_svg;
 pub mod format;
@@ -44,6 +45,10 @@ pub mod workspace;
 pub use annotation::{
     render_annotation, DimensionAnnotationFactory, DimensionAnnotationNode,
     DimensionAnnotationSnapshot, DRAFTING_DIMENSION_TYPE,
+};
+pub use draft::{
+    active_draft_layout, active_draft_snapshot, DraftDefaults, DraftFactory, DraftLayout,
+    DraftNode, DraftPlane, DraftSnapshot, DRAFTS_METADATA_KEY, DRAFT_TYPE,
 };
 pub use export_dxf::{export_dxf, DxfUnit};
 pub use export_svg::{render_dimensions_svg_document, render_dimensions_svg_fragment};

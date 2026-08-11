@@ -29,6 +29,7 @@ use super::{
     annotation::{
         DimensionAnnotationFactory, DimensionAnnotationNode, DimensionAnnotationSnapshot,
     },
+    draft::{DraftFactory, DraftSyncState},
     style::DimensionStyleRegistry,
     visibility::DraftingVisibility,
 };
@@ -57,7 +58,9 @@ impl Plugin for DraftingPlugin {
             .init_resource::<DraftingVisibility>()
             .init_resource::<super::workspace::DraftingWorkspaceState>()
             .init_resource::<DraftingAnnotationSyncState>()
+            .init_resource::<DraftSyncState>()
             .register_authored_entity_factory(DimensionAnnotationFactory)
+            .register_authored_entity_factory(DraftFactory)
             // The "drafting" capability descriptor is owned by
             // drawing_export.rs. This plugin attaches commands to that same
             // capability rather than registering a duplicate, which would
@@ -108,6 +111,108 @@ impl Plugin for DraftingPlugin {
                     capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
                 },
                 super::workspace::execute_inspect_drafting_workspace,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "drafting.create_draft".to_string(),
+                    label: "Create Draft".to_string(),
+                    description: "Create and select a durable Draft metadata container. Members remain referenced authored entities; no geometry is copied.".to_string(),
+                    category: CommandCategory::Create,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "default": "Draft"},
+                            "origin": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                            "normal": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                            "tangent": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+                            "scale_denominator": {"type": "number", "exclusiveMinimum": 0, "default": 50},
+                            "paper_width_mm": {"type": "number", "exclusiveMinimum": 0, "default": 297},
+                            "paper_height_mm": {"type": "number", "exclusiveMinimum": 0, "default": 210},
+                            "margin_mm": {"type": "number", "minimum": 0, "default": 10},
+                            "default_layer": {"type": "string", "default": "Default"},
+                            "default_dimension_style": {"type": "string", "default": "architectural_metric"},
+                            "members": {"type": "array", "items": {"type": "integer", "minimum": 0}, "default": []}
+                        },
+                        "additionalProperties": false
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Create the semantic container for one drawing".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                super::draft::execute_create_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "drafting.select_draft".to_string(),
+                    label: "Select Draft".to_string(),
+                    description: "Select the Draft consumed by the one Drafting workspace and DrawingScene pipeline.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "required": ["draft_id"],
+                        "properties": {"draft_id": {"type": "integer", "minimum": 0}},
+                        "additionalProperties": false
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: None,
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                super::draft::execute_select_draft,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "drafting.update_membership".to_string(),
+                    label: "Update Draft Membership".to_string(),
+                    description: "Add, remove, or replace stable authored-entity references in a Draft without taking geometry ownership.".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "required": ["member_ids"],
+                        "properties": {
+                            "draft_id": {"type": "integer", "minimum": 0, "description": "Omit to use the active Draft"},
+                            "mode": {"type": "string", "enum": ["add", "remove", "replace"], "default": "add"},
+                            "member_ids": {"type": "array", "items": {"type": "integer", "minimum": 0}}
+                        },
+                        "additionalProperties": false
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: None,
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                super::draft::execute_update_membership,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "drafting.inspect_drafts".to_string(),
+                    label: "Inspect Drafts".to_string(),
+                    description: "Inspect all Drafts, active selection, resolved 3D/2D members, and stale references.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: None,
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some(DRAFTING_CAPABILITY_ID.to_string()),
+                },
+                super::draft::execute_inspect_drafts,
             )
             .register_command(
                 CommandDescriptor {
@@ -193,13 +298,23 @@ impl Plugin for DraftingPlugin {
                 (
                     super::migration::migrate_legacy_dimensions,
                     sync_drafting_annotations,
+                    super::draft::sync_drafts,
                 )
                     .chain(),
             )
             .add_systems(
                 Update,
                 super::workspace::enforce_drafting_workspace_invariants,
+            )
+            .add_systems(
+                Update,
+                super::workspace::enforce_active_draft_camera_alignment
+                    .after(crate::plugins::camera::CameraViewUpdateSet),
             );
+        app.add_systems(
+            Update,
+            super::workspace::sync_active_draft_plane_on_change.after(super::draft::sync_drafts),
+        );
     }
 }
 
@@ -354,7 +469,7 @@ pub fn visible_annotations(world: &World) -> Vec<(ElementId, DimensionAnnotation
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::drafting::kind::DimensionKind;
+    use crate::plugins::{command_registry::CommandRegistry, drafting::kind::DimensionKind};
 
     #[test]
     fn sync_writes_and_reads_back() {
@@ -389,5 +504,28 @@ mod tests {
             .get(DRAFTING_ANNOTATIONS_KEY)
             .expect("persisted");
         assert!(stored.is_array());
+    }
+
+    #[test]
+    fn draft_commands_publish_typed_agent_schemas() {
+        let mut app = App::new();
+        app.add_plugins(DraftingPlugin);
+        let registry = app.world().resource::<CommandRegistry>();
+        for id in [
+            "drafting.create_draft",
+            "drafting.select_draft",
+            "drafting.update_membership",
+            "drafting.inspect_drafts",
+        ] {
+            let descriptor = registry.get(id).unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(
+                descriptor.capability_id.as_deref(),
+                Some(DRAFTING_CAPABILITY_ID)
+            );
+            if id != "drafting.inspect_drafts" {
+                assert!(descriptor.parameters.is_some(), "{id} needs a typed schema");
+            }
+        }
+        assert!(registry.duplicate_ids().is_empty());
     }
 }

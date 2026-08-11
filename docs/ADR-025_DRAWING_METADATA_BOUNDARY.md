@@ -63,8 +63,8 @@ Tradeoffs:
 - add dedicated drawing settings UI beyond the renderer window section
 - extend the metadata model to richer section graphics, callouts, and hatch
   behavior
-- implement the first-class `Draft` metadata container, plane, membership, and
-  generic annotation primitives specified by ADR-026
+- implement the generic line, rectangle, circle, and text annotation primitives
+  specified by ADR-026
 
 ## Amendment: Draft container and derived DrawingScene
 
@@ -77,3 +77,28 @@ The normalized `DrawingScene`, paper-layout `DraftingSheet`, raster previews,
 projected silhouettes, and export bytes are derived artifacts. They are rebuilt
 from the authored model plus `Draft`; none is a second persistence source or
 authoring document.
+
+The first-class `Draft` container is now implemented as drawing metadata. It
+stores a validated orthonormal plane, paper/layout policy, references to the
+existing layer and dimension-style registries, and a sorted set of stable member
+`ElementId`s. It stores neither entity snapshots nor projected geometry. The
+existing `DrawingPlane` is the canonical tool frame and is exposed as
+`DraftPlane`; this is deliberately one coordinate-frame implementation, not a
+parallel drafting transform stack. Its handedness is also the camera contract:
+screen right is the plane tangent, screen up is its bitangent, and camera
+forward is the plane normal. The default Draft is therefore a top view with a
+downward normal; the modeling ground plane's upward extrusion normal remains
+unchanged.
+
+Draft membership can reference authored 3D model entities or authored 2D
+drawing metadata. It cannot contain itself or another Draft. Resolution is
+late-bound against the current authored registries, so deletion leaves a
+diagnosable stale reference rather than a hidden cloned object. The normalized
+`DrawingScene` filters projection and annotation capture through the active
+Draft membership and reports missing references as findings.
+
+Draft creation and mutation use the same command/history pipeline as other
+semantic edits. Because `DrawingMetadata` is document-scoped, it is explicitly
+excluded from model-group local-frame composition and automatic group
+membership. This boundary applies equally to Drafts, dimensions, clipping
+planes, and subsequent 2D annotation types.

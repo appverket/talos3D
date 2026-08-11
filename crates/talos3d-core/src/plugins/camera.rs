@@ -187,10 +187,17 @@ impl Plugin for CameraPlugin {
                     apply_camera_controls,
                     orbit_camera.in_set(InputPhase::CameraInput),
                     update_camera_viewport,
-                ),
+                )
+                    .in_set(CameraViewUpdateSet),
             );
     }
 }
+
+/// All built-in camera-controller systems that may update the authored view.
+/// Presentation policies such as Drafting can run after this set to constrain
+/// orientation without forking camera input, pan, zoom, or projection logic.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CameraViewUpdateSet;
 
 /// Tracks the centroid of a three-finger trackpad gesture between frames.
 #[derive(Resource, Default)]
@@ -786,7 +793,7 @@ impl OrbitCamera {
         }
     }
 
-    fn transition_projection_mode(&mut self, next_mode: CameraProjectionMode) {
+    pub(crate) fn transition_projection_mode(&mut self, next_mode: CameraProjectionMode) {
         if self.projection_mode == next_mode {
             return;
         }

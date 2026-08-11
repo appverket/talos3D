@@ -3,6 +3,7 @@ use std::cell::RefCell;
 
 use bevy::window::{PrimaryWindow, Window};
 use bevy::{ecs::system::SystemParam, picking::prelude::*, prelude::*};
+use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{closure::Closure, JsCast};
 
@@ -98,7 +99,7 @@ struct ToolCursorRayCast<'w, 's> {
 /// Default: Y=0 ground plane. Set to a face's plane when face-editing.
 /// All tools that read `CursorWorldPos` automatically get face-aware
 /// projection without any per-tool changes.
-#[derive(Resource, Debug, Clone)]
+#[derive(Resource, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DrawingPlane {
     /// A point on the plane.
     pub origin: Vec3,
@@ -137,6 +138,67 @@ impl DrawingPlane {
             tangent,
             bitangent,
         }
+    }
+
+    /// Construct the canonical right-handed plane frame shared by persistent
+    /// Drafts and interactive drawing tools.
+    ///
+    /// `tangent` is projected onto the plane before normalization and the
+    /// bitangent is derived, so callers cannot persist four independently
+    /// drifting axes for one plane.
+    pub fn try_from_origin_normal_tangent(
+        origin: Vec3,
+        normal: Vec3,
+        tangent: Vec3,
+    ) -> Result<Self, String> {
+        if !origin.is_finite() || !normal.is_finite() || !tangent.is_finite() {
+            return Err("drawing plane origin and axes must be finite".to_string());
+        }
+        let normal = normal
+            .try_normalize()
+            .ok_or_else(|| "drawing plane normal must be non-zero".to_string())?;
+        let tangent = (tangent - normal * tangent.dot(normal))
+            .try_normalize()
+            .ok_or_else(|| {
+                "drawing plane tangent must not be parallel to its normal".to_string()
+            })?;
+        let bitangent = tangent
+            .cross(normal)
+            .try_normalize()
+            .ok_or_else(|| "drawing plane axes must span a plane".to_string())?;
+        let plane = Self {
+            origin,
+            normal,
+            tangent,
+            bitangent,
+        };
+        plane.validate()?;
+        Ok(plane)
+    }
+
+    /// Validate the persisted/runtime frame without silently repairing it.
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.origin.is_finite()
+            || !self.normal.is_finite()
+            || !self.tangent.is_finite()
+            || !self.bitangent.is_finite()
+        {
+            return Err("drawing plane origin and axes must be finite".to_string());
+        }
+        let unit = |axis: Vec3| (axis.length_squared() - 1.0).abs() <= 1e-4;
+        if !unit(self.normal) || !unit(self.tangent) || !unit(self.bitangent) {
+            return Err("drawing plane axes must be unit length".to_string());
+        }
+        if self.normal.dot(self.tangent).abs() > 1e-4
+            || self.normal.dot(self.bitangent).abs() > 1e-4
+            || self.tangent.dot(self.bitangent).abs() > 1e-4
+        {
+            return Err("drawing plane axes must be mutually orthogonal".to_string());
+        }
+        if self.tangent.cross(self.normal).dot(self.bitangent) < 1.0 - 1e-4 {
+            return Err("drawing plane axes must use the canonical handedness".to_string());
+        }
+        Ok(())
     }
 
     /// Project a world-space point onto the plane's 2D coordinate system.
