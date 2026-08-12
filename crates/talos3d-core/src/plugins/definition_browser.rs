@@ -2416,7 +2416,12 @@ fn draw_property_tree(
                     let selected =
                         state.selected_node == DefinitionEditorNode::Parameter(param.name.clone());
                     let label = egui::RichText::new(&param.name);
-                    let unit_hint = param.metadata.unit.as_deref().unwrap_or("").to_string();
+                    let unit_hint = param
+                        .metadata
+                        .unit
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
                     let secondary = egui::RichText::new(if unit_hint.is_empty() {
                         format!("{:?}", param.param_type)
                     } else {
@@ -3506,7 +3511,14 @@ fn draw_context_parameter(
     state
         .parameter_unit_buffers
         .entry(default_key.clone())
-        .or_insert_with(|| parameter.metadata.unit.clone().unwrap_or_default());
+        .or_insert_with(|| {
+            parameter
+                .metadata
+                .unit
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        });
 
     ui.label(egui::RichText::new(&parameter.name).heading());
     ui.horizontal(|ui| {
@@ -3587,8 +3599,17 @@ fn draw_context_parameter(
                 updated.default_value = parse_json_or_string(buffer);
             }
             if let Some(buffer) = state.parameter_unit_buffers.get(&default_key) {
-                updated.metadata.unit =
-                    (!buffer.trim().is_empty()).then_some(buffer.trim().to_string());
+                updated.metadata.unit = if buffer.trim().is_empty() {
+                    None
+                } else {
+                    match crate::plugins::units::ParameterUnit::parse_known(buffer) {
+                        Ok(unit) => Some(unit),
+                        Err(error) => {
+                            status.set_feedback(error, 2.0);
+                            return;
+                        }
+                    }
+                };
             }
             if let Err(error) = apply_patch_to_draft(
                 definitions,
@@ -5035,8 +5056,13 @@ fn build_parameter_from_state(
         override_policy,
         geometry_affecting: true,
         metadata: crate::plugins::modeling::definition::ParameterMetadata {
-            unit: (!state.new_parameter_unit.trim().is_empty())
-                .then_some(state.new_parameter_unit.trim().to_string()),
+            unit: if state.new_parameter_unit.trim().is_empty() {
+                None
+            } else {
+                Some(crate::plugins::units::ParameterUnit::parse_known(
+                    &state.new_parameter_unit,
+                )?)
+            },
             ..Default::default()
         },
     })

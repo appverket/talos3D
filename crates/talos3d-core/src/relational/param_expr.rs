@@ -15,19 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::graph::NodeId;
-
-/// Physical unit of a scalar value. Minimal set for parametric framing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum Unit {
-    /// Length in millimetres (ADR-004 base unit).
-    Mm,
-    /// Angle in degrees.
-    Deg,
-    /// Pure number.
-    Dimensionless,
-}
+pub use crate::plugins::units::Unit;
 
 /// A scalar value carrying its unit. f64 semantics per ADR-020.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

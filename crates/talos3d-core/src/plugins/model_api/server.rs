@@ -8123,7 +8123,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "definition.create",
-        description = "Create a new reusable definition. Requires: name. Optionally: base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data."
+        description = "Create a new reusable definition. Requires: name. Optionally: base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data. Numeric parameter metadata.unit accepts a typed {dimension, unit} object (length, angle, area, volume, ratio, count, or scalar); legacy unit strings are normalized, while unknown geometry-driving units fail validation."
     )]
     pub(super) async fn definition_create_tool(
         &self,
@@ -8138,7 +8138,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "definition.update",
-        description = "Update an existing definition. Requires: definition_id. Optionally: name, base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, and domain_data. Bumps definition_version and propagates changes to all linked occurrences."
+        description = "Update an existing definition. Requires: definition_id. Optionally: name, base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, and domain_data. Parameter metadata uses the same typed-unit contract as definition.create. Bumps definition_version and propagates changes to all linked occurrences."
     )]
     pub(super) async fn definition_update_tool(
         &self,
@@ -8244,7 +8244,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "definition.draft.create",
-        description = "Create a new definition draft. Same payload shape as definition/create, but stored only as an editable draft until published."
+        description = "Create a new definition draft. Same payload shape and typed parameter-unit contract as definition.create, but stored only as an editable draft until published."
     )]
     pub(super) async fn definition_draft_create_tool(
         &self,

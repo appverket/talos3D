@@ -20,6 +20,7 @@ use crate::plugins::{
     hosting_contracts::{HostCapabilityDeclaration, HostedRequirementDeclaration},
     materials::MaterialAssignment,
     registry_generation::RegistryGeneration,
+    units::ParameterUnit,
 };
 
 // ---------------------------------------------------------------------------
@@ -216,7 +217,7 @@ pub enum ParameterScaleBehavior {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParameterMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
+    pub unit: Option<ParameterUnit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +277,20 @@ fn definition_visibility_is_public(v: &DefinitionVisibility) -> bool {
 }
 
 impl ParameterDef {
+    /// Return the typed migration finding for a retained unit spelling that is
+    /// not part of the shared unit vocabulary.
+    pub fn unit_finding(&self) -> Option<ParameterUnitFinding> {
+        self.metadata
+            .unit
+            .as_ref()
+            .and_then(ParameterUnit::unknown_legacy_value)
+            .map(|value| ParameterUnitFinding::UnknownLegacy {
+                parameter: self.name.clone(),
+                value: value.to_string(),
+                blocks_executable_fidelity: self.geometry_affecting,
+            })
+    }
+
     pub fn validate_value(&self, value: &Value, context: &str) -> Result<(), String> {
         validate_param_type(&self.param_type, value, context)?;
 
@@ -288,6 +303,18 @@ impl ParameterDef {
 
         Ok(())
     }
+}
+
+/// Typed finding emitted when legacy parameter-unit metadata cannot be safely
+/// normalized. Importers can carry this directly into their degradation list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ParameterUnitFinding {
+    UnknownLegacy {
+        parameter: String,
+        value: String,
+        blocks_executable_fidelity: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,6 +1158,18 @@ impl Definition {
                     &param.default_value,
                     &format!("default value for parameter '{}'", param.name),
                 )?;
+            }
+
+            if let Some(ParameterUnitFinding::UnknownLegacy {
+                value,
+                blocks_executable_fidelity: true,
+                ..
+            }) = param.unit_finding()
+            {
+                return Err(format!(
+                    "Geometry-affecting parameter '{}' has unknown legacy unit '{}'; resolve it to a typed unit before validation or publication",
+                    param.name, value
+                ));
             }
         }
 
@@ -2081,6 +2120,7 @@ mod adr_026_phase_6c_tests {
 #[cfg(test)]
 mod pp_dhost_param_type_tests {
     use super::*;
+    use crate::plugins::units::{ParameterUnit, QuantityDimension, Unit};
     use serde_json::json;
 
     #[test]
@@ -2196,8 +2236,94 @@ mod pp_dhost_param_type_tests {
             parameter.metadata.scale_behavior,
             Some(ParameterScaleBehavior::FixedWorld)
         );
+        assert_eq!(
+            parameter.metadata.unit,
+            Some(ParameterUnit::Typed {
+                dimension: QuantityDimension::Length,
+                unit: Unit::M,
+            })
+        );
         let value = serde_json::to_value(&parameter).unwrap();
         assert_eq!(value["metadata"]["scale_behavior"], json!("fixed_world"));
+        assert_eq!(
+            value["metadata"]["unit"],
+            json!({"dimension": "length", "unit": "m"})
+        );
+    }
+
+    #[test]
+    fn unknown_legacy_unit_emits_typed_finding_and_blocks_geometry_definition() {
+        let parameter: ParameterDef = serde_json::from_value(json!({
+            "name": "width",
+            "param_type": "Numeric",
+            "default_value": 1.0,
+            "override_policy": "Overridable",
+            "metadata": { "unit": "furlong" }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            parameter.unit_finding(),
+            Some(ParameterUnitFinding::UnknownLegacy {
+                parameter: "width".into(),
+                value: "furlong".into(),
+                blocks_executable_fidelity: true,
+            })
+        );
+
+        let definition = Definition {
+            id: DefinitionId("unknown-unit".into()),
+            base_definition_id: None,
+            name: "Unknown unit".into(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface {
+                parameters: ParameterSchema(vec![parameter]),
+                void_declaration: None,
+                host_capabilities: Vec::new(),
+                hosted_requirements: Vec::new(),
+                external_context_requirements: Vec::new(),
+            },
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+            material_assignment: None,
+            visibility: DefinitionVisibility::PublicRoot,
+            domain_data: Value::Null,
+        };
+
+        let error = definition.validate_with(|_| false).unwrap_err();
+        assert!(error.contains("unknown legacy unit 'furlong'"));
+    }
+
+    #[test]
+    fn unknown_legacy_unit_is_retained_for_non_geometry_metadata() {
+        let mut parameter: ParameterDef = serde_json::from_value(json!({
+            "name": "catalog_value",
+            "param_type": "Numeric",
+            "default_value": 1.0,
+            "override_policy": "Overridable",
+            "geometry_affecting": false,
+            "metadata": { "unit": "vendor_widget" }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            parameter.unit_finding(),
+            Some(ParameterUnitFinding::UnknownLegacy {
+                blocks_executable_fidelity: false,
+                ..
+            })
+        ));
+        assert!(parameter
+            .validate_value(&json!(1.0), "catalog_value")
+            .is_ok());
+
+        parameter.metadata.unit = Some(ParameterUnit::typed(Unit::Count));
+        assert_eq!(
+            serde_json::to_value(&parameter).unwrap()["metadata"]["unit"],
+            json!({"dimension": "count", "unit": "count"})
+        );
     }
 
     #[test]

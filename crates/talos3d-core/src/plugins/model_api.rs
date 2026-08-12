@@ -5994,6 +5994,7 @@ fn parse_parameter_metadata(
     use crate::plugins::modeling::definition::{
         ParameterMetadata, ParameterMutability, ParameterScaleBehavior,
     };
+    use crate::plugins::units::ParameterUnit;
 
     let Some(value) = value else {
         return Ok(ParameterMetadata::default());
@@ -6025,8 +6026,11 @@ fn parse_parameter_metadata(
     Ok(ParameterMetadata {
         unit: object
             .get("unit")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+            .map(|value| {
+                serde_json::from_value::<ParameterUnit>(value.clone())
+                    .map_err(|error| format!("Invalid parameter unit: {error}"))
+            })
+            .transpose()?,
         min: object.get("min").cloned(),
         max: object.get("max").cloned(),
         step: object.get("step").cloned(),

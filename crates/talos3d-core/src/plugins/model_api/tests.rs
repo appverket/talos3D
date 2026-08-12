@@ -2857,6 +2857,49 @@ fn definition_draft_lifecycle_creates_patches_validates_and_publishes() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn definition_parameter_units_migrate_and_expose_typed_metadata() {
+    let mut world = init_model_api_test_world();
+    let mut request = make_rect_extrusion_request();
+    request["parameters"][0]["metadata"] = json!({ "unit": "metres" });
+    request["parameters"][1]["metadata"] =
+        json!({ "unit": { "dimension": "length", "unit": "cm" } });
+
+    let created = handle_create_definition(&mut world, request)
+        .expect("legacy and typed parameter units should be accepted");
+    let parameters = created.full["interface"]["parameters"].as_array().unwrap();
+    assert_eq!(
+        parameters[0]["metadata"]["unit"],
+        json!({"dimension": "length", "unit": "m"})
+    );
+    assert_eq!(
+        parameters[1]["metadata"]["unit"],
+        json!({"dimension": "length", "unit": "cm"})
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn definition_parameter_unknown_unit_is_preserved_but_fails_validation() {
+    let mut world = init_model_api_test_world();
+    let request = json!({
+        "name": "UnknownUnitDefinition",
+        "definition_kind": "Solid",
+        "parameters": [{
+            "name": "width",
+            "param_type": "Numeric",
+            "default_value": 1.0,
+            "override_policy": "Overridable",
+            "metadata": { "unit": "furlong" }
+        }]
+    });
+
+    let error = handle_create_definition(&mut world, request)
+        .expect_err("unknown geometry-driving units must fail Definition validation");
+    assert!(error.contains("unknown legacy unit 'furlong'"));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn definition_draft_patch_sets_core_material_assignment_and_warns_for_legacy() {
     let mut world = init_model_api_test_world();
 
