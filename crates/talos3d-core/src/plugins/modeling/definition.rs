@@ -696,15 +696,25 @@ impl From<ExprNode> for BodyExpr {
             ExprNode::And { nodes } => Self::All {
                 nodes: nodes.into_iter().map(Self::from).collect(),
             },
-            ExprNode::IfElse {
-                condition,
-                when_true,
-                when_false,
-            } => Self::Conditional {
-                condition: Box::new(Self::from(*condition)),
-                when_true: Box::new(Self::from(*when_true)),
-                when_false: Box::new(Self::from(*when_false)),
-            },
+            conditional @ ExprNode::IfElse { .. } => {
+                if let Ok(expr) = legacy_scalar_expr(conditional.clone()) {
+                    Self::Scalar { expr }
+                } else {
+                    let ExprNode::IfElse {
+                        condition,
+                        when_true,
+                        when_false,
+                    } = conditional
+                    else {
+                        unreachable!()
+                    };
+                    Self::Conditional {
+                        condition: Box::new(Self::from(*condition)),
+                        when_true: Box::new(Self::from(*when_true)),
+                        when_false: Box::new(Self::from(*when_false)),
+                    }
+                }
+            }
             ExprNode::Gt { left, right } => legacy_comparison(CmpOp::Gt, *left, *right),
             ExprNode::Lt { left, right } => legacy_comparison(CmpOp::Lt, *left, *right),
             numeric => match legacy_scalar_expr(numeric.clone()) {
@@ -798,8 +808,49 @@ fn legacy_scalar_expr(expr: ExprNode) -> Result<ScalarExpr, String> {
         ExprNode::Tan { value } => Ok(ScalarExpr::Tan {
             expr: Box::new(legacy_angle_expr(*value)?),
         }),
+        ExprNode::IfElse {
+            condition,
+            when_true,
+            when_false,
+        } => Ok(ScalarExpr::If {
+            cond: Box::new(legacy_predicate(*condition)?),
+            then: Box::new(legacy_scalar_expr(*when_true)?),
+            els: Box::new(legacy_scalar_expr(*when_false)?),
+        }),
         other => Err(format!(
             "legacy construct '{}' is not a bounded scalar expression",
+            legacy_expr_kind(&other)
+        )),
+    }
+}
+
+fn legacy_predicate(expr: ExprNode) -> Result<Predicate, String> {
+    let comparison = |op: CmpOp, left: Box<ExprNode>, right: Box<ExprNode>| {
+        Ok(Predicate::Cmp {
+            op,
+            lhs: Box::new(legacy_scalar_expr(*left)?),
+            rhs: Box::new(legacy_scalar_expr(*right)?),
+        })
+    };
+    match expr {
+        ExprNode::Literal { value } => value
+            .as_bool()
+            .map(|value| Predicate::Bool { value })
+            .ok_or_else(|| "predicate literal must be boolean".to_string()),
+        ExprNode::ParamRef { path } => Ok(Predicate::BoolParam {
+            name: path.rsplit('.').next().unwrap_or(&path).to_string(),
+        }),
+        ExprNode::Eq { left, right } => comparison(CmpOp::Eq, left, right),
+        ExprNode::Gt { left, right } => comparison(CmpOp::Gt, left, right),
+        ExprNode::Lt { left, right } => comparison(CmpOp::Lt, left, right),
+        ExprNode::And { nodes } => Ok(Predicate::And {
+            children: nodes
+                .into_iter()
+                .map(legacy_predicate)
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        other => Err(format!(
+            "legacy construct '{}' is not a bounded predicate",
             legacy_expr_kind(&other)
         )),
     }
@@ -1014,18 +1065,21 @@ fn body_scalar_env(
     values
         .iter()
         .filter_map(|(name, value)| {
-            value.as_f64().map(|value| {
-                (
-                    name.clone(),
-                    Quantity {
-                        value,
-                        unit: units
-                            .get(name)
-                            .copied()
-                            .unwrap_or(crate::plugins::units::Unit::Dimensionless),
-                    },
-                )
-            })
+            value
+                .as_f64()
+                .or_else(|| value.as_bool().map(|value| if value { 1.0 } else { 0.0 }))
+                .map(|value| {
+                    (
+                        name.clone(),
+                        Quantity {
+                            value,
+                            unit: units
+                                .get(name)
+                                .copied()
+                                .unwrap_or(crate::plugins::units::Unit::Dimensionless),
+                        },
+                    )
+                })
         })
         .collect()
 }
@@ -3002,6 +3056,65 @@ mod canonical_definition_body_tests {
             )
             .unwrap();
         assert_eq!(value, json!(1.0));
+    }
+
+    #[test]
+    fn legacy_nested_boolean_conditional_migrates_to_scalar_body_expression() {
+        let expression = ExprNode::Mul {
+            left: Box::new(ExprNode::ParamRef {
+                path: "self.width".into(),
+            }),
+            right: Box::new(ExprNode::IfElse {
+                condition: Box::new(ExprNode::ParamRef {
+                    path: "self.enabled".into(),
+                }),
+                when_true: Box::new(ExprNode::Literal { value: json!(0.5) }),
+                when_false: Box::new(ExprNode::Literal { value: json!(0.25) }),
+            }),
+        };
+        let mut legacy = legacy_definition_with_expr(expression);
+        legacy["interface"]["parameters"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "name": "enabled",
+                "param_type": "Boolean",
+                "default_value": true,
+                "override_policy": "Overridable"
+            }));
+
+        let definition: Definition = serde_json::from_value(legacy).unwrap();
+        assert!(definition.body_findings().is_empty());
+        let expr = &definition
+            .body
+            .compound
+            .as_ref()
+            .unwrap()
+            .derived_parameters[0]
+            .expr;
+        assert!(matches!(expr, BodyExpr::Scalar { .. }));
+
+        let units = HashMap::from([("width".into(), crate::plugins::units::Unit::M)]);
+        let enabled = expr
+            .evaluate(
+                &HashMap::from([
+                    ("width".into(), json!(2.0)),
+                    ("enabled".into(), json!(true)),
+                ]),
+                &units,
+            )
+            .unwrap();
+        let disabled = expr
+            .evaluate(
+                &HashMap::from([
+                    ("width".into(), json!(2.0)),
+                    ("enabled".into(), json!(false)),
+                ]),
+                &units,
+            )
+            .unwrap();
+        assert_eq!(enabled, json!(1.0));
+        assert_eq!(disabled, json!(0.5));
     }
 
     #[test]
