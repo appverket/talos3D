@@ -71,6 +71,22 @@ compatible with:
 - explicit mesh-backed leaves where justified
 - future parameterized geometry DAGs such as MultiSurf-style definitions
 
+### Definition parameter units
+
+Numeric Definition parameters carry exchange-safe typed unit metadata. New
+content serializes both the physical dimension and canonical unit, for example:
+
+```json
+{"dimension":"length","unit":"m"}
+```
+
+The shared vocabulary covers length, angle, area, volume, ratio, count, and
+scalar dimensions and is also used by relational quantities. Legacy string
+spellings such as `"metres"` remain readable and normalize to the typed form.
+An unrecognized legacy spelling is retained explicitly as `unknown_legacy`; it
+is never guessed, and it blocks validation/publication when the parameter can
+affect geometry.
+
 ## Evaluated Bodies
 
 Some facts are not authored parameters. They are evaluated body facts derived
