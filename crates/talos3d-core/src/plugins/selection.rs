@@ -22,7 +22,6 @@ use crate::{
         layers::{entity_on_visible_layer, LayerAssignment, LayerRegistry, DEFAULT_LAYER_NAME},
         lighting::{SceneLightNode, SceneLightObjectVisibility},
         modeling::{
-            csg::CsgNode,
             group::{
                 collect_group_members_recursive, find_group_for_member, GroupEditContext,
                 GroupEditMuted, GroupMembers,
@@ -58,13 +57,6 @@ const SELECTION_CLICK_SLOP_PX: f32 = 6.0;
 const SCREEN_BOUNDS_INTERIOR_MAX_AREA_PX2: f32 = 60.0 * 60.0;
 const SCREEN_BOUNDS_OUTLINE_TOLERANCE_PX: f32 = 8.0;
 
-type SelectedCompositeClickQueryItem = (
-    Entity,
-    &'static ElementId,
-    Has<GroupMembers>,
-    Has<CsgNode>,
-    Has<OccurrenceIdentity>,
-);
 type BoxSelectEntityQueryItem = (
     Entity,
     &'static ElementId,
@@ -110,9 +102,6 @@ impl Plugin for SelectionPlugin {
                         draw_box_select_rect,
                     )
                         .chain()
-                        .in_set(InputPhase::ToolInput)
-                        .run_if(in_state(ActiveTool::Select)),
-                    handle_group_double_click
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
                     handle_group_escape
@@ -362,6 +351,23 @@ fn handle_selection_click(world: &mut World) {
         world.insert_resource(edit_context);
     }
 
+    let now = world.resource::<Time<Real>>().elapsed_secs_f64();
+    complete_selection_click(world, hit_entity, additive_selection, now);
+}
+
+/// Complete one press/release click as a single interaction transaction.
+///
+/// Group entry used to run independently on the press while ordinary selection
+/// completed on release. The release then applied the target captured in the old
+/// edit context, which could reselect the entered group or one of its ancestors.
+/// Keeping selection and double-click entry together at the accepted release
+/// boundary makes recursive descent consume one stable target at a time.
+fn complete_selection_click(
+    world: &mut World,
+    hit_entity: Option<Entity>,
+    additive_selection: bool,
+    now: f64,
+) {
     let selected_entities: Vec<Entity> = world
         .query_filtered::<Entity, With<Selected>>()
         .iter(world)
@@ -392,6 +398,8 @@ fn handle_selection_click(world: &mut World) {
         }
         None => {}
     }
+
+    handle_completed_double_click(world, hit_entity, now);
 }
 
 fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity) -> Entity {
@@ -546,76 +554,69 @@ struct DoubleClickTracker {
 
 const DOUBLE_CLICK_THRESHOLD_SECONDS: f64 = 0.4;
 
-#[derive(SystemParam)]
-struct GroupDoubleClickContext<'w, 's> {
-    commands: Commands<'w, 's>,
-    mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
-    keys: Res<'w, ButtonInput<KeyCode>>,
-    time: Res<'w, Time<Real>>,
-    tracker: ResMut<'w, DoubleClickTracker>,
-    selected_query: Query<'w, 's, SelectedCompositeClickQueryItem, With<Selected>>,
-    ownership: Res<'w, InputOwnership>,
-    edit_context: Res<'w, GroupEditContext>,
-    occurrence_edit_context: Res<'w, OccurrenceEditContext>,
-    face_edit_context: ResMut<'w, FaceEditContext>,
-}
+fn handle_completed_double_click(world: &mut World, clicked_entity: Option<Entity>, now: f64) {
+    let Some(entity) = clicked_entity else {
+        world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
+        return;
+    };
 
-fn handle_group_double_click(mut cx: GroupDoubleClickContext) {
-    if !cx.ownership.is_idle() || orbit_modifier_pressed(&cx.keys) {
+    // Preserve the existing contract: double-click entry is available only for
+    // one exclusively selected entity, never as a side effect of a multi-select.
+    let selected: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    if selected.as_slice() != [entity] {
+        world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
         return;
     }
 
-    if !cx.mouse_buttons.just_pressed(MouseButton::Left) {
-        return;
-    }
-
-    // Check if only one entity is selected
-    let selected: Vec<_> = cx.selected_query.iter().collect();
-    if selected.len() != 1 {
-        cx.tracker.last_click_entity = None;
-        return;
-    }
-
-    let (entity, element_id, is_group, is_csg, is_occurrence) = selected[0];
-
-    let now = cx.time.elapsed_secs_f64();
-    let is_double_click = cx.tracker.last_click_entity == Some(entity)
-        && (now - cx.tracker.last_click_time) < DOUBLE_CLICK_THRESHOLD_SECONDS;
-
-    cx.tracker.last_click_time = now;
-    cx.tracker.last_click_entity = Some(entity);
-
+    let is_double_click = {
+        let mut tracker = world.resource_mut::<DoubleClickTracker>();
+        let is_double_click = tracker.last_click_entity == Some(entity)
+            && (now - tracker.last_click_time) < DOUBLE_CLICK_THRESHOLD_SECONDS;
+        if is_double_click {
+            // A double-click is a consumed pair. Resetting prevents a rapid third
+            // click from being interpreted as another hierarchy transition.
+            tracker.last_click_entity = None;
+        } else {
+            tracker.last_click_time = now;
+            tracker.last_click_entity = Some(entity);
+        }
+        is_double_click
+    };
     if !is_double_click {
         return;
     }
 
+    let Some(element_id) = world.get::<ElementId>(entity).copied() else {
+        return;
+    };
+    let is_group = world.get::<GroupMembers>(entity).is_some();
+    let is_occurrence = world.get::<OccurrenceIdentity>(entity).is_some();
+
     if is_group {
-        // Enter group editing
-        let mut ctx = cx.edit_context.clone();
-        ctx.enter(*element_id);
-        cx.commands.insert_resource(ctx);
-        let mut occurrence_ctx = cx.occurrence_edit_context.clone();
-        occurrence_ctx.reset();
-        cx.commands.insert_resource(occurrence_ctx);
-        cx.commands.entity(entity).remove::<Selected>();
+        let mut context = world.resource::<GroupEditContext>().clone();
+        context.enter(element_id);
+        world.insert_resource(context);
+        let mut occurrence_context = world.resource::<OccurrenceEditContext>().clone();
+        occurrence_context.reset();
+        world.insert_resource(occurrence_context);
     } else if is_occurrence {
-        let mut occurrence_ctx = cx.occurrence_edit_context.clone();
-        occurrence_ctx.enter(*element_id);
-        cx.commands.insert_resource(occurrence_ctx);
-        let mut group_ctx = cx.edit_context.clone();
-        group_ctx.reset();
-        cx.commands.insert_resource(group_ctx);
-        cx.commands.entity(entity).remove::<Selected>();
-    } else if is_csg {
-        // Enter face editing mode on the CsgNode — operand faces are
-        // surfaced via csg_face_hit_test in update_hovered_face.
-        cx.face_edit_context.enter(entity, *element_id);
-        cx.commands.entity(entity).remove::<Selected>();
+        let mut occurrence_context = world.resource::<OccurrenceEditContext>().clone();
+        occurrence_context.enter(element_id);
+        world.insert_resource(occurrence_context);
+        let mut group_context = world.resource::<GroupEditContext>().clone();
+        group_context.reset();
+        world.insert_resource(group_context);
     } else {
-        // Enter face editing mode for non-group entities
-        cx.face_edit_context.enter(entity, *element_id);
-        cx.commands.entity(entity).remove::<Selected>();
+        // CSG nodes and ordinary solids share the same face-edit entry. CSG face
+        // hit testing resolves operand faces after the context is active.
+        world
+            .resource_mut::<FaceEditContext>()
+            .enter(entity, element_id);
     }
+    world.entity_mut(entity).remove::<Selected>();
 }
 
 fn handle_group_escape(
@@ -1727,6 +1728,78 @@ mod tests {
 
         assert_eq!(target.entity, Some(parent));
         assert!(target.edit_context_after_click.is_none());
+    }
+
+    #[test]
+    fn completed_double_clicks_descend_nested_groups_without_reselecting_ancestors() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+        world.insert_resource(OccurrenceEditContext::default());
+        world.insert_resource(FaceEditContext::default());
+        world.insert_resource(DoubleClickTracker::default());
+
+        let roof_part_id = ElementId(10);
+        let roof_group_id = ElementId(20);
+        let building_group_id = ElementId(30);
+        let roof_part = world.spawn(roof_part_id).id();
+        let roof_group = world
+            .spawn((
+                roof_group_id,
+                GroupMembers {
+                    name: "Standing-seam gabled roof".to_string(),
+                    member_ids: vec![roof_part_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        let building_group = world
+            .spawn((
+                building_group_id,
+                GroupMembers {
+                    name: "Building".to_string(),
+                    member_ids: vec![roof_group_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+
+        let click_roof_part = |world: &mut World, now| {
+            let target = resolve_selection_click_target(world, Some(roof_part)).entity;
+            complete_selection_click(world, target, false, now);
+        };
+
+        click_roof_part(&mut world, 1.0);
+        assert!(world.get::<Selected>(building_group).is_some());
+        assert!(world.resource::<GroupEditContext>().is_root());
+
+        click_roof_part(&mut world, 1.1);
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![building_group_id]
+        );
+        assert!(world.get::<Selected>(building_group).is_none());
+        assert!(world.get::<Selected>(roof_group).is_none());
+
+        click_roof_part(&mut world, 1.2);
+        assert!(world.get::<Selected>(roof_group).is_some());
+        assert!(world.get::<Selected>(building_group).is_none());
+
+        click_roof_part(&mut world, 1.3);
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![building_group_id, roof_group_id]
+        );
+        assert!(world.get::<Selected>(roof_group).is_none());
+        assert!(world.get::<Selected>(building_group).is_none());
+
+        click_roof_part(&mut world, 1.4);
+        assert!(world.get::<Selected>(roof_part).is_some());
+        assert!(world.get::<Selected>(roof_group).is_none());
+        assert!(world.get::<Selected>(building_group).is_none());
+        assert!(!world.resource::<FaceEditContext>().is_active());
     }
 
     #[test]
