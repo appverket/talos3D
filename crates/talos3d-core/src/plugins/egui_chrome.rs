@@ -175,7 +175,18 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         ],
     },
     MenuSubmenuSpec {
-        label: "Drafting & Reference",
+        label: "Floor Plan",
+        command_ids: &[
+            "drafting.create_draft",
+            "drafting.create_line",
+            "drafting.create_polyline",
+            "drafting.create_rectangle",
+            "drafting.create_circle",
+            "drafting.create_text",
+        ],
+    },
+    MenuSubmenuSpec {
+        label: "Reference",
         command_ids: &[
             "modeling.create_polyline",
             "guide_lines.place",
@@ -248,7 +259,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         command_ids: &["modeling.clip_plane_create"],
     },
     MenuSubmenuSpec {
-        label: "Drafting",
+        label: "Floor Plan",
         command_ids: &[
             "drafting.toggle",
             "drafting.set_preset_arch_imperial",
@@ -4099,9 +4110,9 @@ fn draw_render_settings_window(
 
             ui.collapsing("Drawing Views", |ui| {
                 let drafting_status = if drafting_state.is_active() {
-                    "Drafting workspace is active (orthographic, black on white)."
+                    "Floor Plan mode is active (orthographic, black on white)."
                 } else {
-                    "Drafting workspace is inactive. Use View > Drafting to enter."
+                    "Floor Plan mode is inactive. Use View > Floor Plan to enter."
                 };
                 ui.label(
                     egui::RichText::new(drafting_status)
@@ -5375,4 +5386,40 @@ fn apply_chrome_visuals(ctx: &egui::Context) {
             .insert(egui::TextStyle::Heading, button_font);
     }
     ctx.set_global_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MenuSubmenuSpec, CREATE_MENU_GROUPS, VIEW_MENU_GROUPS};
+
+    fn command_ids_for<'a>(groups: &'a [MenuSubmenuSpec], label: &str) -> &'a [&'a str] {
+        groups
+            .iter()
+            .find(|group| group.label == label)
+            .unwrap_or_else(|| panic!("missing {label} menu group"))
+            .command_ids
+    }
+
+    #[test]
+    fn floor_plan_mode_is_discoverable_from_view() {
+        assert!(command_ids_for(VIEW_MENU_GROUPS, "Floor Plan").contains(&"drafting.toggle"));
+    }
+
+    #[test]
+    fn floor_plan_creation_workflow_is_grouped_in_create() {
+        let floor_plan_commands = command_ids_for(CREATE_MENU_GROUPS, "Floor Plan");
+        for command_id in [
+            "drafting.create_draft",
+            "drafting.create_line",
+            "drafting.create_polyline",
+            "drafting.create_rectangle",
+            "drafting.create_circle",
+            "drafting.create_text",
+        ] {
+            assert!(
+                floor_plan_commands.contains(&command_id),
+                "{command_id} must be directly reachable through Create > Floor Plan"
+            );
+        }
+    }
 }

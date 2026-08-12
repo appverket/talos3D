@@ -68,8 +68,9 @@ impl Plugin for DraftingPlugin {
             .register_command(
                 CommandDescriptor {
                     id: "drafting.toggle".to_string(),
-                    label: "Drafting".to_string(),
-                    description: "Enter or exit the unified Drafting workspace".to_string(),
+                    label: "Floor Plan Mode".to_string(),
+                    description: "Enter or exit Floor Plan mode using the unified Drafting workspace"
+                        .to_string(),
                     category: CommandCategory::View,
                     parameters: Some(serde_json::json!({
                         "type": "object",
@@ -84,7 +85,7 @@ impl Plugin for DraftingPlugin {
                     default_shortcut: None,
                     icon: Some("icon.dimensions".to_string()),
                     hint: Some(
-                        "Toggle the orthographic black-on-white Drafting workspace".to_string(),
+                        "Toggle the orthographic black-on-white Floor Plan workspace".to_string(),
                     ),
                     requires_selection: false,
                     show_in_menu: true,
@@ -513,6 +514,11 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(DraftingPlugin);
         let registry = app.world().resource::<CommandRegistry>();
+        let floor_plan_mode = registry
+            .get("drafting.toggle")
+            .expect("Floor Plan mode command must be registered");
+        assert_eq!(floor_plan_mode.label, "Floor Plan Mode");
+        assert!(floor_plan_mode.show_in_menu);
         for id in [
             "drafting.create_draft",
             "drafting.select_draft",
