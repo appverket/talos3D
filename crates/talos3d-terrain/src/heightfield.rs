@@ -60,6 +60,18 @@ impl<'a> ContourGrid<'a> {
         let mut count = 0usize;
         let mut ring = 0i32;
         loop {
+            // Expanding a ring probes every cell in the surrounding square. On
+            // sparse sites that can be far more work than checking every contour
+            // point directly (and, with fewer than `IDW_K` points, the indexed
+            // search can never satisfy its normal stop condition). Switch to the
+            // exact linear implementation as soon as the square contains at least
+            // as many cells as there are source points. This keeps the indexed
+            // path for dense corpora while bounding empty-cell searches by O(n).
+            let ring_width = ring as usize * 2 + 1;
+            if ring_width.saturating_mul(ring_width) >= self.points.len() {
+                return crate::reconstruction::interpolate_height_idw(point, self.points);
+            }
+
             for di in -ring..=ring {
                 for dj in -ring..=ring {
                     if di.abs() != ring && dj.abs() != ring {
@@ -110,10 +122,10 @@ impl<'a> ContourGrid<'a> {
             weighted += h * w;
             weight += w;
         }
-        if weight <= IDW_EPSILON {
-            0.0
-        } else {
+        if weight > 0.0 {
             weighted / weight
+        } else {
+            0.0
         }
     }
 }
@@ -609,8 +621,18 @@ mod tests {
             Vec3::new(1000.0, 10.0, 1000.0),
         ];
         // Tiny cell hint would blow up; the cap must widen it.
+        let started = Instant::now();
         let hf = TerrainHeightfield::build(&pts, &[], 0.01, 0.0).expect("build");
+        let elapsed = started.elapsed();
         assert!(hf.nx <= MAX_HEIGHTFIELD_NODES_PER_AXIS + 1);
         assert!(hf.nz <= MAX_HEIGHTFIELD_NODES_PER_AXIS + 1);
+        assert_eq!(hf.height_at(0.0, 0.0), Some(0.0));
+        assert_eq!(hf.height_at(1000.0, 1000.0), Some(10.0));
+        let midpoint = hf.height_at(500.0, 500.0).expect("midpoint height");
+        assert!((midpoint - 5.0).abs() < 1e-4, "midpoint height {midpoint}");
+        assert!(
+            elapsed.as_secs_f32() < 2.0,
+            "sparse capped heightfield build took {elapsed:?}"
+        );
     }
 }

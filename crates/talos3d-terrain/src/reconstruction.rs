@@ -858,10 +858,10 @@ pub(crate) fn interpolate_height_idw(point: Vec2, contour_points: &[Vec3]) -> f3
         weighted_sum += elevation * weight;
         weight_sum += weight;
     }
-    if weight_sum <= REPAIR_EPSILON {
-        0.0
-    } else {
+    if weight_sum > 0.0 {
         weighted_sum / weight_sum
+    } else {
+        0.0
     }
 }
 
