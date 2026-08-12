@@ -1614,11 +1614,11 @@ mod tests {
         modeling::{
             assembly::{AssemblyFactory, SemanticAssembly},
             definition::{
-                AxisRef, BindingSide, ChildSlotDef, CompoundDefinition, Definition, DefinitionId,
-                DefinitionKind, DefinitionLibrary, DefinitionLibraryId, DefinitionLibraryScope,
-                DefinitionVisibility, ExprNode, Interface, OverridePolicy, ParamType, ParameterDef,
-                ParameterMetadata, ParameterRef, ParameterSchema, SlotCount, SlotLayout,
-                SlotMultiplicity, TransformBinding,
+                AxisRef, BindingSide, BodyExpr, ChildSlotDef, CompoundDefinition, Definition,
+                DefinitionBody, DefinitionId, DefinitionKind, DefinitionLibrary,
+                DefinitionLibraryId, DefinitionLibraryScope, DefinitionVisibility, Interface,
+                OverridePolicy, ParamType, ParameterDef, ParameterMetadata, ParameterRef,
+                ParameterSchema, SlotCount, SlotLayout, SlotMultiplicity, TransformBinding,
             },
             generic_factory::PrimitiveFactory,
             occurrence::{OccurrenceFactory, OccurrenceIdentity},
@@ -1916,94 +1916,108 @@ mod tests {
             definition_kind: DefinitionKind::Solid,
             definition_version: 1,
             interface: Interface::default(),
-            evaluators: Vec::new(),
-            representations: Vec::new(),
+            body: DefinitionBody::new(
+                Vec::new(),
+                Vec::new(),
+                Some(CompoundDefinition {
+                    child_slots: vec![
+                        ChildSlotDef {
+                            slot_id: "muntin".to_string(),
+                            role: "muntin".to_string(),
+                            definition_id: child_definition_id.clone(),
+                            parameter_bindings: Vec::new(),
+                            transform_binding: TransformBinding::default(),
+                            suppression_expr: None,
+                            multiplicity: SlotMultiplicity::Collection {
+                                count: SlotCount::Fixed(5),
+                                layout: SlotLayout::Linear {
+                                    axis: AxisRef("x".to_string()),
+                                    spacing: BodyExpr::from(
+                                        crate::plugins::modeling::definition::ExprNode::Literal {
+                                            value: serde_json::json!(0.2),
+                                        },
+                                    ),
+                                    origin: TransformBinding::default(),
+                                },
+                            },
+                        },
+                        ChildSlotDef {
+                            slot_id: "pane".to_string(),
+                            role: "pane".to_string(),
+                            definition_id: child_definition_id.clone(),
+                            parameter_bindings: Vec::new(),
+                            transform_binding: TransformBinding::default(),
+                            suppression_expr: None,
+                            multiplicity: SlotMultiplicity::Collection {
+                                count: SlotCount::Fixed(6),
+                                layout: SlotLayout::Grid {
+                                    axis_u: AxisRef("x".to_string()),
+                                    count_u: BodyExpr::from(
+                                        crate::plugins::modeling::definition::ExprNode::Literal {
+                                            value: serde_json::json!(3),
+                                        },
+                                    ),
+                                    spacing_u: BodyExpr::from(
+                                        crate::plugins::modeling::definition::ExprNode::Literal {
+                                            value: serde_json::json!(0.3),
+                                        },
+                                    ),
+                                    axis_v: AxisRef("z".to_string()),
+                                    count_v: BodyExpr::from(
+                                        crate::plugins::modeling::definition::ExprNode::Literal {
+                                            value: serde_json::json!(2),
+                                        },
+                                    ),
+                                    spacing_v: BodyExpr::from(
+                                        crate::plugins::modeling::definition::ExprNode::Literal {
+                                            value: serde_json::json!(0.4),
+                                        },
+                                    ),
+                                    origin: TransformBinding::default(),
+                                },
+                            },
+                        },
+                        ChildSlotDef {
+                            slot_id: "truss".to_string(),
+                            role: "truss".to_string(),
+                            definition_id: child_definition_id.clone(),
+                            parameter_bindings: Vec::new(),
+                            transform_binding: TransformBinding::default(),
+                            suppression_expr: None,
+                            multiplicity: SlotMultiplicity::Collection {
+                                count: SlotCount::Fixed(2),
+                                layout: SlotLayout::BySpacingFromHost {
+                                    host_param: ParameterRef {
+                                        side: BindingSide::Host,
+                                        name: "truss_spacing_mm".to_string(),
+                                    },
+                                    axis: AxisRef("z".to_string()),
+                                },
+                            },
+                        },
+                        ChildSlotDef {
+                            slot_id: "lite".to_string(),
+                            role: "lite".to_string(),
+                            definition_id: child_definition_id,
+                            parameter_bindings: Vec::new(),
+                            transform_binding: TransformBinding::default(),
+                            suppression_expr: None,
+                            multiplicity: SlotMultiplicity::Collection {
+                                count: SlotCount::Fixed(6),
+                                layout: SlotLayout::LitePattern {
+                                    pattern: BodyExpr::from(
+                                        crate::plugins::modeling::definition::ExprNode::Literal {
+                                            value: serde_json::json!("3x2"),
+                                        },
+                                    ),
+                                },
+                            },
+                        },
+                    ],
+                    ..Default::default()
+                }),
+            ),
             visibility: DefinitionVisibility::PublicRoot,
-            compound: Some(CompoundDefinition {
-                child_slots: vec![
-                    ChildSlotDef {
-                        slot_id: "muntin".to_string(),
-                        role: "muntin".to_string(),
-                        definition_id: child_definition_id.clone(),
-                        parameter_bindings: Vec::new(),
-                        transform_binding: TransformBinding::default(),
-                        suppression_expr: None,
-                        multiplicity: SlotMultiplicity::Collection {
-                            count: SlotCount::Fixed(5),
-                            layout: SlotLayout::Linear {
-                                axis: AxisRef("x".to_string()),
-                                spacing: ExprNode::Literal {
-                                    value: serde_json::json!(0.2),
-                                },
-                                origin: TransformBinding::default(),
-                            },
-                        },
-                    },
-                    ChildSlotDef {
-                        slot_id: "pane".to_string(),
-                        role: "pane".to_string(),
-                        definition_id: child_definition_id.clone(),
-                        parameter_bindings: Vec::new(),
-                        transform_binding: TransformBinding::default(),
-                        suppression_expr: None,
-                        multiplicity: SlotMultiplicity::Collection {
-                            count: SlotCount::Fixed(6),
-                            layout: SlotLayout::Grid {
-                                axis_u: AxisRef("x".to_string()),
-                                count_u: ExprNode::Literal {
-                                    value: serde_json::json!(3),
-                                },
-                                spacing_u: ExprNode::Literal {
-                                    value: serde_json::json!(0.3),
-                                },
-                                axis_v: AxisRef("z".to_string()),
-                                count_v: ExprNode::Literal {
-                                    value: serde_json::json!(2),
-                                },
-                                spacing_v: ExprNode::Literal {
-                                    value: serde_json::json!(0.4),
-                                },
-                                origin: TransformBinding::default(),
-                            },
-                        },
-                    },
-                    ChildSlotDef {
-                        slot_id: "truss".to_string(),
-                        role: "truss".to_string(),
-                        definition_id: child_definition_id.clone(),
-                        parameter_bindings: Vec::new(),
-                        transform_binding: TransformBinding::default(),
-                        suppression_expr: None,
-                        multiplicity: SlotMultiplicity::Collection {
-                            count: SlotCount::Fixed(2),
-                            layout: SlotLayout::BySpacingFromHost {
-                                host_param: ParameterRef {
-                                    side: BindingSide::Host,
-                                    name: "truss_spacing_mm".to_string(),
-                                },
-                                axis: AxisRef("z".to_string()),
-                            },
-                        },
-                    },
-                    ChildSlotDef {
-                        slot_id: "lite".to_string(),
-                        role: "lite".to_string(),
-                        definition_id: child_definition_id,
-                        parameter_bindings: Vec::new(),
-                        transform_binding: TransformBinding::default(),
-                        suppression_expr: None,
-                        multiplicity: SlotMultiplicity::Collection {
-                            count: SlotCount::Fixed(6),
-                            layout: SlotLayout::LitePattern {
-                                pattern: ExprNode::Literal {
-                                    value: serde_json::json!("3x2"),
-                                },
-                            },
-                        },
-                    },
-                ],
-                ..Default::default()
-            }),
             material_assignment: None,
             domain_data: Value::Null,
         };
@@ -2065,6 +2079,7 @@ mod tests {
             .get(&definition_id)
             .expect("definition survives project load");
         let compound = restored
+            .body
             .compound
             .as_ref()
             .expect("compound definition survives project load");
@@ -2081,9 +2096,10 @@ mod tests {
                     SlotLayout::Linear { axis, spacing, .. } => {
                         assert_eq!(axis.0, "x");
                         match spacing {
-                            ExprNode::Literal { value } => {
-                                assert_eq!(value, &serde_json::json!(0.2))
-                            }
+                            BodyExpr::Scalar {
+                                expr:
+                                    crate::relational::param_expr::ScalarExpr::ContextualLit { value },
+                            } => assert_eq!(*value, 0.2),
                             other => panic!("expected literal spacing after load, got {other:?}"),
                         }
                     }
@@ -2180,10 +2196,8 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
+            body: DefinitionBody::default(),
             visibility: DefinitionVisibility::PublicRoot,
-            compound: None,
             material_assignment: None,
             domain_data: Value::Null,
         };
@@ -2564,9 +2578,7 @@ mod tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: None,
+            body: crate::plugins::modeling::definition::DefinitionBody::default(),
             material_assignment: None,
             visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,
@@ -3217,7 +3229,7 @@ mod tests {
         let mut promoted_def = crate::plugins::definition_authoring::blank_definition("House");
         promoted_def.id = promoted_definition_id.clone();
         if let PromotionOutputShape::Compound { child_slots } = &out.plan.output_shape {
-            promoted_def.compound = Some(CompoundDefinition {
+            promoted_def.body.compound = Some(CompoundDefinition {
                 child_slots: child_slots.to_vec(),
                 ..Default::default()
             });
@@ -3357,6 +3369,7 @@ mod tests {
         assert_eq!(restored_def.id, promoted_definition_id);
         assert_eq!(restored_def.name, "House");
         let compound = restored_def
+            .body
             .compound
             .as_ref()
             .expect("compound body reloads on the promoted definition");
@@ -3535,7 +3548,7 @@ mod tests {
         if let crate::plugins::promotion::PromotionOutputShape::Compound { child_slots } =
             &out.plan.output_shape
         {
-            promoted_def.compound = Some(CompoundDefinition {
+            promoted_def.body.compound = Some(CompoundDefinition {
                 child_slots: child_slots.clone(),
                 ..Default::default()
             });
@@ -3660,6 +3673,7 @@ mod tests {
         );
         // Slice C3: relation templates survive on the compound body.
         let compound = restored_def
+            .body
             .compound
             .as_ref()
             .expect("compound body reloads");

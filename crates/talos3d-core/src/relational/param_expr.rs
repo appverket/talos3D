@@ -165,6 +165,27 @@ fn require_angle(q: Quantity, op: &'static str) -> Result<f64, EvalError> {
     }
 }
 
+/// Evaluate an additive/comparison pair while preserving the only ambiguity
+/// carried by migrated legacy expressions. A contextual literal adopts the
+/// concrete unit of its peer; two contextual literals remain dimensionless.
+fn contextual_pair(
+    lhs: &ScalarExpr,
+    rhs: &ScalarExpr,
+    env: &Env,
+) -> Result<(Quantity, Quantity), EvalError> {
+    let mut left = lhs.eval(env)?;
+    let mut right = rhs.eval(env)?;
+    match (
+        matches!(lhs, ScalarExpr::ContextualLit { .. }),
+        matches!(rhs, ScalarExpr::ContextualLit { .. }),
+    ) {
+        (true, false) => left.unit = right.unit,
+        (false, true) => right.unit = left.unit,
+        _ => {}
+    }
+    Ok((left, right))
+}
+
 /// Comparison operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
@@ -185,6 +206,17 @@ pub enum CmpOp {
 pub enum ScalarExpr {
     Lit {
         q: Quantity,
+    },
+    /// A numeric literal migrated from the legacy untyped `ExprNode` format.
+    ///
+    /// The old format encoded both dimensional constants (for example `0.9`
+    /// metres in a width constraint) and dimensionless coefficients with the
+    /// same JSON shape. The canonical body preserves that fact explicitly:
+    /// additive/comparison contexts adopt the other operand's unit, while
+    /// multiplicative contexts remain dimensionless. New authored content
+    /// should prefer [`ScalarExpr::Lit`] with an explicit unit.
+    ContextualLit {
+        value: f64,
     },
     Param {
         name: String,
@@ -274,6 +306,9 @@ impl ScalarExpr {
     pub fn lit(q: Quantity) -> Self {
         ScalarExpr::Lit { q }
     }
+    pub fn contextual_lit(value: f64) -> Self {
+        ScalarExpr::ContextualLit { value }
+    }
     pub fn param(name: impl Into<String>) -> Self {
         ScalarExpr::Param { name: name.into() }
     }
@@ -282,12 +317,19 @@ impl ScalarExpr {
     pub fn eval(&self, env: &Env) -> Result<Quantity, EvalError> {
         match self {
             ScalarExpr::Lit { q } => Ok(*q),
+            ScalarExpr::ContextualLit { value } => Ok(Quantity::num(*value)),
             ScalarExpr::Param { name } => env
                 .get(name)
                 .copied()
                 .ok_or_else(|| EvalError::MissingParam(name.clone())),
-            ScalarExpr::Add { lhs, rhs } => add(lhs.eval(env)?, rhs.eval(env)?),
-            ScalarExpr::Sub { lhs, rhs } => sub(lhs.eval(env)?, rhs.eval(env)?),
+            ScalarExpr::Add { lhs, rhs } => {
+                let (lhs, rhs) = contextual_pair(lhs, rhs, env)?;
+                add(lhs, rhs)
+            }
+            ScalarExpr::Sub { lhs, rhs } => {
+                let (lhs, rhs) = contextual_pair(lhs, rhs, env)?;
+                sub(lhs, rhs)
+            }
             ScalarExpr::Mul { lhs, rhs } => mul(lhs.eval(env)?, rhs.eval(env)?),
             ScalarExpr::Div { lhs, rhs } => div(lhs.eval(env)?, rhs.eval(env)?),
             ScalarExpr::Neg { expr } => {
@@ -322,8 +364,7 @@ impl ScalarExpr {
                 Ok(Quantity::deg(yq.value.atan2(xq.value).to_degrees()))
             }
             ScalarExpr::Min { lhs, rhs } => {
-                let a = lhs.eval(env)?;
-                let b = rhs.eval(env)?;
+                let (a, b) = contextual_pair(lhs, rhs, env)?;
                 if a.unit != b.unit {
                     return Err(EvalError::UnitMismatch {
                         op: "min",
@@ -337,8 +378,7 @@ impl ScalarExpr {
                 })
             }
             ScalarExpr::Max { lhs, rhs } => {
-                let a = lhs.eval(env)?;
-                let b = rhs.eval(env)?;
+                let (a, b) = contextual_pair(lhs, rhs, env)?;
                 if a.unit != b.unit {
                     return Err(EvalError::UnitMismatch {
                         op: "max",
@@ -386,7 +426,7 @@ impl ScalarExpr {
 
     fn collect_deps(&self, out: &mut BTreeSet<String>) {
         match self {
-            ScalarExpr::Lit { .. } => {}
+            ScalarExpr::Lit { .. } | ScalarExpr::ContextualLit { .. } => {}
             ScalarExpr::Param { name } => {
                 out.insert(name.clone());
             }
@@ -455,8 +495,7 @@ impl Predicate {
         match self {
             Predicate::Bool { value } => Ok(*value),
             Predicate::Cmp { op, lhs, rhs } => {
-                let a = lhs.eval(env)?;
-                let b = rhs.eval(env)?;
+                let (a, b) = contextual_pair(lhs, rhs, env)?;
                 if a.unit != b.unit {
                     return Err(EvalError::UnitMismatch {
                         op: "cmp",

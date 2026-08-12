@@ -839,7 +839,7 @@ pub fn materialize_relation_templates(
     occurrence_root_id: ElementId,
     slot_id_to_realization_id: &std::collections::HashMap<String, ElementId>,
 ) -> Result<usize, MaterializationError> {
-    let Some(compound) = definition.compound.as_ref() else {
+    let Some(compound) = definition.body.compound.as_ref() else {
         return Ok(0);
     };
     if compound.relation_templates.is_empty() {
@@ -946,7 +946,7 @@ pub fn auto_materialize_self_root_templates(
     definition: &crate::plugins::modeling::definition::Definition,
     occurrence_root_id: ElementId,
 ) -> Result<usize, MaterializationError> {
-    let Some(compound) = definition.compound.as_ref() else {
+    let Some(compound) = definition.body.compound.as_ref() else {
         return Ok(0);
     };
     if compound.relation_templates.is_empty() {
@@ -1733,10 +1733,11 @@ mod tests {
                 if let crate::plugins::promotion::PromotionOutputShape::Compound { child_slots } =
                     &plan.output_shape
                 {
-                    def.compound = Some(crate::plugins::modeling::definition::CompoundDefinition {
-                        child_slots: child_slots.clone(),
-                        ..Default::default()
-                    });
+                    def.body.compound =
+                        Some(crate::plugins::modeling::definition::CompoundDefinition {
+                            child_slots: child_slots.clone(),
+                            ..Default::default()
+                        });
                 }
                 Ok(def)
             },
@@ -2319,7 +2320,7 @@ mod tests {
         assert!(json.contains("relation_templates"));
         let back: crate::plugins::modeling::definition::Definition =
             serde_json::from_str(&json).unwrap();
-        let compound = back.compound.expect("compound body survives reload");
+        let compound = back.body.compound.expect("compound body survives reload");
         assert_eq!(compound.relation_templates.len(), 1);
         assert_eq!(compound.relation_templates[0].relation_type, "contains");
     }

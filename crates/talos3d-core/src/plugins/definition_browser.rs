@@ -104,13 +104,13 @@ struct DefinitionListEntry {
 
 impl DefinitionListEntry {
     fn from_definition(definition: &Definition) -> Self {
-        let compound = definition.compound.as_ref();
+        let compound = definition.body.compound.as_ref();
         Self {
             id: definition.id.to_string(),
             name: definition.name.clone(),
             definition_kind: definition.definition_kind.clone(),
             parameter_count: definition.interface.parameters.0.len(),
-            representation_count: definition.representations.len(),
+            representation_count: definition.body.representations.len(),
             child_slot_count: compound.map(|value| value.child_slots.len()).unwrap_or(0),
             derived_parameter_count: compound
                 .map(|value| value.derived_parameters.len())
@@ -677,7 +677,7 @@ pub fn execute_open_selected_occurrence_definition(
                     );
                     eff.ok()
                         .and_then(|def| {
-                            def.compound.map(|compound| {
+                            def.body.compound.map(|compound| {
                                 compound
                                     .child_slots
                                     .iter()
@@ -1919,6 +1919,7 @@ fn draw_selected_definition_workspace(
             definition.id,
             definition.interface.parameters.0.len(),
             definition
+                .body
                 .compound
                 .as_ref()
                 .map(|compound| compound.child_slots.len())
@@ -2371,7 +2372,7 @@ fn draw_property_tree(
     libraries: &DefinitionLibraryRegistry,
 ) {
     let def = &draft.working_copy;
-    let compound = def.compound.as_ref();
+    let compound = def.body.compound.as_ref();
 
     // Helper: resolve a child definition's human-readable name given its id.
     let preview_reg = preview_registry_for_draft(definitions, libraries, draft)
@@ -2699,7 +2700,7 @@ fn composition_root_ids(
         let Ok(definition) = registry.effective_definition(definition_id) else {
             continue;
         };
-        if let Some(compound) = definition.compound {
+        if let Some(compound) = definition.body.compound {
             for slot in compound.child_slots {
                 if source_set.contains(&slot.definition_id) {
                     referenced.insert(slot.definition_id);
@@ -2771,6 +2772,7 @@ fn draw_definition_composition_node(
     };
     let selected = selected_preview_slot_path.as_deref() == slot_path.as_deref();
     let child_slots = definition
+        .body
         .compound
         .as_ref()
         .map(|compound| compound.child_slots.clone())
@@ -2990,7 +2992,7 @@ fn collect_composition_parent_links(
         }
     }
 
-    if let Some(compound) = definition.compound {
+    if let Some(compound) = definition.body.compound {
         for slot in compound.child_slots {
             collect_child_composition_parent_links(
                 registry,
@@ -3054,7 +3056,7 @@ fn collect_child_composition_parent_links(
         }
     }
 
-    if let Some(compound) = definition.compound {
+    if let Some(compound) = definition.body.compound {
         for slot in compound.child_slots {
             collect_child_composition_parent_links(
                 registry,
@@ -3659,6 +3661,7 @@ fn draw_context_slot(
 ) {
     let child_slots = active_draft
         .working_copy
+        .body
         .compound
         .as_ref()
         .map(|c| c.child_slots.clone())
@@ -3785,9 +3788,12 @@ fn draw_context_slot(
         for binding in &slot.parameter_bindings {
             // Resolve the literal value of this binding (only Literal nodes
             // can be promoted; expressions that reference other params are skipped).
-            use crate::plugins::modeling::definition::ExprNode;
+            use crate::plugins::modeling::definition::BodyExpr;
             let literal_value: Option<serde_json::Value> = match &binding.expr {
-                ExprNode::Literal { value } => Some(value.clone()),
+                BodyExpr::Literal { value } => Some(value.clone()),
+                BodyExpr::Scalar {
+                    expr: crate::relational::param_expr::ScalarExpr::ContextualLit { value },
+                } => Some(serde_json::json!(value)),
                 _ => None,
             };
             let Some(literal) = literal_value else {
@@ -3975,6 +3981,7 @@ fn draw_context_slot_binding(
     // For PP-DBUX2 we show the JSON for this single binding with Apply.
     let child_slots = active_draft
         .working_copy
+        .body
         .compound
         .as_ref()
         .map(|c| c.child_slots.clone())
@@ -4052,7 +4059,7 @@ fn draw_context_anchor(
     anchor_id: &str,
     status: &mut StatusBarData,
 ) {
-    let compound = active_draft.working_copy.compound.as_ref();
+    let compound = active_draft.working_copy.body.compound.as_ref();
     let Some(anchor) = compound.and_then(|c| c.anchors.iter().find(|a| a.id == anchor_id)) else {
         ui.label(format!("Anchor '{anchor_id}' not found."));
         return;
@@ -4126,7 +4133,7 @@ fn draw_context_constraint(
     constraint_id: &str,
     status: &mut StatusBarData,
 ) {
-    let compound = active_draft.working_copy.compound.as_ref();
+    let compound = active_draft.working_copy.body.compound.as_ref();
     let Some(constraint) =
         compound.and_then(|c| c.constraints.iter().find(|c| c.id == constraint_id))
     else {
@@ -4204,7 +4211,7 @@ fn draw_context_derived_parameter(
     derived_name: &str,
     status: &mut StatusBarData,
 ) {
-    let compound = active_draft.working_copy.compound.as_ref();
+    let compound = active_draft.working_copy.body.compound.as_ref();
     let Some(derived) =
         compound.and_then(|c| c.derived_parameters.iter().find(|d| d.name == derived_name))
     else {
@@ -4371,7 +4378,7 @@ fn technical_view_json_for_node(
     draft: &DefinitionDraft,
 ) -> String {
     let def = &draft.working_copy;
-    let compound = def.compound.as_ref();
+    let compound = def.body.compound.as_ref();
     match selected_node {
         DefinitionEditorNode::Definition => {
             // Full definition minus compound.child_slots — editing the compound
@@ -4577,14 +4584,17 @@ fn draw_assets_strip(
 
     // Representations
     ui.label(
-        egui::RichText::new(format!("Representations ({})", def.representations.len()))
-            .small()
-            .strong(),
+        egui::RichText::new(format!(
+            "Representations ({})",
+            def.body.representations.len()
+        ))
+        .small()
+        .strong(),
     );
-    if def.representations.is_empty() {
+    if def.body.representations.is_empty() {
         ui.label(egui::RichText::new("None").small().weak());
     } else {
-        for rep in &def.representations {
+        for rep in &def.body.representations {
             ui.label(egui::RichText::new(format!("{:?} / {:?}", rep.kind, rep.role)).small());
         }
     }
@@ -4600,7 +4610,7 @@ fn draw_assets_strip(
         .get("architectural")
         .and_then(|a| a.get("material_assignment"))
         .is_some();
-    let shows_material_chip = !def.representations.is_empty() || has_material_assignment;
+    let shows_material_chip = !def.body.representations.is_empty() || has_material_assignment;
 
     if shows_material_chip {
         ui.label(egui::RichText::new("Material").small().strong());
@@ -4905,8 +4915,8 @@ fn sync_inspector_state(state: &mut DefinitionsWindowState, draft: &DefinitionDr
     state.selected_draft_id = Some(draft.draft_id.0.clone());
     state.new_definition_name = draft.working_copy.name.clone();
     state.domain_data_buffer = pretty_json(&draft.working_copy.domain_data);
-    state.evaluators_buffer = pretty_json(&draft.working_copy.evaluators);
-    state.representations_buffer = pretty_json(&draft.working_copy.representations);
+    state.evaluators_buffer = pretty_json(&draft.working_copy.body.evaluators);
+    state.representations_buffer = pretty_json(&draft.working_copy.body.representations);
     state.selected_node = default_editor_node_for_draft(draft);
     state.technical_view_buffer.clear();
     state.technical_view_error = None;
@@ -4959,10 +4969,10 @@ fn slot_translation_to_text(slot: &crate::plugins::modeling::definition::ChildSl
         .join(", ")
 }
 
-fn expr_to_short_text(expr: &crate::plugins::modeling::definition::ExprNode) -> String {
+fn expr_to_short_text(expr: &crate::plugins::modeling::definition::BodyExpr) -> String {
     match expr {
-        crate::plugins::modeling::definition::ExprNode::Literal { value } => compact_json(value),
-        crate::plugins::modeling::definition::ExprNode::ParamRef { path } => path.clone(),
+        crate::plugins::modeling::definition::BodyExpr::Literal { value } => compact_json(value),
+        crate::plugins::modeling::definition::BodyExpr::Reference { path } => path.clone(),
         _ => serde_json::to_string(expr).unwrap_or_else(|_| "?".to_string()),
     }
 }
@@ -4989,7 +4999,7 @@ fn build_slot_from_editor_buffers(
 
 fn parse_translation_binding(
     text: &str,
-) -> Result<Option<Vec<crate::plugins::modeling::definition::ExprNode>>, String> {
+) -> Result<Option<Vec<crate::plugins::modeling::definition::BodyExpr>>, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -5007,11 +5017,11 @@ fn parse_translation_binding(
             .into_iter()
             .map(|part| {
                 if let Ok(value) = part.parse::<f64>() {
-                    crate::plugins::modeling::definition::ExprNode::Literal {
-                        value: Value::from(value),
+                    crate::plugins::modeling::definition::BodyExpr::Scalar {
+                        expr: crate::relational::param_expr::ScalarExpr::contextual_lit(value),
                     }
                 } else {
-                    crate::plugins::modeling::definition::ExprNode::ParamRef {
+                    crate::plugins::modeling::definition::BodyExpr::Reference {
                         path: part.to_string(),
                     }
                 }
@@ -5082,11 +5092,11 @@ fn compact_json(value: &Value) -> String {
 
 /// Short human-readable summary of an expression node for display in the
 /// property tree (slot parameter binding rows).
-fn compact_json_expr(expr: &crate::plugins::modeling::definition::ExprNode) -> String {
-    use crate::plugins::modeling::definition::ExprNode;
+fn compact_json_expr(expr: &crate::plugins::modeling::definition::BodyExpr) -> String {
+    use crate::plugins::modeling::definition::BodyExpr;
     match expr {
-        ExprNode::Literal { value } => compact_json(value),
-        ExprNode::ParamRef { path } => path.clone(),
+        BodyExpr::Literal { value } => compact_json(value),
+        BodyExpr::Reference { path } => path.clone(),
         _ => serde_json::to_string(expr).unwrap_or_else(|_| "…".to_string()),
     }
 }
@@ -5187,7 +5197,7 @@ fn ensure_definition_available(
                 to_import.push(base_definition);
             }
         }
-        if let Some(compound) = &definition.compound {
+        if let Some(compound) = &definition.body.compound {
             for slot in &compound.child_slots {
                 if let Some(child) = library.get(&slot.definition_id).cloned() {
                     to_import.push(child);
@@ -5373,9 +5383,7 @@ mod tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: None,
+            body: crate::plugins::modeling::definition::DefinitionBody::default(),
             material_assignment: None,
             visibility: DefinitionVisibility::PublicRoot,
             domain_data: serde_json::Value::Null,
@@ -5481,9 +5489,7 @@ mod tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: None,
+            body: crate::plugins::modeling::definition::DefinitionBody::default(),
             material_assignment: None,
             visibility: DefinitionVisibility::PublicRoot,
             domain_data: serde_json::Value::Null,
@@ -5567,23 +5573,25 @@ mod tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: (!child_slots.is_empty()).then(|| CompoundDefinition {
-                child_slots: child_slots
-                    .into_iter()
-                    .map(|(slot_id, definition_id)| ChildSlotDef {
-                        slot_id: slot_id.to_string(),
-                        role: slot_id.to_string(),
-                        definition_id: DefinitionId(definition_id.to_string()),
-                        parameter_bindings: Vec::new(),
-                        transform_binding: Default::default(),
-                        suppression_expr: None,
-                        multiplicity: Default::default(),
-                    })
-                    .collect(),
-                ..Default::default()
-            }),
+            body: crate::plugins::modeling::definition::DefinitionBody::new(
+                Vec::new(),
+                Vec::new(),
+                (!child_slots.is_empty()).then(|| CompoundDefinition {
+                    child_slots: child_slots
+                        .into_iter()
+                        .map(|(slot_id, definition_id)| ChildSlotDef {
+                            slot_id: slot_id.to_string(),
+                            role: slot_id.to_string(),
+                            definition_id: DefinitionId(definition_id.to_string()),
+                            parameter_bindings: Vec::new(),
+                            transform_binding: Default::default(),
+                            suppression_expr: None,
+                            multiplicity: Default::default(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                }),
+            ),
             material_assignment: None,
             visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,

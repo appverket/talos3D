@@ -222,7 +222,7 @@ fn contains(expr: &ScalarExpr, free: &str) -> bool {
 /// cannot prove affineness.
 fn is_affine_in(expr: &ScalarExpr, free: &str) -> bool {
     match expr {
-        ScalarExpr::Lit { .. } => true,
+        ScalarExpr::Lit { .. } | ScalarExpr::ContextualLit { .. } => true,
         ScalarExpr::Param { .. } => true, // bare param: degree 0 or 1, both affine
         ScalarExpr::Add { lhs, rhs } | ScalarExpr::Sub { lhs, rhs } => {
             is_affine_in(lhs, free) && is_affine_in(rhs, free)

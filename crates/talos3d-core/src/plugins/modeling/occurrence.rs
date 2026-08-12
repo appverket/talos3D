@@ -28,8 +28,8 @@ use crate::{
         materials::{material_assignment_from_value, MaterialAssignment},
         modeling::{
             definition::{
-                AxisRef, ChildSlotDef, ConstraintSeverity, Definition, DefinitionId,
-                DefinitionRegistry, DefinitionVersion, EvaluatorDecl, ExprNode, GeometryParamsHash,
+                AxisRef, BodyExpr, ChildSlotDef, ConstraintSeverity, Definition, DefinitionId,
+                DefinitionRegistry, DefinitionVersion, EvaluatorDecl, GeometryParamsHash,
                 OverrideMap, ParamType, RepresentationKind, ResolvedParam, SlotCount, SlotLayout,
                 SlotMultiplicity, TransformBinding,
             },
@@ -1112,6 +1112,7 @@ pub fn evaluate_occurrences(world: &mut World) {
 
 struct EvaluatedDefinitionState {
     values: HashMap<String, Value>,
+    units: HashMap<String, crate::plugins::units::Unit>,
 }
 
 struct CompoundSpawnContext {
@@ -1154,12 +1155,12 @@ pub(crate) fn resolve_compound_slot_occurrence_context_with_root_overrides(
     let mut current_definition_id = root_definition_id.clone();
     let root_resolved = registry.resolve_params_checked(root_definition_id, root_overrides)?;
     let mut current_definition = registry.effective_definition(root_definition_id)?;
-    let mut current_values = evaluate_definition_state(&current_definition, &root_resolved)?.values;
+    let mut current_state = evaluate_definition_state(&current_definition, &root_resolved)?;
     let mut current_overrides = root_overrides.clone();
 
     for segment in slot_path.split('.').filter(|segment| !segment.is_empty()) {
         let slot_id = slot_path_segment_base(segment);
-        let compound = current_definition.compound.as_ref().ok_or_else(|| {
+        let compound = current_definition.body.compound.as_ref().ok_or_else(|| {
             format!(
                 "Definition '{}' has no child slot '{}'",
                 current_definition.name, slot_id
@@ -1178,7 +1179,7 @@ pub(crate) fn resolve_compound_slot_occurrence_context_with_root_overrides(
 
         let mut child_overrides = OverrideMap::default();
         for binding in &slot.parameter_bindings {
-            let value = evaluate_expr(&binding.expr, &current_values)?;
+            let value = evaluate_expr(&binding.expr, &current_state.values, &current_state.units)?;
             child_overrides.set(binding.target_param.clone(), value);
         }
 
@@ -1186,7 +1187,7 @@ pub(crate) fn resolve_compound_slot_occurrence_context_with_root_overrides(
             registry.resolve_bound_params_checked(&slot.definition_id, &child_overrides)?;
         current_definition_id = slot.definition_id.clone();
         current_definition = registry.effective_definition(&slot.definition_id)?;
-        current_values = evaluate_definition_state(&current_definition, &child_resolved)?.values;
+        current_state = evaluate_definition_state(&current_definition, &child_resolved)?;
         current_overrides = child_overrides;
     }
 
@@ -1212,7 +1213,7 @@ pub(crate) fn render_occurrence(
     let resolved_values = resolved_param_values(&resolved);
     let cache_key = mesh_cache_key_for_definition(&definition, &resolved_values);
 
-    if definition.compound.is_none()
+    if definition.body.compound.is_none()
         && apply_cached_occurrence_mesh(world, root_entity, &cache_key, transform)
     {
         apply_occurrence_material_assignment(world, root_entity, &definition);
@@ -1252,13 +1253,13 @@ pub(crate) fn render_occurrence(
         clear_occurrence_material_assignment(world, root_entity);
     }
 
-    if let Some(compound) = &definition.compound {
+    if let Some(compound) = &definition.body.compound {
         for slot in &compound.child_slots {
             spawn_compound_slot(
                 world,
                 registry,
                 slot,
-                &state.values,
+                &state,
                 CompoundSpawnContext {
                     owner: element_id,
                     parent_translation: transform.translation,
@@ -1321,21 +1322,21 @@ fn spawn_compound_slot(
     world: &mut World,
     registry: &DefinitionRegistry,
     slot: &ChildSlotDef,
-    parent_values: &HashMap<String, Value>,
+    parent_state: &EvaluatedDefinitionState,
     context: CompoundSpawnContext,
 ) -> Result<(), String> {
     match &slot.multiplicity {
         SlotMultiplicity::Single => {
-            spawn_compound_slot_instance(world, registry, slot, parent_values, context)
+            spawn_compound_slot_instance(world, registry, slot, parent_state, context)
         }
         SlotMultiplicity::Collection { layout, count } => {
-            let instances = resolve_collection_instances(slot, layout, count, parent_values)?;
+            let instances = resolve_collection_instances(slot, layout, count, parent_state)?;
             for instance in instances {
                 spawn_compound_slot_instance(
                     world,
                     registry,
                     slot,
-                    parent_values,
+                    parent_state,
                     CompoundSpawnContext {
                         owner: context.owner,
                         parent_translation: context.parent_translation,
@@ -1354,18 +1355,18 @@ fn spawn_compound_slot_instance(
     world: &mut World,
     registry: &DefinitionRegistry,
     slot: &ChildSlotDef,
-    parent_values: &HashMap<String, Value>,
+    parent_state: &EvaluatedDefinitionState,
     context: CompoundSpawnContext,
 ) -> Result<(), String> {
     if let Some(expr) = &slot.suppression_expr {
-        if !evaluate_expr_bool(expr, parent_values)? {
+        if !evaluate_expr_bool(expr, &parent_state.values, &parent_state.units)? {
             return Ok(());
         }
     }
 
     let mut child_overrides = OverrideMap::default();
     for binding in &slot.parameter_bindings {
-        let value = evaluate_expr(&binding.expr, parent_values)?;
+        let value = evaluate_expr(&binding.expr, &parent_state.values, &parent_state.units)?;
         child_overrides.set(binding.target_param.clone(), value);
     }
 
@@ -1377,7 +1378,8 @@ fn spawn_compound_slot_instance(
     // Evaluate the slot's local rotation (if any). Expressed in the parent's
     // local frame, so we pre-multiply the parent rotation.
     let local_rotation =
-        evaluate_rotation_euler_deg(slot, parent_values)?.unwrap_or(Quat::IDENTITY);
+        evaluate_rotation_euler_deg(slot, &parent_state.values, &parent_state.units)?
+            .unwrap_or(Quat::IDENTITY);
     let composed_rotation = context.parent_rotation * local_rotation;
 
     // The local translation offset must be rotated by the *parent* rotation
@@ -1385,8 +1387,8 @@ fn spawn_compound_slot_instance(
     // parent is itself rotated. The slot's own translation is in parent-local
     // space, so it is also rotated by parent_rotation before being added to
     // the parent world translation.
-    let local_translation =
-        evaluate_translation(slot, parent_values)? + context.local_translation_offset;
+    let local_translation = evaluate_translation(slot, &parent_state.values, &parent_state.units)?
+        + context.local_translation_offset;
     let world_translation =
         context.parent_translation + context.parent_rotation * local_translation;
 
@@ -1408,13 +1410,13 @@ fn spawn_compound_slot_instance(
         apply_spawned_material_assignment(&mut entity, &child_definition);
     }
 
-    if let Some(compound) = &child_definition.compound {
+    if let Some(compound) = &child_definition.body.compound {
         for child_slot in &compound.child_slots {
             spawn_compound_slot(
                 world,
                 registry,
                 child_slot,
-                &state.values,
+                &state,
                 CompoundSpawnContext {
                     owner: context.owner,
                     parent_translation: world_translation,
@@ -1439,9 +1441,11 @@ fn resolve_collection_instances(
     slot: &ChildSlotDef,
     layout: &SlotLayout,
     count: &SlotCount,
-    values: &HashMap<String, Value>,
+    state: &EvaluatedDefinitionState,
 ) -> Result<Vec<CollectionInstance>, String> {
-    let requested_count = resolve_slot_count(&slot.slot_id, count, values)?;
+    let values = &state.values;
+    let units = &state.units;
+    let requested_count = resolve_slot_count(&slot.slot_id, count, values, units)?;
     match layout {
         SlotLayout::Linear {
             axis,
@@ -1449,8 +1453,8 @@ fn resolve_collection_instances(
             origin,
         } => {
             let axis = axis_vector(axis)?;
-            let spacing = evaluate_expr_f32(spacing, values)?;
-            let origin = evaluate_transform_binding(origin, &slot.slot_id, values)?;
+            let spacing = evaluate_expr_f32(spacing, values, units)?;
+            let origin = evaluate_transform_binding(origin, &slot.slot_id, values, units)?;
             Ok((0..requested_count)
                 .map(|index| CollectionInstance {
                     index,
@@ -1467,8 +1471,8 @@ fn resolve_collection_instances(
             spacing_v,
             origin,
         } => {
-            let u_count = resolve_expr_count(&slot.slot_id, "count_u", count_u, values)?;
-            let v_count = resolve_expr_count(&slot.slot_id, "count_v", count_v, values)?;
+            let u_count = resolve_expr_count(&slot.slot_id, "count_u", count_u, values, units)?;
+            let v_count = resolve_expr_count(&slot.slot_id, "count_v", count_v, values, units)?;
             let grid_count = u_count.checked_mul(v_count).ok_or_else(|| {
                 format!(
                     "Collection slot '{}' grid count overflows usize",
@@ -1478,9 +1482,9 @@ fn resolve_collection_instances(
             ensure_layout_count_matches(slot, requested_count, grid_count)?;
             let axis_u = axis_vector(axis_u)?;
             let axis_v = axis_vector(axis_v)?;
-            let spacing_u = evaluate_expr_f32(spacing_u, values)?;
-            let spacing_v = evaluate_expr_f32(spacing_v, values)?;
-            let origin = evaluate_transform_binding(origin, &slot.slot_id, values)?;
+            let spacing_u = evaluate_expr_f32(spacing_u, values, units)?;
+            let spacing_v = evaluate_expr_f32(spacing_v, values, units)?;
+            let origin = evaluate_transform_binding(origin, &slot.slot_id, values, units)?;
             let mut instances = Vec::with_capacity(grid_count);
             for v in 0..v_count {
                 for u in 0..u_count {
@@ -1514,7 +1518,7 @@ fn resolve_collection_instances(
                 .collect())
         }
         SlotLayout::LitePattern { pattern } => {
-            let pattern = evaluate_expr(pattern, values)?;
+            let pattern = evaluate_expr(pattern, values, units)?;
             let pattern = pattern.as_str().ok_or_else(|| {
                 format!(
                     "Collection slot '{}' lite pattern must resolve to a string",
@@ -1563,22 +1567,26 @@ fn resolve_slot_count(
     slot_id: &str,
     count: &SlotCount,
     values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
 ) -> Result<usize, String> {
     match count {
         SlotCount::Fixed(count) => usize::try_from(*count).map_err(|_| {
             format!("Collection slot '{slot_id}' fixed count does not fit this platform")
         }),
-        SlotCount::DerivedFromExpr(expr) => resolve_expr_count(slot_id, "count", expr, values),
+        SlotCount::DerivedFromExpr(expr) => {
+            resolve_expr_count(slot_id, "count", expr, values, units)
+        }
     }
 }
 
 fn resolve_expr_count(
     slot_id: &str,
     field: &str,
-    expr: &ExprNode,
+    expr: &BodyExpr,
     values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
 ) -> Result<usize, String> {
-    let value = evaluate_expr_f64(expr, values)?;
+    let value = evaluate_expr_f64(expr, values, units)?;
     if value < 0.0 || value.fract().abs() > f64::EPSILON {
         return Err(format!(
             "Collection slot '{slot_id}' {field} must resolve to a non-negative integer"
@@ -1596,6 +1604,7 @@ fn evaluate_transform_binding(
     binding: &TransformBinding,
     slot_id: &str,
     values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
 ) -> Result<Vec3, String> {
     let Some(translation) = &binding.translation else {
         return Ok(Vec3::ZERO);
@@ -1606,9 +1615,9 @@ fn evaluate_transform_binding(
         ));
     }
     Ok(Vec3::new(
-        evaluate_expr_f32(&translation[0], values)?,
-        evaluate_expr_f32(&translation[1], values)?,
-        evaluate_expr_f32(&translation[2], values)?,
+        evaluate_expr_f32(&translation[0], values, units)?,
+        evaluate_expr_f32(&translation[1], values, units)?,
+        evaluate_expr_f32(&translation[2], values, units)?,
     ))
 }
 
@@ -1652,20 +1661,43 @@ fn evaluate_definition_state(
         .iter()
         .map(|(name, param)| (name.clone(), param.value.clone()))
         .collect();
+    let mut units: HashMap<String, crate::plugins::units::Unit> = definition
+        .interface
+        .parameters
+        .0
+        .iter()
+        .filter_map(|parameter| {
+            parameter
+                .metadata
+                .unit
+                .as_ref()
+                .and_then(|unit| unit.unit())
+                .map(|unit| (parameter.name.clone(), unit))
+        })
+        .collect();
 
-    if let Some(compound) = &definition.compound {
+    if let Some(compound) = &definition.body.compound {
         for derived in &compound.derived_parameters {
-            let value = evaluate_expr(&derived.expr, &values)?;
+            let value = evaluate_expr(&derived.expr, &values, &units)?;
             validate_value_against_param_type(
                 &derived.param_type,
                 &value,
                 &format!("derived parameter '{}'", derived.name),
             )?;
+            if let Some(unit) = derived
+                .metadata
+                .unit
+                .as_ref()
+                .and_then(|unit| unit.unit())
+                .or(derived.expr.evaluated_unit(&values, &units)?)
+            {
+                units.insert(derived.name.clone(), unit);
+            }
             values.insert(derived.name.clone(), value);
         }
 
         for constraint in &compound.constraints {
-            let passed = evaluate_expr_bool(&constraint.expr, &values)?;
+            let passed = evaluate_expr_bool(&constraint.expr, &values, &units)?;
             if !passed {
                 let message = format!(
                     "Definition '{}' constraint '{}' failed: {}",
@@ -1679,12 +1711,13 @@ fn evaluate_definition_state(
         }
     }
 
-    Ok(EvaluatedDefinitionState { values })
+    Ok(EvaluatedDefinitionState { values, units })
 }
 
 fn evaluate_translation(
     slot: &ChildSlotDef,
     values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
 ) -> Result<Vec3, String> {
     let Some(translation) = &slot.transform_binding.translation else {
         return Ok(Vec3::ZERO);
@@ -1697,9 +1730,9 @@ fn evaluate_translation(
     }
 
     Ok(Vec3::new(
-        evaluate_expr_f32(&translation[0], values)?,
-        evaluate_expr_f32(&translation[1], values)?,
-        evaluate_expr_f32(&translation[2], values)?,
+        evaluate_expr_f32(&translation[0], values, units)?,
+        evaluate_expr_f32(&translation[1], values, units)?,
+        evaluate_expr_f32(&translation[2], values, units)?,
     ))
 }
 
@@ -1712,6 +1745,7 @@ fn evaluate_translation(
 fn evaluate_rotation_euler_deg(
     slot: &ChildSlotDef,
     values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
 ) -> Result<Option<Quat>, String> {
     let Some(rotation) = &slot.transform_binding.rotation_euler_deg else {
         return Ok(None);
@@ -1722,102 +1756,46 @@ fn evaluate_rotation_euler_deg(
             slot.slot_id
         ));
     }
-    let rx = evaluate_expr_f32(&rotation[0], values)?.to_radians();
-    let ry = evaluate_expr_f32(&rotation[1], values)?.to_radians();
-    let rz = evaluate_expr_f32(&rotation[2], values)?.to_radians();
+    let rx = evaluate_expr_f32(&rotation[0], values, units)?.to_radians();
+    let ry = evaluate_expr_f32(&rotation[1], values, units)?.to_radians();
+    let rz = evaluate_expr_f32(&rotation[2], values, units)?.to_radians();
     Ok(Some(Quat::from_euler(EulerRot::XYZ, rx, ry, rz)))
 }
 
-fn evaluate_expr(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<Value, String> {
-    match expr {
-        ExprNode::Literal { value } => Ok(value.clone()),
-        ExprNode::ParamRef { path } => lookup_expr_value(path, values),
-        ExprNode::Add { left, right } => Ok(Value::from(
-            evaluate_expr_f64(left, values)? + evaluate_expr_f64(right, values)?,
-        )),
-        ExprNode::Sub { left, right } => Ok(Value::from(
-            evaluate_expr_f64(left, values)? - evaluate_expr_f64(right, values)?,
-        )),
-        ExprNode::Mul { left, right } => Ok(Value::from(
-            evaluate_expr_f64(left, values)? * evaluate_expr_f64(right, values)?,
-        )),
-        ExprNode::Div { left, right } => Ok(Value::from(
-            evaluate_expr_f64(left, values)? / evaluate_expr_f64(right, values)?,
-        )),
-        ExprNode::Min { left, right } => Ok(Value::from(
-            evaluate_expr_f64(left, values)?.min(evaluate_expr_f64(right, values)?),
-        )),
-        ExprNode::Max { left, right } => Ok(Value::from(
-            evaluate_expr_f64(left, values)?.max(evaluate_expr_f64(right, values)?),
-        )),
-        ExprNode::Eq { left, right } => Ok(Value::Bool(
-            evaluate_expr(left, values)? == evaluate_expr(right, values)?,
-        )),
-        ExprNode::Gt { left, right } => Ok(Value::Bool(
-            evaluate_expr_f64(left, values)? > evaluate_expr_f64(right, values)?,
-        )),
-        ExprNode::Lt { left, right } => Ok(Value::Bool(
-            evaluate_expr_f64(left, values)? < evaluate_expr_f64(right, values)?,
-        )),
-        ExprNode::And { nodes } => {
-            for node in nodes {
-                if !evaluate_expr_bool(node, values)? {
-                    return Ok(Value::Bool(false));
-                }
-            }
-            Ok(Value::Bool(true))
-        }
-        ExprNode::IfElse {
-            condition,
-            when_true,
-            when_false,
-        } => {
-            if evaluate_expr_bool(condition, values)? {
-                evaluate_expr(when_true, values)
-            } else {
-                evaluate_expr(when_false, values)
-            }
-        }
-        ExprNode::Sin { value } => Ok(Value::from(
-            evaluate_expr_f64(value, values)?.to_radians().sin(),
-        )),
-        ExprNode::Cos { value } => Ok(Value::from(
-            evaluate_expr_f64(value, values)?.to_radians().cos(),
-        )),
-        ExprNode::Tan { value } => Ok(Value::from(
-            evaluate_expr_f64(value, values)?.to_radians().tan(),
-        )),
-    }
+fn evaluate_expr(
+    expr: &BodyExpr,
+    values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
+) -> Result<Value, String> {
+    expr.evaluate(values, units)
 }
 
-fn evaluate_expr_f64(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<f64, String> {
-    evaluate_expr(expr, values)?
+fn evaluate_expr_f64(
+    expr: &BodyExpr,
+    values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
+) -> Result<f64, String> {
+    evaluate_expr(expr, values, units)?
         .as_f64()
         .ok_or_else(|| "expression must evaluate to a numeric value".to_string())
 }
 
-fn evaluate_expr_f32(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<f32, String> {
-    Ok(evaluate_expr_f64(expr, values)? as f32)
+fn evaluate_expr_f32(
+    expr: &BodyExpr,
+    values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
+) -> Result<f32, String> {
+    Ok(evaluate_expr_f64(expr, values, units)? as f32)
 }
 
-fn evaluate_expr_bool(expr: &ExprNode, values: &HashMap<String, Value>) -> Result<bool, String> {
-    evaluate_expr(expr, values)?
+fn evaluate_expr_bool(
+    expr: &BodyExpr,
+    values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
+) -> Result<bool, String> {
+    evaluate_expr(expr, values, units)?
         .as_bool()
         .ok_or_else(|| "expression must evaluate to a boolean value".to_string())
-}
-
-fn lookup_expr_value(path: &str, values: &HashMap<String, Value>) -> Result<Value, String> {
-    if let Some(value) = values.get(path) {
-        return Ok(value.clone());
-    }
-
-    if let Some(last_segment) = path.rsplit('.').next() {
-        if let Some(value) = values.get(last_segment) {
-            return Ok(value.clone());
-        }
-    }
-
-    Err(format!("Expression references unknown parameter '{path}'"))
 }
 
 fn validate_value_against_param_type(
@@ -1865,7 +1843,7 @@ fn build_rectangular_extrusion_from_values(
     values: &HashMap<String, Value>,
     centre: Vec3,
 ) -> Option<ProfileExtrusion> {
-    let EvaluatorDecl::RectangularExtrusion(evaluator) = definition.evaluators.first()?;
+    let EvaluatorDecl::RectangularExtrusion(evaluator) = definition.body.evaluators.first()?;
 
     let width = values.get(&evaluator.width_param)?.as_f64()? as f32;
     let depth = values.get(&evaluator.depth_param)?.as_f64()? as f32;
@@ -2056,9 +2034,7 @@ mod pp_098_dirty_taxonomy_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: None,
+            body: crate::plugins::modeling::definition::DefinitionBody::default(),
             material_assignment: None,
             visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,
@@ -2289,8 +2265,9 @@ mod pp_098_occurrence_cache_tests {
     use serde_json::json;
 
     use crate::plugins::modeling::definition::{
-        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterBinding,
-        ParameterDef, ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator,
+        CompoundDefinition, DefinitionBody, DefinitionKind, ExprNode, Interface, OverridePolicy,
+        ParameterBinding, ParameterDef, ParameterMetadata, ParameterSchema,
+        RectangularExtrusionEvaluator,
     };
     use crate::plugins::modeling::mesh_generation::{spawn_primitive_meshes, PlaneMaterial};
 
@@ -2336,15 +2313,17 @@ mod pp_098_occurrence_cache_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: vec![EvaluatorDecl::RectangularExtrusion(
-                RectangularExtrusionEvaluator {
-                    width_param: "width".to_string(),
-                    depth_param: "depth".to_string(),
-                    height_param: "height".to_string(),
-                },
-            )],
-            representations: Vec::new(),
-            compound: None,
+            body: DefinitionBody::new(
+                vec![EvaluatorDecl::RectangularExtrusion(
+                    RectangularExtrusionEvaluator {
+                        width_param: "width".to_string(),
+                        depth_param: "depth".to_string(),
+                        height_param: "height".to_string(),
+                    },
+                )],
+                Vec::new(),
+                None,
+            ),
             material_assignment: None,
             domain_data: Value::Null,
         }
@@ -2359,7 +2338,7 @@ mod pp_098_occurrence_cache_tests {
     fn malformed_rectangular_evaluator_definition() -> Definition {
         let mut definition = rectangular_definition();
         let Some(EvaluatorDecl::RectangularExtrusion(evaluator)) =
-            definition.evaluators.first_mut()
+            definition.body.evaluators.first_mut()
         else {
             panic!("expected rectangular evaluator");
         };
@@ -2370,7 +2349,7 @@ mod pp_098_occurrence_cache_tests {
     fn compound_definition(child_definition_id: DefinitionId) -> Definition {
         Definition {
             visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
-            id: DefinitionId("cached.compound".to_string()),
+            id: DefinitionId("cached.body.compound".to_string()),
             base_definition_id: None,
             name: "Cached Compound".to_string(),
             definition_kind: DefinitionKind::Solid,
@@ -2382,39 +2361,42 @@ mod pp_098_occurrence_cache_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: Some(CompoundDefinition {
-                child_slots: vec![
-                    ChildSlotDef {
-                        slot_id: "left".to_string(),
-                        role: "lite".to_string(),
-                        definition_id: child_definition_id.clone(),
-                        parameter_bindings: vec![ParameterBinding {
-                            target_param: "width".to_string(),
-                            expr: ExprNode::ParamRef {
-                                path: "left_width".to_string(),
-                            },
-                        }],
-                        transform_binding: TransformBinding::default(),
-                        suppression_expr: None,
-                        multiplicity: SlotMultiplicity::Single,
-                    },
-                    ChildSlotDef {
-                        slot_id: "right".to_string(),
-                        role: "lite".to_string(),
-                        definition_id: child_definition_id,
-                        parameter_bindings: vec![ParameterBinding {
-                            target_param: "width".to_string(),
-                            expr: ExprNode::Literal { value: json!(1.25) },
-                        }],
-                        transform_binding: TransformBinding::default(),
-                        suppression_expr: None,
-                        multiplicity: SlotMultiplicity::Single,
-                    },
-                ],
-                ..Default::default()
-            }),
+            body: DefinitionBody::new(
+                Vec::new(),
+                Vec::new(),
+                Some(CompoundDefinition {
+                    child_slots: vec![
+                        ChildSlotDef {
+                            slot_id: "left".to_string(),
+                            role: "lite".to_string(),
+                            definition_id: child_definition_id.clone(),
+                            parameter_bindings: vec![ParameterBinding {
+                                target_param: "width".to_string(),
+                                expr: ExprNode::ParamRef {
+                                    path: "left_width".to_string(),
+                                }
+                                .into(),
+                            }],
+                            transform_binding: TransformBinding::default(),
+                            suppression_expr: None,
+                            multiplicity: SlotMultiplicity::Single,
+                        },
+                        ChildSlotDef {
+                            slot_id: "right".to_string(),
+                            role: "lite".to_string(),
+                            definition_id: child_definition_id,
+                            parameter_bindings: vec![ParameterBinding {
+                                target_param: "width".to_string(),
+                                expr: ExprNode::Literal { value: json!(1.25) }.into(),
+                            }],
+                            transform_binding: TransformBinding::default(),
+                            suppression_expr: None,
+                            multiplicity: SlotMultiplicity::Single,
+                        },
+                    ],
+                    ..Default::default()
+                }),
+            ),
             material_assignment: None,
             domain_data: Value::Null,
         }
@@ -3161,8 +3143,9 @@ mod pp_098_occurrence_cache_tests {
 mod trig_and_rotation_tests {
     use super::*;
     use crate::plugins::modeling::definition::{
-        CompoundDefinition, DefinitionKind, Interface, OverridePolicy, ParameterDef,
-        ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator, TransformBinding,
+        CompoundDefinition, DefinitionBody, DefinitionKind, ExprNode, Interface, OverridePolicy,
+        ParameterDef, ParameterMetadata, ParameterSchema, RectangularExtrusionEvaluator,
+        TransformBinding,
     };
     use serde_json::json;
 
@@ -3179,7 +3162,7 @@ mod trig_and_rotation_tests {
         let expr = ExprNode::Sin {
             value: Box::new(ExprNode::Literal { value: json!(30.0) }),
         };
-        let result = evaluate_expr(&expr, &empty_values())
+        let result = evaluate_expr(&expr.into(), &empty_values(), &HashMap::new())
             .expect("sin(30) should evaluate")
             .as_f64()
             .expect("numeric");
@@ -3191,7 +3174,7 @@ mod trig_and_rotation_tests {
         let expr = ExprNode::Cos {
             value: Box::new(ExprNode::Literal { value: json!(60.0) }),
         };
-        let result = evaluate_expr(&expr, &empty_values())
+        let result = evaluate_expr(&expr.into(), &empty_values(), &HashMap::new())
             .expect("cos(60) should evaluate")
             .as_f64()
             .expect("numeric");
@@ -3203,7 +3186,7 @@ mod trig_and_rotation_tests {
         let expr = ExprNode::Tan {
             value: Box::new(ExprNode::Literal { value: json!(45.0) }),
         };
-        let result = evaluate_expr(&expr, &empty_values())
+        let result = evaluate_expr(&expr.into(), &empty_values(), &HashMap::new())
             .expect("tan(45) should evaluate")
             .as_f64()
             .expect("numeric");
@@ -3255,15 +3238,17 @@ mod trig_and_rotation_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: vec![EvaluatorDecl::RectangularExtrusion(
-                RectangularExtrusionEvaluator {
-                    width_param: "width".to_string(),
-                    depth_param: "depth".to_string(),
-                    height_param: "height".to_string(),
-                },
-            )],
-            representations: Vec::new(),
-            compound: None,
+            body: DefinitionBody::new(
+                vec![EvaluatorDecl::RectangularExtrusion(
+                    RectangularExtrusionEvaluator {
+                        width_param: "width".to_string(),
+                        depth_param: "depth".to_string(),
+                        height_param: "height".to_string(),
+                    },
+                )],
+                Vec::new(),
+                None,
+            ),
             material_assignment: None,
             domain_data: Value::Null,
         }
@@ -3274,7 +3259,7 @@ mod trig_and_rotation_tests {
     fn compound_with_z_rotation(child_id: DefinitionId) -> Definition {
         Definition {
             visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
-            id: DefinitionId("rot.compound".to_string()),
+            id: DefinitionId("rot.body.compound".to_string()),
             base_definition_id: None,
             name: "Rotation Compound".to_string(),
             definition_kind: DefinitionKind::Solid,
@@ -3286,27 +3271,29 @@ mod trig_and_rotation_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: Some(CompoundDefinition {
-                child_slots: vec![ChildSlotDef {
-                    slot_id: "member".to_string(),
-                    role: "chord".to_string(),
-                    definition_id: child_id,
-                    parameter_bindings: Vec::new(),
-                    transform_binding: TransformBinding {
-                        translation: None,
-                        rotation_euler_deg: Some(vec![
-                            ExprNode::Literal { value: json!(0.0) },
-                            ExprNode::Literal { value: json!(0.0) },
-                            ExprNode::Literal { value: json!(90.0) },
-                        ]),
-                    },
-                    suppression_expr: None,
-                    multiplicity: SlotMultiplicity::Single,
-                }],
-                ..Default::default()
-            }),
+            body: DefinitionBody::new(
+                Vec::new(),
+                Vec::new(),
+                Some(CompoundDefinition {
+                    child_slots: vec![ChildSlotDef {
+                        slot_id: "member".to_string(),
+                        role: "chord".to_string(),
+                        definition_id: child_id,
+                        parameter_bindings: Vec::new(),
+                        transform_binding: TransformBinding {
+                            translation: None,
+                            rotation_euler_deg: Some(vec![
+                                ExprNode::Literal { value: json!(0.0) }.into(),
+                                ExprNode::Literal { value: json!(0.0) }.into(),
+                                ExprNode::Literal { value: json!(90.0) }.into(),
+                            ]),
+                        },
+                        suppression_expr: None,
+                        multiplicity: SlotMultiplicity::Single,
+                    }],
+                    ..Default::default()
+                }),
+            ),
             material_assignment: None,
             domain_data: Value::Null,
         }
@@ -3363,7 +3350,7 @@ mod trig_and_rotation_tests {
         let leaf = leaf_definition("norot.leaf");
         let compound = Definition {
             visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
-            id: DefinitionId("norot.compound".to_string()),
+            id: DefinitionId("norot.body.compound".to_string()),
             base_definition_id: None,
             name: "No-Rotation Compound".to_string(),
             definition_kind: DefinitionKind::Solid,
@@ -3375,20 +3362,22 @@ mod trig_and_rotation_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: Some(CompoundDefinition {
-                child_slots: vec![ChildSlotDef {
-                    slot_id: "member".to_string(),
-                    role: "chord".to_string(),
-                    definition_id: leaf.id.clone(),
-                    parameter_bindings: Vec::new(),
-                    transform_binding: TransformBinding::default(),
-                    suppression_expr: None,
-                    multiplicity: SlotMultiplicity::Single,
-                }],
-                ..Default::default()
-            }),
+            body: DefinitionBody::new(
+                Vec::new(),
+                Vec::new(),
+                Some(CompoundDefinition {
+                    child_slots: vec![ChildSlotDef {
+                        slot_id: "member".to_string(),
+                        role: "chord".to_string(),
+                        definition_id: leaf.id.clone(),
+                        parameter_bindings: Vec::new(),
+                        transform_binding: TransformBinding::default(),
+                        suppression_expr: None,
+                        multiplicity: SlotMultiplicity::Single,
+                    }],
+                    ..Default::default()
+                }),
+            ),
             material_assignment: None,
             domain_data: Value::Null,
         };

@@ -71,6 +71,29 @@ compatible with:
 - explicit mesh-backed leaves where justified
 - future parameterized geometry DAGs such as MultiSurf-style definitions
 
+### Canonical Definition body
+
+`Definition` and `Occurrence` are the only public lifecycle for reusable
+components. Every Definition persists one versioned `body`; that body is the
+inspectable authority for evaluator implementations, representation
+declarations, unit-aware scalar expressions, constraints, derived parameters,
+and compound child slots. Specialized evaluators are implementation choices
+inside the body—not separately identifiable parametric components.
+
+Body schema version 1 uses the relational `ScalarExpr`/`Predicate` substrate for
+numeric evaluation and a bounded `BodyExpr` value layer for booleans, strings,
+references, equality, conjunction, and conditionals. Dependencies are extracted
+from those expressions and derived-parameter cycles are rejected before
+publication.
+
+Legacy Definition JSON with top-level `evaluators`, `representations`, or
+`compound` fields and legacy `ExprNode` expressions remains readable. Loading
+migrates it deterministically into the canonical body; saving emits only
+`body`. A construct that cannot be translated without guessing is retained as
+an inspectable `UnsupportedLegacyExpression` finding and blocks execution or
+publication. A document may not contain both body forms, and unknown future
+body schema versions are rejected.
+
 ### Definition parameter units
 
 Numeric Definition parameters carry exchange-safe typed unit metadata. New

@@ -13,12 +13,12 @@ use crate::plugins::{
     history::apply_pending_history_commands,
     materials::MaterialAssignment,
     modeling::definition::{
-        AnchorDef, AxisRef, ChildSlotDef, CompoundDefinition, ConstraintDef, Definition,
-        DefinitionId, DefinitionKind, DefinitionLibraryId, DefinitionLibraryRegistry,
-        DefinitionRegistry, DefinitionVisibility, DerivedParameterDef, EvaluatorDecl, ExprNode,
-        Interface, OverridePolicy, ParameterBinding, ParameterDef, ParameterMetadata,
-        ParameterSchema, RepresentationDecl, SlotCount, SlotLayout, SlotMultiplicity,
-        TransformBinding,
+        AnchorDef, AxisRef, BodyExpr, ChildSlotDef, CompoundDefinition, ConstraintDef, Definition,
+        DefinitionBody, DefinitionId, DefinitionKind, DefinitionLibraryId,
+        DefinitionLibraryRegistry, DefinitionRegistry, DefinitionVisibility, DerivedParameterDef,
+        EvaluatorDecl, Interface, OverridePolicy, ParameterBinding, ParameterDef,
+        ParameterMetadata, ParameterSchema, RepresentationDecl, SlotCount, SlotLayout,
+        SlotMultiplicity, TransformBinding,
     },
 };
 
@@ -185,7 +185,7 @@ pub enum DefinitionPatch {
     SetChildSlotSuppression {
         slot_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        suppression_expr: Option<ExprNode>,
+        suppression_expr: Option<BodyExpr>,
     },
     SetChildSlotMultiplicity {
         slot_id: String,
@@ -287,9 +287,7 @@ pub fn blank_definition(name: impl Into<String>) -> Definition {
             hosted_requirements: Vec::new(),
             external_context_requirements: Vec::new(),
         },
-        evaluators: Vec::new(),
-        representations: Vec::new(),
-        compound: None,
+        body: DefinitionBody::default(),
         material_assignment: None,
         visibility: DefinitionVisibility::PublicRoot,
         domain_data: Value::Null,
@@ -356,9 +354,7 @@ pub fn derive_definition_from_base(
             hosted_requirements: Vec::new(),
             external_context_requirements: Vec::new(),
         },
-        evaluators: Vec::new(),
-        representations: Vec::new(),
-        compound: None,
+        body: DefinitionBody::default(),
         material_assignment: None,
         visibility: DefinitionVisibility::PublicVariant,
         domain_data: Value::Null,
@@ -417,7 +413,7 @@ pub fn compile_definition_summary(
         nodes.push(format!("param:{}", parameter.name));
     }
 
-    if let Some(compound) = &effective.compound {
+    if let Some(compound) = &effective.body.compound {
         for derived in &compound.derived_parameters {
             let derived_node = format!("derived:{}", derived.name);
             nodes.push(derived_node.clone());
@@ -537,48 +533,10 @@ fn dedup_edges(edges: &mut Vec<DefinitionDependencyEdge>) {
     edges.retain(|edge| seen.insert((edge.from.clone(), edge.to.clone())));
 }
 
-fn collect_expression_dependencies(expr: &ExprNode, declared: &[String]) -> Vec<String> {
+fn collect_expression_dependencies(expr: &BodyExpr, declared: &[String]) -> Vec<String> {
     let mut dependencies = declared.iter().cloned().collect::<HashSet<_>>();
-    collect_expression_dependencies_into(expr, &mut dependencies);
+    dependencies.extend(expr.dependencies());
     dependencies.into_iter().collect()
-}
-
-fn collect_expression_dependencies_into(expr: &ExprNode, dependencies: &mut HashSet<String>) {
-    match expr {
-        ExprNode::Literal { .. } => {}
-        ExprNode::ParamRef { path } => {
-            dependencies.insert(path.clone());
-        }
-        ExprNode::Add { left, right }
-        | ExprNode::Sub { left, right }
-        | ExprNode::Mul { left, right }
-        | ExprNode::Div { left, right }
-        | ExprNode::Min { left, right }
-        | ExprNode::Max { left, right }
-        | ExprNode::Eq { left, right }
-        | ExprNode::Gt { left, right }
-        | ExprNode::Lt { left, right } => {
-            collect_expression_dependencies_into(left, dependencies);
-            collect_expression_dependencies_into(right, dependencies);
-        }
-        ExprNode::And { nodes } => {
-            for node in nodes {
-                collect_expression_dependencies_into(node, dependencies);
-            }
-        }
-        ExprNode::IfElse {
-            condition,
-            when_true,
-            when_false,
-        } => {
-            collect_expression_dependencies_into(condition, dependencies);
-            collect_expression_dependencies_into(when_true, dependencies);
-            collect_expression_dependencies_into(when_false, dependencies);
-        }
-        ExprNode::Sin { value } | ExprNode::Cos { value } | ExprNode::Tan { value } => {
-            collect_expression_dependencies_into(value, dependencies);
-        }
-    }
 }
 
 pub fn explain_definition(
@@ -606,6 +564,7 @@ pub fn explain_definition(
         .filter(|name| !local_parameters.contains(name))
         .collect::<Vec<_>>();
     let local_slots = raw_definition
+        .body
         .compound
         .as_ref()
         .map(|compound| {
@@ -617,6 +576,7 @@ pub fn explain_definition(
         })
         .unwrap_or_default();
     let inherited_slots = effective
+        .body
         .compound
         .as_ref()
         .map(|compound| {
@@ -643,7 +603,7 @@ pub fn explain_definition(
 }
 
 fn explain_resolved_collection_slots(definition: &Definition) -> Vec<Value> {
-    let Some(compound) = &definition.compound else {
+    let Some(compound) = &definition.body.compound else {
         return Vec::new();
     };
     let mut values = definition
@@ -831,7 +791,7 @@ fn resolve_authoring_slot_count(
 fn resolve_authoring_expr_count(
     slot_id: &str,
     field: &str,
-    expr: &ExprNode,
+    expr: &BodyExpr,
     values: &HashMap<String, Value>,
 ) -> Result<usize, String> {
     let value = evaluate_authoring_expr_f64(expr, values)?;
@@ -904,92 +864,14 @@ fn parse_authoring_lite_pattern_dims(
 }
 
 fn evaluate_authoring_expr(
-    expr: &ExprNode,
+    expr: &BodyExpr,
     values: &HashMap<String, Value>,
 ) -> Result<Value, String> {
-    match expr {
-        ExprNode::Literal { value } => Ok(value.clone()),
-        ExprNode::ParamRef { path } => lookup_authoring_expr_value(path, values),
-        ExprNode::Add { left, right } => Ok(Value::from(
-            evaluate_authoring_expr_f64(left, values)?
-                + evaluate_authoring_expr_f64(right, values)?,
-        )),
-        ExprNode::Sub { left, right } => Ok(Value::from(
-            evaluate_authoring_expr_f64(left, values)?
-                - evaluate_authoring_expr_f64(right, values)?,
-        )),
-        ExprNode::Mul { left, right } => Ok(Value::from(
-            evaluate_authoring_expr_f64(left, values)?
-                * evaluate_authoring_expr_f64(right, values)?,
-        )),
-        ExprNode::Div { left, right } => Ok(Value::from(
-            evaluate_authoring_expr_f64(left, values)?
-                / evaluate_authoring_expr_f64(right, values)?,
-        )),
-        ExprNode::Min { left, right } => Ok(Value::from(
-            evaluate_authoring_expr_f64(left, values)?
-                .min(evaluate_authoring_expr_f64(right, values)?),
-        )),
-        ExprNode::Max { left, right } => Ok(Value::from(
-            evaluate_authoring_expr_f64(left, values)?
-                .max(evaluate_authoring_expr_f64(right, values)?),
-        )),
-        ExprNode::Eq { left, right } => Ok(Value::Bool(
-            evaluate_authoring_expr(left, values)? == evaluate_authoring_expr(right, values)?,
-        )),
-        ExprNode::Gt { left, right } => Ok(Value::Bool(
-            evaluate_authoring_expr_f64(left, values)?
-                > evaluate_authoring_expr_f64(right, values)?,
-        )),
-        ExprNode::Lt { left, right } => Ok(Value::Bool(
-            evaluate_authoring_expr_f64(left, values)?
-                < evaluate_authoring_expr_f64(right, values)?,
-        )),
-        ExprNode::And { nodes } => {
-            for node in nodes {
-                if !evaluate_authoring_expr(node, values)?
-                    .as_bool()
-                    .ok_or_else(|| "expression must evaluate to a boolean value".to_string())?
-                {
-                    return Ok(Value::Bool(false));
-                }
-            }
-            Ok(Value::Bool(true))
-        }
-        ExprNode::IfElse {
-            condition,
-            when_true,
-            when_false,
-        } => {
-            if evaluate_authoring_expr(condition, values)?
-                .as_bool()
-                .ok_or_else(|| "expression must evaluate to a boolean value".to_string())?
-            {
-                evaluate_authoring_expr(when_true, values)
-            } else {
-                evaluate_authoring_expr(when_false, values)
-            }
-        }
-        ExprNode::Sin { value } => Ok(Value::from(
-            evaluate_authoring_expr_f64(value, values)?
-                .to_radians()
-                .sin(),
-        )),
-        ExprNode::Cos { value } => Ok(Value::from(
-            evaluate_authoring_expr_f64(value, values)?
-                .to_radians()
-                .cos(),
-        )),
-        ExprNode::Tan { value } => Ok(Value::from(
-            evaluate_authoring_expr_f64(value, values)?
-                .to_radians()
-                .tan(),
-        )),
-    }
+    expr.evaluate(values, &HashMap::new())
 }
 
 fn evaluate_authoring_expr_f64(
-    expr: &ExprNode,
+    expr: &BodyExpr,
     values: &HashMap<String, Value>,
 ) -> Result<f64, String> {
     evaluate_authoring_expr(expr, values)?
@@ -998,25 +880,10 @@ fn evaluate_authoring_expr_f64(
 }
 
 fn evaluate_authoring_expr_f32(
-    expr: &ExprNode,
+    expr: &BodyExpr,
     values: &HashMap<String, Value>,
 ) -> Result<f32, String> {
     Ok(evaluate_authoring_expr_f64(expr, values)? as f32)
-}
-
-fn lookup_authoring_expr_value(
-    path: &str,
-    values: &HashMap<String, Value>,
-) -> Result<Value, String> {
-    if let Some(value) = values.get(path) {
-        return Ok(value.clone());
-    }
-    if let Some(last_segment) = path.rsplit('.').next() {
-        if let Some(value) = values.get(last_segment) {
-            return Ok(value.clone());
-        }
-    }
-    Err(format!("Expression references unknown parameter '{path}'"))
 }
 
 fn add_vec3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
@@ -1122,7 +989,7 @@ fn ensure_draft_dependencies_available(
     let mut to_import = Vec::new();
     collect_definition_dependencies(
         draft.working_copy.base_definition_id.as_ref(),
-        draft.working_copy.compound.as_ref(),
+        draft.working_copy.body.compound.as_ref(),
         &library,
         &mut to_import,
     );
@@ -1169,7 +1036,7 @@ fn collect_definition_dependencies(
                 stack.push(base_definition);
             }
         }
-        if let Some(compound) = &definition.compound {
+        if let Some(compound) = &definition.body.compound {
             for slot in &compound.child_slots {
                 if let Some(child) = library.get(&slot.definition_id).cloned() {
                     stack.push(child);
@@ -1234,10 +1101,10 @@ fn apply_patch_to_definition(
                 .retain(|entry| entry.name != name);
         }
         DefinitionPatch::SetEvaluators { evaluators } => {
-            definition.evaluators = evaluators;
+            definition.body.evaluators = evaluators;
         }
         DefinitionPatch::SetRepresentations { representations } => {
-            definition.representations = representations;
+            definition.body.representations = representations;
         }
         DefinitionPatch::SetDerivedParameter { derived_parameter } => {
             let compound = ensure_local_compound(definition);
@@ -1248,7 +1115,7 @@ fn apply_patch_to_definition(
             );
         }
         DefinitionPatch::RemoveDerivedParameter { name } => {
-            if let Some(compound) = definition.compound.as_mut() {
+            if let Some(compound) = definition.body.compound.as_mut() {
                 compound
                     .derived_parameters
                     .retain(|entry| entry.name != name);
@@ -1261,7 +1128,7 @@ fn apply_patch_to_definition(
             });
         }
         DefinitionPatch::RemoveConstraint { id } => {
-            if let Some(compound) = definition.compound.as_mut() {
+            if let Some(compound) = definition.body.compound.as_mut() {
                 compound.constraints.retain(|entry| entry.id != id);
             }
         }
@@ -1270,7 +1137,7 @@ fn apply_patch_to_definition(
             upsert_named(&mut compound.anchors, anchor, |entry| entry.id.clone());
         }
         DefinitionPatch::RemoveAnchor { id } => {
-            if let Some(compound) = definition.compound.as_mut() {
+            if let Some(compound) = definition.body.compound.as_mut() {
                 compound.anchors.retain(|entry| entry.id != id);
             }
         }
@@ -1281,7 +1148,7 @@ fn apply_patch_to_definition(
             });
         }
         DefinitionPatch::RemoveChildSlot { slot_id } => {
-            if let Some(compound) = definition.compound.as_mut() {
+            if let Some(compound) = definition.body.compound.as_mut() {
                 compound
                     .child_slots
                     .retain(|entry| entry.slot_id != slot_id);
@@ -1398,6 +1265,7 @@ where
 
 fn ensure_local_compound(definition: &mut Definition) -> &mut CompoundDefinition {
     definition
+        .body
         .compound
         .get_or_insert_with(CompoundDefinition::default)
 }
@@ -1431,6 +1299,7 @@ fn ensure_local_child_slot<'a>(
     slot_id: &str,
 ) -> Result<&'a mut ChildSlotDef, String> {
     let has_local = definition
+        .body
         .compound
         .as_ref()
         .map(|compound| {
@@ -1442,6 +1311,7 @@ fn ensure_local_child_slot<'a>(
         .unwrap_or(false);
     if !has_local {
         let slot = effective_before
+            .body
             .compound
             .as_ref()
             .and_then(|compound| {

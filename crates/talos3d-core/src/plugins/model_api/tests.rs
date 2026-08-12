@@ -2611,6 +2611,64 @@ fn definition_get_returns_full_definition() {
         fetched.effective_full["interface"]["parameters"][0]["name"],
         json!("width")
     );
+    assert_eq!(fetched.full["body"]["schema_version"], json!(1));
+    assert!(fetched.full.get("evaluators").is_none());
+    assert!(fetched.full.get("representations").is_none());
+    assert!(fetched.full.get("compound").is_none());
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn definition_create_and_update_accept_one_canonical_body_authority() {
+    let mut world = init_model_api_test_world();
+    let mut request = make_rect_extrusion_request();
+    let object = request.as_object_mut().unwrap();
+    object.remove("width_param");
+    object.remove("depth_param");
+    object.remove("height_param");
+    request["body"] = json!({
+        "schema_version": 1,
+        "evaluators": [{
+            "RectangularExtrusion": {
+                "width_param": "width",
+                "depth_param": "depth",
+                "height_param": "height"
+            }
+        }]
+    });
+
+    let created = handle_create_definition(&mut world, request)
+        .expect("canonical body create should succeed");
+    assert_eq!(created.full["body"]["schema_version"], json!(1));
+    assert!(created.full.get("evaluators").is_none());
+
+    let updated = handle_update_definition(
+        &mut world,
+        json!({
+            "definition_id": created.definition_id.clone(),
+            "body": {
+                "schema_version": 1,
+                "evaluators": created.full["body"]["evaluators"].clone(),
+                "representations": [{"kind": "Reference", "role": "Axis"}]
+            }
+        }),
+    )
+    .expect("canonical body update should succeed");
+    assert_eq!(
+        updated.full["body"]["representations"][0]["role"],
+        json!("Axis")
+    );
+
+    let error = handle_update_definition(
+        &mut world,
+        json!({
+            "definition_id": updated.definition_id,
+            "body": {"schema_version": 1},
+            "compound": null
+        }),
+    )
+    .unwrap_err();
+    assert!(error.contains("both canonical 'body' and legacy"));
 }
 
 #[cfg(feature = "model-api")]
@@ -2633,7 +2691,7 @@ fn representation_declare_adds_and_replaces_definition_representation() {
     .expect("representation declaration should succeed");
 
     assert_eq!(updated.definition_version, created.definition_version + 1);
-    let representations = updated.full["representations"].as_array().unwrap();
+    let representations = updated.full["body"]["representations"].as_array().unwrap();
     assert!(representations.iter().any(|representation| {
         representation["kind"] == json!("Annotation")
             && representation["role"] == json!("Annotation")
@@ -2652,7 +2710,7 @@ fn representation_declare_adds_and_replaces_definition_representation() {
         },
     )
     .expect("representation replacement should succeed");
-    let annotation_reps: Vec<_> = replaced.full["representations"]
+    let annotation_reps: Vec<_> = replaced.full["body"]["representations"]
         .as_array()
         .unwrap()
         .iter()
@@ -2690,7 +2748,7 @@ fn representation_set_lod_and_policy_update_existing_declaration() {
         },
     )
     .expect("lod update should succeed");
-    let axis = with_lod.full["representations"]
+    let axis = with_lod.full["body"]["representations"]
         .as_array()
         .unwrap()
         .iter()
@@ -2708,7 +2766,7 @@ fn representation_set_lod_and_policy_update_existing_declaration() {
         },
     )
     .expect("policy update should succeed");
-    let axis = with_policy.full["representations"]
+    let axis = with_policy.full["body"]["representations"]
         .as_array()
         .unwrap()
         .iter()
@@ -3023,7 +3081,7 @@ fn compound_definition_round_trips_with_domain_data() {
         .expect("compound definition should be retrievable");
 
     assert_eq!(
-        fetched.full["compound"]["child_slots"][0]["role"],
+        fetched.full["body"]["compound"]["child_slots"][0]["role"],
         json!("frame")
     );
     assert_eq!(

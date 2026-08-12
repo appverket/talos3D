@@ -6556,13 +6556,36 @@ fn definition_explain_value_to_result(value: Value) -> ApiResult<DefinitionExpla
 fn build_definition_from_object(
     object: &serde_json::Map<String, Value>,
 ) -> Result<crate::plugins::modeling::definition::Definition, String> {
-    use crate::plugins::modeling::definition::{Definition, DefinitionId, Interface};
+    use crate::plugins::modeling::definition::{
+        Definition, DefinitionBody, DefinitionId, Interface,
+    };
 
     let name = object
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing 'name'".to_string())?
         .to_string();
+
+    let legacy_body_present = object.contains_key("evaluators")
+        || object.contains_key("representations")
+        || object.contains_key("compound");
+    let body = if let Some(value) = object.get("body") {
+        if legacy_body_present {
+            return Err(
+                "Definition authoring input cannot contain both canonical 'body' and legacy evaluators/representations/compound fields"
+                    .to_string(),
+            );
+        }
+        serde_json::from_value::<DefinitionBody>(value.clone())
+            .map_err(|error| format!("invalid canonical Definition 'body': {error}"))?
+    } else {
+        DefinitionBody::new(
+            parse_evaluators(object)?,
+            parse_representations(object)?,
+            parse_optional_compound(object)?,
+        )
+    };
+    body.validate_schema_version()?;
 
     Ok(Definition {
         id: DefinitionId::new(),
@@ -6577,9 +6600,7 @@ fn build_definition_from_object(
             hosted_requirements: Vec::new(),
             external_context_requirements: Vec::new(),
         },
-        evaluators: parse_evaluators(object)?,
-        representations: parse_representations(object)?,
-        compound: parse_optional_compound(object)?,
+        body,
         material_assignment: None,
         visibility: crate::plugins::modeling::definition::DefinitionVisibility::PublicRoot,
         domain_data: object.get("domain_data").cloned().unwrap_or(Value::Null),
@@ -6780,20 +6801,36 @@ pub fn handle_update_definition(world: &mut World, request: Value) -> ApiResult<
             parse_optional_void_declaration(obj.get("void_declaration"))?;
     }
 
-    if obj.contains_key("evaluators")
+    let legacy_body_update = obj.contains_key("evaluators")
+        || obj.contains_key("representations")
+        || obj.contains_key("compound")
         || obj.contains_key("width_param")
         || obj.contains_key("depth_param")
-        || obj.contains_key("height_param")
-    {
-        after.evaluators = parse_evaluators(obj)?;
-    }
-
-    if obj.contains_key("representations") {
-        after.representations = parse_representations(obj)?;
-    }
-
-    if obj.contains_key("compound") {
-        after.compound = parse_optional_compound(obj)?;
+        || obj.contains_key("height_param");
+    if let Some(body) = obj.get("body") {
+        if legacy_body_update {
+            return Err(
+                "Definition update cannot contain both canonical 'body' and legacy evaluators/representations/compound fields"
+                    .to_string(),
+            );
+        }
+        after.body = serde_json::from_value(body.clone())
+            .map_err(|error| format!("invalid canonical Definition 'body': {error}"))?;
+        after.body.validate_schema_version()?;
+    } else {
+        if obj.contains_key("evaluators")
+            || obj.contains_key("width_param")
+            || obj.contains_key("depth_param")
+            || obj.contains_key("height_param")
+        {
+            after.body.evaluators = parse_evaluators(obj)?;
+        }
+        if obj.contains_key("representations") {
+            after.body.representations = parse_representations(obj)?;
+        }
+        if obj.contains_key("compound") {
+            after.body.compound = parse_optional_compound(obj)?;
+        }
     }
 
     if obj.contains_key("domain_data") {
@@ -6918,13 +6955,14 @@ pub fn handle_representation_declare(
             update_policy,
         };
         if let Some(existing) = definition
+            .body
             .representations
             .iter_mut()
             .find(|representation| representation.kind == kind && representation.role == role)
         {
             *existing = declaration;
         } else {
-            definition.representations.push(declaration);
+            definition.body.representations.push(declaration);
         }
         Ok(())
     })
@@ -6946,11 +6984,11 @@ pub fn handle_representation_set_lod(
     mutate_definition_representations(world, &request.definition_id, move |definition| {
         let index = find_representation_index(
             &definition.name,
-            &definition.representations,
+            &definition.body.representations,
             &kind,
             role.as_ref(),
         )?;
-        definition.representations[index].lod = Some(lod);
+        definition.body.representations[index].lod = Some(lod);
         Ok(())
     })
 }
@@ -6971,11 +7009,11 @@ pub fn handle_representation_set_update_policy(
     mutate_definition_representations(world, &request.definition_id, move |definition| {
         let index = find_representation_index(
             &definition.name,
-            &definition.representations,
+            &definition.body.representations,
             &kind,
             role.as_ref(),
         )?;
-        definition.representations[index].update_policy = Some(update_policy);
+        definition.body.representations[index].update_policy = Some(update_policy);
         Ok(())
     })
 }
@@ -7409,7 +7447,7 @@ pub fn handle_add_definition_to_library(
                     stack.push(base_definition);
                 }
             }
-            if let Some(compound) = &definition.compound {
+            if let Some(compound) = &definition.body.compound {
                 for slot in &compound.child_slots {
                     if let Some(child_definition) = registry.get(&slot.definition_id).cloned() {
                         stack.push(child_definition);
@@ -7786,7 +7824,7 @@ fn ensure_definition_available_for_request(
                     to_import.push(base_definition);
                 }
             }
-            if let Some(compound) = &definition.compound {
+            if let Some(compound) = &definition.body.compound {
                 for slot in &compound.child_slots {
                     if let Some(child) = library.get(&slot.definition_id).cloned() {
                         to_import.push(child);
@@ -9255,7 +9293,7 @@ fn copy_effective_definition_tree(
         .unwrap_or_else(|| format!("{} Copy", source.name));
 
     if copy_dependencies {
-        if let Some(compound) = copy.compound.as_mut() {
+        if let Some(compound) = copy.body.compound.as_mut() {
             for slot in &mut compound.child_slots {
                 let child_new_id = copy_effective_definition_tree(
                     registry,
@@ -9477,6 +9515,7 @@ pub fn handle_explain_occurrence(
         .ok_or_else(|| format!("Definition '{}' not found", identity.definition_id))?;
     let resolved = registry.resolve_params_checked(&identity.definition_id, &identity.overrides)?;
     let anchors = definition
+        .body
         .compound
         .as_ref()
         .map(|compound| {
