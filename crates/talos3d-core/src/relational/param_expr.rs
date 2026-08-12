@@ -116,8 +116,8 @@ fn sub(a: Quantity, b: Quantity) -> Result<Quantity, EvalError> {
 
 fn mul(a: Quantity, b: Quantity) -> Result<Quantity, EvalError> {
     let unit = match (a.unit, b.unit) {
-        (u, Unit::Dimensionless) => u,
-        (Unit::Dimensionless, u) => u,
+        (u, Unit::Dimensionless | Unit::Ratio) => u,
+        (Unit::Dimensionless | Unit::Ratio, u) => u,
         // length*length (area) etc. are not modelled in this bounded layer.
         (lhs, rhs) => {
             return Err(EvalError::UnitMismatch {
@@ -138,8 +138,8 @@ fn div(a: Quantity, b: Quantity) -> Result<Quantity, EvalError> {
         return Err(EvalError::DivByZero);
     }
     let unit = match (a.unit, b.unit) {
-        (u, Unit::Dimensionless) => u,
         (x, y) if x == y => Unit::Dimensionless, // mm/mm, deg/deg -> number
+        (u, Unit::Dimensionless | Unit::Ratio) => u,
         (lhs, rhs) => {
             return Err(EvalError::UnitMismatch {
                 op: "div",
@@ -283,6 +283,13 @@ pub enum ScalarExpr {
 pub enum Predicate {
     Bool {
         value: bool,
+    },
+    /// Boolean driver encoded in the shared evaluation environment as a
+    /// dimensionless 0/1 quantity. This keeps bounded conditionals inside the
+    /// relational expression substrate without introducing a second value
+    /// graph.
+    BoolParam {
+        name: String,
     },
     Cmp {
         op: CmpOp,
@@ -494,6 +501,21 @@ impl Predicate {
     pub fn eval(&self, env: &Env) -> Result<bool, EvalError> {
         match self {
             Predicate::Bool { value } => Ok(*value),
+            Predicate::BoolParam { name } => env
+                .get(name)
+                .copied()
+                .ok_or_else(|| EvalError::MissingParam(name.clone()))
+                .and_then(|quantity| {
+                    if quantity.unit == Unit::Dimensionless {
+                        Ok(quantity.value != 0.0)
+                    } else {
+                        Err(EvalError::ExpectedUnit {
+                            op: "bool_param",
+                            got: quantity.unit,
+                            want: Unit::Dimensionless,
+                        })
+                    }
+                }),
             Predicate::Cmp { op, lhs, rhs } => {
                 let (a, b) = contextual_pair(lhs, rhs, env)?;
                 if a.unit != b.unit {
@@ -542,6 +564,9 @@ impl Predicate {
     fn collect_deps(&self, out: &mut BTreeSet<String>) {
         match self {
             Predicate::Bool { .. } => {}
+            Predicate::BoolParam { name } => {
+                out.insert(name.clone());
+            }
             Predicate::Cmp { lhs, rhs, .. } => {
                 lhs.collect_deps(out);
                 rhs.collect_deps(out);
@@ -587,6 +612,68 @@ mod tests {
             t.eval(&Env::new()).unwrap_err(),
             EvalError::ExpectedUnit { .. }
         ));
+    }
+
+    #[test]
+    fn ratio_values_are_dimensionless_multipliers_and_divisors() {
+        let metres = Quantity {
+            value: 2.0,
+            unit: Unit::M,
+        };
+        let ratio = Quantity {
+            value: 0.5,
+            unit: Unit::Ratio,
+        };
+
+        assert_eq!(
+            mul(metres, ratio).unwrap(),
+            Quantity {
+                value: 1.0,
+                unit: Unit::M
+            }
+        );
+        assert_eq!(
+            mul(ratio, metres).unwrap(),
+            Quantity {
+                value: 1.0,
+                unit: Unit::M
+            }
+        );
+        assert_eq!(
+            div(metres, ratio).unwrap(),
+            Quantity {
+                value: 4.0,
+                unit: Unit::M
+            }
+        );
+    }
+
+    #[test]
+    fn boolean_parameter_drives_a_bounded_conditional() {
+        let expression = ScalarExpr::If {
+            cond: Box::new(Predicate::BoolParam {
+                name: "enabled".into(),
+            }),
+            then: b(ScalarExpr::lit(Quantity::mm(1200.0))),
+            els: b(ScalarExpr::lit(Quantity::mm(600.0))),
+        };
+
+        assert_eq!(
+            expression
+                .eval(&env(&[("enabled", Quantity::num(1.0))]))
+                .unwrap(),
+            Quantity::mm(1200.0)
+        );
+        assert_eq!(
+            expression
+                .eval(&env(&[("enabled", Quantity::num(0.0))]))
+                .unwrap(),
+            Quantity::mm(600.0)
+        );
+        assert_eq!(
+            expression.dependencies(),
+            BTreeSet::from(["enabled".to_string()])
+        );
     }
 
     #[test]
