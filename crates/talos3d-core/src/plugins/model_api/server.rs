@@ -8108,7 +8108,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "definition.get",
-        description = "Get a definition by its definition_id. Returns both the raw stored definition and the effective inherited definition."
+        description = "Get a definition by its definition_id. Returns both the raw stored definition and the effective inherited definition. Each result exposes one versioned canonical body containing evaluator implementations, representations, expressions, and compound composition."
     )]
     pub(super) async fn definition_get_tool(
         &self,
@@ -8123,7 +8123,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "definition.create",
-        description = "Create a new reusable definition. Requires: name. Optionally: base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, width_param/depth_param/height_param fallback fields, and domain_data. Numeric parameter metadata.unit accepts a typed {dimension, unit} object (length, angle, area, volume, ratio, count, or scalar); legacy unit strings are normalized, while unknown geometry-driving units fail validation."
+        description = "Create a new reusable definition. Requires: name. Prefer one canonical body with schema_version, evaluators, representations, and optional compound composition. Legacy top-level evaluators/representations/compound and width_param/depth_param/height_param fallback fields remain accepted as migration input but cannot coexist with body. Numeric parameter metadata.unit accepts a typed {dimension, unit} object (length, angle, area, volume, ratio, count, or scalar); legacy unit strings are normalized, while unknown geometry-driving units fail validation."
     )]
     pub(super) async fn definition_create_tool(
         &self,
@@ -8138,7 +8138,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "definition.update",
-        description = "Update an existing definition. Requires: definition_id. Optionally: name, base_definition_id, definition_kind, parameters, void_declaration, evaluators, representations, compound, and domain_data. Parameter metadata uses the same typed-unit contract as definition.create. Bumps definition_version and propagates changes to all linked occurrences."
+        description = "Update an existing definition. Requires: definition_id. Optionally replace the canonical body, or supply legacy top-level evaluator/representation/compound migration fields (never both), plus name, base_definition_id, definition_kind, parameters, void_declaration, and domain_data. Parameter metadata uses the same typed-unit contract as definition.create. Bumps definition_version and propagates changes to all linked occurrences."
     )]
     pub(super) async fn definition_update_tool(
         &self,

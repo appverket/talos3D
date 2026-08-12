@@ -5,14 +5,14 @@
 //! values for a given set of occurrence overrides.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use super::void_declaration::VoidDeclaration;
@@ -22,6 +22,7 @@ use crate::plugins::{
     registry_generation::RegistryGeneration,
     units::ParameterUnit,
 };
+use crate::relational::param_expr::{CmpOp, Env, Predicate, Quantity, ScalarExpr};
 
 // ---------------------------------------------------------------------------
 // Global counters
@@ -564,6 +565,517 @@ pub enum ExprNode {
     },
 }
 
+/// Canonical expression carried by a [`DefinitionBody`].
+///
+/// Numeric arithmetic delegates to the relational substrate's unit-aware
+/// [`ScalarExpr`]. The remaining variants are the deliberately small value
+/// layer needed by compound Definitions: direct typed references, equality,
+/// boolean conjunction, and a bounded conditional. `ExprNode` is accepted only
+/// by this type's deserializer as a compatibility input and is never emitted by
+/// new serialization.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "expr_kind", rename_all = "snake_case")]
+pub enum BodyExpr {
+    Scalar {
+        expr: ScalarExpr,
+    },
+    Predicate {
+        predicate: Predicate,
+    },
+    Literal {
+        value: Value,
+    },
+    Reference {
+        path: String,
+    },
+    Equals {
+        left: Box<BodyExpr>,
+        right: Box<BodyExpr>,
+    },
+    All {
+        nodes: Vec<BodyExpr>,
+    },
+    Conditional {
+        condition: Box<BodyExpr>,
+        when_true: Box<BodyExpr>,
+        when_false: Box<BodyExpr>,
+    },
+    /// A retained legacy construct that could not be translated without
+    /// guessing. Validation and evaluation reject this variant with the
+    /// recorded reason; serialization keeps the original input inspectable.
+    UnsupportedLegacy {
+        original: ExprNode,
+        reason: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for BodyExpr {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        if value.get("expr_kind").is_some() {
+            #[derive(Deserialize)]
+            #[serde(tag = "expr_kind", rename_all = "snake_case")]
+            enum CanonicalBodyExpr {
+                Scalar {
+                    expr: ScalarExpr,
+                },
+                Predicate {
+                    predicate: Predicate,
+                },
+                Literal {
+                    value: Value,
+                },
+                Reference {
+                    path: String,
+                },
+                Equals {
+                    left: Box<BodyExpr>,
+                    right: Box<BodyExpr>,
+                },
+                All {
+                    nodes: Vec<BodyExpr>,
+                },
+                Conditional {
+                    condition: Box<BodyExpr>,
+                    when_true: Box<BodyExpr>,
+                    when_false: Box<BodyExpr>,
+                },
+                UnsupportedLegacy {
+                    original: ExprNode,
+                    reason: String,
+                },
+            }
+
+            return serde_json::from_value::<CanonicalBodyExpr>(value)
+                .map(|expr| match expr {
+                    CanonicalBodyExpr::Scalar { expr } => Self::Scalar { expr },
+                    CanonicalBodyExpr::Predicate { predicate } => Self::Predicate { predicate },
+                    CanonicalBodyExpr::Literal { value } => Self::Literal { value },
+                    CanonicalBodyExpr::Reference { path } => Self::Reference { path },
+                    CanonicalBodyExpr::Equals { left, right } => Self::Equals { left, right },
+                    CanonicalBodyExpr::All { nodes } => Self::All { nodes },
+                    CanonicalBodyExpr::Conditional {
+                        condition,
+                        when_true,
+                        when_false,
+                    } => Self::Conditional {
+                        condition,
+                        when_true,
+                        when_false,
+                    },
+                    CanonicalBodyExpr::UnsupportedLegacy { original, reason } => {
+                        Self::UnsupportedLegacy { original, reason }
+                    }
+                })
+                .map_err(de::Error::custom);
+        }
+
+        serde_json::from_value::<ExprNode>(value)
+            .map(BodyExpr::from)
+            .map_err(de::Error::custom)
+    }
+}
+
+impl From<ExprNode> for BodyExpr {
+    fn from(expr: ExprNode) -> Self {
+        match expr {
+            ExprNode::Literal { value } => value
+                .as_f64()
+                .map(|value| Self::Scalar {
+                    expr: ScalarExpr::contextual_lit(value),
+                })
+                .unwrap_or(Self::Literal { value }),
+            ExprNode::ParamRef { path } => Self::Reference { path },
+            ExprNode::Eq { left, right } => Self::Equals {
+                left: Box::new(Self::from(*left)),
+                right: Box::new(Self::from(*right)),
+            },
+            ExprNode::And { nodes } => Self::All {
+                nodes: nodes.into_iter().map(Self::from).collect(),
+            },
+            ExprNode::IfElse {
+                condition,
+                when_true,
+                when_false,
+            } => Self::Conditional {
+                condition: Box::new(Self::from(*condition)),
+                when_true: Box::new(Self::from(*when_true)),
+                when_false: Box::new(Self::from(*when_false)),
+            },
+            ExprNode::Gt { left, right } => legacy_comparison(CmpOp::Gt, *left, *right),
+            ExprNode::Lt { left, right } => legacy_comparison(CmpOp::Lt, *left, *right),
+            numeric => match legacy_scalar_expr(numeric.clone()) {
+                Ok(expr) => Self::Scalar { expr },
+                Err(reason) => Self::UnsupportedLegacy {
+                    original: numeric,
+                    reason,
+                },
+            },
+        }
+    }
+}
+
+fn legacy_comparison(op: CmpOp, left: ExprNode, right: ExprNode) -> BodyExpr {
+    let original = || match op {
+        CmpOp::Gt => ExprNode::Gt {
+            left: Box::new(left.clone()),
+            right: Box::new(right.clone()),
+        },
+        CmpOp::Lt => ExprNode::Lt {
+            left: Box::new(left.clone()),
+            right: Box::new(right.clone()),
+        },
+        // Legacy ExprNode only exposed strict greater-than/less-than.
+        _ => unreachable!("legacy comparison only supports gt/lt"),
+    };
+    match (
+        legacy_scalar_expr(left.clone()),
+        legacy_scalar_expr(right.clone()),
+    ) {
+        (Ok(lhs), Ok(rhs)) => BodyExpr::Predicate {
+            predicate: Predicate::Cmp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+        },
+        (Err(left_reason), Err(right_reason)) => BodyExpr::UnsupportedLegacy {
+            original: original(),
+            reason: format!("left operand: {left_reason}; right operand: {right_reason}"),
+        },
+        (Err(reason), _) | (_, Err(reason)) => BodyExpr::UnsupportedLegacy {
+            original: original(),
+            reason,
+        },
+    }
+}
+
+fn legacy_scalar_expr(expr: ExprNode) -> Result<ScalarExpr, String> {
+    let binary = |left: Box<ExprNode>,
+                  right: Box<ExprNode>,
+                  make: fn(Box<ScalarExpr>, Box<ScalarExpr>) -> ScalarExpr|
+     -> Result<ScalarExpr, String> {
+        Ok(make(
+            Box::new(legacy_scalar_expr(*left)?),
+            Box::new(legacy_scalar_expr(*right)?),
+        ))
+    };
+    match expr {
+        ExprNode::Literal { value } => value
+            .as_f64()
+            .map(ScalarExpr::contextual_lit)
+            .ok_or_else(|| "non-numeric literal in scalar expression".to_string()),
+        ExprNode::ParamRef { path } => {
+            Ok(ScalarExpr::param(path.rsplit('.').next().unwrap_or(&path)))
+        }
+        ExprNode::Add { left, right } => {
+            binary(left, right, |lhs, rhs| ScalarExpr::Add { lhs, rhs })
+        }
+        ExprNode::Sub { left, right } => {
+            binary(left, right, |lhs, rhs| ScalarExpr::Sub { lhs, rhs })
+        }
+        ExprNode::Mul { left, right } => {
+            binary(left, right, |lhs, rhs| ScalarExpr::Mul { lhs, rhs })
+        }
+        ExprNode::Div { left, right } => {
+            binary(left, right, |lhs, rhs| ScalarExpr::Div { lhs, rhs })
+        }
+        ExprNode::Min { left, right } => {
+            binary(left, right, |lhs, rhs| ScalarExpr::Min { lhs, rhs })
+        }
+        ExprNode::Max { left, right } => {
+            binary(left, right, |lhs, rhs| ScalarExpr::Max { lhs, rhs })
+        }
+        ExprNode::Sin { value } => Ok(ScalarExpr::Sin {
+            expr: Box::new(legacy_angle_expr(*value)?),
+        }),
+        ExprNode::Cos { value } => Ok(ScalarExpr::Cos {
+            expr: Box::new(legacy_angle_expr(*value)?),
+        }),
+        ExprNode::Tan { value } => Ok(ScalarExpr::Tan {
+            expr: Box::new(legacy_angle_expr(*value)?),
+        }),
+        other => Err(format!(
+            "legacy construct '{}' is not a bounded scalar expression",
+            legacy_expr_kind(&other)
+        )),
+    }
+}
+
+fn legacy_angle_expr(expr: ExprNode) -> Result<ScalarExpr, String> {
+    match expr {
+        ExprNode::Literal { value } => value
+            .as_f64()
+            .map(|value| ScalarExpr::lit(Quantity::deg(value)))
+            .ok_or_else(|| "non-numeric literal in angle expression".to_string()),
+        other => legacy_scalar_expr(other),
+    }
+}
+
+fn legacy_expr_kind(expr: &ExprNode) -> &'static str {
+    match expr {
+        ExprNode::Literal { .. } => "literal",
+        ExprNode::ParamRef { .. } => "param_ref",
+        ExprNode::Add { .. } => "add",
+        ExprNode::Sub { .. } => "sub",
+        ExprNode::Mul { .. } => "mul",
+        ExprNode::Div { .. } => "div",
+        ExprNode::Min { .. } => "min",
+        ExprNode::Max { .. } => "max",
+        ExprNode::Eq { .. } => "eq",
+        ExprNode::Gt { .. } => "gt",
+        ExprNode::Lt { .. } => "lt",
+        ExprNode::And { .. } => "and",
+        ExprNode::IfElse { .. } => "if_else",
+        ExprNode::Sin { .. } => "sin",
+        ExprNode::Cos { .. } => "cos",
+        ExprNode::Tan { .. } => "tan",
+    }
+}
+
+impl BodyExpr {
+    pub fn evaluate(
+        &self,
+        values: &HashMap<String, Value>,
+        units: &HashMap<String, crate::plugins::units::Unit>,
+    ) -> Result<Value, String> {
+        match self {
+            Self::Scalar { expr } => {
+                let env = body_scalar_env(values, units);
+                expr.eval(&env)
+                    .map(|quantity| Value::from(quantity.value))
+                    .map_err(|error| error.to_string())
+            }
+            Self::Predicate { predicate } => {
+                let env = body_scalar_env(values, units);
+                predicate
+                    .eval(&env)
+                    .map(Value::Bool)
+                    .map_err(|error| error.to_string())
+            }
+            Self::Literal { value } => Ok(value.clone()),
+            Self::Reference { path } => lookup_body_value(path, values),
+            Self::Equals { left, right } => Ok(Value::Bool(
+                left.evaluate(values, units)? == right.evaluate(values, units)?,
+            )),
+            Self::All { nodes } => {
+                for node in nodes {
+                    if !node.evaluate(values, units)?.as_bool().ok_or_else(|| {
+                        "all expression child must evaluate to boolean".to_string()
+                    })? {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            }
+            Self::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                if condition
+                    .evaluate(values, units)?
+                    .as_bool()
+                    .ok_or_else(|| "conditional expression guard must be boolean".to_string())?
+                {
+                    when_true.evaluate(values, units)
+                } else {
+                    when_false.evaluate(values, units)
+                }
+            }
+            Self::UnsupportedLegacy { reason, .. } => {
+                Err(format!("unsupported legacy expression: {reason}"))
+            }
+        }
+    }
+
+    pub fn unsupported_legacy_reason(&self) -> Option<&str> {
+        match self {
+            Self::UnsupportedLegacy { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Unit produced by the selected numeric path, if this expression is
+    /// dimensional. Used to propagate units to derived parameters before
+    /// evaluating downstream expressions.
+    pub fn evaluated_unit(
+        &self,
+        values: &HashMap<String, Value>,
+        units: &HashMap<String, crate::plugins::units::Unit>,
+    ) -> Result<Option<crate::plugins::units::Unit>, String> {
+        match self {
+            Self::Scalar { expr } => expr
+                .eval(&body_scalar_env(values, units))
+                .map(|quantity| Some(quantity.unit))
+                .map_err(|error| error.to_string()),
+            Self::Reference { path } => Ok(units
+                .get(path)
+                .or_else(|| path.rsplit('.').next().and_then(|name| units.get(name)))
+                .copied()),
+            Self::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                if condition
+                    .evaluate(values, units)?
+                    .as_bool()
+                    .ok_or_else(|| "conditional expression guard must be boolean".to_string())?
+                {
+                    when_true.evaluated_unit(values, units)
+                } else {
+                    when_false.evaluated_unit(values, units)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn dependencies(&self) -> BTreeSet<String> {
+        let mut dependencies = BTreeSet::new();
+        self.collect_dependencies(&mut dependencies);
+        dependencies
+    }
+
+    fn collect_dependencies(&self, dependencies: &mut BTreeSet<String>) {
+        match self {
+            Self::Scalar { expr } => dependencies.extend(expr.dependencies()),
+            Self::Predicate { predicate } => dependencies.extend(predicate.dependencies()),
+            Self::Literal { .. } => {}
+            Self::Reference { path } => {
+                dependencies.insert(path.clone());
+            }
+            Self::Equals { left, right } => {
+                left.collect_dependencies(dependencies);
+                right.collect_dependencies(dependencies);
+            }
+            Self::All { nodes } => {
+                for node in nodes {
+                    node.collect_dependencies(dependencies);
+                }
+            }
+            Self::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                condition.collect_dependencies(dependencies);
+                when_true.collect_dependencies(dependencies);
+                when_false.collect_dependencies(dependencies);
+            }
+            Self::UnsupportedLegacy { original, .. } => {
+                collect_legacy_dependencies(original, dependencies)
+            }
+        }
+    }
+
+    fn collect_unsupported_legacy(&self, path: &str, findings: &mut Vec<DefinitionBodyFinding>) {
+        match self {
+            Self::Equals { left, right } => {
+                left.collect_unsupported_legacy(&format!("{path}.left"), findings);
+                right.collect_unsupported_legacy(&format!("{path}.right"), findings);
+            }
+            Self::All { nodes } => {
+                for (index, node) in nodes.iter().enumerate() {
+                    node.collect_unsupported_legacy(&format!("{path}.nodes[{index}]"), findings);
+                }
+            }
+            Self::Conditional {
+                condition,
+                when_true,
+                when_false,
+            } => {
+                condition.collect_unsupported_legacy(&format!("{path}.condition"), findings);
+                when_true.collect_unsupported_legacy(&format!("{path}.when_true"), findings);
+                when_false.collect_unsupported_legacy(&format!("{path}.when_false"), findings);
+            }
+            Self::UnsupportedLegacy { reason, .. } => {
+                findings.push(DefinitionBodyFinding::UnsupportedLegacyExpression {
+                    path: path.to_string(),
+                    reason: reason.clone(),
+                });
+            }
+            Self::Scalar { .. }
+            | Self::Predicate { .. }
+            | Self::Literal { .. }
+            | Self::Reference { .. } => {}
+        }
+    }
+}
+
+fn body_scalar_env(
+    values: &HashMap<String, Value>,
+    units: &HashMap<String, crate::plugins::units::Unit>,
+) -> Env {
+    values
+        .iter()
+        .filter_map(|(name, value)| {
+            value.as_f64().map(|value| {
+                (
+                    name.clone(),
+                    Quantity {
+                        value,
+                        unit: units
+                            .get(name)
+                            .copied()
+                            .unwrap_or(crate::plugins::units::Unit::Dimensionless),
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+fn collect_legacy_dependencies(expr: &ExprNode, dependencies: &mut BTreeSet<String>) {
+    match expr {
+        ExprNode::Literal { .. } => {}
+        ExprNode::ParamRef { path } => {
+            dependencies.insert(path.clone());
+        }
+        ExprNode::Add { left, right }
+        | ExprNode::Sub { left, right }
+        | ExprNode::Mul { left, right }
+        | ExprNode::Div { left, right }
+        | ExprNode::Min { left, right }
+        | ExprNode::Max { left, right }
+        | ExprNode::Eq { left, right }
+        | ExprNode::Gt { left, right }
+        | ExprNode::Lt { left, right } => {
+            collect_legacy_dependencies(left, dependencies);
+            collect_legacy_dependencies(right, dependencies);
+        }
+        ExprNode::And { nodes } => {
+            for node in nodes {
+                collect_legacy_dependencies(node, dependencies);
+            }
+        }
+        ExprNode::IfElse {
+            condition,
+            when_true,
+            when_false,
+        } => {
+            collect_legacy_dependencies(condition, dependencies);
+            collect_legacy_dependencies(when_true, dependencies);
+            collect_legacy_dependencies(when_false, dependencies);
+        }
+        ExprNode::Sin { value } | ExprNode::Cos { value } | ExprNode::Tan { value } => {
+            collect_legacy_dependencies(value, dependencies)
+        }
+    }
+}
+
+fn lookup_body_value(path: &str, values: &HashMap<String, Value>) -> Result<Value, String> {
+    values
+        .get(path)
+        .or_else(|| path.rsplit('.').next().and_then(|name| values.get(name)))
+        .cloned()
+        .ok_or_else(|| format!("Expression references unknown parameter '{path}'"))
+}
+
 /// Machine-readable anchor name exposed by a definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnchorDef {
@@ -576,7 +1088,7 @@ pub struct AnchorDef {
 pub struct DerivedParameterDef {
     pub name: String,
     pub param_type: ParamType,
-    pub expr: ExprNode,
+    pub expr: BodyExpr,
     #[serde(default)]
     pub dependencies: Vec<String>,
     #[serde(default)]
@@ -594,7 +1106,7 @@ pub enum ConstraintSeverity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstraintDef {
     pub id: String,
-    pub expr: ExprNode,
+    pub expr: BodyExpr,
     #[serde(default)]
     pub dependencies: Vec<String>,
     pub severity: ConstraintSeverity,
@@ -605,20 +1117,20 @@ pub struct ConstraintDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterBinding {
     pub target_param: String,
-    pub expr: ExprNode,
+    pub expr: BodyExpr,
 }
 
 /// Placement binding for a child slot relative to its parent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransformBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub translation: Option<Vec<ExprNode>>,
+    pub translation: Option<Vec<BodyExpr>>,
     /// Intrinsic XYZ Euler rotation in degrees applied to the child part in
     /// the parent's local frame. Must contain exactly 3 expressions when
     /// present; corresponds to `Quat::from_euler(EulerRot::XYZ, rx, ry, rz)`
     /// after converting each value to radians.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rotation_euler_deg: Option<Vec<ExprNode>>,
+    pub rotation_euler_deg: Option<Vec<BodyExpr>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -649,7 +1161,7 @@ pub struct ParameterRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SlotCount {
     Fixed(u32),
-    DerivedFromExpr(ExprNode),
+    DerivedFromExpr(BodyExpr),
 }
 
 /// Layout strategy for a `Collection` slot. PP-097 slice 1 ships
@@ -661,18 +1173,18 @@ pub enum SlotLayout {
     /// N children laid out along an axis with constant spacing.
     Linear {
         axis: AxisRef,
-        spacing: ExprNode,
+        spacing: BodyExpr,
         #[serde(default)]
         origin: TransformBinding,
     },
     /// N×M children laid out on a 2D grid.
     Grid {
         axis_u: AxisRef,
-        count_u: ExprNode,
-        spacing_u: ExprNode,
+        count_u: BodyExpr,
+        spacing_u: BodyExpr,
         axis_v: AxisRef,
-        count_v: ExprNode,
-        spacing_v: ExprNode,
+        count_v: BodyExpr,
+        spacing_v: BodyExpr,
         #[serde(default)]
         origin: TransformBinding,
     },
@@ -686,7 +1198,7 @@ pub enum SlotLayout {
     /// Pattern-named layout (e.g. "3x2", "horizontal-3"). The
     /// pattern string is interpreted by domain-specific layout
     /// providers in slice 2.
-    LitePattern { pattern: ExprNode },
+    LitePattern { pattern: BodyExpr },
 }
 
 /// Whether a child slot stands for a single child or a
@@ -760,7 +1272,7 @@ pub struct ChildSlotDef {
     #[serde(default)]
     pub transform_binding: TransformBinding,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suppression_expr: Option<ExprNode>,
+    pub suppression_expr: Option<BodyExpr>,
     /// PP-097 slice 1: whether this slot stands for a single child
     /// (default, backwards compatible) or a deterministic
     /// collection of N children. `#[serde(default)]` keeps
@@ -815,6 +1327,88 @@ pub struct CompoundDefinition {
     /// without templates bit-stable in serialized form.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relation_templates: Vec<crate::plugins::promotion::SemanticRelationTemplate>,
+}
+
+/// Current canonical Definition-body schema.
+pub const DEFINITION_BODY_SCHEMA_VERSION: u32 = 1;
+
+fn default_definition_body_schema_version() -> u32 {
+    DEFINITION_BODY_SCHEMA_VERSION
+}
+
+/// The single persisted authority for executable and representational content
+/// of a Definition.
+///
+/// Legacy documents stored `evaluators`, `representations`, and `compound` as
+/// peer top-level fields. `Definition` deserialization deterministically moves
+/// those fields into this body; serialization emits only this body. Specialized
+/// evaluators remain implementation declarations inside it and do not acquire
+/// ids, stores, or a lifecycle separate from the owning Definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefinitionBody {
+    #[serde(default = "default_definition_body_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub evaluators: Vec<EvaluatorDecl>,
+    #[serde(default)]
+    pub representations: Vec<RepresentationDecl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compound: Option<CompoundDefinition>,
+}
+
+/// A machine-readable reason why a migrated Definition body cannot be safely
+/// executed or published.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "finding_kind", rename_all = "snake_case")]
+pub enum DefinitionBodyFinding {
+    UnsupportedLegacyExpression {
+        path: String,
+        reason: String,
+    },
+    UnknownDerivedDependency {
+        derived_parameter: String,
+        dependency: String,
+    },
+    DerivedDependencyCycle {
+        cycle: Vec<String>,
+    },
+}
+
+impl Default for DefinitionBody {
+    fn default() -> Self {
+        Self {
+            schema_version: DEFINITION_BODY_SCHEMA_VERSION,
+            evaluators: Vec::new(),
+            representations: Vec::new(),
+            compound: None,
+        }
+    }
+}
+
+impl DefinitionBody {
+    pub fn new(
+        evaluators: Vec<EvaluatorDecl>,
+        representations: Vec<RepresentationDecl>,
+        compound: Option<CompoundDefinition>,
+    ) -> Self {
+        Self {
+            schema_version: DEFINITION_BODY_SCHEMA_VERSION,
+            evaluators,
+            representations,
+            compound,
+        }
+    }
+
+    pub fn validate_schema_version(&self) -> Result<(), String> {
+        if self.schema_version == DEFINITION_BODY_SCHEMA_VERSION {
+            Ok(())
+        } else {
+            Err(format!(
+                "unsupported Definition body schema version {}; supported version is {}",
+                self.schema_version, DEFINITION_BODY_SCHEMA_VERSION
+            ))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -948,12 +1542,11 @@ impl DefinitionVisibility {
 ///
 /// `Definition`s are immutable once published; the `definition_version` is
 /// bumped on every edit and used to propagate changes to all occurrences.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Definition {
     /// Globally unique identifier.
     pub id: DefinitionId,
     /// Optional reusable base definition that this definition specializes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_definition_id: Option<DefinitionId>,
     /// Human-readable name displayed in the UI.
     pub name: String,
@@ -963,13 +1556,10 @@ pub struct Definition {
     pub definition_version: DefinitionVersion,
     /// Typed parameter interface exposed to occurrences.
     pub interface: Interface,
-    /// Ordered list of evaluation strategies used to produce geometry.
-    pub evaluators: Vec<EvaluatorDecl>,
-    /// Declared geometry representations.
-    pub representations: Vec<RepresentationDecl>,
-    /// Optional composition graph for compound definitions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compound: Option<CompoundDefinition>,
+    /// Canonical executable and representational body. This is the only
+    /// persisted authority for evaluators, representations, expressions, and
+    /// compound slots.
+    pub body: DefinitionBody,
     /// Default material assignment for occurrences of this Definition.
     ///
     /// Per ADR-026 / ADR-043 / ADR-044 and the material architecture
@@ -978,19 +1568,115 @@ pub struct Definition {
     /// JSON poke. PP-099 / PP-MATREL-1 slice 1 lands the data shape
     /// additively; legacy JSON sites continue to work in parallel
     /// until follow-up slices migrate them and remove the helper.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material_assignment: Option<MaterialAssignment>,
     /// Visibility governs default browser and MCP discovery exposure.
     ///
     /// Defaults to `PublicRoot` so every existing persisted `Definition`
     /// round-trips as a public family — backward compatible.
-    #[serde(default, skip_serializing_if = "definition_visibility_is_public")]
     pub visibility: DefinitionVisibility,
     /// Domain-specific extension payload owned by higher-level products.
     ///
     /// Core treats this as opaque JSON and round-trips it unchanged.
-    #[serde(default)]
     pub domain_data: Value,
+}
+
+impl Serialize for Definition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct DefinitionWire<'a> {
+            id: &'a DefinitionId,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            base_definition_id: &'a Option<DefinitionId>,
+            name: &'a str,
+            definition_kind: &'a DefinitionKind,
+            definition_version: DefinitionVersion,
+            interface: &'a Interface,
+            body: &'a DefinitionBody,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            material_assignment: &'a Option<MaterialAssignment>,
+            #[serde(skip_serializing_if = "definition_visibility_is_public")]
+            visibility: &'a DefinitionVisibility,
+            domain_data: &'a Value,
+        }
+
+        DefinitionWire {
+            id: &self.id,
+            base_definition_id: &self.base_definition_id,
+            name: &self.name,
+            definition_kind: &self.definition_kind,
+            definition_version: self.definition_version,
+            interface: &self.interface,
+            body: &self.body,
+            material_assignment: &self.material_assignment,
+            visibility: &self.visibility,
+            domain_data: &self.domain_data,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Definition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct DefinitionWire {
+            id: DefinitionId,
+            #[serde(default)]
+            base_definition_id: Option<DefinitionId>,
+            name: String,
+            definition_kind: DefinitionKind,
+            definition_version: DefinitionVersion,
+            interface: Interface,
+            #[serde(default)]
+            body: Option<DefinitionBody>,
+            #[serde(default)]
+            evaluators: Option<Vec<EvaluatorDecl>>,
+            #[serde(default)]
+            representations: Option<Vec<RepresentationDecl>>,
+            #[serde(default)]
+            compound: Option<CompoundDefinition>,
+            #[serde(default)]
+            material_assignment: Option<MaterialAssignment>,
+            #[serde(default)]
+            visibility: DefinitionVisibility,
+            #[serde(default)]
+            domain_data: Value,
+        }
+
+        let wire = DefinitionWire::deserialize(deserializer)?;
+        let legacy_body_present =
+            wire.evaluators.is_some() || wire.representations.is_some() || wire.compound.is_some();
+        if wire.body.is_some() && legacy_body_present {
+            return Err(de::Error::custom(
+                "Definition cannot contain both canonical 'body' and legacy evaluators/representations/compound fields",
+            ));
+        }
+        let body = wire.body.unwrap_or_else(|| DefinitionBody {
+            schema_version: DEFINITION_BODY_SCHEMA_VERSION,
+            evaluators: wire.evaluators.unwrap_or_default(),
+            representations: wire.representations.unwrap_or_default(),
+            compound: wire.compound,
+        });
+        body.validate_schema_version().map_err(de::Error::custom)?;
+
+        Ok(Self {
+            id: wire.id,
+            base_definition_id: wire.base_definition_id,
+            name: wire.name,
+            definition_kind: wire.definition_kind,
+            definition_version: wire.definition_version,
+            interface: wire.interface,
+            body,
+            material_assignment: wire.material_assignment,
+            visibility: wire.visibility,
+            domain_data: wire.domain_data,
+        })
+    }
 }
 
 /// Provenance reported by `Definition::resolve_material_assignment` and
@@ -1132,10 +1818,110 @@ impl Definition {
         templates: Vec<crate::plugins::promotion::SemanticRelationTemplate>,
     ) -> Self {
         let compound = self
+            .body
             .compound
             .get_or_insert_with(CompoundDefinition::default);
         compound.relation_templates = templates;
         self
+    }
+
+    /// Inspect the canonical body for migration or dependency defects that
+    /// would make execution ambiguous. The result is deterministic and
+    /// machine-readable so importers can report unsupported legacy content
+    /// without guessing at a replacement.
+    pub fn body_findings(&self) -> Vec<DefinitionBodyFinding> {
+        let Some(compound) = &self.body.compound else {
+            return Vec::new();
+        };
+        let mut findings = Vec::new();
+        let input_names: HashSet<&str> = self
+            .interface
+            .parameters
+            .0
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect();
+        let derived_names: HashSet<&str> = compound
+            .derived_parameters
+            .iter()
+            .map(|derived| derived.name.as_str())
+            .collect();
+        let mut derived_graph: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+        for derived in &compound.derived_parameters {
+            let path = format!("derived_parameters.{}.expr", derived.name);
+            derived
+                .expr
+                .collect_unsupported_legacy(&path, &mut findings);
+            let dependencies = derived
+                .expr
+                .dependencies()
+                .into_iter()
+                .map(|dependency| canonical_dependency_name(&dependency).to_string())
+                .collect::<BTreeSet<_>>();
+            for dependency in &dependencies {
+                if !input_names.contains(dependency.as_str())
+                    && !derived_names.contains(dependency.as_str())
+                {
+                    findings.push(DefinitionBodyFinding::UnknownDerivedDependency {
+                        derived_parameter: derived.name.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
+            derived_graph.insert(
+                derived.name.clone(),
+                dependencies
+                    .into_iter()
+                    .filter(|dependency| derived_names.contains(dependency.as_str()))
+                    .collect(),
+            );
+        }
+
+        if let Some(cycle) = first_dependency_cycle(&derived_graph) {
+            findings.push(DefinitionBodyFinding::DerivedDependencyCycle { cycle });
+        }
+
+        for constraint in &compound.constraints {
+            constraint.expr.collect_unsupported_legacy(
+                &format!("constraints.{}.expr", constraint.id),
+                &mut findings,
+            );
+        }
+        for slot in &compound.child_slots {
+            let slot_path = format!("child_slots.{}", slot.slot_id);
+            for binding in &slot.parameter_bindings {
+                binding.expr.collect_unsupported_legacy(
+                    &format!("{slot_path}.parameter_bindings.{}", binding.target_param),
+                    &mut findings,
+                );
+            }
+            collect_transform_unsupported(
+                &slot.transform_binding,
+                &format!("{slot_path}.transform_binding"),
+                &mut findings,
+            );
+            if let Some(expr) = &slot.suppression_expr {
+                expr.collect_unsupported_legacy(
+                    &format!("{slot_path}.suppression_expr"),
+                    &mut findings,
+                );
+            }
+            if let SlotMultiplicity::Collection { count, layout } = &slot.multiplicity {
+                if let SlotCount::DerivedFromExpr(expr) = count {
+                    expr.collect_unsupported_legacy(
+                        &format!("{slot_path}.multiplicity.count"),
+                        &mut findings,
+                    );
+                }
+                collect_layout_unsupported(
+                    layout,
+                    &format!("{slot_path}.multiplicity.layout"),
+                    &mut findings,
+                );
+            }
+        }
+        findings
     }
 
     /// Validate internal structure and cross-definition references.
@@ -1143,6 +1929,13 @@ impl Definition {
     where
         F: FnMut(&DefinitionId) -> bool,
     {
+        self.body.validate_schema_version()?;
+        if let Some(finding) = self.body_findings().into_iter().next() {
+            return Err(format!(
+                "Definition '{}' body finding: {finding:?}",
+                self.name
+            ));
+        }
         let mut parameter_names = HashSet::new();
         for param in &self.interface.parameters.0 {
             if !parameter_names.insert(param.name.clone()) {
@@ -1173,7 +1966,7 @@ impl Definition {
             }
         }
 
-        if let Some(compound) = &self.compound {
+        if let Some(compound) = &self.body.compound {
             let mut anchor_ids = HashSet::new();
             for anchor in &compound.anchors {
                 if !anchor_ids.insert(anchor.id.clone()) {
@@ -1263,6 +2056,110 @@ impl Definition {
         }
 
         Ok(())
+    }
+}
+
+fn canonical_dependency_name(path: &str) -> &str {
+    path.rsplit('.').next().unwrap_or(path)
+}
+
+fn first_dependency_cycle(graph: &HashMap<String, BTreeSet<String>>) -> Option<Vec<String>> {
+    fn visit(
+        node: &str,
+        graph: &HashMap<String, BTreeSet<String>>,
+        states: &mut HashMap<String, u8>,
+        stack: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        match states.get(node).copied().unwrap_or_default() {
+            1 => {
+                let start = stack.iter().position(|name| name == node).unwrap_or(0);
+                let mut cycle = stack[start..].to_vec();
+                cycle.push(node.to_string());
+                return Some(cycle);
+            }
+            2 => return None,
+            _ => {}
+        }
+        states.insert(node.to_string(), 1);
+        stack.push(node.to_string());
+        if let Some(dependencies) = graph.get(node) {
+            for dependency in dependencies {
+                if let Some(cycle) = visit(dependency, graph, states, stack) {
+                    return Some(cycle);
+                }
+            }
+        }
+        stack.pop();
+        states.insert(node.to_string(), 2);
+        None
+    }
+
+    let mut nodes = graph.keys().cloned().collect::<Vec<_>>();
+    nodes.sort();
+    let mut states = HashMap::new();
+    let mut stack = Vec::new();
+    for node in nodes {
+        if let Some(cycle) = visit(&node, graph, &mut states, &mut stack) {
+            return Some(cycle);
+        }
+    }
+    None
+}
+
+fn collect_transform_unsupported(
+    transform: &TransformBinding,
+    path: &str,
+    findings: &mut Vec<DefinitionBodyFinding>,
+) {
+    if let Some(translation) = &transform.translation {
+        for (index, expr) in translation.iter().enumerate() {
+            expr.collect_unsupported_legacy(&format!("{path}.translation[{index}]"), findings);
+        }
+    }
+    if let Some(rotation) = &transform.rotation_euler_deg {
+        for (index, expr) in rotation.iter().enumerate() {
+            expr.collect_unsupported_legacy(
+                &format!("{path}.rotation_euler_deg[{index}]"),
+                findings,
+            );
+        }
+    }
+}
+
+fn collect_layout_unsupported(
+    layout: &SlotLayout,
+    path: &str,
+    findings: &mut Vec<DefinitionBodyFinding>,
+) {
+    match layout {
+        SlotLayout::Linear {
+            spacing, origin, ..
+        } => {
+            spacing.collect_unsupported_legacy(&format!("{path}.spacing"), findings);
+            collect_transform_unsupported(origin, &format!("{path}.origin"), findings);
+        }
+        SlotLayout::Grid {
+            count_u,
+            spacing_u,
+            count_v,
+            spacing_v,
+            origin,
+            ..
+        } => {
+            for (name, expr) in [
+                ("count_u", count_u),
+                ("spacing_u", spacing_u),
+                ("count_v", count_v),
+                ("spacing_v", spacing_v),
+            ] {
+                expr.collect_unsupported_legacy(&format!("{path}.{name}"), findings);
+            }
+            collect_transform_unsupported(origin, &format!("{path}.origin"), findings);
+        }
+        SlotLayout::LitePattern { pattern } => {
+            pattern.collect_unsupported_legacy(&format!("{path}.pattern"), findings);
+        }
+        SlotLayout::BySpacingFromHost { .. } => {}
     }
 }
 
@@ -1814,14 +2711,19 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
         definition_kind,
         definition_version,
         interface,
-        evaluators,
-        representations,
-        compound,
+        body,
         material_assignment,
         // Visibility comes from the child (the specialised definition).
         visibility,
         domain_data,
     } = child;
+
+    let DefinitionBody {
+        schema_version,
+        evaluators,
+        representations,
+        compound,
+    } = body;
 
     let interface = merge_interface(base.interface, interface);
 
@@ -1832,17 +2734,20 @@ fn merge_definition(base: Definition, child: Definition) -> Definition {
         definition_kind,
         definition_version,
         interface,
-        evaluators: if evaluators.is_empty() {
-            base.evaluators
-        } else {
-            evaluators
+        body: DefinitionBody {
+            schema_version,
+            evaluators: if evaluators.is_empty() {
+                base.body.evaluators
+            } else {
+                evaluators
+            },
+            representations: if representations.is_empty() {
+                base.body.representations
+            } else {
+                representations
+            },
+            compound: merge_compound_definition(base.body.compound, compound),
         },
-        representations: if representations.is_empty() {
-            base.representations
-        } else {
-            representations
-        },
-        compound: merge_compound_definition(base.compound, compound),
         material_assignment: material_assignment.or(base.material_assignment),
         visibility,
         domain_data: merge_json_values(base.domain_data, domain_data),
@@ -2015,6 +2920,174 @@ fn validate_numeric_bound(
         Err(format!("{context} must be >= {bound}"))
     } else {
         Err(format!("{context} must be <= {bound}"))
+    }
+}
+
+#[cfg(test)]
+mod canonical_definition_body_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn legacy_definition_with_expr(expr: ExprNode) -> Value {
+        json!({
+            "id": "test.legacy-body",
+            "name": "Legacy body",
+            "definition_kind": "Solid",
+            "definition_version": 7,
+            "interface": {
+                "parameters": [{
+                    "name": "width",
+                    "param_type": "Numeric",
+                    "default_value": 2.0,
+                    "override_policy": "Overridable",
+                    "metadata": {
+                        "unit": {"dimension": "length", "unit": "m"}
+                    }
+                }]
+            },
+            "evaluators": [],
+            "representations": [],
+            "compound": {
+                "derived_parameters": [{
+                    "name": "half_width",
+                    "param_type": "Numeric",
+                    "expr": serde_json::to_value(expr).unwrap(),
+                    "dependencies": ["width"]
+                }]
+            },
+            "domain_data": null
+        })
+    }
+
+    #[test]
+    fn legacy_peer_fields_migrate_and_reserialize_as_one_versioned_body() {
+        let legacy = legacy_definition_with_expr(ExprNode::Div {
+            left: Box::new(ExprNode::ParamRef {
+                path: "self.width".into(),
+            }),
+            right: Box::new(ExprNode::Literal { value: json!(2.0) }),
+        });
+        let definition: Definition = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            definition.body.schema_version,
+            DEFINITION_BODY_SCHEMA_VERSION
+        );
+        let derived = &definition
+            .body
+            .compound
+            .as_ref()
+            .unwrap()
+            .derived_parameters[0];
+        assert_eq!(
+            derived.expr.dependencies(),
+            BTreeSet::from(["width".into()])
+        );
+
+        let encoded = serde_json::to_value(&definition).unwrap();
+        assert_eq!(encoded["body"]["schema_version"], json!(1));
+        assert!(encoded.get("evaluators").is_none());
+        assert!(encoded.get("representations").is_none());
+        assert!(encoded.get("compound").is_none());
+        assert_eq!(
+            encoded["body"]["compound"]["derived_parameters"][0]["expr"]["expr_kind"],
+            json!("scalar")
+        );
+
+        let reloaded: Definition = serde_json::from_value(encoded).unwrap();
+        let expr = &reloaded.body.compound.as_ref().unwrap().derived_parameters[0].expr;
+        let value = expr
+            .evaluate(
+                &HashMap::from([("width".into(), json!(2.0))]),
+                &HashMap::from([("width".into(), crate::plugins::units::Unit::M)]),
+            )
+            .unwrap();
+        assert_eq!(value, json!(1.0));
+    }
+
+    #[test]
+    fn canonical_and_legacy_body_authorities_cannot_coexist() {
+        let mut value = legacy_definition_with_expr(ExprNode::Literal { value: json!(1.0) });
+        value["body"] = json!({"schema_version": 1});
+        let error = serde_json::from_value::<Definition>(value).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("both canonical 'body' and legacy"));
+    }
+
+    #[test]
+    fn unsupported_body_schema_version_is_rejected_during_load() {
+        let mut value = legacy_definition_with_expr(ExprNode::Literal { value: json!(1.0) });
+        value.as_object_mut().unwrap().remove("evaluators");
+        value.as_object_mut().unwrap().remove("representations");
+        value.as_object_mut().unwrap().remove("compound");
+        value["body"] = json!({"schema_version": 99});
+        let error = serde_json::from_value::<Definition>(value).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported Definition body schema version 99"));
+    }
+
+    #[test]
+    fn unsafe_legacy_construct_becomes_a_typed_blocking_finding() {
+        let legacy = legacy_definition_with_expr(ExprNode::Add {
+            left: Box::new(ExprNode::Eq {
+                left: Box::new(ExprNode::ParamRef {
+                    path: "width".into(),
+                }),
+                right: Box::new(ExprNode::Literal { value: json!(1.0) }),
+            }),
+            right: Box::new(ExprNode::Literal { value: json!(2.0) }),
+        });
+        let definition: Definition = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            definition.body_findings().as_slice(),
+            [DefinitionBodyFinding::UnsupportedLegacyExpression { path, .. }]
+                if path == "derived_parameters.half_width.expr"
+        ));
+        assert!(definition.validate_with(|_| false).is_err());
+    }
+
+    #[test]
+    fn derived_dependencies_are_extracted_and_cycles_are_typed() {
+        let definition = Definition {
+            id: DefinitionId("test.cycle".into()),
+            base_definition_id: None,
+            name: "Cycle".into(),
+            definition_kind: DefinitionKind::Solid,
+            definition_version: 1,
+            interface: Interface::default(),
+            body: DefinitionBody::new(
+                Vec::new(),
+                Vec::new(),
+                Some(CompoundDefinition {
+                    derived_parameters: vec![
+                        DerivedParameterDef {
+                            name: "a".into(),
+                            param_type: ParamType::Numeric,
+                            expr: BodyExpr::Reference { path: "b".into() },
+                            dependencies: Vec::new(),
+                            metadata: ParameterMetadata::default(),
+                        },
+                        DerivedParameterDef {
+                            name: "b".into(),
+                            param_type: ParamType::Numeric,
+                            expr: BodyExpr::Reference { path: "a".into() },
+                            dependencies: Vec::new(),
+                            metadata: ParameterMetadata::default(),
+                        },
+                    ],
+                    ..Default::default()
+                }),
+            ),
+            material_assignment: None,
+            visibility: DefinitionVisibility::PublicRoot,
+            domain_data: Value::Null,
+        };
+        assert!(definition.body_findings().iter().any(|finding| matches!(
+            finding,
+            DefinitionBodyFinding::DerivedDependencyCycle { cycle }
+                if cycle == &vec!["a".to_string(), "b".to_string(), "a".to_string()]
+        )));
     }
 }
 
@@ -2284,9 +3357,7 @@ mod pp_dhost_param_type_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: None,
+            body: crate::plugins::modeling::definition::DefinitionBody::default(),
             material_assignment: None,
             visibility: DefinitionVisibility::PublicRoot,
             domain_data: Value::Null,
@@ -2496,7 +3567,7 @@ mod pp_097_slot_multiplicity_tests {
         let m = SlotMultiplicity::Collection {
             layout: SlotLayout::Linear {
                 axis: AxisRef("x".into()),
-                spacing: ExprNode::Literal { value: json!(1.0) },
+                spacing: ExprNode::Literal { value: json!(1.0) }.into(),
                 origin: TransformBinding::default(),
             },
             count: SlotCount::Fixed(3),
@@ -2524,7 +3595,7 @@ mod pp_097_slot_multiplicity_tests {
         let original = slot_with(SlotMultiplicity::Collection {
             layout: SlotLayout::Linear {
                 axis: AxisRef("u".into()),
-                spacing: ExprNode::Literal { value: json!(0.5) },
+                spacing: ExprNode::Literal { value: json!(0.5) }.into(),
                 origin: TransformBinding::default(),
             },
             count: SlotCount::Fixed(4),
@@ -2540,7 +3611,7 @@ mod pp_097_slot_multiplicity_tests {
         let slot = slot_with(SlotMultiplicity::Collection {
             layout: SlotLayout::Linear {
                 axis: AxisRef("u".into()),
-                spacing: ExprNode::Literal { value: json!(0.5) },
+                spacing: ExprNode::Literal { value: json!(0.5) }.into(),
                 origin: TransformBinding::default(),
             },
             count: SlotCount::Fixed(0),
@@ -2557,14 +3628,17 @@ mod pp_097_slot_multiplicity_tests {
         let mut slot = slot_with(SlotMultiplicity::Collection {
             layout: SlotLayout::Linear {
                 axis: AxisRef("u".into()),
-                spacing: ExprNode::Literal { value: json!(0.5) },
+                spacing: ExprNode::Literal { value: json!(0.5) }.into(),
                 origin: TransformBinding::default(),
             },
             count: SlotCount::Fixed(2),
         });
-        slot.suppression_expr = Some(ExprNode::Literal {
-            value: json!(false),
-        });
+        slot.suppression_expr = Some(
+            ExprNode::Literal {
+                value: json!(false),
+            }
+            .into(),
+        );
         let err = slot.validate_multiplicity().unwrap_err();
         assert!(matches!(
             err,
@@ -2575,7 +3649,7 @@ mod pp_097_slot_multiplicity_tests {
     #[test]
     fn validate_accepts_single_with_suppression_expr() {
         let mut slot = slot_with(SlotMultiplicity::Single);
-        slot.suppression_expr = Some(ExprNode::Literal { value: json!(true) });
+        slot.suppression_expr = Some(ExprNode::Literal { value: json!(true) }.into());
         assert!(slot.validate_multiplicity().is_ok());
     }
 
@@ -2590,10 +3664,10 @@ mod pp_097_slot_multiplicity_tests {
         let slot = slot_with(SlotMultiplicity::Collection {
             layout: SlotLayout::Linear {
                 axis: AxisRef("u".into()),
-                spacing: ExprNode::Literal { value: json!(0.5) },
+                spacing: ExprNode::Literal { value: json!(0.5) }.into(),
                 origin: TransformBinding::default(),
             },
-            count: SlotCount::DerivedFromExpr(ExprNode::Literal { value: json!(0.0) }),
+            count: SlotCount::DerivedFromExpr(ExprNode::Literal { value: json!(0.0) }.into()),
         });
         assert!(slot.validate_multiplicity().is_ok());
     }
@@ -2602,11 +3676,11 @@ mod pp_097_slot_multiplicity_tests {
     fn slot_layout_grid_round_trips() {
         let layout = SlotLayout::Grid {
             axis_u: AxisRef("u".into()),
-            count_u: ExprNode::Literal { value: json!(3) },
-            spacing_u: ExprNode::Literal { value: json!(0.5) },
+            count_u: ExprNode::Literal { value: json!(3) }.into(),
+            spacing_u: ExprNode::Literal { value: json!(0.5) }.into(),
             axis_v: AxisRef("v".into()),
-            count_v: ExprNode::Literal { value: json!(2) },
-            spacing_v: ExprNode::Literal { value: json!(0.4) },
+            count_v: ExprNode::Literal { value: json!(2) }.into(),
+            spacing_v: ExprNode::Literal { value: json!(0.4) }.into(),
             origin: TransformBinding::default(),
         };
         let json_str = serde_json::to_string(&layout).unwrap();
@@ -2615,9 +3689,16 @@ mod pp_097_slot_multiplicity_tests {
             SlotLayout::Grid {
                 count_u, count_v, ..
             } => match (count_u, count_v) {
-                (ExprNode::Literal { value: u }, ExprNode::Literal { value: v }) => {
-                    assert_eq!(u, json!(3));
-                    assert_eq!(v, json!(2));
+                (
+                    BodyExpr::Scalar {
+                        expr: ScalarExpr::ContextualLit { value: u },
+                    },
+                    BodyExpr::Scalar {
+                        expr: ScalarExpr::ContextualLit { value: v },
+                    },
+                ) => {
+                    assert_eq!(u, 3.0);
+                    assert_eq!(v, 2.0);
                 }
                 other => panic!("count_u/count_v should round-trip as Literal: {other:?}"),
             },
@@ -2681,9 +3762,7 @@ mod pp_098_geometry_param_hash_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: None,
+            body: crate::plugins::modeling::definition::DefinitionBody::default(),
             material_assignment: None,
             domain_data: Value::Null,
         }
@@ -2796,9 +3875,7 @@ mod pp_099_material_assignment_relocation_tests {
                 hosted_requirements: Vec::new(),
                 external_context_requirements: Vec::new(),
             },
-            evaluators: Vec::new(),
-            representations: Vec::new(),
-            compound: None,
+            body: crate::plugins::modeling::definition::DefinitionBody::default(),
             material_assignment: None,
             domain_data: serde_json::Value::Null,
         }
@@ -3249,7 +4326,7 @@ mod pp_100_workspace_library_tests {
         // `draft_status` key. Serde must default it to Active so the
         // file deserializes unchanged.
         let legacy = json!({
-            "id": "reference.compound-parts-library",
+            "id": "reference.body.compound-parts-library",
             "name": "Reference Compound Parts Library",
             "scope": "Bundled",
             "tags": [],

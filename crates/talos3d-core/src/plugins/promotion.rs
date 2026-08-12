@@ -2471,7 +2471,7 @@ mod tests {
                         child_slots: child_slots.clone(),
                         ..Default::default()
                     };
-                    def.compound = Some(compound);
+                    def.body.compound = Some(compound);
                 }
                 Ok(def)
             });
@@ -2482,6 +2482,7 @@ mod tests {
         let stored = drafts.get(&plan_draft_id).unwrap();
         let compound = stored
             .working_copy
+            .body
             .compound
             .as_ref()
             .expect("compound body");
