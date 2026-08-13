@@ -12952,6 +12952,25 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // A public parametric type only closes an authoring gap when it can emit
+    // geometry. Public derivation-only types remain discoverable through
+    // `parametric.list_types`, but `parametric.create` cannot materialize them
+    // without a representation and therefore must not suppress CorpusGap
+    // guidance in the capability snapshot.
+    let executable_public_parametric_types = world
+        .get_resource::<ParametricRegistry>()
+        .map(|registry| {
+            registry
+                .list_public()
+                .into_iter()
+                .filter(|(id, _)| {
+                    registry
+                        .get(id)
+                        .is_some_and(|definition| definition.representation.is_some())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let catalog_provider_ids = world
         .get_resource::<CapabilityRegistry>()
         .map(|registry| {
@@ -13123,7 +13142,12 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
             let has_installed_recipe = lookup_class_ids
                 .iter()
                 .any(|lookup_class| installed_recipe_classes.contains(&lookup_class.0));
-            if recipe_count == 0 && !has_installed_recipe {
+            let has_executable_public_parametric = lookup_class_ids.iter().any(|lookup_class| {
+                executable_public_parametric_types
+                    .iter()
+                    .any(|(id, label)| parametric_class_token_match(&lookup_class.0, id, label))
+            });
+            if recipe_count == 0 && !has_installed_recipe && !has_executable_public_parametric {
                 no_curated_paths.push(NoCuratedPathInfo {
                     element_class: class.id.0.clone(),
                     missing_artifact_kind: "recipe_or_executable_asset".into(),

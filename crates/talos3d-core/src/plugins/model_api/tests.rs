@@ -283,6 +283,90 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
     assert!(snapshot.estimated_json_bytes <= snapshot.size_budget_bytes);
 }
 
+/// An executable public parametric type is a genuine geometry-producing path,
+/// so the session snapshot must not contradict `discover_curated_paths` by
+/// advertising a CorpusGap for the same class. Public derivation-only and
+/// private evaluator types do not close that gap.
+#[cfg(feature = "model-api")]
+#[test]
+fn capability_snapshot_counts_only_geometry_emitting_public_parametrics_as_curated_paths() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::SemanticRole;
+    use crate::relational::{
+        component::ComponentParams,
+        registry::{ParametricRegistry, ParametricRepresentation, ParametricTypeDef},
+        transform::TransformBindings,
+    };
+
+    let element_class = |id: &str, label: &str| ElementClassDescriptor {
+        id: ElementClassId(id.into()),
+        label: label.into(),
+        description: "test".into(),
+        semantic_roles: vec![SemanticRole("system".into())],
+        class_min_obligations: Default::default(),
+        class_min_promotion_critical_paths: Default::default(),
+        parameter_schema: json!({}),
+    };
+    let parametric =
+        |id: &str, label: &str, public: bool, representation: Option<ParametricRepresentation>| {
+            ParametricTypeDef {
+                id: id.into(),
+                label: label.into(),
+                params: ComponentParams::default(),
+                driver_units: Default::default(),
+                defaults: Default::default(),
+                derivations: Default::default(),
+                transform: TransformBindings::default(),
+                public,
+                representation,
+            }
+        };
+
+    let mut registry = CapabilityRegistry::default();
+    registry.register_element_class(element_class("rainwater_system", "Rainwater System"));
+    registry.register_element_class(element_class("roof_system", "Roof System"));
+    registry.register_element_class(element_class("wall_assembly", "Wall Assembly"));
+
+    let mut parametrics = ParametricRegistry::default();
+    parametrics.register(parametric(
+        "architecture.rainwater.system.half_round",
+        "Half-Round Rainwater System",
+        true,
+        Some(ParametricRepresentation { members: vec![] }),
+    ));
+    parametrics.register(parametric(
+        "architecture.roof.system.derivation_only",
+        "Roof System Derivation Only",
+        true,
+        None,
+    ));
+    parametrics.register(parametric(
+        "architecture.wall.assembly.private",
+        "Private Wall Assembly Evaluator",
+        false,
+        Some(ParametricRepresentation { members: vec![] }),
+    ));
+
+    let mut world = World::new();
+    world.insert_resource(registry);
+    world.insert_resource(parametrics);
+
+    let snapshot = handle_get_capability_snapshot(&world, false);
+    assert_eq!(snapshot.summary.no_curated_path_count, 2);
+    assert!(!snapshot
+        .no_curated_paths
+        .iter()
+        .any(|gap| gap.element_class == "rainwater_system"));
+    assert!(snapshot
+        .no_curated_paths
+        .iter()
+        .any(|gap| gap.element_class == "roof_system"));
+    assert!(snapshot
+        .no_curated_paths
+        .iter()
+        .any(|gap| gap.element_class == "wall_assembly"));
+}
+
 /// Session-contract gate: every `must_read_guidance_card_id` the snapshot
 /// advertises must resolve through `get_guidance_card`. Regression guard for the
 /// case where dynamic authoring-guidance / reference ids (e.g.
