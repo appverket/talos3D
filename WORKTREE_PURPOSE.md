@@ -6,4 +6,4 @@
 - task-id: TALOS-hsjklfrn
 - target base: origin/main
 - summary: Formalize the inspectable linked-model relationship and lifecycle in talos3d-core.
-- status: active; implementation verified, preparing review
+- status: awaiting merge; review https://github.com/appverket/talos3D/pull/25
