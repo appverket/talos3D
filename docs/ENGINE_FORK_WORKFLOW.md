@@ -173,3 +173,41 @@ by the current dependency line. Talos3D now uses registry dependencies and no
 egui vendor tree. Future integration defects should be fixed upstream or
 carried briefly as reviewed source pins, never as a revived permanent vendor
 fork.
+
+## Bevy 0.19.1 Audit
+
+The 2026-08-13 patch release is the first released dependency baseline after
+Talos3D's 0.19 release-candidate work. Direct Bevy requirements use `0.19.1`,
+and Bevy/egui compositions use released `bevy_egui` `0.40.1`. Do not restore an
+RC requirement in a downstream launcher: it can silently leave one lockfile on
+the release candidate while another resolves the stable engine.
+
+The upstream fixes change which engine workarounds Talos3D should avoid:
+
+- Keep SSAO available on WebGPU. Bevy 0.19.1 fixes both Chrome's invalid depth
+  `textureGather` call and an SSAO normalization error; do not add a
+  browser-specific SSAO disable for those defects.
+- Keep light and preview-camera isolation expressed with Bevy `RenderLayers`.
+  The patch repairs extracted light/shadow layers and camera-despawn shadow
+  handling; do not duplicate render extraction or defer camera cleanup locally.
+- Continue updating reusable `Assets<Mesh>` handles for regenerated model and
+  terrain meshes. The patch repairs mesh reallocation bookkeeping; do not churn
+  handles as a defensive workaround.
+- Transparent WebGPU batching, material binding-array checks, text layout, UI
+  camera propagation, and macOS cursor-grab fallback are upstream-owned fixes.
+  Talos3D should consume them through the released engine rather than carry
+  platform branches for the fixed behavior.
+
+Bevy's 0.19 `TransformGizmoPlugin` is deliberately not substituted for
+Talos3D's `HandlesPlugin`. The upstream gizmo mutates one focused entity's
+`Transform` during drag. Talos3D transforms authored snapshots and aggregates,
+runs semantic-plan modifiers, and commits through command/history. Replacing
+that path would create a second movement authority. Reconsider the upstream
+gizmo only if its interaction deltas can feed the shared Talos3D edit plan (or
+Bevy gains an equivalent interception contract) with presentation-path tests.
+
+Likewise, BSN scenes, Bevy app settings, and runtime asset saving are useful
+engine facilities but do not replace Talos3D authored models, Definition
+libraries, command history, or persistence. They may be adopted for
+presentation-only composition where they do not introduce a second semantic
+lifecycle.

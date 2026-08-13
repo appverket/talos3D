@@ -14,7 +14,7 @@ perf-stats = ["talos3d-core/perf-stats"]
 terrain = ["dep:talos3d-terrain"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = [
+bevy = { version = "0.19.1", default-features = false, features = [
     "bevy_asset",
     "bevy_core_pipeline",
     "bevy_gizmos",
