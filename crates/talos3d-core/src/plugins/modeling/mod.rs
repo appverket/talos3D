@@ -354,6 +354,34 @@ impl Plugin for ModelingPlugin {
             )
             .register_command(
                 CommandDescriptor {
+                    id: "modeling.inspect_linked_models".to_string(),
+                    label: "Inspect Linked Models".to_string(),
+                    description: "Inspect the explicit source-document to scene-instance relationships for linked models without mutating or refreshing them".to_string(),
+                    category: CommandCategory::View,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "group_id": { "type": "integer" },
+                            "group_ids": {
+                                "type": "array",
+                                "items": { "type": "integer" }
+                            }
+                        },
+                        "additionalProperties": false
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Return linked source, instance root, frame, identity map, and source freshness".to_string()),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                linked_model::execute_inspect_linked_models,
+            )
+            .register_command(
+                CommandDescriptor {
                     id: "modeling.place_linked_model".to_string(),
                     label: "Place Linked Model".to_string(),
                     description: "Choose a Talos3D project file and place it into the current model as a live linked model".to_string(),

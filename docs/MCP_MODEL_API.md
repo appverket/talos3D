@@ -69,6 +69,23 @@ while `DrawingScene` projections and export bytes remain derived. The Draft's
 plane reuses the same `DrawingPlane` consumed by interactive tools, so agent and
 UI creation share one coordinate-frame contract.
 
+Linked documents use the same registered command surface. Discover and invoke
+`modeling.place_linked_model` to insert an external Talos3D document as a live
+instance. The result contains an explicit `linked_model_instance` relationship,
+including the source path/root/hash, instance root/frame, and source-to-scene
+identity map. Placement is one history operation, so undo removes the complete
+instance and redo restores the same relationship and scene ids.
+
+Use the read-only `modeling.inspect_linked_models` command to inspect one or
+more relationships without refreshing them. Pass `group_id`, `group_ids`, or
+neither to inspect selected linked roots and otherwise all linked roots. Each
+result reports whether the external source is `current`, `changed`, or
+`unavailable` relative to the last successfully loaded hash. Use
+`modeling.refresh_linked_models` for the separate mutating lifecycle step.
+Downstream domain capabilities should resolve their semantics through the
+reported instance root and identity map rather than treating mapped members as
+ordinary host-owned geometry.
+
 `get_camera` reports both the orbit controller's navigation values and the
 actual live `view_position`, `view_forward`, `view_up`, and `view_right` axes.
 The latter are authoritative while a Draft plane constrains orientation,

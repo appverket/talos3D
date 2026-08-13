@@ -58,6 +58,28 @@ from editing groups: an assembly can express multi-membership and semantic
 participation without becoming an editing context or implying cascade deletion
 of its members.
 
+### Linked-model relationships
+
+A linked model is an explicit relationship between an external Talos3D
+document and one instance root in the current document. It is not an import
+that becomes ordinary copied geometry. The relationship records:
+
+- the external source path and source root element id
+- the content hash from the last successful load
+- the instance root's local-to-scene frame
+- stable source-to-scene element-id mappings for that instance
+- the mapped members immediately owned by the source root
+
+Multiple instances may reference the same source while retaining disjoint scene
+ids and independent instance transforms. Linked members remain source-owned;
+host-document capabilities should consume the relationship and instance root
+instead of editing mapped members as if they were local content.
+
+This contract is domain-neutral. Core does not infer that a linked model is a
+building, vehicle, site, or any other domain object. Domain capabilities may
+inspect the mapped authored content and contribute their own typed affordances
+on top of the same relationship.
+
 ## Definition Graph Direction
 
 ADR-023 establishes the direction that authored geometry is represented as

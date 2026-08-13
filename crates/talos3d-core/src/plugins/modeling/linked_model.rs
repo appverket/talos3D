@@ -5,6 +5,7 @@ use std::{
 };
 
 use bevy::{ecs::world::EntityRef, prelude::*};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 #[cfg(test)]
@@ -16,6 +17,7 @@ use crate::{
         command_registry::CommandResult,
         commands::{snapshot_dependency_order, ApplyEntityChangesCommand, CreateEntityCommand},
         document_state::DocumentState,
+        history::{EditorCommand, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         materials::{ensure_builtin_materials, MaterialRegistry, TextureRegistry},
         modeling::{
@@ -38,6 +40,107 @@ use crate::{
 };
 
 const RELOAD_INTERVAL_SECONDS: f32 = 1.0;
+
+/// Domain-neutral description of one live relationship between an external
+/// Talos3D document and its instance root in the current scene.
+///
+/// Domain capabilities consume this relationship instead of reaching into the
+/// linked group's ECS components or treating the imported members as ordinary
+/// copied geometry. Architecture-specific concepts such as a building or
+/// foundation intentionally do not appear here.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LinkedModelRelationship {
+    pub relationship_kind: &'static str,
+    pub instance_root_id: u64,
+    pub instance_name: String,
+    pub source_path: String,
+    pub source_root_id: u64,
+    pub loaded_content_hash: u64,
+    pub frame: LinkedModelFrame,
+    pub root_member_ids: Vec<u64>,
+    pub source_to_scene_ids: Vec<LinkedModelRelationshipMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LinkedModelFrame {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkedModelRelationshipMapping {
+    pub source_id: u64,
+    pub scene_id: u64,
+}
+
+/// Inspect one linked-model relationship without loading or mutating its
+/// source document.
+pub fn linked_model_relationship(
+    world: &World,
+    instance_root_id: ElementId,
+) -> Result<LinkedModelRelationship, String> {
+    let members = group_members(world, instance_root_id)
+        .ok_or_else(|| format!("Group {} not found", instance_root_id.0))?;
+    let linked = members.linked_model.as_ref().ok_or_else(|| {
+        format!(
+            "Group {} is not a linked model instance",
+            instance_root_id.0
+        )
+    })?;
+    let mut root_member_ids = members.member_ids.iter().map(|id| id.0).collect::<Vec<_>>();
+    root_member_ids.sort_unstable();
+    let mut source_to_scene_ids = linked
+        .source_to_scene_ids
+        .iter()
+        .map(|mapping| LinkedModelRelationshipMapping {
+            source_id: mapping.source_id.0,
+            scene_id: mapping.scene_id.0,
+        })
+        .collect::<Vec<_>>();
+    source_to_scene_ids.sort_by_key(|mapping| (mapping.source_id, mapping.scene_id));
+
+    Ok(LinkedModelRelationship {
+        relationship_kind: "linked_model_instance",
+        instance_root_id: instance_root_id.0,
+        instance_name: members.name.clone(),
+        source_path: linked.path.clone(),
+        source_root_id: linked.source_root_id.0,
+        loaded_content_hash: linked.content_hash,
+        frame: LinkedModelFrame {
+            translation: members.frame.translation.to_array(),
+            rotation: members.frame.rotation.to_array(),
+        },
+        root_member_ids,
+        source_to_scene_ids,
+    })
+}
+
+struct CreateLinkedModelInstanceHistoryCommand {
+    snapshots: Vec<BoxedEntity>,
+    instance_root_id: ElementId,
+}
+
+impl EditorCommand for CreateLinkedModelInstanceHistoryCommand {
+    fn label(&self) -> &'static str {
+        "Place linked model"
+    }
+
+    fn apply(&mut self, world: &mut World) {
+        self.snapshots.sort_by_key(snapshot_dependency_order);
+        for snapshot in &self.snapshots {
+            snapshot.apply_to(world);
+            stamp_authored_entity_dependencies(world, snapshot);
+        }
+        select_only(world, self.instance_root_id);
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        self.snapshots.sort_by_key(snapshot_dependency_order);
+        for snapshot in self.snapshots.iter().rev() {
+            snapshot.remove_from(world);
+        }
+    }
+}
 
 #[derive(Resource, Debug, Default)]
 pub struct LinkedModelReloadState {
@@ -84,6 +187,7 @@ pub fn execute_create_linked_model(
             before: vec![before],
             after: vec![after.clone()],
         });
+    let relationship = linked_model_relationship(world, group_id)?;
 
     Ok(CommandResult {
         created: created_group.into_iter().map(|id| id.0).collect(),
@@ -98,6 +202,7 @@ pub fn execute_create_linked_model(
                 "translation": [frame.translation.x, frame.translation.y, frame.translation.z],
                 "rotation": [frame.rotation.x, frame.rotation.y, frame.rotation.z, frame.rotation.w],
             },
+            "relationship": relationship,
         })),
     })
 }
@@ -128,10 +233,42 @@ pub fn execute_open_linked_model(
     })
 }
 
+/// Read-only command handler for UI, command-palette, and MCP consumers that
+/// need the explicit linked-document/instance relationship.
+pub fn execute_inspect_linked_models(
+    world: &mut World,
+    params: &Value,
+) -> Result<CommandResult, String> {
+    let group_ids = inspect_linked_group_ids(world, params)?;
+    let relationships = group_ids
+        .into_iter()
+        .map(|group_id| {
+            let relationship = linked_model_relationship(world, group_id)?;
+            let source_state = linked_model_source_state(world, &relationship);
+            Ok(json!({
+                "relationship": relationship,
+                "source_state": source_state,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(CommandResult {
+        output: Some(json!({
+            "relationship_kind": "linked_model_instance",
+            "count": relationships.len(),
+            "relationships": relationships,
+        })),
+        ..CommandResult::empty()
+    })
+}
+
 pub fn execute_place_linked_model(
     world: &mut World,
     params: &Value,
 ) -> Result<CommandResult, String> {
+    if world.get_resource::<PendingCommandQueue>().is_none() {
+        return Err("Linked-model placement requires the command history plugin".to_string());
+    }
     let Some(path) = place_linked_model_path(world, params)? else {
         return Ok(CommandResult::empty());
     };
@@ -166,10 +303,26 @@ pub fn execute_place_linked_model(
     apply_linked_snapshots(world, group_id, linked, hash, linked_project)?;
     select_only(world, group_id);
 
-    let mut created = collect_group_members_recursive(world, group_id);
-    created.push(group_id);
+    let relationship = linked_model_relationship(world, group_id)?;
+    let mut created = relationship
+        .source_to_scene_ids
+        .iter()
+        .map(|mapping| ElementId(mapping.scene_id))
+        .collect::<Vec<_>>();
     created.sort_by_key(|id| id.0);
     created.dedup();
+    let mut snapshots = created
+        .iter()
+        .copied()
+        .map(|id| capture_snapshot(world, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    snapshots.sort_by_key(snapshot_dependency_order);
+    world
+        .resource_mut::<PendingCommandQueue>()
+        .push_command(Box::new(CreateLinkedModelInstanceHistoryCommand {
+            snapshots,
+            instance_root_id: group_id,
+        }));
 
     Ok(CommandResult {
         created: created.iter().map(|id| id.0).collect(),
@@ -180,6 +333,7 @@ pub fn execute_place_linked_model(
             "root_group_id": group_id.0,
             "source_root_id": root.element_id.0,
             "content_hash": hash,
+            "relationship": relationship,
         })),
     })
 }
@@ -201,13 +355,24 @@ pub fn execute_refresh_linked_models(
         .unwrap_or_else(|| linked_group_ids(world));
 
     let mut modified = Vec::new();
+    let mut results = Vec::new();
     for group_id in group_ids {
-        if refresh_linked_group(world, group_id, force)?.is_some() {
+        let refreshed = refresh_linked_group(world, group_id, force)?.is_some();
+        if refreshed {
             modified.push(group_id.0);
         }
+        results.push(json!({
+            "instance_root_id": group_id.0,
+            "status": if refreshed { "refreshed" } else { "unchanged" },
+            "relationship": linked_model_relationship(world, group_id)?,
+        }));
     }
     Ok(CommandResult {
         modified,
+        output: Some(json!({
+            "relationship_kind": "linked_model_instance",
+            "results": results,
+        })),
         ..CommandResult::empty()
     })
 }
@@ -230,6 +395,76 @@ pub fn reload_linked_models_system(world: &mut World) {
                 group_id.0, error
             );
         }
+    }
+}
+
+fn inspect_linked_group_ids(world: &mut World, params: &Value) -> Result<Vec<ElementId>, String> {
+    let singular = params
+        .get("group_id")
+        .and_then(Value::as_u64)
+        .map(ElementId);
+    let plural = params
+        .get("group_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_u64)
+                .map(ElementId)
+                .collect::<Vec<_>>()
+        });
+    if singular.is_some() && plural.is_some() {
+        return Err("Pass group_id or group_ids, not both".to_string());
+    }
+
+    let mut group_ids = if let Some(group_id) = singular {
+        vec![group_id]
+    } else if let Some(group_ids) = plural {
+        group_ids
+    } else {
+        let mut selected = world
+            .query_filtered::<(&ElementId, &GroupMembers), With<Selected>>()
+            .iter(world)
+            .filter_map(|(id, members)| members.linked_model.is_some().then_some(*id))
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            selected = linked_group_ids(world);
+        }
+        selected
+    };
+    group_ids.sort_by_key(|id| id.0);
+    group_ids.dedup();
+    for group_id in &group_ids {
+        linked_model_relationship(world, *group_id)?;
+    }
+    Ok(group_ids)
+}
+
+fn linked_model_source_state(world: &World, relationship: &LinkedModelRelationship) -> Value {
+    let Some(storage) = world.get_resource::<Storage>() else {
+        return json!({
+            "status": "unavailable",
+            "loaded_content_hash": relationship.loaded_content_hash,
+            "error": "storage backend is not available",
+        });
+    };
+    match storage.0.load(&relationship.source_path) {
+        Ok(bytes) => {
+            let observed_content_hash = content_hash(&bytes);
+            json!({
+                "status": if observed_content_hash == relationship.loaded_content_hash {
+                    "current"
+                } else {
+                    "changed"
+                },
+                "loaded_content_hash": relationship.loaded_content_hash,
+                "observed_content_hash": observed_content_hash,
+            })
+        }
+        Err(error) => json!({
+            "status": "unavailable",
+            "loaded_content_hash": relationship.loaded_content_hash,
+            "error": error,
+        }),
     }
 }
 
@@ -1073,6 +1308,7 @@ mod tests {
         capability_registry::CapabilityRegistry,
         plugins::{
             commands::ApplyEntityChangesCommand,
+            history::{apply_pending_history_commands_for_test, History},
             materials::{MaterialAssignment, MaterialDef, MaterialRegistry},
             modeling::{
                 assembly::{
@@ -1104,6 +1340,8 @@ mod tests {
         world.insert_resource(Storage(Box::new(LocalFileBackend)));
         world.insert_resource(Messages::<CreateEntityCommand>::default());
         world.insert_resource(Messages::<ApplyEntityChangesCommand>::default());
+        world.insert_resource(PendingCommandQueue::default());
+        world.insert_resource(History::default());
         world
     }
 
@@ -1227,6 +1465,245 @@ mod tests {
                 .get::<Selected>(find_entity(&target, ElementId(100)).unwrap())
                 .is_some(),
             "placed linked model group should be selected"
+        );
+    }
+
+    #[test]
+    fn inspect_linked_model_reports_relationship_and_source_freshness() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({
+                "group_id": source_group.0,
+                "path": path.to_string_lossy()
+            }),
+        )
+        .unwrap();
+        let mut target = test_world();
+        let placed =
+            execute_place_linked_model(&mut target, &json!({ "path": path.to_string_lossy() }))
+                .unwrap();
+        let root_id = ElementId(placed.created[0]);
+        let inspected =
+            execute_inspect_linked_models(&mut target, &json!({ "group_id": root_id.0 }))
+                .unwrap()
+                .output
+                .unwrap();
+        assert_eq!(inspected["count"], 1);
+        assert_eq!(
+            inspected["relationships"][0]["relationship"]["relationship_kind"],
+            "linked_model_instance"
+        );
+        assert_eq!(
+            inspected["relationships"][0]["relationship"]["instance_root_id"],
+            root_id.0
+        );
+        assert_eq!(
+            inspected["relationships"][0]["source_state"]["status"],
+            "current"
+        );
+        assert_eq!(
+            inspected["relationships"][0]["relationship"]["source_to_scene_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+        let changed = execute_inspect_linked_models(&mut target, &json!({ "group_id": root_id.0 }))
+            .unwrap()
+            .output
+            .unwrap();
+        assert_eq!(
+            changed["relationships"][0]["source_state"]["status"],
+            "changed"
+        );
+    }
+
+    #[test]
+    fn placing_linked_model_is_one_undoable_history_operation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({
+                "group_id": source_group.0,
+                "path": path.to_string_lossy()
+            }),
+        )
+        .unwrap();
+        let (next_id, mut records) =
+            deserialize_project_entity_records(&std::fs::read(&path).unwrap()).unwrap();
+        records.push(PersistedEntityRecord {
+            type_name: "semantic_assembly".to_string(),
+            data: AssemblySnapshot {
+                element_id: ElementId(10),
+                assembly: SemanticAssembly {
+                    assembly_type: "source_metadata".to_string(),
+                    label: "Source-owned relationship metadata".to_string(),
+                    members: vec![AssemblyMemberRef {
+                        target: source_group,
+                        role: "describes_linked_root".to_string(),
+                    }],
+                    parameters: Value::Null,
+                    metadata: Value::Null,
+                },
+                refinement_state: None,
+                obligations: None,
+                claim_grounding: None,
+                authoring_provenance: None,
+            }
+            .to_persisted_json(),
+            semantic: None,
+        });
+        std::fs::write(
+            &path,
+            serialize_entity_records_as_project(&source, next_id.max(11), records).unwrap(),
+        )
+        .unwrap();
+
+        let mut target = test_world();
+        let result =
+            execute_place_linked_model(&mut target, &json!({ "path": path.to_string_lossy() }))
+                .unwrap();
+        let created = result
+            .created
+            .iter()
+            .copied()
+            .map(ElementId)
+            .collect::<Vec<_>>();
+        assert_eq!(created.len(), 4, "all source-owned records enter history");
+
+        apply_pending_history_commands_for_test(&mut target);
+        assert_eq!(target.resource::<History>().undo_stack_len(), 1);
+        target.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut target);
+        assert!(created.iter().all(|id| find_entity(&target, *id).is_none()));
+
+        target.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut target);
+        assert!(created.iter().all(|id| find_entity(&target, *id).is_some()));
+        assert!(linked_model_relationship(&target, created[0]).is_ok());
+    }
+
+    #[test]
+    fn multiple_instances_have_distinct_scene_identity_maps() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({
+                "group_id": source_group.0,
+                "path": path.to_string_lossy()
+            }),
+        )
+        .unwrap();
+
+        let mut target = test_world();
+        let first = execute_place_linked_model(
+            &mut target,
+            &json!({ "path": path.to_string_lossy(), "name": "House A" }),
+        )
+        .unwrap();
+        let second = execute_place_linked_model(
+            &mut target,
+            &json!({ "path": path.to_string_lossy(), "name": "House B" }),
+        )
+        .unwrap();
+        let first_relationship =
+            linked_model_relationship(&target, ElementId(first.created[0])).unwrap();
+        let second_relationship =
+            linked_model_relationship(&target, ElementId(second.created[0])).unwrap();
+
+        assert_eq!(
+            first_relationship.source_path,
+            second_relationship.source_path
+        );
+        assert_eq!(
+            first_relationship.source_root_id,
+            second_relationship.source_root_id
+        );
+        assert_ne!(
+            first_relationship.instance_root_id,
+            second_relationship.instance_root_id
+        );
+        let first_scene_ids = first_relationship
+            .source_to_scene_ids
+            .iter()
+            .map(|mapping| mapping.scene_id)
+            .collect::<HashSet<_>>();
+        let second_scene_ids = second_relationship
+            .source_to_scene_ids
+            .iter()
+            .map(|mapping| mapping.scene_id)
+            .collect::<HashSet<_>>();
+        assert!(first_scene_ids.is_disjoint(&second_scene_ids));
+
+        let inspected = execute_inspect_linked_models(
+            &mut target,
+            &json!({
+                "group_ids": [
+                    first_relationship.instance_root_id,
+                    second_relationship.instance_root_id
+                ]
+            }),
+        )
+        .unwrap()
+        .output
+        .unwrap();
+        assert_eq!(inspected["count"], 2);
+    }
+
+    #[test]
+    fn linked_relationship_round_trips_through_group_persistence() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({
+                "group_id": source_group.0,
+                "path": path.to_string_lossy()
+            }),
+        )
+        .unwrap();
+
+        let mut target = test_world();
+        let placed =
+            execute_place_linked_model(&mut target, &json!({ "path": path.to_string_lossy() }))
+                .unwrap();
+        let root_id = ElementId(placed.created[0]);
+        let expected = linked_model_relationship(&target, root_id).unwrap();
+        let persisted = capture_snapshot(&target, root_id)
+            .unwrap()
+            .to_persisted_json();
+
+        let mut restored = test_world();
+        restored
+            .resource::<CapabilityRegistry>()
+            .factory_for("group")
+            .unwrap()
+            .from_persisted_json(&persisted)
+            .unwrap()
+            .apply_to(&mut restored);
+        assert_eq!(
+            linked_model_relationship(&restored, root_id).unwrap(),
+            expected
         );
     }
 

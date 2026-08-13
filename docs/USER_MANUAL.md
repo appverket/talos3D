@@ -115,6 +115,19 @@ The View menu also exposes a Renderer window for direct control over
 tonemapping, exposure, ambient occlusion, bloom, and screen-space reflections.
 The same renderer state is available over MCP for agent-driven workflows.
 
+## Linked Models
+
+**Place Linked Model** inserts another `.talos3d` project as a live instance in
+the current model. The placed root can be moved or rotated independently, while
+its mapped contents remain owned by the external source file. Placing the model
+is one undoable operation.
+
+Use **Open Linked Model** to edit the source document and **Refresh Linked
+Models** to pull source changes into existing instances. Refresh preserves each
+instance's root transform and stable source-to-scene mappings whenever the
+source identities remain available. Linked instances cannot be ungrouped;
+breaking the group would also break the live relationship.
+
 ## Capability-Specific Workflows
 
 Some interactions only appear when a capability is loaded. For example:
