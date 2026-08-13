@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-08-13T12:15:00Z
-- branch: codex/TALOS-skvpvbse-linked-placement-subject
-- task-id: TALOS-skvpvbse
+- created: 2026-08-13T14:31:00Z
+- branch: codex/TALOS-viyltwqr-architecture-linked-planting
+- task-id: TALOS-viyltwqr
 - target base: origin/main
-- summary: Expose a domain-neutral, refresh-safe linked-instance placement subject and atomic edit plan.
+- summary: Make linked-model terrain planting atomic, host-owned, reversible, and reload-safe.
 - status: active; verified, preparing integration

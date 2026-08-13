@@ -24,7 +24,7 @@ use talos3d_core::{
         commands::{
             despawn_by_element_id, find_entity_by_element_id, find_entity_by_element_id_readonly,
         },
-        history::HistorySet,
+        history::{EditorCommand, HistorySet, PendingCommandQueue},
         identity::{ElementId, ElementIdAllocator},
         modeling::assembly::{
             AssemblyMemberRef, AssemblySnapshot, RelationSnapshot, SemanticAssembly,
@@ -35,6 +35,10 @@ use talos3d_core::{
             find_group_for_member, group_frame, group_frame_change_snapshots,
             group_membership_add_snapshots, is_group, remove_member_from_groups, GroupFrame,
             GroupMembers, GroupSnapshot,
+        },
+        modeling::linked_model::{
+            linked_model_placement_subject, plan_linked_model_placement,
+            LinkedModelPlacementOperation,
         },
         modeling::primitives::{BoxPrimitive, ShapeRotation, TriangleMesh},
         modeling::snapshots::TriangleMeshSnapshot,
@@ -82,6 +86,63 @@ pub struct PlantedStructure {
     pub surface_id: ElementId,
     /// Superstructure base offset from the conforming foundation top.
     pub base_offset_from_foundation_top: f32,
+}
+
+struct PlantLinkedOnSurfaceHistoryCommand {
+    target_id: ElementId,
+    before: Vec<BoxedEntity>,
+    after: Vec<BoxedEntity>,
+    created: Vec<BoxedEntity>,
+    planted_on_surface: PlantedOnSurface,
+    planted_structure: PlantedStructure,
+    hidden_foundation: Option<ElementId>,
+    previous_hidden_visibility: Option<Visibility>,
+}
+
+impl EditorCommand for PlantLinkedOnSurfaceHistoryCommand {
+    fn label(&self) -> &'static str {
+        "Plant linked model on surface"
+    }
+
+    fn apply(&mut self, world: &mut World) {
+        for snapshot in &self.created {
+            snapshot.apply_to(world);
+        }
+        for snapshot in &self.after {
+            snapshot.apply_to(world);
+        }
+        if let Some(target) = find_entity_by_element_id(world, self.target_id) {
+            world.entity_mut(target).insert(self.planted_on_surface);
+            world.entity_mut(target).insert(self.planted_structure);
+        }
+        if let Some(hidden_id) = self.hidden_foundation {
+            if let Some(entity) = find_entity_by_element_id(world, hidden_id) {
+                world.entity_mut(entity).insert(Visibility::Hidden);
+            }
+        }
+    }
+
+    fn undo(&mut self, world: &mut World) {
+        for snapshot in self.created.iter().rev() {
+            snapshot.remove_from(world);
+        }
+        for snapshot in &self.before {
+            snapshot.apply_to(world);
+        }
+        if let Some(target) = find_entity_by_element_id(world, self.target_id) {
+            world.entity_mut(target).remove::<PlantedOnSurface>();
+            world.entity_mut(target).remove::<PlantedStructure>();
+        }
+        if let Some(hidden_id) = self.hidden_foundation {
+            if let Some(entity) = find_entity_by_element_id(world, hidden_id) {
+                if let Some(visibility) = self.previous_hidden_visibility {
+                    world.entity_mut(entity).insert(visibility);
+                } else {
+                    world.entity_mut(entity).remove::<Visibility>();
+                }
+            }
+        }
+    }
 }
 
 pub struct PlantingPlugin;
@@ -1415,6 +1476,8 @@ fn create_structure_assembly(
     foundation_structure_id: ElementId,
     foundation_id: ElementId,
     surface_id: ElementId,
+    y_delta: f32,
+    hidden_foundation: Option<ElementId>,
     label: String,
 ) -> ElementId {
     let structure_id = world.resource::<ElementIdAllocator>().next_id();
@@ -1440,6 +1503,8 @@ fn create_structure_assembly(
             parameters: json!({
                 "placement": "planted_on_surface",
                 "surface_id": surface_id.0,
+                "y_delta": y_delta,
+                "hidden_foundation_id": hidden_foundation.map(|id| id.0),
             }),
             metadata: json!({
                 "kind": "structure",
@@ -1474,6 +1539,7 @@ fn find_foundation_structure_for_body(world: &mut World, body_id: ElementId) -> 
 struct PersistedPlantedStructure {
     group_id: ElementId,
     planted: PlantedStructure,
+    planted_on_surface: PlantedOnSurface,
 }
 
 fn is_persisted_planted_structure(assembly: &SemanticAssembly) -> bool {
@@ -1612,6 +1678,15 @@ fn persisted_planted_structures(world: &mut World) -> Vec<PersistedPlantedStruct
                     &structure,
                 ),
             },
+            planted_on_surface: PlantedOnSurface {
+                foundation_id,
+                y_delta: structure
+                    .parameters
+                    .get("y_delta")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0) as f32,
+                hidden_foundation: id_from_value(&structure.parameters, "hidden_foundation_id"),
+            },
         });
     }
     planted
@@ -1645,6 +1720,14 @@ fn rehydrate_planted_structure_components(world: &mut World) {
             .is_some_and(|current| same_planted_structure(*current, contract.planted))
         {
             world.entity_mut(group_entity).insert(contract.planted);
+        }
+        world
+            .entity_mut(group_entity)
+            .insert(contract.planted_on_surface);
+        if let Some(hidden_id) = contract.planted_on_surface.hidden_foundation {
+            if let Some(hidden_entity) = find_entity_by_element_id(world, hidden_id) {
+                world.entity_mut(hidden_entity).insert(Visibility::Hidden);
+            }
         }
     }
 }
@@ -2035,6 +2118,23 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         return Err("target is already planted; unplant first".to_string());
     }
 
+    let linked_subject = match linked_model_placement_subject(world, target_id) {
+        Ok(subject) => {
+            if world.get_resource::<PendingCommandQueue>().is_none() {
+                return Err(
+                    "Planting a linked model requires the command history plugin".to_string(),
+                );
+            }
+            Some(subject)
+        }
+        Err(error) if error.code == "not_applicable" => None,
+        Err(error) => {
+            return Err(format!(
+                "Linked placement subject refused before mutation: {error}"
+            ));
+        }
+    };
+
     let target_before =
         capture(world, target_entity).ok_or_else(|| "cannot capture target".to_string())?;
     let bounds = if is_group(world, target_id) {
@@ -2069,6 +2169,27 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         .ok_or_else(|| "footprint does not overlap the surface".to_string())?;
     let y_top = max_grade + min_thickness;
     let y_delta = y_top - base_y;
+    let linked_plan = linked_subject
+        .as_ref()
+        .map(|_| {
+            plan_linked_model_placement(
+                world,
+                target_id,
+                LinkedModelPlacementOperation::Translate {
+                    delta: Vec3::new(0.0, y_delta, 0.0),
+                },
+            )
+            .map_err(|error| format!("Linked placement subject refused before mutation: {error}"))
+        })
+        .transpose()?;
+    let linked_before = linked_plan
+        .as_ref()
+        .map(|plan| plan.before().to_vec())
+        .unwrap_or_default();
+    let previous_hidden_visibility = hide_id.and_then(|id| {
+        find_entity_by_element_id(world, id)
+            .and_then(|entity| world.get::<Visibility>(entity).copied())
+    });
 
     // Create the hugging foundation under the footprint.
     let foundation_id = world.resource::<ElementIdAllocator>().next_id();
@@ -2094,7 +2215,13 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
     // Seat the object on the foundation's flat top. Group targets need their
     // authored members moved as a unit; a group snapshot itself is membership
     // metadata and intentionally has no geometric translate.
-    translate_target(world, target_id, Vec3::new(0.0, y_delta, 0.0));
+    if let Some(plan) = &linked_plan {
+        for snapshot in plan.after() {
+            snapshot.apply_to(world);
+        }
+    } else {
+        translate_target(world, target_id, Vec3::new(0.0, y_delta, 0.0));
+    }
     if is_group(world, target_id) {
         if let Some((_, after)) = group_membership_add_snapshots(world, target_id, foundation_id) {
             after.apply_to(world);
@@ -2106,6 +2233,8 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         foundation_structure_id,
         foundation_id,
         surface_id,
+        y_delta,
+        hide_id,
         format!("Planted {}", target_before.0.label()),
     );
 
@@ -2116,20 +2245,64 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
         }
     }
 
-    world.entity_mut(target_entity).insert(PlantedOnSurface {
+    let planted_on_surface = PlantedOnSurface {
         foundation_id,
         y_delta,
         hidden_foundation: hide_id,
-    });
-    world.entity_mut(target_entity).insert(PlantedStructure {
+    };
+    let planted_structure = PlantedStructure {
         structure_id,
         foundation_structure_id: Some(foundation_structure_id),
         foundation_id,
         surface_id,
         base_offset_from_foundation_top: 0.0,
-    });
+    };
+    world.entity_mut(target_entity).insert(planted_on_surface);
+    world.entity_mut(target_entity).insert(planted_structure);
+
+    if linked_subject.is_some() {
+        let mut after_ids = linked_before
+            .iter()
+            .map(BoxedEntity::element_id)
+            .collect::<Vec<_>>();
+        if !after_ids.contains(&target_id) {
+            after_ids.push(target_id);
+        }
+        after_ids.sort_by_key(|id| id.0);
+        after_ids.dedup();
+        let after = after_ids
+            .into_iter()
+            .map(|id| {
+                capture_by_id(world, id).ok_or_else(|| {
+                    format!("Could not capture linked planting result entity {}", id.0)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let created = [foundation_id, foundation_structure_id, structure_id]
+            .into_iter()
+            .map(|id| {
+                capture_by_id(world, id).ok_or_else(|| {
+                    format!("Could not capture linked planting created entity {}", id.0)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        world
+            .resource_mut::<PendingCommandQueue>()
+            .push_command(Box::new(PlantLinkedOnSurfaceHistoryCommand {
+                target_id,
+                before: linked_before,
+                after,
+                created,
+                planted_on_surface,
+                planted_structure,
+                hidden_foundation: hide_id,
+                previous_hidden_visibility,
+            }));
+    }
 
     Ok(CommandResult {
+        created: vec![foundation_id.0, foundation_structure_id.0, structure_id.0],
+        modified: vec![target_id.0],
         output: Some(json!({
             "structure_id": structure_id.0,
             "foundation_structure_id": foundation_structure_id.0,
@@ -2137,6 +2310,12 @@ fn execute_plant_on_surface(world: &mut World, params: &Value) -> Result<Command
             "foundation_id": foundation_id.0,
             "y_top": y_top,
             "raised_by": y_delta,
+            "linked_placement": linked_subject.as_ref().map(|subject| json!({
+                "instance_root_id": subject.relationship.instance_root_id,
+                "mapping_fingerprint": subject.mapping_fingerprint,
+                "dependency_anchor": subject.dependency_anchor,
+                "foundation_ownership": "host_document",
+            })),
         })),
         ..CommandResult::empty()
     })
@@ -2289,6 +2468,16 @@ fn execute_unplant_on_surface(world: &mut World, params: &Value) -> Result<Comma
         .get::<PlantedOnSurface>(target_entity)
         .copied()
         .ok_or_else(|| "target is not planted".to_string())?;
+    let planted = world.get::<PlantedStructure>(target_entity).copied();
+    let remove_host_assemblies = planted.is_some_and(|planted| {
+        semantic_assembly_by_id(world, planted.structure_id).is_some_and(|assembly| {
+            assembly
+                .metadata
+                .get("placement_kind")
+                .and_then(Value::as_str)
+                == Some("planted_structure")
+        })
+    });
 
     // Remove the foundation (and free its mesh).
     remove_member_from_groups(world, link.foundation_id);
@@ -2302,6 +2491,14 @@ fn execute_unplant_on_surface(world: &mut World, params: &Value) -> Result<Comma
         }
     }
     despawn_by_element_id(world, link.foundation_id);
+    if remove_host_assemblies {
+        if let Some(planted) = planted {
+            if let Some(foundation_structure_id) = planted.foundation_structure_id {
+                despawn_by_element_id(world, foundation_structure_id);
+            }
+            despawn_by_element_id(world, planted.structure_id);
+        }
+    }
 
     // Lower the object back to its original datum.
     translate_target(world, target_id, Vec3::new(0.0, -link.y_delta, 0.0));
@@ -2330,11 +2527,15 @@ mod tests {
         capability_registry::{
             AuthoredEntityFactory, CapabilityRegistry, ElementClassAssignment, ElementClassId,
         },
+        plugins::history::{History, HistoryPlugin},
         plugins::modeling::{
-            assembly::{SemanticAssembly, SemanticRelation},
+            assembly::{AssemblyFactory, SemanticAssembly, SemanticRelation},
             generic_factory::PrimitiveFactory,
             generic_snapshot::PrimitiveSnapshot,
-            group::{GroupFactory, GroupFrame, GroupMembers, GroupSnapshot},
+            group::{
+                compute_group_bounds_from_world, GroupFactory, GroupFrame, GroupMembers,
+                GroupSnapshot, LinkedModelIdMapping, LinkedModelRef,
+            },
             primitives::{BoxPrimitive, ShapeRotation},
             snapshots::TriangleMeshFactory,
         },
@@ -2543,6 +2744,7 @@ mod tests {
         let mut world = World::new();
         let mut registry = CapabilityRegistry::default();
         registry.register_factory(GroupFactory);
+        registry.register_factory(AssemblyFactory);
         registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
         registry.register_factory(TriangleMeshFactory);
         registry.register_factory(ConformingSolidFactory);
@@ -2553,6 +2755,198 @@ mod tests {
         allocator.set_next(1000);
         world.insert_resource(allocator);
         world
+    }
+
+    fn linked_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins(HistoryPlugin);
+        let world = app.world_mut();
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(GroupFactory);
+        registry.register_factory(AssemblyFactory);
+        registry.register_factory(PrimitiveFactory::<BoxPrimitive>::new());
+        registry.register_factory(TriangleMeshFactory);
+        registry.register_factory(ConformingSolidFactory);
+        world.insert_resource(registry);
+        let mut allocator = ElementIdAllocator::default();
+        allocator.set_next(1000);
+        world.insert_resource(allocator);
+        app
+    }
+
+    fn spawn_linked_building(world: &mut World) {
+        for (element_id, centre, half_extents) in [
+            (
+                ElementId(2),
+                Vec3::new(0.0, 0.2, 0.0),
+                Vec3::new(1.5, 0.2, 1.5),
+            ),
+            (
+                ElementId(3),
+                Vec3::new(0.0, 1.4, 0.0),
+                Vec3::new(1.5, 1.0, 1.5),
+            ),
+        ] {
+            PrimitiveSnapshot {
+                element_id,
+                primitive: BoxPrimitive {
+                    centre,
+                    half_extents,
+                },
+                rotation: ShapeRotation::default(),
+                material_assignment: None,
+                opening_context: None,
+                subobject_display_overrides: None,
+            }
+            .apply_to(world);
+        }
+        GroupSnapshot {
+            element_id: ElementId(1),
+            name: "Linked building".to_string(),
+            member_ids: vec![ElementId(2), ElementId(3)],
+            frame: GroupFrame::identity(),
+            composite: None,
+            linked_model: Some(LinkedModelRef {
+                path: "source-building.talos3d".to_string(),
+                source_root_id: ElementId(100),
+                source_to_scene_ids: [(100, 1), (101, 2), (102, 3)]
+                    .into_iter()
+                    .map(|(source_id, scene_id)| LinkedModelIdMapping {
+                        source_id: ElementId(source_id),
+                        scene_id: ElementId(scene_id),
+                    })
+                    .collect(),
+                content_hash: 42,
+            }),
+            cached_bounds: None,
+        }
+        .apply_to(world);
+    }
+
+    #[test]
+    fn linked_model_planting_is_atomic_reversible_and_host_owned() {
+        let mut app = linked_test_app();
+        app.world_mut().spawn((ElementId(10), ramp_heightfield()));
+        spawn_linked_building(app.world_mut());
+        let initial_subject = linked_model_placement_subject(app.world(), ElementId(1)).unwrap();
+        let initial_fingerprint = initial_subject.mapping_fingerprint;
+        let initial_bounds = compute_group_bounds_from_world(app.world(), &[ElementId(1)])
+            .expect("linked building bounds");
+        let initial_foundation_visibility = app
+            .world()
+            .get::<Visibility>(
+                find_entity_by_element_id_readonly(app.world(), ElementId(2)).unwrap(),
+            )
+            .copied();
+
+        let result = execute_plant_on_surface(
+            app.world_mut(),
+            &json!({
+                "target_id": 1,
+                "surface_id": 10,
+                "hide_element_id": 2,
+                "min_thickness": 0.2,
+            }),
+        )
+        .expect("plant linked model on ramp");
+        let foundation_id = ElementId(
+            result.output.as_ref().unwrap()["foundation_id"]
+                .as_u64()
+                .unwrap(),
+        );
+        let foundation_structure_id = ElementId(
+            result.output.as_ref().unwrap()["foundation_structure_id"]
+                .as_u64()
+                .unwrap(),
+        );
+        let structure_id = ElementId(
+            result.output.as_ref().unwrap()["structure_id"]
+                .as_u64()
+                .unwrap(),
+        );
+        let planted_subject = linked_model_placement_subject(app.world(), ElementId(1)).unwrap();
+        assert_eq!(planted_subject.mapping_fingerprint, initial_fingerprint);
+        assert!(!planted_subject
+            .source_owned_scene_ids
+            .contains(&foundation_id.0));
+        assert!(planted_subject
+            .host_dependent_scene_ids
+            .contains(&foundation_id.0));
+        assert_eq!(
+            app.world().get::<Visibility>(
+                find_entity_by_element_id_readonly(app.world(), ElementId(2)).unwrap()
+            ),
+            Some(&Visibility::Hidden)
+        );
+
+        // The real history drain re-applies the idempotent authored plan and
+        // records one atomic operation for root, source bodies, and host foundation.
+        app.update();
+        assert_eq!(app.world().resource::<History>().undo_stack_len(), 1);
+        app.world_mut()
+            .resource_mut::<PendingCommandQueue>()
+            .queue_undo();
+        app.update();
+        assert!(find_entity_by_element_id_readonly(app.world(), foundation_id).is_none());
+        assert_eq!(
+            app.world().get::<Visibility>(
+                find_entity_by_element_id_readonly(app.world(), ElementId(2)).unwrap()
+            ),
+            initial_foundation_visibility.as_ref()
+        );
+        let undone_bounds = compute_group_bounds_from_world(app.world(), &[ElementId(1)])
+            .expect("undone linked building bounds");
+        assert!((undone_bounds.min - initial_bounds.min).length() < 1e-4);
+        assert_eq!(
+            linked_model_placement_subject(app.world(), ElementId(1))
+                .unwrap()
+                .mapping_fingerprint,
+            initial_fingerprint
+        );
+
+        app.world_mut()
+            .resource_mut::<PendingCommandQueue>()
+            .queue_redo();
+        app.update();
+        assert!(find_entity_by_element_id_readonly(app.world(), foundation_id).is_some());
+        assert_eq!(
+            linked_model_placement_subject(app.world(), ElementId(1))
+                .unwrap()
+                .mapping_fingerprint,
+            initial_fingerprint
+        );
+
+        // Persisted host assemblies are the reopen contract: runtime planting
+        // components and source-foundation visibility are reconstructed.
+        let linked_root = find_entity_by_element_id_readonly(app.world(), ElementId(1)).unwrap();
+        app.world_mut()
+            .entity_mut(linked_root)
+            .remove::<PlantedOnSurface>();
+        app.world_mut()
+            .entity_mut(linked_root)
+            .remove::<PlantedStructure>();
+        let source_foundation =
+            find_entity_by_element_id_readonly(app.world(), ElementId(2)).unwrap();
+        app.world_mut()
+            .entity_mut(source_foundation)
+            .remove::<Visibility>();
+        rehydrate_planted_structure_components(app.world_mut());
+        assert!(app.world().get::<PlantedOnSurface>(linked_root).is_some());
+        assert!(app.world().get::<PlantedStructure>(linked_root).is_some());
+        assert_eq!(
+            app.world().get::<Visibility>(source_foundation),
+            Some(&Visibility::Hidden)
+        );
+
+        execute_unplant_on_surface(app.world_mut(), &json!({ "target_id": 1 }))
+            .expect("unplant linked model");
+        assert!(linked_model_placement_subject(app.world(), ElementId(1)).is_ok());
+        assert!(find_entity_by_element_id_readonly(app.world(), foundation_id).is_none());
+        assert!(find_entity_by_element_id_readonly(app.world(), foundation_structure_id).is_none());
+        assert!(find_entity_by_element_id_readonly(app.world(), structure_id).is_none());
+        let unplanted_bounds = compute_group_bounds_from_world(app.world(), &[ElementId(1)])
+            .expect("unplanted linked building bounds");
+        assert!((unplanted_bounds.min - initial_bounds.min).length() < 1e-4);
     }
 
     #[test]
