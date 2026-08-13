@@ -249,6 +249,7 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "view.toggle_xray",
             "view.toggle_outline",
             "view.toggle_wireframe",
+            "view.toggle_group_focus_hide",
             "view.toggle_guide_lines",
             "view.toggle_dimensions",
             "view.toggle_compass",
@@ -5403,6 +5404,13 @@ mod tests {
     #[test]
     fn floor_plan_mode_is_discoverable_from_view() {
         assert!(command_ids_for(VIEW_MENU_GROUPS, "Floor Plan").contains(&"drafting.toggle"));
+    }
+
+    #[test]
+    fn group_focus_hide_is_discoverable_from_view_display() {
+        assert!(
+            command_ids_for(VIEW_MENU_GROUPS, "Display").contains(&"view.toggle_group_focus_hide")
+        );
     }
 
     #[test]

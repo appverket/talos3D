@@ -12,6 +12,9 @@ use crate::{
     capability_registry::{CapabilityRegistry, HitCandidate},
     plugins::{
         camera::{orbit_modifier_pressed, pan_modifier_pressed, OrbitCamera},
+        command_registry::{
+            CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
+        },
         commands::DeleteEntitiesCommand,
         cursor::cursor_window_position,
         definition_preview_scene::PreviewOnly,
@@ -91,8 +94,35 @@ impl Plugin for SelectionPlugin {
             .init_resource::<BoxSelectState>()
             .init_resource::<SelectionPressCapture>()
             .init_resource::<PreviousGroupEditContext>()
+            .init_resource::<GroupEditFocusSettings>()
             .init_resource::<OccurrenceEditContext>()
             .init_resource::<PreviousOccurrenceEditContext>()
+            .register_command(
+                CommandDescriptor {
+                    id: "view.toggle_group_focus_hide".to_string(),
+                    label: "Hide Outside Active Group".to_string(),
+                    description: "While editing a group, switch other geometry between muted and hidden focus presentation.".to_string(),
+                    category: CommandCategory::View,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "enabled": {
+                                "type": "boolean",
+                                "description": "Hide outside geometry when true; show it muted when false. Omit to toggle."
+                            }
+                        }
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Hide or mute geometry outside the group being edited".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_toggle_group_focus_hide,
+            )
             .add_systems(
                 Update,
                 (
@@ -139,11 +169,20 @@ struct SelectionPressCapture {
     entity: Option<Entity>,
     cursor_screen: Option<Vec2>,
     additive: bool,
-    edit_context_after_click: Option<GroupEditContext>,
 }
 
 #[derive(Component)]
 pub struct Selected;
+
+/// Presentation preference for geometry outside the active group-edit context.
+///
+/// Selectability is context-driven in both modes. This resource changes only
+/// whether the non-interactive geometry remains visible as a muted reference or
+/// is completely hidden for maximum focus.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GroupEditFocusSettings {
+    pub hide_outside: bool,
+}
 
 /// Marks an authored product that remains directly selectable even when it is
 /// nested inside physical groups.
@@ -239,6 +278,7 @@ type MeshSelectableQueryFilter = (
 struct SelectionHitTest<'w, 's> {
     ray_cast: MeshRayCast<'w, 's>,
     mesh_selectable_query: Query<'w, 's, (), MeshSelectableQueryFilter>,
+    muted_query: Query<'w, 's, (), With<GroupEditMuted>>,
     visibility_query: Query<'w, 's, &'static Visibility>,
     wireframe_surface_visibility_query:
         Query<'w, 's, Option<&'static WireframeSurfaceVisibilityOverride>>,
@@ -310,28 +350,39 @@ fn handle_selection_click(world: &mut World) {
         None
     };
 
-    let hit_target = if let Some(ray) = click_ray {
+    if let Some(ray) = click_ray {
         let raw_hit_entity = selection_hit_entity(world, ray, cursor_position);
-        resolve_selection_click_target(world, raw_hit_entity)
-    } else {
-        SelectionClickTarget::default()
-    };
-
-    let additive_pressed = {
-        let keys = world.resource::<ButtonInput<KeyCode>>();
-        keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
-    };
-    let mut press_capture = world.resource_mut::<SelectionPressCapture>();
-    if just_pressed {
-        press_capture.entity = hit_target.entity;
-        press_capture.cursor_screen = Some(cursor_position);
-        press_capture.additive = additive_pressed;
-        press_capture.edit_context_after_click = hit_target.edit_context_after_click;
+        let additive_pressed = {
+            let keys = world.resource::<ButtonInput<KeyCode>>();
+            keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
+        };
+        capture_selection_press(world, raw_hit_entity, cursor_position, additive_pressed);
     }
 
     if !just_released {
         return;
     }
+
+    let now = world.resource::<Time<Real>>().elapsed_secs_f64();
+    complete_selection_release(world, cursor_position, now);
+}
+
+fn capture_selection_press(
+    world: &mut World,
+    raw_hit_entity: Option<Entity>,
+    cursor_position: Vec2,
+    additive: bool,
+) -> Option<Entity> {
+    let target = resolve_selection_click_target(world, raw_hit_entity).entity;
+    let mut press_capture = world.resource_mut::<SelectionPressCapture>();
+    press_capture.entity = target;
+    press_capture.cursor_screen = Some(cursor_position);
+    press_capture.additive = additive;
+    target
+}
+
+fn complete_selection_release(world: &mut World, cursor_position: Vec2, now: f64) {
+    let mut press_capture = world.resource_mut::<SelectionPressCapture>();
 
     let moved_too_far = press_capture
         .cursor_screen
@@ -339,7 +390,6 @@ fn handle_selection_click(world: &mut World) {
         .unwrap_or(false);
     let additive_selection = press_capture.additive;
     let hit_entity = press_capture.entity.take();
-    let edit_context_after_click = press_capture.edit_context_after_click.take();
     press_capture.cursor_screen = None;
     press_capture.additive = false;
 
@@ -347,11 +397,6 @@ fn handle_selection_click(world: &mut World) {
         return;
     }
 
-    if let Some(edit_context) = edit_context_after_click {
-        world.insert_resource(edit_context);
-    }
-
-    let now = world.resource::<Time<Real>>().elapsed_secs_f64();
     complete_selection_click(world, hit_entity, additive_selection, now);
 }
 
@@ -394,7 +439,6 @@ fn complete_selection_click(
                 world.entity_mut(selected_entity).remove::<Selected>();
             }
             world.insert_resource(PivotPoint::default());
-            world.insert_resource(GroupEditContext::default());
         }
         None => {}
     }
@@ -416,6 +460,9 @@ fn redirect_generated_occurrence_part_to_owner(world: &mut World, entity: Entity
 
 pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Entity> {
     let entity = redirect_selection_proxy_to_target(world, entity);
+    if world.get::<GroupEditMuted>(entity).is_some() {
+        return None;
+    }
     if world
         .get_resource::<crate::plugins::layers::LayerRegistry>()
         .is_some()
@@ -456,14 +503,7 @@ pub fn resolve_entity_for_selection(world: &World, entity: Entity) -> Option<Ent
         return Some(entity);
     }
 
-    let mut parent_context = edit_context;
-    parent_context.exit();
-    Some(redirect_hit_to_context_group(
-        world,
-        entity,
-        element_id,
-        &parent_context,
-    ))
+    None
 }
 
 fn redirect_selection_proxy_to_target(world: &World, entity: Entity) -> Entity {
@@ -490,7 +530,6 @@ fn redirect_selection_proxy_to_target(world: &World, entity: Entity) -> Entity {
 #[derive(Default)]
 struct SelectionClickTarget {
     entity: Option<Entity>,
-    edit_context_after_click: Option<GroupEditContext>,
 }
 
 fn resolve_selection_click_target(
@@ -507,17 +546,26 @@ fn resolve_selection_click_target(
     };
     let edit_context = world.resource::<GroupEditContext>().clone();
 
+    // Preserve the user's explicit aggregate target across the two clicks of a
+    // double-click. Group entities usually have no render mesh of their own, so
+    // the second physical hit lands on a descendant. Re-resolving that leaf from
+    // scratch can promote it to a larger ancestor (for example roof -> house)
+    // before the double-click transaction gets a chance to enter the roof.
+    if let Some(selected_group) = selected_group_containing(world, element_id) {
+        return SelectionClickTarget {
+            entity: Some(selected_group),
+        };
+    }
+
     if edit_context.is_root() {
         return SelectionClickTarget {
             entity: resolve_entity_for_selection(world, entity),
-            edit_context_after_click: None,
         };
     }
 
     let Some(active_group_id) = edit_context.current_group() else {
         return SelectionClickTarget {
             entity: Some(entity),
-            edit_context_after_click: None,
         };
     };
 
@@ -526,24 +574,33 @@ fn resolve_selection_click_target(
         if is_direct_child_of_group(world, redirected_id, active_group_id) {
             return SelectionClickTarget {
                 entity: Some(redirected),
-                edit_context_after_click: None,
             };
         }
     }
     if is_direct_child_of_group(world, element_id, active_group_id) {
         return SelectionClickTarget {
             entity: Some(entity),
-            edit_context_after_click: None,
         };
     }
 
-    let mut parent_context = edit_context;
-    parent_context.exit();
-    entity = redirect_hit_to_context_group(world, entity, element_id, &parent_context);
-    SelectionClickTarget {
-        entity: (!crate::plugins::layers::entity_on_locked_layer(world, entity)).then_some(entity),
-        edit_context_after_click: Some(parent_context),
+    // Geometry outside an entered group is reference context only. It must not
+    // implicitly pop the edit stack or become selectable; Escape is the explicit
+    // and deterministic way back to the parent context.
+    SelectionClickTarget::default()
+}
+
+fn selected_group_containing(world: &World, hit_element_id: ElementId) -> Option<Entity> {
+    let mut selected_query =
+        world.try_query_filtered::<(Entity, &ElementId, &GroupMembers), With<Selected>>()?;
+    let mut selected_groups = selected_query.iter(world);
+    let (entity, group_id, _) = selected_groups.next()?;
+    if selected_groups.next().is_some() {
+        return None;
     }
+
+    (*group_id == hit_element_id
+        || collect_group_members_recursive(world, *group_id).contains(&hit_element_id))
+    .then_some(entity)
 }
 
 #[derive(Resource, Default)]
@@ -619,6 +676,45 @@ fn handle_completed_double_click(world: &mut World, clicked_entity: Option<Entit
     world.entity_mut(entity).remove::<Selected>();
 }
 
+fn execute_toggle_group_focus_hide(
+    world: &mut World,
+    parameters: &serde_json::Value,
+) -> Result<CommandResult, String> {
+    let group_active = world
+        .get_resource::<GroupEditContext>()
+        .is_some_and(|context| !context.is_root());
+    let occurrence_active = world
+        .get_resource::<OccurrenceEditContext>()
+        .is_some_and(|context| !context.is_root());
+    if !group_active && !occurrence_active {
+        return Err("Enter a group before changing focus presentation".to_string());
+    }
+
+    let hide_outside = {
+        let mut settings = world
+            .get_resource_mut::<GroupEditFocusSettings>()
+            .ok_or_else(|| "Group focus settings are unavailable".to_string())?;
+        settings.hide_outside = parameters
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(!settings.hide_outside);
+        settings.hide_outside
+    };
+
+    if let Some(mut status) = world.get_resource_mut::<StatusBarData>() {
+        status.selection_summary = if hide_outside {
+            "Group focus: outside geometry hidden".to_string()
+        } else {
+            "Group focus: outside geometry muted".to_string()
+        };
+    }
+
+    Ok(CommandResult {
+        output: Some(serde_json::json!({ "hide_outside": hide_outside })),
+        ..Default::default()
+    })
+}
+
 fn handle_group_escape(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -626,6 +722,8 @@ fn handle_group_escape(
     occurrence_edit_context: Res<OccurrenceEditContext>,
     face_edit_context: Res<FaceEditContext>,
     ownership: Res<InputOwnership>,
+    selected_query: Query<Entity, With<Selected>>,
+    mut double_click_tracker: ResMut<DoubleClickTracker>,
 ) {
     if !ownership.is_idle()
         || (edit_context.is_root() && occurrence_edit_context.is_root())
@@ -644,8 +742,10 @@ fn handle_group_escape(
             ctx.exit();
             commands.insert_resource(ctx);
         }
-        // Deselect all when exiting group
-        // (deselection happens naturally since the next click will re-evaluate)
+        for entity in &selected_query {
+            commands.entity(entity).remove::<Selected>();
+        }
+        double_click_tracker.last_click_entity = None;
     }
 }
 
@@ -876,6 +976,9 @@ fn entity_is_visible(world: &World, entity: Entity) -> bool {
     let Ok(entity_ref) = world.get_entity(entity) else {
         return false;
     };
+    if entity_ref.contains::<GroupEditMuted>() {
+        return false;
+    }
     if !entity_on_visible_layer(world, entity) {
         return false;
     }
@@ -964,6 +1067,7 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
     let SelectionHitTest {
         ray_cast,
         mesh_selectable_query,
+        muted_query,
         visibility_query,
         wireframe_surface_visibility_query,
         layer_assignment_query,
@@ -977,6 +1081,7 @@ fn selection_hit_entity(world: &mut World, ray: Ray3d, cursor_position: Vec2) ->
             ray,
             &MeshRayCastSettings::default().with_filter(&|entity| {
                 mesh_selectable_query.contains(entity)
+                    && !muted_query.contains(entity)
                     && !face_profile_feature_query.contains(entity)
                     && (visibility_query
                         .get(entity)
@@ -1620,7 +1725,6 @@ mod tests {
         let target = resolve_selection_click_target(&mut world, Some(child));
 
         assert_eq!(target.entity, Some(group));
-        assert!(target.edit_context_after_click.is_none());
     }
 
     #[test]
@@ -1631,7 +1735,6 @@ mod tests {
         let target = resolve_selection_click_target(&mut world, Some(child));
 
         assert_eq!(target.entity, Some(child));
-        assert!(target.edit_context_after_click.is_none());
     }
 
     #[test]
@@ -1659,7 +1762,6 @@ mod tests {
         let target = resolve_selection_click_target(&mut world, Some(opening));
 
         assert_eq!(target.entity, Some(product));
-        assert!(target.edit_context_after_click.is_none());
     }
 
     #[test]
@@ -1690,7 +1792,6 @@ mod tests {
         let target = resolve_selection_click_target(&mut world, Some(child));
 
         assert_eq!(target.entity, Some(child));
-        assert!(target.edit_context_after_click.is_none());
     }
 
     #[test]
@@ -1727,7 +1828,6 @@ mod tests {
         let target = resolve_selection_click_target(&mut world, Some(child));
 
         assert_eq!(target.entity, Some(parent));
-        assert!(target.edit_context_after_click.is_none());
     }
 
     #[test]
@@ -1738,6 +1838,7 @@ mod tests {
         world.insert_resource(OccurrenceEditContext::default());
         world.insert_resource(FaceEditContext::default());
         world.insert_resource(DoubleClickTracker::default());
+        world.insert_resource(SelectionPressCapture::default());
 
         let roof_part_id = ElementId(10);
         let roof_group_id = ElementId(20);
@@ -1800,6 +1901,222 @@ mod tests {
         assert!(world.get::<Selected>(roof_group).is_none());
         assert!(world.get::<Selected>(building_group).is_none());
         assert!(!world.resource::<FaceEditContext>().is_active());
+    }
+
+    #[test]
+    fn selected_roof_double_click_descends_one_level_instead_of_promoting_to_house() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+        world.insert_resource(OccurrenceEditContext::default());
+        world.insert_resource(FaceEditContext::default());
+        world.insert_resource(DoubleClickTracker::default());
+        world.insert_resource(SelectionPressCapture::default());
+
+        let panel_id = ElementId(10);
+        let covering_group_id = ElementId(15);
+        let roof_group_id = ElementId(20);
+        let wall_id = ElementId(25);
+        let house_group_id = ElementId(30);
+        let panel = world.spawn(panel_id).id();
+        let covering_group = world
+            .spawn((
+                covering_group_id,
+                GroupMembers {
+                    name: "Roof covering".to_string(),
+                    member_ids: vec![panel_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        let roof_group = world
+            .spawn((
+                roof_group_id,
+                GroupMembers {
+                    name: "Gabled roof".to_string(),
+                    member_ids: vec![covering_group_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+                Selected,
+            ))
+            .id();
+        world.spawn(wall_id);
+        let house_group = world
+            .spawn((
+                house_group_id,
+                GroupMembers {
+                    name: "House".to_string(),
+                    member_ids: vec![roof_group_id, wall_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+
+        let click_panel = |world: &mut World, now| {
+            let target =
+                capture_selection_press(world, Some(panel), Vec2::new(320.0, 240.0), false);
+            complete_selection_release(world, Vec2::new(320.0, 240.0), now);
+            target
+        };
+
+        assert_eq!(click_panel(&mut world, 1.0), Some(roof_group));
+        assert!(world.get::<Selected>(roof_group).is_some());
+        assert!(world.get::<Selected>(house_group).is_none());
+
+        assert_eq!(click_panel(&mut world, 1.1), Some(roof_group));
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![roof_group_id]
+        );
+        assert!(world.get::<Selected>(roof_group).is_none());
+        assert!(world.get::<Selected>(house_group).is_none());
+
+        assert_eq!(click_panel(&mut world, 1.2), Some(covering_group));
+        assert!(world.get::<Selected>(covering_group).is_some());
+        assert_eq!(click_panel(&mut world, 1.3), Some(covering_group));
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![roof_group_id, covering_group_id]
+        );
+        assert!(world.get::<Selected>(house_group).is_none());
+    }
+
+    #[test]
+    fn outside_click_cannot_select_or_exit_an_entered_group() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(OccurrenceEditContext::default());
+        world.insert_resource(FaceEditContext::default());
+        world.insert_resource(DoubleClickTracker::default());
+
+        let child_id = ElementId(10);
+        let group_id = ElementId(20);
+        let outside_id = ElementId(30);
+        world.spawn(child_id);
+        let group = world
+            .spawn((
+                group_id,
+                GroupMembers {
+                    name: "Active group".to_string(),
+                    member_ids: vec![child_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        let outside = world.spawn((outside_id, GroupEditMuted)).id();
+        let mut context = GroupEditContext::default();
+        context.enter(group_id);
+        world.insert_resource(context);
+
+        assert!(resolve_entity_for_selection(&world, outside).is_none());
+        assert!(resolve_selection_click_target(&mut world, Some(outside))
+            .entity
+            .is_none());
+        complete_selection_click(&mut world, None, false, 1.0);
+
+        assert_eq!(world.resource::<GroupEditContext>().stack, vec![group_id]);
+        assert!(world.get::<Selected>(outside).is_none());
+        assert!(world.get::<Selected>(group).is_none());
+    }
+
+    #[test]
+    fn group_focus_switches_outside_geometry_between_muted_hidden_and_restored() {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<PreviousGroupEditContext>()
+            .init_resource::<PreviousOccurrenceEditContext>()
+            .init_resource::<OccurrenceEditContext>()
+            .insert_resource(GroupEditFocusSettings::default())
+            .add_systems(Update, update_group_edit_muting);
+
+        let original_material = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let active_id = ElementId(10);
+        let group_id = ElementId(20);
+        let outside_id = ElementId(30);
+        let active = app
+            .world_mut()
+            .spawn((
+                active_id,
+                Visibility::Visible,
+                MeshMaterial3d(original_material.clone()),
+            ))
+            .id();
+        app.world_mut().spawn((
+            group_id,
+            GroupMembers {
+                name: "Active group".to_string(),
+                member_ids: vec![active_id],
+                frame: Default::default(),
+                linked_model: None,
+            },
+        ));
+        let outside = app
+            .world_mut()
+            .spawn((
+                outside_id,
+                Visibility::Visible,
+                MeshMaterial3d(original_material.clone()),
+            ))
+            .id();
+        let mut context = GroupEditContext::default();
+        context.enter(group_id);
+        app.insert_resource(context);
+
+        app.update();
+        assert!(app.world().get::<GroupEditMuted>(outside).is_some());
+        assert_eq!(
+            app.world().get::<Visibility>(outside),
+            Some(&Visibility::Visible)
+        );
+        assert!(app.world().get::<MutedMaterialRestore>(outside).is_some());
+        assert!(app.world().get::<GroupEditMuted>(active).is_none());
+
+        app.world_mut()
+            .resource_mut::<GroupEditFocusSettings>()
+            .hide_outside = true;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(outside),
+            Some(&Visibility::Hidden)
+        );
+        assert!(app
+            .world()
+            .get::<GroupEditVisibilityRestore>(outside)
+            .is_some());
+        assert!(app.world().get::<MutedMaterialRestore>(outside).is_none());
+
+        app.world_mut()
+            .resource_mut::<GroupEditFocusSettings>()
+            .hide_outside = false;
+        app.update();
+        assert_eq!(
+            app.world().get::<Visibility>(outside),
+            Some(&Visibility::Visible)
+        );
+        assert!(app.world().get::<MutedMaterialRestore>(outside).is_some());
+
+        app.insert_resource(GroupEditContext::default());
+        app.update();
+        assert!(app.world().get::<GroupEditMuted>(outside).is_none());
+        assert!(app
+            .world()
+            .get::<GroupEditVisibilityRestore>(outside)
+            .is_none());
+        assert!(app.world().get::<MutedMaterialRestore>(outside).is_none());
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(outside)
+                .expect("outside material should be restored")
+                .0,
+            original_material
+        );
     }
 
     #[test]
@@ -2271,6 +2588,7 @@ fn egui_color(color: Color) -> egui::Color32 {
 #[derive(Resource, Default)]
 struct PreviousGroupEditContext {
     stack: Vec<ElementId>,
+    hide_outside: bool,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -2319,9 +2637,16 @@ const MUTED_ALPHA: f32 = 0.15;
 #[derive(Component)]
 pub struct MutedMaterialRestore(pub Handle<StandardMaterial>);
 
+/// Restores the entity's pre-focus visibility after hidden group focus ends.
+/// `None` means the entity did not carry a local `Visibility` component before
+/// focus mode inserted one.
+#[derive(Component)]
+struct GroupEditVisibilityRestore(Option<Visibility>);
+
 fn update_group_edit_muting(
     mut commands: Commands,
     edit_context: Res<GroupEditContext>,
+    focus_settings: Res<GroupEditFocusSettings>,
     occurrence_edit_context: Res<OccurrenceEditContext>,
     mut previous: ResMut<PreviousGroupEditContext>,
     mut previous_occurrence: ResMut<PreviousOccurrenceEditContext>,
@@ -2331,6 +2656,9 @@ fn update_group_edit_muting(
             Option<&ElementId>,
             Option<&GeneratedOccurrencePart>,
             Has<GroupEditMuted>,
+            Option<&Visibility>,
+            Option<&GroupEditVisibilityRestore>,
+            Has<SceneLightNode>,
         ),
         (
             Or<(With<ElementId>, With<GeneratedOccurrencePart>)>,
@@ -2338,6 +2666,9 @@ fn update_group_edit_muting(
         ),
     >,
     group_query: Query<(&ElementId, &GroupMembers)>,
+    changed_groups: Query<(), Changed<GroupMembers>>,
+    added_authored_entities: Query<(), Added<ElementId>>,
+    added_generated_parts: Query<(), Added<GeneratedOccurrencePart>>,
     material_query: Query<
         (
             Entity,
@@ -2351,15 +2682,22 @@ fn update_group_edit_muting(
             Without<PreviewOnly>,
         ),
     >,
+    added_materials: Query<(), Added<MeshMaterial3d<StandardMaterial>>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut muted_material: Local<Option<Handle<StandardMaterial>>>,
 ) {
     if edit_context.stack == previous.stack
+        && focus_settings.hide_outside == previous.hide_outside
         && occurrence_edit_context.stack == previous_occurrence.stack
+        && changed_groups.is_empty()
+        && added_authored_entities.is_empty()
+        && added_generated_parts.is_empty()
+        && added_materials.is_empty()
     {
         return;
     }
     previous.stack = edit_context.stack.clone();
+    previous.hide_outside = focus_settings.hide_outside;
     previous_occurrence.stack = occurrence_edit_context.stack.clone();
 
     // One shared translucent material for all dimmed entities. Built once.
@@ -2385,10 +2723,20 @@ fn update_group_edit_muting(
         };
 
     if edit_context.is_root() && occurrence_edit_context.is_root() {
-        for (entity, _, _, is_muted) in &entity_query {
+        for (entity, _, _, is_muted, _, visibility_restore, _) in &entity_query {
             if is_muted {
                 if let Ok(mut ec) = commands.get_entity(entity) {
                     ec.remove::<GroupEditMuted>();
+                }
+            }
+            if let Some(restore) = visibility_restore {
+                if let Ok(mut ec) = commands.get_entity(entity) {
+                    if let Some(visibility) = restore.0 {
+                        ec.insert(visibility);
+                    } else {
+                        ec.remove::<Visibility>();
+                    }
+                    ec.remove::<GroupEditVisibilityRestore>();
                 }
             }
         }
@@ -2404,7 +2752,16 @@ fn update_group_edit_muting(
             .map(|group_id| collect_members_recursive(&group_query, group_id))
             .unwrap_or_default();
 
-        for (entity, element_id, generated_part, is_muted) in &entity_query {
+        for (
+            entity,
+            element_id,
+            generated_part,
+            is_muted,
+            visibility,
+            visibility_restore,
+            is_scene_light,
+        ) in &entity_query
+        {
             let is_active_member = edit_entity_is_active(
                 element_id,
                 generated_part,
@@ -2422,16 +2779,35 @@ fn update_group_edit_muting(
                     ec.insert(GroupEditMuted);
                 }
             }
+
+            if !is_active_member && focus_settings.hide_outside && !is_scene_light {
+                if let Ok(mut ec) = commands.get_entity(entity) {
+                    if visibility_restore.is_none() {
+                        ec.insert(GroupEditVisibilityRestore(visibility.copied()));
+                    }
+                    ec.insert(Visibility::Hidden);
+                }
+            } else if let Some(restore) = visibility_restore {
+                if let Ok(mut ec) = commands.get_entity(entity) {
+                    if let Some(visibility) = restore.0 {
+                        ec.insert(visibility);
+                    } else {
+                        ec.remove::<Visibility>();
+                    }
+                    ec.remove::<GroupEditVisibilityRestore>();
+                }
+            }
         }
 
         for (entity, element_id, generated_part, mat_handle, restore) in &material_query {
-            let should_mute = !edit_entity_is_active(
-                element_id,
-                generated_part,
-                active_group_id,
-                active_occurrence_id,
-                &active_members,
-            );
+            let should_mute = !focus_settings.hide_outside
+                && !edit_entity_is_active(
+                    element_id,
+                    generated_part,
+                    active_group_id,
+                    active_occurrence_id,
+                    &active_members,
+                );
 
             if should_mute {
                 // Swap to the shared muted material, remembering the real handle.
