@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-08-13T14:31:00Z
-- branch: codex/TALOS-viyltwqr-architecture-linked-planting
-- task-id: TALOS-viyltwqr
+- created: 2026-08-13T15:24:00Z
+- branch: codex/TALOS-fxjzahoi-linked-product-proof
+- task-id: TALOS-fxjzahoi
 - target base: origin/main
-- summary: Make linked-model terrain planting atomic, host-owned, reversible, and reload-safe.
-- status: active; verified, preparing integration
+- summary: Add product-level linked insert/plant/refresh proof and repair any narrow defects it exposes.
+- status: complete; verified, preparing integration

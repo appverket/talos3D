@@ -976,9 +976,9 @@ fn insert_bevy_light_direct(entity_mut: &mut EntityWorldMut, node: &SceneLightNo
 fn apply_scene_light_components(commands: &mut Commands, entity: Entity, node: &SceneLightNode) {
     let mut entity_commands = commands.entity(entity);
     entity_commands
-        .remove::<DirectionalLight>()
-        .remove::<PointLight>()
-        .remove::<SpotLight>();
+        .try_remove::<DirectionalLight>()
+        .try_remove::<PointLight>()
+        .try_remove::<SpotLight>();
 
     if !node.enabled {
         return;
@@ -987,7 +987,7 @@ fn apply_scene_light_components(commands: &mut Commands, entity: Entity, node: &
     let color = Color::srgb(node.color[0], node.color[1], node.color[2]);
     match node.kind {
         SceneLightKind::Directional => {
-            entity_commands.insert(DirectionalLight {
+            entity_commands.try_insert(DirectionalLight {
                 color,
                 illuminance: node.intensity.max(0.0),
                 shadow_maps_enabled: node.shadows_enabled,
@@ -995,7 +995,7 @@ fn apply_scene_light_components(commands: &mut Commands, entity: Entity, node: &
             });
         }
         SceneLightKind::Point => {
-            entity_commands.insert(PointLight {
+            entity_commands.try_insert(PointLight {
                 color,
                 intensity: node.intensity.max(0.0),
                 shadow_maps_enabled: node.shadows_enabled,
@@ -1005,7 +1005,7 @@ fn apply_scene_light_components(commands: &mut Commands, entity: Entity, node: &
             });
         }
         SceneLightKind::Spot => {
-            entity_commands.insert(SpotLight {
+            entity_commands.try_insert(SpotLight {
                 color,
                 intensity: node.intensity.max(0.0),
                 shadow_maps_enabled: node.shadows_enabled,
@@ -1244,5 +1244,26 @@ mod tests {
         )
         .expect("light object visibility should deserialize");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn deferred_light_sync_tolerates_document_clear_before_commands_apply() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        let node = SceneLightNode {
+            kind: SceneLightKind::Directional,
+            enabled: true,
+            ..default()
+        };
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            apply_scene_light_components(&mut commands, entity, &node);
+        }
+
+        assert!(world.despawn(entity));
+        queue.apply(&mut world);
+        assert!(world.get_entity(entity).is_err());
     }
 }
