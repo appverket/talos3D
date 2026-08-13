@@ -234,6 +234,7 @@ pub struct NeedsEval;
 #[cfg(test)]
 mod hosted_occurrence_contract_context_tests {
     use super::*;
+    use crate::capability_registry::CapabilityRegistry;
 
     #[test]
     fn hosted_occurrence_contract_context_round_trips_generic_binding() {
@@ -285,6 +286,33 @@ mod hosted_occurrence_contract_context_tests {
 
         assert!(parsed.binding.is_none());
         assert_eq!(parsed.host_element_id, Some(ElementId(10)));
+    }
+
+    #[test]
+    fn deleting_hosted_occurrence_cascades_to_owned_opening_feature() {
+        let occurrence_id = ElementId(20);
+        let opening_id = ElementId(21);
+        let mut identity =
+            OccurrenceIdentity::new(DefinitionId("architecture.window.fixed".into()), 1);
+        identity.hosting = Some(HostedOccurrenceContext {
+            host_element_id: Some(ElementId(10)),
+            opening_element_id: Some(opening_id),
+            binding: Some(HostedPlacementBinding {
+                host_feature_element_id: Some(opening_id),
+                ..Default::default()
+            }),
+            anchors: Vec::new(),
+        });
+
+        let mut world = World::new();
+        world.spawn((occurrence_id, identity));
+        let mut registry = CapabilityRegistry::default();
+        registry.register_factory(OccurrenceFactory);
+
+        assert_eq!(
+            registry.expand_delete_ids(&world, &[occurrence_id]),
+            vec![occurrence_id, opening_id],
+        );
     }
 }
 
@@ -891,6 +919,44 @@ impl AuthoredEntityFactory for OccurrenceFactory {
             count + 12
         } else {
             0
+        }
+    }
+
+    fn collect_delete_dependencies(
+        &self,
+        world: &World,
+        requested_ids: &[ElementId],
+        out: &mut Vec<ElementId>,
+    ) {
+        // A hosted occurrence owns the host feature created for its placement.
+        // Deleting only the filling while leaving that internal opening behind
+        // produces a stale void which is persisted and materializes again on
+        // reload. The opening is deliberately not user-editable on its own, so
+        // occurrence deletion is the authoritative way to close it.
+        let mut query = world
+            .try_query::<(&ElementId, &OccurrenceIdentity)>()
+            .unwrap();
+        for (element_id, identity) in query.iter(world) {
+            if !requested_ids.contains(element_id) {
+                continue;
+            }
+            let Some(hosting) = identity.hosting.as_ref() else {
+                continue;
+            };
+            for opening_id in [
+                hosting.opening_element_id,
+                hosting
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.host_feature_element_id),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !out.contains(&opening_id) {
+                    out.push(opening_id);
+                }
+            }
         }
     }
 }
