@@ -128,6 +128,11 @@ instance's root transform and stable source-to-scene mappings whenever the
 source identities remain available. Linked instances cannot be ungrouped;
 breaking the group would also break the live relationship.
 
+Placement capabilities treat the linked root as one object. Imported members
+cannot be edited directly; edit the source model or move/rotate the linked root.
+Host-side placement geometry may remain attached to that root and is preserved
+when the source refreshes, without being written into the source file.
+
 ## Capability-Specific Workflows
 
 Some interactions only appear when a capability is loaded. For example:

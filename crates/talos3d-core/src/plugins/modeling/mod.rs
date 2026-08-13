@@ -382,6 +382,31 @@ impl Plugin for ModelingPlugin {
             )
             .register_command(
                 CommandDescriptor {
+                    id: "modeling.inspect_linked_model_placement_subject".to_string(),
+                    label: "Inspect Linked Model Placement Subject".to_string(),
+                    description: "Resolve a linked instance as one domain-neutral placement subject, including source-owned members, host dependents, bounds, refresh-safe anchor, and mapping validity".to_string(),
+                    category: CommandCategory::View,
+                    parameters: Some(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "instance_root_id": { "type": "integer" },
+                            "group_id": { "type": "integer", "description": "Deprecated alias of instance_root_id" }
+                        },
+                        "additionalProperties": false
+                    })),
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Return applicable, not_applicable, or stale_mapping before a placement capability mutates anything".to_string()),
+                    requires_selection: false,
+                    show_in_menu: false,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: Some("modeling".to_string()),
+                },
+                linked_model::execute_inspect_linked_model_placement_subject,
+            )
+            .register_command(
+                CommandDescriptor {
                     id: "modeling.place_linked_model".to_string(),
                     label: "Place Linked Model".to_string(),
                     description: "Choose a Talos3D project file and place it into the current model as a live linked model".to_string(),

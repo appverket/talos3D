@@ -11314,6 +11314,16 @@ fn ensure_user_editable_entity(
     operation: &str,
 ) -> ApiResult<()> {
     ensure_entity_exists(world, element_id)?;
+    if let Some((instance_root_id, source_id)) =
+        crate::plugins::modeling::linked_model::linked_model_source_owner(world, element_id)
+    {
+        if element_id != instance_root_id {
+            return Err(format!(
+                "Entity {} is source-owned linked-model content (source id {}) and cannot be {operation} directly; edit source document or transform linked instance root {} instead",
+                element_id.0, source_id.0, instance_root_id.0
+            ));
+        }
+    }
     let Some(entity) = find_entity_by_element_id_readonly(world, element_id) else {
         return Err(format!("Entity not found: {}", element_id.0));
     };

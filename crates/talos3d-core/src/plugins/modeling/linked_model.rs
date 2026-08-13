@@ -25,7 +25,8 @@ use crate::{
             group::{
                 collect_group_members_recursive, compose_snapshot_into_frame,
                 compute_group_bounds_from_world, compute_group_bounds_in_frame_from_world,
-                GroupFrame, GroupMembers, GroupSnapshot, LinkedModelIdMapping, LinkedModelRef,
+                group_frame, group_frame_change_snapshots, is_group, GroupFrame, GroupMembers,
+                GroupSnapshot, LinkedModelIdMapping, LinkedModelRef,
             },
             primitives::TriangleMesh,
             snapshots::{EditableMeshSnapshot, TriangleMeshSnapshot},
@@ -36,6 +37,7 @@ use crate::{
         },
         selection::Selected,
         storage::Storage,
+        transform::{apply_transform_plan_modifiers, TransformMode},
     },
 };
 
@@ -73,6 +75,100 @@ pub struct LinkedModelRelationshipMapping {
     pub scene_id: u64,
 }
 
+/// A domain-neutral placement view over a linked instance.
+///
+/// Source-owned scene ids are refreshed from the external document and must not
+/// be edited individually. Host dependents belong to the containing document;
+/// terrain foundations and other derived placement representations attach there
+/// and survive source refresh without leaking into the linked source.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LinkedModelPlacementSubject {
+    pub subject_kind: &'static str,
+    pub relationship: LinkedModelRelationship,
+    pub source_owned_scene_ids: Vec<u64>,
+    pub host_dependent_scene_ids: Vec<u64>,
+    pub bounds: LinkedModelPlacementBounds,
+    pub dependency_anchor: LinkedModelDependencyAnchor,
+    pub mapping_fingerprint: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct LinkedModelPlacementBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+/// Stable source-side identity used by host-owned dependent representations.
+///
+/// `scene_id` is deliberately not stored: refresh is allowed to reallocate a
+/// scene id, and resolution follows the source id through the live mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LinkedModelDependencyAnchor {
+    pub instance_root_id: u64,
+    pub source_id: u64,
+    pub observed_content_hash: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ResolvedLinkedModelDependencyAnchor {
+    pub instance_root_id: u64,
+    pub source_id: u64,
+    pub scene_id: u64,
+    pub loaded_content_hash: u64,
+    pub status: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinkedModelPlacementError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for LinkedModelPlacementError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for LinkedModelPlacementError {}
+
+/// A single rigid placement operation. Domain capabilities build this plan for
+/// preview and commit instead of translating linked members independently.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LinkedModelPlacementOperation {
+    Translate { delta: Vec3 },
+    Rotate { rotation: Quat, pivot: Option<Vec3> },
+}
+
+/// Authored before/after snapshots for one linked-instance placement.
+///
+/// The plan is pure until its command is queued. Callers may compose additional
+/// host-owned dependent snapshots into the same command before committing.
+#[derive(Clone)]
+pub struct LinkedModelPlacementPlan {
+    pub subject: LinkedModelPlacementSubject,
+    before: Vec<BoxedEntity>,
+    after: Vec<BoxedEntity>,
+}
+
+impl LinkedModelPlacementPlan {
+    pub fn before(&self) -> &[BoxedEntity] {
+        &self.before
+    }
+
+    pub fn after(&self) -> &[BoxedEntity] {
+        &self.after
+    }
+
+    pub fn into_apply_command(self, label: &'static str) -> ApplyEntityChangesCommand {
+        ApplyEntityChangesCommand {
+            label,
+            before: self.before,
+            after: self.after,
+        }
+    }
+}
+
 /// Inspect one linked-model relationship without loading or mutating its
 /// source document.
 pub fn linked_model_relationship(
@@ -87,7 +183,17 @@ pub fn linked_model_relationship(
             instance_root_id.0
         )
     })?;
-    let mut root_member_ids = members.member_ids.iter().map(|id| id.0).collect::<Vec<_>>();
+    let mapped_scene_ids = linked
+        .source_to_scene_ids
+        .iter()
+        .map(|mapping| mapping.scene_id)
+        .collect::<HashSet<_>>();
+    let mut root_member_ids = members
+        .member_ids
+        .iter()
+        .filter(|id| mapped_scene_ids.contains(id))
+        .map(|id| id.0)
+        .collect::<Vec<_>>();
     root_member_ids.sort_unstable();
     let mut source_to_scene_ids = linked
         .source_to_scene_ids
@@ -112,6 +218,299 @@ pub fn linked_model_relationship(
         },
         root_member_ids,
         source_to_scene_ids,
+    })
+}
+
+fn placement_error(code: &'static str, message: impl Into<String>) -> LinkedModelPlacementError {
+    LinkedModelPlacementError {
+        code,
+        message: message.into(),
+    }
+}
+
+/// Resolve and validate the placement subject for a linked instance.
+///
+/// Validation is intentionally complete before any edit plan is built. A
+/// missing/duplicate mapping therefore refuses safely without partial movement.
+pub fn linked_model_placement_subject(
+    world: &World,
+    instance_root_id: ElementId,
+) -> Result<LinkedModelPlacementSubject, LinkedModelPlacementError> {
+    let relationship = linked_model_relationship(world, instance_root_id).map_err(|message| {
+        placement_error(
+            "not_applicable",
+            format!(
+                "Element {} is not an applicable linked-model placement subject: {message}",
+                instance_root_id.0
+            ),
+        )
+    })?;
+    let members = group_members(world, instance_root_id).ok_or_else(|| {
+        placement_error(
+            "stale_mapping",
+            format!("Linked instance root {} is missing", instance_root_id.0),
+        )
+    })?;
+
+    let mut source_ids = HashSet::new();
+    let mut scene_ids = HashSet::new();
+    for mapping in &relationship.source_to_scene_ids {
+        if !source_ids.insert(mapping.source_id) {
+            return Err(placement_error(
+                "stale_mapping",
+                format!("Source id {} is mapped more than once", mapping.source_id),
+            ));
+        }
+        if !scene_ids.insert(mapping.scene_id) {
+            return Err(placement_error(
+                "stale_mapping",
+                format!("Scene id {} is mapped more than once", mapping.scene_id),
+            ));
+        }
+        capture_snapshot(world, ElementId(mapping.scene_id)).map_err(|_| {
+            placement_error(
+                "stale_mapping",
+                format!(
+                    "Mapped source id {} points to missing scene id {}",
+                    mapping.source_id, mapping.scene_id
+                ),
+            )
+        })?;
+    }
+    if !relationship.source_to_scene_ids.iter().any(|mapping| {
+        mapping.source_id == relationship.source_root_id
+            && mapping.scene_id == relationship.instance_root_id
+    }) {
+        return Err(placement_error(
+            "stale_mapping",
+            format!(
+                "Linked source root {} does not resolve to instance root {}",
+                relationship.source_root_id, relationship.instance_root_id
+            ),
+        ));
+    }
+
+    let root_member_ids = members.member_ids.iter().copied().collect::<HashSet<_>>();
+    for root_member_id in &relationship.root_member_ids {
+        let root_member_id = ElementId(*root_member_id);
+        if !root_member_ids.contains(&root_member_id) || !scene_ids.contains(&root_member_id.0) {
+            return Err(placement_error(
+                "stale_mapping",
+                format!(
+                    "Linked root member {} is absent from the current source mapping",
+                    root_member_id.0
+                ),
+            ));
+        }
+    }
+
+    let source_root_members = relationship
+        .root_member_ids
+        .iter()
+        .copied()
+        .map(ElementId)
+        .collect::<Vec<_>>();
+    let bounds = compute_group_bounds_from_world(world, &source_root_members).ok_or_else(|| {
+        placement_error(
+            "not_applicable",
+            format!(
+                "Linked instance {} has no resolved placement bounds",
+                instance_root_id.0
+            ),
+        )
+    })?;
+
+    let mut source_owned_scene_ids = scene_ids.iter().copied().collect::<Vec<_>>();
+    source_owned_scene_ids.sort_unstable();
+    let mut host_dependent_scene_ids = members
+        .member_ids
+        .iter()
+        .filter(|id| !scene_ids.contains(&id.0))
+        .map(|id| id.0)
+        .collect::<Vec<_>>();
+    host_dependent_scene_ids.sort_unstable();
+
+    let mut hasher = DefaultHasher::new();
+    relationship.source_path.hash(&mut hasher);
+    relationship.source_root_id.hash(&mut hasher);
+    relationship.loaded_content_hash.hash(&mut hasher);
+    for mapping in &relationship.source_to_scene_ids {
+        mapping.source_id.hash(&mut hasher);
+        mapping.scene_id.hash(&mut hasher);
+    }
+
+    Ok(LinkedModelPlacementSubject {
+        subject_kind: "linked_model_placement_subject",
+        dependency_anchor: LinkedModelDependencyAnchor {
+            instance_root_id: relationship.instance_root_id,
+            source_id: relationship.source_root_id,
+            observed_content_hash: relationship.loaded_content_hash,
+        },
+        mapping_fingerprint: hasher.finish(),
+        bounds: LinkedModelPlacementBounds {
+            min: bounds.min.to_array(),
+            max: bounds.max.to_array(),
+        },
+        relationship,
+        source_owned_scene_ids,
+        host_dependent_scene_ids,
+    })
+}
+
+/// Resolve a source-stable dependency anchor against the current mapping.
+/// A changed content hash reports `rebased`; removal of the anchored source id
+/// is a structured stale-mapping error.
+pub fn resolve_linked_model_dependency_anchor(
+    world: &World,
+    anchor: LinkedModelDependencyAnchor,
+) -> Result<ResolvedLinkedModelDependencyAnchor, LinkedModelPlacementError> {
+    let subject = linked_model_placement_subject(world, ElementId(anchor.instance_root_id))?;
+    let mapping = subject
+        .relationship
+        .source_to_scene_ids
+        .iter()
+        .find(|mapping| mapping.source_id == anchor.source_id)
+        .ok_or_else(|| {
+            placement_error(
+                "stale_mapping",
+                format!(
+                    "Anchored source id {} no longer exists in linked instance {}",
+                    anchor.source_id, anchor.instance_root_id
+                ),
+            )
+        })?;
+    Ok(ResolvedLinkedModelDependencyAnchor {
+        instance_root_id: anchor.instance_root_id,
+        source_id: anchor.source_id,
+        scene_id: mapping.scene_id,
+        loaded_content_hash: subject.relationship.loaded_content_hash,
+        status: if anchor.observed_content_hash == subject.relationship.loaded_content_hash {
+            "current"
+        } else {
+            "rebased"
+        },
+    })
+}
+
+/// Find the linked instance that owns a source-derived scene entity.
+pub fn linked_model_source_owner(
+    world: &World,
+    scene_id: ElementId,
+) -> Option<(ElementId, ElementId)> {
+    let mut roots = world
+        .iter_entities()
+        .filter_map(|entity_ref| {
+            let root_id = *entity_ref.get::<ElementId>()?;
+            let linked = entity_ref.get::<GroupMembers>()?.linked_model.as_ref()?;
+            linked
+                .source_to_scene_ids
+                .iter()
+                .find(|mapping| mapping.scene_id == scene_id)
+                .map(|mapping| (root_id, mapping.source_id))
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|(root_id, source_id)| (root_id.0, source_id.0));
+    roots.into_iter().next()
+}
+
+/// Build one atomic authored edit plan for translating or rotating a linked
+/// instance. The same `after` snapshots can drive a live preview and the
+/// committed [`ApplyEntityChangesCommand`].
+pub fn plan_linked_model_placement(
+    world: &World,
+    instance_root_id: ElementId,
+    operation: LinkedModelPlacementOperation,
+) -> Result<LinkedModelPlacementPlan, LinkedModelPlacementError> {
+    let subject = linked_model_placement_subject(world, instance_root_id)?;
+    let all_member_ids = collect_group_members_recursive(world, instance_root_id);
+    let member_set = all_member_ids.iter().copied().collect::<HashSet<_>>();
+    let leaf_ids = all_member_ids
+        .iter()
+        .copied()
+        .filter(|id| !is_group(world, *id))
+        .collect::<Vec<_>>();
+    let pivot = match operation {
+        LinkedModelPlacementOperation::Rotate {
+            pivot: Some(pivot), ..
+        } => pivot,
+        _ => {
+            let min = Vec3::from_array(subject.bounds.min);
+            let max = Vec3::from_array(subject.bounds.max);
+            (min + max) * 0.5
+        }
+    };
+
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for leaf_id in leaf_ids {
+        let snapshot = capture_snapshot(world, leaf_id).map_err(|message| {
+            placement_error(
+                "stale_mapping",
+                format!(
+                    "Could not capture placement member {}: {message}",
+                    leaf_id.0
+                ),
+            )
+        })?;
+        if snapshot
+            .transform_parent()
+            .is_some_and(|parent_id| member_set.contains(&parent_id))
+        {
+            continue;
+        }
+        let placed = match operation {
+            LinkedModelPlacementOperation::Translate { delta } => snapshot.translate_by(delta),
+            LinkedModelPlacementOperation::Rotate { rotation, .. } => {
+                let target = pivot + rotation * (snapshot.center() - pivot);
+                let rotated = snapshot.rotate_by(rotation);
+                rotated.translate_by(target - rotated.center())
+            }
+        };
+        before.push(snapshot);
+        after.push(placed);
+    }
+
+    let mut group_ids = vec![instance_root_id];
+    group_ids.extend(
+        all_member_ids
+            .iter()
+            .copied()
+            .filter(|id| is_group(world, *id)),
+    );
+    group_ids.sort_by_key(|id| id.0);
+    group_ids.dedup();
+    for group_id in group_ids {
+        let old = group_frame(world, group_id).unwrap_or_default();
+        let new = match operation {
+            LinkedModelPlacementOperation::Translate { delta } => GroupFrame {
+                translation: old.translation + delta,
+                rotation: old.rotation,
+            },
+            LinkedModelPlacementOperation::Rotate { rotation, .. } => GroupFrame {
+                translation: pivot + rotation * (old.translation - pivot),
+                rotation: rotation * old.rotation,
+            },
+        };
+        if let Some((group_before, group_after)) =
+            group_frame_change_snapshots(world, group_id, new)
+        {
+            before.push(group_before);
+            after.push(group_after);
+        }
+    }
+
+    let mode = match operation {
+        LinkedModelPlacementOperation::Translate { .. } => TransformMode::Moving,
+        LinkedModelPlacementOperation::Rotate { .. } => TransformMode::Rotating,
+    };
+    apply_transform_plan_modifiers(world, mode, &mut before, &mut after);
+    before.sort_by_key(snapshot_dependency_order);
+    after.sort_by_key(snapshot_dependency_order);
+
+    Ok(LinkedModelPlacementPlan {
+        subject,
+        before,
+        after,
     })
 }
 
@@ -258,6 +657,43 @@ pub fn execute_inspect_linked_models(
             "count": relationships.len(),
             "relationships": relationships,
         })),
+        ..CommandResult::empty()
+    })
+}
+
+/// Read-only structured applicability probe for placement capabilities.
+pub fn execute_inspect_linked_model_placement_subject(
+    world: &mut World,
+    params: &Value,
+) -> Result<CommandResult, String> {
+    let instance_root_id = params
+        .get("instance_root_id")
+        .or_else(|| params.get("group_id"))
+        .and_then(Value::as_u64)
+        .map(ElementId)
+        .or_else(|| {
+            world
+                .query_filtered::<(&ElementId, &GroupMembers), With<Selected>>()
+                .iter(world)
+                .find_map(|(id, members)| members.linked_model.is_some().then_some(*id))
+        })
+        .ok_or_else(|| {
+            "Pass instance_root_id (or select one linked-model instance root)".to_string()
+        })?;
+
+    let output = match linked_model_placement_subject(world, instance_root_id) {
+        Ok(subject) => json!({
+            "status": "applicable",
+            "subject": subject,
+        }),
+        Err(error) => json!({
+            "status": error.code,
+            "instance_root_id": instance_root_id.0,
+            "message": error.message,
+        }),
+    };
+    Ok(CommandResult {
+        output: Some(output),
         ..CommandResult::empty()
     })
 }
@@ -948,6 +1384,26 @@ fn apply_linked_snapshots(
         .cloned()
         .ok_or_else(|| "Linked model file is missing its root group".to_string())?;
     let frame = current_group_frame(world, group_id);
+    // Root members absent from the source mapping are owned by the host
+    // document (for example a terrain-conforming foundation). Refresh may
+    // replace source-owned members, but must preserve these dependents and must
+    // never serialize them back into the linked source.
+    let mapped_scene_ids = linked
+        .source_to_scene_ids
+        .iter()
+        .map(|mapping| mapping.scene_id)
+        .collect::<HashSet<_>>();
+    let host_dependent_root_members = group_members(world, group_id)
+        .map(|members| {
+            members
+                .member_ids
+                .iter()
+                .copied()
+                .filter(|member_id| !mapped_scene_ids.contains(member_id))
+                .filter(|member_id| capture_snapshot(world, *member_id).is_ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let id_map = build_linked_instance_id_map(world, group_id, &linked, &snapshots);
     let new_scene_ids: HashSet<ElementId> = snapshots
         .iter()
@@ -994,11 +1450,14 @@ fn apply_linked_snapshots(
     linked
         .source_to_scene_ids
         .sort_by_key(|mapping| (mapping.source_id.0, mapping.scene_id.0));
-    let root_member_ids = root
+    let mut root_member_ids = root
         .member_ids
         .iter()
         .filter_map(|source_id| id_map.get(source_id).copied())
-        .collect();
+        .collect::<Vec<_>>();
+    root_member_ids.extend(host_dependent_root_members);
+    root_member_ids.sort_by_key(|id| id.0);
+    root_member_ids.dedup();
     let group_after = linked_group_snapshot(world, group_id, root_member_ids, frame, Some(linked))?;
     group_after.apply_to(world);
     bump_allocator_past(world, &new_scene_ids);
@@ -1385,6 +1844,17 @@ mod tests {
         ElementId(3)
     }
 
+    fn placed_house(world: &mut World, path: &Path) -> ElementId {
+        let result = execute_place_linked_model(
+            world,
+            &json!({
+                "path": path.to_string_lossy()
+            }),
+        )
+        .expect("linked model should be placed");
+        ElementId(result.created[0])
+    }
+
     #[test]
     fn create_linked_model_normalizes_foundation_minimum_to_xz_plane() {
         let mut world = test_world();
@@ -1525,6 +1995,213 @@ mod tests {
             changed["relationships"][0]["source_state"]["status"],
             "changed"
         );
+    }
+
+    #[test]
+    fn placement_subject_moves_non_flat_delta_atomically_with_history() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({ "group_id": source_group.0, "path": path.to_string_lossy() }),
+        )
+        .unwrap();
+
+        let mut target = test_world();
+        let root_id = placed_house(&mut target, &path);
+        apply_pending_history_commands_for_test(&mut target);
+        let subject = linked_model_placement_subject(&target, root_id).unwrap();
+        assert_eq!(subject.subject_kind, "linked_model_placement_subject");
+        assert_eq!(subject.source_owned_scene_ids.len(), 3);
+        assert!(subject.host_dependent_scene_ids.is_empty());
+        assert_eq!(subject.dependency_anchor.source_id, 3);
+
+        let initial_bounds = compute_group_bounds_from_world(&target, &[root_id]).unwrap();
+        let delta = Vec3::new(4.0, 2.5, -3.0);
+        let plan = plan_linked_model_placement(
+            &target,
+            root_id,
+            LinkedModelPlacementOperation::Translate { delta },
+        )
+        .unwrap();
+        assert_eq!(
+            plan.subject.mapping_fingerprint,
+            subject.mapping_fingerprint
+        );
+        assert!(plan
+            .after()
+            .iter()
+            .any(|snapshot| snapshot.element_id() == root_id));
+        crate::plugins::commands::enqueue_apply_entity_changes(
+            &mut target,
+            plan.into_apply_command("Place linked instance"),
+        );
+        apply_pending_history_commands_for_test(&mut target);
+
+        let moved_bounds = compute_group_bounds_from_world(&target, &[root_id]).unwrap();
+        assert!((moved_bounds.min - (initial_bounds.min + delta)).length() < 1e-4);
+        assert!((moved_bounds.max - (initial_bounds.max + delta)).length() < 1e-4);
+        assert_eq!(
+            linked_model_placement_subject(&target, root_id)
+                .unwrap()
+                .relationship
+                .frame
+                .translation,
+            delta.to_array()
+        );
+
+        target.resource_mut::<PendingCommandQueue>().queue_undo();
+        apply_pending_history_commands_for_test(&mut target);
+        let undone = compute_group_bounds_from_world(&target, &[root_id]).unwrap();
+        assert!((undone.min - initial_bounds.min).length() < 1e-4);
+        target.resource_mut::<PendingCommandQueue>().queue_redo();
+        apply_pending_history_commands_for_test(&mut target);
+        let redone = compute_group_bounds_from_world(&target, &[root_id]).unwrap();
+        assert!((redone.min - moved_bounds.min).length() < 1e-4);
+        assert!(linked_model_relationship(&target, root_id).is_ok());
+    }
+
+    #[test]
+    fn placement_subject_rotates_about_explicit_pivot_without_breaking_link() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({ "group_id": source_group.0, "path": path.to_string_lossy() }),
+        )
+        .unwrap();
+
+        let mut target = test_world();
+        let root_id = placed_house(&mut target, &path);
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let plan = plan_linked_model_placement(
+            &target,
+            root_id,
+            LinkedModelPlacementOperation::Rotate {
+                rotation,
+                pivot: Some(Vec3::ZERO),
+            },
+        )
+        .unwrap();
+        for snapshot in plan.after() {
+            snapshot.apply_to(&mut target);
+        }
+        let relationship = linked_model_relationship(&target, root_id).unwrap();
+        let actual_rotation = Quat::from_array(relationship.frame.rotation);
+        assert!(
+            actual_rotation.dot(rotation).abs() > 0.99999,
+            "expected {rotation:?}, got {actual_rotation:?}"
+        );
+        assert_eq!(relationship.source_to_scene_ids.len(), 3);
+        assert!(linked_model_placement_subject(&target, root_id).is_ok());
+    }
+
+    #[test]
+    fn stale_placement_mapping_refuses_without_partial_mutation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({ "group_id": source_group.0, "path": path.to_string_lossy() }),
+        )
+        .unwrap();
+
+        let mut target = test_world();
+        let root_id = placed_house(&mut target, &path);
+        let relationship = linked_model_relationship(&target, root_id).unwrap();
+        let missing_id = relationship
+            .source_to_scene_ids
+            .iter()
+            .find(|mapping| mapping.scene_id != root_id.0)
+            .map(|mapping| ElementId(mapping.scene_id))
+            .unwrap();
+        capture_snapshot(&target, missing_id)
+            .unwrap()
+            .remove_from(&mut target);
+        let frame_before = group_frame(&target, root_id).unwrap();
+
+        let error = plan_linked_model_placement(
+            &target,
+            root_id,
+            LinkedModelPlacementOperation::Translate { delta: Vec3::Y },
+        )
+        .err()
+        .expect("stale mapping should refuse");
+        assert_eq!(error.code, "stale_mapping");
+        assert_eq!(group_frame(&target, root_id).unwrap(), frame_before);
+
+        let inspected = execute_inspect_linked_model_placement_subject(
+            &mut target,
+            &json!({ "instance_root_id": root_id.0 }),
+        )
+        .unwrap()
+        .output
+        .unwrap();
+        assert_eq!(inspected["status"], "stale_mapping");
+    }
+
+    #[test]
+    fn refresh_preserves_host_dependents_and_rebases_source_anchor() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("house.talos3d");
+        let mut source = test_world();
+        let source_group = spawn_house_group(&mut source);
+        execute_create_linked_model(
+            &mut source,
+            &json!({ "group_id": source_group.0, "path": path.to_string_lossy() }),
+        )
+        .unwrap();
+
+        let mut target = test_world();
+        let root_id = placed_house(&mut target, &path);
+        let host_id = ElementId(500);
+        PrimitiveSnapshot {
+            element_id: host_id,
+            primitive: BoxPrimitive {
+                centre: Vec3::new(0.0, -0.1, 0.0),
+                half_extents: Vec3::new(2.0, 0.1, 2.0),
+            },
+            rotation: ShapeRotation::default(),
+            material_assignment: None,
+            opening_context: None,
+            subobject_display_overrides: None,
+        }
+        .apply_to(&mut target);
+        let (_, membership_after) =
+            crate::plugins::modeling::group::group_membership_add_snapshots(
+                &target, root_id, host_id,
+            )
+            .unwrap();
+        membership_after.apply_to(&mut target);
+        let anchor = linked_model_placement_subject(&target, root_id)
+            .unwrap()
+            .dependency_anchor;
+
+        let mut source_bytes = std::fs::read(&path).unwrap();
+        source_bytes.push(b'\n');
+        std::fs::write(&path, source_bytes).unwrap();
+        execute_refresh_linked_models(
+            &mut target,
+            &json!({ "group_ids": [root_id.0], "force": true }),
+        )
+        .unwrap();
+
+        let refreshed = linked_model_placement_subject(&target, root_id).unwrap();
+        assert_eq!(refreshed.host_dependent_scene_ids, vec![host_id.0]);
+        assert!(group_members(&target, root_id)
+            .unwrap()
+            .member_ids
+            .contains(&host_id));
+        assert!(find_entity(&target, host_id).is_some());
+        let resolved = resolve_linked_model_dependency_anchor(&target, anchor).unwrap();
+        assert_eq!(resolved.scene_id, root_id.0);
+        assert_eq!(resolved.status, "rebased");
     }
 
     #[test]

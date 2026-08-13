@@ -1552,6 +1552,67 @@ fn set_property_validates_entity_specific_fields() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn source_owned_linked_member_rejects_direct_property_edit() {
+    use crate::plugins::modeling::group::{
+        GroupFactory, GroupFrame, GroupSnapshot, LinkedModelIdMapping, LinkedModelRef,
+    };
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(GroupFactory);
+    let member_id = handle_create_entity(
+        &mut world,
+        json!({
+            "type": "box",
+            "centre": [0.0, 0.0, 0.0],
+            "half_extents": [1.0, 2.0, 3.0]
+        }),
+    )
+    .unwrap();
+    let root_id = ElementId(900);
+    GroupSnapshot {
+        element_id: root_id,
+        name: "Linked placement subject".to_string(),
+        member_ids: vec![ElementId(member_id)],
+        frame: GroupFrame::identity(),
+        composite: None,
+        linked_model: Some(LinkedModelRef {
+            path: "linked.talos3d".to_string(),
+            source_root_id: ElementId(10),
+            source_to_scene_ids: vec![
+                LinkedModelIdMapping {
+                    source_id: ElementId(10),
+                    scene_id: root_id,
+                },
+                LinkedModelIdMapping {
+                    source_id: ElementId(11),
+                    scene_id: ElementId(member_id),
+                },
+            ],
+            content_hash: 42,
+        }),
+        cached_bounds: None,
+    }
+    .apply_to(&mut world);
+
+    let error = handle_set_property(
+        &mut world,
+        member_id,
+        "half_extents",
+        json!([4.0, 5.0, 6.0]),
+    )
+    .expect_err("source-owned linked member should be read-only");
+    assert!(error.contains("source-owned linked-model content"));
+    assert!(error.contains("transform linked instance root 900"));
+
+    let updated = handle_set_property(&mut world, root_id.0, "name", json!("Moved link"))
+        .expect("the host-owned instance root remains editable");
+    assert_eq!(updated["Group"]["name"], "Moved link");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn toolbar_handlers_list_and_update_toolbar_layout() {
     let mut world = init_model_api_test_world();
 

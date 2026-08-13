@@ -86,6 +86,15 @@ Downstream domain capabilities should resolve their semantics through the
 reported instance root and identity map rather than treating mapped members as
 ordinary host-owned geometry.
 
+Use `modeling.inspect_linked_model_placement_subject` before a domain placement
+operation. Pass `instance_root_id` (or select one linked root). An applicable
+result includes resolved bounds, source-owned ids, host-dependent ids, a
+mapping fingerprint, and a refresh-safe source anchor. `not_applicable` and
+`stale_mapping` are structured non-mutating outcomes. Transform the returned
+instance root as one subject; direct `transform`, `set_property`, or delete
+requests against mapped source-owned members are rejected. Host-owned dependent
+representations remain attached to the instance when its source is refreshed.
+
 `get_camera` reports both the orbit controller's navigation values and the
 actual live `view_position`, `view_forward`, `view_up`, and `view_right` axes.
 The latter are authoritative while a Draft plane constrains orientation,

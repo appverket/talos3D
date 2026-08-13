@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-08-13T10:50:17Z
-- branch: codex/TALOS-hsjklfrn-linked-model-lifecycle
-- task-id: TALOS-hsjklfrn
+- created: 2026-08-13T12:15:00Z
+- branch: codex/TALOS-skvpvbse-linked-placement-subject
+- task-id: TALOS-skvpvbse
 - target base: origin/main
-- summary: Formalize the inspectable linked-model relationship and lifecycle in talos3d-core.
-- status: awaiting merge; review https://github.com/appverket/talos3D/pull/25
+- summary: Expose a domain-neutral, refresh-safe linked-instance placement subject and atomic edit plan.
+- status: active; verified, preparing integration

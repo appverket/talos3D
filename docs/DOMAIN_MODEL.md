@@ -75,6 +75,21 @@ ids and independent instance transforms. Linked members remain source-owned;
 host-document capabilities should consume the relationship and instance root
 instead of editing mapped members as if they were local content.
 
+Placement capabilities consume `LinkedModelPlacementSubject`, which resolves
+the instance as one bounded movable subject and validates its identity map
+before producing an authored edit plan. The subject separates source-owned
+scene ids from host-dependent ids. A host may attach derived placement content
+(for example, a surface-conforming support) to the instance root without that
+content becoming part of the external source. Refresh replaces mapped source
+members while retaining those host-owned dependents.
+
+Dependencies that need to survive refresh store a source-side
+`LinkedModelDependencyAnchor`, not a transient mapped scene id. Resolving the
+anchor reports `current`, `rebased` after a source revision, or a structured
+`stale_mapping` refusal when its source identity disappeared. Translation and
+rotation use one pure before/after placement plan for preview, command commit,
+and history; a stale subject produces no mutation.
+
 This contract is domain-neutral. Core does not infer that a linked model is a
 building, vehicle, site, or any other domain object. Domain capabilities may
 inspect the mapped authored content and contribute their own typed affordances
