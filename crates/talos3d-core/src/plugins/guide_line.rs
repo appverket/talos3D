@@ -1509,7 +1509,7 @@ impl Plugin for GuideLinePlugin {
                 },
                 execute_place_guide_line,
             )
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_guide_lines".to_string(),
                     label: "Guide Lines".to_string(),
@@ -1526,6 +1526,7 @@ impl Plugin for GuideLinePlugin {
                     capability_id: Some(crate::plugins::drawing_export::DRAFTING_CAPABILITY_ID.to_string()),
                 },
                 execute_toggle_guide_line_visibility,
+                guide_lines_shown,
             )
             .register_toolbar(ToolbarDescriptor {
                 id: "reference_geometry".to_string(),
@@ -1667,4 +1668,12 @@ mod tests {
             .iter()
             .all(|snap_point| snap_point.kind == SnapKind::Endpoint));
     }
+}
+
+/// Reports whether this view mode is currently on, so its menu row can show a
+/// checkmark rather than leaving the state invisible.
+fn guide_lines_shown(world: &World) -> bool {
+    world
+        .get_resource::<GuideLineVisibility>()
+        .is_some_and(|state| state.show_all)
 }

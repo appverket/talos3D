@@ -616,6 +616,11 @@ fn load_from_path(world: &mut World, path: &Path) -> Result<(), String> {
     doc_state.mark_saved(path.to_path_buf());
     drop(doc_state);
 
+    // Frame what was just opened. Without this the camera keeps whatever pose it
+    // had, so opening a project routinely showed an empty grid with the model
+    // off the edge of the viewport until the user found Zoom To Extents.
+    crate::plugins::command_registry::frame_camera_on_document_open(world);
+
     record_recent_path(world, path.to_path_buf());
     if let Some(mut autosave) = world.get_resource_mut::<RecoveryAutosaveState>() {
         autosave.rotate_document();

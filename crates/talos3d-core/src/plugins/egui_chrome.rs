@@ -27,8 +27,8 @@ use crate::plugins::{
     },
     command_registry::{
         ordered_menu_categories, queue_command_invocation_resource, viewport_context_commands,
-        CommandDescriptor, CommandRegistry, IconRegistry, PendingCommandInvocations,
-        ViewportContextCommandRegistry,
+        CommandCategory, CommandDescriptor, CommandRegistry, CommandToggleStates, IconRegistry,
+        PendingCommandInvocations, ViewportContextCommandRegistry,
     },
     commands::{
         ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
@@ -155,12 +155,22 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "modeling.move",
             "modeling.rotate",
             "modeling.scale",
+            "core.set_pivot",
             "core.clear_pivot",
         ],
     },
     MenuSubmenuSpec {
         label: "Structure",
         command_ids: &["modeling.group", "modeling.ungroup"],
+    },
+    MenuSubmenuSpec {
+        label: "Linked Models",
+        command_ids: &[
+            "modeling.create_linked_model_from_selection",
+            "modeling.open_linked_model",
+            "modeling.refresh_linked_models",
+            "modeling.open_selected_occurrence_definition",
+        ],
     },
 ];
 
@@ -219,6 +229,10 @@ const TOOLS_MENU_GROUPS: &[MenuSubmenuSpec] = &[MenuSubmenuSpec {
 }];
 
 const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
+    MenuSubmenuSpec {
+        label: "Find",
+        command_ids: &["core.show_command_palette"],
+    },
     MenuSubmenuSpec {
         label: "Zoom",
         command_ids: &["core.zoom_to_extents", "core.zoom_to_selection"],
@@ -281,6 +295,133 @@ const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
         ],
     },
 ];
+
+#[cfg(test)]
+mod menu_presentation_tests {
+    use super::*;
+
+    #[test]
+    fn macos_shortcuts_render_as_native_glyphs_in_canonical_order() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        assert_eq!(format_shortcut_for_platform("Ctrl/Cmd+S"), "\u{2318}S");
+        // ⇧⌘O, not ⌘⇧O — modifiers have a conventional order on macOS.
+        assert_eq!(
+            format_shortcut_for_platform("Ctrl/Cmd+Shift+O"),
+            "\u{21e7}\u{2318}O"
+        );
+        assert_eq!(format_shortcut_for_platform("Shift+T"), "\u{21e7}T");
+        assert_eq!(format_shortcut_for_platform("Cmd+K"), "\u{2318}K");
+    }
+
+    #[test]
+    fn non_macos_shortcuts_drop_the_dual_platform_prefix() {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        assert_eq!(format_shortcut_for_platform("Ctrl/Cmd+S"), "Ctrl+S");
+    }
+
+    #[test]
+    fn contributed_groups_are_scoped_to_their_category() {
+        let mut registry = MenuGroupRegistry::default();
+        registry.register(CommandCategory::Create, "Terrain", ["terrain.generate"]);
+        registry.register(CommandCategory::Edit, "Site Placement", ["terrain.plant"]);
+
+        let create: Vec<&str> = registry
+            .groups_for(&CommandCategory::Create)
+            .map(|group| group.label.as_str())
+            .collect();
+        let edit: Vec<&str> = registry
+            .groups_for(&CommandCategory::Edit)
+            .map(|group| group.label.as_str())
+            .collect();
+        let view: Vec<&str> = registry
+            .groups_for(&CommandCategory::View)
+            .map(|group| group.label.as_str())
+            .collect();
+
+        assert_eq!(create, vec!["Terrain"]);
+        assert_eq!(edit, vec!["Site Placement"]);
+        assert!(view.is_empty(), "no group leaks into an unrelated menu");
+    }
+}
+
+/// A menu group contributed by a capability plugin at runtime.
+///
+/// The static specs above can only name core commands — core must not know that
+/// walls or terrain exist. Without this, every domain command fell through to
+/// the auto-generated "More" catch-all, which is how one menu ended up holding
+/// linked models, terrain planting and foundations in a single ungrouped list.
+/// A plugin that owns commands now also owns where they appear.
+#[derive(Debug, Clone)]
+pub struct ContributedMenuGroup {
+    pub label: String,
+    pub command_ids: Vec<String>,
+}
+
+/// Menu groups contributed by capability plugins, rendered after the core
+/// groups for the same category.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct MenuGroupRegistry {
+    groups: Vec<(CommandCategory, ContributedMenuGroup)>,
+}
+
+impl MenuGroupRegistry {
+    pub fn register(
+        &mut self,
+        category: CommandCategory,
+        label: impl Into<String>,
+        command_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) {
+        self.groups.push((
+            category,
+            ContributedMenuGroup {
+                label: label.into(),
+                command_ids: command_ids.into_iter().map(Into::into).collect(),
+            },
+        ));
+    }
+
+    pub fn groups_for<'a>(
+        &'a self,
+        category: &'a CommandCategory,
+    ) -> impl Iterator<Item = &'a ContributedMenuGroup> {
+        self.groups
+            .iter()
+            .filter(move |(group_category, _)| group_category == category)
+            .map(|(_, group)| group)
+    }
+}
+
+pub trait MenuGroupAppExt {
+    /// Place a capability's commands in a named menu group instead of letting
+    /// them fall into "More".
+    fn register_menu_group(
+        &mut self,
+        category: CommandCategory,
+        label: impl Into<String>,
+        command_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self;
+}
+
+impl MenuGroupAppExt for App {
+    fn register_menu_group(
+        &mut self,
+        category: CommandCategory,
+        label: impl Into<String>,
+        command_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self {
+        if !self.world().contains_resource::<MenuGroupRegistry>() {
+            self.init_resource::<MenuGroupRegistry>();
+        }
+        self.world_mut()
+            .resource_mut::<MenuGroupRegistry>()
+            .register(category, label, command_ids);
+        self
+    }
+}
 
 /// Every command id referenced by the menu bar. Used by startup validation to
 /// guarantee menu items only ever drive registered commands.
@@ -754,15 +895,20 @@ fn draw_command_menu_button(
     pending_command_invocations: &mut PendingCommandInvocations,
     status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
+    toggle_states: &CommandToggleStates,
 ) {
     let enabled = !descriptor.requires_selection || selection_count > 0;
     let label = if let Some(shortcut) = &descriptor.default_shortcut {
-        format!("{}    {shortcut}", descriptor.label)
+        format!(
+            "{}    {}",
+            descriptor.label,
+            format_shortcut_for_platform(shortcut)
+        )
     } else {
         descriptor.label.clone()
     };
-    let response =
-        menu_row_button_enabled(ui, enabled, label).on_hover_text(command_tooltip_text(descriptor));
+    let response = menu_row_button_state(ui, enabled, toggle_states.get(&descriptor.id), label)
+        .on_hover_text(command_tooltip_text(descriptor));
     if enabled && response.contains_pointer() {
         *hovered_menu_hint = descriptor.hint.clone();
     }
@@ -776,6 +922,11 @@ fn draw_command_menu_button(
     }
 }
 
+/// Width of the leading gutter that holds a toggle's checkmark. Reserved on
+/// every row in a menu that contains any toggle, so labels stay aligned whether
+/// or not their own row is checked.
+const MENU_CHECK_GUTTER: f32 = 16.0;
+
 fn menu_row_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
     menu_row_button_enabled(ui, true, label)
 }
@@ -783,6 +934,17 @@ fn menu_row_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Respons
 fn menu_row_button_enabled(
     ui: &mut egui::Ui,
     enabled: bool,
+    label: impl Into<String>,
+) -> egui::Response {
+    menu_row_button_state(ui, enabled, None, label)
+}
+
+/// Draw one menu row. `toggle_state` is `Some` only for commands that flip a
+/// mode; `Some(true)` draws the checkmark that tells the user the mode is on.
+fn menu_row_button_state(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    toggle_state: Option<bool>,
     label: impl Into<String>,
 ) -> egui::Response {
     let label = label.into();
@@ -793,7 +955,12 @@ fn menu_row_button_enabled(
         .layout_no_wrap(label.clone(), font_id.clone(), egui::Color32::WHITE)
         .size()
         .x;
-    let row_width = (text_width + ui.spacing().button_padding.x * 2.0).clamp(160.0, 320.0);
+    let gutter = if toggle_state.is_some() {
+        MENU_CHECK_GUTTER
+    } else {
+        0.0
+    };
+    let row_width = (text_width + gutter + ui.spacing().button_padding.x * 2.0).clamp(160.0, 320.0);
     let desired_size = egui::vec2(row_width, row_height);
     let sense = if enabled {
         egui::Sense::click()
@@ -808,17 +975,50 @@ fn menu_row_button_enabled(
         } else {
             ui.visuals().weak_text_color()
         };
-        let text_pos = egui::pos2(rect.left() + ui.spacing().button_padding.x, rect.center().y);
+        if toggle_state == Some(true) {
+            ui.painter().text(
+                egui::pos2(rect.left() + ui.spacing().button_padding.x, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                "✓",
+                font_id.clone(),
+                ui.visuals().strong_text_color(),
+            );
+        }
+        let text_pos = egui::pos2(
+            rect.left() + ui.spacing().button_padding.x + gutter,
+            rect.center().y,
+        );
         ui.painter().text(
             text_pos,
             egui::Align2::LEFT_CENTER,
             label,
-            egui::TextStyle::Button.resolve(ui.style()),
+            font_id,
             text_color,
         );
     }
 
     response
+}
+
+/// Render a `default_shortcut` the way the host platform writes it.
+///
+/// Descriptors declare shortcuts portably as `Ctrl/Cmd+Shift+O`. Showing that
+/// raw string makes every macOS menu read like a cross-platform cheat sheet, so
+/// collapse it to the native glyphs there and to plain `Ctrl+` elsewhere.
+fn format_shortcut_for_platform(shortcut: &str) -> String {
+    if cfg!(target_os = "macos") {
+        shortcut
+            .replace("Ctrl/Cmd+", "\u{2318}")
+            .replace("Cmd+", "\u{2318}")
+            .replace("Ctrl+", "\u{2303}")
+            .replace("Shift+", "\u{21e7}")
+            .replace("Alt+", "\u{2325}")
+            // Modifier glyphs are written in canonical order with no separator:
+            // ⇧⌘O, not ⌘⇧O.
+            .replace("\u{2318}\u{21e7}", "\u{21e7}\u{2318}")
+    } else {
+        shortcut.replace("Ctrl/Cmd+", "Ctrl+")
+    }
 }
 
 fn queue_visible_command(
@@ -987,6 +1187,7 @@ fn draw_command_submenu(
     pending_command_invocations: &mut PendingCommandInvocations,
     status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
+    toggle_states: &CommandToggleStates,
     rendered_ids: &mut HashSet<String>,
 ) -> Option<MenuGroupRenderKind> {
     let descriptors: Vec<&CommandDescriptor> = command_ids
@@ -1020,6 +1221,7 @@ fn draw_command_submenu(
                 pending_command_invocations,
                 status_bar_data,
                 hovered_menu_hint,
+                toggle_states,
             );
         }
         Some(MenuGroupRenderKind::Inline)
@@ -1033,6 +1235,7 @@ fn draw_command_submenu(
                     pending_command_invocations,
                     status_bar_data,
                     hovered_menu_hint,
+                    toggle_states,
                 );
             }
         });
@@ -1150,6 +1353,8 @@ fn draw_category_menu_contents(
     pending_command_invocations: &mut PendingCommandInvocations,
     status_bar_data: &mut StatusBarData,
     hovered_menu_hint: &mut Option<String>,
+    toggle_states: &CommandToggleStates,
+    menu_groups: &MenuGroupRegistry,
     assistant_window_state: &mut RightSidebarState,
     lighting_window_state: &mut LightingWindowState,
     render_settings_window_state: &mut RenderSettingsWindowState,
@@ -1171,6 +1376,7 @@ fn draw_category_menu_contents(
                 pending_command_invocations,
                 status_bar_data,
                 hovered_menu_hint,
+                toggle_states,
             );
         }
         return;
@@ -1202,9 +1408,33 @@ fn draw_category_menu_contents(
             pending_command_invocations,
             status_bar_data,
             hovered_menu_hint,
+            toggle_states,
             &mut rendered_ids,
         ) {
             previous_kind = Some(kind);
+        }
+    }
+
+    // Capability-contributed groups render after the core ones, so a domain's
+    // commands land in a named submenu of its own choosing rather than in "More".
+    for group in menu_groups.groups_for(category) {
+        let command_ids: Vec<&str> = group.command_ids.iter().map(String::as_str).collect();
+        if draw_command_submenu(
+            ui,
+            &group.label,
+            &command_ids,
+            category_commands,
+            selection_count,
+            pending_command_invocations,
+            status_bar_data,
+            hovered_menu_hint,
+            toggle_states,
+            &mut rendered_ids,
+        )
+        .is_some()
+        {
+            // Contributed groups render last, so nothing downstream reads
+            // `previous_kind` again; each already emits its own submenu frame.
         }
     }
 
@@ -1257,6 +1487,7 @@ fn draw_category_menu_contents(
                     pending_command_invocations,
                     status_bar_data,
                     hovered_menu_hint,
+                    toggle_states,
                 );
             }
         });
@@ -1312,6 +1543,8 @@ struct ChromeData<'w, 's> {
     commands: Commands<'w, 's>,
     camera_controls: ResMut<'w, CameraControlsState>,
     command_registry: Res<'w, CommandRegistry>,
+    command_toggle_states: Res<'w, CommandToggleStates>,
+    menu_groups: Res<'w, MenuGroupRegistry>,
     viewport_context_commands: Res<'w, ViewportContextCommandRegistry>,
     icon_registry: Res<'w, IconRegistry>,
     toolbar_registry: Res<'w, ToolbarRegistry>,
@@ -1479,6 +1712,8 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                             &mut data.pending_command_invocations,
                             &mut data.status_bar_data,
                             &mut hovered_menu_hint,
+                            &data.command_toggle_states,
+                            &data.menu_groups,
                             &mut data.assistant_window_state,
                             &mut data.lighting_window_state,
                             &mut data.render_settings_window_state,

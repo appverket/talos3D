@@ -28,6 +28,7 @@ impl Plugin for CommandRegistryPlugin {
             .init_resource::<IconRegistry>()
             .init_resource::<ViewportContextCommandRegistry>()
             .init_resource::<PendingCommandInvocations>()
+            .init_resource::<CommandToggleStates>()
             .add_systems(Startup, setup_core_icons)
             .add_systems(
                 Update,
@@ -36,6 +37,11 @@ impl Plugin for CommandRegistryPlugin {
                     execute_pending_commands,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                refresh_command_toggle_states
+                    .before(crate::plugins::egui_chrome::EguiChromeSystems),
             );
         crate::plugins::keymap::register(app);
         register_core_commands(app);
@@ -115,10 +121,61 @@ impl CommandResult {
 
 pub type CommandHandler = fn(&mut World, &Value) -> Result<CommandResult, String>;
 
+/// Reports whether a toggle-like command is currently *on*.
+///
+/// A command that flips a mode — a panel, a display overlay, the projection —
+/// has a state the user needs to see. Without this the only way to learn whether
+/// wireframe is on is to toggle it and watch the viewport. The probe lives with
+/// the command's own plugin, which is the only place that knows where that state
+/// is kept, and menus read it generically rather than special-casing ids.
+pub type CommandStateProbe = fn(&World) -> bool;
+
 #[derive(Clone)]
 struct RegisteredCommand {
     descriptor: CommandDescriptor,
     handler: CommandHandler,
+    state_probe: Option<CommandStateProbe>,
+}
+
+/// Current on/off state of every command that declared a [`CommandStateProbe`],
+/// refreshed once per frame so UI draw passes can show it without world access.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct CommandToggleStates {
+    states: HashMap<String, bool>,
+}
+
+impl CommandToggleStates {
+    /// `Some(true)`/`Some(false)` for a toggle-like command, `None` for a plain
+    /// action that has no on/off state to show.
+    pub fn get(&self, command_id: &str) -> Option<bool> {
+        self.states.get(command_id).copied()
+    }
+}
+
+/// Refresh [`CommandToggleStates`] from every registered probe.
+pub fn refresh_command_toggle_states(world: &mut World) {
+    let probes: Vec<(String, CommandStateProbe)> = {
+        let Some(registry) = world.get_resource::<CommandRegistry>() else {
+            return;
+        };
+        registry
+            .commands
+            .iter()
+            .filter_map(|command| {
+                command
+                    .state_probe
+                    .map(|probe| (command.descriptor.id.clone(), probe))
+            })
+            .collect()
+    };
+    let states: HashMap<String, bool> = probes
+        .into_iter()
+        .map(|(id, probe)| {
+            let state = probe(world);
+            (id, state)
+        })
+        .collect();
+    world.insert_resource(CommandToggleStates { states });
 }
 
 #[derive(Resource, Default)]
@@ -172,7 +229,12 @@ impl CommandRegistry {
         &self.duplicate_ids
     }
 
-    fn register(&mut self, descriptor: CommandDescriptor, handler: CommandHandler) {
+    fn register(
+        &mut self,
+        descriptor: CommandDescriptor,
+        handler: CommandHandler,
+        state_probe: Option<CommandStateProbe>,
+    ) {
         if self.index_by_id.contains_key(&descriptor.id) {
             // Reject the duplicate (first registration is canonical) and record
             // it; validate_registry turns this into a hard failure.
@@ -184,6 +246,7 @@ impl CommandRegistry {
         self.commands.push(RegisteredCommand {
             descriptor,
             handler,
+            state_probe,
         });
     }
 
@@ -286,6 +349,16 @@ pub trait CommandRegistryAppExt {
         handler: CommandHandler,
     ) -> &mut Self;
 
+    /// Register a command that flips a mode, together with the probe that
+    /// reports whether it is currently on, so menus can show a checkmark
+    /// instead of leaving the user to toggle it and watch what happens.
+    fn register_toggle_command(
+        &mut self,
+        descriptor: CommandDescriptor,
+        handler: CommandHandler,
+        state_probe: CommandStateProbe,
+    ) -> &mut Self;
+
     /// Expose an already-registered command in the viewport context menu.
     fn register_viewport_context_command(&mut self, command_id: impl Into<String>) -> &mut Self;
 }
@@ -301,7 +374,24 @@ impl CommandRegistryAppExt for App {
         }
         self.world_mut()
             .resource_mut::<CommandRegistry>()
-            .register(descriptor, handler);
+            .register(descriptor, handler, None);
+        self
+    }
+
+    fn register_toggle_command(
+        &mut self,
+        descriptor: CommandDescriptor,
+        handler: CommandHandler,
+        state_probe: CommandStateProbe,
+    ) -> &mut Self {
+        if !self.world().contains_resource::<CommandRegistry>() {
+            self.init_resource::<CommandRegistry>();
+        }
+        self.world_mut().resource_mut::<CommandRegistry>().register(
+            descriptor,
+            handler,
+            Some(state_probe),
+        );
         self
     }
 
@@ -912,6 +1002,15 @@ fn execute_zoom_to_extents(world: &mut World, _: &Value) -> Result<CommandResult
     frame_camera_for_entities(world, false)
 }
 
+/// Frame the whole model after a document is opened. Failure is not worth
+/// failing the open over — a badly framed camera is recoverable, a rejected
+/// document is not.
+pub(crate) fn frame_camera_on_document_open(world: &mut World) {
+    if let Err(error) = frame_camera_for_entities(world, false) {
+        debug!("Could not frame the camera on document open: {error}");
+    }
+}
+
 fn execute_zoom_to_selection(world: &mut World, _: &Value) -> Result<CommandResult, String> {
     frame_camera_for_entities(world, true)
 }
@@ -1218,8 +1317,8 @@ mod tests {
     #[test]
     fn duplicate_command_ids_are_rejected_and_recorded() {
         let mut registry = CommandRegistry::default();
-        registry.register(minimal_descriptor("dup"), execute_noop);
-        registry.register(minimal_descriptor("dup"), execute_noop);
+        registry.register(minimal_descriptor("dup"), execute_noop, None);
+        registry.register(minimal_descriptor("dup"), execute_noop, None);
 
         // First registration is canonical; the duplicate is dropped but recorded.
         assert_eq!(registry.commands().count(), 1);
@@ -1386,6 +1485,7 @@ mod tests {
                 capability_id: None,
             },
             execute_noop,
+            None,
         );
 
         let invocation = PendingCommandInvocation {

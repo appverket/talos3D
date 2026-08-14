@@ -1476,7 +1476,7 @@ impl Plugin for MaterialPlugin {
                 },
                 execute_clear_material_assignment_on_selection,
             )
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "materials.toggle_browser".to_string(),
                     label: "Materials".to_string(),
@@ -1493,6 +1493,7 @@ impl Plugin for MaterialPlugin {
                     capability_id: Some("materials".to_string()),
                 },
                 execute_toggle_materials_browser,
+                materials_browser_shown,
             );
     }
 }
@@ -2321,4 +2322,11 @@ mod tests {
             TextureColorSpace::Data
         );
     }
+}
+
+/// Reports whether this panel is open, so its menu row can show a checkmark.
+fn materials_browser_shown(world: &World) -> bool {
+    world
+        .get_resource::<crate::plugins::material_browser::MaterialsWindowState>()
+        .is_some_and(|state| state.visible)
 }

@@ -5899,3 +5899,11 @@ mod tests {
         );
     }
 }
+
+/// Reports whether the Definitions panel is open, so its menu row can show a
+/// checkmark.
+pub fn definitions_browser_shown(world: &World) -> bool {
+    world
+        .get_resource::<DefinitionsWindowState>()
+        .is_some_and(|state| state.visible)
+}

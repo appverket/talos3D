@@ -144,10 +144,10 @@ impl Plugin for LayersPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LayersPanelState>()
             .init_resource::<LayersPanelData>()
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_layers".to_string(),
-                    label: "Toggle Layers".to_string(),
+                    label: "Layers".to_string(),
                     description: "Show or hide the layers panel.".to_string(),
                     category: CommandCategory::View,
                     parameters: None,
@@ -161,6 +161,7 @@ impl Plugin for LayersPanelPlugin {
                     capability_id: None,
                 },
                 execute_toggle_layers,
+                layers_panel_shown,
             )
             .add_systems(Update, build_layers_panel_data.before(EguiChromeSystems));
     }
@@ -757,4 +758,12 @@ mod tests {
         assert_eq!(world.resource::<LayerState>().active_layer, "Walls");
         assert!(world.get::<Selected>(entity).is_some());
     }
+}
+
+/// Reports whether this view mode is currently on, so its menu row can show a
+/// checkmark rather than leaving the state invisible.
+fn layers_panel_shown(world: &World) -> bool {
+    world
+        .get_resource::<LayersPanelState>()
+        .is_some_and(|state| state.visible)
 }

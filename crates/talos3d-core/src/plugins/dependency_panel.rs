@@ -128,10 +128,10 @@ impl Plugin for DependencyPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DependencyPanelState>()
             .init_resource::<DependencyPanelData>()
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_dependency_graph".to_string(),
-                    label: "Toggle Dependency Graph".to_string(),
+                    label: "Dependency Graph".to_string(),
                     description: "Show or hide the dependency graph inspector.".to_string(),
                     category: CommandCategory::View,
                     parameters: None,
@@ -147,6 +147,7 @@ impl Plugin for DependencyPanelPlugin {
                     capability_id: None,
                 },
                 execute_toggle_dependency_graph,
+                dependency_panel_shown,
             )
             .add_systems(
                 Update,
@@ -551,4 +552,12 @@ mod tests {
         execute_toggle_dependency_graph(&mut world, &Value::Null).unwrap();
         assert!(!world.resource::<DependencyPanelState>().visible);
     }
+}
+
+/// Reports whether this view mode is currently on, so its menu row can show a
+/// checkmark rather than leaving the state invisible.
+fn dependency_panel_shown(world: &World) -> bool {
+    world
+        .get_resource::<DependencyPanelState>()
+        .is_some_and(|state| state.visible)
 }

@@ -9,6 +9,7 @@ use talos3d_core::plugins::{
         ApplyEntityChangesCommand, BeginCommandGroup, CreateEntityCommand, DeleteEntitiesCommand,
         EndCommandGroup,
     },
+    egui_chrome::MenuGroupAppExt,
     identity::{ElementId, ElementIdAllocator},
     modeling::primitives::{ElevationMetadata, Polyline},
     selection::Selected,
@@ -358,6 +359,44 @@ impl Plugin for TerrainCommandPlugin {
                 capability_id: Some("terrain".to_string()),
             },
             execute_toggle_generated_contours,
+        );
+
+        // Terrain owns a large, coherent command family. Left unclaimed these
+        // scatter into the "More" catch-all of three different menus, which is
+        // where they used to live.
+        app.register_menu_group(
+            CommandCategory::Create,
+            "Terrain",
+            [
+                "terrain.generate_surface",
+                "terrain.prepare_site_surface",
+                "terrain.create_proposed_surface",
+                "terrain.convert_to_elevation_curves",
+                "terrain.draw_elevation_curve",
+                "terrain.add_elevation_curve",
+                "terrain.delete_elevation_curve",
+                "terrain.place_spot_elevation",
+                "terrain.add_spot_elevation",
+            ],
+        );
+        app.register_menu_group(
+            CommandCategory::Edit,
+            "Site Placement",
+            [
+                "terrain.plant_on_surface",
+                "terrain.plant_structure",
+                "terrain.release_planted_structure",
+                "terrain.unplant_on_surface",
+                "terrain.demote_conforming_foundation",
+            ],
+        );
+        app.register_menu_group(
+            CommandCategory::View,
+            "Terrain",
+            [
+                "terrain.set_visualization_mode",
+                "terrain.toggle_generated_contours",
+            ],
         );
     }
 }

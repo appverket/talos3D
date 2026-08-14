@@ -159,7 +159,7 @@ impl Plugin for ModelingPlugin {
             )
             .register_format_importer(ObjImporter)
             .register_format_importer(DxfImporter)
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "modeling.toggle_definitions_browser".to_string(),
                     label: "Definitions".to_string(),
@@ -176,6 +176,7 @@ impl Plugin for ModelingPlugin {
                     capability_id: Some("modeling".to_string()),
                 },
                 execute_toggle_definitions_browser,
+                crate::plugins::definition_browser::definitions_browser_shown,
             )
             .register_command(
                 CommandDescriptor {

@@ -330,10 +330,10 @@ impl Plugin for RenderPipelinePlugin {
                     ],
                 }],
             })
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_grid".to_string(),
-                    label: "Toggle Grid".to_string(),
+                    label: "Grid".to_string(),
                     description: "Show or hide the modeling grid.".to_string(),
                     category: CommandCategory::View,
                     parameters: None,
@@ -347,8 +347,9 @@ impl Plugin for RenderPipelinePlugin {
                     capability_id: None,
                 },
                 execute_toggle_grid,
+                render_state_grid,
             )
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_xray".to_string(),
                     label: "X-Ray".to_string(),
@@ -380,8 +381,9 @@ impl Plugin for RenderPipelinePlugin {
                     capability_id: None,
                 },
                 execute_toggle_xray,
+                render_state_xray,
             )
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_outline".to_string(),
                     label: "Outline".to_string(),
@@ -398,8 +400,9 @@ impl Plugin for RenderPipelinePlugin {
                     capability_id: None,
                 },
                 execute_toggle_outline,
+                render_state_outline,
             )
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_wireframe".to_string(),
                     label: "Wireframe".to_string(),
@@ -416,6 +419,7 @@ impl Plugin for RenderPipelinePlugin {
                     capability_id: None,
                 },
                 execute_toggle_wireframe,
+                render_state_wireframe,
             )
             .add_systems(
                 Update,
@@ -439,6 +443,32 @@ impl Plugin for RenderPipelinePlugin {
         // an Update system: plane/mesh intersection must return through a
         // bounded invalidation cache before it can ship in the live backend.
     }
+}
+
+/// State probes for the display toggles, so the View → Display menu can show
+/// which modes are on instead of requiring the user to flip one and look.
+fn render_state_grid(world: &World) -> bool {
+    world
+        .get_resource::<RenderSettings>()
+        .is_some_and(|settings| settings.grid_enabled)
+}
+
+fn render_state_xray(world: &World) -> bool {
+    world
+        .get_resource::<RenderSettings>()
+        .is_some_and(|settings| settings.xray_enabled)
+}
+
+fn render_state_outline(world: &World) -> bool {
+    world
+        .get_resource::<RenderSettings>()
+        .is_some_and(|settings| settings.edge_display_mode() == EdgeDisplayMode::Outline)
+}
+
+fn render_state_wireframe(world: &World) -> bool {
+    world
+        .get_resource::<RenderSettings>()
+        .is_some_and(|settings| settings.edge_display_mode() == EdgeDisplayMode::Wireframe)
 }
 
 fn execute_toggle_grid(world: &mut World, _: &Value) -> Result<CommandResult, String> {

@@ -141,10 +141,10 @@ impl Plugin for OutlinerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<OutlinerWindowState>()
             .init_resource::<OutlinerTree>()
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_outliner".to_string(),
-                    label: "Toggle Outliner".to_string(),
+                    label: "Outliner".to_string(),
                     description: "Show or hide the model outline tree.".to_string(),
                     category: CommandCategory::View,
                     parameters: None,
@@ -158,9 +158,17 @@ impl Plugin for OutlinerPlugin {
                     capability_id: None,
                 },
                 execute_toggle_outliner,
+                outliner_shown,
             )
             .add_systems(Update, build_outliner_tree.before(EguiChromeSystems));
     }
+}
+
+/// Reports whether the panel is open, so its menu row can show a checkmark.
+fn outliner_shown(world: &World) -> bool {
+    world
+        .get_resource::<OutlinerWindowState>()
+        .is_some_and(|state| state.visible)
 }
 
 pub fn execute_toggle_outliner(world: &mut World, _: &Value) -> Result<CommandResult, String> {
@@ -624,6 +632,23 @@ pub fn draw_outliner_window(
                 ui.weak("The model is empty.");
                 return;
             }
+            // Rows are expanded by default, so a real model opens as hundreds of
+            // rows. Without a way to fold the tree, finding an assembly means
+            // scrolling past every generated part in the model.
+            ui.horizontal(|ui| {
+                if ui.small_button("Collapse All").clicked() {
+                    state.collapsed = tree
+                        .nodes
+                        .iter()
+                        .filter(|node| !node.children.is_empty())
+                        .map(|node| node.node_id)
+                        .collect();
+                }
+                if ui.small_button("Expand All").clicked() {
+                    state.collapsed.clear();
+                }
+            });
+            ui.separator();
             let visible_rows = collect_visible_outliner_rows(tree, state);
             // A selection made outside the panel is only communicated if the row
             // is on screen. Ancestors were expanded during the build, so the row
@@ -835,12 +860,16 @@ fn draw_disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> bool {
     response.clicked()
 }
 
+/// Row glyphs. Drawn from geometric shapes rather than ASCII stand-ins like
+/// `[]` and `<>`, which read as tofu next to the rest of the icon-led chrome,
+/// and chosen so group / occurrence / part / leaf stay distinguishable at a
+/// glance and in a single font weight.
 fn kind_glyph(kind: OutlinerKind) -> &'static str {
     match kind {
-        OutlinerKind::Group => "[]",
-        OutlinerKind::Occurrence => "<>",
-        OutlinerKind::Part => "-",
-        OutlinerKind::Leaf => "*",
+        OutlinerKind::Group => "\u{25a3}", // ▣ filled square in square
+        OutlinerKind::Occurrence => "\u{25c8}", // ◈ diamond in diamond
+        OutlinerKind::Part => "\u{2022}",  // • bullet
+        OutlinerKind::Leaf => "\u{25ab}",  // ▫ small hollow square
     }
 }
 

@@ -83,7 +83,7 @@ impl Plugin for CompassPlugin {
             // Draw after transform propagation so the rose anchors to the
             // camera's final transform for this frame (no swim while orbiting).
             .add_systems(PostUpdate, draw_compass.after(TransformSystems::Propagate))
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_compass".to_string(),
                     label: "Compass Rose".to_string(),
@@ -102,6 +102,7 @@ impl Plugin for CompassPlugin {
                     capability_id: None,
                 },
                 execute_toggle_compass,
+                compass_shown,
             );
     }
 }
@@ -349,4 +350,12 @@ mod tests {
             }
         }
     }
+}
+
+/// Reports whether this view mode is currently on, so its menu row can show a
+/// checkmark rather than leaving the state invisible.
+fn compass_shown(world: &World) -> bool {
+    world
+        .get_resource::<CompassSettings>()
+        .is_some_and(|settings| settings.enabled)
 }

@@ -77,7 +77,7 @@ impl Plugin for CameraPlugin {
                     },
                 ],
             })
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.projection_perspective".to_string(),
                     label: "Perspective".to_string(),
@@ -94,8 +94,9 @@ impl Plugin for CameraPlugin {
                     capability_id: None,
                 },
                 execute_projection_perspective,
+                projection_is_perspective,
             )
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.projection_orthographic".to_string(),
                     label: "Orthographic".to_string(),
@@ -114,6 +115,7 @@ impl Plugin for CameraPlugin {
                     capability_id: None,
                 },
                 execute_projection_orthographic,
+                projection_is_orthographic,
             )
             .register_command(
                 view_preset_command(
@@ -1082,4 +1084,21 @@ mod tests {
         let bottom = orbit_transform(&orbit);
         assert!((bottom.translation.y + orbit.radius).abs() < 0.001);
     }
+}
+
+/// Perspective and Orthographic are one mutually exclusive choice. Reporting
+/// each one's state turns the pair into a radio group the user can read, rather
+/// than two identical-looking rows.
+fn projection_is_perspective(world: &World) -> bool {
+    camera_projection_mode(world) == Some(CameraProjectionMode::Perspective)
+}
+
+fn projection_is_orthographic(world: &World) -> bool {
+    camera_projection_mode(world) == Some(CameraProjectionMode::Isometric)
+}
+
+fn camera_projection_mode(world: &World) -> Option<CameraProjectionMode> {
+    world
+        .get_resource::<CameraControlsState>()
+        .map(|controls| controls.projection_mode)
 }

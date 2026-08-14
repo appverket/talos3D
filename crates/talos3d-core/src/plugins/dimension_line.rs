@@ -1269,7 +1269,7 @@ impl Plugin for DimensionLinePlugin {
                 },
                 execute_place_dimension_line,
             )
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "view.toggle_dimensions".to_string(),
                     label: "Dimensions".to_string(),
@@ -1286,6 +1286,7 @@ impl Plugin for DimensionLinePlugin {
                     capability_id: Some(crate::plugins::drawing_export::DRAFTING_CAPABILITY_ID.to_string()),
                 },
                 execute_toggle_dimension_line_visibility,
+                dimensions_shown,
             )
             .register_toolbar(ToolbarDescriptor {
                 id: "dimensions".to_string(),
@@ -3331,4 +3332,12 @@ mod tests {
             .find(|field| field.name == "label")
             .is_some_and(|field| field.editable));
     }
+}
+
+/// Reports whether this view mode is currently on, so its menu row can show a
+/// checkmark rather than leaving the state invisible.
+fn dimensions_shown(world: &World) -> bool {
+    world
+        .get_resource::<DimensionLineVisibility>()
+        .is_some_and(|state| state.show_all)
 }

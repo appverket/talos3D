@@ -719,7 +719,7 @@ impl Plugin for LightingPlugin {
                 license: None,
                 repository: None,
             })
-            .register_command(
+            .register_toggle_command(
                 CommandDescriptor {
                     id: "lighting.toggle_browser".to_string(),
                     label: "Lights".to_string(),
@@ -736,6 +736,7 @@ impl Plugin for LightingPlugin {
                     capability_id: Some("lighting".to_string()),
                 },
                 execute_toggle_lights_browser,
+                lights_browser_shown,
             )
             .add_systems(Startup, seed_default_lighting_scene)
             .add_systems(
@@ -1266,4 +1267,11 @@ mod tests {
         queue.apply(&mut world);
         assert!(world.get_entity(entity).is_err());
     }
+}
+
+/// Reports whether this panel is open, so its menu row can show a checkmark.
+fn lights_browser_shown(world: &World) -> bool {
+    world
+        .get_resource::<crate::plugins::egui_chrome::LightingWindowState>()
+        .is_some_and(|state| state.visible)
 }
