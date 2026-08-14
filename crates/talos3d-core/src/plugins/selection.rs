@@ -231,6 +231,59 @@ pub fn apply_click_selection(
     }
 }
 
+/// Enforce the selection *boundary* rules on an already-selected entity, without
+/// re-running viewport hit resolution.
+///
+/// [`resolve_entity_for_selection`] answers "the user clicked this pixel — which
+/// aggregate did they mean?", so at root context it promotes a hit to its
+/// top-level group. That is right for a raycast, and wrong for a selection the
+/// user named explicitly: an Outliner/Layers row click, or a model-api
+/// `set_selection`, already identifies the exact element. Re-resolving those
+/// every frame collapsed every nested group, wall and opening up to the
+/// outermost group, so only [`DirectSelection`] entities stayed selectable.
+///
+/// This keeps the entity the caller asked for and only drops it when it is
+/// genuinely not selectable right now: muted, on a locked layer, or outside the
+/// group being edited.
+pub fn retain_selected_entity(world: &World, entity: Entity) -> Option<Entity> {
+    let entity = redirect_selection_proxy_to_target(world, entity);
+    if world.get::<GroupEditMuted>(entity).is_some() {
+        return None;
+    }
+    if world
+        .get_resource::<crate::plugins::layers::LayerRegistry>()
+        .is_some()
+        && crate::plugins::layers::entity_on_locked_layer(world, entity)
+    {
+        return None;
+    }
+
+    let element_id = world.get::<ElementId>(entity).copied()?;
+    if world.get::<DirectSelection>(entity).is_some() {
+        return Some(entity);
+    }
+
+    let edit_context = world
+        .get_resource::<GroupEditContext>()
+        .cloned()
+        .unwrap_or_default();
+    let Some(active_group_id) = edit_context.current_group() else {
+        // At root every authored element is addressable on its own terms.
+        return Some(entity);
+    };
+
+    // Inside an entered group, the context still bounds what may stay selected —
+    // but anywhere in that group's subtree is fair game, not just direct
+    // children, so naming a nested member explicitly keeps working.
+    if element_id == active_group_id
+        || collect_group_members_recursive(world, active_group_id).contains(&element_id)
+    {
+        return Some(entity);
+    }
+
+    None
+}
+
 fn normalize_selection_boundaries(world: &mut World) {
     let selected_entities: Vec<Entity> = world
         .query_filtered::<Entity, With<Selected>>()
@@ -242,7 +295,7 @@ fn normalize_selection_boundaries(world: &mut World) {
 
     let mut target_entities = std::collections::HashSet::new();
     for entity in &selected_entities {
-        if let Some(target) = resolve_entity_for_selection(world, *entity) {
+        if let Some(target) = retain_selected_entity(world, *entity) {
             target_entities.insert(target);
         }
     }
@@ -2289,15 +2342,74 @@ mod tests {
         assert_eq!(target, child);
     }
 
+    /// A row click in the Outliner/Layers panel, or a model-api `set_selection`,
+    /// names one element. Normalization must leave it alone instead of promoting
+    /// it to the enclosing group the way a viewport raycast does.
     #[test]
-    fn selection_normalization_remaps_group_member_to_group_at_root() {
+    fn selection_normalization_keeps_explicitly_named_group_member_at_root() {
         let (mut world, child, group, _, _) = selection_world_with_group();
         world.entity_mut(child).insert(Selected);
 
         normalize_selection_boundaries(&mut world);
 
-        assert!(world.get::<Selected>(child).is_none());
-        assert!(world.get::<Selected>(group).is_some());
+        assert!(world.get::<Selected>(child).is_some());
+        assert!(world.get::<Selected>(group).is_none());
+    }
+
+    /// The promotion that normalization used to apply belongs to viewport hit
+    /// resolution, and must still happen there.
+    #[test]
+    fn viewport_click_still_promotes_group_member_to_group_at_root() {
+        let (mut world, child, group, _, _) = selection_world_with_group();
+
+        assert_eq!(resolve_entity_for_selection(&world, child), Some(group));
+        assert_eq!(
+            resolve_selection_click_target(&mut world, Some(child)).entity,
+            Some(group)
+        );
+    }
+
+    /// A nested group is a legitimate selection target in its own right — this is
+    /// the case that collapsed to the outermost group for every non-`DirectSelection`
+    /// element (roof, foundation, walls, openings).
+    #[test]
+    fn selection_normalization_keeps_nested_group_selected_at_root() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+
+        let leaf_id = ElementId(10);
+        let nested_id = ElementId(20);
+        let house_id = ElementId(30);
+        world.spawn(leaf_id);
+        let nested = world
+            .spawn((
+                nested_id,
+                GroupMembers {
+                    name: "Roof".to_string(),
+                    member_ids: vec![leaf_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        let house = world
+            .spawn((
+                house_id,
+                GroupMembers {
+                    name: "House".to_string(),
+                    member_ids: vec![nested_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        world.entity_mut(nested).insert(Selected);
+
+        normalize_selection_boundaries(&mut world);
+
+        assert!(world.get::<Selected>(nested).is_some());
+        assert!(world.get::<Selected>(house).is_none());
     }
 
     #[test]
@@ -2315,7 +2427,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_normalization_deduplicates_nested_members_to_top_group_at_root() {
+    fn selection_normalization_keeps_each_named_nested_member_at_root() {
         let mut world = World::new();
         world.insert_resource(LayerRegistry::default());
         world.insert_resource(GroupEditContext::default());
@@ -2351,9 +2463,55 @@ mod tests {
 
         normalize_selection_boundaries(&mut world);
 
-        assert!(world.get::<Selected>(child_a).is_none());
-        assert!(world.get::<Selected>(child_b).is_none());
-        assert!(world.get::<Selected>(parent).is_some());
+        assert!(world.get::<Selected>(child_a).is_some());
+        assert!(world.get::<Selected>(child_b).is_some());
+        assert!(world.get::<Selected>(parent).is_none());
+    }
+
+    /// Entering a group still bounds the selection, but anywhere in that group's
+    /// subtree stays selectable — naming a nested member must not drop it.
+    #[test]
+    fn selection_normalization_keeps_deep_member_inside_group_edit_context() {
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+
+        let leaf_id = ElementId(10);
+        let nested_id = ElementId(20);
+        let active_id = ElementId(30);
+        let outside_id = ElementId(40);
+        let leaf = world.spawn(leaf_id).id();
+        world.spawn((
+            nested_id,
+            GroupMembers {
+                name: "Nested".to_string(),
+                member_ids: vec![leaf_id],
+                frame: Default::default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            active_id,
+            GroupMembers {
+                name: "Active".to_string(),
+                member_ids: vec![nested_id],
+                frame: Default::default(),
+                linked_model: None,
+            },
+        ));
+        let outside = world.spawn(outside_id).id();
+        let mut edit_context = GroupEditContext::default();
+        edit_context.enter(active_id);
+        world.insert_resource(edit_context);
+        world.entity_mut(leaf).insert(Selected);
+        world.entity_mut(outside).insert(Selected);
+
+        normalize_selection_boundaries(&mut world);
+
+        assert!(world.get::<Selected>(leaf).is_some(), "deep member stays");
+        assert!(
+            world.get::<Selected>(outside).is_none(),
+            "geometry outside the entered group is dropped"
+        );
     }
 }
 

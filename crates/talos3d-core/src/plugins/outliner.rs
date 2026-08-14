@@ -38,7 +38,7 @@ use crate::plugins::{
     layers::entity_on_locked_layer,
     modeling::{
         assembly::SemanticRelation,
-        group::{semantic_assembly_physical_group_links, GroupMembers},
+        group::{semantic_assembly_physical_group_links, GroupEditContext, GroupMembers},
         occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
     },
     selection::Selected,
@@ -75,6 +75,24 @@ pub struct OutlinerNode {
     pub is_linked_model: bool,
     /// Arena indices of child rows.
     pub children: Vec<usize>,
+    /// Arena index of this row's parent, or `None` for a root row. Used to walk
+    /// upwards when revealing a selection made outside the panel.
+    pub parent: Option<usize>,
+    /// This row is the group the user has descended into (the innermost entry on
+    /// the group-edit stack), or an outer group on the way down to it.
+    pub edit_context: OutlinerEditContext,
+}
+
+/// Where a row sits relative to the group the user has entered by
+/// double-clicking down the hierarchy in the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutlinerEditContext {
+    #[default]
+    Outside,
+    /// An outer group on the edit stack — a container the user has passed through.
+    Ancestor,
+    /// The group currently being edited.
+    Active,
 }
 
 /// Flattened arena of [`OutlinerNode`]s rebuilt each frame while the panel is
@@ -98,6 +116,16 @@ pub struct OutlinerWindowState {
     /// `node_id`s that are currently collapsed. Rows are expanded by default so
     /// the whole structure is visible the moment the panel opens.
     pub collapsed: HashSet<u64>,
+    /// Selection observed on the previous build, so a change made *outside* the
+    /// panel — a viewport click, a double-click descending into a group, a
+    /// model-api call — can be revealed exactly once instead of every frame.
+    last_selection: Vec<u64>,
+    /// `node_id` of a row to scroll into view on the next draw.
+    pending_reveal: Option<u64>,
+    /// Set when the panel itself produced the selection change. Scrolling then
+    /// would yank rows out from under the cursor mid-click; the clicked row is
+    /// on screen already, so there is nothing to reveal.
+    selection_from_panel: bool,
 }
 
 /// A pending selection change produced by a click on an outliner row.
@@ -193,6 +221,11 @@ pub fn build_outliner_tree(world: &mut World) {
         .iter()
         .map(|entry| flatten_entry(world, entry, &mut nodes))
         .collect();
+    link_parents(&mut nodes);
+    mark_edit_context(world, &mut nodes);
+    let selected_node_ids = selected_node_ids(world, &nodes);
+    reveal_selection_if_changed(world, &nodes, selected_node_ids);
+
     let mut tree = world.resource_mut::<OutlinerTree>();
     tree.nodes = nodes;
     tree.roots = roots;
@@ -202,6 +235,98 @@ pub fn build_outliner_tree(world: &mut World) {
     {
         add_outliner_build_time(&mut perf_stats, perf_start.elapsed());
     }
+}
+
+/// Fill in each row's `parent` from the child indices recorded during flattening.
+fn link_parents(nodes: &mut [OutlinerNode]) {
+    let edges: Vec<(usize, usize)> = nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(parent, node)| node.children.iter().map(move |child| (*child, parent)))
+        .collect();
+    for (child, parent) in edges {
+        nodes[child].parent = Some(parent);
+    }
+}
+
+/// Tag the rows on the group-edit stack so the panel can show *where the user
+/// is* in the hierarchy, not just what is selected. Descending into a group by
+/// double-clicking in the viewport is a navigation act, and the tree is where
+/// that position should be legible.
+fn mark_edit_context(world: &World, nodes: &mut [OutlinerNode]) {
+    let Some(context) = world.get_resource::<GroupEditContext>() else {
+        return;
+    };
+    let Some(active) = context.current_group() else {
+        return;
+    };
+    let ancestors: HashSet<u64> = context.stack.iter().map(|id| id.0).collect();
+    for node in nodes.iter_mut() {
+        node.edit_context = if node.node_id == active.0 {
+            OutlinerEditContext::Active
+        } else if ancestors.contains(&node.node_id) {
+            OutlinerEditContext::Ancestor
+        } else {
+            OutlinerEditContext::Outside
+        };
+    }
+}
+
+/// `node_id`s of rows whose entity is currently selected, in row order.
+fn selected_node_ids(world: &mut World, nodes: &[OutlinerNode]) -> Vec<u64> {
+    let selected: HashSet<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    nodes
+        .iter()
+        .filter(|node| {
+            node.select_entity
+                .is_some_and(|entity| selected.contains(&entity))
+        })
+        .map(|node| node.node_id)
+        .collect()
+}
+
+/// When the selection changes, expand whatever is collapsed above it and queue a
+/// scroll so the row is actually on screen. Without this a selection made in the
+/// viewport can sit inside a collapsed branch, or hundreds of rows away, and the
+/// panel looks like it simply did not respond.
+fn reveal_selection_if_changed(world: &mut World, nodes: &[OutlinerNode], selected: Vec<u64>) {
+    let Some(state) = world.get_resource::<OutlinerWindowState>() else {
+        return;
+    };
+    if state.last_selection == selected {
+        return;
+    }
+
+    let index_of: HashMap<u64, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.node_id, index))
+        .collect();
+    let mut expand: Vec<u64> = Vec::new();
+    for node_id in &selected {
+        let Some(&index) = index_of.get(node_id) else {
+            continue;
+        };
+        let mut cursor = nodes[index].parent;
+        while let Some(parent) = cursor {
+            expand.push(nodes[parent].node_id);
+            cursor = nodes[parent].parent;
+        }
+    }
+
+    let mut state = world.resource_mut::<OutlinerWindowState>();
+    if std::mem::take(&mut state.selection_from_panel) {
+        state.last_selection = selected;
+        return;
+    }
+    for node_id in expand {
+        state.collapsed.remove(&node_id);
+    }
+    state.pending_reveal = selected.first().copied();
+    state.last_selection = selected;
 }
 
 /// Flatten a nested [`OutlineEntry`] into the panel arena, returning its index.
@@ -226,6 +351,8 @@ fn flatten_entry(world: &World, entry: &OutlineEntry, nodes: &mut Vec<OutlinerNo
                 .and_then(|members| members.linked_model.as_ref())
                 .is_some(),
         children,
+        parent: None,
+        edit_context: OutlinerEditContext::default(),
     });
     nodes.len() - 1
 }
@@ -498,31 +625,45 @@ pub fn draw_outliner_window(
                 return;
             }
             let visible_rows = collect_visible_outliner_rows(tree, state);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show_rows(
-                    ui,
-                    OUTLINER_ROW_HEIGHT,
-                    visible_rows.len(),
-                    |ui, row_range| {
-                        for row_index in row_range {
-                            let (node_index, depth) = visible_rows[row_index];
-                            render_outliner_row(
-                                ui,
-                                node_index,
-                                tree,
-                                state,
-                                selected,
-                                pending_commands,
-                                command_registry,
-                                &mut action,
-                                depth,
-                            );
-                        }
-                    },
-                );
+            // A selection made outside the panel is only communicated if the row
+            // is on screen. Ancestors were expanded during the build, so the row
+            // is in `visible_rows` and its offset is exact.
+            let reveal_offset = state.pending_reveal.take().and_then(|node_id| {
+                visible_rows
+                    .iter()
+                    .position(|(index, _)| tree.nodes[*index].node_id == node_id)
+                    .map(|row| row as f32 * OUTLINER_ROW_HEIGHT)
+            });
+            let mut scroll_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+            if let Some(offset) = reveal_offset {
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
+            }
+            scroll_area.show_rows(
+                ui,
+                OUTLINER_ROW_HEIGHT,
+                visible_rows.len(),
+                |ui, row_range| {
+                    for row_index in row_range {
+                        let (node_index, depth) = visible_rows[row_index];
+                        render_outliner_row(
+                            ui,
+                            node_index,
+                            tree,
+                            state,
+                            selected,
+                            pending_commands,
+                            command_registry,
+                            &mut action,
+                            depth,
+                        );
+                    }
+                },
+            );
         });
     state.visible = open;
+    if action.is_some() {
+        state.selection_from_panel = true;
+    }
     action
 }
 
@@ -590,7 +731,19 @@ fn render_outliner_row(
         let is_selected = node
             .select_entity
             .is_some_and(|select_entity| selected.contains(&select_entity));
-        let text = format!("{} {}", kind_glyph(node.kind), node.label);
+        let mut text = egui::RichText::new(format!("{} {}", kind_glyph(node.kind), node.label));
+        // The group being edited is *where you are*, which is a different fact
+        // from what is selected — give it its own weight rather than reusing the
+        // selection highlight and making the two indistinguishable.
+        match node.edit_context {
+            OutlinerEditContext::Active => {
+                text = text.strong().color(ui.visuals().hyperlink_color);
+            }
+            OutlinerEditContext::Ancestor => {
+                text = text.color(ui.visuals().weak_text_color());
+            }
+            OutlinerEditContext::Outside => {}
+        }
         let response = ui.selectable_label(is_selected, text);
         if response.clicked() && node.select_entity.is_some() {
             let additive = ui.input(|input| input.modifiers.command || input.modifiers.shift);
@@ -864,6 +1017,156 @@ mod tests {
 
         let child_node = node_for(&tree, 2).expect("child node");
         assert_eq!(child_node.select_entity, Some(child));
+    }
+
+    /// Double-clicking down the hierarchy in the viewport selects a nested
+    /// element. If its branch is collapsed the panel would silently show
+    /// nothing, so the build expands the ancestors and queues the scroll.
+    #[test]
+    fn selection_made_outside_the_panel_expands_ancestors_and_queues_reveal() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "House".to_string(),
+                member_ids: vec![ElementId(2)],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(2),
+            GroupMembers {
+                name: "Roof".to_string(),
+                member_ids: vec![ElementId(3)],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+        let leaf = world.spawn(ElementId(3)).id();
+        world.insert_resource(OutlinerWindowState {
+            visible: true,
+            collapsed: HashSet::from([1, 2]),
+            ..Default::default()
+        });
+        world.init_resource::<OutlinerTree>();
+        world.init_resource::<CapabilityRegistry>();
+        world.entity_mut(leaf).insert(Selected);
+
+        build_outliner_tree(&mut world);
+
+        let state = world.resource::<OutlinerWindowState>();
+        assert!(!state.collapsed.contains(&1), "house expanded");
+        assert!(!state.collapsed.contains(&2), "roof expanded");
+        assert_eq!(state.pending_reveal, Some(3), "leaf queued for scroll");
+        assert_eq!(state.last_selection, vec![3]);
+    }
+
+    /// Clicking a row inside the panel must not scroll the list — the row is
+    /// already on screen, and moving it yanks the tree out from under the
+    /// cursor between clicks.
+    #[test]
+    fn selection_made_by_clicking_a_row_does_not_scroll_the_panel() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "House".to_string(),
+                member_ids: vec![ElementId(2)],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+        let child = world.spawn(ElementId(2)).id();
+        world.insert_resource(OutlinerWindowState {
+            visible: true,
+            selection_from_panel: true,
+            ..Default::default()
+        });
+        world.init_resource::<OutlinerTree>();
+        world.init_resource::<CapabilityRegistry>();
+        world.entity_mut(child).insert(Selected);
+
+        build_outliner_tree(&mut world);
+
+        let state = world.resource::<OutlinerWindowState>();
+        assert_eq!(state.pending_reveal, None, "panel click must not scroll");
+        assert!(!state.selection_from_panel, "flag consumed");
+        assert_eq!(state.last_selection, vec![2], "selection still tracked");
+    }
+
+    /// Re-revealing every frame would fight the user's own scrolling and
+    /// re-expand branches they deliberately collapsed.
+    #[test]
+    fn unchanged_selection_does_not_re_reveal() {
+        let mut world = World::new();
+        let leaf = world.spawn(ElementId(3)).id();
+        world.insert_resource(OutlinerWindowState {
+            visible: true,
+            ..Default::default()
+        });
+        world.init_resource::<OutlinerTree>();
+        world.init_resource::<CapabilityRegistry>();
+        world.entity_mut(leaf).insert(Selected);
+
+        build_outliner_tree(&mut world);
+        world.resource_mut::<OutlinerWindowState>().pending_reveal = None;
+        world
+            .resource_mut::<OutlinerWindowState>()
+            .collapsed
+            .insert(3);
+        build_outliner_tree(&mut world);
+
+        let state = world.resource::<OutlinerWindowState>();
+        assert_eq!(state.pending_reveal, None, "no second reveal");
+        assert!(state.collapsed.contains(&3), "user's collapse respected");
+    }
+
+    /// The entered group is a different fact from the selection, and the tree is
+    /// where the user's position in the hierarchy should be readable.
+    #[test]
+    fn entered_group_and_its_ancestors_are_marked() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            GroupMembers {
+                name: "House".to_string(),
+                member_ids: vec![ElementId(2)],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(2),
+            GroupMembers {
+                name: "Roof".to_string(),
+                member_ids: vec![ElementId(3)],
+                frame: GroupFrame::default(),
+                linked_model: None,
+            },
+        ));
+        world.spawn(ElementId(3));
+        world.insert_resource({
+            let mut context = GroupEditContext::default();
+            context.enter(ElementId(1));
+            context.enter(ElementId(2));
+            context
+        });
+
+        let tree = build(&mut world);
+
+        assert_eq!(
+            node_for(&tree, 2).unwrap().edit_context,
+            OutlinerEditContext::Active
+        );
+        assert_eq!(
+            node_for(&tree, 1).unwrap().edit_context,
+            OutlinerEditContext::Ancestor
+        );
+        assert_eq!(
+            node_for(&tree, 3).unwrap().edit_context,
+            OutlinerEditContext::Outside
+        );
     }
 
     #[test]

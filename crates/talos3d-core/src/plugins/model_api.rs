@@ -91,7 +91,7 @@ use crate::plugins::{
     },
     named_views::NamedViewRegistry,
     persistence::{load_project_from_path, save_project_to_path},
-    selection::{resolve_entity_for_selection, Selected},
+    selection::{retain_selected_entity, Selected},
     toolbar::{
         update_toolbar_layout_entry, ToolbarDock, ToolbarLayoutState, ToolbarRegistry,
         ToolbarSection,
@@ -3378,7 +3378,11 @@ fn handle_set_selection(world: &mut World, element_ids: Vec<u64>) -> Result<Vec<
     let mut target_entities = HashSet::new();
     for eid in &target_ids {
         if let Some(entity) = find_entity_by_element_id(world, *eid) {
-            if let Some(target) = resolve_entity_for_selection(world, entity) {
+            // The caller named this element by id, so honour it. Viewport hit
+            // resolution promotes to the enclosing top-level group, which would
+            // turn every `set_selection` on a group, wall or opening into a
+            // selection of the outermost group instead.
+            if let Some(target) = retain_selected_entity(world, entity) {
                 let Some(target_id) = world.get::<ElementId>(target).copied() else {
                     return Err(format!(
                         "Selection target for entity {} has no authored element ID",

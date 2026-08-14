@@ -7549,7 +7549,7 @@ fn create_assembly_group_moves_members_as_a_unit() {
 
 #[cfg(feature = "model-api")]
 #[test]
-fn set_selection_on_group_member_selects_group_at_root() {
+fn set_selection_honours_the_named_member_instead_of_its_group_at_root() {
     let mut world = init_model_api_test_world();
     world
         .resource_mut::<CapabilityRegistry>()
@@ -7596,11 +7596,18 @@ fn set_selection_on_group_member_selects_group_at_root() {
     .expect("assembly should be creatable");
     let group_id = result.group_element_id.expect("physical group id");
 
+    // The caller named the foundation by id. Promoting that to the enclosing
+    // house group — as a viewport raycast would — made every group, wall and
+    // opening in a model impossible to address over the API.
     let selected = handle_set_selection(&mut world, vec![foundation])
-        .expect("member selection should resolve to its group");
+        .expect("a named member should be selectable");
 
+    assert_eq!(selected, vec![foundation]);
+    assert_eq!(handle_get_selection(&mut world), vec![foundation]);
+
+    let selected = handle_set_selection(&mut world, vec![group_id])
+        .expect("the group itself should still be selectable");
     assert_eq!(selected, vec![group_id]);
-    assert_eq!(handle_get_selection(&mut world), vec![group_id]);
 }
 
 #[cfg(feature = "model-api")]
