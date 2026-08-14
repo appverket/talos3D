@@ -677,6 +677,16 @@ impl AuthoredEntityFactory for RelationFactory {
             {
                 out.push(*element_id);
             }
+            if relation.relation_type
+                == crate::plugins::modeling::group::ASSEMBLY_PHYSICAL_GROUP_RELATION
+            {
+                if requested_ids.contains(&relation.source) && !out.contains(&relation.target) {
+                    out.push(relation.target);
+                }
+                if requested_ids.contains(&relation.target) && !out.contains(&relation.source) {
+                    out.push(relation.source);
+                }
+            }
         }
     }
 }
@@ -701,6 +711,42 @@ pub fn remove_member_from_assemblies(world: &mut World, member_id: ElementId) {
             assembly.members.retain(|m| m.target != member_id);
         }
     }
+}
+
+/// Expand a delete request across the two persisted facets of an assembly
+/// without traversing the physical group's children. Used by non-recursive
+/// group-shell deletion so semantic owner, physical group, and their internal
+/// representation relation remain one lifecycle unit.
+pub fn expand_assembly_representation_delete_ids(
+    world: &World,
+    requested_ids: &[ElementId],
+) -> Vec<ElementId> {
+    let mut expanded = requested_ids.to_vec();
+    loop {
+        let previous_len = expanded.len();
+        for entity_ref in world.iter_entities() {
+            let (Some(relation_id), Some(relation)) = (
+                entity_ref.get::<ElementId>(),
+                entity_ref.get::<SemanticRelation>(),
+            ) else {
+                continue;
+            };
+            if relation.relation_type
+                != crate::plugins::modeling::group::ASSEMBLY_PHYSICAL_GROUP_RELATION
+            {
+                continue;
+            }
+            if expanded.contains(&relation.source) || expanded.contains(&relation.target) {
+                expanded.extend([*relation_id, relation.source, relation.target]);
+            }
+        }
+        expanded.sort_unstable_by_key(|element_id| element_id.0);
+        expanded.dedup();
+        if expanded.len() == previous_len {
+            break;
+        }
+    }
+    expanded
 }
 
 /// Find all assembly ElementIds that contain the given member.

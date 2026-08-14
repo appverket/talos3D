@@ -748,9 +748,15 @@ Example spot light creation:
 }
 ```
 
-Semantic assemblies are authored records, distinct from editing groups. They
-are intended as a first step toward domain structures such as rooms, storeys,
-houses, and future domain-specific assemblies.
+Semantic assemblies are authored records, distinct from editing groups. Each
+assembly created through the model API is paired with one geometry-bearing
+physical group by the internal `core.physical_representation` relation. The
+semantic side remains authoritative for typed member roles and validation; the
+physical side is authoritative for scene-tree containment, outliner rows,
+selection, bounds, and transforms. Parent assemblies therefore retain semantic
+assembly ids in their typed membership while their physical groups contain the
+paired child groups. Existing project files with the older duplicated/DAG
+membership shape are reconciled to this tree when loaded.
 
 For bottom-up modelling, prefer the selection-driven flow over constructing a
 raw `create_assembly` payload by hand:
@@ -762,8 +768,9 @@ raw `create_assembly` payload by hand:
    the chosen assembly type.
 3. Call `create_semantic_assembly_from_selection` with explicit
    `assembly_type` and `member_role`. The tool creates the semantic assembly,
-   creates/selects a physical group for the same members, records
-   bottom-up-selection metadata, and may annotate member
+   creates/selects a paired physical group, nests any existing physical
+   subgroups without duplicating their leaves, records bottom-up-selection
+   metadata, and may annotate member
    `SemanticIntent.parameters.component_role` for later queries.
 
 This is the programmatic equivalent of the UI command **Create Semantic

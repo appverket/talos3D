@@ -1416,6 +1416,17 @@ fn load_project(world: &mut World, project: ProjectFile) -> Result<(), String> {
     world
         .resource_mut::<ElementIdAllocator>()
         .set_next(next_element_id);
+    let assembly_group_reconciliation =
+        crate::plugins::modeling::group::reconcile_semantic_assembly_groups(world);
+    if assembly_group_reconciliation.linked_assemblies > 0
+        || assembly_group_reconciliation.rewritten_groups > 0
+    {
+        info!(
+            "Reconciled {} semantic assembly/group link(s) and rewrote {} physical group(s) into a canonical containment tree",
+            assembly_group_reconciliation.linked_assemblies,
+            assembly_group_reconciliation.rewritten_groups,
+        );
+    }
     world.resource_mut::<History>().clear();
     world.resource_mut::<PendingCommandQueue>().clear();
     world.resource_mut::<PropertyEditState>().clear();

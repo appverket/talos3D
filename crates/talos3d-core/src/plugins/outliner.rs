@@ -38,7 +38,7 @@ use crate::plugins::{
     layers::entity_on_locked_layer,
     modeling::{
         assembly::SemanticRelation,
-        group::GroupMembers,
+        group::{semantic_assembly_physical_group_links, GroupMembers},
         occurrence::{GeneratedOccurrencePart, OccurrenceIdentity},
     },
     selection::Selected,
@@ -266,6 +266,15 @@ pub fn collect_outline_forest(world: &mut World) -> Vec<OutlineEntry> {
         }
     }
 
+    // A semantic assembly and its geometry-bearing physical group are two
+    // authored facets of one user-facing aggregate. Present the physical group
+    // row (which has bounds and can be selected/edited), not a duplicate leaf
+    // for the semantic owner.
+    let represented_assembly_set: HashSet<u64> = semantic_assembly_physical_group_links(world)
+        .into_keys()
+        .map(|element_id| element_id.0)
+        .collect();
+
     // Relations are connectivity, not aggregation — keep them out of the tree.
     let mut relation_set: HashSet<u64> = HashSet::new();
     {
@@ -329,7 +338,11 @@ pub fn collect_outline_forest(world: &mut World) -> Vec<OutlineEntry> {
     let mut root_eids: Vec<u64> = all_eids
         .iter()
         .map(|(eid, _)| *eid)
-        .filter(|eid| !member_set.contains(eid) && !relation_set.contains(eid))
+        .filter(|eid| {
+            !member_set.contains(eid)
+                && !relation_set.contains(eid)
+                && !represented_assembly_set.contains(eid)
+        })
         .collect();
     root_eids.sort_by_key(|a| ctx.label_for(*a));
 

@@ -6996,6 +6996,9 @@ fn create_assembly_creates_selected_physical_group_for_members() {
     world
         .resource_mut::<CapabilityRegistry>()
         .register_factory(crate::plugins::modeling::group::GroupFactory);
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::assembly::AssemblyFactory);
     register_house_with_member_obligations(&mut world);
     let foundation = handle_create_entity(
         &mut world,
@@ -7052,11 +7055,147 @@ fn create_assembly_creates_selected_physical_group_for_members() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn nested_assemblies_build_one_physical_tree_and_outliner_shows_every_child() {
+    use crate::plugins::{
+        modeling::group::GroupMembers,
+        outliner::{collect_outline_forest, OutlinerKind},
+    };
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::group::GroupFactory);
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::assembly::AssemblyFactory);
+    register_house_with_member_obligations(&mut world);
+
+    let mut child_assembly_ids = Vec::new();
+    let mut child_group_ids = Vec::new();
+    let mut wall_ids = Vec::new();
+    for (index, cardinal) in ["East", "West", "South", "North"].into_iter().enumerate() {
+        let wall_id = ElementId(
+            handle_create_entity(
+                &mut world,
+                json!({
+                    "type": "box",
+                    "centre": [index as f32 * 2.0, 1.0, 0.0],
+                    "half_extents": [0.5, 1.0, 0.1]
+                }),
+            )
+            .expect("wall stand-in should be creatable"),
+        );
+        wall_ids.push(wall_id);
+        let result = handle_create_assembly(
+            &mut world,
+            CreateAssemblyRequest {
+                assembly_type: "house".into(),
+                label: format!("{cardinal} exterior wall assembly"),
+                members: vec![AssemblyMemberRefRequest {
+                    target: wall_id.0,
+                    role: "exterior_wall".into(),
+                }],
+                parameters: Value::Null,
+                metadata: Value::Null,
+                relations: Vec::new(),
+            },
+        )
+        .expect("child assembly should be creatable");
+        child_assembly_ids.push(ElementId(result.assembly_id));
+        child_group_ids.push(ElementId(
+            result.group_element_id.expect("child physical group"),
+        ));
+    }
+
+    let house = handle_create_assembly(
+        &mut world,
+        CreateAssemblyRequest {
+            assembly_type: "house".into(),
+            label: "Four-wall house".into(),
+            members: child_assembly_ids
+                .iter()
+                .map(|assembly_id| AssemblyMemberRefRequest {
+                    target: assembly_id.0,
+                    role: "exterior_wall".into(),
+                })
+                .collect(),
+            parameters: Value::Null,
+            metadata: Value::Null,
+            relations: Vec::new(),
+        },
+    )
+    .expect("parent assembly should be creatable");
+    let house_group_id = ElementId(house.group_element_id.expect("house physical group"));
+    let house_group_entity = find_entity_by_element_id_readonly(&world, house_group_id)
+        .expect("house group should exist");
+    assert_eq!(
+        world
+            .get::<GroupMembers>(house_group_entity)
+            .expect("house group members")
+            .member_ids,
+        child_group_ids,
+        "semantic assembly owners must resolve to their geometry-bearing groups"
+    );
+
+    let forest = collect_outline_forest(&mut world);
+    let house_node = forest
+        .iter()
+        .find(|entry| entry.element_id == Some(house_group_id.0))
+        .expect("physical house group should be an outliner root");
+    assert_eq!(house_node.kind, OutlinerKind::Group);
+    assert_eq!(house_node.children.len(), 4);
+    assert_eq!(
+        house_node
+            .children
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "East exterior wall assembly",
+            "North exterior wall assembly",
+            "South exterior wall assembly",
+            "West exterior wall assembly",
+        ]
+    );
+    for semantic_owner in child_assembly_ids
+        .iter()
+        .copied()
+        .chain(std::iter::once(ElementId(house.assembly_id)))
+    {
+        assert!(
+            forest
+                .iter()
+                .all(|entry| entry.element_id != Some(semantic_owner.0)),
+            "paired semantic owners must not appear as duplicate outliner roots"
+        );
+    }
+
+    for wall_id in wall_ids {
+        let parents: Vec<ElementId> = world
+            .iter_entities()
+            .filter_map(|entity_ref| {
+                let group_id = entity_ref.get::<ElementId>()?;
+                let members = entity_ref.get::<GroupMembers>()?;
+                members.member_ids.contains(&wall_id).then_some(*group_id)
+            })
+            .collect();
+        assert_eq!(parents.len(), 1, "each wall must have one physical parent");
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn delete_entities_can_delete_group_shell_without_members() {
     let mut world = init_model_api_test_world();
     world
         .resource_mut::<CapabilityRegistry>()
         .register_factory(crate::plugins::modeling::group::GroupFactory);
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::assembly::AssemblyFactory);
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_factory(crate::plugins::modeling::assembly::RelationFactory);
     register_house_with_member_obligations(&mut world);
     let foundation = handle_create_entity(
         &mut world,
@@ -7099,12 +7238,25 @@ fn delete_entities_can_delete_group_shell_without_members() {
     )
     .expect("assembly should be creatable");
     let group_id = result.group_element_id.expect("physical group id");
+    let assembly_id = result.assembly_id;
 
     let deleted_count = handle_delete_entities_with_options(&mut world, vec![group_id], false)
-        .expect("non-recursive delete should remove only the group shell");
+        .expect("non-recursive delete should remove the paired aggregate shell");
 
-    assert_eq!(deleted_count, 1);
+    assert_eq!(deleted_count, 3);
     assert!(get_entity_snapshot(&world, ElementId(group_id)).is_none());
+    assert!(
+        get_entity_snapshot(&world, ElementId(assembly_id)).is_none(),
+        "deleting a physical assembly group must also remove its semantic owner"
+    );
+    assert!(world.iter_entities().all(|entity_ref| {
+        entity_ref
+            .get::<crate::plugins::modeling::assembly::SemanticRelation>()
+            .is_none_or(|relation| {
+                relation.relation_type
+                    != crate::plugins::modeling::group::ASSEMBLY_PHYSICAL_GROUP_RELATION
+            })
+    }));
     assert!(get_entity_snapshot(&world, ElementId(foundation)).is_some());
     assert!(get_entity_snapshot(&world, ElementId(wall)).is_some());
 }

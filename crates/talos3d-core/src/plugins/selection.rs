@@ -1904,6 +1904,121 @@ mod tests {
     }
 
     #[test]
+    fn reconciled_assembly_clicks_descend_house_wall_and_recipe_groups_stably() {
+        use crate::plugins::modeling::{
+            assembly::{AssemblyMemberRef, SemanticAssembly},
+            group::reconcile_semantic_assembly_groups,
+        };
+
+        let mut world = World::new();
+        world.insert_resource(LayerRegistry::default());
+        world.insert_resource(GroupEditContext::default());
+        world.insert_resource(OccurrenceEditContext::default());
+        world.insert_resource(FaceEditContext::default());
+        world.insert_resource(DoubleClickTracker::default());
+        world.insert_resource(SelectionPressCapture::default());
+        let mut allocator = crate::plugins::identity::ElementIdAllocator::default();
+        allocator.set_next(300);
+        world.insert_resource(allocator);
+
+        let wall_id = ElementId(6);
+        let recipe_group_id = ElementId(7);
+        let wall_assembly_id = ElementId(250);
+        let wall_group_id = ElementId(251);
+        let house_assembly_id = ElementId(260);
+        let house_group_id = ElementId(261);
+        let wall = world.spawn(wall_id).id();
+        let recipe_group = world
+            .spawn((
+                recipe_group_id,
+                GroupMembers {
+                    name: "wall recipe".into(),
+                    member_ids: vec![wall_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        world.spawn((
+            wall_assembly_id,
+            SemanticAssembly {
+                assembly_type: "wall_assembly".into(),
+                label: "East exterior wall assembly".into(),
+                members: vec![AssemblyMemberRef {
+                    target: wall_id,
+                    role: "exterior_wall".into(),
+                }],
+                parameters: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+            },
+        ));
+        let wall_group = world
+            .spawn((
+                wall_group_id,
+                GroupMembers {
+                    name: "East exterior wall assembly".into(),
+                    member_ids: vec![wall_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+        world.spawn((
+            house_assembly_id,
+            SemanticAssembly {
+                assembly_type: "house".into(),
+                label: "House".into(),
+                members: vec![AssemblyMemberRef {
+                    target: wall_assembly_id,
+                    role: "exterior_wall".into(),
+                }],
+                parameters: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+            },
+        ));
+        let house_group = world
+            .spawn((
+                house_group_id,
+                GroupMembers {
+                    name: "House".into(),
+                    member_ids: vec![wall_assembly_id],
+                    frame: Default::default(),
+                    linked_model: None,
+                },
+            ))
+            .id();
+
+        let report = reconcile_semantic_assembly_groups(&mut world);
+        assert_eq!(report.linked_assemblies, 2);
+        assert_eq!(report.rewritten_groups, 2);
+
+        let click_wall = |world: &mut World, now| {
+            let target = capture_selection_press(world, Some(wall), Vec2::new(320.0, 240.0), false);
+            complete_selection_release(world, Vec2::new(320.0, 240.0), now);
+            target
+        };
+
+        assert_eq!(click_wall(&mut world, 1.0), Some(house_group));
+        assert!(world.get::<Selected>(house_group).is_some());
+        assert_eq!(click_wall(&mut world, 1.1), Some(house_group));
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![house_group_id]
+        );
+
+        assert_eq!(click_wall(&mut world, 1.2), Some(wall_group));
+        assert!(world.get::<Selected>(wall_group).is_some());
+        assert_eq!(click_wall(&mut world, 1.3), Some(wall_group));
+        assert_eq!(
+            world.resource::<GroupEditContext>().stack,
+            vec![house_group_id, wall_group_id]
+        );
+
+        assert_eq!(click_wall(&mut world, 1.4), Some(recipe_group));
+        assert!(world.get::<Selected>(recipe_group).is_some());
+    }
+
+    #[test]
     fn selected_roof_double_click_descends_one_level_instead_of_promoting_to_house() {
         let mut world = World::new();
         world.insert_resource(LayerRegistry::default());

@@ -547,11 +547,355 @@ impl GroupEditContext {
 
 pub fn find_group_for_member(world: &World, member_id: ElementId) -> Option<ElementId> {
     let mut q = world.try_query::<EntityRef>().unwrap();
-    q.iter(world).find_map(|e| {
-        let group_id = e.get::<ElementId>()?;
-        let members = e.get::<GroupMembers>()?;
-        members.member_ids.contains(&member_id).then_some(*group_id)
-    })
+    q.iter(world)
+        .filter_map(|e| {
+            let group_id = e.get::<ElementId>()?;
+            let members = e.get::<GroupMembers>()?;
+            members.member_ids.contains(&member_id).then_some(*group_id)
+        })
+        .min_by_key(|group_id| group_id.0)
+}
+
+#[derive(Debug, Clone)]
+struct AssemblyGroupRecord {
+    label: String,
+    members: Vec<ElementId>,
+}
+
+#[derive(Debug, Clone)]
+struct PhysicalGroupRecord {
+    entity: Entity,
+    name: String,
+    members: Vec<ElementId>,
+}
+
+/// Summary of legacy semantic/physical assembly reconciliation performed after
+/// loading a project.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AssemblyGroupReconcileReport {
+    pub linked_assemblies: usize,
+    pub rewritten_groups: usize,
+}
+
+pub const ASSEMBLY_PHYSICAL_GROUP_RELATION: &str = "core.physical_representation";
+
+fn assembly_group_records(
+    world: &World,
+) -> (
+    HashMap<ElementId, AssemblyGroupRecord>,
+    HashMap<ElementId, PhysicalGroupRecord>,
+    HashMap<ElementId, ElementId>,
+) {
+    use crate::plugins::modeling::assembly::{SemanticAssembly, SemanticRelation};
+
+    let mut assemblies = HashMap::new();
+    let mut groups = HashMap::new();
+    for entity_ref in world.iter_entities() {
+        let Some(element_id) = entity_ref.get::<ElementId>().copied() else {
+            continue;
+        };
+        if let Some(assembly) = entity_ref.get::<SemanticAssembly>() {
+            assemblies.insert(
+                element_id,
+                AssemblyGroupRecord {
+                    label: assembly.label.clone(),
+                    members: assembly
+                        .members
+                        .iter()
+                        .map(|member| member.target)
+                        .collect(),
+                },
+            );
+        }
+        if let Some(group) = entity_ref.get::<GroupMembers>() {
+            groups.insert(
+                element_id,
+                PhysicalGroupRecord {
+                    entity: entity_ref.id(),
+                    name: group.name.clone(),
+                    members: group.member_ids.clone(),
+                },
+            );
+        }
+    }
+    let links = world
+        .iter_entities()
+        .filter_map(|entity_ref| {
+            let relation = entity_ref.get::<SemanticRelation>()?;
+            (relation.relation_type == ASSEMBLY_PHYSICAL_GROUP_RELATION
+                && assemblies.contains_key(&relation.source)
+                && groups.contains_key(&relation.target))
+            .then_some((relation.source, relation.target))
+        })
+        .collect();
+    (assemblies, groups, links)
+}
+
+fn infer_legacy_assembly_group_links(
+    assemblies: &HashMap<ElementId, AssemblyGroupRecord>,
+    groups: &HashMap<ElementId, PhysicalGroupRecord>,
+    explicit_links: &HashMap<ElementId, ElementId>,
+) -> HashMap<ElementId, ElementId> {
+    let mut links = explicit_links.clone();
+    let mut claimed_groups: HashSet<ElementId> = links.values().copied().collect();
+
+    let mut assembly_ids: Vec<ElementId> = assemblies.keys().copied().collect();
+    assembly_ids.sort_by_key(|id| id.0);
+
+    for assembly_id in assembly_ids {
+        if links.contains_key(&assembly_id) {
+            continue;
+        }
+        let assembly = &assemblies[&assembly_id];
+        let mut candidates: Vec<ElementId> = groups
+            .iter()
+            .filter_map(|(group_id, group)| {
+                (!claimed_groups.contains(group_id)
+                    && group.name == assembly.label
+                    && group.members == assembly.members)
+                    .then_some(*group_id)
+            })
+            .collect();
+        candidates.sort_by_key(|id| id.0);
+        if candidates.len() == 1 {
+            links.insert(assembly_id, candidates[0]);
+            claimed_groups.insert(candidates[0]);
+        }
+    }
+
+    links
+}
+
+/// Resolve semantic assembly owners to their geometry-bearing groups. Explicit
+/// persisted representation relations are authoritative; exact legacy
+/// assembly/group twins are recognized until the load migration records those
+/// relations.
+pub fn semantic_assembly_physical_group_links(world: &World) -> HashMap<ElementId, ElementId> {
+    let (assemblies, groups, explicit_links) = assembly_group_records(world);
+    infer_legacy_assembly_group_links(&assemblies, &groups, &explicit_links)
+}
+
+fn raw_group_leaf_count(
+    group_id: ElementId,
+    groups: &HashMap<ElementId, PhysicalGroupRecord>,
+    visiting: &mut HashSet<ElementId>,
+) -> usize {
+    if !visiting.insert(group_id) {
+        return usize::MAX / 2;
+    }
+    let count = groups.get(&group_id).map_or(usize::MAX / 2, |group| {
+        group
+            .members
+            .iter()
+            .map(|member| {
+                if groups.contains_key(member) {
+                    raw_group_leaf_count(*member, groups, visiting)
+                } else {
+                    1
+                }
+            })
+            .sum()
+    });
+    visiting.remove(&group_id);
+    count
+}
+
+fn best_unpaired_direct_parent(
+    target: ElementId,
+    current_group: Option<ElementId>,
+    groups: &HashMap<ElementId, PhysicalGroupRecord>,
+    paired_groups: &HashSet<ElementId>,
+) -> Option<ElementId> {
+    let mut candidates: Vec<(usize, u64, ElementId)> = groups
+        .iter()
+        .filter_map(|(group_id, group)| {
+            (*group_id != current_group.unwrap_or(ElementId(u64::MAX))
+                && !paired_groups.contains(group_id)
+                && group.members.contains(&target))
+            .then(|| {
+                (
+                    raw_group_leaf_count(*group_id, groups, &mut HashSet::new()),
+                    group_id.0,
+                    *group_id,
+                )
+            })
+        })
+        .collect();
+    candidates.sort_by_key(|(leaf_count, id, _)| (*leaf_count, *id));
+    candidates.first().map(|(_, _, group_id)| *group_id)
+}
+
+fn group_contains_with_members(
+    group_id: ElementId,
+    target: ElementId,
+    groups: &HashMap<ElementId, PhysicalGroupRecord>,
+    normalized: &HashMap<ElementId, Vec<ElementId>>,
+) -> bool {
+    let mut stack = vec![group_id];
+    let mut visited = HashSet::new();
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current) {
+            continue;
+        }
+        let members = normalized
+            .get(&current)
+            .or_else(|| groups.get(&current).map(|group| &group.members));
+        let Some(members) = members else {
+            continue;
+        };
+        for member in members {
+            if *member == target {
+                return true;
+            }
+            if groups.contains_key(member) {
+                stack.push(*member);
+            }
+        }
+    }
+    false
+}
+
+fn normalize_assembly_group_members(
+    assembly_id: ElementId,
+    assemblies: &HashMap<ElementId, AssemblyGroupRecord>,
+    groups: &HashMap<ElementId, PhysicalGroupRecord>,
+    links: &HashMap<ElementId, ElementId>,
+    normalized: &mut HashMap<ElementId, Vec<ElementId>>,
+    visiting: &mut HashSet<ElementId>,
+) {
+    let Some(group_id) = links.get(&assembly_id).copied() else {
+        return;
+    };
+    if normalized.contains_key(&group_id) || !visiting.insert(assembly_id) {
+        return;
+    }
+
+    let paired_groups: HashSet<ElementId> = links.values().copied().collect();
+    let mut physical_members = Vec::new();
+    for target in &assemblies[&assembly_id].members {
+        let physical_target = if let Some(child_group) = links.get(target).copied() {
+            normalize_assembly_group_members(
+                *target, assemblies, groups, links, normalized, visiting,
+            );
+            child_group
+        } else if groups.contains_key(target) {
+            *target
+        } else {
+            best_unpaired_direct_parent(*target, Some(group_id), groups, &paired_groups)
+                .unwrap_or(*target)
+        };
+        if !physical_members.contains(&physical_target) {
+            physical_members.push(physical_target);
+        }
+    }
+
+    let membership_candidates = physical_members.clone();
+    physical_members.retain(|candidate| {
+        !membership_candidates.iter().any(|other| {
+            other != candidate
+                && groups.contains_key(other)
+                && group_contains_with_members(*other, *candidate, groups, normalized)
+        })
+    });
+    normalized.insert(group_id, physical_members);
+    visiting.remove(&assembly_id);
+}
+
+/// Resolve the physical scene-tree members for a new semantic assembly.
+/// Existing recipe/product groups are retained as subgroups, semantic assembly
+/// targets are redirected to their paired physical groups, and redundant
+/// descendants are removed when a higher aggregate already contains them.
+pub fn canonical_physical_members_for_assembly(
+    world: &World,
+    semantic_members: &[ElementId],
+) -> Vec<ElementId> {
+    let (assemblies, groups, explicit_links) = assembly_group_records(world);
+    let links = infer_legacy_assembly_group_links(&assemblies, &groups, &explicit_links);
+    let paired_groups: HashSet<ElementId> = links.values().copied().collect();
+    let mut normalized = HashMap::new();
+    let mut visiting = HashSet::new();
+    for assembly_id in assemblies.keys().copied() {
+        normalize_assembly_group_members(
+            assembly_id,
+            &assemblies,
+            &groups,
+            &links,
+            &mut normalized,
+            &mut visiting,
+        );
+    }
+
+    let mut physical_members = Vec::new();
+    for target in semantic_members {
+        let physical_target = links
+            .get(target)
+            .copied()
+            .or_else(|| groups.contains_key(target).then_some(*target))
+            .or_else(|| best_unpaired_direct_parent(*target, None, &groups, &paired_groups))
+            .unwrap_or(*target);
+        if !physical_members.contains(&physical_target) {
+            physical_members.push(physical_target);
+        }
+    }
+    let membership_candidates = physical_members.clone();
+    physical_members.retain(|candidate| {
+        !membership_candidates.iter().any(|other| {
+            other != candidate
+                && groups.contains_key(other)
+                && group_contains_with_members(*other, *candidate, &groups, &normalized)
+        })
+    });
+    physical_members
+}
+
+/// Pair legacy semantic assemblies with their physical groups and rewrite the
+/// group side into a strict containment tree. This runs during project load,
+/// before history/dirty state is reset, so old files gain stable outliner and
+/// viewport behavior without creating a user-visible edit.
+pub fn reconcile_semantic_assembly_groups(world: &mut World) -> AssemblyGroupReconcileReport {
+    use crate::plugins::modeling::assembly::SemanticRelation;
+
+    let (assemblies, groups, explicit_links) = assembly_group_records(world);
+    let links = infer_legacy_assembly_group_links(&assemblies, &groups, &explicit_links);
+    let mut normalized = HashMap::new();
+    let mut visiting = HashSet::new();
+    for assembly_id in assemblies.keys().copied() {
+        normalize_assembly_group_members(
+            assembly_id,
+            &assemblies,
+            &groups,
+            &links,
+            &mut normalized,
+            &mut visiting,
+        );
+    }
+
+    let mut report = AssemblyGroupReconcileReport::default();
+    for (assembly_id, group_id) in &links {
+        if !explicit_links.contains_key(assembly_id) {
+            let relation_id = world.resource::<ElementIdAllocator>().next_id();
+            world.spawn((
+                relation_id,
+                SemanticRelation {
+                    source: *assembly_id,
+                    target: *group_id,
+                    relation_type: ASSEMBLY_PHYSICAL_GROUP_RELATION.to_string(),
+                    parameters: serde_json::Value::Null,
+                },
+            ));
+            report.linked_assemblies += 1;
+        }
+    }
+    for (group_id, member_ids) in normalized {
+        let record = &groups[&group_id];
+        if record.members != member_ids {
+            if let Some(mut group) = world.get_mut::<GroupMembers>(record.entity) {
+                group.member_ids = member_ids;
+                report.rewritten_groups += 1;
+            }
+        }
+    }
+    report
 }
 
 /// Collect all member IDs of a group recursively (including nested group members).
@@ -832,6 +1176,7 @@ mod frame_tests {
     use crate::{
         capability_registry::CapabilityRegistry,
         plugins::modeling::{
+            assembly::{AssemblyMemberRef, SemanticAssembly},
             generic_factory::PrimitiveFactory,
             primitives::{BoxPrimitive, ShapeRotation},
         },
@@ -961,5 +1306,227 @@ mod frame_tests {
 
         let members = collect_group_members_recursive(&world, ElementId(1));
         assert_eq!(members, vec![ElementId(2), ElementId(3), ElementId(4)]);
+    }
+
+    #[test]
+    fn legacy_assembly_group_dag_reconciles_to_one_nested_physical_tree() {
+        let mut world = World::new();
+        let mut allocator = ElementIdAllocator::default();
+        allocator.set_next(300);
+        world.insert_resource(allocator);
+        let cardinals = [
+            (
+                "East",
+                ElementId(6),
+                ElementId(7),
+                ElementId(250),
+                ElementId(251),
+            ),
+            (
+                "West",
+                ElementId(9),
+                ElementId(10),
+                ElementId(252),
+                ElementId(253),
+            ),
+            (
+                "South",
+                ElementId(12),
+                ElementId(13),
+                ElementId(254),
+                ElementId(255),
+            ),
+            (
+                "North",
+                ElementId(15),
+                ElementId(16),
+                ElementId(256),
+                ElementId(257),
+            ),
+        ];
+
+        for (cardinal, wall_id, recipe_group_id, assembly_id, assembly_group_id) in cardinals {
+            let recipe_root_id = ElementId(wall_id.0 - 1);
+            world.spawn(recipe_root_id);
+            world.spawn(wall_id);
+            world.spawn((
+                recipe_group_id,
+                GroupMembers {
+                    name: "wall_assembly assembly".into(),
+                    member_ids: vec![recipe_root_id, wall_id],
+                    frame: GroupFrame::identity(),
+                    linked_model: None,
+                },
+            ));
+            let label = format!("{cardinal} exterior wall assembly");
+            world.spawn((
+                assembly_id,
+                SemanticAssembly {
+                    assembly_type: "wall_assembly".into(),
+                    label: label.clone(),
+                    members: vec![AssemblyMemberRef {
+                        target: wall_id,
+                        role: "exterior_wall".into(),
+                    }],
+                    parameters: serde_json::Value::Null,
+                    metadata: serde_json::Value::Null,
+                },
+            ));
+            world.spawn((
+                assembly_group_id,
+                GroupMembers {
+                    name: label,
+                    member_ids: vec![wall_id],
+                    frame: GroupFrame::identity(),
+                    linked_model: None,
+                },
+            ));
+        }
+
+        let wall_assembly_ids = vec![
+            ElementId(250),
+            ElementId(252),
+            ElementId(254),
+            ElementId(256),
+        ];
+        world.spawn((
+            ElementId(258),
+            SemanticAssembly {
+                assembly_type: "storey".into(),
+                label: "Ground floor".into(),
+                members: wall_assembly_ids
+                    .iter()
+                    .map(|target| AssemblyMemberRef {
+                        target: *target,
+                        role: "exterior_wall".into(),
+                    })
+                    .collect(),
+                parameters: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+            },
+        ));
+        world.spawn((
+            ElementId(259),
+            GroupMembers {
+                name: "Ground floor".into(),
+                member_ids: wall_assembly_ids.clone(),
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+        let mut house_members = wall_assembly_ids.clone();
+        house_members.push(ElementId(258));
+        world.spawn((
+            ElementId(260),
+            SemanticAssembly {
+                assembly_type: "house".into(),
+                label: "House".into(),
+                members: house_members
+                    .iter()
+                    .map(|target| AssemblyMemberRef {
+                        target: *target,
+                        role: "system".into(),
+                    })
+                    .collect(),
+                parameters: serde_json::Value::Null,
+                metadata: serde_json::Value::Null,
+            },
+        ));
+        world.spawn((
+            ElementId(261),
+            GroupMembers {
+                name: "House".into(),
+                member_ids: house_members,
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+
+        let report = reconcile_semantic_assembly_groups(&mut world);
+        assert_eq!(report.linked_assemblies, 6);
+        assert_eq!(report.rewritten_groups, 6);
+
+        for (assembly_id, group_id) in [
+            (250, 251),
+            (252, 253),
+            (254, 255),
+            (256, 257),
+            (258, 259),
+            (260, 261),
+        ] {
+            assert!(world.iter_entities().any(|entity_ref| {
+                entity_ref
+                    .get::<crate::plugins::modeling::assembly::SemanticRelation>()
+                    .is_some_and(|relation| {
+                        relation.source == ElementId(assembly_id)
+                            && relation.target == ElementId(group_id)
+                            && relation.relation_type == ASSEMBLY_PHYSICAL_GROUP_RELATION
+                    })
+            }));
+        }
+
+        for (wall_id, recipe_group_id, wall_group_id) in
+            [(6, 7, 251), (9, 10, 253), (12, 13, 255), (15, 16, 257)]
+        {
+            assert_eq!(
+                find_group_for_member(&world, ElementId(wall_id)),
+                Some(ElementId(recipe_group_id))
+            );
+            assert_eq!(
+                find_group_for_member(&world, ElementId(recipe_group_id)),
+                Some(ElementId(wall_group_id))
+            );
+        }
+        let storey_entity = find_entity_by_element_id_readonly(&world, ElementId(259)).unwrap();
+        assert_eq!(
+            world.get::<GroupMembers>(storey_entity).unwrap().member_ids,
+            vec![
+                ElementId(251),
+                ElementId(253),
+                ElementId(255),
+                ElementId(257)
+            ]
+        );
+        let house_entity = find_entity_by_element_id_readonly(&world, ElementId(261)).unwrap();
+        assert_eq!(
+            world.get::<GroupMembers>(house_entity).unwrap().member_ids,
+            vec![ElementId(259)],
+            "the storey already covers every wall, so the house must not duplicate them"
+        );
+        assert_eq!(
+            find_group_for_member(&world, ElementId(259)),
+            Some(ElementId(261))
+        );
+    }
+
+    #[test]
+    fn ambiguous_legacy_parent_lookup_is_deterministic() {
+        let mut world = World::new();
+        world.spawn(ElementId(10));
+        world.spawn((
+            ElementId(30),
+            GroupMembers {
+                name: "later parent".into(),
+                member_ids: vec![ElementId(10)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+        world.spawn((
+            ElementId(20),
+            GroupMembers {
+                name: "earlier parent".into(),
+                member_ids: vec![ElementId(10)],
+                frame: GroupFrame::identity(),
+                linked_model: None,
+            },
+        ));
+
+        for _ in 0..10 {
+            assert_eq!(
+                find_group_for_member(&world, ElementId(10)),
+                Some(ElementId(20))
+            );
+        }
     }
 }

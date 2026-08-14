@@ -4998,7 +4998,11 @@ pub fn handle_create_assembly(
             role: m.role.clone(),
         })
         .collect();
-    let group_member_ids: Vec<ElementId> = members.iter().map(|member| member.target).collect();
+    let semantic_member_ids: Vec<ElementId> = members.iter().map(|member| member.target).collect();
+    let group_member_ids = crate::plugins::modeling::group::canonical_physical_members_for_assembly(
+        world,
+        &semantic_member_ids,
+    );
     let group_label = request.label.clone();
     let group_id =
         (!group_member_ids.is_empty()).then(|| world.resource::<ElementIdAllocator>().next_id());
@@ -5019,6 +5023,17 @@ pub fn handle_create_assembly(
         claim_grounding: None,
         authoring_provenance: None,
     };
+
+    let physical_group_relation = group_id.map(|group_id| RelationSnapshot {
+        element_id: world.resource::<ElementIdAllocator>().next_id(),
+        relation: SemanticRelation {
+            source: assembly_id,
+            target: group_id,
+            relation_type: crate::plugins::modeling::group::ASSEMBLY_PHYSICAL_GROUP_RELATION
+                .to_string(),
+            parameters: Value::Null,
+        },
+    });
 
     let mut relation_snapshots: Vec<RelationSnapshot> = Vec::new();
     for rel in &request.relations {
@@ -5051,6 +5066,14 @@ pub fn handle_create_assembly(
     );
     if let Some(snapshot) = group_snapshot {
         send_event(world, CreateEntityCommand { snapshot });
+    }
+    if let Some(snapshot) = physical_group_relation {
+        send_event(
+            world,
+            CreateEntityCommand {
+                snapshot: snapshot.into(),
+            },
+        );
     }
 
     let mut relation_ids = Vec::new();
@@ -10704,7 +10727,7 @@ pub fn handle_delete_entities_with_options(
             .resource::<CapabilityRegistry>()
             .expand_delete_ids(world, &ids)
     } else {
-        ids.clone()
+        crate::plugins::modeling::assembly::expand_assembly_representation_delete_ids(world, &ids)
     };
     let deleted_count = expanded_ids.len();
     send_event(

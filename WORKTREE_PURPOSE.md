@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-08-13T20:35:00Z
-- branch: codex/TALOS-msnwmvce-south-wall-gutters
-- task-id: TALOS-msnwmvce
-- target base: main
-- summary: Make capability snapshots recognize executable public parametric paths so installed domain capabilities are not falsely reported as corpus gaps.
-- status: awaiting-merge
+- created: 2026-08-14T00:00:00Z
+- branch: codex/TALOS-rqrinlws-outliner-selection
+- task-id: TALOS-rqrinlws
+- target base: origin/main
+- summary: Repair semantic/physical assembly hierarchy presentation and stable group selection.
+- status: active
