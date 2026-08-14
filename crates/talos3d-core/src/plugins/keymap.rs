@@ -304,7 +304,45 @@ pub(crate) fn intrinsic_problems(registry: &CommandRegistry) -> Vec<String> {
     for conflict in detect_conflicts(&bindings) {
         problems.push(format!("shortcut conflict: {conflict}"));
     }
+    problems.extend(unsatisfiable_menu_problems(registry));
     problems
+}
+
+/// Menu items that cannot possibly succeed.
+///
+/// A menu click invokes its command with `{}` — there is nowhere for a menu row
+/// to collect arguments. So a command with required parameters is dead on click
+/// unless it activates a tool (the tool gathers the arguments interactively)
+/// instead of running immediately. Six such rows shipped: the whole terrain
+/// planting family plus `core.set_pivot` and `terrain.cut_fill_analysis`, each
+/// of which could only ever return "Missing required parameter".
+///
+/// These commands are still valuable over MCP, where a caller supplies the
+/// arguments; the defect is showing them in a menu. `show_in_menu: false` is the
+/// fix, not deleting the command.
+pub(crate) fn unsatisfiable_menu_problems(registry: &CommandRegistry) -> Vec<String> {
+    registry
+        .commands()
+        .filter(|descriptor| descriptor.show_in_menu && descriptor.activates_tool.is_none())
+        .filter_map(|descriptor| {
+            let required = descriptor
+                .parameters
+                .as_ref()?
+                .get("required")?
+                .as_array()
+                .filter(|required| !required.is_empty())?;
+            let names: Vec<String> = required
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_string))
+                .collect();
+            Some(format!(
+                "command `{}` is shown in a menu but requires parameters [{}] a menu click \
+                 cannot supply; set show_in_menu: false or give it a tool",
+                descriptor.id,
+                names.join(", ")
+            ))
+        })
+        .collect()
 }
 
 /// Reference-integrity problems: toolbar/menu items that point at a command id
@@ -568,6 +606,60 @@ mod tests {
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("core.undo")));
         assert!(problems.iter().any(|p| p.contains("modeling.move")));
+    }
+
+    /// A menu row cannot carry arguments, so a command that requires them and
+    /// does not activate a tool can only ever fail when clicked.
+    #[test]
+    fn menu_commands_requiring_parameters_are_reported() {
+        use crate::plugins::command_registry::{
+            CommandCategory, CommandDescriptor, CommandRegistryAppExt, CommandResult,
+        };
+        use serde_json::Value;
+
+        fn noop(_: &mut World, _: &Value) -> Result<CommandResult, String> {
+            Ok(CommandResult::empty())
+        }
+        fn descriptor(
+            id: &str,
+            show_in_menu: bool,
+            activates_tool: Option<&str>,
+        ) -> CommandDescriptor {
+            CommandDescriptor {
+                id: id.to_string(),
+                label: id.to_string(),
+                description: String::new(),
+                category: CommandCategory::Edit,
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["target_id"],
+                    "properties": {"target_id": {"type": "integer"}}
+                })),
+                default_shortcut: None,
+                icon: None,
+                hint: None,
+                requires_selection: false,
+                show_in_menu,
+                version: 1,
+                activates_tool: activates_tool.map(str::to_string),
+                capability_id: None,
+            }
+        }
+
+        let mut app = App::new();
+        app.init_resource::<CommandRegistry>()
+            .register_command(descriptor("test.dead_menu_row", true, None), noop)
+            .register_command(descriptor("test.api_only", false, None), noop)
+            .register_command(
+                descriptor("test.tool_gathers_args", true, Some("SomeTool")),
+                noop,
+            );
+
+        let problems = unsatisfiable_menu_problems(app.world().resource::<CommandRegistry>());
+
+        assert_eq!(problems.len(), 1, "got: {problems:?}");
+        assert!(problems[0].contains("test.dead_menu_row"));
+        assert!(problems[0].contains("target_id"));
     }
 
     #[test]

@@ -59,7 +59,7 @@ impl Plugin for TapeToolPlugin {
                 id: "tools.tape".to_string(),
                 label: "Tape".to_string(),
                 description: "Measure point-to-point distances".to_string(),
-                category: CommandCategory::Tools,
+                category: CommandCategory::Create,
                 parameters: None,
                 default_shortcut: Some("Shift+T".to_string()),
                 icon: None,

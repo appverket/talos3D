@@ -43,6 +43,8 @@ impl Plugin for CommandRegistryPlugin {
                 refresh_command_toggle_states
                     .before(crate::plugins::egui_chrome::EguiChromeSystems),
             );
+        app.add_plugins(crate::plugins::clipboard::ClipboardPlugin);
+        app.add_plugins(crate::plugins::model_export::ModelExportPlugin);
         crate::plugins::keymap::register(app);
         register_core_commands(app);
     }
@@ -571,7 +573,7 @@ pub fn register_core_commands(app: &mut App) {
             description: "Clear the current selection".to_string(),
             category: CommandCategory::Edit,
             parameters: None,
-            default_shortcut: Some("Esc, Ctrl/Cmd+D".to_string()),
+            default_shortcut: Some("Esc, Ctrl/Cmd+Shift+A".to_string()),
             icon: Some("icon.deselect".to_string()),
             hint: Some("Clear the current selection".to_string()),
             requires_selection: true,
@@ -659,7 +661,7 @@ pub fn register_core_commands(app: &mut App) {
             icon: Some("icon.crosshair".to_string()),
             hint: Some("Type `Set Pivot x y z` in the palette to set a custom pivot".to_string()),
             requires_selection: true,
-            show_in_menu: true,
+            show_in_menu: false,
             version: 1,
             activates_tool: None,
             capability_id: None,

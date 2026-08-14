@@ -197,7 +197,7 @@ impl Plugin for PlantingPlugin {
         .register_command(
             CommandDescriptor {
                 id: "terrain.plant_on_surface".to_string(),
-                label: "Plant On Surface".to_string(),
+                label: "Plant Object On Terrain Surface".to_string(),
                 description:
                     "Place a terrain-conforming foundation under an object and seat it on \
                               the surface at minimum clearance; optionally hide its original \
@@ -222,7 +222,7 @@ impl Plugin for PlantingPlugin {
                 icon: Some("icon.create".to_string()),
                 hint: Some("Seat an object on the terrain with a hugging foundation".to_string()),
                 requires_selection: false,
-                show_in_menu: true,
+                show_in_menu: false,
                 version: 1,
                 activates_tool: None,
                 capability_id: Some("terrain".to_string()),
@@ -232,7 +232,7 @@ impl Plugin for PlantingPlugin {
         .register_command(
             CommandDescriptor {
                 id: "terrain.release_planted_structure".to_string(),
-                label: "Release Planted Structure".to_string(),
+                label: "Release Structure From Terrain Following".to_string(),
                 description:
                     "Detach a planted structure from terrain-following behavior while leaving the \
                               current foundation and superstructure in place."
@@ -247,7 +247,7 @@ impl Plugin for PlantingPlugin {
                 icon: Some("icon.edit".to_string()),
                 hint: Some("Stop a structure from re-seating to terrain when moved".to_string()),
                 requires_selection: false,
-                show_in_menu: true,
+                show_in_menu: false,
                 version: 1,
                 activates_tool: None,
                 capability_id: Some("terrain".to_string()),
@@ -257,7 +257,7 @@ impl Plugin for PlantingPlugin {
         .register_command(
             CommandDescriptor {
                 id: "terrain.demote_conforming_foundation".to_string(),
-                label: "Demote Conforming Foundation".to_string(),
+                label: "Freeze Conforming Foundation".to_string(),
                 description:
                     "Freeze an adaptive terrain-conforming foundation body as either a static \
                               snapshot mesh or a conservative max-height box."
@@ -281,7 +281,7 @@ impl Plugin for PlantingPlugin {
                     "Replace terrain-adaptive foundation behavior with fixed geometry".to_string(),
                 ),
                 requires_selection: false,
-                show_in_menu: true,
+                show_in_menu: false,
                 version: 1,
                 activates_tool: None,
                 capability_id: Some("terrain".to_string()),
@@ -291,7 +291,7 @@ impl Plugin for PlantingPlugin {
         .register_command(
             CommandDescriptor {
                 id: "terrain.unplant_on_surface".to_string(),
-                label: "Unplant From Surface".to_string(),
+                label: "Unplant Object From Terrain".to_string(),
                 description:
                     "Reverse a plant: remove the hugging foundation, lower the object back, \
                               and un-hide its original foundation."
@@ -306,7 +306,7 @@ impl Plugin for PlantingPlugin {
                 icon: Some("icon.edit".to_string()),
                 hint: Some("Reverse a plant operation".to_string()),
                 requires_selection: false,
-                show_in_menu: true,
+                show_in_menu: false,
                 version: 1,
                 activates_tool: None,
                 capability_id: Some("terrain".to_string()),

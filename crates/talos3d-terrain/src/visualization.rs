@@ -29,6 +29,18 @@ pub enum TerrainVisualizationMode {
 }
 
 impl TerrainVisualizationMode {
+    /// The next mode in a fixed cycle, so a no-argument invocation (a menu
+    /// click, a shortcut) can advance through every mode.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Standard => Self::Slope,
+            Self::Slope => Self::Aspect,
+            Self::Aspect => Self::ElevationBands,
+            Self::ElevationBands => Self::CutFill,
+            Self::CutFill => Self::Standard,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Standard => "standard",

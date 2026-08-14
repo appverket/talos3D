@@ -7,6 +7,7 @@ pub mod authoring_guidance;
 pub mod browser_mcp;
 pub mod bundled_definition_libraries;
 pub mod camera;
+pub mod clipboard;
 pub mod clipping_planes;
 pub mod command_registry;
 pub mod commands;
@@ -52,6 +53,7 @@ pub mod math;
 pub mod menu_bar;
 #[cfg(any(feature = "model-api", test))]
 pub mod model_api;
+pub mod model_export;
 pub mod modeling;
 pub mod named_views;
 pub mod outliner;

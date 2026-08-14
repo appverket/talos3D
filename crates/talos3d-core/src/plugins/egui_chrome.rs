@@ -131,6 +131,7 @@ const FILE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "core.export_drawing_pdf",
             "core.export_drawing_svg",
             "core.export_drawing_dxf",
+            "core.export_model_obj",
         ],
     },
 ];
@@ -139,6 +140,10 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
         label: "History",
         command_ids: &["core.undo", "core.redo"],
+    },
+    MenuSubmenuSpec {
+        label: "Clipboard",
+        command_ids: &["core.cut", "core.copy", "core.paste", "core.duplicate"],
     },
     MenuSubmenuSpec {
         label: "Selection",
@@ -155,7 +160,6 @@ const EDIT_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "modeling.move",
             "modeling.rotate",
             "modeling.scale",
-            "core.set_pivot",
             "core.clear_pivot",
         ],
     },
@@ -201,6 +205,7 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
             "modeling.create_polyline",
             "guide_lines.place",
             "dimensions.place",
+            "tools.tape",
             "modeling.place_linked_model",
         ],
     },
@@ -223,10 +228,11 @@ const CREATE_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     },
 ];
 
-const TOOLS_MENU_GROUPS: &[MenuSubmenuSpec] = &[MenuSubmenuSpec {
-    label: "Measure",
-    command_ids: &["tools.tape"],
-}];
+/// The Tools category no longer owns any command: measurement moved in with the
+/// other reference aids under Create rather than sitting alone in a top-level
+/// menu of one. Kept as an empty spec so a capability can still populate the
+/// category without re-adding the plumbing.
+const TOOLS_MENU_GROUPS: &[MenuSubmenuSpec] = &[];
 
 const VIEW_MENU_GROUPS: &[MenuSubmenuSpec] = &[
     MenuSubmenuSpec {
@@ -1250,6 +1256,7 @@ fn draw_view_workspace_submenu(
     lighting_window_state: &mut LightingWindowState,
     render_settings_window_state: &mut RenderSettingsWindowState,
     extensions_window_state: &mut ExtensionsWindowState,
+    agent_connection_window_state: &mut AgentConnectionWindowState,
     toolbar_registry: &ToolbarRegistry,
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
@@ -1293,6 +1300,17 @@ fn draw_view_workspace_submenu(
         }
         if extensions.clicked() {
             extensions_window_state.visible = true;
+            ui.close();
+        }
+
+        let agent = menu_row_button(ui, "Connect an AI Agent...")
+            .on_hover_text("Connect an external AI agent to this instance");
+        if agent.contains_pointer() {
+            *hovered_menu_hint = Some("Connect an external AI agent to this instance".to_string());
+        }
+        if agent.clicked() {
+            agent_connection_window_state.visible = true;
+            agent_connection_window_state.copy_status = None;
             ui.close();
         }
 
@@ -1360,6 +1378,7 @@ fn draw_category_menu_contents(
     render_settings_window_state: &mut RenderSettingsWindowState,
     project_settings_window_state: &mut ProjectSettingsWindowState,
     extensions_window_state: &mut ExtensionsWindowState,
+    agent_connection_window_state: &mut AgentConnectionWindowState,
     toolbar_registry: &ToolbarRegistry,
     toolbar_layout_state: &mut ToolbarLayoutState,
     doc_props: &mut DocumentProperties,
@@ -1466,6 +1485,7 @@ fn draw_category_menu_contents(
             lighting_window_state,
             render_settings_window_state,
             extensions_window_state,
+            agent_connection_window_state,
             toolbar_registry,
             toolbar_layout_state,
             doc_props,
@@ -1719,6 +1739,7 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                             &mut data.render_settings_window_state,
                             &mut data.project_settings_window_state,
                             &mut data.extensions_window_state,
+                            &mut data.agent_connection_window_state,
                             &data.toolbar_registry,
                             &mut data.toolbar_layout_state,
                             &mut data.doc_props,
@@ -1727,13 +1748,6 @@ fn draw_egui_chrome(mut contexts: EguiContexts, mut data: ChromeData) {
                         );
                     });
                 }
-                ui.menu_button("AI", |ui| {
-                    if ui.button("Connect an AI Agent…").clicked() {
-                        data.agent_connection_window_state.visible = true;
-                        data.agent_connection_window_state.copy_status = None;
-                        ui.close();
-                    }
-                });
                 ui.menu_button("About", draw_about_menu);
             });
         });

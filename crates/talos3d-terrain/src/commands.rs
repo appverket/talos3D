@@ -126,11 +126,10 @@ impl Plugin for TerrainCommandPlugin {
                 id: "terrain.cut_fill_analysis".to_string(),
                 label: "Cut/Fill Analysis".to_string(),
                 description: "Compute cut, fill, and net volumes between terrain surfaces or a datum.".to_string(),
-                category: CommandCategory::Custom("Analysis".to_string()),
+                category: CommandCategory::View,
                 parameters: Some(serde_json::json!({
                     "type": "object",
-                    "required": ["existing_surface_id"],
-                    "properties": {
+                                        "properties": {
                         "existing_surface_id": {"type": "integer", "minimum": 0},
                         "proposed_surface_id": {"type": "integer", "minimum": 0},
                         "datum_y": {"type": "number"},
@@ -160,13 +159,12 @@ impl Plugin for TerrainCommandPlugin {
         .register_command(
             CommandDescriptor {
                 id: "terrain.set_visualization_mode".to_string(),
-                label: "Set Terrain Visualization".to_string(),
+                label: "Cycle Terrain Visualization".to_string(),
                 description: "Switch terrain shading between standard, slope, aspect, elevation bands, and the latest cut/fill result.".to_string(),
                 category: CommandCategory::View,
                 parameters: Some(serde_json::json!({
                     "type": "object",
-                    "required": ["mode"],
-                    "properties": {
+                                        "properties": {
                         "mode": {
                             "type": "string",
                             "enum": ["standard", "slope", "aspect", "elevation_bands", "cut_fill"]
@@ -275,7 +273,7 @@ impl Plugin for TerrainCommandPlugin {
                 icon: Some("icon.create".to_string()),
                 hint: Some("Append a new elevation curve to a terrain surface".to_string()),
                 requires_selection: false,
-                show_in_menu: true,
+                show_in_menu: false,
                 version: 1,
                 activates_tool: None,
                 capability_id: Some("terrain".to_string()),
@@ -307,7 +305,7 @@ impl Plugin for TerrainCommandPlugin {
                 icon: Some("icon.create".to_string()),
                 hint: Some("Append a spot elevation to a terrain surface".to_string()),
                 requires_selection: false,
-                show_in_menu: true,
+                show_in_menu: false,
                 version: 1,
                 activates_tool: None,
                 capability_id: Some("terrain".to_string()),
@@ -396,6 +394,7 @@ impl Plugin for TerrainCommandPlugin {
             [
                 "terrain.set_visualization_mode",
                 "terrain.toggle_generated_contours",
+                "terrain.cut_fill_analysis",
             ],
         );
     }
@@ -746,7 +745,15 @@ fn execute_cut_fill_analysis(
     world: &mut World,
     parameters: &Value,
 ) -> Result<CommandResult, String> {
-    let existing_id = required_element_id(parameters, "existing_surface_id")?;
+    // A menu click cannot carry arguments, and the surfaces to compare are not
+    // ambiguous in the common case: one existing site surface against one
+    // proposed surface. Infer them by role so the menu item does the obvious
+    // thing, and keep the explicit ids for callers that mean something else.
+    let existing_id = match optional_element_id(parameters, "existing_surface_id")? {
+        Some(id) => id,
+        None => sole_surface_with_role(world, TerrainSurfaceRole::Existing)
+            .ok_or_else(|| unambiguous_surface_error("existing"))?,
+    };
     let existing = terrain_mesh_by_id(world, existing_id)
         .ok_or_else(|| format!("Terrain surface {} has no generated mesh", existing_id.0))?;
     let sample_spacing = parameters
@@ -757,8 +764,13 @@ fn execute_cut_fill_analysis(
     let boundary = parse_boundary(parameters)?;
     let options = CutFillOptions::new(sample_spacing).with_boundary(boundary.clone());
 
+    let proposed_from_parameters = optional_element_id(parameters, "proposed_surface_id")?;
+    let inferred_proposed = (proposed_from_parameters.is_none()
+        && parameters.get("datum_y").is_none())
+    .then(|| sole_surface_with_role(world, TerrainSurfaceRole::Proposed))
+    .flatten();
     let (result, target, comparison) = if let Some(proposed_id) =
-        optional_element_id(parameters, "proposed_surface_id")?
+        proposed_from_parameters.or(inferred_proposed)
     {
         let proposed = terrain_mesh_by_id(world, proposed_id)
             .ok_or_else(|| format!("Terrain surface {} has no generated mesh", proposed_id.0))?;
@@ -779,7 +791,11 @@ fn execute_cut_fill_analysis(
             serde_json::json!({ "datum_y": datum_y }),
         )
     } else {
-        return Err("Provide either proposed_surface_id or datum_y".to_string());
+        return Err(
+            "Provide proposed_surface_id or datum_y, or create a proposed surface to \
+             compare the existing site against"
+                .to_string(),
+        );
     };
 
     store_cut_fill_analysis(world, existing_id, target, result, &options);
@@ -864,12 +880,16 @@ fn execute_set_visualization_mode(
     world: &mut World,
     parameters: &Value,
 ) -> Result<CommandResult, String> {
-    let mode = parameters
-        .get("mode")
-        .and_then(Value::as_str)
-        .map(parse_visualization_mode)
-        .transpose()?
-        .ok_or_else(|| "Missing required parameter mode".to_string())?;
+    let mode = match parameters.get("mode").and_then(Value::as_str) {
+        Some(mode) => parse_visualization_mode(mode)?,
+        // A menu click carries no arguments. Advancing to the next mode is the
+        // useful thing to do, and keeps every mode reachable from the keyboard
+        // and the menu without one row per mode.
+        None => world
+            .get_resource::<TerrainVisualizationState>()
+            .map(|state| state.mode.next())
+            .unwrap_or_default(),
+    };
     let requested_band_width = parameters
         .get("elevation_band_width")
         .map(|value| {
@@ -1691,6 +1711,22 @@ mod tests {
         }
     }
 
+    fn surface_with_role(name: &str, role: TerrainSurfaceRole) -> TerrainSurface {
+        TerrainSurface {
+            name: name.to_string(),
+            source_curve_ids: Vec::new(),
+            role,
+            datum_elevation: 0.0,
+            boundary: Vec::new(),
+            max_triangle_area: DEFAULT_TERRAIN_MAX_TRIANGLE_AREA,
+            minimum_angle: DEFAULT_TERRAIN_MINIMUM_ANGLE,
+            contour_interval: DEFAULT_TERRAIN_CONTOUR_INTERVAL,
+            drape_sample_spacing: DEFAULT_TERRAIN_DRAPE_SAMPLE_SPACING,
+            smoothing: DEFAULT_TERRAIN_SMOOTHING,
+            offset: Vec3::ZERO,
+        }
+    }
+
     fn sample_curve(elevation: f32) -> ElevationCurve {
         ElevationCurve {
             points: vec![
@@ -2050,7 +2086,56 @@ mod tests {
         )
         .expect_err("missing comparison should fail");
 
-        assert_eq!(error, "Provide either proposed_surface_id or datum_y");
+        assert!(
+            error.contains("proposed_surface_id or datum_y"),
+            "got: {error}"
+        );
+    }
+
+    /// A menu click carries no arguments, so the command infers the surfaces
+    /// from their roles when the document has one of each.
+    #[test]
+    fn cut_fill_command_infers_existing_and_proposed_surfaces_by_role() {
+        let mut world = init_command_test_world();
+        world.spawn((
+            ElementId(10),
+            flat_square(2.0),
+            surface_with_role("Existing Site", TerrainSurfaceRole::Existing),
+        ));
+        world.spawn((
+            ElementId(11),
+            flat_square(1.0),
+            surface_with_role("Proposed", TerrainSurfaceRole::Proposed),
+        ));
+
+        let result = execute_cut_fill_analysis(&mut world, &json!({}))
+            .expect("roles should identify both surfaces");
+        let output = result.output.expect("analysis output");
+
+        assert_eq!(output["existing_surface_id"], json!(10));
+        assert_eq!(output["comparison"]["proposed_surface_id"], json!(11));
+    }
+
+    /// Two candidates for the same role is genuinely ambiguous — the command
+    /// must ask rather than silently pick one.
+    #[test]
+    fn cut_fill_command_refuses_to_guess_between_two_existing_surfaces() {
+        let mut world = init_command_test_world();
+        world.spawn((
+            ElementId(10),
+            flat_square(2.0),
+            surface_with_role("Site A", TerrainSurfaceRole::Existing),
+        ));
+        world.spawn((
+            ElementId(12),
+            flat_square(2.0),
+            surface_with_role("Site B", TerrainSurfaceRole::Existing),
+        ));
+
+        let error = execute_cut_fill_analysis(&mut world, &json!({}))
+            .expect_err("ambiguous existing surface must not be guessed");
+
+        assert!(error.contains("existing_surface_id"), "got: {error}");
     }
 
     #[test]
@@ -2184,4 +2269,26 @@ mod tests {
             Some(vec![json!("BYGGNAD_TAK")])
         );
     }
+}
+
+/// The only terrain surface carrying `role`, or `None` when there is no such
+/// surface or more than one — in which case the caller must name the surface
+/// explicitly rather than have one silently chosen.
+fn sole_surface_with_role(world: &mut World, role: TerrainSurfaceRole) -> Option<ElementId> {
+    let mut query = world.query::<(&ElementId, &TerrainSurface)>();
+    let mut found = None;
+    for (element_id, surface) in query.iter(world) {
+        if surface.role != role {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(*element_id);
+    }
+    found
+}
+
+fn unambiguous_surface_error(role: &str) -> String {
+    format!("No single {role} terrain surface to analyse — pass {role}_surface_id explicitly")
 }
