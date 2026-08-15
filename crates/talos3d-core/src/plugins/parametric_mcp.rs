@@ -39,6 +39,35 @@ use crate::relational::transform::{TransformAxis, TransformGesture, TransformOut
 pub struct ParametricTypeInfo {
     pub id: String,
     pub label: String,
+    /// `true` only when this type has an emitting representation and can be
+    /// passed directly to `parametric.create`.
+    pub executable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_path: Option<String>,
+    /// Explicit use guidance prevents derivation-only definitions from being
+    /// mistaken for geometry-producing authoring paths.
+    pub how_to_use: String,
+}
+
+fn type_info(definition: &ParametricTypeDef) -> ParametricTypeInfo {
+    let executable = definition.representation.is_some();
+    ParametricTypeInfo {
+        id: definition.id.clone(),
+        label: definition.label.clone(),
+        executable,
+        execution_path: executable.then(|| "parametric.create".to_string()),
+        how_to_use: if executable {
+            format!(
+                "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.",
+                definition.id
+            )
+        } else {
+            format!(
+                "Curated derivation-only type {:?}: it cannot emit geometry. Record a CorpusGap and curate an emitting representation or executable recipe; do not call parametric.create.",
+                definition.id
+            )
+        },
+    }
 }
 
 /// Bevy ECS component that back-references a spawned geometry entity to its
@@ -151,7 +180,7 @@ pub fn world_list_types(world: &mut World) -> Vec<ParametricTypeInfo> {
     };
     reg.list_public()
         .into_iter()
-        .map(|(id, label)| ParametricTypeInfo { id, label })
+        .filter_map(|(id, _)| reg.get(&id).map(type_info))
         .collect()
 }
 
