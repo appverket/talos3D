@@ -251,12 +251,13 @@ Before you author or refine **any** element class at a target refinement state:
    {target_state})`; also consult `list_recipe_families`, `parametric.list_types`,
    and `list_generation_priors`. If a curated path exists, **use it** (a recipe,
    an assembly pattern, or `definition` + `occurrence`).
-2. **No curated path ⇒ a knowledge gap, not a licence to improvise.** An empty
-   `select_recipe` result is a `CorpusGap`. Do **not** approximate the assembly
-   from primitives. Instead: call `request_corpus_expansion`, then either
-   acquire/curate a draft (`save_recipe_draft` / `save_assembly_pattern_draft`)
-   and validate it, or — if you cannot ground it this session — **stop and tell
-   the user in plain language**. Unknowns are reported, never bluffed.
+2. **No curated path ⇒ go and learn it.** An empty `select_recipe` result is a
+   `CorpusGap`. Call `request_corpus_expansion`, then *close* it: research
+   authoritative sources, land each excerpt with `acquire_corpus_passage`
+   (`source_url` + `license`), curate a draft (`save_recipe_draft` /
+   `save_assembly_pattern_draft`), validate and install it. Stopping to ask the
+   user is the **fallback** when you cannot ground it — not the first move.
+   Unknowns are reported, never bluffed.
 
 **What counts as a bluff (prohibited):** ungrounded geometry authored *outside* a
 recipe, assembly pattern, or definition/occurrence, for a class that has — or
