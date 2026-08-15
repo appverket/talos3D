@@ -1499,6 +1499,25 @@ impl ModelApiServer {
         .await?
     }
 
+    async fn request_rebase_refinement_branch(
+        &self,
+        request: crate::plugins::refinement::RefinementBranchRebaseRequest,
+    ) -> ApiResult<RefinementBranchRebaseResult> {
+        self.round_trip(|response| ModelApiRequest::RebaseRefinementBranch { request, response })
+            .await?
+    }
+
+    async fn request_regenerate_refinement_branch(
+        &self,
+        request: RegenerateRefinementBranchRequest,
+    ) -> ApiResult<PromoteRefinementResult> {
+        self.round_trip(|response| ModelApiRequest::RegenerateRefinementBranch {
+            request,
+            response,
+        })
+        .await?
+    }
+
     async fn request_discard_refinement_branch(
         &self,
         parent_element_id: u64,
@@ -4292,7 +4311,11 @@ pub struct RefinementBranchApiInfo {
     pub target_state: String,
     pub recipe_id: Option<String>,
     pub status: String,
+    pub basis: crate::plugins::refinement::RefinementBranchBasis,
+    pub compatibility: crate::plugins::refinement::RefinementBranchCompatibility,
 }
+
+pub type RefinementBranchRebaseResult = crate::plugins::refinement::RefinementBranchRebaseResult;
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -4373,6 +4396,19 @@ pub(super) struct DemoteRefinementRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InspectRefinementBranchesRequest {
     pub(super) element_id: u64,
+}
+
+pub type RebaseRefinementBranchRequest = crate::plugins::refinement::RefinementBranchRebaseRequest;
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct RegenerateRefinementBranchRequest {
+    pub(super) parent_element_id: u64,
+    pub(super) child_element_id: u64,
+    #[serde(default)]
+    pub(super) overrides: serde_json::Value,
+    pub(super) confirm_discard_parked_branch: bool,
 }
 
 #[cfg(feature = "model-api")]
@@ -7599,6 +7635,36 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_inspect_refinement_branches(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "rebase_refinement_branch",
+        description = "Explicitly three-way rebase a PARKED refinement branch over current generator controls. The stored branch basis is the merge base. Supply current authored controls and the new generator controls. Conflicts are returned without mutation unless each path is listed in confirm_authored_wins; confirmed authored values win and are never silently dropped. The branch remains parked after rebase."
+    )]
+    pub(super) async fn rebase_refinement_branch_tool(
+        &self,
+        Parameters(request): Parameters<RebaseRefinementBranchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_rebase_refinement_branch(request)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "regenerate_refinement_branch",
+        description = "Explicitly replace a PARKED stale refinement branch with current generator output. This permanently discards the parked subtree before regenerating, so confirm_discard_parked_branch must be true. Use rebase_refinement_branch instead when authored overrides must be carried forward."
+    )]
+    pub(super) async fn regenerate_refinement_branch_tool(
+        &self,
+        Parameters(request): Parameters<RegenerateRefinementBranchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_regenerate_refinement_branch(request)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)

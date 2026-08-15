@@ -1072,6 +1072,7 @@ mod tests {
                 target_state: RefinementState::Constructible,
                 recipe_id: None,
                 status: RefinementBranchStatus::Parked,
+                basis: Default::default(),
             },
         ));
 

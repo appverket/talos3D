@@ -782,6 +782,7 @@ use crate::plugins::{
     identity::ElementId,
     modeling::assembly::{RelationSnapshot, SemanticAssembly, SemanticRelation},
 };
+use crate::semantics::PublishedAnchors;
 
 // ---------------------------------------------------------------------------
 // Assembly member-composition obligations (ADR-042 anti-bluff gate)
@@ -1220,10 +1221,101 @@ impl RefinementBranchStatus {
     }
 }
 
+/// Stable identity and version for a capability that contributed to a branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementBasisIdentity {
+    pub id: String,
+    pub version: String,
+}
+
+/// Setting-out inputs whose preservation keeps coarse and generated geometry
+/// on the same dimensional contract.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementSettingOutBasis {
+    pub contract_revision: String,
+    #[serde(default)]
+    pub locks: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub reservations: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub tolerances: BTreeMap<String, serde_json::Value>,
+}
+
+/// Semantic basis captured when a generated refinement branch is created.
+///
+/// The fingerprint is only a fast equality check. The structured fields are
+/// retained so stale previews can explain *which* input changed and an
+/// explicit three-way rebase can preserve authored overrides.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementBranchBasis {
+    pub schema_version: String,
+    pub construction_system: Option<RefinementBasisIdentity>,
+    pub setting_out: RefinementSettingOutBasis,
+    pub generator: Option<RefinementBasisIdentity>,
+    #[serde(default)]
+    pub resolved_controls: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub dependency_revisions: BTreeMap<String, u64>,
+    pub obligation_schema_version: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementBranchBasisMismatch {
+    pub field: String,
+    pub previous: String,
+    pub current: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementBranchCompatibility {
+    pub can_reactivate_silently: bool,
+    pub target_obligations_satisfied: bool,
+    pub mismatches: Vec<RefinementBranchBasisMismatch>,
+    pub available_actions: Vec<String>,
+}
+
+/// Explicit three-way rebase request. `current_authored_controls` describes
+/// the live authored branch/model values, while `new_generator_controls`
+/// describes what the current generator would produce. The stored branch
+/// basis is the merge base.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementBranchRebaseRequest {
+    pub parent_element_id: u64,
+    pub child_element_id: u64,
+    #[serde(default)]
+    pub current_authored_controls: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub new_generator_controls: BTreeMap<String, serde_json::Value>,
+    /// Conflict paths the caller explicitly accepts with authored/current
+    /// values winning. Unlisted conflicts block the rebase.
+    #[serde(default)]
+    pub confirm_authored_wins: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementBranchRebaseResult {
+    pub parent_element_id: u64,
+    pub child_element_id: u64,
+    pub applied: bool,
+    pub carried_authored_overrides: BTreeMap<String, serde_json::Value>,
+    pub conflicts: Vec<String>,
+    pub merged_controls: BTreeMap<String, serde_json::Value>,
+    pub basis: RefinementBranchBasis,
+}
+
 /// Metadata attached to both `refinement_of` and `refined_into` relation
 /// entities so demotion can park generated detail without deleting authored
 /// overrides.
-#[derive(Component, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RefinementBranch {
     pub root_element_id: u64,
     pub parent_element_id: u64,
@@ -1231,9 +1323,11 @@ pub struct RefinementBranch {
     pub target_state: RefinementState,
     pub recipe_id: Option<RecipeId>,
     pub status: RefinementBranchStatus,
+    #[serde(default)]
+    pub basis: RefinementBranchBasis,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct RefinementBranchInfo {
     pub root_element_id: u64,
@@ -1242,6 +1336,8 @@ pub struct RefinementBranchInfo {
     pub target_state: RefinementState,
     pub recipe_id: Option<RecipeId>,
     pub status: RefinementBranchStatus,
+    pub basis: RefinementBranchBasis,
+    pub compatibility: RefinementBranchCompatibility,
 }
 
 /// Why [`apply_promote_refinement`] did not advance the refinement state.
@@ -1259,15 +1355,20 @@ pub enum PromoteError {
         unsatisfied_obligations: Vec<String>,
         message: String,
     },
+    StaleRefinementBranch {
+        child_element_id: u64,
+        compatibility: RefinementBranchCompatibility,
+        message: String,
+    },
     Other(String),
 }
 
 impl std::fmt::Display for PromoteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ObligationsUnsatisfied { message, .. } | Self::Other(message) => {
-                f.write_str(message)
-            }
+            Self::ObligationsUnsatisfied { message, .. }
+            | Self::StaleRefinementBranch { message, .. }
+            | Self::Other(message) => f.write_str(message),
         }
     }
 }
@@ -1408,8 +1509,13 @@ pub fn apply_promote_refinement(
         .as_ref()
         .map(|recipe_id| RecipeId(recipe_id.0.clone()));
 
-    if reactivate_parked_refinement_branch(world, eid, target_state, requested_recipe_id.as_ref())?
-    {
+    if reactivate_parked_refinement_branch(
+        world,
+        eid,
+        target_state,
+        requested_recipe_id.as_ref(),
+        &request.overrides,
+    )? {
         set_refinement_state(world, entity, target_state);
         send_refinement_change_command(
             world,
@@ -1525,7 +1631,21 @@ pub fn apply_promote_refinement(
     } else {
         (Vec::new(), HashMap::new())
     };
-    annotate_new_refinement_branches(world, eid, target_state, requested_recipe_id.clone());
+    let branch_basis = capture_refinement_branch_basis(
+        world,
+        eid,
+        target_state,
+        requested_recipe_id.as_ref(),
+        None,
+        &request.overrides,
+    );
+    annotate_new_refinement_branches(
+        world,
+        eid,
+        target_state,
+        requested_recipe_id.clone(),
+        branch_basis,
+    );
 
     // Re-locate entity after possible world mutations from generate.
     let entity = {
@@ -2119,6 +2239,336 @@ pub fn register_refinement_relations(app: &mut App) {
 
 use crate::plugins::identity::ElementIdAllocator;
 
+const REFINEMENT_BRANCH_BASIS_SCHEMA_VERSION: &str = "refinement-branch-basis.v1";
+
+fn json_display(value: &impl Serialize) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
+}
+
+fn fingerprint_value(value: &impl Serialize) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    blake3::hash(&bytes).to_hex().to_string()
+}
+
+fn parent_resolved_controls(
+    world: &World,
+    parent_eid: ElementId,
+    baseline: Option<&BTreeMap<String, serde_json::Value>>,
+    requested: &HashMap<ClaimPath, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut controls = baseline.cloned().unwrap_or_default();
+    let model_controls: BTreeMap<String, serde_json::Value> =
+        find_entity_by_element_id_readonly(world, parent_eid)
+            .and_then(|entity| world.get::<SemanticAssembly>(entity))
+            .and_then(|assembly| assembly.parameters.as_object())
+            .map(|parameters| {
+                parameters
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+    controls.extend(model_controls);
+    controls.extend(
+        requested
+            .iter()
+            .map(|(path, value)| (path.0.clone(), value.clone())),
+    );
+    controls
+}
+
+fn setting_out_basis(controls: &BTreeMap<String, serde_json::Value>) -> RefinementSettingOutBasis {
+    fn selected(
+        controls: &BTreeMap<String, serde_json::Value>,
+        fragments: &[&str],
+    ) -> BTreeMap<String, serde_json::Value> {
+        controls
+            .iter()
+            .filter(|(key, _)| fragments.iter().any(|fragment| key.contains(fragment)))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    let locks = selected(
+        controls,
+        &[
+            "dimension",
+            "thickness",
+            "width",
+            "height",
+            "length",
+            "datum",
+            "pitch",
+            "span",
+            "lock",
+        ],
+    );
+    let reservations = selected(
+        controls,
+        &[
+            "reservation",
+            "opening",
+            "clearance",
+            "service_zone",
+            "penetration",
+        ],
+    );
+    let tolerances = selected(controls, &["tolerance", "allowance", "deviation"]);
+    let contract_revision = controls
+        .get("setting_out_contract_revision")
+        .map(json_display)
+        .unwrap_or_else(|| "implicit-v1".to_string());
+    RefinementSettingOutBasis {
+        contract_revision,
+        locks,
+        reservations,
+        tolerances,
+    }
+}
+
+fn construction_system_basis(
+    controls: &BTreeMap<String, serde_json::Value>,
+) -> Option<RefinementBasisIdentity> {
+    let id = [
+        "construction_system",
+        "wall_system",
+        "roof_system",
+        "structural_system",
+    ]
+    .iter()
+    .find_map(|key| controls.get(*key))?;
+    let id = id
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| json_display(id));
+    let version = controls
+        .get("construction_system_version")
+        .or_else(|| controls.get("system_version"))
+        .map(json_display)
+        .unwrap_or_else(|| "unspecified".to_string());
+    Some(RefinementBasisIdentity { id, version })
+}
+
+fn dependency_revisions(world: &World, parent_eid: ElementId) -> BTreeMap<String, u64> {
+    let mut dependencies = BTreeSet::from([parent_eid.0]);
+    if let Some(mut query) = world.try_query::<(EntityRef,)>() {
+        for (entity_ref,) in query.iter(world) {
+            let Some(relation) = entity_ref.get::<SemanticRelation>() else {
+                continue;
+            };
+            if relation.source == parent_eid {
+                dependencies.insert(relation.target.0);
+            } else if relation.target == parent_eid {
+                dependencies.insert(relation.source.0);
+            }
+        }
+    }
+
+    let mut revisions = BTreeMap::new();
+    for dependency in dependencies.into_iter().map(ElementId) {
+        let Some(entity) = find_entity_by_element_id_readonly(world, dependency) else {
+            continue;
+        };
+        let Some(anchors) = world.get::<PublishedAnchors>(entity) else {
+            continue;
+        };
+        for anchor in &anchors.anchors {
+            revisions.insert(
+                format!("{}/{}/{}", dependency.0, anchor.kind.0, anchor.role.0),
+                anchor.revision,
+            );
+        }
+    }
+    revisions
+}
+
+fn obligation_schema_version(
+    world: &World,
+    parent_eid: ElementId,
+    target_state: RefinementState,
+    recipe_id: Option<&RecipeId>,
+) -> String {
+    use crate::capability_registry::{
+        effective_obligations, effective_promotion_critical_paths, ElementClassAssignment,
+        RecipeFamilyId,
+    };
+
+    let Some(parent) = find_entity_by_element_id_readonly(world, parent_eid) else {
+        return "no-parent".to_string();
+    };
+    let Some(assignment) = world.get::<ElementClassAssignment>(parent) else {
+        return "no-element-class".to_string();
+    };
+    let Some(registry) = world.get_resource::<crate::capability_registry::CapabilityRegistry>()
+    else {
+        return "no-capability-registry".to_string();
+    };
+    let Some(class) = registry.element_class_descriptor(&assignment.element_class) else {
+        return "unknown-element-class".to_string();
+    };
+    let recipe = recipe_id.and_then(|recipe_id| {
+        registry.recipe_family_descriptor(&RecipeFamilyId(recipe_id.0.clone()))
+    });
+    let obligations = effective_obligations(class, recipe, target_state)
+        .into_iter()
+        .map(|obligation| {
+            (
+                obligation.id.0,
+                obligation.role.0,
+                obligation.required_by_state.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let paths = effective_promotion_critical_paths(class, recipe, target_state)
+        .into_iter()
+        .map(|path| path.0)
+        .collect::<Vec<_>>();
+    fingerprint_value(&(assignment.element_class.0.as_str(), obligations, paths))
+}
+
+fn capture_refinement_branch_basis(
+    world: &World,
+    parent_eid: ElementId,
+    target_state: RefinementState,
+    recipe_id: Option<&RecipeId>,
+    baseline_controls: Option<&BTreeMap<String, serde_json::Value>>,
+    requested: &HashMap<ClaimPath, serde_json::Value>,
+) -> RefinementBranchBasis {
+    let resolved_controls =
+        parent_resolved_controls(world, parent_eid, baseline_controls, requested);
+    let obligation_schema_version =
+        obligation_schema_version(world, parent_eid, target_state, recipe_id);
+    let generator = recipe_id.map(|recipe_id| RefinementBasisIdentity {
+        id: recipe_id.0.clone(),
+        version: format!(
+            "core-{}:{}",
+            env!("CARGO_PKG_VERSION"),
+            obligation_schema_version
+        ),
+    });
+    let mut basis = RefinementBranchBasis {
+        schema_version: REFINEMENT_BRANCH_BASIS_SCHEMA_VERSION.to_string(),
+        construction_system: construction_system_basis(&resolved_controls),
+        setting_out: setting_out_basis(&resolved_controls),
+        generator,
+        resolved_controls,
+        dependency_revisions: dependency_revisions(world, parent_eid),
+        obligation_schema_version,
+        fingerprint: String::new(),
+    };
+    basis.fingerprint = fingerprint_value(&basis);
+    basis
+}
+
+fn target_obligations_satisfied(
+    world: &World,
+    parent_eid: ElementId,
+    target_state: RefinementState,
+) -> bool {
+    let Some(parent) = find_entity_by_element_id_readonly(world, parent_eid) else {
+        return false;
+    };
+    world.get::<ObligationSet>(parent).is_none_or(|set| {
+        set.entries.iter().all(|obligation| {
+            obligation.required_by_state > target_state
+                || !matches!(obligation.status, ObligationStatus::Unresolved)
+        })
+    })
+}
+
+fn compare_branch_basis(
+    previous: &RefinementBranchBasis,
+    current: &RefinementBranchBasis,
+    obligations_satisfied: bool,
+) -> RefinementBranchCompatibility {
+    let mut mismatches = Vec::new();
+    macro_rules! compare_field {
+        ($field:literal, $left:expr, $right:expr, $reason:literal) => {
+            if $left != $right {
+                mismatches.push(RefinementBranchBasisMismatch {
+                    field: $field.to_string(),
+                    previous: json_display($left),
+                    current: json_display($right),
+                    reason: $reason.to_string(),
+                });
+            }
+        };
+    }
+    compare_field!(
+        "schema_version",
+        &previous.schema_version,
+        &current.schema_version,
+        "branch basis schema changed"
+    );
+    compare_field!(
+        "construction_system",
+        &previous.construction_system,
+        &current.construction_system,
+        "construction-system identity or version changed"
+    );
+    compare_field!(
+        "setting_out",
+        &previous.setting_out,
+        &current.setting_out,
+        "setting-out contract, locks, reservations, or tolerances changed"
+    );
+    compare_field!(
+        "generator",
+        &previous.generator,
+        &current.generator,
+        "generator identity or version changed"
+    );
+    compare_field!(
+        "resolved_controls",
+        &previous.resolved_controls,
+        &current.resolved_controls,
+        "resolved generator inputs changed"
+    );
+    compare_field!(
+        "dependency_revisions",
+        &previous.dependency_revisions,
+        &current.dependency_revisions,
+        "a relevant host/dependency anchor revision changed"
+    );
+    compare_field!(
+        "obligation_schema_version",
+        &previous.obligation_schema_version,
+        &current.obligation_schema_version,
+        "target obligation ladder/schema changed"
+    );
+    if previous.fingerprint.is_empty() {
+        mismatches.push(RefinementBranchBasisMismatch {
+            field: "fingerprint".to_string(),
+            previous: "<missing legacy fingerprint>".to_string(),
+            current: current.fingerprint.clone(),
+            reason: "legacy branch must be regenerated or explicitly rebased".to_string(),
+        });
+    }
+    if !obligations_satisfied {
+        mismatches.push(RefinementBranchBasisMismatch {
+            field: "target_obligations".to_string(),
+            previous: "satisfied".to_string(),
+            current: "unsatisfied".to_string(),
+            reason: "silent reactivation cannot restore a target whose obligations no longer hold"
+                .to_string(),
+        });
+    }
+    let can_reactivate_silently = mismatches.is_empty() && obligations_satisfied;
+    RefinementBranchCompatibility {
+        can_reactivate_silently,
+        target_obligations_satisfied: obligations_satisfied,
+        mismatches,
+        available_actions: if can_reactivate_silently {
+            vec!["reactivate".to_string()]
+        } else {
+            vec![
+                "regenerate".to_string(),
+                "explicit_three_way_rebase".to_string(),
+            ]
+        },
+    }
+}
+
 /// Create a `refinement_of(child → parent)` and a matching
 /// `refined_into(parent → child)` relation pair, returning both element-ids.
 ///
@@ -2181,6 +2631,14 @@ fn tag_refinement_relation_pair(
     recipe_id: Option<RecipeId>,
 ) {
     let root_element_id = root_refinement_handle(world, parent_eid).0;
+    let basis = capture_refinement_branch_basis(
+        world,
+        parent_eid,
+        target_state,
+        recipe_id.as_ref(),
+        None,
+        &HashMap::new(),
+    );
     let branch = RefinementBranch {
         root_element_id,
         parent_element_id: parent_eid.0,
@@ -2188,6 +2646,7 @@ fn tag_refinement_relation_pair(
         target_state,
         recipe_id,
         status: RefinementBranchStatus::Active,
+        basis,
     };
 
     for relation_id in [fwd_id, inv_id] {
@@ -2258,8 +2717,9 @@ fn reactivate_parked_refinement_branch(
     parent_eid: ElementId,
     target_state: RefinementState,
     recipe_id: Option<&RecipeId>,
-) -> Result<bool, String> {
-    let parked_child = {
+    requested: &HashMap<ClaimPath, serde_json::Value>,
+) -> Result<bool, PromoteError> {
+    let parked_branch = {
         let mut q = world.try_query::<(EntityRef,)>().unwrap();
         q.iter(world).find_map(|(entity_ref,)| {
             let rel = entity_ref.get::<SemanticRelation>()?;
@@ -2273,11 +2733,40 @@ fn reactivate_parked_refinement_branch(
             if branch.target_state != target_state || branch.recipe_id.as_ref() != recipe_id {
                 return None;
             }
-            Some(rel.target)
+            Some((rel.target, branch.clone()))
         })
     };
 
-    if let Some(child) = parked_child {
+    if let Some((child, branch)) = parked_branch {
+        let current_basis = capture_refinement_branch_basis(
+            world,
+            parent_eid,
+            target_state,
+            recipe_id,
+            Some(&branch.basis.resolved_controls),
+            requested,
+        );
+        let compatibility = compare_branch_basis(
+            &branch.basis,
+            &current_basis,
+            target_obligations_satisfied(world, parent_eid, target_state),
+        );
+        if !compatibility.can_reactivate_silently {
+            let reasons = compatibility
+                .mismatches
+                .iter()
+                .map(|mismatch| format!("{}: {}", mismatch.field, mismatch.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(PromoteError::StaleRefinementBranch {
+                child_element_id: child.0,
+                compatibility,
+                message: format!(
+                    "Parked refinement branch {} -> {} is stale and was not reactivated: {}. Inspect the branch, then explicitly regenerate or perform a three-way rebase; authored overrides will not be discarded silently.",
+                    parent_eid.0, child.0, reasons
+                ),
+            });
+        }
         set_refinement_branch_status(world, parent_eid, child, RefinementBranchStatus::Active);
         Ok(true)
     } else {
@@ -2290,6 +2779,7 @@ fn annotate_new_refinement_branches(
     parent_eid: ElementId,
     target_state: RefinementState,
     recipe_id: Option<RecipeId>,
+    basis: RefinementBranchBasis,
 ) {
     let relation_entities: Vec<Entity> = {
         let mut q = world.try_query::<(Entity, EntityRef)>().unwrap();
@@ -2311,6 +2801,7 @@ fn annotate_new_refinement_branches(
     for entity in relation_entities {
         if let Some(mut branch) = world.get_mut::<RefinementBranch>(entity) {
             branch.recipe_id = recipe_id.clone();
+            branch.basis = basis.clone();
         }
     }
 }
@@ -2404,6 +2895,19 @@ pub fn list_refinement_branches(world: &World, parent_eid: ElementId) -> Vec<Ref
                 return None;
             }
             let branch = entity_ref.get::<RefinementBranch>()?;
+            let current_basis = capture_refinement_branch_basis(
+                world,
+                parent_eid,
+                branch.target_state,
+                branch.recipe_id.as_ref(),
+                Some(&branch.basis.resolved_controls),
+                &HashMap::new(),
+            );
+            let compatibility = compare_branch_basis(
+                &branch.basis,
+                &current_basis,
+                target_obligations_satisfied(world, parent_eid, branch.target_state),
+            );
             Some(RefinementBranchInfo {
                 root_element_id: branch.root_element_id,
                 parent_element_id: branch.parent_element_id,
@@ -2411,11 +2915,149 @@ pub fn list_refinement_branches(world: &World, parent_eid: ElementId) -> Vec<Ref
                 target_state: branch.target_state,
                 recipe_id: branch.recipe_id.clone(),
                 status: branch.status,
+                basis: branch.basis.clone(),
+                compatibility,
             })
         })
         .collect();
     branches.sort_by_key(|branch| (branch.status.as_str().to_string(), branch.child_element_id));
     branches
+}
+
+/// Explicitly rebase a parked generated branch over the current generator
+/// controls without dropping authored changes.
+///
+/// The merge base is the branch's captured `resolved_controls`. Current model
+/// parameters plus `current_authored_controls` form "ours"; the supplied
+/// current generator output forms "theirs". Conflicts are returned without
+/// mutation unless every conflicting path is explicitly confirmed, in which
+/// case the authored/current value wins.
+pub fn rebase_refinement_branch(
+    world: &mut World,
+    request: RefinementBranchRebaseRequest,
+) -> Result<RefinementBranchRebaseResult, String> {
+    let parent_eid = ElementId(request.parent_element_id);
+    let child_eid = ElementId(request.child_element_id);
+    let branch = {
+        let mut query = world.try_query::<(EntityRef,)>().unwrap();
+        query.iter(world).find_map(|(entity_ref,)| {
+            let relation = entity_ref.get::<SemanticRelation>()?;
+            let branch = entity_ref.get::<RefinementBranch>()?;
+            (relation.relation_type == "refined_into"
+                && relation.source == parent_eid
+                && relation.target == child_eid
+                && branch.status == RefinementBranchStatus::Parked)
+                .then(|| branch.clone())
+        })
+    }
+    .ok_or_else(|| {
+        format!(
+            "Refinement branch {} -> {} is not parked or does not exist",
+            parent_eid.0, child_eid.0
+        )
+    })?;
+
+    let authored_request: HashMap<ClaimPath, serde_json::Value> = request
+        .current_authored_controls
+        .iter()
+        .map(|(key, value)| (ClaimPath(key.clone()), value.clone()))
+        .collect();
+    let current_controls = parent_resolved_controls(
+        world,
+        parent_eid,
+        Some(&branch.basis.resolved_controls),
+        &authored_request,
+    );
+    let old_controls = &branch.basis.resolved_controls;
+    let new_controls = &request.new_generator_controls;
+    let all_paths: BTreeSet<String> = old_controls
+        .keys()
+        .chain(current_controls.keys())
+        .chain(new_controls.keys())
+        .cloned()
+        .collect();
+
+    let mut carried_authored_overrides = BTreeMap::new();
+    let mut conflicts = Vec::new();
+    for path in &all_paths {
+        let old = old_controls.get(path);
+        let current = current_controls.get(path);
+        let generated = new_controls.get(path);
+        let authored_changed = current != old;
+        let generator_changed = generated != old;
+        if authored_changed {
+            if let Some(value) = current {
+                carried_authored_overrides.insert(path.clone(), value.clone());
+            }
+            if generator_changed && current != generated {
+                conflicts.push(path.clone());
+            }
+        }
+    }
+
+    let unconfirmed: Vec<String> = conflicts
+        .iter()
+        .filter(|path| !request.confirm_authored_wins.contains(*path))
+        .cloned()
+        .collect();
+    if !unconfirmed.is_empty() {
+        return Ok(RefinementBranchRebaseResult {
+            parent_element_id: parent_eid.0,
+            child_element_id: child_eid.0,
+            applied: false,
+            carried_authored_overrides,
+            conflicts: unconfirmed,
+            merged_controls: new_controls.clone(),
+            basis: branch.basis,
+        });
+    }
+
+    let mut merged_controls = new_controls.clone();
+    for path in carried_authored_overrides.keys() {
+        if let Some(value) = current_controls.get(path) {
+            merged_controls.insert(path.clone(), value.clone());
+        } else {
+            merged_controls.remove(path);
+        }
+    }
+    let merged_request: HashMap<ClaimPath, serde_json::Value> = merged_controls
+        .iter()
+        .map(|(key, value)| (ClaimPath(key.clone()), value.clone()))
+        .collect();
+    let new_basis = capture_refinement_branch_basis(
+        world,
+        parent_eid,
+        branch.target_state,
+        branch.recipe_id.as_ref(),
+        None,
+        &merged_request,
+    );
+
+    let relation_entities: Vec<Entity> = {
+        let mut query = world.try_query::<(Entity, EntityRef)>().unwrap();
+        query
+            .iter(world)
+            .filter_map(|(entity, entity_ref)| {
+                let relation = entity_ref.get::<SemanticRelation>()?;
+                relation_matches_refinement_pair(relation, parent_eid, child_eid).then_some(entity)
+            })
+            .collect()
+    };
+    for entity in relation_entities {
+        if let Some(mut relation_branch) = world.get_mut::<RefinementBranch>(entity) {
+            relation_branch.basis = new_basis.clone();
+        }
+    }
+
+    Ok(RefinementBranchRebaseResult {
+        parent_element_id: parent_eid.0,
+        child_element_id: child_eid.0,
+        applied: true,
+        carried_authored_overrides,
+        conflicts,
+        merged_controls,
+        basis: new_basis,
+    })
 }
 
 pub fn discard_refinement_branch(
@@ -2994,6 +3636,132 @@ mod tests {
         assert_eq!(
             world.get::<RefinementStateComponent>(parent).unwrap().state,
             RefinementState::Constructible
+        );
+    }
+
+    #[test]
+    fn re_promotion_refuses_branch_when_dependency_revision_changed() {
+        use crate::semantics::{AnchorKindId, AnchorRoleId, PublishedAnchor};
+
+        let mut world = refinement_command_world();
+        let parent = world
+            .spawn((
+                ElementId(1),
+                RefinementStateComponent {
+                    state: RefinementState::Constructible,
+                },
+                PublishedAnchors::new([PublishedAnchor {
+                    kind: AnchorKindId::new("setting_out.axis"),
+                    role: AnchorRoleId::new("primary"),
+                    revision: 1,
+                }]),
+            ))
+            .id();
+        world.spawn((ElementId(2),));
+        create_refinement_relation_pair(
+            &mut world,
+            ElementId(1),
+            ElementId(2),
+            RefinementState::Conceptual,
+            RefinementState::Constructible,
+        );
+        apply_demote_refinement(
+            &mut world,
+            DemoteRefinementRequest {
+                entity_element_id: 1,
+                target_state: RefinementState::Conceptual,
+            },
+        )
+        .unwrap();
+        world
+            .get_mut::<PublishedAnchors>(parent)
+            .unwrap()
+            .bump_revisions();
+
+        let error = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 1,
+                target_state: RefinementState::Constructible,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .unwrap_err();
+
+        let PromoteError::StaleRefinementBranch { compatibility, .. } = error else {
+            panic!("expected structured stale-branch error")
+        };
+        assert!(!compatibility.can_reactivate_silently);
+        assert!(compatibility
+            .mismatches
+            .iter()
+            .any(|mismatch| mismatch.field == "dependency_revisions"));
+        assert_eq!(
+            query_parked_refined_into(&world, ElementId(1)),
+            vec![ElementId(2)]
+        );
+    }
+
+    #[test]
+    fn explicit_three_way_rebase_preserves_authored_override_and_surfaces_conflict() {
+        let mut world = refinement_command_world();
+        world.spawn((
+            ElementId(1),
+            RefinementStateComponent {
+                state: RefinementState::Constructible,
+            },
+        ));
+        world.spawn((ElementId(2),));
+        create_refinement_relation_pair(
+            &mut world,
+            ElementId(1),
+            ElementId(2),
+            RefinementState::Conceptual,
+            RefinementState::Constructible,
+        );
+        apply_demote_refinement(
+            &mut world,
+            DemoteRefinementRequest {
+                entity_element_id: 1,
+                target_state: RefinementState::Conceptual,
+            },
+        )
+        .unwrap();
+
+        let request = RefinementBranchRebaseRequest {
+            parent_element_id: 1,
+            child_element_id: 2,
+            current_authored_controls: BTreeMap::from([(
+                "stud_spacing_mm".to_string(),
+                serde_json::json!(600),
+            )]),
+            new_generator_controls: BTreeMap::from([(
+                "stud_spacing_mm".to_string(),
+                serde_json::json!(400),
+            )]),
+            confirm_authored_wins: BTreeSet::new(),
+        };
+        let preview = rebase_refinement_branch(&mut world, request.clone()).unwrap();
+        assert!(!preview.applied);
+        assert_eq!(preview.conflicts, vec!["stud_spacing_mm"]);
+
+        let applied = rebase_refinement_branch(
+            &mut world,
+            RefinementBranchRebaseRequest {
+                confirm_authored_wins: BTreeSet::from(["stud_spacing_mm".to_string()]),
+                ..request
+            },
+        )
+        .unwrap();
+        assert!(applied.applied);
+        assert_eq!(
+            applied.merged_controls.get("stud_spacing_mm"),
+            Some(&serde_json::json!(600))
+        );
+        assert_eq!(
+            applied.carried_authored_overrides.get("stud_spacing_mm"),
+            Some(&serde_json::json!(600))
         );
     }
 
