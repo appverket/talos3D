@@ -294,6 +294,8 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("list_refinement_goals", ToolCategory::Refinement),
     ("apply_refinement_goal", ToolCategory::Refinement),
     ("get_refinement_state", ToolCategory::Refinement),
+    ("get_setting_out_contract", ToolCategory::Refinement),
+    ("set_setting_out_contract", ToolCategory::Refinement),
     ("inspect_refinement_branches", ToolCategory::Refinement),
     ("rebase_refinement_branch", ToolCategory::Refinement),
     ("regenerate_refinement_branch", ToolCategory::Refinement),

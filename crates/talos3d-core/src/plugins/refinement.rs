@@ -1328,6 +1328,319 @@ pub struct RefinementSettingOutBasis {
     pub tolerances: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SettingOutDatum {
+    Centreline,
+    InteriorFace,
+    ExteriorFace,
+    ReferencedDatum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SettingOutLockedDimension {
+    ExteriorEnvelope,
+    InteriorClear,
+    Grid,
+    UserDimension,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SettingOutSource {
+    User,
+    SelectedSystem,
+    Prior,
+    Imported,
+    AuthoredPhysical,
+}
+
+/// Domain-neutral dimensional contract around an invariant setting-out datum.
+/// Offsets are signed sides of the datum but stored as positive millimetre
+/// reservations for deterministic comparison.
+#[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SettingOutContract {
+    pub revision: u64,
+    pub datum: SettingOutDatum,
+    #[serde(default)]
+    pub locked_dimensions: BTreeSet<SettingOutLockedDimension>,
+    pub reserved_negative_offset_mm: f64,
+    pub reserved_positive_offset_mm: f64,
+    pub source: SettingOutSource,
+    pub confidence: f32,
+    pub tolerance_mm: f64,
+    pub source_ref: Option<String>,
+}
+
+impl SettingOutContract {
+    pub fn reserved_thickness_mm(&self) -> f64 {
+        self.reserved_negative_offset_mm.max(0.0) + self.reserved_positive_offset_mm.max(0.0)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.reserved_thickness_mm() <= 0.0
+            || self.reserved_negative_offset_mm < 0.0
+            || self.reserved_positive_offset_mm < 0.0
+            || self.tolerance_mm < 0.0
+            || !(0.0..=1.0).contains(&self.confidence)
+        {
+            return Err("SettingOutContract requires positive reservations, non-negative offsets/tolerance, and confidence in [0,1]".to_string());
+        }
+        if self.locked_dimensions.is_empty() {
+            return Err(
+                "SettingOutContract must lock at least one governing dimension".to_string(),
+            );
+        }
+        if matches!(self.source, SettingOutSource::Prior)
+            && self
+                .source_ref
+                .as_deref()
+                .is_none_or(|source_ref| source_ref.trim().is_empty())
+        {
+            return Err("Prior-sourced SettingOutContract requires an evidence source_ref".into());
+        }
+        Ok(())
+    }
+}
+
+/// Lightweight authored snapshot used to put contract edits through the same
+/// undo/redo and model-revision fence as geometry and obligation changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingOutContractSnapshot {
+    pub element_id: ElementId,
+    pub contract: Option<SettingOutContract>,
+}
+
+impl SettingOutContractSnapshot {
+    pub fn capture(world: &World, entity: Entity, element_id: ElementId) -> Self {
+        Self {
+            element_id,
+            contract: world.get::<SettingOutContract>(entity).cloned(),
+        }
+    }
+}
+
+impl AuthoredEntity for SettingOutContractSnapshot {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn type_name(&self) -> &'static str {
+        "setting_out_contract_snapshot"
+    }
+
+    fn element_id(&self) -> ElementId {
+        self.element_id
+    }
+
+    fn label(&self) -> String {
+        format!("setting_out_contract:{}", self.element_id.0)
+    }
+
+    fn center(&self) -> Vec3 {
+        Vec3::ZERO
+    }
+
+    fn bounds(&self) -> Option<EntityBounds> {
+        None
+    }
+
+    fn translate_by(&self, _delta: Vec3) -> BoxedEntity {
+        self.clone().into()
+    }
+
+    fn rotate_by(&self, _rotation: Quat) -> BoxedEntity {
+        self.clone().into()
+    }
+
+    fn scale_by(&self, _factor: Vec3, _center: Vec3) -> BoxedEntity {
+        self.clone().into()
+    }
+
+    fn property_fields(&self) -> Vec<PropertyFieldDef> {
+        Vec::new()
+    }
+
+    fn set_property_json(
+        &self,
+        _name: &str,
+        _value: &serde_json::Value,
+    ) -> Result<BoxedEntity, String> {
+        Err("SettingOutContractSnapshot is read-only".into())
+    }
+
+    fn handles(&self) -> Vec<HandleInfo> {
+        Vec::new()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn apply_to(&self, world: &mut World) {
+        let Some(entity) = find_entity_by_element_id_readonly(world, self.element_id) else {
+            return;
+        };
+        if let Some(contract) = &self.contract {
+            world.entity_mut(entity).insert(contract.clone());
+        } else {
+            world.entity_mut(entity).remove::<SettingOutContract>();
+        }
+    }
+
+    fn remove_from(&self, _world: &mut World) {}
+
+    fn draw_preview(&self, _gizmos: &mut Gizmos, _color: Color) {}
+
+    fn box_clone(&self) -> BoxedEntity {
+        self.clone().into()
+    }
+
+    fn eq_snapshot(&self, other: &dyn AuthoredEntity) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| self == other)
+    }
+}
+
+impl From<SettingOutContractSnapshot> for BoxedEntity {
+    fn from(snapshot: SettingOutContractSnapshot) -> Self {
+        BoxedEntity(Box::new(snapshot))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SettingOutThicknessPrior {
+    pub prior_id: String,
+    pub element_class: String,
+    pub construction_system_id: Option<String>,
+    pub jurisdiction: Option<String>,
+    pub thickness_mm: f64,
+    pub negative_offset_mm: f64,
+    pub positive_offset_mm: f64,
+    pub source_ref: String,
+    pub confidence: f32,
+}
+
+#[derive(Resource, Debug, Clone, Default)]
+pub struct SettingOutThicknessPriorRegistry {
+    priors: Vec<SettingOutThicknessPrior>,
+}
+
+impl SettingOutThicknessPriorRegistry {
+    pub fn register(&mut self, prior: SettingOutThicknessPrior) -> Result<(), String> {
+        if prior.source_ref.trim().is_empty() {
+            return Err(format!(
+                "Setting-out prior '{}' has no evidence source_ref",
+                prior.prior_id
+            ));
+        }
+        if !(0.0..=1.0).contains(&prior.confidence) {
+            return Err(format!(
+                "Setting-out prior '{}' confidence must be in [0,1]",
+                prior.prior_id
+            ));
+        }
+        if prior.thickness_mm <= 0.0
+            || prior.negative_offset_mm < 0.0
+            || prior.positive_offset_mm < 0.0
+        {
+            return Err(format!(
+                "Setting-out prior '{}' has invalid thickness or offsets",
+                prior.prior_id
+            ));
+        }
+        if (prior.negative_offset_mm + prior.positive_offset_mm - prior.thickness_mm).abs() > 0.01 {
+            return Err(format!(
+                "Setting-out prior '{}' offsets do not sum to thickness",
+                prior.prior_id
+            ));
+        }
+        self.priors
+            .retain(|existing| existing.prior_id != prior.prior_id);
+        self.priors.push(prior);
+        Ok(())
+    }
+
+    pub fn select(
+        &self,
+        element_class: &str,
+        construction_system_id: Option<&str>,
+        jurisdiction: Option<&str>,
+    ) -> Option<&SettingOutThicknessPrior> {
+        self.priors
+            .iter()
+            .filter(|prior| prior.element_class == element_class)
+            .filter(|prior| {
+                prior.construction_system_id.as_deref().is_none()
+                    || prior.construction_system_id.as_deref() == construction_system_id
+            })
+            .filter(|prior| {
+                prior.jurisdiction.as_deref().is_none()
+                    || prior.jurisdiction.as_deref() == jurisdiction
+            })
+            .max_by_key(|prior| {
+                usize::from(prior.construction_system_id.is_some()) * 2
+                    + usize::from(prior.jurisdiction.is_some())
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SettingOutThicknessSource {
+    ExplicitContract,
+    AuthoredStack,
+    AuthoredPhysical,
+    EvidenceBackedPrior,
+    CorpusGap,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct SettingOutResolution {
+    pub required_thickness_mm: Option<f64>,
+    pub source: SettingOutThicknessSource,
+    pub source_ref: Option<String>,
+    pub governing_contract: Option<SettingOutContract>,
+    pub proposed_contract: Option<SettingOutContract>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum DimensionImpactChoiceKind {
+    PreserveExteriorEnvelope,
+    PreserveInteriorClear,
+    PreserveGoverningGrid,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct DimensionImpactChoice {
+    pub choice: DimensionImpactChoiceKind,
+    pub effect: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct DimensionImpact {
+    pub reserved_thickness_mm: f64,
+    pub required_thickness_mm: f64,
+    pub excess_mm: f64,
+    pub conflicts: Vec<String>,
+    pub choices: Vec<DimensionImpactChoice>,
+    pub accepted_choice: Option<DimensionImpactChoiceKind>,
+}
+
 /// Semantic basis captured when a generated refinement branch is created.
 ///
 /// The fingerprint is only a fast equality check. The structured fields are
@@ -2277,6 +2590,7 @@ use crate::capability_registry::{CapabilityRegistryAppExt, RelationTypeDescripto
 /// `build` method.
 pub fn register_refinement_relations(app: &mut App) {
     app.init_resource::<RefinementGoalRegistry>();
+    app.init_resource::<SettingOutThicknessPriorRegistry>();
     app.register_relation_type(RelationTypeDescriptor {
         relation_type: "refinement_of".to_string(),
         label: "Refinement Of".to_string(),

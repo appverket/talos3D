@@ -732,6 +732,14 @@ pub(super) enum ModelApiRequest {
         overrides: serde_json::Value,
         response: oneshot::Sender<ApiResult<PromoteRefinementResult>>,
     },
+    GetSettingOutContract {
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<SettingOutContractInfo>>,
+    },
+    SetSettingOutContract {
+        request: SetSettingOutContractRequest,
+        response: oneshot::Sender<ApiResult<SettingOutContractInfo>>,
+    },
     InferRefinementGoal {
         request: crate::plugins::refinement::InferRefinementGoalRequest,
         response: oneshot::Sender<ApiResult<RefinementGoalInfo>>,
@@ -2117,6 +2125,15 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
                 recipe_id,
                 overrides,
             ));
+        }
+        ModelApiRequest::GetSettingOutContract {
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_get_setting_out_contract(world, element_id));
+        }
+        ModelApiRequest::SetSettingOutContract { request, response } => {
+            let _ = response.send(handle_set_setting_out_contract(world, request));
         }
         ModelApiRequest::InferRefinementGoal { request, response } => {
             let _ = response.send(handle_infer_refinement_goal(world, request));

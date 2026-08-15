@@ -808,6 +808,24 @@ fn init_model_api_test_world() -> World {
 }
 
 #[cfg(feature = "model-api")]
+fn test_wall_setting_out_contract() -> crate::plugins::refinement::SettingOutContract {
+    use crate::plugins::refinement::{
+        SettingOutContract, SettingOutDatum, SettingOutLockedDimension, SettingOutSource,
+    };
+    SettingOutContract {
+        revision: 1,
+        datum: SettingOutDatum::Centreline,
+        locked_dimensions: [SettingOutLockedDimension::Grid].into_iter().collect(),
+        reserved_negative_offset_mm: 150.0,
+        reserved_positive_offset_mm: 150.0,
+        source: SettingOutSource::User,
+        confidence: 1.0,
+        tolerance_mm: 1.0,
+        source_ref: None,
+    }
+}
+
+#[cfg(feature = "model-api")]
 #[test]
 fn create_box_semantic_annotation_is_inspectable_and_survives_transform() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
@@ -6946,34 +6964,36 @@ fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
         RefinementState::Schematic,
         vec![ClaimPath("construction_system".into())],
     );
-    let mut registry = world.resource_mut::<CapabilityRegistry>();
-    registry.register_element_class(ElementClassDescriptor {
-        id: ElementClassId("wall_assembly".into()),
-        label: "Wall Assembly".into(),
-        description: "Test wall".into(),
-        semantic_roles: Vec::new(),
-        class_min_obligations,
-        class_min_promotion_critical_paths: critical_paths,
-        parameter_schema: json!({"type": "object"}),
-    });
-    let mut recipe_obligations = std::collections::HashMap::new();
-    recipe_obligations.insert(RefinementState::Schematic, Vec::new());
-    registry.register_recipe_family(RecipeFamilyDescriptor {
-        id: RecipeFamilyId("schematic_wall".into()),
-        target_class: ElementClassId("wall_assembly".into()),
-        label: "Schematic Wall".into(),
-        description: "Resolves system intent".into(),
-        parameters: Vec::new(),
-        supported_refinement_levels: vec![RefinementState::Schematic],
-        obligation_specializations: recipe_obligations,
-        promotion_critical_path_specializations: std::collections::HashMap::new(),
-        generate: Arc::new(|_input, _world| {
-            Ok(GenerateOutput {
-                satisfaction_links: vec![(ObligationId("system_intent".into()), 999)],
-                grounding_updates: std::collections::HashMap::new(),
-            })
-        }),
-    });
+    {
+        let mut registry = world.resource_mut::<CapabilityRegistry>();
+        registry.register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test wall".into(),
+            semantic_roles: Vec::new(),
+            class_min_obligations,
+            class_min_promotion_critical_paths: critical_paths,
+            parameter_schema: json!({"type": "object"}),
+        });
+        let mut recipe_obligations = std::collections::HashMap::new();
+        recipe_obligations.insert(RefinementState::Schematic, Vec::new());
+        registry.register_recipe_family(RecipeFamilyDescriptor {
+            id: RecipeFamilyId("schematic_wall".into()),
+            target_class: ElementClassId("wall_assembly".into()),
+            label: "Schematic Wall".into(),
+            description: "Resolves system intent".into(),
+            parameters: Vec::new(),
+            supported_refinement_levels: vec![RefinementState::Schematic],
+            obligation_specializations: recipe_obligations,
+            promotion_critical_path_specializations: std::collections::HashMap::new(),
+            generate: Arc::new(|_input, _world| {
+                Ok(GenerateOutput {
+                    satisfaction_links: vec![(ObligationId("system_intent".into()), 999)],
+                    grounding_updates: std::collections::HashMap::new(),
+                })
+            }),
+        });
+    }
 
     let selected = world
         .spawn((
@@ -6985,6 +7005,7 @@ fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
             RefinementStateComponent {
                 state: RefinementState::Conceptual,
             },
+            test_wall_setting_out_contract(),
         ))
         .id();
     let unrelated = world
@@ -6997,6 +7018,7 @@ fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
             RefinementStateComponent {
                 state: RefinementState::Conceptual,
             },
+            test_wall_setting_out_contract(),
         ))
         .id();
 
@@ -7095,6 +7117,339 @@ fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn wall_setting_out_preserves_envelope_and_requires_explicit_dimension_impact_choice() {
+    use std::sync::Arc;
+
+    use crate::capability_registry::{
+        ElementClassAssignment, ElementClassDescriptor, ElementClassId, GenerateOutput,
+        ObligationTemplate, RecipeFamilyDescriptor, RecipeFamilyId,
+    };
+    use crate::plugins::refinement::{
+        ClaimPath, ObligationId, RefinementState, RefinementStateComponent, SemanticRole,
+        SettingOutContract, SettingOutDatum, SettingOutLockedDimension, SettingOutSource,
+    };
+
+    let mut world = init_model_api_test_world();
+    let mut class_min_obligations = std::collections::HashMap::new();
+    class_min_obligations.insert(
+        RefinementState::Schematic,
+        vec![ObligationTemplate {
+            id: ObligationId("wall_system_selected".into()),
+            role: SemanticRole("envelope_system".into()),
+            required_by_state: RefinementState::Schematic,
+        }],
+    );
+    let mut critical_paths = std::collections::HashMap::new();
+    critical_paths.insert(
+        RefinementState::Schematic,
+        vec![ClaimPath("construction_system".into())],
+    );
+    {
+        let mut registry = world.resource_mut::<CapabilityRegistry>();
+        registry.register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test wall".into(),
+            semantic_roles: Vec::new(),
+            class_min_obligations,
+            class_min_promotion_critical_paths: critical_paths,
+            parameter_schema: json!({"type": "object"}),
+        });
+        let mut recipe_obligations = std::collections::HashMap::new();
+        recipe_obligations.insert(RefinementState::Schematic, Vec::new());
+        registry.register_recipe_family(RecipeFamilyDescriptor {
+            id: RecipeFamilyId("schematic_wall".into()),
+            target_class: ElementClassId("wall_assembly".into()),
+            label: "Schematic wall".into(),
+            description: "Selects a wall system".into(),
+            parameters: Vec::new(),
+            supported_refinement_levels: vec![RefinementState::Schematic],
+            obligation_specializations: recipe_obligations,
+            promotion_critical_path_specializations: std::collections::HashMap::new(),
+            generate: Arc::new(|_input, _world| {
+                Ok(GenerateOutput {
+                    satisfaction_links: vec![(ObligationId("wall_system_selected".into()), 700)],
+                    grounding_updates: std::collections::HashMap::new(),
+                })
+            }),
+        });
+    }
+
+    let entity = world
+        .spawn((
+            ElementId(700),
+            BoxPrimitive {
+                centre: Vec3::ZERO,
+                // The conceptual body reserves the complete 300 mm envelope.
+                half_extents: Vec3::new(2.0, 1.5, 0.15),
+            },
+            ShapeRotation::default(),
+            ElementClassAssignment {
+                element_class: ElementClassId("wall_assembly".into()),
+                active_recipe: None,
+            },
+            RefinementStateComponent {
+                state: RefinementState::Conceptual,
+            },
+            SettingOutContract {
+                revision: 1,
+                datum: SettingOutDatum::Centreline,
+                locked_dimensions: [SettingOutLockedDimension::ExteriorEnvelope]
+                    .into_iter()
+                    .collect(),
+                reserved_negative_offset_mm: 150.0,
+                reserved_positive_offset_mm: 150.0,
+                source: SettingOutSource::User,
+                confidence: 1.0,
+                tolerance_mm: 0.5,
+                source_ref: None,
+            },
+        ))
+        .id();
+
+    let fitting = handle_preview_promotion(
+        &mut world,
+        700,
+        "Schematic".into(),
+        Some("schematic_wall".into()),
+        json!({"stack_thickness_mm": 300.0}),
+    )
+    .expect("a stack inside the reservation should preview silently");
+    assert!(fitting.plan.dimension_impact.is_none());
+    assert!(fitting.plan.can_commit);
+
+    let incompatible = handle_preview_promotion(
+        &mut world,
+        700,
+        "Schematic".into(),
+        Some("schematic_wall".into()),
+        json!({"stack_thickness_mm": 400.0}),
+    )
+    .expect("an incompatible stack should return choices, not mutate the wall");
+    let impact = incompatible
+        .plan
+        .dimension_impact
+        .expect("DimensionImpact is required");
+    assert_eq!(impact.excess_mm, 100.0);
+    assert!(impact.accepted_choice.is_none());
+    assert_eq!(impact.choices.len(), 3);
+    assert!(!incompatible.plan.can_commit);
+    assert_eq!(
+        world
+            .get::<SettingOutContract>(entity)
+            .unwrap()
+            .reserved_thickness_mm(),
+        300.0,
+        "preview must be read-only"
+    );
+
+    let accepted = handle_promote_refinement(
+        &mut world,
+        700,
+        "Schematic".into(),
+        Some("schematic_wall".into()),
+        json!({
+            "stack_thickness_mm": 400.0,
+            "dimension_impact_choice": "preserve_exterior_envelope"
+        }),
+    )
+    .expect("an explicit dimensional choice should permit promotion");
+    assert_eq!(accepted.new_state, "Schematic");
+    let contract = world.get::<SettingOutContract>(entity).unwrap();
+    assert_eq!(contract.datum, SettingOutDatum::ExteriorFace);
+    assert_eq!(contract.reserved_thickness_mm(), 400.0);
+    assert!(contract
+        .locked_dimensions
+        .contains(&SettingOutLockedDimension::ExteriorEnvelope));
+
+    let drift = handle_run_validation(&world, 700).expect("validation");
+    assert!(drift
+        .iter()
+        .any(|finding| finding.validator == "SettingOutContractDrift"));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn under_specified_wall_records_durable_setting_out_corpus_gap() {
+    use crate::capability_registry::{
+        ElementClassAssignment, ElementClassDescriptor, ElementClassId, ObligationTemplate,
+    };
+    use crate::plugins::modeling::assembly::SemanticAssembly;
+    use crate::plugins::refinement::{ClaimPath, ObligationId, RefinementState, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+    let mut obligations = std::collections::HashMap::new();
+    obligations.insert(
+        RefinementState::Schematic,
+        vec![ObligationTemplate {
+            id: ObligationId("wall_system_selected".into()),
+            role: SemanticRole("envelope_system".into()),
+            required_by_state: RefinementState::Schematic,
+        }],
+    );
+    let mut critical_paths = std::collections::HashMap::new();
+    critical_paths.insert(
+        RefinementState::Schematic,
+        vec![ClaimPath("construction_system".into())],
+    );
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test wall".into(),
+            semantic_roles: Vec::new(),
+            class_min_obligations: obligations,
+            class_min_promotion_critical_paths: critical_paths,
+            parameter_schema: json!({"type": "object"}),
+        });
+    world.spawn((
+        ElementId(710),
+        SemanticAssembly {
+            assembly_type: "wall".into(),
+            label: "Unspecified wall".into(),
+            members: Vec::new(),
+            parameters: json!({}),
+            metadata: json!({}),
+        },
+        ElementClassAssignment {
+            element_class: ElementClassId("wall_assembly".into()),
+            active_recipe: None,
+        },
+    ));
+
+    let preview = handle_preview_promotion(&mut world, 710, "Schematic".into(), None, json!({}))
+        .expect("the preview should surface a gap instead of hand-rolling a thickness");
+    assert!(preview.plan.corpus_gap_required);
+    assert!(!preview.plan.can_commit);
+    let gaps = world
+        .resource::<crate::plugins::corpus_gap::CorpusGapQueue>()
+        .list();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].missing_artifact_kind, "setting_out_thickness_prior");
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn evidence_backed_wall_prior_proposes_a_full_conceptual_envelope() {
+    use crate::capability_registry::{
+        ElementClassAssignment, ElementClassDescriptor, ElementClassId,
+    };
+    use crate::plugins::modeling::assembly::SemanticAssembly;
+    use crate::plugins::refinement::{
+        SettingOutSource, SettingOutThicknessPrior, SettingOutThicknessPriorRegistry,
+        SettingOutThicknessSource,
+    };
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("wall_assembly".into()),
+            label: "Wall Assembly".into(),
+            description: "Test wall".into(),
+            semantic_roles: Vec::new(),
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: json!({"type": "object"}),
+        });
+    let mut priors = SettingOutThicknessPriorRegistry::default();
+    priors
+        .register(SettingOutThicknessPrior {
+            prior_id: "se.test.light_frame".into(),
+            element_class: "wall_assembly".into(),
+            construction_system_id: Some("platform_light_frame".into()),
+            jurisdiction: Some("SE".into()),
+            thickness_mm: 300.0,
+            negative_offset_mm: 150.0,
+            positive_offset_mm: 150.0,
+            source_ref: "se.test.wall-envelope.v1".into(),
+            confidence: 0.9,
+        })
+        .expect("valid evidence-backed prior");
+    world.insert_resource(priors);
+    world.spawn((
+        ElementId(720),
+        SemanticAssembly {
+            assembly_type: "wall".into(),
+            label: "Swedish light-frame wall".into(),
+            members: Vec::new(),
+            parameters: json!({}),
+            metadata: json!({}),
+        },
+        ElementClassAssignment {
+            element_class: ElementClassId("wall_assembly".into()),
+            active_recipe: None,
+        },
+    ));
+
+    let plan = build_refinement_promotion_plan(
+        &world,
+        720,
+        "Schematic".into(),
+        None,
+        json!({
+            "construction_system": "platform_light_frame",
+            "jurisdiction": "SE"
+        }),
+    )
+    .expect("prior-backed plan");
+    assert!(!plan.corpus_gap_required);
+    let resolution = plan.setting_out_resolution.expect("resolution");
+    assert_eq!(
+        resolution.source,
+        SettingOutThicknessSource::EvidenceBackedPrior
+    );
+    assert_eq!(resolution.required_thickness_mm, Some(300.0));
+    let proposed = resolution.proposed_contract.expect("proposed contract");
+    assert_eq!(proposed.source, SettingOutSource::Prior);
+    assert_eq!(proposed.reserved_thickness_mm(), 300.0);
+    assert_eq!(
+        proposed.source_ref.as_deref(),
+        Some("se.test.wall-envelope.v1")
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn setting_out_contract_edit_is_revision_fenced_and_undoable() {
+    use crate::plugins::refinement::{
+        SettingOutContract, SettingOutDatum, SettingOutLockedDimension, SettingOutSource,
+    };
+
+    let mut world = init_model_api_test_world();
+    let entity = world.spawn((ElementId(730),)).id();
+    let contract = SettingOutContract {
+        revision: 1,
+        datum: SettingOutDatum::Centreline,
+        locked_dimensions: [SettingOutLockedDimension::Grid].into_iter().collect(),
+        reserved_negative_offset_mm: 199.0,
+        reserved_positive_offset_mm: 199.0,
+        source: SettingOutSource::User,
+        confidence: 1.0,
+        tolerance_mm: 1.0,
+        source_ref: None,
+    };
+
+    handle_set_setting_out_contract(
+        &mut world,
+        SetSettingOutContractRequest {
+            element_id: 730,
+            contract: contract.clone(),
+        },
+    )
+    .expect("setting-out edit");
+    assert_eq!(world.get::<SettingOutContract>(entity), Some(&contract));
+    assert_eq!(world.resource::<History>().model_revision(), 1);
+
+    world.resource_mut::<PendingCommandQueue>().queue_undo();
+    flush_model_api_write_pipeline(&mut world);
+    assert!(world.get::<SettingOutContract>(entity).is_none());
+    assert_eq!(world.resource::<History>().model_revision(), 2);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn outcome_inference_is_ordered_scoped_and_does_not_treat_nouns_as_levels() {
     use std::sync::Arc;
 
@@ -7156,6 +7511,7 @@ fn outcome_inference_is_ordered_scoped_and_does_not_treat_nouns_as_levels() {
             RefinementStateComponent {
                 state: RefinementState::Conceptual,
             },
+            test_wall_setting_out_contract(),
         ));
     }
     let scope = |root_element_id, recipe_id: Option<&str>| RefinementInferenceScope {

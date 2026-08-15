@@ -1,7 +1,7 @@
 #[cfg(feature = "model-api")]
 pub mod concept_tools;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[cfg(feature = "model-api")]
 use bevy::window::PrimaryWindow;
@@ -246,8 +246,8 @@ impl ModelApiRequestSender {
         }
     }
 
-    fn send(&self, request: ModelApiRequest) -> Result<(), mpsc::SendError<ModelApiRequest>> {
-        self.sender.send(request)?;
+    fn send(&self, request: ModelApiRequest) -> Result<(), ()> {
+        self.sender.send(request).map_err(|_| ())?;
         self.wake();
         Ok(())
     }
@@ -11797,6 +11797,74 @@ fn handle_get_refinement_state(world: &World, element_id: u64) -> ApiResult<Refi
 }
 
 #[cfg(feature = "model-api")]
+fn handle_get_setting_out_contract(
+    world: &World,
+    element_id: u64,
+) -> ApiResult<SettingOutContractInfo> {
+    ensure_refinable_entity_exists(world, ElementId(element_id))?;
+    let entity = find_entity_by_element_id_readonly(world, ElementId(element_id))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let contract = world
+        .get::<crate::plugins::refinement::SettingOutContract>(entity)
+        .cloned()
+        .ok_or_else(|| format!("Entity {element_id} has no SettingOutContract"))?;
+    Ok(SettingOutContractInfo {
+        element_id,
+        contract,
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_set_setting_out_contract(
+    world: &mut World,
+    request: SetSettingOutContractRequest,
+) -> ApiResult<SettingOutContractInfo> {
+    ensure_refinable_entity_exists(world, ElementId(request.element_id))?;
+    request.contract.validate()?;
+    let entity = find_entity_by_element_id_readonly(world, ElementId(request.element_id))
+        .ok_or_else(|| format!("Entity {} not found", request.element_id))?;
+    if let Some(existing) = world.get::<crate::plugins::refinement::SettingOutContract>(entity) {
+        if request.contract.revision <= existing.revision {
+            return Err(format!(
+                "stale SettingOutContract revision {}: entity {} is already at revision {}; submit a newer revision",
+                request.contract.revision, request.element_id, existing.revision
+            ));
+        }
+    }
+    let before = crate::plugins::refinement::SettingOutContractSnapshot::capture(
+        world,
+        entity,
+        ElementId(request.element_id),
+    );
+    world.entity_mut(entity).insert(request.contract.clone());
+    let after = crate::plugins::refinement::SettingOutContractSnapshot::capture(
+        world,
+        entity,
+        ElementId(request.element_id),
+    );
+    send_event(
+        world,
+        BeginCommandGroup {
+            label: "Set Setting-Out Contract",
+        },
+    );
+    send_event(
+        world,
+        ApplyEntityChangesCommand {
+            label: "Set Setting-Out Contract",
+            before: vec![before.into()],
+            after: vec![after.into()],
+        },
+    );
+    send_event(world, EndCommandGroup);
+    flush_model_api_write_pipeline(world);
+    Ok(SettingOutContractInfo {
+        element_id: request.element_id,
+        contract: request.contract,
+    })
+}
+
+#[cfg(feature = "model-api")]
 fn handle_get_obligations(world: &World, element_id: u64) -> ApiResult<Vec<ObligationInfo>> {
     use crate::plugins::refinement::{ObligationSet, ObligationStatus};
 
@@ -12116,6 +12184,37 @@ fn promote_refinement_structured(
 
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
+    let entity = find_entity_by_element_id_readonly(world, eid)
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let setting_out_evaluation = world
+        .get::<crate::capability_registry::ElementClassAssignment>(entity)
+        .filter(|assignment| assignment.element_class.0 == "wall_assembly")
+        .map(|assignment| {
+            evaluate_wall_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
+        });
+    if setting_out_evaluation.as_ref().is_some_and(|evaluation| {
+        matches!(
+            evaluation.resolution.source,
+            crate::plugins::refinement::SettingOutThicknessSource::CorpusGap
+        )
+    }) {
+        ensure_wall_thickness_corpus_gap(world, element_id)?;
+        return Err(crate::plugins::refinement::PromoteError::Other(
+            "Cannot promote under-specified wall: a durable CorpusGap was recorded because no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed thickness prior exists".to_string(),
+        ));
+    }
+    if let Some(impact) = setting_out_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.impact.as_ref())
+        .filter(|impact| impact.accepted_choice.is_none())
+    {
+        return Err(crate::plugins::refinement::PromoteError::Other(format!(
+            "DimensionImpact requires explicit acceptance before recipe execution: {:.1} mm stack exceeds {:.1} mm reservation by {:.1} mm; choose dimension_impact_choice preserve_exterior_envelope, preserve_interior_clear, or preserve_governing_grid",
+            impact.required_thickness_mm, impact.reserved_thickness_mm, impact.excess_mm
+        )));
+    }
+    let resolved_setting_out_contract =
+        setting_out_evaluation.and_then(|evaluation| evaluation.resolved_contract);
     let before_ids = collect_element_ids(world);
 
     // If the recipe_id matches a body in the RecipeArtifactRegistry, execute it
@@ -12281,6 +12380,11 @@ fn promote_refinement_structured(
             .collect();
         created_element_ids.sort_unstable();
         if script_steps_run > 0 || !created_element_ids.is_empty() {
+            if let Some(contract) = resolved_setting_out_contract.clone() {
+                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
+                    world.entity_mut(entity).insert(contract);
+                }
+            }
             return Ok(PromoteRefinementResult {
                 element_id,
                 previous_state: previous_state.as_str().to_string(),
@@ -12321,18 +12425,30 @@ fn promote_refinement_structured(
     created_element_ids.sort_unstable();
 
     match promote_result {
-        Ok(new_state) => Ok(PromoteRefinementResult {
-            element_id,
-            previous_state: previous_state.as_str().to_string(),
-            new_state: new_state.as_str().to_string(),
-            script_steps_run,
-            created_element_ids,
-            promotion_blocked: None,
-        }),
+        Ok(new_state) => {
+            if let Some(contract) = resolved_setting_out_contract.clone() {
+                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
+                    world.entity_mut(entity).insert(contract);
+                }
+            }
+            Ok(PromoteRefinementResult {
+                element_id,
+                previous_state: previous_state.as_str().to_string(),
+                new_state: new_state.as_str().to_string(),
+                script_steps_run,
+                created_element_ids,
+                promotion_blocked: None,
+            })
+        }
         Err(PromoteError::ObligationsUnsatisfied {
             unsatisfied_obligations,
             message,
         }) if script_steps_run > 0 || !created_element_ids.is_empty() => {
+            if let Some(contract) = resolved_setting_out_contract {
+                if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
+                    world.entity_mut(entity).insert(contract);
+                }
+            }
             Ok(PromoteRefinementResult {
                 element_id,
                 previous_state: previous_state.as_str().to_string(),
@@ -12793,6 +12909,40 @@ pub fn handle_run_validation(
                 passage_ref: None,
             })
             .collect();
+
+    // A conceptual wall is allowed to render as one plain body, but that body
+    // must still occupy the full envelope reserved by its setting-out
+    // contract. Catch datum/envelope drift before a later refinement silently
+    // changes exterior dimensions or interior clearances.
+    if let Some(entity) = find_entity_by_element_id_readonly(world, eid) {
+        let is_wall = world
+            .get::<crate::capability_registry::ElementClassAssignment>(entity)
+            .is_some_and(|assignment| assignment.element_class.0 == "wall_assembly");
+        if is_wall {
+            if let (Some(contract), Some(actual_thickness_mm)) = (
+                world.get::<crate::plugins::refinement::SettingOutContract>(entity),
+                authored_physical_thickness_mm(world, eid),
+            ) {
+                let reserved_thickness_mm = contract.reserved_thickness_mm();
+                let drift_mm = (actual_thickness_mm - reserved_thickness_mm).abs();
+                if drift_mm > contract.tolerance_mm {
+                    infos.push(ValidationFindingInfo {
+                        finding_id: format!("setting_out_contract_drift:{element_id}"),
+                        entity_element_id: element_id,
+                        validator: "SettingOutContractDrift".to_string(),
+                        severity: "Error".to_string(),
+                        message: format!(
+                            "Wall thickness is {actual_thickness_mm:.1} mm but its setting-out contract reserves {reserved_thickness_mm:.1} mm (drift {drift_mm:.1} mm exceeds tolerance {:.1} mm)",
+                            contract.tolerance_mm
+                        ),
+                        rationale: "Refinement must preserve the governing datum and locked dimensions; conceptual geometry reserves the full future envelope rather than growing when layers or framing are resolved".to_string(),
+                        obligation_id: None,
+                        passage_ref: contract.source_ref.clone(),
+                    });
+                }
+            }
+        }
+    }
 
     // PP74: also dispatch to every registered ConstraintDescriptor whose
     // applicability matches this entity. No dirty-propagation cache yet —
@@ -15940,6 +16090,9 @@ fn handle_preview_promotion(
         recipe_id,
         overrides,
     )?;
+    if plan.corpus_gap_required {
+        ensure_wall_thickness_corpus_gap(world, element_id)?;
+    }
 
     Ok(PreviewPromotionResult {
         element_id,
@@ -15948,6 +16101,31 @@ fn handle_preview_promotion(
         findings: plan.findings.clone(),
         plan,
     })
+}
+
+#[cfg(feature = "model-api")]
+fn ensure_wall_thickness_corpus_gap(world: &mut World, element_id: u64) -> ApiResult<()> {
+    let already_recorded = world
+        .get_resource::<crate::plugins::corpus_gap::CorpusGapQueue>()
+        .is_some_and(|queue| {
+            queue.list().iter().any(|gap| {
+                gap.element_class.as_deref() == Some("wall_assembly")
+                    && gap.missing_artifact_kind == "setting_out_thickness_prior"
+            })
+        });
+    if already_recorded {
+        return Ok(());
+    }
+    handle_request_corpus_expansion(
+        world,
+        Some("wall_assembly".to_string()),
+        active_jurisdiction(world, &serde_json::Value::Null),
+        "setting_out_thickness_prior".to_string(),
+        format!(
+            "Entity {element_id} needs a new wall envelope reservation but has no explicit SettingOutContract, authored stack/physical thickness, or evidence-backed construction-system/jurisdiction prior"
+        ),
+    )?;
+    Ok(())
 }
 
 #[cfg(feature = "model-api")]
@@ -15990,6 +16168,327 @@ fn has_executable_refinement_path(
                 )
         });
     native || scripted
+}
+
+#[cfg(feature = "model-api")]
+#[derive(Debug, Clone)]
+struct SettingOutEvaluation {
+    resolution: crate::plugins::refinement::SettingOutResolution,
+    impact: Option<crate::plugins::refinement::DimensionImpact>,
+    resolved_contract: Option<crate::plugins::refinement::SettingOutContract>,
+}
+
+#[cfg(feature = "model-api")]
+fn override_number(overrides: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    let object = overrides.as_object()?;
+    keys.iter().find_map(|key| object.get(*key)?.as_f64())
+}
+
+#[cfg(feature = "model-api")]
+fn override_text<'a>(overrides: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    let object = overrides.as_object()?;
+    keys.iter().find_map(|key| object.get(*key)?.as_str())
+}
+
+#[cfg(feature = "model-api")]
+fn authored_stack_thickness_mm(overrides: &serde_json::Value) -> Option<f64> {
+    if let Some(thickness) = override_number(
+        overrides,
+        &[
+            "stack_thickness_mm",
+            "wall_thickness_mm",
+            "wall/thickness_mm",
+            "total_thickness_mm",
+        ],
+    ) {
+        return (thickness > 0.0).then_some(thickness);
+    }
+    let layers = overrides
+        .as_object()?
+        .get("layers")
+        .or_else(|| overrides.as_object()?.get("wall_layers"))?
+        .as_array()?;
+    let thickness = layers
+        .iter()
+        .filter_map(|layer| {
+            layer
+                .get("thickness_mm")
+                .and_then(serde_json::Value::as_f64)
+                .or_else(|| {
+                    layer
+                        .get("thickness")
+                        .and_then(serde_json::Value::as_f64)
+                        .map(|metres| metres * 1_000.0)
+                })
+        })
+        .sum::<f64>();
+    (thickness > 0.0).then_some(thickness)
+}
+
+#[cfg(feature = "model-api")]
+fn authored_physical_thickness_mm(world: &World, element_id: ElementId) -> Option<f64> {
+    let snapshot = capture_entity_snapshot(world, element_id)?;
+    if let Some(thickness) = snapshot
+        .property_fields()
+        .into_iter()
+        .find(|field| field.name == "total_thickness" || field.name == "thickness")
+        .and_then(|field| field.value)
+        .and_then(|value| match value {
+            crate::authored_entity::PropertyValue::Scalar(value) => Some(value as f64),
+            _ => None,
+        })
+    {
+        return (thickness > 0.0).then_some(thickness * 1_000.0);
+    }
+    infer_wall_thickness_from_snapshot(&snapshot)
+        .map(|thickness| thickness as f64 * 1_000.0)
+        .filter(|thickness| *thickness > 0.0)
+}
+
+#[cfg(feature = "model-api")]
+fn active_jurisdiction(world: &World, overrides: &serde_json::Value) -> Option<String> {
+    override_text(overrides, &["jurisdiction", "region"])
+        .map(str::to_string)
+        .or_else(|| {
+            world
+                .get_resource::<crate::semantics::ActiveJurisdiction>()
+                .and_then(|active| active.0.as_ref())
+                .map(|tag| tag.as_str().to_string())
+        })
+}
+
+#[cfg(feature = "model-api")]
+fn parse_dimension_impact_choice(
+    overrides: &serde_json::Value,
+) -> Option<crate::plugins::refinement::DimensionImpactChoiceKind> {
+    use crate::plugins::refinement::DimensionImpactChoiceKind;
+    match override_text(overrides, &["dimension_impact_choice"])? {
+        "preserve_exterior_envelope" => Some(DimensionImpactChoiceKind::PreserveExteriorEnvelope),
+        "preserve_interior_clear" => Some(DimensionImpactChoiceKind::PreserveInteriorClear),
+        "preserve_governing_grid" => Some(DimensionImpactChoiceKind::PreserveGoverningGrid),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn contract_for_dimension_choice(
+    contract: &crate::plugins::refinement::SettingOutContract,
+    required_thickness_mm: f64,
+    choice: crate::plugins::refinement::DimensionImpactChoiceKind,
+) -> crate::plugins::refinement::SettingOutContract {
+    use crate::plugins::refinement::{
+        DimensionImpactChoiceKind, SettingOutDatum, SettingOutLockedDimension,
+    };
+    let mut resolved = contract.clone();
+    resolved.revision = resolved.revision.saturating_add(1);
+    resolved.locked_dimensions.clear();
+    match choice {
+        DimensionImpactChoiceKind::PreserveExteriorEnvelope => {
+            resolved.datum = SettingOutDatum::ExteriorFace;
+            resolved.reserved_negative_offset_mm = required_thickness_mm;
+            resolved.reserved_positive_offset_mm = 0.0;
+            resolved
+                .locked_dimensions
+                .insert(SettingOutLockedDimension::ExteriorEnvelope);
+        }
+        DimensionImpactChoiceKind::PreserveInteriorClear => {
+            resolved.datum = SettingOutDatum::InteriorFace;
+            resolved.reserved_negative_offset_mm = 0.0;
+            resolved.reserved_positive_offset_mm = required_thickness_mm;
+            resolved
+                .locked_dimensions
+                .insert(SettingOutLockedDimension::InteriorClear);
+        }
+        DimensionImpactChoiceKind::PreserveGoverningGrid => {
+            resolved.datum = SettingOutDatum::Centreline;
+            resolved.reserved_negative_offset_mm = required_thickness_mm * 0.5;
+            resolved.reserved_positive_offset_mm = required_thickness_mm * 0.5;
+            resolved
+                .locked_dimensions
+                .insert(SettingOutLockedDimension::Grid);
+        }
+    }
+    resolved
+}
+
+#[cfg(feature = "model-api")]
+fn evaluate_wall_setting_out(
+    world: &World,
+    entity: Entity,
+    element_id: ElementId,
+    element_class: &str,
+    overrides: &serde_json::Value,
+) -> SettingOutEvaluation {
+    use crate::plugins::refinement::{
+        DimensionImpact, DimensionImpactChoice, DimensionImpactChoiceKind, SettingOutContract,
+        SettingOutDatum, SettingOutLockedDimension, SettingOutResolution, SettingOutSource,
+        SettingOutThicknessPriorRegistry, SettingOutThicknessSource,
+    };
+
+    let existing_contract = world.get::<SettingOutContract>(entity).cloned();
+    let stack_thickness = authored_stack_thickness_mm(overrides);
+    let physical_thickness = authored_physical_thickness_mm(world, element_id);
+    let construction_system = override_text(
+        overrides,
+        &[
+            "construction_system",
+            "construction_system_id",
+            "top_level_construction_system",
+            "wall_system",
+            "structural_system",
+        ],
+    )
+    .map(str::to_string)
+    .or_else(|| {
+        world
+            .get::<crate::plugins::refinement::SemanticIntent>(entity)
+            .and_then(|intent| {
+                override_text(
+                    &intent.parameters,
+                    &[
+                        "construction_system",
+                        "construction_system_id",
+                        "top_level_construction_system",
+                        "wall_system",
+                        "structural_system",
+                    ],
+                )
+            })
+            .map(str::to_string)
+    });
+    let jurisdiction = active_jurisdiction(world, overrides);
+    let prior = world
+        .get_resource::<SettingOutThicknessPriorRegistry>()
+        .and_then(|registry| {
+            registry
+                .select(
+                    element_class,
+                    construction_system.as_deref(),
+                    jurisdiction.as_deref(),
+                )
+                .cloned()
+        });
+
+    let (required_thickness_mm, source, source_ref) = if let Some(thickness) = stack_thickness {
+        (
+            Some(thickness),
+            SettingOutThicknessSource::AuthoredStack,
+            None,
+        )
+    } else if let Some(contract) = existing_contract.as_ref() {
+        (
+            Some(contract.reserved_thickness_mm()),
+            SettingOutThicknessSource::ExplicitContract,
+            contract.source_ref.clone(),
+        )
+    } else if let Some(thickness) = physical_thickness {
+        (
+            Some(thickness),
+            SettingOutThicknessSource::AuthoredPhysical,
+            None,
+        )
+    } else if let Some(prior) = prior.as_ref() {
+        (
+            Some(prior.thickness_mm),
+            SettingOutThicknessSource::EvidenceBackedPrior,
+            Some(prior.source_ref.clone()),
+        )
+    } else {
+        (None, SettingOutThicknessSource::CorpusGap, None)
+    };
+
+    let proposed_contract = if existing_contract.is_none() {
+        required_thickness_mm.map(|thickness| {
+            if let Some(prior) = prior
+                .as_ref()
+                .filter(|_| matches!(source, SettingOutThicknessSource::EvidenceBackedPrior))
+            {
+                SettingOutContract {
+                    revision: 1,
+                    datum: SettingOutDatum::Centreline,
+                    locked_dimensions: BTreeSet::from([SettingOutLockedDimension::Grid]),
+                    reserved_negative_offset_mm: prior.negative_offset_mm,
+                    reserved_positive_offset_mm: prior.positive_offset_mm,
+                    source: SettingOutSource::Prior,
+                    confidence: prior.confidence,
+                    tolerance_mm: 1.0,
+                    source_ref: Some(prior.source_ref.clone()),
+                }
+            } else {
+                SettingOutContract {
+                    revision: 1,
+                    datum: SettingOutDatum::Centreline,
+                    locked_dimensions: BTreeSet::from([SettingOutLockedDimension::Grid]),
+                    reserved_negative_offset_mm: thickness * 0.5,
+                    reserved_positive_offset_mm: thickness * 0.5,
+                    source: SettingOutSource::AuthoredPhysical,
+                    confidence: 1.0,
+                    tolerance_mm: 1.0,
+                    source_ref: None,
+                }
+            }
+        })
+    } else {
+        None
+    };
+
+    let governing = existing_contract
+        .clone()
+        .or_else(|| proposed_contract.clone());
+    let accepted_choice = parse_dimension_impact_choice(overrides);
+    let impact = governing.as_ref().and_then(|contract| {
+        let required = required_thickness_mm?;
+        let reserved = contract.reserved_thickness_mm();
+        let excess = required - reserved;
+        (excess > contract.tolerance_mm.max(0.0)).then(|| DimensionImpact {
+            reserved_thickness_mm: reserved,
+            required_thickness_mm: required,
+            excess_mm: excess,
+            conflicts: contract
+                .locked_dimensions
+                .iter()
+                .map(|locked| format!("{locked:?}"))
+                .collect(),
+            choices: vec![
+                DimensionImpactChoice {
+                    choice: DimensionImpactChoiceKind::PreserveExteriorEnvelope,
+                    effect:
+                        "keep the exterior face fixed and consume/reduce interior clear dimension"
+                            .to_string(),
+                },
+                DimensionImpactChoice {
+                    choice: DimensionImpactChoiceKind::PreserveInteriorClear,
+                    effect: "keep the interior face fixed and expand the exterior envelope"
+                        .to_string(),
+                },
+                DimensionImpactChoice {
+                    choice: DimensionImpactChoiceKind::PreserveGoverningGrid,
+                    effect:
+                        "keep the centre/grid datum fixed and distribute growth across both faces"
+                            .to_string(),
+                },
+            ],
+            accepted_choice,
+        })
+    });
+    let resolved_contract = match (&governing, required_thickness_mm, accepted_choice, &impact) {
+        (Some(contract), Some(required), Some(choice), Some(_)) => {
+            Some(contract_for_dimension_choice(contract, required, choice))
+        }
+        (Some(contract), _, _, _) => Some(contract.clone()),
+        _ => None,
+    };
+    SettingOutEvaluation {
+        resolution: SettingOutResolution {
+            required_thickness_mm,
+            source,
+            source_ref,
+            governing_contract: existing_contract,
+            proposed_contract,
+        },
+        impact,
+        resolved_contract,
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -16050,7 +16549,35 @@ fn build_refinement_promotion_plan(
             .and_then(|assignment| registry.element_class_descriptor(&assignment.element_class))
     });
 
+    let setting_out_evaluation = assignment
+        .as_ref()
+        .filter(|assignment| assignment.element_class.0 == "wall_assembly")
+        .map(|assignment| {
+            evaluate_wall_setting_out(world, entity, eid, &assignment.element_class.0, &overrides)
+        });
+
     let mut missing_inputs = Vec::new();
+    if setting_out_evaluation.as_ref().is_some_and(|evaluation| {
+        matches!(
+            evaluation.resolution.source,
+            crate::plugins::refinement::SettingOutThicknessSource::CorpusGap
+        )
+    }) {
+        missing_inputs.push(
+            "CorpusGap: no explicit setting-out contract, authored wall stack/physical thickness, or evidence-backed wall-thickness prior"
+                .to_string(),
+        );
+    }
+    if let Some(impact) = setting_out_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.impact.as_ref())
+        .filter(|impact| impact.accepted_choice.is_none())
+    {
+        missing_inputs.push(format!(
+            "DimensionImpact: required wall stack is {:.1} mm but reservation is {:.1} mm; explicitly choose preserve_exterior_envelope, preserve_interior_clear, or preserve_governing_grid",
+            impact.required_thickness_mm, impact.reserved_thickness_mm
+        ));
+    }
     if let Some(recipe_id) = requested_recipe_id.as_deref() {
         if world
             .get_resource::<crate::plugins::recipe_drafts::RecipeDraftRegistry>()
@@ -16283,6 +16810,18 @@ fn build_refinement_promotion_plan(
         derived_graph_additions,
         resolution_predicate_available,
         executable_path_available,
+        setting_out_resolution: setting_out_evaluation
+            .as_ref()
+            .map(|evaluation| evaluation.resolution.clone()),
+        dimension_impact: setting_out_evaluation
+            .as_ref()
+            .and_then(|evaluation| evaluation.impact.clone()),
+        corpus_gap_required: setting_out_evaluation.as_ref().is_some_and(|evaluation| {
+            matches!(
+                evaluation.resolution.source,
+                crate::plugins::refinement::SettingOutThicknessSource::CorpusGap
+            )
+        }),
         can_commit: missing_inputs.is_empty(),
     })
 }
@@ -16635,13 +17174,17 @@ fn handle_create_refinement_goal(
             .map(|state| state.state)
             .unwrap_or_default();
         if current_state < target_state {
-            target_plans.push(build_refinement_promotion_plan(
+            let plan = build_refinement_promotion_plan(
                 world,
                 eid.0,
                 target_state.as_str().to_string(),
                 recipe_id.as_ref().map(|id| id.0.clone()),
                 target.overrides.clone(),
-            )?);
+            )?;
+            if plan.corpus_gap_required {
+                ensure_wall_thickness_corpus_gap(world, eid.0)?;
+            }
+            target_plans.push(plan);
         }
         targets.push(RefinementGoalTarget {
             scope: target.scope,
