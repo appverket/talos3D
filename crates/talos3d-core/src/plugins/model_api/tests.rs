@@ -2492,6 +2492,81 @@ async fn procedural_session_builds_post_and_beam_pavilion_through_mcp() {
 }
 
 #[cfg(feature = "model-api")]
+#[test]
+fn recipe_step_executor_materializes_registered_parametric_geometry() {
+    use crate::curation::McpToolId;
+    use crate::plugins::procedural_session_mcp::SessionStepExecutor;
+    use crate::relational::param_expr::ScalarExpr;
+    use crate::relational::registry::{
+        ParametricMember, ParametricRegistry, ParametricRepresentation, ParametricStore,
+        ParametricTypeDef,
+    };
+
+    let mut world = init_model_api_test_world();
+    world.insert_resource(ParametricRegistry::default());
+    world.insert_resource(ParametricStore::default());
+    let mut type_def = ParametricTypeDef {
+        id: "test.recipe_parametric".into(),
+        label: "Recipe parametric fixture".into(),
+        params: Default::default(),
+        driver_units: Default::default(),
+        defaults: Default::default(),
+        derivations: Default::default(),
+        transform: Default::default(),
+        public: true,
+        representation: Some(ParametricRepresentation {
+            members: vec![ParametricMember {
+                size: [
+                    ScalarExpr::contextual_lit(1000.0),
+                    ScalarExpr::contextual_lit(200.0),
+                    ScalarExpr::contextual_lit(100.0),
+                ],
+                translate: [
+                    ScalarExpr::contextual_lit(0.0),
+                    ScalarExpr::contextual_lit(0.0),
+                    ScalarExpr::contextual_lit(0.0),
+                ],
+                rotate_euler_deg: [
+                    ScalarExpr::contextual_lit(0.0),
+                    ScalarExpr::contextual_lit(0.0),
+                    ScalarExpr::contextual_lit(0.0),
+                ],
+                profile_xz: Vec::new(),
+                label: Some("member".into()),
+                semantic: None,
+            }],
+        }),
+    };
+    // No declared drivers are needed for this fixed test representation.
+    type_def.public = true;
+    world
+        .resource_mut::<ParametricRegistry>()
+        .register(type_def);
+
+    let args = serde_json::json!({ "type_id": "test.recipe_parametric" })
+        .as_object()
+        .unwrap()
+        .clone();
+    let mut executor = ModelApiStepExecutor;
+    let response = executor
+        .execute(&mut world, &McpToolId::new("parametric.create"), &args)
+        .expect("recipe step should execute the registered parametric type");
+
+    let ids = response["element_ids"]
+        .as_array()
+        .expect("parametric response element ids");
+    assert_eq!(ids.len(), 1);
+    let element_id = ElementId(ids[0].as_u64().expect("numeric element id"));
+    let entity = find_entity_by_element_id_readonly(&world, element_id)
+        .expect("materialized parametric member");
+    assert!(world.get::<ProfileExtrusion>(entity).is_some());
+
+    let mut tools = crate::curation::procedural_session::SessionToolRegistry::default();
+    register_model_api_session_tools(&mut tools);
+    assert!(tools.get(&McpToolId::new("parametric.create")).is_some());
+}
+
+#[cfg(feature = "model-api")]
 #[tokio::test]
 async fn get_authoring_guidance_tool_returns_resource_contents() {
     use crate::plugins::authoring_guidance::{

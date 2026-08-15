@@ -10071,10 +10071,11 @@ pub(crate) fn flush_model_api_write_pipeline(world: &mut World) {
 /// steps to the existing Model API world handlers, so a session commit
 /// produces real geometry / authored entities (ADR-051, PP-SPS-3/4).
 ///
-/// Supported step tools in v1: `create_box`, `create_entity`,
-/// `set_property`, plus read-only checks such as `model_summary` and
-/// `run_validation_v2`. Mutating tools return a JSON object containing the
-/// affected `element_id` so later steps can bind to it.
+/// Supported step tools include `create_box`, `create_entity`,
+/// `parametric.create`, `set_property`, plus read-only checks such as
+/// `model_summary` and `run_validation_v2`. Mutating tools return the same
+/// response shape as their MCP handler so recipe steps can bind to later
+/// outputs without a parallel execution contract.
 #[cfg(feature = "model-api")]
 pub struct ModelApiStepExecutor;
 
@@ -10100,6 +10101,15 @@ impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiSte
                 let id = handle_create_entity(world, Value::Object(args.clone()))
                     .map_err(|e| to_err("create_entity_failed", e))?;
                 Ok(serde_json::json!({ "element_id": id }))
+            }
+            "parametric.create" => {
+                let request: crate::plugins::parametric_mcp::CreateParametricRequest =
+                    serde_json::from_value(Value::Object(args.clone()))
+                        .map_err(|e| to_err("invalid_args", e.to_string()))?;
+                let response = crate::plugins::parametric_mcp::world_create(world, request)
+                    .map_err(|e| to_err("parametric_create_failed", e))?;
+                serde_json::to_value(response)
+                    .map_err(|e| to_err("parametric_create_failed", e.to_string()))
             }
             "set_property" => {
                 let element_id = args
@@ -10157,6 +10167,22 @@ pub fn register_model_api_session_tools(
         tool: McpToolId::new("create_entity"),
         mutates: true,
         default_stub: Some(serde_json::json!({ "element_id": 0 })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("parametric.create"),
+        mutates: true,
+        default_stub: Some(serde_json::json!({
+            "snapshot": {
+                "instance_id": 0,
+                "type_id": "",
+                "label": "",
+                "drivers": {},
+                "derived": {}
+            },
+            "element_ids": []
+        })),
         creates_obligations: Vec::new(),
         satisfies_obligation_ids: Vec::new(),
     });
