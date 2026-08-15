@@ -261,9 +261,11 @@ Before you author or refine **any** element class at a target refinement state:
 **What counts as a bluff (prohibited):** ungrounded geometry authored *outside* a
 recipe, assembly pattern, or definition/occurrence, for a class that has — or
 should have — a curated path. Approximating a sloped, framed, or layered assembly
-(roofs, trusses, stud walls, envelope build-ups) with axis-aligned boxes or
-ad-hoc meshes is never a valid substitute. Raw primitives are legitimate only as
-the committed body of a curated recipe/pattern, or as `Conceptual` massing.
+(roofs, trusses, stud walls, envelope build-ups) with raw geometry of any kind —
+boxes, meshes, swept profiles alike — is never a valid substitute; what matters
+is what the geometry stands in for, not which primitive drew it. Raw primitives
+are legitimate only as the committed body of a curated recipe/pattern, or as
+`Conceptual` massing.
 
 **A registered type that emits no geometry is also a gap.** Some generators are
 derivation-only (they compute quantities but do not place geometry). Verify that
