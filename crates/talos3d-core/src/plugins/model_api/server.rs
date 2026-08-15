@@ -1453,6 +1453,25 @@ impl ModelApiServer {
         .await?
     }
 
+    async fn request_get_setting_out_contract(
+        &self,
+        element_id: u64,
+    ) -> ApiResult<SettingOutContractInfo> {
+        self.round_trip(|response| ModelApiRequest::GetSettingOutContract {
+            element_id,
+            response,
+        })
+        .await?
+    }
+
+    async fn request_set_setting_out_contract(
+        &self,
+        request: SetSettingOutContractRequest,
+    ) -> ApiResult<SettingOutContractInfo> {
+        self.round_trip(|response| ModelApiRequest::SetSettingOutContract { request, response })
+            .await?
+    }
+
     async fn request_create_refinement_goal(
         &self,
         request: CreateRefinementGoalRequest,
@@ -4190,6 +4209,12 @@ pub struct RefinementPromotionPlanInfo {
     pub derived_graph_additions: Vec<String>,
     pub resolution_predicate_available: bool,
     pub executable_path_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setting_out_resolution: Option<crate::plugins::refinement::SettingOutResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension_impact: Option<crate::plugins::refinement::DimensionImpact>,
+    #[serde(default)]
+    pub corpus_gap_required: bool,
     pub can_commit: bool,
 }
 
@@ -4200,6 +4225,13 @@ pub struct RefinementGoalInfo {
     pub coverage: Vec<crate::plugins::refinement::RefinementGoalCoverageEntry>,
     pub target_plans: Vec<RefinementPromotionPlanInfo>,
     pub readback: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SettingOutContractInfo {
+    pub element_id: u64,
+    pub contract: crate::plugins::refinement::SettingOutContract,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -4358,6 +4390,14 @@ pub(super) struct PromoteRefinementRequest {
     pub(super) target_state: String,
     pub(super) recipe_id: Option<String>,
     pub(super) overrides: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct SetSettingOutContractRequest {
+    pub(super) element_id: u64,
+    pub(super) contract: crate::plugins::refinement::SettingOutContract,
 }
 
 #[cfg(feature = "model-api")]
@@ -7554,6 +7594,36 @@ reports the active frame. Returns the updated editing context. Call exit_group w
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(entries)
+    }
+
+    #[tool(
+        name = "get_setting_out_contract",
+        description = "Read the invariant datum, locked dimensions, signed envelope reservations, provenance, confidence, and tolerance governing refinement of an entity."
+    )]
+    pub(super) async fn get_setting_out_contract_tool(
+        &self,
+        Parameters(params): Parameters<RefinementEntityRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_get_setting_out_contract(params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "set_setting_out_contract",
+        description = "Set an explicit provenance-bearing setting-out contract before refinement. Offsets are millimetres on the negative and positive side of the invariant datum. Promotion preserves it silently when a resolved stack fits; an incompatible stack is blocked with DimensionImpact choices."
+    )]
+    pub(super) async fn set_setting_out_contract_tool(
+        &self,
+        Parameters(request): Parameters<SetSettingOutContractRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_set_setting_out_contract(request)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
     }
 
     #[tool(

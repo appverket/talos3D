@@ -41,7 +41,9 @@ use crate::{
         named_views::NamedViewRegistry,
         property_edit::PropertyEditState,
         recipe_drafts::{RecipeDraftArtifact, RecipeDraftRegistry},
-        refinement::{AuthoringProvenance, RefinementStateComponent, SemanticIntent},
+        refinement::{
+            AuthoringProvenance, RefinementStateComponent, SemanticIntent, SettingOutContract,
+        },
         selection::Selected,
         storage::Storage,
         tools::{ActiveTool, Preview},
@@ -226,6 +228,12 @@ pub struct PersistedSemanticSidecars {
     /// Bindings this entity holds against other entities' anchors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_bindings: Option<SemanticBindings>,
+    /// Stable datum, envelope reservation, and dimensional locks used when an
+    /// architectural assembly is refined. This is a semantic sidecar rather
+    /// than a geometry-type field so native walls, semantic assemblies, and
+    /// future wall representations all preserve the same contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setting_out_contract: Option<SettingOutContract>,
 }
 
 #[derive(Resource, Debug, Default, Clone, PartialEq)]
@@ -306,6 +314,7 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
         concept: entity_ref.get::<ConceptAssignment>().cloned(),
         published_anchors: entity_ref.get::<PublishedAnchors>().cloned(),
         semantic_bindings: entity_ref.get::<SemanticBindings>().cloned(),
+        setting_out_contract: entity_ref.get::<SettingOutContract>().cloned(),
     };
     (sidecars.element_class.is_some()
         || sidecars.refinement_state.is_some()
@@ -313,7 +322,8 @@ fn capture_semantic_sidecars(entity_ref: &EntityRef<'_>) -> Option<PersistedSema
         || sidecars.authoring_provenance.is_some()
         || sidecars.concept.is_some()
         || sidecars.published_anchors.is_some()
-        || sidecars.semantic_bindings.is_some())
+        || sidecars.semantic_bindings.is_some()
+        || sidecars.setting_out_contract.is_some())
     .then_some(sidecars)
 }
 
@@ -345,6 +355,9 @@ fn apply_semantic_sidecars(
         entity_mut.insert(component.clone());
     }
     if let Some(component) = &sidecars.semantic_bindings {
+        entity_mut.insert(component.clone());
+    }
+    if let Some(component) = &sidecars.setting_out_contract {
         entity_mut.insert(component.clone());
     }
 }
@@ -1644,7 +1657,8 @@ mod tests {
         refinement::{
             AgentId, AuthoringMode, AuthoringProvenance, ClaimGrounding, ClaimPath, ClaimRecord,
             Grounding, Obligation, ObligationId, ObligationSet, ObligationStatus, RefinementState,
-            RefinementStateComponent, RuleId, SemanticIntent, SemanticRole,
+            RefinementStateComponent, RuleId, SemanticIntent, SemanticRole, SettingOutContract,
+            SettingOutDatum, SettingOutLockedDimension, SettingOutSource,
         },
         tools::ActiveTool,
         transform::TransformState,
@@ -2831,6 +2845,19 @@ mod tests {
             mode: AuthoringMode::Freeform,
             rationale: Some("semantic primitive persistence fixture".into()),
         };
+        let setting_out_contract = SettingOutContract {
+            revision: 2,
+            datum: SettingOutDatum::ExteriorFace,
+            locked_dimensions: [SettingOutLockedDimension::ExteriorEnvelope]
+                .into_iter()
+                .collect(),
+            reserved_negative_offset_mm: 398.0,
+            reserved_positive_offset_mm: 0.0,
+            source: SettingOutSource::Prior,
+            confidence: 0.95,
+            tolerance_mm: 1.0,
+            source_ref: Some("traguiden.se.wall-table-2.195.v1".into()),
+        };
 
         source.spawn((
             ElementId(42),
@@ -2843,6 +2870,7 @@ mod tests {
             refinement_state.clone(),
             semantic_intent.clone(),
             authoring_provenance.clone(),
+            setting_out_contract.clone(),
         ));
 
         let project = build_project_file(&mut source).expect("project should serialize");
@@ -2882,15 +2910,17 @@ mod tests {
             &RefinementStateComponent,
             &SemanticIntent,
             &AuthoringProvenance,
+            &SettingOutContract,
         )>();
         let restored = query
             .iter(&target)
-            .find(|(element_id, _, _, _, _)| **element_id == ElementId(42))
+            .find(|(element_id, _, _, _, _, _)| **element_id == ElementId(42))
             .expect("primitive semantic sidecars should reload");
         assert_eq!(restored.1, &element_class);
         assert_eq!(restored.2, &refinement_state);
         assert_eq!(restored.3, &semantic_intent);
         assert_eq!(restored.4, &authoring_provenance);
+        assert_eq!(restored.5, &setting_out_contract);
     }
 
     #[test]
