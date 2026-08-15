@@ -283,6 +283,58 @@ fn capability_snapshot_reports_registry_counts_and_no_curated_paths() {
     assert!(snapshot.estimated_json_bytes <= snapshot.size_budget_bytes);
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn capability_snapshot_enforces_byte_budget_as_registries_grow() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::authoring_guidance::{
+        AuthoringGuidance, ComponentStructurePolicy, GuidanceReference,
+    };
+    use crate::plugins::refinement::SemanticRole;
+
+    let mut world = World::new();
+    let mut registry = CapabilityRegistry::default();
+    for index in 0..8 {
+        registry.register_element_class(ElementClassDescriptor {
+            id: ElementClassId(format!(
+                "unresolved_architectural_system_{index}_with_a_descriptive_registry_identifier"
+            )),
+            label: format!("Unresolved system {index}"),
+            description: "test".into(),
+            semantic_roles: vec![SemanticRole("system".into())],
+            class_min_obligations: Default::default(),
+            class_min_promotion_critical_paths: Default::default(),
+            parameter_schema: json!({}),
+        });
+    }
+    world.insert_resource(registry);
+    world.insert_resource(AuthoringGuidance {
+        guidance_id: "test.large-guidance-registry".into(),
+        version: 1,
+        prompt_text: "Use curated paths.".into(),
+        component_structure: ComponentStructurePolicy::default(),
+        references: (0..11)
+            .map(|index| GuidanceReference {
+                kind: "mcp_tool".into(),
+                target: format!("tool_{index}_{}", "descriptive_target_".repeat(14)),
+                note: None,
+            })
+            .collect(),
+        guidance_chapters: Vec::new(),
+    });
+
+    let snapshot = handle_get_capability_snapshot(&world, false);
+    assert_eq!(snapshot.summary.no_curated_path_count, 8);
+    assert!(snapshot.no_curated_paths.len() < 8);
+    assert!(snapshot.estimated_json_bytes <= snapshot.size_budget_bytes);
+    assert_eq!(
+        serde_json::to_vec(&snapshot)
+            .expect("snapshot serializes")
+            .len(),
+        snapshot.estimated_json_bytes
+    );
+}
+
 /// An executable public parametric type is a genuine geometry-producing path,
 /// so the session snapshot must not contradict `discover_curated_paths` by
 /// advertising a CorpusGap for the same class. Public derivation-only and

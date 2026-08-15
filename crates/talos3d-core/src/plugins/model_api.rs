@@ -13461,9 +13461,29 @@ pub fn handle_get_capability_snapshot(world: &World, expanded: bool) -> Capabili
         must_read_agent_skill_ids,
         next_tools: capability_snapshot_next_tools(),
     };
-    snapshot.estimated_json_bytes = serde_json::to_vec(&snapshot)
-        .map(|bytes| bytes.len())
-        .unwrap_or_default();
+    // The default snapshot is an onboarding handshake with a hard byte budget,
+    // not merely an item-count target. Registry growth can make eight otherwise
+    // bounded gap summaries exceed that budget because each summary repeats its
+    // routing/card context. Preserve the authoritative total in `summary` and
+    // deterministically trim only trailing summaries until the encoded response
+    // fits. Expanded diagnostic snapshots intentionally remain complete.
+    loop {
+        let previous_estimate = snapshot.estimated_json_bytes;
+        snapshot.estimated_json_bytes = serde_json::to_vec(&snapshot)
+            .map(|bytes| bytes.len())
+            .unwrap_or_default();
+        if snapshot.estimated_json_bytes != previous_estimate {
+            continue;
+        }
+        if snapshot.expanded
+            || snapshot.estimated_json_bytes <= snapshot.size_budget_bytes
+            || snapshot.no_curated_paths.is_empty()
+        {
+            break;
+        }
+        snapshot.no_curated_paths.pop();
+        snapshot.estimated_json_bytes = 0;
+    }
     snapshot
 }
 
