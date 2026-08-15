@@ -201,6 +201,19 @@ specialise the *content* of each band, not the *intent*.)
   grades and cut/quantity data resolved. *Consumer:* the shop or manufacturer
   that builds it without an RFI.
 
+## Infer outcomes without teaching users level names
+
+Users describe outcomes and downstream deliverables; they are not expected to
+know this ladder. Do not maintain a prompt-keyword table and do not let a noun
+such as "truss" prove a level. Resolve structured evidence in this order:
+explicit outcome/target, downstream deliverable, requested explicitness,
+selected-scope model context, evidence-backed regional/typology prior, then
+Conceptual when no signal remains. Call `infer_refinement_goal` with that
+structured interpretation. It records evidence, confidence, assumptions,
+alternatives, scope, and model revision and returns the one-line user-language
+read-back. Read that line back once before `apply_refinement_goal`; the inferred
+Candidate is progress intent, never active model truth.
+
 ## The identical-vs-level contradiction
 
 Because a level is *defined by resolved content*, two models that are
@@ -1049,6 +1062,74 @@ pub struct RefinementInferenceEvidence {
     pub source_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementInferenceAlternative {
+    pub target_state: RefinementState,
+    pub confidence: f32,
+    pub rationale: String,
+}
+
+/// Structured downstream deliverables. These are semantic choices supplied by
+/// a GUI or agent interpretation layer, not prompt keywords.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RefinementDeliverable {
+    MassingStudy,
+    DesignStudy,
+    PermitSet,
+    Estimate,
+    FrameDrawing,
+    QuantityTakeoff,
+    CoordinationModel,
+    InterfaceDetail,
+    ShopTicket,
+    CncOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RefinementRequestedExplicitness {
+    ChooseSystem,
+    DeclareSpacing,
+    ModelMembers,
+    QuantityBearingMaterials,
+    ResolveJunctions,
+    ProduceFabricationData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct EvidenceBackedRefinementPrior {
+    pub target_state: RefinementState,
+    pub source_ref: String,
+    pub rationale: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementInferenceScope {
+    pub scope: RefinementGoalScope,
+    pub recipe_id: Option<String>,
+    #[serde(default)]
+    pub overrides: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct InferRefinementGoalRequest {
+    pub requested_outcomes: Vec<String>,
+    pub selected_scopes: Vec<RefinementInferenceScope>,
+    pub explicit_target: Option<RefinementState>,
+    pub deliverable: Option<RefinementDeliverable>,
+    #[serde(default)]
+    pub requested_explicitness: Vec<RefinementRequestedExplicitness>,
+    pub evidence_backed_prior: Option<EvidenceBackedRefinementPrior>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub enum RefinementGoalStatus {
@@ -1090,6 +1171,10 @@ pub struct RefinementGoal {
     pub requested_outcomes: Vec<String>,
     pub proposed_targets: Vec<RefinementGoalTarget>,
     pub inference_evidence: Vec<RefinementInferenceEvidence>,
+    #[serde(default)]
+    pub inference_confidence: f32,
+    #[serde(default)]
+    pub inference_alternatives: Vec<RefinementInferenceAlternative>,
     pub assumption_refs: Vec<String>,
     pub base_model_revision: u64,
     pub capability_snapshot_fingerprint: String,
@@ -4337,6 +4422,8 @@ mod tests {
                 },
             ],
             inference_evidence: Vec::new(),
+            inference_confidence: 1.0,
+            inference_alternatives: Vec::new(),
             assumption_refs: Vec::new(),
             base_model_revision: 0,
             capability_snapshot_fingerprint: "test".into(),

@@ -1461,6 +1461,14 @@ impl ModelApiServer {
             .await?
     }
 
+    async fn request_infer_refinement_goal(
+        &self,
+        request: crate::plugins::refinement::InferRefinementGoalRequest,
+    ) -> ApiResult<RefinementGoalInfo> {
+        self.round_trip(|response| ModelApiRequest::InferRefinementGoal { request, response })
+            .await?
+    }
+
     async fn request_list_refinement_goals(&self) -> Vec<RefinementGoalInfo> {
         self.round_trip(|response| ModelApiRequest::ListRefinementGoals { response })
             .await
@@ -4372,6 +4380,11 @@ pub(super) struct CreateRefinementGoalRequest {
     pub(super) targets: Vec<RefinementGoalTargetRequest>,
     #[serde(default)]
     pub(super) inference_evidence: Vec<crate::plugins::refinement::RefinementInferenceEvidence>,
+    #[serde(default)]
+    pub(super) inference_confidence: f32,
+    #[serde(default)]
+    pub(super) inference_alternatives:
+        Vec<crate::plugins::refinement::RefinementInferenceAlternative>,
     #[serde(default)]
     pub(super) assumption_refs: Vec<String>,
 }
@@ -7567,6 +7580,21 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 params.recipe_id,
                 params.overrides.unwrap_or_default(),
             )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "infer_refinement_goal",
+        description = "Infer and persist a Candidate scoped refinement goal from structured ordered evidence: explicit target, downstream deliverable, requested explicitness, selected-scope context, evidence-backed prior, then Conceptual fallback. This is not keyword matching: requested_outcomes is read-back text and nouns alone do not force a level. Returns provenance, confidence, alternatives, coverage, plans, and a one-line user-language read-back."
+    )]
+    pub(super) async fn infer_refinement_goal_tool(
+        &self,
+        Parameters(request): Parameters<crate::plugins::refinement::InferRefinementGoalRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_infer_refinement_goal(request)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)

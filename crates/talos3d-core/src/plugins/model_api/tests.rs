@@ -7015,6 +7015,8 @@ fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
                 overrides: json!({}),
             }],
             inference_evidence: Vec::new(),
+            inference_confidence: 1.0,
+            inference_alternatives: Vec::new(),
             assumption_refs: Vec::new(),
         },
     )
@@ -7069,6 +7071,8 @@ fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
                 overrides: json!({}),
             }],
             inference_evidence: Vec::new(),
+            inference_confidence: 1.0,
+            inference_alternatives: Vec::new(),
             assumption_refs: Vec::new(),
         },
     )
@@ -7087,6 +7091,163 @@ fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
     let stale_error = handle_apply_refinement_goal(&mut world, &stale_candidate.goal.goal_id.0)
         .expect_err("old goal must be fenced after another model mutation");
     assert!(stale_error.contains("model revision changed"));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn outcome_inference_is_ordered_scoped_and_does_not_treat_nouns_as_levels() {
+    use std::sync::Arc;
+
+    use crate::capability_registry::{
+        ElementClassAssignment, ElementClassDescriptor, ElementClassId, GenerateOutput,
+        ObligationTemplate, RecipeFamilyDescriptor, RecipeFamilyId,
+    };
+    use crate::plugins::refinement::{
+        ClaimPath, InferRefinementGoalRequest, ObligationId, RefinementDeliverable,
+        RefinementGoalScope, RefinementGoalScopeKind, RefinementInferenceScope, RefinementState,
+        RefinementStateComponent, SemanticRole,
+    };
+
+    let mut world = init_model_api_test_world();
+    let mut class_min_obligations = std::collections::HashMap::new();
+    class_min_obligations.insert(
+        RefinementState::Constructible,
+        vec![ObligationTemplate {
+            id: ObligationId("explicit_frame_members".into()),
+            role: SemanticRole("primary_structure".into()),
+            required_by_state: RefinementState::Constructible,
+        }],
+    );
+    let mut critical_paths = std::collections::HashMap::new();
+    critical_paths.insert(
+        RefinementState::Constructible,
+        vec![ClaimPath("framing/member_schedule".into())],
+    );
+    let mut registry = world.resource_mut::<CapabilityRegistry>();
+    registry.register_element_class(ElementClassDescriptor {
+        id: ElementClassId("wall_assembly".into()),
+        label: "Wall Assembly".into(),
+        description: "Test wall".into(),
+        semantic_roles: Vec::new(),
+        class_min_obligations,
+        class_min_promotion_critical_paths: critical_paths,
+        parameter_schema: json!({"type": "object"}),
+    });
+    registry.register_recipe_family(RecipeFamilyDescriptor {
+        id: RecipeFamilyId("frame_wall".into()),
+        target_class: ElementClassId("wall_assembly".into()),
+        label: "Frame Wall".into(),
+        description: "Produces explicit frame members".into(),
+        parameters: Vec::new(),
+        supported_refinement_levels: vec![RefinementState::Constructible],
+        obligation_specializations: std::collections::HashMap::new(),
+        promotion_critical_path_specializations: std::collections::HashMap::new(),
+        generate: Arc::new(|_input, _world| Ok(GenerateOutput::default())),
+    });
+    drop(registry);
+
+    for element_id in [400, 401] {
+        world.spawn((
+            ElementId(element_id),
+            ElementClassAssignment {
+                element_class: ElementClassId("wall_assembly".into()),
+                active_recipe: None,
+            },
+            RefinementStateComponent {
+                state: RefinementState::Conceptual,
+            },
+        ));
+    }
+    let scope = |root_element_id, recipe_id: Option<&str>| RefinementInferenceScope {
+        scope: RefinementGoalScope {
+            kind: RefinementGoalScopeKind::Entity,
+            root_element_id,
+        },
+        recipe_id: recipe_id.map(str::to_string),
+        overrides: json!({}),
+    };
+
+    let noun_only = handle_infer_refinement_goal(
+        &mut world,
+        InferRefinementGoalRequest {
+            requested_outcomes: vec!["truss roof".into()],
+            selected_scopes: vec![scope(400, None)],
+            explicit_target: None,
+            deliverable: None,
+            requested_explicitness: Vec::new(),
+            evidence_backed_prior: None,
+        },
+    )
+    .expect("noun-only request falls back honestly");
+    assert_eq!(
+        noun_only.goal.proposed_targets[0].target_state,
+        RefinementState::Conceptual
+    );
+    assert_eq!(
+        noun_only.goal.inference_evidence[0].kind,
+        "no_signal_fallback"
+    );
+
+    let massing = handle_infer_refinement_goal(
+        &mut world,
+        InferRefinementGoalRequest {
+            requested_outcomes: vec!["cottage massing study".into()],
+            selected_scopes: vec![scope(401, None)],
+            explicit_target: None,
+            deliverable: Some(RefinementDeliverable::MassingStudy),
+            requested_explicitness: Vec::new(),
+            evidence_backed_prior: None,
+        },
+    )
+    .expect("massing inference");
+    assert_eq!(
+        massing.goal.proposed_targets[0].target_state,
+        RefinementState::Conceptual
+    );
+    assert!(massing.readback.contains("footprint, envelope, placement"));
+
+    let framing = handle_infer_refinement_goal(
+        &mut world,
+        InferRefinementGoalRequest {
+            requested_outcomes: vec!["frame blueprints for the selected walls".into()],
+            selected_scopes: vec![scope(400, Some("frame_wall"))],
+            explicit_target: None,
+            deliverable: Some(RefinementDeliverable::FrameDrawing),
+            requested_explicitness: Vec::new(),
+            evidence_backed_prior: None,
+        },
+    )
+    .expect("frame drawing inference");
+    assert_eq!(framing.goal.proposed_targets.len(), 1);
+    assert_eq!(
+        framing.goal.proposed_targets[0].target_state,
+        RefinementState::Constructible
+    );
+    assert_eq!(framing.goal.proposed_targets[0].scope.root_element_id, 400);
+    assert!(framing.readback.contains("explicit buildable parts"));
+    assert!(framing.target_plans[0].can_commit);
+
+    let explicit_beats_deliverable = handle_infer_refinement_goal(
+        &mut world,
+        InferRefinementGoalRequest {
+            requested_outcomes: vec!["keep this at coordinated design intent".into()],
+            selected_scopes: vec![scope(401, None)],
+            explicit_target: Some(RefinementState::Schematic),
+            deliverable: Some(RefinementDeliverable::ShopTicket),
+            requested_explicitness: Vec::new(),
+            evidence_backed_prior: None,
+        },
+    )
+    .expect("explicit target remains a candidate even when reachability blocks commit");
+    assert_eq!(
+        explicit_beats_deliverable.goal.proposed_targets[0].target_state,
+        RefinementState::Schematic
+    );
+    assert_eq!(
+        explicit_beats_deliverable.goal.inference_evidence[0].kind,
+        "explicit_outcome"
+    );
+    assert!(!explicit_beats_deliverable.target_plans[0].can_commit);
 }
 
 /// Register a "house" assembly type carrying the ADR-042 member-composition
