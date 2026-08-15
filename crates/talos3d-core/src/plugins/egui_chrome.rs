@@ -352,6 +352,26 @@ mod menu_presentation_tests {
         assert_eq!(edit, vec!["Site Placement"]);
         assert!(view.is_empty(), "no group leaks into an unrelated menu");
     }
+
+    #[test]
+    fn custom_category_uses_contributed_group_presentation() {
+        let category = CommandCategory::Custom("Refinement".to_string());
+        let mut registry = MenuGroupRegistry::default();
+        registry.register(
+            category.clone(),
+            "View only",
+            ["refinement.view_massing", "refinement.view_design"],
+        );
+
+        assert!(category_has_grouped_presentation(&category, &registry));
+        assert_eq!(
+            registry
+                .groups_for(&category)
+                .map(|group| group.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["View only"]
+        );
+    }
 }
 
 /// A menu group contributed by a capability plugin at runtime.
@@ -844,6 +864,13 @@ fn category_menu_groups(
         CommandCategory::View => VIEW_MENU_GROUPS,
         CommandCategory::Custom(_) => &[],
     }
+}
+
+fn category_has_grouped_presentation(
+    category: &crate::plugins::command_registry::CommandCategory,
+    menu_groups: &MenuGroupRegistry,
+) -> bool {
+    !category_menu_groups(category).is_empty() || menu_groups.groups_for(category).next().is_some()
 }
 
 fn ordered_menu_categories_for_bar(
@@ -1386,7 +1413,7 @@ fn draw_category_menu_contents(
     recovery_files: &RecoveryFiles,
 ) {
     let groups = category_menu_groups(category);
-    if groups.is_empty() {
+    if !category_has_grouped_presentation(category, menu_groups) {
         for descriptor in category_commands {
             draw_command_menu_button(
                 ui,
