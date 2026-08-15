@@ -16288,6 +16288,287 @@ fn build_refinement_promotion_plan(
 }
 
 #[cfg(feature = "model-api")]
+fn deliverable_inference(
+    deliverable: crate::plugins::refinement::RefinementDeliverable,
+) -> (
+    crate::plugins::refinement::RefinementState,
+    f32,
+    Vec<crate::plugins::refinement::RefinementInferenceAlternative>,
+) {
+    use crate::plugins::refinement::{
+        RefinementDeliverable as Deliverable, RefinementInferenceAlternative, RefinementState,
+    };
+    let alternative = |target_state, confidence, rationale: &str| RefinementInferenceAlternative {
+        target_state,
+        confidence,
+        rationale: rationale.to_string(),
+    };
+    match deliverable {
+        Deliverable::MassingStudy => (RefinementState::Conceptual, 0.98, Vec::new()),
+        Deliverable::DesignStudy => (RefinementState::Schematic, 0.90, Vec::new()),
+        Deliverable::PermitSet => (
+            RefinementState::Schematic,
+            0.72,
+            vec![alternative(
+                RefinementState::Detailed,
+                0.45,
+                "some jurisdictions require locally resolved permit details",
+            )],
+        ),
+        Deliverable::Estimate => (
+            RefinementState::Constructible,
+            0.78,
+            vec![alternative(
+                RefinementState::Schematic,
+                0.38,
+                "an early order-of-magnitude estimate may use coordinated system intent",
+            )],
+        ),
+        Deliverable::FrameDrawing | Deliverable::QuantityTakeoff => {
+            (RefinementState::Constructible, 0.96, Vec::new())
+        }
+        Deliverable::CoordinationModel => (
+            RefinementState::Detailed,
+            0.84,
+            vec![alternative(
+                RefinementState::Schematic,
+                0.36,
+                "early coordination may need only principal systems and datums",
+            )],
+        ),
+        Deliverable::InterfaceDetail => (RefinementState::Detailed, 0.96, Vec::new()),
+        Deliverable::ShopTicket | Deliverable::CncOutput => {
+            (RefinementState::FabricationReady, 0.99, Vec::new())
+        }
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn explicitness_target(
+    explicitness: crate::plugins::refinement::RefinementRequestedExplicitness,
+) -> crate::plugins::refinement::RefinementState {
+    use crate::plugins::refinement::{
+        RefinementRequestedExplicitness as Explicitness, RefinementState,
+    };
+    match explicitness {
+        Explicitness::ChooseSystem => RefinementState::Schematic,
+        Explicitness::DeclareSpacing
+        | Explicitness::ModelMembers
+        | Explicitness::QuantityBearingMaterials => RefinementState::Constructible,
+        Explicitness::ResolveJunctions => RefinementState::Detailed,
+        Explicitness::ProduceFabricationData => RefinementState::FabricationReady,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn context_inference(
+    world: &World,
+    scopes: &[crate::plugins::refinement::RefinementInferenceScope],
+) -> Option<(
+    crate::plugins::refinement::RefinementState,
+    crate::plugins::refinement::RefinementInferenceEvidence,
+)> {
+    use crate::plugins::refinement::{
+        list_refinement_branches, RefinementInferenceEvidence, RefinementState,
+        RefinementStateComponent, SemanticIntent,
+    };
+    let mut target = RefinementState::Conceptual;
+    let mut details = Vec::new();
+    let mut has_signal = false;
+    for scope in scopes {
+        let root = ElementId(scope.scope.root_element_id);
+        let Some(entity) = find_entity_by_element_id_readonly(world, root) else {
+            continue;
+        };
+        let active = world
+            .get::<RefinementStateComponent>(entity)
+            .map(|state| state.state)
+            .unwrap_or_default();
+        if active > RefinementState::Conceptual {
+            target = target.max(active);
+            has_signal = true;
+            details.push(format!("entity {} is actively {}", root.0, active.as_str()));
+        }
+        for branch in list_refinement_branches(world, root)
+            .into_iter()
+            .filter(|branch| {
+                branch.status == crate::plugins::refinement::RefinementBranchStatus::Parked
+            })
+        {
+            target = target.max(branch.target_state);
+            has_signal = true;
+            details.push(format!(
+                "entity {} has a parked {} branch",
+                root.0,
+                branch.target_state.as_str()
+            ));
+        }
+        if let Some(intent) = world.get::<SemanticIntent>(entity) {
+            if intent
+                .parameters
+                .as_object()
+                .is_some_and(|parameters| !parameters.is_empty())
+            {
+                target = target.max(RefinementState::Schematic);
+                has_signal = true;
+                details.push(format!("entity {} has authored system facets", root.0));
+            }
+            if !intent.unresolved_decisions.is_empty() {
+                has_signal = true;
+                details.push(format!(
+                    "entity {} has {} unresolved decision(s)",
+                    root.0,
+                    intent.unresolved_decisions.len()
+                ));
+            }
+        }
+    }
+    has_signal.then(|| {
+        (
+            target,
+            RefinementInferenceEvidence {
+                kind: "selected_scope_context".to_string(),
+                detail: details.join("; "),
+                confidence: 0.68,
+                source_ref: None,
+            },
+        )
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_infer_refinement_goal(
+    world: &mut World,
+    request: crate::plugins::refinement::InferRefinementGoalRequest,
+) -> ApiResult<RefinementGoalInfo> {
+    use crate::plugins::refinement::{
+        RefinementInferenceAlternative, RefinementInferenceEvidence, RefinementState,
+    };
+
+    if request.selected_scopes.is_empty() {
+        return Err("Outcome inference requires at least one selected scope".to_string());
+    }
+    let (target_state, evidence, confidence, alternatives, assumption_refs) = if let Some(target) =
+        request.explicit_target
+    {
+        (
+            target,
+            vec![RefinementInferenceEvidence {
+                kind: "explicit_outcome".to_string(),
+                detail: format!("the user explicitly selected {}", target.as_str()),
+                confidence: 1.0,
+                source_ref: None,
+            }],
+            1.0,
+            Vec::new(),
+            Vec::new(),
+        )
+    } else if let Some(deliverable) = request.deliverable {
+        let (target, confidence, alternatives) = deliverable_inference(deliverable);
+        (
+            target,
+            vec![RefinementInferenceEvidence {
+                kind: "downstream_deliverable".to_string(),
+                detail: format!("requested deliverable: {deliverable:?}"),
+                confidence,
+                source_ref: None,
+            }],
+            confidence,
+            alternatives,
+            vec![format!(
+                "deliverable_mapping:{deliverable:?}:{}",
+                target.as_str()
+            )],
+        )
+    } else if !request.requested_explicitness.is_empty() {
+        let target = request
+            .requested_explicitness
+            .iter()
+            .copied()
+            .map(explicitness_target)
+            .max()
+            .unwrap_or(RefinementState::Conceptual);
+        (
+            target,
+            vec![RefinementInferenceEvidence {
+                kind: "requested_explicitness".to_string(),
+                detail: format!("requested decisions: {:?}", request.requested_explicitness),
+                confidence: 0.94,
+                source_ref: None,
+            }],
+            0.94,
+            Vec::new(),
+            Vec::new(),
+        )
+    } else if let Some((target, evidence)) = context_inference(world, &request.selected_scopes) {
+        (target, vec![evidence], 0.68, Vec::new(), Vec::new())
+    } else if let Some(prior) = request.evidence_backed_prior.as_ref() {
+        if prior.source_ref.trim().is_empty() {
+            return Err("A refinement prior is not evidence-backed without source_ref".into());
+        }
+        let confidence = prior.confidence.clamp(0.0, 1.0);
+        (
+            prior.target_state,
+            vec![RefinementInferenceEvidence {
+                kind: "evidence_backed_prior".to_string(),
+                detail: prior.rationale.clone(),
+                confidence,
+                source_ref: Some(prior.source_ref.clone()),
+            }],
+            confidence,
+            Vec::new(),
+            vec![format!("prior:{}", prior.source_ref)],
+        )
+    } else {
+        (
+                RefinementState::Conceptual,
+                vec![RefinementInferenceEvidence {
+                    kind: "no_signal_fallback".to_string(),
+                    detail: "no explicit outcome, deliverable, explicitness, selected-scope context, or evidence-backed prior was supplied".to_string(),
+                    confidence: 0.40,
+                    source_ref: None,
+                }],
+                0.40,
+                vec![RefinementInferenceAlternative {
+                    target_state: RefinementState::Schematic,
+                    confidence: 0.20,
+                    rationale: "choose coordinated design intent if system decisions are intended"
+                        .to_string(),
+                }],
+                vec!["fallback:conceptual_until_outcome_is_clear".to_string()],
+            )
+    };
+
+    let requested_outcomes = if request.requested_outcomes.is_empty() {
+        vec!["the requested scoped outcome".to_string()]
+    } else {
+        request.requested_outcomes
+    };
+    let targets = request
+        .selected_scopes
+        .into_iter()
+        .map(|scope| RefinementGoalTargetRequest {
+            scope: scope.scope,
+            element_class: None,
+            target_state: target_state.as_str().to_string(),
+            recipe_id: scope.recipe_id,
+            overrides: scope.overrides,
+        })
+        .collect();
+    handle_create_refinement_goal(
+        world,
+        CreateRefinementGoalRequest {
+            requested_outcomes,
+            targets,
+            inference_evidence: evidence,
+            inference_confidence: confidence,
+            inference_alternatives: alternatives,
+            assumption_refs,
+        },
+    )
+}
+
+#[cfg(feature = "model-api")]
 fn handle_create_refinement_goal(
     world: &mut World,
     request: CreateRefinementGoalRequest,
@@ -16378,11 +16659,19 @@ fn handle_create_refinement_goal(
             .ok_or_else(|| "RefinementGoalRegistry is not initialised".to_string())?;
         registry.allocate_id()
     };
+    let inference_confidence =
+        if request.inference_confidence == 0.0 && request.inference_evidence.is_empty() {
+            1.0
+        } else {
+            request.inference_confidence.clamp(0.0, 1.0)
+        };
     let goal = RefinementGoal {
         goal_id,
         requested_outcomes: request.requested_outcomes,
         proposed_targets: targets,
         inference_evidence: request.inference_evidence,
+        inference_confidence,
+        inference_alternatives: request.inference_alternatives,
         assumption_refs: request.assumption_refs,
         base_model_revision,
         capability_snapshot_fingerprint,
@@ -16438,8 +16727,37 @@ fn refinement_goal_info(
     });
     let outcomes = goal.requested_outcomes.join(", ");
     let target_count = goal.proposed_targets.len();
+    let highest_target = goal
+        .proposed_targets
+        .iter()
+        .map(|target| target.target_state)
+        .max()
+        .unwrap_or_default();
+    let promise = match highest_target {
+        crate::plugins::refinement::RefinementState::Conceptual => {
+            "massing intent: footprint, envelope, placement, and rough form"
+        }
+        crate::plugins::refinement::RefinementState::Schematic => {
+            "coordinated design intent: selected systems, principal structure, and datums"
+        }
+        crate::plugins::refinement::RefinementState::Constructible => {
+            "explicit buildable parts and quantity-bearing materials"
+        }
+        crate::plugins::refinement::RefinementState::Detailed => {
+            "resolved interfaces, junctions, fixings, and local tolerances"
+        }
+        crate::plugins::refinement::RefinementState::FabricationReady => {
+            "fabrication-ready cut data, piece marks, grades, and production outputs"
+        }
+    };
+    let why = goal
+        .inference_evidence
+        .first()
+        .map(|evidence| evidence.detail.as_str())
+        .unwrap_or("the explicit target supplied with the goal");
     let readback = format!(
-        "Develop {target_count} explicit scope(s) for {outcomes}; review the captured targets and scoped blockers before applying."
+        "I understood {outcomes} for {target_count} selected scope(s) as {promise}, because {why}; confidence {:.0}%—review the scoped plan before applying.",
+        goal.inference_confidence.clamp(0.0, 1.0) * 100.0
     );
     RefinementGoalInfo {
         goal: goal.clone(),

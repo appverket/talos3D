@@ -1326,6 +1326,8 @@ mod tests {
                     captured_element_ids: vec![71],
                 }],
                 inference_evidence: Vec::new(),
+                inference_confidence: 1.0,
+                inference_alternatives: Vec::new(),
                 assumption_refs: Vec::new(),
                 base_model_revision: 0,
                 capability_snapshot_fingerprint: "snapshot".into(),

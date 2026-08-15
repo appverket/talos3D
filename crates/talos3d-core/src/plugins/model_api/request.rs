@@ -732,6 +732,10 @@ pub(super) enum ModelApiRequest {
         overrides: serde_json::Value,
         response: oneshot::Sender<ApiResult<PromoteRefinementResult>>,
     },
+    InferRefinementGoal {
+        request: crate::plugins::refinement::InferRefinementGoalRequest,
+        response: oneshot::Sender<ApiResult<RefinementGoalInfo>>,
+    },
     CreateRefinementGoal {
         request: CreateRefinementGoalRequest,
         response: oneshot::Sender<ApiResult<RefinementGoalInfo>>,
@@ -2113,6 +2117,9 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
                 recipe_id,
                 overrides,
             ));
+        }
+        ModelApiRequest::InferRefinementGoal { request, response } => {
+            let _ = response.send(handle_infer_refinement_goal(world, request));
         }
         ModelApiRequest::CreateRefinementGoal { request, response } => {
             let _ = response.send(handle_create_refinement_goal(world, request));
