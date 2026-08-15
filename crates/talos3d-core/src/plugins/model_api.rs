@@ -12341,6 +12341,7 @@ fn promote_refinement_structured(
                 created_element_ids,
                 promotion_blocked: Some(PromotionBlockedInfo {
                     unsatisfied_obligations,
+                    obligation_element_id: Some(element_id),
                     message,
                 }),
             })
@@ -12539,6 +12540,7 @@ fn handle_instantiate_recipe(
             created_element_ids: Vec::new(),
             promotion_blocked: Some(PromotionBlockedInfo {
                 unsatisfied_obligations,
+                obligation_element_id: Some(root),
                 message,
             }),
         },
@@ -12578,6 +12580,16 @@ fn handle_instantiate_recipe(
     let validation_target = group_element_id.unwrap_or(root);
     let findings = handle_run_validation(world, validation_target).unwrap_or_default();
 
+    // `move_recipe_semantics_from_anchor_to_group` relocates the ObligationSet
+    // onto the group, so a block must point the agent at the group rather than
+    // at the anchor it named.
+    let promotion_blocked = promote
+        .promotion_blocked
+        .map(|blocked| PromotionBlockedInfo {
+            obligation_element_id: group_element_id.or(blocked.obligation_element_id),
+            ..blocked
+        });
+
     Ok(InstantiateRecipeResult {
         root_element_id: root,
         group_element_id,
@@ -12586,7 +12598,7 @@ fn handle_instantiate_recipe(
         steps_run_count: promote.script_steps_run,
         recipe_id_used: Some(request.family_id.clone()),
         findings,
-        promotion_blocked: promote.promotion_blocked,
+        promotion_blocked,
     })
 }
 
@@ -15774,7 +15786,13 @@ fn handle_run_validation_v2(world: &World, element_id: Option<u64>) -> Vec<Valid
 #[cfg(feature = "model-api")]
 fn validation_element_ids(world: &World) -> Vec<u64> {
     let mut ids = Vec::new();
-    let mut q = world.try_query::<&ElementId>().unwrap();
+    // A world that has never held an authored entity has no `ElementId`
+    // registered, so the query cannot be built. That is an empty document, not
+    // an error — unwrapping here panicked the model-api worker and closed the
+    // response channel.
+    let Some(mut q) = world.try_query::<&ElementId>() else {
+        return ids;
+    };
     for id in q.iter(world) {
         if crate::plugins::refinement::is_parked_refinement_entity(world, *id) {
             continue;

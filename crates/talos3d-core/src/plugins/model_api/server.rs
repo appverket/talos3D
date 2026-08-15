@@ -4186,6 +4186,16 @@ pub struct PromotionBlockedInfo {
     /// Obligation ids still blocking the target state; each is resolvable via
     /// `resolve_obligation` (the entity already carries the ObligationSet).
     pub unsatisfied_obligations: Vec<String>,
+    /// Element that carries the `ObligationSet` — the element to pass to
+    /// `resolve_obligation`.
+    ///
+    /// This is not always the element the caller named. `instantiate_recipe`
+    /// moves the recipe's semantics from the root anchor onto the physical
+    /// group it creates, so the obligations end up on the group. Without this
+    /// field an agent would retry against `root_element_id`, find no
+    /// obligations there, and conclude the recovery path was broken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation_element_id: Option<u64>,
     /// Human-readable gate message explaining how to proceed.
     pub message: String,
 }

@@ -6466,12 +6466,18 @@ fn executable_learned_asset_materializes_through_parametric_path() {
     )
     .expect("learned asset should save");
 
+    // The asset is saved under jurisdiction "SE", and jurisdiction-scoped
+    // knowledge is deliberately withheld until the caller names the region
+    // (see `jurisdiction_matches_request`) so SE-specific construction rules are
+    // never handed to a request that has not selected SE. Ask as an agent
+    // building in Sweden would.
     let ranking = handle_select_recipe(
         &world,
         "roof_system".into(),
         serde_json::json!({
             "target_state": "Conceptual",
-            "include_session_drafts": true
+            "include_session_drafts": true,
+            "jurisdiction": "SE"
         }),
     )
     .expect("select_recipe should surface executable learned asset");
@@ -11511,15 +11517,27 @@ fn instantiate_recipe_gated_promotion_reports_partial_state_not_bare_error() {
         blocked.message
     );
 
-    // The root carries a resolvable ObligationSet — the recovery path works.
-    let root_entity = find_entity_by_element_id_readonly(
+    // The block names the element that carries the obligations, and that
+    // element really carries them — otherwise `resolve_obligation` has nothing
+    // to act on and the advertised recovery path is a dead end. It is the group,
+    // not the root anchor: instantiate_recipe moves the recipe's semantics onto
+    // the group it creates.
+    let obligation_element_id = blocked
+        .obligation_element_id
+        .expect("a block must say which element to resolve obligations on");
+    assert_eq!(
+        Some(obligation_element_id),
+        result.group_element_id,
+        "the semantics moved to the group, so the block must point at the group"
+    );
+    let obligation_entity = find_entity_by_element_id_readonly(
         &world,
-        crate::plugins::identity::ElementId(result.root_element_id),
+        crate::plugins::identity::ElementId(obligation_element_id),
     )
-    .expect("root entity must exist");
+    .expect("the named obligation element must exist");
     assert!(
-        world.get::<ObligationSet>(root_entity).is_some(),
-        "the root must carry the ObligationSet so resolve_obligation can run"
+        world.get::<ObligationSet>(obligation_entity).is_some(),
+        "the named element must carry the ObligationSet so resolve_obligation can run"
     );
 }
 
@@ -12678,6 +12696,14 @@ mod capability_profiles {
     /// full surface, both in tool count and in serialized schema bytes (the
     /// actual cold-start cost). Counts are bounded loosely so adding a tool
     /// does not break the build, but a wholesale un-gating does.
+    ///
+    /// The byte bound was 55% and ordinary growth crossed it by 0.5% — a single
+    /// tool's schema, which is exactly the "adding a tool breaks the build" case
+    /// this guard says it does not want to be. Measured at the time of writing:
+    /// 130/253 tools (51.4%) and 123/222 KB (55.3%). The bound is set to leave
+    /// room for that kind of drift while still failing loudly on the thing it
+    /// exists to catch: un-gating the surface wholesale would put both ratios
+    /// near 100%.
     #[test]
     fn authoring_profile_is_a_fraction_of_full_surface() {
         let catalog = profile_tool_catalog();
@@ -12704,8 +12730,8 @@ mod capability_profiles {
             full_bytes / 1024
         );
         assert!(
-            authoring_bytes * 100 <= full_bytes * 55,
-            "authoring schema bytes ({authoring_bytes}) should be at most 55% of full ({full_bytes})"
+            authoring_bytes * 100 <= full_bytes * 60,
+            "authoring schema bytes ({authoring_bytes}) should be at most 60% of full ({full_bytes})"
         );
     }
 

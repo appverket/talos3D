@@ -933,9 +933,13 @@ impl AuthoredEntityFactory for OccurrenceFactory {
         // produces a stale void which is persisted and materializes again on
         // reload. The opening is deliberately not user-editable on its own, so
         // occurrence deletion is the authoritative way to close it.
-        let mut query = world
-            .try_query::<(&ElementId, &OccurrenceIdentity)>()
-            .unwrap();
+        // `try_query` yields `None` when `OccurrenceIdentity` was never
+        // registered — a document that has never held an occurrence. Unwrapping
+        // that panicked on any delete in such a world, which is the ordinary
+        // state of a new document.
+        let Some(mut query) = world.try_query::<(&ElementId, &OccurrenceIdentity)>() else {
+            return;
+        };
         for (element_id, identity) in query.iter(world) {
             if !requested_ids.contains(element_id) {
                 continue;

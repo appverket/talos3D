@@ -1088,6 +1088,31 @@ impl From<String> for PromoteError {
 /// computed from the registered descriptors and installed as an `ObligationSet`.
 /// If a `recipe_id` is provided, the recipe's `generate` function is invoked
 /// to spawn child entities and link them via `create_refinement_relation_pair`.
+/// Add obligations to an entity's [`ObligationSet`], keeping any already there.
+///
+/// The two promotion gates can each contribute blocking obligations, and a
+/// wholesale replace would let the later one erase the earlier one's entries.
+fn merge_obligation_entries(world: &mut World, entity: Entity, entries: Vec<Obligation>) {
+    if entries.is_empty() {
+        return;
+    }
+    let mut merged = world
+        .get::<ObligationSet>(entity)
+        .cloned()
+        .unwrap_or_default();
+    for entry in entries {
+        match merged
+            .entries
+            .iter_mut()
+            .find(|existing| existing.id == entry.id)
+        {
+            Some(existing) => *existing = entry,
+            None => merged.entries.push(entry),
+        }
+    }
+    world.entity_mut(entity).insert(merged);
+}
+
 pub fn apply_promote_refinement(
     world: &mut World,
     request: PromoteRefinementRequest,
@@ -1138,6 +1163,21 @@ pub fn apply_promote_refinement(
                 .map(|o| format!("{} ({})", o.id.0, o.detail))
                 .collect::<Vec<_>>()
                 .join("; ");
+            // Leave the blocking obligations on the entity, exactly as the
+            // element-class gate below does. The error tells the caller to
+            // recover with `resolve_obligation`, and that reads the
+            // `ObligationSet` — without this the advertised recovery path had
+            // nothing to act on, so a blocked assembly promotion was a dead end.
+            let entries: Vec<Obligation> = unmet
+                .iter()
+                .map(|obligation| Obligation {
+                    id: obligation.id.clone(),
+                    role: obligation.role.clone(),
+                    required_by_state: obligation.required_by_state,
+                    status: obligation.status.clone(),
+                })
+                .collect();
+            merge_obligation_entries(world, entity, entries);
             return Err(PromoteError::ObligationsUnsatisfied {
                 unsatisfied_obligations: unmet.iter().map(|o| o.id.0.clone()).collect(),
                 message: format!(
@@ -2988,6 +3028,35 @@ mod tests {
                 },
             ))
             .id()
+    }
+
+    /// A blocked promotion tells the caller to recover with `resolve_obligation`,
+    /// which reads the entity's `ObligationSet`. The gate must therefore leave
+    /// that set on the entity, or the advertised recovery path is a dead end.
+    #[test]
+    fn blocked_promotion_leaves_a_resolvable_obligation_set_on_the_entity() {
+        let mut world = obligation_gate_world();
+        let entity = spawn_synthetic_entity(&mut world, 100);
+
+        let _ = apply_promote_refinement(
+            &mut world,
+            PromoteRefinementRequest {
+                entity_element_id: 100,
+                target_state: RefinementState::Schematic,
+                recipe_id: None,
+                overrides: HashMap::new(),
+            },
+        )
+        .unwrap_err();
+
+        let set = world
+            .get::<ObligationSet>(entity)
+            .expect("the gate must leave an ObligationSet to resolve");
+        assert!(
+            set.entries.iter().any(|o| o.id.0 == "load_path"),
+            "the blocking obligation must be in the set: {:?}",
+            set.entries
+        );
     }
 
     #[test]

@@ -211,7 +211,7 @@ fn capture_selection(world: &mut World) -> Result<Vec<ClipboardEntry>, String> {
         .iter()
         .filter_map(|element_id| find_entity(world, *element_id))
         .collect();
-    let registry = world.resource::<CapabilityRegistry>().clone();
+    let registry = world.resource::<CapabilityRegistry>();
     let mut entries = Vec::new();
     for entity in entities {
         let Ok(entity_ref) = world.get_entity(entity) else {
@@ -262,7 +262,7 @@ fn instantiate(world: &mut World, entries: &[ClipboardEntry]) -> Result<Vec<Elem
         id_map.push((entry.source_id.0, new.0));
     }
 
-    let registry = world.resource::<CapabilityRegistry>().clone();
+    let registry = world.resource::<CapabilityRegistry>();
     let mut snapshots = Vec::new();
     for entry in entries {
         let mut data = entry.data.clone();
