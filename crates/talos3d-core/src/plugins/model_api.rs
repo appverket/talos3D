@@ -14438,12 +14438,28 @@ pub fn handle_discover_curated_paths(
                         None => true,
                         Some(class) => parametric_class_token_match(class, id, label),
                     })
-                    .map(
-                        |(id, label)| crate::plugins::parametric_mcp::ParametricTypeInfo {
-                            id,
-                            label,
-                        },
-                    )
+                    .filter_map(|(id, _)| {
+                        let definition = registry.get(&id)?;
+                        let executable = definition.representation.is_some();
+                        Some(crate::plugins::parametric_mcp::ParametricTypeInfo {
+                            id: definition.id.clone(),
+                            label: definition.label.clone(),
+                            executable,
+                            execution_path: executable
+                                .then(|| "parametric.create".to_string()),
+                            how_to_use: if executable {
+                                format!(
+                                    "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.",
+                                    definition.id
+                                )
+                            } else {
+                                format!(
+                                    "Curated derivation-only type {:?}: it cannot emit geometry. Record a CorpusGap and curate an emitting representation or executable recipe; do not call parametric.create.",
+                                    definition.id
+                                )
+                            },
+                        })
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -14655,8 +14671,14 @@ pub fn handle_discover_curated_paths(
         None => None,
     };
 
+    let query_selects_derivation_only_parametric =
+        query_specific_derivation_only_parametric_beats_paths(
+            request.query.as_deref(),
+            &parametric_types,
+            &recipe_rankings,
+        );
     let has_materializable_path = recipe_rankings.iter().any(|ranking| ranking.executable)
-        || !parametric_types.is_empty()
+        || parametric_types.iter().any(|path| path.executable)
         || !definition_assets.is_empty()
         || !generation_priors.is_empty();
     let has_hosted_definition_path = definition_assets.iter().any(|asset| {
@@ -14665,12 +14687,19 @@ pub fn handle_discover_curated_paths(
             .starts_with("Call definition.instantiate_hosted")
     });
     related_asset_ids.extend(curated_assets.iter().map(|asset| asset.asset_id.clone()));
+    related_asset_ids.extend(
+        parametric_types
+            .iter()
+            .filter(|path| !path.executable)
+            .map(|path| path.id.clone()),
+    );
     related_asset_ids.sort();
     related_asset_ids.dedup();
     related_asset_ids.truncate(12);
     // A recognised native non-class term is not a gap: it already has a path.
-    let no_curated_path =
-        (non_class_term.is_none() && !has_materializable_path).then(|| NoCuratedPathInfo {
+    let no_curated_path = (non_class_term.is_none()
+        && (!has_materializable_path || query_selects_derivation_only_parametric))
+        .then(|| NoCuratedPathInfo {
             element_class: request
                 .element_class
                 .clone()
@@ -14693,6 +14722,8 @@ pub fn handle_discover_curated_paths(
         } else {
             "create_entity"
         }
+    } else if query_selects_derivation_only_parametric {
+        "request_corpus_expansion"
     } else if has_materializable_path {
         match path_kind.as_str() {
             "recipe"
@@ -14705,7 +14736,9 @@ pub fn handle_discover_curated_paths(
                 "parametric.create"
             }
             "recipe" if !recipe_rankings.is_empty() => "instantiate_recipe",
-            "parametric" if !parametric_types.is_empty() => "parametric.create",
+            "parametric" if parametric_types.iter().any(|path| path.executable) => {
+                "parametric.create"
+            }
             "definition" if !definition_assets.is_empty() => "occurrence.create",
             "prior" if !generation_priors.is_empty() => "list_generation_priors",
             _ => "get_guidance_card",
@@ -14755,6 +14788,7 @@ fn query_specific_parametric_beats_recipes(
     };
     let best_parametric = parametric_types
         .iter()
+        .filter(|path| path.executable)
         .map(|path| overlap(&format!("{} {}", path.id, path.label)))
         .max()
         .unwrap_or(0);
@@ -14765,6 +14799,50 @@ fn query_specific_parametric_beats_recipes(
         .unwrap_or(0);
 
     best_parametric >= 2 && best_parametric > best_recipe
+}
+
+#[cfg(feature = "model-api")]
+fn query_specific_derivation_only_parametric_beats_paths(
+    query: Option<&str>,
+    parametric_types: &[crate::plugins::parametric_mcp::ParametricTypeInfo],
+    recipe_rankings: &[RecipeRankingInfo],
+) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    let query_terms = bridge_tokens(query);
+    if query_terms.is_empty() {
+        return false;
+    }
+    let overlap = |text: &str| -> usize {
+        let tokens = bridge_tokens(text);
+        query_terms
+            .iter()
+            .filter(|term| tokens.iter().any(|candidate| candidate == *term))
+            .count()
+    };
+    let best_derivation_only = parametric_types
+        .iter()
+        .filter(|path| !path.executable)
+        .map(|path| overlap(&format!("{} {}", path.id, path.label)))
+        .max()
+        .unwrap_or(0);
+    let best_executable = parametric_types
+        .iter()
+        .filter(|path| path.executable)
+        .map(|path| overlap(&format!("{} {}", path.id, path.label)))
+        .max()
+        .unwrap_or(0);
+    let best_recipe = recipe_rankings
+        .iter()
+        .filter(|ranking| ranking.executable)
+        .map(|ranking| overlap(&format!("{} {}", ranking.id, ranking.label)))
+        .max()
+        .unwrap_or(0);
+
+    best_derivation_only >= 2
+        && best_derivation_only > best_executable
+        && best_derivation_only > best_recipe
 }
 
 #[cfg(feature = "model-api")]

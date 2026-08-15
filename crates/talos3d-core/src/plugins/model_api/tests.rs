@@ -6185,11 +6185,15 @@ fn curated_path_discovery_matches_aliases_and_curated_manifests() {
         },
     )
     .expect("parametric discovery should succeed");
-    assert!(parametric
+    let gable_type = parametric
         .parametric_types
         .iter()
-        .any(|ty| ty.id == "architecture.roof.system.gable"));
-    assert!(parametric.no_curated_path.is_none());
+        .find(|ty| ty.id == "architecture.roof.system.gable")
+        .expect("curated derivation-only type remains visible");
+    assert!(!gable_type.executable);
+    assert_eq!(gable_type.execution_path, None);
+    assert!(parametric.no_curated_path.is_some());
+    assert_eq!(parametric.suggested_next_tool, "request_corpus_expansion");
 
     let recipe = handle_discover_curated_paths(
         &world,
@@ -6205,7 +6209,8 @@ fn curated_path_discovery_matches_aliases_and_curated_manifests() {
         .curated_assets
         .iter()
         .any(|asset| asset.asset_id == asset_id.as_str()));
-    assert!(recipe.no_curated_path.is_none());
+    assert!(recipe.no_curated_path.is_some());
+    assert_eq!(recipe.suggested_next_tool, "request_corpus_expansion");
 }
 
 #[cfg(feature = "model-api")]
@@ -6438,11 +6443,19 @@ fn curated_asset_target_types_bridge_to_scoped_executable_recipes() {
         },
     )
     .expect("parametric-specific discovery should succeed");
-    assert_eq!(parametric_specific.suggested_next_tool, "parametric.create");
-    assert!(parametric_specific
+    assert_eq!(
+        parametric_specific.suggested_next_tool,
+        "request_corpus_expansion"
+    );
+    let standing_seam = parametric_specific
         .parametric_types
         .iter()
-        .any(|path| path.id == "architecture.roof.covering.standing_seam_gable"));
+        .find(|path| path.id == "architecture.roof.covering.standing_seam_gable")
+        .expect("derivation-only curated type remains discoverable");
+    assert!(!standing_seam.executable);
+    assert_eq!(standing_seam.execution_path, None);
+    assert!(standing_seam.how_to_use.contains("cannot emit geometry"));
+    assert!(parametric_specific.no_curated_path.is_some());
     assert!(
         parametric_specific.recipe_rankings.is_empty(),
         "query-specific parametric discovery must not backfill cross-class recipe bridges: {:?}",
