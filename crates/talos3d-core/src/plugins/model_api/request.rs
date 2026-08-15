@@ -752,6 +752,14 @@ pub(super) enum ModelApiRequest {
         element_id: u64,
         response: oneshot::Sender<ApiResult<Vec<RefinementBranchApiInfo>>>,
     },
+    RebaseRefinementBranch {
+        request: crate::plugins::refinement::RefinementBranchRebaseRequest,
+        response: oneshot::Sender<ApiResult<RefinementBranchRebaseResult>>,
+    },
+    RegenerateRefinementBranch {
+        request: RegenerateRefinementBranchRequest,
+        response: oneshot::Sender<ApiResult<PromoteRefinementResult>>,
+    },
     DiscardRefinementBranch {
         parent_element_id: u64,
         child_element_id: u64,
@@ -2127,6 +2135,12 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
             response,
         } => {
             let _ = response.send(handle_inspect_refinement_branches(world, element_id));
+        }
+        ModelApiRequest::RebaseRefinementBranch { request, response } => {
+            let _ = response.send(handle_rebase_refinement_branch(world, request));
+        }
+        ModelApiRequest::RegenerateRefinementBranch { request, response } => {
+            let _ = response.send(handle_regenerate_refinement_branch(world, request));
         }
         ModelApiRequest::DiscardRefinementBranch {
             parent_element_id,

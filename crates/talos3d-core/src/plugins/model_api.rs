@@ -12668,8 +12668,57 @@ fn handle_inspect_refinement_branches(
             target_state: branch.target_state.as_str().to_string(),
             recipe_id: branch.recipe_id.map(|recipe_id| recipe_id.0),
             status: branch.status.as_str().to_string(),
+            basis: branch.basis,
+            compatibility: branch.compatibility,
         })
         .collect())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_rebase_refinement_branch(
+    world: &mut World,
+    request: crate::plugins::refinement::RefinementBranchRebaseRequest,
+) -> ApiResult<RefinementBranchRebaseResult> {
+    use crate::plugins::refinement::rebase_refinement_branch;
+
+    ensure_refinable_entity_exists(world, ElementId(request.parent_element_id))?;
+    ensure_refinable_entity_exists(world, ElementId(request.child_element_id))?;
+    let result = rebase_refinement_branch(world, request)?;
+    flush_model_api_write_pipeline(world);
+    Ok(result)
+}
+
+#[cfg(feature = "model-api")]
+fn handle_regenerate_refinement_branch(
+    world: &mut World,
+    request: RegenerateRefinementBranchRequest,
+) -> ApiResult<PromoteRefinementResult> {
+    use crate::plugins::refinement::{discard_refinement_branch, list_refinement_branches};
+
+    if !request.confirm_discard_parked_branch {
+        return Err("Regeneration permanently discards the parked branch. Set confirm_discard_parked_branch=true, or use rebase_refinement_branch to preserve authored overrides.".to_string());
+    }
+    let parent = ElementId(request.parent_element_id);
+    let child = ElementId(request.child_element_id);
+    ensure_refinable_entity_exists(world, parent)?;
+    ensure_refinable_entity_exists(world, child)?;
+    let branch = list_refinement_branches(world, parent)
+        .into_iter()
+        .find(|branch| {
+            branch.child_element_id == child.0
+                && branch.status == crate::plugins::refinement::RefinementBranchStatus::Parked
+        })
+        .ok_or_else(|| {
+            format!(
+                "Refinement branch {} -> {} is not parked or does not exist",
+                parent.0, child.0
+            )
+        })?;
+    let target_state = branch.target_state.as_str().to_string();
+    let recipe_id = branch.recipe_id.map(|recipe_id| recipe_id.0);
+    discard_refinement_branch(world, parent, child)?;
+    promote_refinement_structured(world, parent.0, target_state, recipe_id, request.overrides)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "model-api")]
