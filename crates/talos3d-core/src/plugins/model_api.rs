@@ -10062,7 +10062,7 @@ fn build_mirror_plane(
 }
 
 #[cfg(feature = "model-api")]
-fn flush_model_api_write_pipeline(world: &mut World) {
+pub(crate) fn flush_model_api_write_pipeline(world: &mut World) {
     queue_command_events(world);
     apply_pending_history_commands(world);
 }
@@ -12719,17 +12719,32 @@ fn handle_instantiate_recipe(
 }
 
 #[cfg(feature = "model-api")]
-fn handle_demote_refinement(
-    world: &mut World,
+fn handle_preview_demote_refinement(
+    world: &World,
     element_id: u64,
     target_state_str: String,
+) -> ApiResult<crate::plugins::refinement::RefinementDemotionPlan> {
+    let target_state = crate::plugins::refinement::RefinementState::from_str(&target_state_str)
+        .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
+    crate::plugins::refinement::build_refinement_demotion_plan(
+        world,
+        vec![element_id],
+        target_state,
+    )
+}
+
+#[cfg(feature = "model-api")]
+fn handle_demote_refinement(
+    world: &mut World,
+    request: DemoteRefinementRequest,
 ) -> ApiResult<DemoteRefinementResult> {
     use crate::plugins::refinement::{
-        apply_demote_refinement, DemoteRefinementRequest, RefinementState, RefinementStateComponent,
+        apply_refinement_demotion_plan, RefinementState, RefinementStateComponent,
     };
 
-    let target_state = RefinementState::from_str(&target_state_str)
-        .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
+    let target_state = RefinementState::from_str(&request.target_state)
+        .ok_or_else(|| format!("Unknown refinement state: '{}'", request.target_state))?;
+    let element_id = request.element_id;
 
     let eid = ElementId(element_id);
     ensure_refinable_entity_exists(world, eid)?;
@@ -12751,18 +12766,34 @@ fn handle_demote_refinement(
             .unwrap_or_default()
     };
 
-    let request = DemoteRefinementRequest {
-        entity_element_id: element_id,
+    let plan = crate::plugins::refinement::build_refinement_demotion_plan(
+        world,
+        vec![element_id],
         target_state,
-    };
-
-    let new_state = apply_demote_refinement(world, request)?;
+    )?;
+    if let Some(expected) = request.preview_plan_id.as_deref() {
+        if expected != plan.plan_id {
+            return Err(format!(
+                "Demotion preview is stale: expected plan '{}' but current plan is '{}'; preview it again",
+                expected, plan.plan_id
+            ));
+        }
+    }
+    if let Some(expected) = request.base_model_revision {
+        if expected != plan.base_model_revision {
+            return Err(format!(
+                "Demotion preview is stale: model revision changed from {} to {}; preview it again",
+                expected, plan.base_model_revision
+            ));
+        }
+    }
+    apply_refinement_demotion_plan(world, &plan)?;
     flush_model_api_write_pipeline(world);
 
     Ok(DemoteRefinementResult {
         element_id,
         previous_state: previous_state.as_str().to_string(),
-        new_state: new_state.as_str().to_string(),
+        new_state: target_state.as_str().to_string(),
     })
 }
 
@@ -17128,7 +17159,7 @@ fn handle_infer_refinement_goal(
 }
 
 #[cfg(feature = "model-api")]
-fn handle_create_refinement_goal(
+pub(crate) fn handle_create_refinement_goal(
     world: &mut World,
     request: CreateRefinementGoalRequest,
 ) -> ApiResult<RefinementGoalInfo> {
@@ -17389,7 +17420,7 @@ fn validate_refinement_goal_fence(
 }
 
 #[cfg(feature = "model-api")]
-fn handle_apply_refinement_goal(
+pub(crate) fn handle_apply_refinement_goal(
     world: &mut World,
     goal_id: &str,
 ) -> ApiResult<ApplyRefinementGoalResult> {

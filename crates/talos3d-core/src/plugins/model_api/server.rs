@@ -1504,10 +1504,18 @@ impl ModelApiServer {
 
     async fn request_demote_refinement(
         &self,
+        request: DemoteRefinementRequest,
+    ) -> ApiResult<DemoteRefinementResult> {
+        self.round_trip(|response| ModelApiRequest::DemoteRefinement { request, response })
+            .await?
+    }
+
+    async fn request_preview_demote_refinement(
+        &self,
         element_id: u64,
         target_state: String,
-    ) -> ApiResult<DemoteRefinementResult> {
-        self.round_trip(|response| ModelApiRequest::DemoteRefinement {
+    ) -> ApiResult<crate::plugins::refinement::RefinementDemotionPlan> {
+        self.round_trip(|response| ModelApiRequest::PreviewDemoteRefinement {
             element_id,
             target_state,
             response,
@@ -4403,30 +4411,30 @@ pub(super) struct SetSettingOutContractRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct RefinementGoalTargetRequest {
-    pub(super) scope: crate::plugins::refinement::RefinementGoalScope,
-    pub(super) element_class: Option<String>,
-    pub(super) target_state: String,
-    pub(super) recipe_id: Option<String>,
+pub(crate) struct RefinementGoalTargetRequest {
+    pub(crate) scope: crate::plugins::refinement::RefinementGoalScope,
+    pub(crate) element_class: Option<String>,
+    pub(crate) target_state: String,
+    pub(crate) recipe_id: Option<String>,
     #[serde(default)]
-    pub(super) overrides: serde_json::Value,
+    pub(crate) overrides: serde_json::Value,
 }
 
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct CreateRefinementGoalRequest {
-    pub(super) requested_outcomes: Vec<String>,
-    pub(super) targets: Vec<RefinementGoalTargetRequest>,
+pub(crate) struct CreateRefinementGoalRequest {
+    pub(crate) requested_outcomes: Vec<String>,
+    pub(crate) targets: Vec<RefinementGoalTargetRequest>,
     #[serde(default)]
-    pub(super) inference_evidence: Vec<crate::plugins::refinement::RefinementInferenceEvidence>,
+    pub(crate) inference_evidence: Vec<crate::plugins::refinement::RefinementInferenceEvidence>,
     #[serde(default)]
-    pub(super) inference_confidence: f32,
+    pub(crate) inference_confidence: f32,
     #[serde(default)]
-    pub(super) inference_alternatives:
+    pub(crate) inference_alternatives:
         Vec<crate::plugins::refinement::RefinementInferenceAlternative>,
     #[serde(default)]
-    pub(super) assumption_refs: Vec<String>,
+    pub(crate) assumption_refs: Vec<String>,
 }
 
 #[cfg(feature = "model-api")]
@@ -4442,6 +4450,10 @@ pub(super) struct RefinementGoalIdRequest {
 pub(super) struct DemoteRefinementRequest {
     pub(super) element_id: u64,
     pub(super) target_state: String,
+    #[serde(default)]
+    pub(super) preview_plan_id: Option<String>,
+    #[serde(default)]
+    pub(super) base_model_revision: Option<u64>,
 }
 
 #[cfg(feature = "model-api")]
@@ -7709,15 +7721,30 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "preview_demote_refinement",
+        description = "Preview an explicit demotion without mutation. Returns the revision-fenced target scope and exact higher-detail branches that commit will park. Pass its plan_id as preview_plan_id and base_model_revision to demote_refinement after review."
+    )]
+    pub(super) async fn preview_demote_refinement_tool(
+        &self,
+        Parameters(params): Parameters<DemoteRefinementRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_preview_demote_refinement(params.element_id, params.target_state)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
         name = "demote_refinement",
-        description = "Demote an entity to a lower refinement state. Generated refinement branches are parked, not deleted, so authored overrides can be reactivated later. The demotion is undoable."
+        description = "Explicitly commit a demotion using the same shared plan returned by preview_demote_refinement. Supply preview_plan_id and base_model_revision from that preview. Generated refinement branches are parked, not deleted, and the demotion is undoable; intervening model changes are refused."
     )]
     pub(super) async fn demote_refinement_tool(
         &self,
         Parameters(params): Parameters<DemoteRefinementRequest>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .request_demote_refinement(params.element_id, params.target_state)
+            .request_demote_refinement(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)

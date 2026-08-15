@@ -755,9 +755,13 @@ pub(super) enum ModelApiRequest {
         goal_id: String,
         response: oneshot::Sender<ApiResult<ApplyRefinementGoalResult>>,
     },
-    DemoteRefinement {
+    PreviewDemoteRefinement {
         element_id: u64,
         target_state: String,
+        response: oneshot::Sender<ApiResult<crate::plugins::refinement::RefinementDemotionPlan>>,
+    },
+    DemoteRefinement {
+        request: DemoteRefinementRequest,
         response: oneshot::Sender<ApiResult<DemoteRefinementResult>>,
     },
     InspectRefinementBranches {
@@ -2147,12 +2151,19 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         ModelApiRequest::ApplyRefinementGoal { goal_id, response } => {
             let _ = response.send(handle_apply_refinement_goal(world, &goal_id));
         }
-        ModelApiRequest::DemoteRefinement {
+        ModelApiRequest::PreviewDemoteRefinement {
             element_id,
             target_state,
             response,
         } => {
-            let _ = response.send(handle_demote_refinement(world, element_id, target_state));
+            let _ = response.send(handle_preview_demote_refinement(
+                world,
+                element_id,
+                target_state,
+            ));
+        }
+        ModelApiRequest::DemoteRefinement { request, response } => {
+            let _ = response.send(handle_demote_refinement(world, request));
         }
         ModelApiRequest::InspectRefinementBranches {
             element_id,

@@ -991,6 +991,136 @@ pub struct DemoteRefinementRequest {
     pub target_state: RefinementState,
 }
 
+/// Revision-fenced preview for an explicit multi-entity demotion.
+///
+/// The preview captures the exact active branches that commit will park. It is
+/// deliberately separate from a refinement lens, which has no authored-model
+/// revision and never appears here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementDemotionPlan {
+    pub plan_id: String,
+    pub base_model_revision: u64,
+    pub target_state: RefinementState,
+    pub targets: Vec<RefinementDemotionTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementDemotionTarget {
+    pub element_id: u64,
+    pub current_state: RefinementState,
+    pub active_scope_element_ids: Vec<u64>,
+    pub branch_element_ids_to_park: Vec<u64>,
+}
+
+pub fn build_refinement_demotion_plan(
+    world: &World,
+    mut element_ids: Vec<u64>,
+    target_state: RefinementState,
+) -> Result<RefinementDemotionPlan, String> {
+    element_ids.sort_unstable();
+    element_ids.dedup();
+    if element_ids.is_empty() {
+        return Err("A demotion plan requires at least one explicit target".into());
+    }
+    let mut targets = Vec::with_capacity(element_ids.len());
+    for element_id in element_ids {
+        let eid = ElementId(element_id);
+        let entity = find_entity_by_element_id_readonly(world, eid)
+            .ok_or_else(|| format!("Entity {element_id} not found"))?;
+        let current_state = world
+            .get::<RefinementStateComponent>(entity)
+            .map(|state| state.state)
+            .unwrap_or_default();
+        if target_state >= current_state {
+            return Err(format!(
+                "Cannot demote entity {element_id} from {} to {} — target must be lower",
+                current_state.as_str(),
+                target_state.as_str()
+            ));
+        }
+        targets.push(RefinementDemotionTarget {
+            element_id,
+            current_state,
+            active_scope_element_ids: resolve_refinement_subtree(world, eid)?.active_element_ids,
+            branch_element_ids_to_park: query_refined_into(world, eid)
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
+        });
+    }
+    let base_model_revision = world
+        .get_resource::<crate::plugins::history::History>()
+        .map(crate::plugins::history::History::model_revision)
+        .unwrap_or_default();
+    let target_list = targets
+        .iter()
+        .map(|target| target.element_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(RefinementDemotionPlan {
+        plan_id: format!(
+            "demotion:{base_model_revision}:{}:{target_list}",
+            target_state.as_str()
+        ),
+        base_model_revision,
+        target_state,
+        targets,
+    })
+}
+
+pub fn apply_refinement_demotion_plan(
+    world: &mut World,
+    plan: &RefinementDemotionPlan,
+) -> Result<Vec<u64>, String> {
+    let revision = world
+        .get_resource::<crate::plugins::history::History>()
+        .map(crate::plugins::history::History::model_revision)
+        .unwrap_or_default();
+    if revision != plan.base_model_revision {
+        return Err(format!(
+            "Demotion plan '{}' is stale: model revision changed from {} to {}; preview it again",
+            plan.plan_id, plan.base_model_revision, revision
+        ));
+    }
+    for target in &plan.targets {
+        let eid = ElementId(target.element_id);
+        let entity = find_entity_by_element_id_readonly(world, eid)
+            .ok_or_else(|| format!("Entity {} no longer exists", target.element_id))?;
+        let current_state = world
+            .get::<RefinementStateComponent>(entity)
+            .map(|state| state.state)
+            .unwrap_or_default();
+        let active_scope = resolve_refinement_subtree(world, eid)?.active_element_ids;
+        let active_branches = query_refined_into(world, eid)
+            .into_iter()
+            .map(|id| id.0)
+            .collect::<Vec<_>>();
+        if current_state != target.current_state
+            || active_scope != target.active_scope_element_ids
+            || active_branches != target.branch_element_ids_to_park
+        {
+            return Err(format!(
+                "Demotion plan '{}' is stale for entity {}; preview it again",
+                plan.plan_id, target.element_id
+            ));
+        }
+    }
+    let mut applied = Vec::with_capacity(plan.targets.len());
+    for target in &plan.targets {
+        apply_demote_refinement(
+            world,
+            DemoteRefinementRequest {
+                entity_element_id: target.element_id,
+                target_state: plan.target_state,
+            },
+        )?;
+        applied.push(target.element_id);
+    }
+    Ok(applied)
+}
+
 /// Explicit target scope for a refinement promotion preview or commit.
 ///
 /// The subtree is rooted at a stable coarse handle and contains the root plus
@@ -1847,6 +1977,7 @@ pub fn apply_promote_refinement(
 
     let before_state = current_state;
     let target_state = request.target_state;
+    let before_snapshot = RefinementStateSnapshot::capture(world, eid, before_state);
 
     // Anti-bluff gate (ADR-042): if this entity is a SemanticAssembly whose
     // type declares member-composition obligations, the promotion target must
@@ -1918,14 +2049,8 @@ pub fn apply_promote_refinement(
         send_refinement_change_command(
             world,
             "Promote Refinement",
-            RefinementStateSnapshot {
-                element_id: eid,
-                state: before_state,
-            },
-            RefinementStateSnapshot {
-                element_id: eid,
-                state: target_state,
-            },
+            before_snapshot,
+            RefinementStateSnapshot::capture(world, eid, target_state),
         );
         return Ok(target_state);
     }
@@ -2229,14 +2354,7 @@ pub fn apply_promote_refinement(
     set_refinement_state(world, entity, target_state);
 
     // Queue a history entry so the promotion is undoable.
-    let before_snapshot = RefinementStateSnapshot {
-        element_id: eid,
-        state: before_state,
-    };
-    let after_snapshot = RefinementStateSnapshot {
-        element_id: eid,
-        state: target_state,
-    };
+    let after_snapshot = RefinementStateSnapshot::capture(world, eid, target_state);
 
     send_refinement_change_command(world, "Promote Refinement", before_snapshot, after_snapshot);
 
@@ -2274,6 +2392,7 @@ pub fn apply_demote_refinement(
     }
 
     let target_state = request.target_state;
+    let before_snapshot = RefinementStateSnapshot::capture(world, eid, current_state);
 
     let children_to_park = query_refined_into(world, eid);
 
@@ -2284,14 +2403,7 @@ pub fn apply_demote_refinement(
     }
 
     // Queue undo/redo history.
-    let before_snapshot = RefinementStateSnapshot {
-        element_id: eid,
-        state: current_state,
-    };
-    let after_snapshot = RefinementStateSnapshot {
-        element_id: eid,
-        state: target_state,
-    };
+    let after_snapshot = RefinementStateSnapshot::capture(world, eid, target_state);
     send_refinement_change_command(world, "Demote Refinement", before_snapshot, after_snapshot);
 
     Ok(target_state)
@@ -2317,6 +2429,43 @@ fn set_refinement_state(world: &mut World, entity: Entity, state: RefinementStat
 struct RefinementStateSnapshot {
     element_id: ElementId,
     state: RefinementState,
+    #[serde(default)]
+    branch_statuses: Vec<RefinementBranchStatusSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RefinementBranchStatusSnapshot {
+    child_element_id: ElementId,
+    status: RefinementBranchStatus,
+}
+
+impl RefinementStateSnapshot {
+    fn capture(world: &World, parent_element_id: ElementId, state: RefinementState) -> Self {
+        let mut branch_statuses = world
+            .try_query::<(EntityRef,)>()
+            .map(|mut query| {
+                query
+                    .iter(world)
+                    .filter_map(|(entity_ref,)| {
+                        let relation = entity_ref.get::<SemanticRelation>()?;
+                        let branch = entity_ref.get::<RefinementBranch>()?;
+                        (relation.relation_type == "refined_into"
+                            && relation.source == parent_element_id)
+                            .then_some(RefinementBranchStatusSnapshot {
+                                child_element_id: relation.target,
+                                status: branch.status,
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        branch_statuses.sort_by_key(|branch| branch.child_element_id.0);
+        Self {
+            element_id: parent_element_id,
+            state,
+            branch_statuses,
+        }
+    }
 }
 
 use crate::authored_entity::{
@@ -2397,6 +2546,14 @@ impl AuthoredEntity for RefinementStateSnapshot {
                     .entity_mut(entity)
                     .insert(RefinementStateComponent { state: self.state });
             }
+        }
+        for branch in &self.branch_statuses {
+            set_refinement_branch_status(
+                world,
+                self.element_id,
+                branch.child_element_id,
+                branch.status,
+            );
         }
     }
 

@@ -68,6 +68,8 @@ pub mod promotion_world;
 pub mod property_edit;
 pub mod recipe_drafts;
 pub mod refinement;
+#[cfg(feature = "model-api")]
+pub mod refinement_controls;
 pub mod registry_generation;
 pub mod remote_catalog;
 pub mod render_pipeline;
