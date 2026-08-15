@@ -80,7 +80,7 @@ use crate::plugins::{
     dimension_line::constrained_box_edge_dimension_line_point,
     document_properties::DocumentProperties,
     document_state::DocumentState,
-    history::{apply_pending_history_commands, HistorySet},
+    history::{apply_pending_history_commands, History, HistorySet},
     import::{import_file_now, ImportRegistry, ImporterDescriptor},
     layers::{LayerAssignment, LayerRegistry, LayerState},
     lighting::{
@@ -13279,6 +13279,8 @@ fn capability_snapshot_next_tools() -> Vec<String> {
         "list_element_classes",
         "discover_curated_paths",
         "select_recipe",
+        "plan_refinement_goal",
+        "list_refinement_goals",
         "parametric.list_types",
         "list_corpus_gaps",
         "request_corpus_expansion",
@@ -15900,6 +15902,48 @@ fn handle_preview_promotion(
 }
 
 #[cfg(feature = "model-api")]
+fn current_model_revision(world: &World) -> u64 {
+    world
+        .get_resource::<History>()
+        .map(History::model_revision)
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "model-api")]
+fn refinement_capability_snapshot_fingerprint(world: &World) -> String {
+    let snapshot = handle_get_capability_snapshot(world, true);
+    let bytes = serde_json::to_vec(&snapshot).unwrap_or_default();
+    blake3::hash(&bytes).to_hex().to_string()
+}
+
+#[cfg(feature = "model-api")]
+fn has_executable_refinement_path(
+    world: &World,
+    recipe_id: Option<&str>,
+    target_state: crate::plugins::refinement::RefinementState,
+) -> bool {
+    let Some(recipe_id) = recipe_id else {
+        return false;
+    };
+    let family_id = crate::capability_registry::RecipeFamilyId(recipe_id.to_string());
+    let native = world
+        .get_resource::<crate::capability_registry::CapabilityRegistry>()
+        .and_then(|registry| registry.recipe_family_descriptor(&family_id))
+        .is_some_and(|recipe| recipe.supported_refinement_levels.contains(&target_state));
+    let scripted = world
+        .get_resource::<crate::curation::RecipeArtifactRegistry>()
+        .and_then(|registry| registry.get_by_family(&family_id))
+        .is_some_and(|artifact| {
+            artifact.supported_refinement_states.contains(&target_state)
+                && matches!(
+                    artifact.body,
+                    crate::curation::recipes::RecipeBody::AuthoringScript { .. }
+                )
+        });
+    native || scripted
+}
+
+#[cfg(feature = "model-api")]
 fn build_refinement_promotion_plan(
     world: &World,
     element_id: u64,
@@ -15967,7 +16011,9 @@ fn build_refinement_promotion_plan(
             missing_inputs.push(format!(
                 "recipe draft '{recipe_id}' is consultable but not executable"
             ));
-        } else if recipe_descriptor.is_none() {
+        } else if recipe_descriptor.is_none()
+            && !has_executable_refinement_path(world, Some(recipe_id), target_state)
+        {
             missing_inputs.push(format!("unknown recipe family '{recipe_id}'"));
         }
     }
@@ -16009,6 +16055,45 @@ fn build_refinement_promotion_plan(
     let obligation_templates = class_descriptor
         .map(|class| effective_obligations(class, recipe_descriptor, target_state))
         .unwrap_or_default();
+    let class_resolution_predicate_available = class_descriptor.is_some_and(|class| {
+        class
+            .class_min_obligations
+            .get(&target_state)
+            .is_some_and(|obligations| !obligations.is_empty())
+            && class
+                .class_min_promotion_critical_paths
+                .get(&target_state)
+                .is_some_and(|paths| !paths.is_empty())
+    });
+    let assembly_resolution_predicate_available = world
+        .get::<crate::plugins::modeling::assembly::SemanticAssembly>(entity)
+        .and_then(|assembly| {
+            registry.and_then(|registry| registry.assembly_type_descriptor(&assembly.assembly_type))
+        })
+        .is_some_and(|descriptor| !descriptor.member_obligations.is_empty());
+    let resolution_predicate_available =
+        class_resolution_predicate_available || assembly_resolution_predicate_available;
+    // A registered assembly-composition contract is itself an executable path:
+    // the existing shared member plan can prove or refuse the root claim
+    // without generating replacement geometry.
+    let executable_path_available = assembly_resolution_predicate_available
+        || has_executable_refinement_path(world, effective_recipe_id.as_deref(), target_state);
+    if !resolution_predicate_available {
+        missing_inputs.push(format!(
+            "element class '{}' has no enforceable {} resolution predicate",
+            assignment
+                .as_ref()
+                .map(|assignment| assignment.element_class.0.as_str())
+                .unwrap_or("unassigned"),
+            target_state.as_str()
+        ));
+    }
+    if !executable_path_available {
+        missing_inputs.push(format!(
+            "no executable curated path can produce {} content for element {element_id}",
+            target_state.as_str()
+        ));
+    }
     let mut obligation_set = ObligationSet {
         entries: obligation_templates
             .into_iter()
@@ -16072,18 +16157,14 @@ fn build_refinement_promotion_plan(
             .collect();
 
     let validators = promotion_plan_validators(world, entity, target_state);
-    let changed_entities = subtree
-        .active_element_ids
-        .iter()
-        .map(|id| PromotionPlanEntityChangeInfo {
-            element_id: Some(*id),
-            action: "set_refinement_state".to_string(),
-            reason: format!(
-                "default selected for promotion to {}",
-                target_state.as_str()
-            ),
-        })
-        .collect::<Vec<_>>();
+    // The stable root carries the active refinement claim. Existing active
+    // descendants are inside the affected/inspection scope but are not silently
+    // relabelled; recipes may regenerate or add descendants during commit.
+    let changed_entities = vec![PromotionPlanEntityChangeInfo {
+        element_id: Some(element_id),
+        action: "set_refinement_state".to_string(),
+        reason: format!("promote the explicit root to {}", target_state.as_str()),
+    }];
     let generated_entities = recipe_descriptor
         .map(|recipe| {
             vec![PromotionPlanEntityChangeInfo {
@@ -16121,6 +16202,8 @@ fn build_refinement_promotion_plan(
             target_state.as_str(),
             effective_recipe_id.as_deref().unwrap_or("-")
         ),
+        base_model_revision: current_model_revision(world),
+        capability_snapshot_fingerprint: refinement_capability_snapshot_fingerprint(world),
         target: RefinementPromotionTargetInfo {
             kind: "refinement_subtree".to_string(),
             root_element_id: element_id,
@@ -16149,7 +16232,328 @@ fn build_refinement_promotion_plan(
         missing_inputs: missing_inputs.clone(),
         findings,
         derived_graph_additions,
+        resolution_predicate_available,
+        executable_path_available,
         can_commit: missing_inputs.is_empty(),
+    })
+}
+
+#[cfg(feature = "model-api")]
+fn handle_create_refinement_goal(
+    world: &mut World,
+    request: CreateRefinementGoalRequest,
+) -> ApiResult<RefinementGoalInfo> {
+    use crate::capability_registry::ElementClassAssignment;
+    use crate::plugins::refinement::{
+        resolve_refinement_subtree, ClaimPath, RecipeId, RefinementGoal, RefinementGoalRegistry,
+        RefinementGoalScopeKind, RefinementGoalStatus, RefinementGoalTarget, RefinementState,
+    };
+
+    if request.requested_outcomes.is_empty() {
+        return Err("A refinement goal requires at least one requested outcome".into());
+    }
+    if request.targets.is_empty() {
+        return Err("A refinement goal requires at least one explicit target scope".into());
+    }
+
+    let base_model_revision = current_model_revision(world);
+    let capability_snapshot_fingerprint = refinement_capability_snapshot_fingerprint(world);
+    let mut targets = Vec::with_capacity(request.targets.len());
+    let mut target_plans = Vec::with_capacity(request.targets.len());
+
+    for target in request.targets {
+        let target_state = RefinementState::from_str(&target.target_state)
+            .ok_or_else(|| format!("Unknown refinement state: '{}'", target.target_state))?;
+        let eid = ElementId(target.scope.root_element_id);
+        let entity = find_entity_by_element_id_readonly(world, eid)
+            .ok_or_else(|| format!("Entity {} not found", eid.0))?;
+        let assigned_class = world
+            .get::<ElementClassAssignment>(entity)
+            .map(|assignment| assignment.element_class.0.clone())
+            .ok_or_else(|| format!("Entity {} has no element-class assignment", eid.0))?;
+        if target
+            .element_class
+            .as_ref()
+            .is_some_and(|requested| requested != &assigned_class)
+        {
+            return Err(format!(
+                "Entity {} is assigned to '{}' rather than requested class '{}'",
+                eid.0,
+                assigned_class,
+                target.element_class.as_deref().unwrap_or_default()
+            ));
+        }
+        let captured_element_ids = match target.scope.kind {
+            RefinementGoalScopeKind::Entity => vec![eid.0],
+            RefinementGoalScopeKind::RefinementSubtree => {
+                resolve_refinement_subtree(world, eid)?.active_element_ids
+            }
+        };
+        let overrides = target
+            .overrides
+            .as_object()
+            .map(|object| {
+                object
+                    .iter()
+                    .map(|(key, value)| (ClaimPath(key.clone()), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let recipe_id = target.recipe_id.map(RecipeId);
+        let current_state = world
+            .get::<crate::plugins::refinement::RefinementStateComponent>(entity)
+            .map(|state| state.state)
+            .unwrap_or_default();
+        if current_state < target_state {
+            target_plans.push(build_refinement_promotion_plan(
+                world,
+                eid.0,
+                target_state.as_str().to_string(),
+                recipe_id.as_ref().map(|id| id.0.clone()),
+                target.overrides.clone(),
+            )?);
+        }
+        targets.push(RefinementGoalTarget {
+            scope: target.scope,
+            element_class: assigned_class,
+            target_state,
+            recipe_id,
+            overrides,
+            captured_element_ids,
+        });
+    }
+
+    let goal_id = {
+        let mut registry = world
+            .get_resource_mut::<RefinementGoalRegistry>()
+            .ok_or_else(|| "RefinementGoalRegistry is not initialised".to_string())?;
+        registry.allocate_id()
+    };
+    let goal = RefinementGoal {
+        goal_id,
+        requested_outcomes: request.requested_outcomes,
+        proposed_targets: targets,
+        inference_evidence: request.inference_evidence,
+        assumption_refs: request.assumption_refs,
+        base_model_revision,
+        capability_snapshot_fingerprint,
+        status: RefinementGoalStatus::Candidate,
+    };
+    world
+        .resource_mut::<RefinementGoalRegistry>()
+        .insert(goal.clone())?;
+    Ok(refinement_goal_info(world, &goal, Some(target_plans)))
+}
+
+#[cfg(feature = "model-api")]
+fn refinement_goal_info(
+    world: &World,
+    goal: &crate::plugins::refinement::RefinementGoal,
+    captured_plans: Option<Vec<RefinementPromotionPlanInfo>>,
+) -> RefinementGoalInfo {
+    use crate::plugins::refinement::{refinement_goal_coverage, RefinementStateComponent};
+
+    let target_plans = captured_plans.unwrap_or_else(|| {
+        goal.proposed_targets
+            .iter()
+            .filter_map(|target| {
+                let entity = find_entity_by_element_id_readonly(
+                    world,
+                    ElementId(target.scope.root_element_id),
+                )?;
+                let current = world
+                    .get::<RefinementStateComponent>(entity)
+                    .map(|state| state.state)
+                    .unwrap_or_default();
+                (current < target.target_state)
+                    .then(|| {
+                        let overrides = serde_json::Value::Object(
+                            target
+                                .overrides
+                                .iter()
+                                .map(|(path, value)| (path.0.clone(), value.clone()))
+                                .collect(),
+                        );
+                        build_refinement_promotion_plan(
+                            world,
+                            target.scope.root_element_id,
+                            target.target_state.as_str().to_string(),
+                            target.recipe_id.as_ref().map(|id| id.0.clone()),
+                            overrides,
+                        )
+                        .ok()
+                    })
+                    .flatten()
+            })
+            .collect()
+    });
+    let outcomes = goal.requested_outcomes.join(", ");
+    let target_count = goal.proposed_targets.len();
+    let readback = format!(
+        "Develop {target_count} explicit scope(s) for {outcomes}; review the captured targets and scoped blockers before applying."
+    );
+    RefinementGoalInfo {
+        goal: goal.clone(),
+        coverage: refinement_goal_coverage(world, goal),
+        target_plans,
+        readback,
+    }
+}
+
+#[cfg(feature = "model-api")]
+fn handle_list_refinement_goals(world: &World) -> Vec<RefinementGoalInfo> {
+    world
+        .get_resource::<crate::plugins::refinement::RefinementGoalRegistry>()
+        .map(|registry| {
+            registry
+                .iter()
+                .map(|goal| refinement_goal_info(world, goal, None))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "model-api")]
+fn validate_refinement_goal_fence(
+    world: &World,
+    goal: &crate::plugins::refinement::RefinementGoal,
+) -> ApiResult<()> {
+    let revision = current_model_revision(world);
+    if revision != goal.base_model_revision {
+        return Err(format!(
+            "Refinement goal '{}' is stale: model revision changed from {} to {}; preview it again",
+            goal.goal_id.0, goal.base_model_revision, revision
+        ));
+    }
+    let fingerprint = refinement_capability_snapshot_fingerprint(world);
+    if fingerprint != goal.capability_snapshot_fingerprint {
+        return Err(format!(
+            "Refinement goal '{}' is stale: capability snapshot changed; preview it again",
+            goal.goal_id.0
+        ));
+    }
+    for target in &goal.proposed_targets {
+        let current_ids = match target.scope.kind {
+            crate::plugins::refinement::RefinementGoalScopeKind::Entity => {
+                vec![target.scope.root_element_id]
+            }
+            crate::plugins::refinement::RefinementGoalScopeKind::RefinementSubtree => {
+                crate::plugins::refinement::resolve_refinement_subtree(
+                    world,
+                    ElementId(target.scope.root_element_id),
+                )?
+                .active_element_ids
+            }
+        };
+        if current_ids != target.captured_element_ids {
+            return Err(format!(
+                "Refinement goal '{}' is stale: captured scope for {} changed from {:?} to {:?}",
+                goal.goal_id.0,
+                target.scope.root_element_id,
+                target.captured_element_ids,
+                current_ids
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-api")]
+fn handle_apply_refinement_goal(
+    world: &mut World,
+    goal_id: &str,
+) -> ApiResult<ApplyRefinementGoalResult> {
+    use crate::plugins::refinement::{
+        refinement_goal_coverage, RefinementGoalRegistry, RefinementGoalStatus,
+        RefinementStateComponent,
+    };
+
+    let goal = world
+        .get_resource::<RefinementGoalRegistry>()
+        .and_then(|registry| registry.get(goal_id))
+        .cloned()
+        .ok_or_else(|| format!("Unknown refinement goal '{goal_id}'"))?;
+    if !matches!(
+        goal.status,
+        RefinementGoalStatus::Candidate | RefinementGoalStatus::Accepted
+    ) {
+        return Err(format!(
+            "Refinement goal '{goal_id}' cannot be applied from status {}",
+            goal.status.as_str()
+        ));
+    }
+    validate_refinement_goal_fence(world, &goal)?;
+    if goal.status == RefinementGoalStatus::Candidate {
+        world
+            .resource_mut::<RefinementGoalRegistry>()
+            .get_mut(goal_id)
+            .expect("goal exists")
+            .status = RefinementGoalStatus::Accepted;
+    }
+
+    let mut applied_targets = Vec::new();
+    let mut blocked_targets = Vec::new();
+    for target in &goal.proposed_targets {
+        let element_id = target.scope.root_element_id;
+        let current = find_entity_by_element_id_readonly(world, ElementId(element_id))
+            .and_then(|entity| world.get::<RefinementStateComponent>(entity))
+            .map(|state| state.state)
+            .unwrap_or_default();
+        if current >= target.target_state {
+            applied_targets.push(element_id);
+            continue;
+        }
+        let overrides = serde_json::Value::Object(
+            target
+                .overrides
+                .iter()
+                .map(|(path, value)| (path.0.clone(), value.clone()))
+                .collect(),
+        );
+        match promote_refinement_structured(
+            world,
+            element_id,
+            target.target_state.as_str().to_string(),
+            target.recipe_id.as_ref().map(|id| id.0.clone()),
+            overrides,
+        ) {
+            Ok(result) if result.promotion_blocked.is_none() => applied_targets.push(element_id),
+            Ok(result) => blocked_targets.push(RefinementGoalApplyBlock {
+                element_id,
+                reason: result
+                    .promotion_blocked
+                    .map(|blocked| blocked.message)
+                    .unwrap_or_else(|| "promotion did not reach target".into()),
+            }),
+            Err(error) => blocked_targets.push(RefinementGoalApplyBlock {
+                element_id,
+                reason: error.to_string(),
+            }),
+        }
+    }
+    let status = if blocked_targets.is_empty() {
+        RefinementGoalStatus::Applied
+    } else if applied_targets.is_empty() {
+        RefinementGoalStatus::Blocked
+    } else {
+        RefinementGoalStatus::PartiallyApplied
+    };
+    world
+        .resource_mut::<RefinementGoalRegistry>()
+        .get_mut(goal_id)
+        .expect("goal exists")
+        .status = status;
+    let updated = world
+        .resource::<RefinementGoalRegistry>()
+        .get(goal_id)
+        .cloned()
+        .expect("goal exists");
+    Ok(ApplyRefinementGoalResult {
+        goal_id: goal_id.to_string(),
+        status: status.as_str().to_string(),
+        applied_targets,
+        blocked_targets,
+        coverage: refinement_goal_coverage(world, &updated),
     })
 }
 

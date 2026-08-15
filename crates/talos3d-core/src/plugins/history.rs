@@ -107,6 +107,10 @@ pub struct History {
     redo_stack: Vec<Box<dyn EditorCommand>>,
     /// The undo stack depth at the last save. `None` means never saved in this session.
     save_point: Option<usize>,
+    /// Monotonic revision fence for accepted model mutations. Unlike stack
+    /// depth this also advances on undo and redo, so an old preview can never
+    /// become accidentally current again.
+    model_revision: u64,
 }
 
 impl History {
@@ -114,6 +118,10 @@ impl History {
     /// command never entered history.
     pub fn undo_stack_len(&self) -> usize {
         self.undo_stack.len()
+    }
+
+    pub fn model_revision(&self) -> u64 {
+        self.model_revision
     }
 
     pub fn clear(&mut self) {
@@ -238,6 +246,7 @@ pub(crate) fn apply_pending_history_commands(world: &mut World) {
         let mut history = world.resource_mut::<History>();
         history.undo_stack.push(command);
         history.redo_stack.clear();
+        history.model_revision = history.model_revision.saturating_add(1);
     }
 
     for action in pending_actions {
@@ -322,7 +331,9 @@ fn undo_last_command(world: &mut World) {
     let message = format!("Undo: {}", command.label());
     command.undo(world);
 
-    world.resource_mut::<History>().redo_stack.push(command);
+    let mut history = world.resource_mut::<History>();
+    history.redo_stack.push(command);
+    history.model_revision = history.model_revision.saturating_add(1);
     set_feedback(world, message);
 }
 
@@ -337,7 +348,9 @@ fn redo_last_command(world: &mut World) {
     let message = format!("Redo: {}", command.label());
     command.redo(world);
 
-    world.resource_mut::<History>().undo_stack.push(command);
+    let mut history = world.resource_mut::<History>();
+    history.undo_stack.push(command);
+    history.model_revision = history.model_revision.saturating_add(1);
     set_feedback(world, message);
 }
 
@@ -427,6 +440,7 @@ mod tests {
         );
         assert_eq!(world.resource::<CounterA>().0, 1);
         assert_eq!(world.resource::<LogB>().0, vec!["first"]);
+        assert_eq!(world.resource::<History>().model_revision(), 1);
 
         world.resource_mut::<PendingCommandQueue>().queue_undo();
         apply_pending_history_commands_for_test(&mut world);
@@ -445,6 +459,7 @@ mod tests {
             world.resource::<LogB>().0.is_empty(),
             "atomic undo must revert both sub-command effects together"
         );
+        assert_eq!(world.resource::<History>().model_revision(), 2);
 
         world.resource_mut::<PendingCommandQueue>().queue_redo();
         apply_pending_history_commands_for_test(&mut world);
@@ -456,5 +471,6 @@ mod tests {
         );
         assert_eq!(world.resource::<CounterA>().0, 1);
         assert_eq!(world.resource::<LogB>().0, vec!["first"]);
+        assert_eq!(world.resource::<History>().model_revision(), 3);
     }
 }

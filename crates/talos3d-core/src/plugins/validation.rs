@@ -31,7 +31,8 @@ use crate::plugins::{
     identity::ElementId,
     modeling::occurrence::OccurrenceIdentity,
     refinement::{
-        ObligationSet, ObligationStatus, RefinementState, RefinementStateComponent, SemanticRole,
+        refinement_goal_coverage, ObligationSet, ObligationStatus, RefinementGoalCoverageStatus,
+        RefinementGoalRegistry, RefinementState, RefinementStateComponent, SemanticRole,
     },
 };
 
@@ -378,6 +379,80 @@ pub fn declared_state_obligations_constraint() -> ConstraintDescriptor {
     }
 }
 
+/// Progress validation for accepted scoped refinement goals. It is separate
+/// from declared-state/content validation because a goal is intent, not model
+/// truth: an honest Schematic wall can still be lower than an accepted Build
+/// goal without misrepresenting its active state.
+pub fn refinement_goal_progress_constraint() -> ConstraintDescriptor {
+    use crate::capability_registry::Severity;
+    use std::sync::Arc;
+
+    ConstraintDescriptor {
+        id: ConstraintId("RefinementGoalProgress".into()),
+        label: "Refinement Goal Progress".into(),
+        description: "Reports accepted scoped refinement goals whose requested targets are lower, parked, blocked, or missing.".into(),
+        applicability: Applicability::any(),
+        default_severity: Severity::Warning,
+        rationale: "A refinement goal records requested progress independently of active refinement truth. Unachieved targets must remain visible without relabelling the underlying content.".into(),
+        source_backlink: None,
+        role: ConstraintRole::Validation,
+        validator: Arc::new(run_refinement_goal_progress),
+    }
+}
+
+fn run_refinement_goal_progress(subject: Entity, world: &World) -> Vec<Finding> {
+    use crate::capability_registry::Severity;
+
+    let Some(element_id) = world.get::<ElementId>(subject).map(|id| id.0) else {
+        return Vec::new();
+    };
+    let Some(registry) = world.get_resource::<RefinementGoalRegistry>() else {
+        return Vec::new();
+    };
+    let emitted_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let mut findings = Vec::new();
+
+    for goal in registry.iter().filter(|goal| goal.status.tracks_progress()) {
+        let Some(coverage) = refinement_goal_coverage(world, goal)
+            .into_iter()
+            .find(|entry| entry.element_id == element_id)
+        else {
+            continue;
+        };
+        if coverage.status == RefinementGoalCoverageStatus::Achieved {
+            continue;
+        }
+        let severity = if coverage.status == RefinementGoalCoverageStatus::Blocked {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        findings.push(Finding {
+            id: FindingId(format!(
+                "RefinementGoalProgress:{}:{element_id}",
+                goal.goal_id.0
+            )),
+            constraint_id: ConstraintId("RefinementGoalProgress".into()),
+            subject: element_id,
+            severity,
+            message: format!(
+                "Refinement goal '{}' is not achieved for entity {element_id}: target={}, progress={:?}.",
+                goal.goal_id.0,
+                coverage.target_state.as_str(),
+                coverage.status
+            ),
+            rationale: "The accepted goal remains outstanding; use its captured promotion plan or resolve its scoped blocker. Do not raise the active refinement label without producing the required content.".into(),
+            backlink: None,
+            emitted_at,
+            role: ConstraintRole::Validation,
+        });
+    }
+    findings
+}
+
 fn run_declared_state_obligations(subject: Entity, world: &World) -> Vec<Finding> {
     use crate::capability_registry::Severity;
 
@@ -610,6 +685,9 @@ impl Plugin for ValidationPlugin {
         app.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_constraint(declared_state_obligations_constraint());
+        app.world_mut()
+            .resource_mut::<CapabilityRegistry>()
+            .register_constraint(refinement_goal_progress_constraint());
         app.world_mut()
             .resource_mut::<CapabilityRegistry>()
             .register_constraint(occurrence_geometry_non_degenerate_constraint());
@@ -1212,6 +1290,57 @@ mod tests {
         assert!(
             findings.is_empty(),
             "non-occurrence entity must produce no findings; got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn accepted_goal_progress_is_reported_without_changing_active_state() {
+        use crate::plugins::refinement::{
+            RefinementGoal, RefinementGoalId, RefinementGoalScope, RefinementGoalScopeKind,
+            RefinementGoalStatus, RefinementGoalTarget,
+        };
+
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                ElementId(71),
+                RefinementStateComponent {
+                    state: RefinementState::Schematic,
+                },
+            ))
+            .id();
+        let mut registry = RefinementGoalRegistry::default();
+        registry
+            .insert(RefinementGoal {
+                goal_id: RefinementGoalId("frame-drawings".into()),
+                requested_outcomes: vec!["frame drawings".into()],
+                proposed_targets: vec![RefinementGoalTarget {
+                    scope: RefinementGoalScope {
+                        kind: RefinementGoalScopeKind::Entity,
+                        root_element_id: 71,
+                    },
+                    element_class: "wall_assembly".into(),
+                    target_state: RefinementState::Constructible,
+                    recipe_id: None,
+                    overrides: std::collections::BTreeMap::new(),
+                    captured_element_ids: vec![71],
+                }],
+                inference_evidence: Vec::new(),
+                assumption_refs: Vec::new(),
+                base_model_revision: 0,
+                capability_snapshot_fingerprint: "snapshot".into(),
+                status: RefinementGoalStatus::Accepted,
+            })
+            .unwrap();
+        world.insert_resource(registry);
+
+        let findings = run_refinement_goal_progress(entity, &world);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(
+            world.get::<RefinementStateComponent>(entity).unwrap().state,
+            RefinementState::Schematic
         );
     }
 }

@@ -17,7 +17,7 @@
 //! change detection and caching will land in PP74.
 
 use crate::plugins::commands::find_entity_by_element_id_readonly;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Opaque identity for an obligation within an `ObligationSet`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ObligationId(pub String);
 
@@ -50,7 +50,7 @@ impl SemanticRole {
 
 /// A slash-delimited path into a claim record
 /// (e.g. `"riser_max_mm"`, `"envelope/exterior_finish"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
 pub struct ClaimPath(pub String);
 
@@ -1002,6 +1002,202 @@ impl RefinementSubtree {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scoped refinement goals (PP-RLC-3)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementGoalId(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RefinementGoalScopeKind {
+    Entity,
+    RefinementSubtree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementGoalScope {
+    pub kind: RefinementGoalScopeKind,
+    pub root_element_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementGoalTarget {
+    pub scope: RefinementGoalScope,
+    pub element_class: String,
+    pub target_state: RefinementState,
+    pub recipe_id: Option<RecipeId>,
+    #[serde(default)]
+    pub overrides: BTreeMap<ClaimPath, serde_json::Value>,
+    /// Exact active ids selected by preview. Commit is revision-fenced and
+    /// must consume this captured scope instead of silently expanding it.
+    pub captured_element_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementInferenceEvidence {
+    pub kind: String,
+    pub detail: String,
+    pub confidence: f32,
+    pub source_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub enum RefinementGoalStatus {
+    #[default]
+    Candidate,
+    Accepted,
+    PartiallyApplied,
+    Blocked,
+    Applied,
+    Superseded,
+}
+
+impl RefinementGoalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Accepted => "accepted",
+            Self::PartiallyApplied => "partially_applied",
+            Self::Blocked => "blocked",
+            Self::Applied => "applied",
+            Self::Superseded => "superseded",
+        }
+    }
+
+    pub fn tracks_progress(self) -> bool {
+        matches!(
+            self,
+            Self::Accepted | Self::PartiallyApplied | Self::Blocked
+        )
+    }
+}
+
+/// Provenance-bearing authoring request. This is progress state, never active
+/// refinement truth; only `RefinementStateComponent` carries that claim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementGoal {
+    pub goal_id: RefinementGoalId,
+    pub requested_outcomes: Vec<String>,
+    pub proposed_targets: Vec<RefinementGoalTarget>,
+    pub inference_evidence: Vec<RefinementInferenceEvidence>,
+    pub assumption_refs: Vec<String>,
+    pub base_model_revision: u64,
+    pub capability_snapshot_fingerprint: String,
+    pub status: RefinementGoalStatus,
+}
+
+#[derive(Resource, Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RefinementGoalRegistry {
+    goals: BTreeMap<String, RefinementGoal>,
+    next_sequence: u64,
+}
+
+impl RefinementGoalRegistry {
+    pub fn allocate_id(&mut self) -> RefinementGoalId {
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        RefinementGoalId(format!("refinement-goal-{}", self.next_sequence))
+    }
+
+    pub fn insert(&mut self, goal: RefinementGoal) -> Result<(), String> {
+        if self.goals.contains_key(&goal.goal_id.0) {
+            return Err(format!(
+                "Refinement goal '{}' already exists",
+                goal.goal_id.0
+            ));
+        }
+        self.goals.insert(goal.goal_id.0.clone(), goal);
+        Ok(())
+    }
+
+    pub fn get(&self, goal_id: &str) -> Option<&RefinementGoal> {
+        self.goals.get(goal_id)
+    }
+
+    pub fn get_mut(&mut self, goal_id: &str) -> Option<&mut RefinementGoal> {
+        self.goals.get_mut(goal_id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &RefinementGoal> {
+        self.goals.values()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum RefinementGoalCoverageStatus {
+    Achieved,
+    Lower,
+    Parked,
+    Blocked,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct RefinementGoalCoverageEntry {
+    pub element_id: u64,
+    pub target_state: RefinementState,
+    pub current_state: Option<RefinementState>,
+    pub status: RefinementGoalCoverageStatus,
+}
+
+pub fn refinement_goal_coverage(
+    world: &World,
+    goal: &RefinementGoal,
+) -> Vec<RefinementGoalCoverageEntry> {
+    goal.proposed_targets
+        .iter()
+        .map(|target| {
+            let eid = ElementId(target.scope.root_element_id);
+            let entity = find_entity_by_element_id_readonly(world, eid);
+            let current_state = entity.and_then(|entity| {
+                world
+                    .get::<RefinementStateComponent>(entity)
+                    .map(|state| state.state)
+            });
+            let parked = is_parked_refinement_child(world, eid);
+            let status = if entity.is_none() {
+                RefinementGoalCoverageStatus::Missing
+            } else if parked {
+                RefinementGoalCoverageStatus::Parked
+            } else if current_state.is_some_and(|state| state >= target.target_state) {
+                RefinementGoalCoverageStatus::Achieved
+            } else if goal.status == RefinementGoalStatus::Blocked {
+                RefinementGoalCoverageStatus::Blocked
+            } else {
+                RefinementGoalCoverageStatus::Lower
+            };
+            RefinementGoalCoverageEntry {
+                element_id: eid.0,
+                target_state: target.target_state,
+                current_state,
+                status,
+            }
+        })
+        .collect()
+}
+
+fn is_parked_refinement_child(world: &World, child: ElementId) -> bool {
+    let Some(mut query) = world.try_query::<(EntityRef,)>() else {
+        return false;
+    };
+    query.iter(world).any(|(entity_ref,)| {
+        entity_ref.get::<RefinementBranch>().is_some_and(|branch| {
+            branch.child_element_id == child.0 && branch.status == RefinementBranchStatus::Parked
+        })
+    })
+}
+
 /// Lifecycle state for a generated refinement branch.
 ///
 /// Parked branches remain in the model for inspection/reactivation, but are
@@ -1875,6 +2071,7 @@ use crate::capability_registry::{CapabilityRegistryAppExt, RelationTypeDescripto
 /// Call this from an `App::add_systems(Startup, ...)` or from a plugin's
 /// `build` method.
 pub fn register_refinement_relations(app: &mut App) {
+    app.init_resource::<RefinementGoalRegistry>();
     app.register_relation_type(RelationTypeDescriptor {
         relation_type: "refinement_of".to_string(),
         label: "Refinement Of".to_string(),
@@ -3310,5 +3507,78 @@ mod tests {
         )
         .expect("Schematic promotion must not be blocked by Constructible obligation");
         assert_eq!(state, RefinementState::Schematic);
+    }
+
+    #[test]
+    fn refinement_goal_registry_allocates_stable_unique_ids() {
+        let mut registry = RefinementGoalRegistry::default();
+        let first = registry.allocate_id();
+        let second = registry.allocate_id();
+        assert_eq!(first.0, "refinement-goal-1");
+        assert_eq!(second.0, "refinement-goal-2");
+    }
+
+    #[test]
+    fn goal_coverage_is_scoped_to_requested_entities() {
+        let mut world = World::new();
+        world.spawn((
+            ElementId(1),
+            RefinementStateComponent {
+                state: RefinementState::Constructible,
+            },
+        ));
+        world.spawn((
+            ElementId(2),
+            RefinementStateComponent {
+                state: RefinementState::Schematic,
+            },
+        ));
+        // An unrelated lower-state wall must not enter selected-wall coverage.
+        world.spawn((
+            ElementId(3),
+            RefinementStateComponent {
+                state: RefinementState::Conceptual,
+            },
+        ));
+
+        let goal = RefinementGoal {
+            goal_id: RefinementGoalId("selected-walls".into()),
+            requested_outcomes: vec!["frame drawings".into()],
+            proposed_targets: vec![
+                RefinementGoalTarget {
+                    scope: RefinementGoalScope {
+                        kind: RefinementGoalScopeKind::Entity,
+                        root_element_id: 1,
+                    },
+                    element_class: "wall_assembly".into(),
+                    target_state: RefinementState::Constructible,
+                    recipe_id: None,
+                    overrides: BTreeMap::new(),
+                    captured_element_ids: vec![1],
+                },
+                RefinementGoalTarget {
+                    scope: RefinementGoalScope {
+                        kind: RefinementGoalScopeKind::Entity,
+                        root_element_id: 2,
+                    },
+                    element_class: "wall_assembly".into(),
+                    target_state: RefinementState::Constructible,
+                    recipe_id: None,
+                    overrides: BTreeMap::new(),
+                    captured_element_ids: vec![2],
+                },
+            ],
+            inference_evidence: Vec::new(),
+            assumption_refs: Vec::new(),
+            base_model_revision: 0,
+            capability_snapshot_fingerprint: "test".into(),
+            status: RefinementGoalStatus::Accepted,
+        };
+
+        let coverage = refinement_goal_coverage(&world, &goal);
+        assert_eq!(coverage.len(), 2);
+        assert_eq!(coverage[0].status, RefinementGoalCoverageStatus::Achieved);
+        assert_eq!(coverage[1].status, RefinementGoalCoverageStatus::Lower);
+        assert!(coverage.iter().all(|entry| entry.element_id != 3));
     }
 }
