@@ -710,6 +710,7 @@ fn init_model_api_test_world() -> World {
     world.insert_resource(Messages::<EndCommandGroup>::default());
     world.insert_resource(PendingCommandQueue::default());
     world.insert_resource(History::default());
+    world.insert_resource(crate::plugins::refinement::RefinementGoalRegistry::default());
     world.insert_resource(TextureRegistry::default());
     world.insert_resource(MaterialRegistry::default());
     world.insert_resource(ElementIdAllocator::default());
@@ -6896,11 +6897,196 @@ fn preview_promotion_returns_read_only_refinement_plan() {
         .plan
         .supported_commit_policies
         .contains(&"accept_with_waivers".to_string()));
-    assert_eq!(result.plan.changed_entities.len(), 2);
+    assert_eq!(result.plan.changed_entities.len(), 1);
+    assert_eq!(result.plan.changed_entities[0].element_id, Some(100));
     assert_eq!(result.obligation_set.len(), 1);
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].severity, "warning");
-    assert!(result.plan.can_commit);
+    assert!(!result.plan.can_commit);
+    assert!(!result.plan.resolution_predicate_available);
+    assert!(!result.plan.executable_path_available);
+    assert!(result
+        .plan
+        .missing_inputs
+        .iter()
+        .any(|input| input.contains("no enforceable")));
+    assert!(result
+        .plan
+        .missing_inputs
+        .iter()
+        .any(|input| input.contains("no executable curated path")));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn refinement_goal_plan_and_explicit_apply_is_scoped_and_revision_fenced() {
+    use std::sync::Arc;
+
+    use crate::capability_registry::{
+        ElementClassAssignment, ElementClassDescriptor, ElementClassId, GenerateOutput,
+        ObligationTemplate, RecipeFamilyDescriptor, RecipeFamilyId,
+    };
+    use crate::plugins::refinement::{
+        ClaimPath, ObligationId, RefinementGoalScope, RefinementGoalScopeKind,
+        RefinementGoalStatus, RefinementState, RefinementStateComponent, SemanticRole,
+    };
+
+    let mut world = init_model_api_test_world();
+    let mut class_min_obligations = std::collections::HashMap::new();
+    class_min_obligations.insert(
+        RefinementState::Schematic,
+        vec![ObligationTemplate {
+            id: ObligationId("system_intent".into()),
+            role: SemanticRole("primary_structure".into()),
+            required_by_state: RefinementState::Schematic,
+        }],
+    );
+    let mut critical_paths = std::collections::HashMap::new();
+    critical_paths.insert(
+        RefinementState::Schematic,
+        vec![ClaimPath("construction_system".into())],
+    );
+    let mut registry = world.resource_mut::<CapabilityRegistry>();
+    registry.register_element_class(ElementClassDescriptor {
+        id: ElementClassId("wall_assembly".into()),
+        label: "Wall Assembly".into(),
+        description: "Test wall".into(),
+        semantic_roles: Vec::new(),
+        class_min_obligations,
+        class_min_promotion_critical_paths: critical_paths,
+        parameter_schema: json!({"type": "object"}),
+    });
+    let mut recipe_obligations = std::collections::HashMap::new();
+    recipe_obligations.insert(RefinementState::Schematic, Vec::new());
+    registry.register_recipe_family(RecipeFamilyDescriptor {
+        id: RecipeFamilyId("schematic_wall".into()),
+        target_class: ElementClassId("wall_assembly".into()),
+        label: "Schematic Wall".into(),
+        description: "Resolves system intent".into(),
+        parameters: Vec::new(),
+        supported_refinement_levels: vec![RefinementState::Schematic],
+        obligation_specializations: recipe_obligations,
+        promotion_critical_path_specializations: std::collections::HashMap::new(),
+        generate: Arc::new(|_input, _world| {
+            Ok(GenerateOutput {
+                satisfaction_links: vec![(ObligationId("system_intent".into()), 999)],
+                grounding_updates: std::collections::HashMap::new(),
+            })
+        }),
+    });
+
+    let selected = world
+        .spawn((
+            ElementId(300),
+            ElementClassAssignment {
+                element_class: ElementClassId("wall_assembly".into()),
+                active_recipe: None,
+            },
+            RefinementStateComponent {
+                state: RefinementState::Conceptual,
+            },
+        ))
+        .id();
+    let unrelated = world
+        .spawn((
+            ElementId(301),
+            ElementClassAssignment {
+                element_class: ElementClassId("wall_assembly".into()),
+                active_recipe: None,
+            },
+            RefinementStateComponent {
+                state: RefinementState::Conceptual,
+            },
+        ))
+        .id();
+
+    let planned = handle_create_refinement_goal(
+        &mut world,
+        CreateRefinementGoalRequest {
+            requested_outcomes: vec!["coordinate the selected wall system".into()],
+            targets: vec![RefinementGoalTargetRequest {
+                scope: RefinementGoalScope {
+                    kind: RefinementGoalScopeKind::Entity,
+                    root_element_id: 300,
+                },
+                element_class: Some("wall_assembly".into()),
+                target_state: "Schematic".into(),
+                recipe_id: Some("schematic_wall".into()),
+                overrides: json!({}),
+            }],
+            inference_evidence: Vec::new(),
+            assumption_refs: Vec::new(),
+        },
+    )
+    .expect("goal plan");
+    assert_eq!(planned.goal.status, RefinementGoalStatus::Candidate);
+    assert_eq!(
+        planned.goal.proposed_targets[0].captured_element_ids,
+        vec![300]
+    );
+    assert!(planned.target_plans[0].resolution_predicate_available);
+    assert!(planned.target_plans[0].executable_path_available);
+    assert!(planned.target_plans[0].can_commit);
+    assert_eq!(
+        world
+            .get::<RefinementStateComponent>(selected)
+            .unwrap()
+            .state,
+        RefinementState::Conceptual
+    );
+
+    let applied = handle_apply_refinement_goal(&mut world, &planned.goal.goal_id.0)
+        .expect("explicitly accept and apply candidate goal");
+    assert_eq!(applied.status, "applied");
+    assert_eq!(applied.applied_targets, vec![300]);
+    assert_eq!(
+        world
+            .get::<RefinementStateComponent>(selected)
+            .unwrap()
+            .state,
+        RefinementState::Schematic
+    );
+    assert_eq!(
+        world
+            .get::<RefinementStateComponent>(unrelated)
+            .unwrap()
+            .state,
+        RefinementState::Conceptual
+    );
+
+    let stale_candidate = handle_create_refinement_goal(
+        &mut world,
+        CreateRefinementGoalRequest {
+            requested_outcomes: vec!["coordinate the other wall".into()],
+            targets: vec![RefinementGoalTargetRequest {
+                scope: RefinementGoalScope {
+                    kind: RefinementGoalScopeKind::Entity,
+                    root_element_id: 301,
+                },
+                element_class: Some("wall_assembly".into()),
+                target_state: "Schematic".into(),
+                recipe_id: Some("schematic_wall".into()),
+                overrides: json!({}),
+            }],
+            inference_evidence: Vec::new(),
+            assumption_refs: Vec::new(),
+        },
+    )
+    .expect("second goal plan");
+    handle_create_box(
+        &mut world,
+        CreateBoxRequest {
+            center: Some([0.0, 0.0, 0.0]),
+            half_extents: Some([0.5, 0.5, 0.5]),
+            size: None,
+            rotation: None,
+            semantic: None,
+        },
+    )
+    .expect("intervening model mutation");
+    let stale_error = handle_apply_refinement_goal(&mut world, &stale_candidate.goal.goal_id.0)
+        .expect_err("old goal must be fenced after another model mutation");
+    assert!(stale_error.contains("model revision changed"));
 }
 
 /// Register a "house" assembly type carrying the ADR-042 member-composition

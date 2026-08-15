@@ -1072,48 +1072,78 @@ impl std::fmt::Debug for RecipeFamilyDescriptor {
     }
 }
 
-/// Compute the effective merged obligation list for a given target state,
-/// combining class-minimum obligations with recipe specialisations.
+/// Compute the cumulative effective obligation list for a target state.
 ///
-/// The class-minimum obligations are always included first; recipe
-/// specialisations are appended. No de-duplication by id — callers must ensure
-/// ids are unique across the two sets.
+/// Refinement is monotonic: reaching a higher rung cannot discard obligations
+/// introduced by a lower rung. Class minima and recipe specialisations are
+/// therefore accumulated from Conceptual through `target_state`. Duplicate ids
+/// are emitted once, preserving the first (lowest-rung) declaration.
 pub fn effective_obligations(
     class: &ElementClassDescriptor,
     recipe: Option<&RecipeFamilyDescriptor>,
     target_state: RefinementState,
 ) -> Vec<ObligationTemplate> {
-    let mut out: Vec<ObligationTemplate> = class
-        .class_min_obligations
-        .get(&target_state)
-        .cloned()
-        .unwrap_or_default();
-    if let Some(recipe) = recipe {
-        if let Some(specializations) = recipe.obligation_specializations.get(&target_state) {
-            out.extend_from_slice(specializations);
+    let states = [
+        RefinementState::Conceptual,
+        RefinementState::Schematic,
+        RefinementState::Constructible,
+        RefinementState::Detailed,
+        RefinementState::FabricationReady,
+    ];
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for state in states.into_iter().filter(|state| *state <= target_state) {
+        if let Some(obligations) = class.class_min_obligations.get(&state) {
+            for obligation in obligations {
+                if seen.insert(obligation.id.clone()) {
+                    out.push(obligation.clone());
+                }
+            }
+        }
+        if let Some(specializations) =
+            recipe.and_then(|recipe| recipe.obligation_specializations.get(&state))
+        {
+            for obligation in specializations {
+                if seen.insert(obligation.id.clone()) {
+                    out.push(obligation.clone());
+                }
+            }
         }
     }
     out
 }
 
-/// Compute the effective merged promotion-critical paths for a given target
-/// state, combining class-minimum paths with recipe specialisations.
+/// Compute cumulative promotion-critical paths through a target state.
 pub fn effective_promotion_critical_paths(
     class: &ElementClassDescriptor,
     recipe: Option<&RecipeFamilyDescriptor>,
     target_state: RefinementState,
 ) -> Vec<ClaimPath> {
-    let mut out: Vec<ClaimPath> = class
-        .class_min_promotion_critical_paths
-        .get(&target_state)
-        .cloned()
-        .unwrap_or_default();
-    if let Some(recipe) = recipe {
-        if let Some(specializations) = recipe
-            .promotion_critical_path_specializations
-            .get(&target_state)
+    let states = [
+        RefinementState::Conceptual,
+        RefinementState::Schematic,
+        RefinementState::Constructible,
+        RefinementState::Detailed,
+        RefinementState::FabricationReady,
+    ];
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for state in states.into_iter().filter(|state| *state <= target_state) {
+        if let Some(paths) = class.class_min_promotion_critical_paths.get(&state) {
+            for path in paths {
+                if seen.insert(path.clone()) {
+                    out.push(path.clone());
+                }
+            }
+        }
+        if let Some(specializations) =
+            recipe.and_then(|recipe| recipe.promotion_critical_path_specializations.get(&state))
         {
-            out.extend_from_slice(specializations);
+            for path in specializations {
+                if seen.insert(path.clone()) {
+                    out.push(path.clone());
+                }
+            }
         }
     }
     out
@@ -2482,6 +2512,39 @@ mod pp71_tests {
         // class has 2 + recipe adds 1
         assert_eq!(paths.len(), 3);
         assert!(paths.iter().any(|p| p.0 == "stud_spacing_mm"));
+    }
+
+    #[test]
+    fn higher_targets_keep_lower_rung_obligations_and_paths() {
+        let mut class = make_wall_class();
+        class.class_min_obligations.insert(
+            RefinementState::Schematic,
+            vec![ObligationTemplate {
+                id: ObligationId("system_selection".into()),
+                role: SemanticRole("primary_structure".into()),
+                required_by_state: RefinementState::Schematic,
+            }],
+        );
+        class.class_min_promotion_critical_paths.insert(
+            RefinementState::Schematic,
+            vec![ClaimPath("construction_system".into())],
+        );
+        let recipe = make_recipe(ElementClassId("wall_assembly".into()));
+
+        let obligations =
+            effective_obligations(&class, Some(&recipe), RefinementState::Constructible);
+        assert!(obligations
+            .iter()
+            .any(|item| item.id.0 == "system_selection"));
+        assert!(obligations.iter().any(|item| item.id.0 == "structure"));
+
+        let paths = effective_promotion_critical_paths(
+            &class,
+            Some(&recipe),
+            RefinementState::Constructible,
+        );
+        assert!(paths.iter().any(|path| path.0 == "construction_system"));
+        assert!(paths.iter().any(|path| path.0 == "height_mm"));
     }
 
     #[test]

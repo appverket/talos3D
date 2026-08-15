@@ -732,6 +732,17 @@ pub(super) enum ModelApiRequest {
         overrides: serde_json::Value,
         response: oneshot::Sender<ApiResult<PromoteRefinementResult>>,
     },
+    CreateRefinementGoal {
+        request: CreateRefinementGoalRequest,
+        response: oneshot::Sender<ApiResult<RefinementGoalInfo>>,
+    },
+    ListRefinementGoals {
+        response: oneshot::Sender<Vec<RefinementGoalInfo>>,
+    },
+    ApplyRefinementGoal {
+        goal_id: String,
+        response: oneshot::Sender<ApiResult<ApplyRefinementGoalResult>>,
+    },
     DemoteRefinement {
         element_id: u64,
         target_state: String,
@@ -2094,6 +2105,15 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
                 recipe_id,
                 overrides,
             ));
+        }
+        ModelApiRequest::CreateRefinementGoal { request, response } => {
+            let _ = response.send(handle_create_refinement_goal(world, request));
+        }
+        ModelApiRequest::ListRefinementGoals { response } => {
+            let _ = response.send(handle_list_refinement_goals(world));
+        }
+        ModelApiRequest::ApplyRefinementGoal { goal_id, response } => {
+            let _ = response.send(handle_apply_refinement_goal(world, &goal_id));
         }
         ModelApiRequest::DemoteRefinement {
             element_id,

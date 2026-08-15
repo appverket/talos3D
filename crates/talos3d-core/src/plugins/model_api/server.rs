@@ -1453,6 +1453,28 @@ impl ModelApiServer {
         .await?
     }
 
+    async fn request_create_refinement_goal(
+        &self,
+        request: CreateRefinementGoalRequest,
+    ) -> ApiResult<RefinementGoalInfo> {
+        self.round_trip(|response| ModelApiRequest::CreateRefinementGoal { request, response })
+            .await?
+    }
+
+    async fn request_list_refinement_goals(&self) -> Vec<RefinementGoalInfo> {
+        self.round_trip(|response| ModelApiRequest::ListRefinementGoals { response })
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn request_apply_refinement_goal(
+        &self,
+        goal_id: String,
+    ) -> ApiResult<ApplyRefinementGoalResult> {
+        self.round_trip(|response| ModelApiRequest::ApplyRefinementGoal { goal_id, response })
+            .await?
+    }
+
     async fn request_demote_refinement(
         &self,
         element_id: u64,
@@ -4121,6 +4143,8 @@ pub struct PreviewPromotionResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RefinementPromotionPlanInfo {
     pub plan_id: String,
+    pub base_model_revision: u64,
+    pub capability_snapshot_fingerprint: String,
     pub target: RefinementPromotionTargetInfo,
     pub affected_scope: RefinementPromotionScopeInfo,
     pub current_state: String,
@@ -4137,7 +4161,35 @@ pub struct RefinementPromotionPlanInfo {
     pub missing_inputs: Vec<String>,
     pub findings: Vec<ValidationFindingInfo>,
     pub derived_graph_additions: Vec<String>,
+    pub resolution_predicate_available: bool,
+    pub executable_path_available: bool,
     pub can_commit: bool,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementGoalInfo {
+    pub goal: crate::plugins::refinement::RefinementGoal,
+    pub coverage: Vec<crate::plugins::refinement::RefinementGoalCoverageEntry>,
+    pub target_plans: Vec<RefinementPromotionPlanInfo>,
+    pub readback: String,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApplyRefinementGoalResult {
+    pub goal_id: String,
+    pub status: String,
+    pub applied_targets: Vec<u64>,
+    pub blocked_targets: Vec<RefinementGoalApplyBlock>,
+    pub coverage: Vec<crate::plugins::refinement::RefinementGoalCoverageEntry>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementGoalApplyBlock {
+    pub element_id: u64,
+    pub reason: String,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -4275,6 +4327,37 @@ pub(super) struct PromoteRefinementRequest {
     pub(super) target_state: String,
     pub(super) recipe_id: Option<String>,
     pub(super) overrides: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct RefinementGoalTargetRequest {
+    pub(super) scope: crate::plugins::refinement::RefinementGoalScope,
+    pub(super) element_class: Option<String>,
+    pub(super) target_state: String,
+    pub(super) recipe_id: Option<String>,
+    #[serde(default)]
+    pub(super) overrides: serde_json::Value,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct CreateRefinementGoalRequest {
+    pub(super) requested_outcomes: Vec<String>,
+    pub(super) targets: Vec<RefinementGoalTargetRequest>,
+    #[serde(default)]
+    pub(super) inference_evidence: Vec<crate::plugins::refinement::RefinementInferenceEvidence>,
+    #[serde(default)]
+    pub(super) assumption_refs: Vec<String>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct RefinementGoalIdRequest {
+    pub(super) goal_id: String,
 }
 
 #[cfg(feature = "model-api")]
@@ -7448,6 +7531,44 @@ reports the active frame. Returns the updated editing context. Call exit_group w
                 params.recipe_id,
                 params.overrides.unwrap_or_default(),
             )
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "plan_refinement_goal",
+        description = "Create a persisted Candidate refinement goal for explicit Entity or RefinementSubtree scopes. Returns the exact revision-fenced promotion plans, provenance, scoped coverage, capability fingerprint, and one-line outcome read-back. This does not mutate active refinement state; after review, apply_refinement_goal is the explicit acceptance and commit action."
+    )]
+    pub(super) async fn plan_refinement_goal_tool(
+        &self,
+        Parameters(params): Parameters<CreateRefinementGoalRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_create_refinement_goal(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "list_refinement_goals",
+        description = "List persisted refinement goals with active scoped coverage and their captured promotion plans. Goal progress is separate from active refinement truth."
+    )]
+    pub(super) async fn list_refinement_goals_tool(&self) -> Result<CallToolResult, McpError> {
+        json_tool_result(self.request_list_refinement_goals().await)
+    }
+
+    #[tool(
+        name = "apply_refinement_goal",
+        description = "Explicitly accept and commit a Candidate scoped refinement goal, or resume an already Accepted goal, through its exact captured target plans. Refuses stale revisions/capability snapshots and never expands selection to unrelated entities. Returns applied and blocked targets plus coverage."
+    )]
+    pub(super) async fn apply_refinement_goal_tool(
+        &self,
+        Parameters(params): Parameters<RefinementGoalIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_apply_refinement_goal(params.goal_id)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)
