@@ -4379,6 +4379,36 @@ fn workspace_definition_library_tools_persist_draft_crud_to_files() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn hosted_element_ids_accept_lossless_json_encodings_and_reject_lossy_values() {
+    for value in [json!(24), json!(24.0), json!("24")] {
+        let hosting = json!({ "opening_element_id": value });
+        let parsed = parse_hosting_element_id(
+            hosting.as_object().expect("hosting fixture is an object"),
+            "opening_element_id",
+        )
+        .expect("lossless element id should parse");
+        assert_eq!(parsed, Some(ElementId(24)));
+    }
+
+    for value in [
+        json!(-1),
+        json!(24.5),
+        json!(9_007_199_254_740_992.0),
+        json!("twenty-four"),
+        json!([]),
+    ] {
+        let hosting = json!({ "opening_element_id": value });
+        let error = parse_hosting_element_id(
+            hosting.as_object().expect("hosting fixture is an object"),
+            "opening_element_id",
+        )
+        .expect_err("lossy element id must not be silently discarded");
+        assert!(error.contains("non-negative integer element id"));
+    }
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn hosted_definition_instantiation_derives_anchors_and_relation() {
     use crate::plugins::history::PendingCommandQueue;
     use crate::plugins::modeling::void_declaration::{OpeningContext, VoidLink};
