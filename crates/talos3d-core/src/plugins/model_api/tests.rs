@@ -7786,6 +7786,125 @@ fn outcome_inference_is_ordered_scoped_and_does_not_treat_nouns_as_levels() {
     assert!(!explicit_beats_deliverable.target_plans[0].can_commit);
 }
 
+#[cfg(feature = "model-api")]
+#[test]
+fn refinement_goal_inference_accepts_registered_semantic_assembly_scope() {
+    use crate::plugins::refinement::{
+        InferRefinementGoalRequest, RefinementGoalScope, RefinementGoalScopeKind,
+        RefinementInferenceScope, RefinementState,
+    };
+
+    let mut world = init_model_api_test_world();
+    register_house_with_member_obligations(&mut world);
+    spawn_house_assembly(&mut world, 450, Vec::new());
+
+    let inferred = handle_infer_refinement_goal(
+        &mut world,
+        InferRefinementGoalRequest {
+            requested_outcomes: vec!["develop the whole cottage".into()],
+            selected_scopes: vec![RefinementInferenceScope {
+                scope: RefinementGoalScope {
+                    kind: RefinementGoalScopeKind::RefinementSubtree,
+                    root_element_id: 450,
+                },
+                recipe_id: None,
+                overrides: json!({}),
+            }],
+            explicit_target: Some(RefinementState::Schematic),
+            deliverable: None,
+            requested_explicitness: Vec::new(),
+            evidence_backed_prior: None,
+        },
+    )
+    .expect("registered house assembly is a valid whole-building scope");
+
+    assert_eq!(inferred.goal.proposed_targets[0].element_class, "house");
+    assert_eq!(inferred.goal.proposed_targets[0].scope.root_element_id, 450);
+    assert_eq!(
+        inferred.goal.proposed_targets[0].captured_element_ids,
+        vec![450]
+    );
+    assert!(inferred.readback.contains("coordinated design intent"));
+    assert_eq!(inferred.coverage.len(), 1);
+    assert!(
+        !inferred.target_plans[0].can_commit,
+        "the valid scope must still refuse a bluff promotion until house systems exist"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn refinement_goal_inference_resolves_recipe_locator_to_semantic_aggregate() {
+    use crate::capability_registry::{
+        ElementClassAssignment, ElementClassDescriptor, ElementClassId,
+    };
+    use crate::plugins::modeling::group::{GroupFrame, GroupMembers};
+    use crate::plugins::refinement::{
+        InferRefinementGoalRequest, RefinementGoalScope, RefinementGoalScopeKind,
+        RefinementInferenceScope, RefinementState, RefinementStateComponent,
+    };
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("conceptual_building_block".into()),
+            label: "Conceptual building block".into(),
+            description: "Test recipe aggregate".into(),
+            semantic_roles: Vec::new(),
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: json!({"type": "object"}),
+        });
+    world.spawn((ElementId(460),));
+    world.spawn((
+        ElementId(461),
+        GroupMembers {
+            name: "Conceptual cottage assembly".into(),
+            member_ids: vec![ElementId(460)],
+            frame: GroupFrame::default(),
+            linked_model: None,
+        },
+        ElementClassAssignment {
+            element_class: ElementClassId("conceptual_building_block".into()),
+            active_recipe: None,
+        },
+        RefinementStateComponent {
+            state: RefinementState::Conceptual,
+        },
+    ));
+
+    let inferred = handle_infer_refinement_goal(
+        &mut world,
+        InferRefinementGoalRequest {
+            requested_outcomes: vec!["develop the selected cottage mass".into()],
+            selected_scopes: vec![RefinementInferenceScope {
+                scope: RefinementGoalScope {
+                    kind: RefinementGoalScopeKind::RefinementSubtree,
+                    root_element_id: 460,
+                },
+                recipe_id: None,
+                overrides: json!({}),
+            }],
+            explicit_target: Some(RefinementState::Schematic),
+            deliverable: None,
+            requested_explicitness: Vec::new(),
+            evidence_backed_prior: None,
+        },
+    )
+    .expect("recipe locator resolves to its semantic aggregate");
+
+    assert_eq!(inferred.goal.proposed_targets[0].scope.root_element_id, 461);
+    assert_eq!(
+        inferred.goal.proposed_targets[0].element_class,
+        "conceptual_building_block"
+    );
+    assert_eq!(
+        inferred.goal.proposed_targets[0].captured_element_ids,
+        vec![461]
+    );
+}
+
 /// Register a "house" assembly type carrying the ADR-042 member-composition
 /// ladder used by the anti-bluff promotion tests below.
 #[cfg(feature = "model-api")]
