@@ -10072,10 +10072,12 @@ pub(crate) fn flush_model_api_write_pipeline(world: &mut World) {
 /// produces real geometry / authored entities (ADR-051, PP-SPS-3/4).
 ///
 /// Supported step tools include `create_box`, `create_entity`,
+/// `definition.create`, `definition.instantiate`, `occurrence.place`,
 /// `parametric.create`, `set_property`, plus read-only checks such as
 /// `model_summary` and `run_validation_v2`. Mutating tools return the same
-/// response shape as their MCP handler so recipe steps can bind to later
-/// outputs without a parallel execution contract.
+/// response shape as their MCP handler, with `occurrence.place` additionally
+/// exposing an `element_id` object field so recipe steps can bind it without a
+/// parallel execution contract.
 #[cfg(feature = "model-api")]
 pub struct ModelApiStepExecutor;
 
@@ -10101,6 +10103,23 @@ impl crate::plugins::procedural_session_mcp::SessionStepExecutor for ModelApiSte
                 let id = handle_create_entity(world, Value::Object(args.clone()))
                     .map_err(|e| to_err("create_entity_failed", e))?;
                 Ok(serde_json::json!({ "element_id": id }))
+            }
+            "definition.create" => {
+                let entry = handle_create_definition(world, Value::Object(args.clone()))
+                    .map_err(|e| to_err("definition_create_failed", e))?;
+                serde_json::to_value(entry)
+                    .map_err(|e| to_err("definition_create_failed", e.to_string()))
+            }
+            "definition.instantiate" => {
+                let result = handle_instantiate_definition(world, Value::Object(args.clone()))
+                    .map_err(|e| to_err("definition_instantiate_failed", e))?;
+                serde_json::to_value(result)
+                    .map_err(|e| to_err("definition_instantiate_failed", e.to_string()))
+            }
+            "occurrence.place" => {
+                let element_id = handle_place_occurrence(world, Value::Object(args.clone()))
+                    .map_err(|e| to_err("occurrence_place_failed", e))?;
+                Ok(serde_json::json!({ "element_id": element_id }))
             }
             "parametric.create" => {
                 let request: crate::plugins::parametric_mcp::CreateParametricRequest =
@@ -10165,6 +10184,40 @@ pub fn register_model_api_session_tools(
     });
     registry.register(SessionToolDescriptor {
         tool: McpToolId::new("create_entity"),
+        mutates: true,
+        default_stub: Some(serde_json::json!({ "element_id": 0 })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("definition.create"),
+        mutates: true,
+        default_stub: Some(serde_json::json!({
+            "definition_id": "definition:test",
+            "name": "Definition",
+            "definition_kind": "Solid",
+            "definition_version": 1,
+            "parameter_names": [],
+            "full": {},
+            "effective_full": {}
+        })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("definition.instantiate"),
+        mutates: true,
+        default_stub: Some(serde_json::json!({
+            "element_id": 0,
+            "definition_id": "definition:test",
+            "imported_definition_ids": [],
+            "relation_ids": []
+        })),
+        creates_obligations: Vec::new(),
+        satisfies_obligation_ids: Vec::new(),
+    });
+    registry.register(SessionToolDescriptor {
+        tool: McpToolId::new("occurrence.place"),
         mutates: true,
         default_stub: Some(serde_json::json!({ "element_id": 0 })),
         creates_obligations: Vec::new(),

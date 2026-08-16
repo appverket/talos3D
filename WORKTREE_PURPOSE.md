@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-08-16T11:31:00+02:00
-- branch: codex/onrrthca-recipe-atomicity
-- task-id: TALOS-onrrthca
+- created: 2026-08-16T15:11:00+02:00
+- branch: codex/rfledfpi-definition-occurrence-script
+- task-id: TALOS-rfledfpi
 - target base: main
-- summary: Make recipe-backed MCP instantiation atomic and fix Conceptual-state generation.
+- summary: Allow executable AuthoringScripts to create document Definitions and place reusable Occurrences atomically.
 - status: active

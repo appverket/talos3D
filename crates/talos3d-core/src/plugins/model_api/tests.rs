@@ -2564,6 +2564,16 @@ fn recipe_step_executor_materializes_registered_parametric_geometry() {
     let mut tools = crate::curation::procedural_session::SessionToolRegistry::default();
     register_model_api_session_tools(&mut tools);
     assert!(tools.get(&McpToolId::new("parametric.create")).is_some());
+    for reusable_tool in [
+        "definition.create",
+        "definition.instantiate",
+        "occurrence.place",
+    ] {
+        assert!(
+            tools.get(&McpToolId::new(reusable_tool)).is_some(),
+            "session registry must expose reusable recipe step {reusable_tool}"
+        );
+    }
 }
 
 #[cfg(feature = "model-api")]
@@ -11852,6 +11862,83 @@ fn build_two_box_recipe_script() -> crate::curation::authoring_script::Authoring
     script
 }
 
+/// Build a document-scoped reusable member recipe. The second step consumes
+/// the generated Definition id from the first step, exercising the exact
+/// binding path architecture recipes use for repeated framing members.
+#[cfg(feature = "model-api")]
+fn build_definition_occurrence_recipe_script() -> crate::curation::authoring_script::AuthoringScript
+{
+    use crate::curation::authoring_script::{
+        ArgExpr, AuthoringScript, McpToolId, MutationScope, OutputPath, ScriptInstruction, Step,
+        StepId,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut script = AuthoringScript::stub(MutationScope::ProjectRoot);
+    script.allowed_tools = [
+        McpToolId::new("definition.create"),
+        McpToolId::new("occurrence.place"),
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+
+    let definition_request = make_rect_extrusion_request();
+    let definition_args = definition_request
+        .as_object()
+        .expect("definition fixture is an object")
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                ArgExpr::Literal {
+                    value: value.clone(),
+                },
+            )
+        })
+        .collect();
+    let create_definition = Step {
+        id: StepId::new("member_definition"),
+        tool: McpToolId::new("definition.create"),
+        args: definition_args,
+        bindings: BTreeMap::from([("definition_id".into(), OutputPath::new("definition_id"))]),
+        essential: true,
+        precondition: None,
+    };
+    let place_occurrence = Step {
+        id: StepId::new("member_occurrence"),
+        tool: McpToolId::new("occurrence.place"),
+        args: BTreeMap::from([
+            (
+                "definition_id".into(),
+                ArgExpr::StepOutput {
+                    step_id: StepId::new("member_definition"),
+                    path: OutputPath::new("definition_id"),
+                },
+            ),
+            (
+                "label".into(),
+                ArgExpr::Literal {
+                    value: serde_json::json!("Reusable framing member"),
+                },
+            ),
+            (
+                "offset".into(),
+                ArgExpr::Literal {
+                    value: serde_json::json!([1.0, 2.0, 3.0]),
+                },
+            ),
+        ]),
+        bindings: BTreeMap::from([("element_id".into(), OutputPath::new("element_id"))]),
+        essential: true,
+        precondition: None,
+    };
+    script.steps = vec![
+        ScriptInstruction::Call(create_definition),
+        ScriptInstruction::Call(place_occurrence),
+    ];
+    script
+}
+
 /// Insert a test AuthoringScript recipe artifact into a fresh
 /// `RecipeArtifactRegistry` on the world.
 #[cfg(feature = "model-api")]
@@ -11914,6 +12001,167 @@ fn install_two_box_recipe_with_states(
             )
         });
     registry.insert(artifact);
+}
+
+#[cfg(feature = "model-api")]
+fn install_definition_occurrence_recipe(
+    world: &mut World,
+    family_id: &str,
+    target_class: &str,
+    script: crate::curation::authoring_script::AuthoringScript,
+) {
+    use crate::curation::{
+        provenance::{Confidence, Lineage, Provenance},
+        scope_trust::{Scope, Trust},
+        AssetId, AssetKindId, CurationMeta, RecipeArtifact, RecipeArtifactRegistry, RecipeBody,
+        RECIPE_ARTIFACT_KIND,
+    };
+    use crate::plugins::refinement::{AgentId, RefinementState};
+
+    let artifact = RecipeArtifact {
+        meta: CurationMeta::new(
+            AssetId(format!("installed_recipe/{family_id}")),
+            AssetKindId(RECIPE_ARTIFACT_KIND.into()),
+            Provenance {
+                author: AgentId("test_agent".into()),
+                confidence: Confidence::High,
+                lineage: Lineage::Freeform,
+                rationale: Some("test reusable Definition/Occurrence recipe".into()),
+                jurisdiction: None,
+                catalog_dependencies: Vec::new(),
+                evidence: Vec::new(),
+            },
+        )
+        .with_scope(Scope::Project)
+        .with_trust(Trust::Draft),
+        body: RecipeBody::AuthoringScript { script },
+        parameter_schema: serde_json::json!({"type": "object", "properties": {}}),
+        target_class: target_class.into(),
+        supported_refinement_states: vec![RefinementState::Constructible],
+        tests: Vec::new(),
+    };
+    world
+        .resource_mut::<RecipeArtifactRegistry>()
+        .insert(artifact);
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_can_create_definition_and_bind_reusable_occurrence() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::modeling::occurrence::OccurrenceIdentity;
+    use crate::plugins::refinement::SemanticRole;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("framing_system".into()),
+            label: "Framing System".into(),
+            description: "Reusable framing recipe test class".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_definition_occurrence_recipe(
+        &mut world,
+        "definition_occurrence_framing",
+        "framing_system",
+        build_definition_occurrence_recipe_script(),
+    );
+    world.register_component::<ElementId>();
+
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "definition_occurrence_framing".into(),
+            target_class: "framing_system".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect("Definition/Occurrence recipe must execute");
+
+    assert_eq!(result.steps_run_count, 2);
+    assert_eq!(handle_list_definitions(&world).len(), 1);
+    assert_eq!(result.created_element_ids.len(), 1);
+    let occurrence_id = ElementId(result.created_element_ids[0]);
+    let occurrence_entity =
+        find_entity_by_element_id(&mut world, occurrence_id).expect("recipe occurrence exists");
+    let identity = world
+        .get::<OccurrenceIdentity>(occurrence_entity)
+        .expect("created element is a reusable Occurrence");
+    assert_eq!(
+        identity.definition_id.to_string(),
+        handle_list_definitions(&world)[0].definition_id
+    );
+    let snapshot = get_entity_snapshot(&world, occurrence_id).expect("occurrence resolves");
+    assert_eq!(snapshot["offset"], serde_json::json!([1.0, 2.0, 3.0]));
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn failed_recipe_rolls_back_created_definition_before_returning_error() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::curation::authoring_script::{ArgExpr, ScriptInstruction};
+    use crate::plugins::refinement::SemanticRole;
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("framing_system".into()),
+            label: "Framing System".into(),
+            description: "Reusable framing recipe rollback test class".into(),
+            semantic_roles: vec![SemanticRole("primary_structure".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    world.register_component::<ElementId>();
+
+    let mut script = build_definition_occurrence_recipe_script();
+    let ScriptInstruction::Call(place) = &mut script.steps[1] else {
+        panic!("second fixture step must place an occurrence");
+    };
+    place.args.insert(
+        "definition_id".into(),
+        ArgExpr::Literal {
+            value: serde_json::json!("missing-definition"),
+        },
+    );
+    install_definition_occurrence_recipe(
+        &mut world,
+        "failing_definition_occurrence_framing",
+        "framing_system",
+        script,
+    );
+
+    let error = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "failing_definition_occurrence_framing".into(),
+            target_class: "framing_system".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Constructible".into()),
+        },
+    )
+    .expect_err("failed occurrence placement must fail the recipe atomically");
+
+    assert!(error.contains("rolled back"), "unexpected error: {error}");
+    assert!(
+        handle_list_definitions(&world).is_empty(),
+        "the Definition created by an earlier recipe step must be undone"
+    );
+    assert!(
+        list_entities(&world).is_empty(),
+        "the recipe root and any partial output must be undone"
+    );
 }
 
 /// An installed `AuthoringScript` recipe, when passed to `instantiate_recipe`,
