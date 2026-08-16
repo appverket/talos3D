@@ -2,8 +2,8 @@
 
 - agent: codex
 - created: 2026-08-16T15:11:00+02:00
-- branch: codex/hdwbgvhp-refinement-goal-semantic-roots
-- task-id: TALOS-hdwbgvhp
+- branch: codex/lwwdsbac-parametric-runtime-contracts
+- task-id: TALOS-lwwdsbac, TALOS-llixvdve
 - target base: main
-- summary: Let whole-scope refinement inference resolve canonical recipe aggregates and registered semantic assemblies.
+- summary: Expose/enforce parametric placement contracts and purge transient parametric state on project load.
 - status: active

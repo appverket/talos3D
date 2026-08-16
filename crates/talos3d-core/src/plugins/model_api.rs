@@ -14559,6 +14559,7 @@ pub fn handle_discover_curated_paths(
                     .filter_map(|(id, _)| {
                         let definition = registry.get(&id)?;
                         let executable = definition.representation.is_some();
+                        let placement_contract = registry.placement_contract(&id).cloned();
                         Some(crate::plugins::parametric_mcp::ParametricTypeInfo {
                             id: definition.id.clone(),
                             label: definition.label.clone(),
@@ -14567,8 +14568,12 @@ pub fn handle_discover_curated_paths(
                                 .then(|| "parametric.create".to_string()),
                             how_to_use: if executable {
                                 format!(
-                                    "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.",
-                                    definition.id
+                                    "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.{}",
+                                    definition.id,
+                                    placement_contract
+                                        .as_ref()
+                                        .map(|contract| format!(" Placement contract: {}", contract.guidance))
+                                        .unwrap_or_default()
                                 )
                             } else {
                                 format!(
@@ -14576,6 +14581,7 @@ pub fn handle_discover_curated_paths(
                                     definition.id
                                 )
                             },
+                            placement_contract,
                         })
                     })
                     .collect()

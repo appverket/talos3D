@@ -334,11 +334,56 @@ fn evaluate_members(
 #[derive(Debug, Clone, Default, Resource)]
 pub struct ParametricRegistry {
     types: BTreeMap<String, ParametricTypeDef>,
+    placement_contracts: BTreeMap<String, ParametricPlacementContract>,
+}
+
+/// Declares axes whose member coordinates already include an absolute datum
+/// derived from the parametric drivers. Placement on such an axis would apply
+/// the same datum twice and is rejected before authoring.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "model-api", derive(schemars::JsonSchema))]
+pub struct ParametricPlacementContract {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub driver_anchored_translation_axes: BTreeMap<String, String>,
+    pub guidance: String,
+}
+
+impl ParametricPlacementContract {
+    pub fn validate(&self, placement: &Placement) -> Result<(), String> {
+        const TOLERANCE_M: f64 = 1.0e-9;
+        for (axis, source) in &self.driver_anchored_translation_axes {
+            let value = match axis.as_str() {
+                "x" => placement.translate[0],
+                "y" => placement.translate[1],
+                "z" => placement.translate[2],
+                other => return Err(format!("unknown placement-contract axis '{other}'")),
+            };
+            if value.abs() > TOLERANCE_M {
+                return Err(format!(
+                    "placement translation {axis} must be 0 for this parametric type because {source} already supplies that world datum; {}",
+                    self.guidance
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ParametricRegistry {
     pub fn register(&mut self, def: ParametricTypeDef) {
         self.types.insert(def.id.clone(), def);
+    }
+
+    pub fn register_placement_contract(
+        &mut self,
+        type_id: impl Into<String>,
+        contract: ParametricPlacementContract,
+    ) {
+        self.placement_contracts.insert(type_id.into(), contract);
+    }
+
+    pub fn placement_contract(&self, type_id: &str) -> Option<&ParametricPlacementContract> {
+        self.placement_contracts.get(type_id)
     }
 
     /// Register an ephemeral (runtime-only, non-public) type and return its
