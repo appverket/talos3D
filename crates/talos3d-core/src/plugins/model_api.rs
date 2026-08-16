@@ -15894,8 +15894,13 @@ fn dkc_guidance_cards() -> Vec<GuidanceCardInfo> {
                 }),
                 serde_json::json!({
                     "after_instantiate_recipe": {
-                        "use_root_element_id_for": ["refinement", "obligations"],
-                        "use_group_element_id_or_created_element_ids_for": ["house_assembly_membership", "validation", "screenshots"]
+                        "group_element_id_is_the_semantic_aggregate_for": ["refinement", "obligations", "house_assembly_membership", "validation", "screenshots"],
+                        "root_element_id_is_a_locator": "refinement-goal inference resolves a selected recipe locator to its semantic aggregate",
+                        "created_element_ids_are_members_for": ["targeted inspection"]
+                    },
+                    "whole_building_refinement": {
+                        "scope": "the registered semantic house assembly",
+                        "behavior": "preview member obligations, materialize the missing systems, then apply the same scoped goal"
                     }
                 }),
             ],
@@ -17381,11 +17386,72 @@ fn handle_infer_refinement_goal(
 }
 
 #[cfg(feature = "model-api")]
+fn resolve_refinement_goal_scope(
+    world: &World,
+    requested_root: ElementId,
+) -> ApiResult<(ElementId, String)> {
+    use crate::capability_registry::ElementClassAssignment;
+    use crate::plugins::modeling::assembly::SemanticAssembly;
+
+    let requested_entity = find_entity_by_element_id_readonly(world, requested_root)
+        .ok_or_else(|| format!("Entity {} not found", requested_root.0))?;
+    if let Some(assignment) = world.get::<ElementClassAssignment>(requested_entity) {
+        return Ok((requested_root, assignment.element_class.0.clone()));
+    }
+
+    if let Some(assembly) = world.get::<SemanticAssembly>(requested_entity) {
+        let registered = world
+            .get_resource::<CapabilityRegistry>()
+            .is_some_and(|registry| {
+                registry
+                    .assembly_type_descriptor(&assembly.assembly_type)
+                    .is_some()
+            });
+        if registered {
+            return Ok((requested_root, assembly.assembly_type.clone()));
+        }
+    }
+
+    // Recipe execution leaves a tiny stable locator in the generated physical
+    // group and moves the semantic claim to that group. Selecting either one
+    // should therefore target the same refinement aggregate.
+    let mut aggregate_candidates = Vec::new();
+    for candidate in world.iter_entities() {
+        let Some(group) = candidate.get::<GroupMembers>() else {
+            continue;
+        };
+        if !group.member_ids.contains(&requested_root) {
+            continue;
+        }
+        let (Some(id), Some(assignment)) = (
+            candidate.get::<ElementId>(),
+            candidate.get::<ElementClassAssignment>(),
+        ) else {
+            continue;
+        };
+        aggregate_candidates.push((*id, assignment.element_class.0.clone()));
+    }
+    aggregate_candidates.sort_by_key(|(id, _)| id.0);
+    aggregate_candidates.dedup();
+    match aggregate_candidates.as_slice() {
+        [(aggregate_id, element_class)] => Ok((*aggregate_id, element_class.clone())),
+        [] => Err(format!(
+            "Entity {} is neither an assigned refinement aggregate nor a registered semantic assembly",
+            requested_root.0
+        )),
+        candidates => Err(format!(
+            "Entity {} belongs to multiple refinement aggregates {:?}; select the intended aggregate",
+            requested_root.0,
+            candidates.iter().map(|(id, _)| id.0).collect::<Vec<_>>()
+        )),
+    }
+}
+
+#[cfg(feature = "model-api")]
 pub(crate) fn handle_create_refinement_goal(
     world: &mut World,
     request: CreateRefinementGoalRequest,
 ) -> ApiResult<RefinementGoalInfo> {
-    use crate::capability_registry::ElementClassAssignment;
     use crate::plugins::refinement::{
         resolve_refinement_subtree, ClaimPath, RecipeId, RefinementGoal, RefinementGoalRegistry,
         RefinementGoalScopeKind, RefinementGoalStatus, RefinementGoalTarget, RefinementState,
@@ -17403,16 +17469,14 @@ pub(crate) fn handle_create_refinement_goal(
     let mut targets = Vec::with_capacity(request.targets.len());
     let mut target_plans = Vec::with_capacity(request.targets.len());
 
-    for target in request.targets {
+    for mut target in request.targets {
         let target_state = RefinementState::from_str(&target.target_state)
             .ok_or_else(|| format!("Unknown refinement state: '{}'", target.target_state))?;
-        let eid = ElementId(target.scope.root_element_id);
+        let requested_eid = ElementId(target.scope.root_element_id);
+        let (eid, assigned_class) = resolve_refinement_goal_scope(world, requested_eid)?;
+        target.scope.root_element_id = eid.0;
         let entity = find_entity_by_element_id_readonly(world, eid)
             .ok_or_else(|| format!("Entity {} not found", eid.0))?;
-        let assigned_class = world
-            .get::<ElementClassAssignment>(entity)
-            .map(|assignment| assignment.element_class.0.clone())
-            .ok_or_else(|| format!("Entity {} has no element-class assignment", eid.0))?;
         if target
             .element_class
             .as_ref()
