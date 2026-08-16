@@ -139,6 +139,34 @@ impl History {
     }
 }
 
+/// Roll back commands applied after `target_depth` and discard their redo
+/// entries.
+///
+/// This is the transaction-abort path for compound API operations that must
+/// apply intermediate commands in order to calculate later steps. A failed
+/// operation must not leave either authored state or a redo-able fragment
+/// behind. The model revision still advances for each compensating undo, so a
+/// preview created before the failed attempt remains safely stale.
+pub(crate) fn rollback_to_undo_depth(world: &mut World, target_depth: usize) -> usize {
+    let mut rolled_back = 0;
+    while world.resource::<History>().undo_stack_len() > target_depth {
+        undo_last_command(world);
+        rolled_back += 1;
+    }
+
+    let at_save_point = {
+        let mut history = world.resource_mut::<History>();
+        history.redo_stack.clear();
+        history.at_save_point()
+    };
+    if let Some(mut document_state) =
+        world.get_resource_mut::<crate::plugins::document_state::DocumentState>()
+    {
+        document_state.dirty = !at_save_point;
+    }
+    rolled_back
+}
+
 #[derive(Resource, Default)]
 pub struct PendingCommandQueue {
     pub commands: Vec<Box<dyn EditorCommand>>,

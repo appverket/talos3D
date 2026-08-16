@@ -11959,7 +11959,8 @@ fn instantiate_recipe_with_authoring_script_creates_sub_elements_and_is_undoable
 
     let entity_count_before = list_entities(&world).len();
 
-    // Root is created at "Schematic"; promote must target a higher level.
+    // Recipe roots are born Conceptual; the recipe then resolves and promotes
+    // the aggregate to the requested Constructible state.
     let result = handle_instantiate_recipe(
         &mut world,
         InstantiateRecipeRequest {
@@ -12165,6 +12166,136 @@ fn instantiate_recipe_at_creation_state_materializes_without_promote_error() {
 
 #[cfg(feature = "model-api")]
 #[test]
+fn instantiate_recipe_can_materialize_an_honest_conceptual_aggregate() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::plugins::refinement::{RefinementState, RefinementStateComponent, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("conceptual_building_block".into()),
+            label: "Conceptual Building Block".into(),
+            description: "Test class for Conceptual recipe instantiation.".into(),
+            semantic_roles: vec![SemanticRole("conceptual_massing".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+    world.insert_resource(crate::curation::RecipeArtifactRegistry::default());
+    install_two_box_recipe_with_states(
+        &mut world,
+        "conceptual_massing",
+        "conceptual_building_block",
+        vec![RefinementState::Conceptual],
+    );
+
+    let result = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "conceptual_massing".into(),
+            target_class: "conceptual_building_block".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Conceptual".into()),
+        },
+    )
+    .expect("Conceptual recipe must materialize without an illegal downward promotion");
+
+    assert_eq!(result.state, "Conceptual");
+    assert_eq!(result.steps_run_count, 2);
+    assert_eq!(result.created_element_ids.len(), 2);
+    assert!(result.promotion_blocked.is_none());
+    let group_id = result.group_element_id.expect("recipe output aggregate");
+    let group = find_entity_by_element_id(&mut world, ElementId(group_id))
+        .expect("Conceptual aggregate exists");
+    assert_eq!(
+        world
+            .get::<RefinementStateComponent>(group)
+            .expect("aggregate carries refinement state")
+            .state,
+        RefinementState::Conceptual
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
+fn instantiate_recipe_hard_failure_rolls_back_root_and_completed_steps() {
+    use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
+    use crate::curation::{AssetId, RecipeArtifactRegistry, RecipeBody};
+    use crate::plugins::refinement::{RefinementState, SemanticRole};
+
+    let mut world = init_model_api_test_world();
+    world
+        .resource_mut::<CapabilityRegistry>()
+        .register_element_class(ElementClassDescriptor {
+            id: ElementClassId("conceptual_building_block".into()),
+            label: "Conceptual Building Block".into(),
+            description: "Test class for atomic recipe rollback.".into(),
+            semantic_roles: vec![SemanticRole("conceptual_massing".into())],
+            class_min_obligations: std::collections::HashMap::new(),
+            class_min_promotion_critical_paths: std::collections::HashMap::new(),
+            parameter_schema: serde_json::json!({}),
+        });
+    world.insert_resource(RecipeArtifactRegistry::default());
+    install_two_box_recipe_with_states(
+        &mut world,
+        "failing_conceptual_massing",
+        "conceptual_building_block",
+        vec![RefinementState::Conceptual],
+    );
+    {
+        let mut recipe_registry = world.resource_mut::<RecipeArtifactRegistry>();
+        let artifact = recipe_registry
+            .entries
+            .get_mut(&AssetId(
+                "installed_recipe/failing_conceptual_massing".into(),
+            ))
+            .expect("installed test recipe");
+        let RecipeBody::AuthoringScript { script } = &mut artifact.body else {
+            panic!("test recipe must be an AuthoringScript");
+        };
+        let crate::curation::authoring_script::ScriptInstruction::Call(second) =
+            &mut script.steps[1]
+        else {
+            panic!("second instruction must be a call");
+        };
+        second.tool = crate::curation::authoring_script::McpToolId::new("missing_tool");
+    }
+
+    let ids_before = collect_element_ids(&mut world);
+    let history_depth_before = world
+        .resource::<crate::plugins::history::History>()
+        .undo_stack_len();
+    let error = handle_instantiate_recipe(
+        &mut world,
+        InstantiateRecipeRequest {
+            family_id: "failing_conceptual_massing".into(),
+            target_class: "conceptual_building_block".into(),
+            parameters: serde_json::json!({}),
+            placement: None,
+            target_state: Some("Conceptual".into()),
+        },
+    )
+    .expect_err("hard replay failure must abort the complete instantiation");
+
+    assert!(error.contains("rolled back"), "unexpected error: {error}");
+    assert_eq!(
+        collect_element_ids(&mut world),
+        ids_before,
+        "neither the root nor the first successful script step may persist"
+    );
+    assert_eq!(
+        world
+            .resource::<crate::plugins::history::History>()
+            .undo_stack_len(),
+        history_depth_before,
+        "failed transaction must not remain in undo history"
+    );
+}
+
+#[cfg(feature = "model-api")]
+#[test]
 fn instantiate_recipe_rejects_unsupported_target_state_before_creating_anchor() {
     use crate::capability_registry::{ElementClassDescriptor, ElementClassId};
     use crate::plugins::refinement::{RefinementState, SemanticRole};
@@ -12338,9 +12469,9 @@ fn instantiate_recipe_gated_promotion_reports_partial_state_not_bare_error() {
     );
     assert_eq!(result.steps_run_count, 2);
 
-    // The refinement claim did NOT advance past the creation state.
+    // The refinement claim did NOT advance past the Conceptual creation state.
     assert_eq!(
-        result.state, "Schematic",
+        result.state, "Conceptual",
         "a blocked promotion must not advance the refinement state"
     );
 
