@@ -12205,6 +12205,10 @@ fn promote_refinement_structured(
         RefinementState, RefinementStateComponent,
     };
 
+    let transaction_history_depth = world
+        .get_resource::<crate::plugins::history::History>()
+        .map(crate::plugins::history::History::undo_stack_len)
+        .unwrap_or_default();
     let target_state = RefinementState::from_str(&target_state_str)
         .ok_or_else(|| format!("Unknown refinement state: '{target_state_str}'"))?;
 
@@ -12331,15 +12335,26 @@ fn promote_refinement_structured(
                                 executor: Some(&mut executor),
                             };
                         let oracle = crate::curation::procedural_session::AlwaysPassOracle;
-                        let report = crate::curation::replay::replay_with_lookup(
+                        let report = match crate::curation::replay::replay_with_lookup(
                             &script,
                             params,
                             &mut dispatcher,
                             &oracle,
                             &crate::curation::replay::NoRecipeLookup,
                             0,
-                        )
-                        .map_err(|e| format!("AuthoringScript replay failed: {e}"))?;
+                        ) {
+                            Ok(report) => report,
+                            Err(error) => {
+                                drop(dispatcher);
+                                crate::plugins::history::rollback_to_undo_depth(
+                                    world,
+                                    transaction_history_depth,
+                                );
+                                return Err(PromoteError::Other(format!(
+                                    "AuthoringScript replay failed and was rolled back: {error}"
+                                )));
+                            }
+                        };
                         script_steps_run = report.steps_run.len();
                     }
                     ArtifactBody::NativeResolvable => {
@@ -12488,13 +12503,14 @@ fn promote_refinement_structured(
                 }),
             })
         }
-        Err(e) if !created_element_ids.is_empty() => Err(PromoteError::Other(format!(
-            "{e}; note: recipe execution already created {} element(s) {:?} before this failure \
-             — they persist in the model; do not retry blindly (that duplicates geometry); \
-             inspect and reuse or delete them first",
-            created_element_ids.len(),
-            created_element_ids
-        ))),
+        Err(e) if !created_element_ids.is_empty() => {
+            crate::plugins::history::rollback_to_undo_depth(world, transaction_history_depth);
+            Err(PromoteError::Other(format!(
+                "{e}; recipe execution created {} element(s) {:?}, but the failed promotion was rolled back atomically",
+                created_element_ids.len(),
+                created_element_ids
+            )))
+        }
         Err(e) => Err(e),
     }
 }
@@ -12509,6 +12525,10 @@ fn handle_instantiate_recipe(
     world: &mut World,
     request: InstantiateRecipeRequest,
 ) -> ApiResult<InstantiateRecipeResult> {
+    let transaction_history_depth = world
+        .get_resource::<crate::plugins::history::History>()
+        .map(crate::plugins::history::History::undo_stack_len)
+        .unwrap_or_default();
     let target_state = request
         .target_state
         .clone()
@@ -12610,7 +12630,7 @@ fn handle_instantiate_recipe(
         "half_extents": half_extents,
         "semantic": {
             "element_class": request.target_class,
-            "refinement_state": "Schematic",
+            "refinement_state": "Conceptual",
             "parameters": request.parameters,
         }
     });
@@ -12631,6 +12651,16 @@ fn handle_instantiate_recipe(
         request.parameters.clone(),
     );
 
+    // Obligation gates are a structured partial success and remain available
+    // for the caller to resolve. Every other failure aborts the whole
+    // instantiation, including the root anchor created above.
+    if let Err(error @ PromoteError::Other(_)) = &promote_result {
+        crate::plugins::history::rollback_to_undo_depth(world, transaction_history_depth);
+        return Err(format!(
+            "{error}; instantiate_recipe rolled back its root anchor and all generated elements"
+        ));
+    }
+
     // 3. Created ids = everything new since the snapshot, excluding the root.
     let after = collect_element_ids(world);
     let mut created_element_ids: Vec<u64> = after
@@ -12646,13 +12676,18 @@ fn handle_instantiate_recipe(
     //    Applying placement after generation is the only reliable way to keep
     //    root, generated members, and rotation coherent for both script-backed
     //    and native recipes.
-    apply_instantiate_recipe_placement(
+    if let Err(error) = apply_instantiate_recipe_placement(
         world,
         ElementId(root),
         &created_element_ids,
         anchor_centre,
         &placement,
-    )?;
+    ) {
+        crate::plugins::history::rollback_to_undo_depth(world, transaction_history_depth);
+        return Err(format!(
+            "Recipe placement failed and instantiate_recipe was rolled back: {error}"
+        ));
+    }
     if placement_has_effect(&placement) {
         flush_model_api_write_pipeline(world);
     }
@@ -12661,7 +12696,12 @@ fn handle_instantiate_recipe(
     // Some recipes need a sized root during generation; shrink it after the
     // recipe has emitted its real members so broad material application does
     // not leave placeholder cubes on the finished structure.
-    shrink_recipe_root_locator(world, ElementId(root))?;
+    if let Err(error) = shrink_recipe_root_locator(world, ElementId(root)) {
+        crate::plugins::history::rollback_to_undo_depth(world, transaction_history_depth);
+        return Err(format!(
+            "Recipe root finalization failed and instantiate_recipe was rolled back: {error}"
+        ));
+    }
     flush_model_api_write_pipeline(world);
 
     // Resolve the promotion outcome only after geometry was recorded and the
@@ -12676,8 +12716,8 @@ fn handle_instantiate_recipe(
             message,
         }) => PromoteRefinementResult {
             element_id: root,
-            previous_state: "Schematic".to_string(),
-            new_state: "Schematic".to_string(),
+            previous_state: "Conceptual".to_string(),
+            new_state: "Conceptual".to_string(),
             script_steps_run: 0,
             created_element_ids: Vec::new(),
             promotion_blocked: Some(PromotionBlockedInfo {
@@ -12686,13 +12726,10 @@ fn handle_instantiate_recipe(
                 message,
             }),
         },
-        // Real failure. promote_refinement_structured already annotated any
-        // recipe-created sub-elements; add the root anchor this handler created.
+        // Other failures are handled transactionally before placement above.
         Err(e) => {
-            return Err(format!(
-                "{e}; note: this instantiate_recipe call already created root anchor element \
-                 {root}, which persists in the model"
-            ));
+            crate::plugins::history::rollback_to_undo_depth(world, transaction_history_depth);
+            return Err(format!("{e}; instantiate_recipe was rolled back"));
         }
     };
 
