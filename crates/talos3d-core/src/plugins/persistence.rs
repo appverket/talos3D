@@ -1584,10 +1584,13 @@ fn clear_scene(world: &mut World) {
             Option<&Mesh3d>,
             Option<&ElementId>,
             Has<Preview>,
+            Has<crate::plugins::modeling::occurrence::GeneratedOccurrencePart>,
             Has<Selected>,
         )>();
-        for (entity, mesh, element_id, is_preview, _) in query.iter(world) {
-            if element_id.is_some() || is_preview {
+        for (entity, mesh, element_id, is_preview, is_generated_occurrence_part, _) in
+            query.iter(world)
+        {
+            if element_id.is_some() || is_preview || is_generated_occurrence_part {
                 entities_to_despawn.push(entity);
                 if let Some(mesh) = mesh {
                     meshes_to_remove.push(mesh.id());
@@ -1658,7 +1661,7 @@ mod tests {
                 ParameterSchema, SlotCount, SlotLayout, SlotMultiplicity, TransformBinding,
             },
             generic_factory::PrimitiveFactory,
-            occurrence::{OccurrenceFactory, OccurrenceIdentity},
+            occurrence::{GeneratedOccurrencePart, OccurrenceFactory, OccurrenceIdentity},
             primitives::{BoxPrimitive, ShapeRotation},
         },
         property_edit::PropertyEditState,
@@ -1696,6 +1699,26 @@ mod tests {
             .is_none());
         let mut refs = world.query::<&crate::plugins::parametric_mcp::ParametricInstanceRef>();
         assert_eq!(refs.iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn clear_scene_purges_transient_compound_occurrence_parts() {
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.spawn(GeneratedOccurrencePart {
+            owner: ElementId(91),
+            slot_path: "frame.left".into(),
+            definition_id: DefinitionId("test.frame-member".into()),
+        });
+
+        clear_scene(&mut world);
+
+        let mut generated = world.query::<&GeneratedOccurrencePart>();
+        assert_eq!(
+            generated.iter(&world).count(),
+            0,
+            "project replacement must not retain rendered occurrence children from the previous document"
+        );
     }
 
     #[test]
