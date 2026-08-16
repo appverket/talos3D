@@ -8594,6 +8594,39 @@ fn build_relation_snapshot(
 }
 
 #[cfg(feature = "model-api")]
+fn parse_hosting_element_id(
+    hosting: &serde_json::Map<String, Value>,
+    field: &str,
+) -> ApiResult<Option<ElementId>> {
+    let Some(value) = hosting.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+
+    let parsed = value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        .or_else(|| {
+            value.as_f64().and_then(|number| {
+                (number.is_finite()
+                    && number >= 0.0
+                    && number.fract() == 0.0
+                    // Largest integer that an IEEE-754 JSON number can carry
+                    // without silently rounding to a different element id.
+                    && number <= 9_007_199_254_740_991.0)
+                    .then_some(number as u64)
+            })
+        })
+        .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+        .ok_or_else(|| {
+            format!("hosting.{field} must be a non-negative integer element id; received {value}")
+        })?;
+    Ok(Some(ElementId(parsed)))
+}
+
+#[cfg(feature = "model-api")]
 fn prepare_hosted_occurrence_request(
     world: &World,
     object: &serde_json::Map<String, Value>,
@@ -8606,14 +8639,8 @@ fn prepare_hosted_occurrence_request(
         .and_then(Value::as_object)
         .ok_or_else(|| "Hosted instantiation requires a 'hosting' object".to_string())?;
 
-    let host_element_id = hosting
-        .get("host_element_id")
-        .and_then(Value::as_u64)
-        .map(ElementId);
-    let opening_element_id = hosting
-        .get("opening_element_id")
-        .and_then(Value::as_u64)
-        .map(ElementId);
+    let host_element_id = parse_hosting_element_id(hosting, "host_element_id")?;
+    let opening_element_id = parse_hosting_element_id(hosting, "opening_element_id")?;
 
     let mut anchors_by_id: HashMap<String, HostedAnchor> = HashMap::new();
     if let Some(anchor_object) = hosting.get("anchors").and_then(Value::as_object) {
@@ -8750,24 +8777,25 @@ fn prepare_hosted_occurrence_request(
         if relation_parameters.is_null() {
             relation_parameters = Value::Object(Default::default());
         }
-        if let Some(object) = relation_parameters.as_object_mut() {
-            if let Some(opening_id) = opening_element_id {
-                object
-                    .entry("opening_element_id".to_string())
-                    .or_insert(Value::from(opening_id.0));
-            }
-            if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
-                if let Some(opening_center) = hosted_context.anchor_position("opening.center") {
-                    if let Some(position_along_wall) =
-                        infer_position_along_wall(&host_snapshot, opening_center)
-                    {
-                        object
-                            .entry("position_along_wall".to_string())
-                            .or_insert(Value::from(position_along_wall));
-                    }
+        let object = relation_parameters.as_object_mut().ok_or_else(|| {
+            "hosting.relation_parameters must be an object when provided".to_string()
+        })?;
+        if let Some(opening_id) = opening_element_id {
+            object
+                .entry("opening_element_id".to_string())
+                .or_insert(Value::from(opening_id.0));
+        }
+        if let Some(host_snapshot) = capture_entity_snapshot(world, host_id) {
+            if let Some(opening_center) = hosted_context.anchor_position("opening.center") {
+                if let Some(position_along_wall) =
+                    infer_position_along_wall(&host_snapshot, opening_center)
+                {
+                    object
+                        .entry("position_along_wall".to_string())
+                        .or_insert(Value::from(position_along_wall));
                 }
-                validate_relation_descriptor(world, relation_type, "occurrence", &host_snapshot)?;
             }
+            validate_relation_descriptor(world, relation_type, "occurrence", &host_snapshot)?;
         }
     }
 
