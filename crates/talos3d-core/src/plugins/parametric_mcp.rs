@@ -27,8 +27,8 @@ use crate::plugins::refinement::{
 use crate::relational::graph::NodeId;
 use crate::relational::param_expr::{ScalarExpr, Unit};
 use crate::relational::registry::{
-    ParametricRegistry, ParametricRepresentation, ParametricSnapshot, ParametricStore,
-    ParametricTypeDef, Placement,
+    ParametricPlacementContract, ParametricRegistry, ParametricRepresentation, ParametricSnapshot,
+    ParametricStore, ParametricTypeDef, Placement,
 };
 use crate::relational::transform::{TransformAxis, TransformGesture, TransformOutcome};
 
@@ -47,9 +47,14 @@ pub struct ParametricTypeInfo {
     /// Explicit use guidance prevents derivation-only definitions from being
     /// mistaken for geometry-producing authoring paths.
     pub how_to_use: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_contract: Option<ParametricPlacementContract>,
 }
 
-fn type_info(definition: &ParametricTypeDef) -> ParametricTypeInfo {
+fn type_info(
+    definition: &ParametricTypeDef,
+    placement_contract: Option<&ParametricPlacementContract>,
+) -> ParametricTypeInfo {
     let executable = definition.representation.is_some();
     ParametricTypeInfo {
         id: definition.id.clone(),
@@ -58,8 +63,11 @@ fn type_info(definition: &ParametricTypeDef) -> ParametricTypeInfo {
         execution_path: executable.then(|| "parametric.create".to_string()),
         how_to_use: if executable {
             format!(
-                "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.",
-                definition.id
+                "Call parametric.create with type_id {:?}; inspect its drivers first when overrides are required.{}",
+                definition.id,
+                placement_contract
+                    .map(|contract| format!(" Placement contract: {}", contract.guidance))
+                    .unwrap_or_default()
             )
         } else {
             format!(
@@ -67,6 +75,7 @@ fn type_info(definition: &ParametricTypeDef) -> ParametricTypeInfo {
                 definition.id
             )
         },
+        placement_contract: placement_contract.cloned(),
     }
 }
 
@@ -180,7 +189,10 @@ pub fn world_list_types(world: &mut World) -> Vec<ParametricTypeInfo> {
     };
     reg.list_public()
         .into_iter()
-        .filter_map(|(id, _)| reg.get(&id).map(type_info))
+        .filter_map(|(id, _)| {
+            reg.get(&id)
+                .map(|definition| type_info(definition, reg.placement_contract(&id)))
+        })
         .collect()
 }
 
@@ -257,6 +269,10 @@ pub fn world_create(
         }
         req.type_id.clone()
     };
+
+    if let Some(contract) = reg.placement_contract(&effective_type_id) {
+        contract.validate(&placement)?;
+    }
 
     let instance_id = {
         let mut store = world.resource_mut::<ParametricStore>();
@@ -876,6 +892,55 @@ mod tests {
         let store = w.resource::<ParametricStore>();
         let inst = store.get(resp.snapshot.instance_id).unwrap();
         assert_eq!(inst.placement, pl);
+    }
+
+    #[test]
+    fn driver_anchored_placement_axis_is_discovered_and_rejected_before_authoring() {
+        let mut app = app();
+        let w = app.world_mut();
+        w.resource_mut::<ParametricRegistry>()
+            .register_placement_contract(
+                "test.repr_box",
+                ParametricPlacementContract {
+                    driver_anchored_translation_axes: [(
+                        "y".to_string(),
+                        "height_driver".to_string(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                    guidance: "Keep placement Y at 0.".to_string(),
+                },
+            );
+
+        let info = world_list_types(w)
+            .into_iter()
+            .find(|info| info.id == "test.repr_box")
+            .expect("public type is discoverable");
+        assert_eq!(
+            info.placement_contract
+                .as_ref()
+                .and_then(|contract| contract.driver_anchored_translation_axes.get("y"))
+                .map(String::as_str),
+            Some("height_driver")
+        );
+        assert!(info.how_to_use.contains("Keep placement Y at 0"));
+
+        let error = world_create(
+            w,
+            CreateParametricRequest {
+                type_id: "test.repr_box".into(),
+                placement: Some(Placement {
+                    translate: [0.0, 2.2, 0.0],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect_err("driver-anchored Y cannot be applied twice");
+        assert!(error.contains("translation y must be 0"));
+        assert!(w.resource::<ParametricStore>().get(1).is_none());
+        let mut ids = w.query::<&ElementId>();
+        assert_eq!(ids.iter(w).count(), 0, "rejection must create no geometry");
     }
 
     // ---- P1a: re-synthesis on set_driver -----------------------------------

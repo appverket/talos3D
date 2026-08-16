@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::relational::registry::ParametricStore;
 use crate::semantics::{ConceptAssignment, PublishedAnchors, SemanticBindings};
 use crate::{
     authored_entity::{BoxedEntity, EntityBounds},
@@ -1602,6 +1603,13 @@ fn clear_scene(world: &mut World) {
     for entity in entities_to_despawn {
         let _ = world.despawn(entity);
     }
+
+    // Parametric instances are transient derivation state, not project
+    // content. Retaining them across load can regenerate geometry belonging to
+    // the document that was just replaced.
+    if world.contains_resource::<ParametricStore>() {
+        world.insert_resource(ParametricStore::default());
+    }
 }
 
 fn primary_shortcut_state(world: &mut World, key: KeyCode) -> (bool, bool) {
@@ -1663,6 +1671,32 @@ mod tests {
         tools::ActiveTool,
         transform::TransformState,
     };
+
+    #[test]
+    fn clear_scene_resets_transient_parametric_instances() {
+        let mut world = World::new();
+        world.insert_resource(ParametricStore::default());
+        let instance_id = world
+            .resource_mut::<ParametricStore>()
+            .instantiate("test.transient");
+        world.spawn((
+            ElementId(81),
+            crate::plugins::parametric_mcp::ParametricInstanceRef {
+                instance_id,
+                member_index: 0,
+                member_label: Some("stale_member".into()),
+            },
+        ));
+
+        clear_scene(&mut world);
+
+        assert!(world
+            .resource::<ParametricStore>()
+            .get(instance_id)
+            .is_none());
+        let mut refs = world.query::<&crate::plugins::parametric_mcp::ParametricInstanceRef>();
+        assert_eq!(refs.iter(&world).count(), 0);
+    }
 
     #[test]
     fn recent_files_are_mru_deduplicated_and_capped_at_ten() {
