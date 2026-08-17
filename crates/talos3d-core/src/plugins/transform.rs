@@ -20,7 +20,7 @@ use crate::{
         commands::{
             find_entity_by_element_id_readonly, ApplyEntityChangesCommand, CreateEntityCommand,
         },
-        cursor::{cursor_viewport_position, CursorWorldPos},
+        cursor::{cursor_window_position, CursorWorldPos},
         drafting::authoring::{
             active_drafting_frame, active_drafting_plane, authoring_drag_plane_normal,
             authoring_rotation_axis,
@@ -1348,7 +1348,7 @@ fn cursor_on_parallel_plane(world: &World, anchor: Vec3, normal: Vec3) -> Option
         .iter(world)
         .find(|(camera, _)| camera.is_active)
         .or_else(|| camera_query.iter(world).next())?;
-    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let viewport_cursor = cursor_window_position(window)?;
     let ray = camera
         .viewport_to_world(camera_transform, viewport_cursor)
         .ok()?;
@@ -1368,7 +1368,7 @@ fn vertical_axis_cursor_y(world: &World, anchor: Vec3) -> Option<f32> {
         .iter(world)
         .find(|(camera, _)| camera.is_active)
         .or_else(|| camera_query.iter(world).next())?;
-    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let viewport_cursor = cursor_window_position(window)?;
     let ray = camera
         .viewport_to_world(camera_transform, viewport_cursor)
         .ok()?;
@@ -1548,12 +1548,15 @@ fn current_transform_cursor(world: &World) -> Option<Vec3> {
 fn current_viewport_cursor(world: &World) -> Option<Vec2> {
     let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
     let window = window_query.single(world).ok()?;
+    // The cursor is reported in window space and no longer needs the camera to
+    // convert it, but callers still treat "no orbit camera" as "no usable
+    // cursor", so keep that guard rather than widening the contract.
     let mut camera_query = world.try_query_filtered::<&Camera, With<OrbitCamera>>()?;
-    let camera = camera_query
+    camera_query
         .iter(world)
         .find(|camera| camera.is_active)
         .or_else(|| camera_query.iter(world).next())?;
-    cursor_viewport_position(window, camera)
+    cursor_window_position(window)
 }
 
 fn rotation_cursor_on_plane(world: &World, center: Vec3, axis: AxisConstraint) -> Option<Vec3> {
@@ -1565,7 +1568,7 @@ fn rotation_cursor_on_plane(world: &World, center: Vec3, axis: AxisConstraint) -
         .iter(world)
         .find(|(camera, _)| camera.is_active)
         .or_else(|| camera_query.iter(world).next())?;
-    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let viewport_cursor = cursor_window_position(window)?;
     let ray = camera
         .viewport_to_world(camera_transform, viewport_cursor)
         .ok()?;
@@ -1583,7 +1586,7 @@ fn rotation_cursor_on_plane_from_queries(
         .iter()
         .find(|(camera, _)| camera.is_active)
         .or_else(|| camera_query.iter().next())?;
-    let viewport_cursor = cursor_viewport_position(window, camera)?;
+    let viewport_cursor = cursor_window_position(window)?;
     let ray = camera
         .viewport_to_world(camera_transform, viewport_cursor)
         .ok()?;

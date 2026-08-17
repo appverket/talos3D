@@ -228,21 +228,19 @@ thread_local! {
     static BROWSER_CANVAS_CURSOR_POSITION: RefCell<Option<Vec2>> = RefCell::new(None);
 }
 
-/// Return the cursor position in camera viewport logical pixels.
+/// Return the cursor position in Bevy window (render-target) logical pixels.
+///
+/// This is the **only** cursor space in the codebase, and it is the space both
+/// [`Camera::viewport_to_world`] and [`Camera::world_to_viewport`] use:
+/// `viewport_to_ndc` subtracts `logical_viewport_rect().min` internally and
+/// `world_to_viewport` adds it back, so callers must never apply that offset
+/// themselves. Doing so double-counts it and shifts every pick, marquee and
+/// projected overlay by the viewport origin the moment a camera viewport is set.
 ///
 /// Native builds use Bevy's window cursor directly. Web builds prefer a browser
 /// canvas event mapping, because shells can differ in how DOM/client pixels are
 /// routed into winit after UI interaction. That environment-specific mapping is
 /// normalized here so tools and ray-casting code can remain generic.
-pub fn cursor_viewport_position(window: &Window, camera: &Camera) -> Option<Vec2> {
-    let cursor_position = platform_window_cursor_position(window)?;
-    Some(match camera.logical_viewport_rect() {
-        Some(rect) => cursor_position - rect.min,
-        None => cursor_position,
-    })
-}
-
-/// Return the cursor position in Bevy window logical pixels.
 pub fn cursor_window_position(window: &Window) -> Option<Vec2> {
     platform_window_cursor_position(window)
 }
@@ -445,7 +443,7 @@ fn update_cursor_world_pos(
         return;
     };
 
-    let Some(viewport_cursor) = cursor_viewport_position(window, camera) else {
+    let Some(viewport_cursor) = cursor_window_position(window) else {
         clear_cursor_world_pos(&mut cursor_world_pos);
         return;
     };

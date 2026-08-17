@@ -13,7 +13,7 @@ use crate::{
         camera::OrbitCamera,
         commands::CreateEntityCommand,
         cursor::{
-            cursor_viewport_position as mapped_cursor_viewport_position, CursorWorldPos,
+            cursor_window_position as mapped_cursor_window_position, CursorWorldPos,
             DrawingPlane,
         },
         drafting::{
@@ -871,10 +871,13 @@ fn active_camera(world: &World) -> Option<(Camera, GlobalTransform)> {
         .map(|(camera, transform)| (camera.clone(), *transform))
 }
 
-fn viewport_cursor_position(world: &World, camera: &Camera) -> Option<Vec2> {
+/// Cursor position in window/render-target logical pixels — the space
+/// `viewport_to_world` and `world_to_viewport` both use, so no camera-relative
+/// offset is applied here.
+fn viewport_cursor_position(world: &World) -> Option<Vec2> {
     let mut window_query = world.try_query_filtered::<&Window, With<PrimaryWindow>>()?;
     let window = window_query.single(world).ok()?;
-    mapped_cursor_viewport_position(window, camera)
+    mapped_cursor_window_position(window)
 }
 
 fn projected_face_normal_screen(
@@ -982,7 +985,7 @@ fn handle_push_pull_shortcut(world: &mut World) {
         build_push_pull_drag_plane(camera_transform, selected_face.centroid, face_normal);
     let initial_cursor_screen = active_camera
         .as_ref()
-        .and_then(|(camera, _)| viewport_cursor_position(world, camera));
+        .and_then(|_| viewport_cursor_position(world));
     let screen_normal = active_camera
         .as_ref()
         .and_then(|(camera, camera_transform)| {

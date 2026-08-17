@@ -14,6 +14,18 @@ use crate::plugins::layers::entity_on_visible_layer;
 use crate::plugins::modeling::occurrence::GeneratedOccurrencePart;
 use crate::plugins::render_pipeline::WireframeSurfaceVisibilityOverride;
 
+/// Build a pick ray through a window-space screen position.
+///
+/// Every cursor-driven ray in the app must go through here. `viewport_to_world`
+/// already maps render-target logical pixels through
+/// `logical_viewport_rect()`, so subtracting that rect's origin first
+/// double-counts the viewport offset and aims the ray at the wrong pixel. Four
+/// call sites used to hand-roll that subtraction; keeping one helper means the
+/// convention cannot drift back apart.
+pub fn pick_ray_at(camera: &Camera, camera_transform: &GlobalTransform, screen: Vec2) -> Option<Ray3d> {
+    camera.viewport_to_world(camera_transform, screen).ok()
+}
+
 /// Build a camera ray from the current cursor position.
 ///
 /// Requires `&mut World` because `world.query()` borrows mutably in exclusive
@@ -25,11 +37,7 @@ pub fn build_camera_ray(world: &mut World) -> Option<Ray3d> {
 
     let mut camera_query = world.query_filtered::<(&Camera, &GlobalTransform), With<OrbitCamera>>();
     let (camera, cam_tf) = camera_query.iter(world).next()?;
-    let viewport_cursor = match camera.logical_viewport_rect() {
-        Some(rect) => cursor_position - rect.min,
-        None => cursor_position,
-    };
-    camera.viewport_to_world(cam_tf, viewport_cursor).ok()
+    pick_ray_at(camera, cam_tf, cursor_position)
 }
 
 /// Find the nearest entity hit by a ray, across all registered factories.

@@ -73,6 +73,8 @@ enum UxStepAction {
         logical_key: Key,
         state: ButtonState,
     },
+    /// Set the double-click pairing window for the frames of one gesture.
+    SetDoubleClickWindow(f64),
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -89,6 +91,27 @@ pub struct UxClickRequest {
     pub y: f32,
     #[serde(default)]
     pub button: Option<String>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UxMultiClickRequest {
+    pub x: f32,
+    pub y: f32,
+    #[serde(default)]
+    pub button: Option<String>,
+    /// Number of press/release pairs; defaults to 2 (a double-click), max 5.
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Widen the double-click pairing window (seconds) **for this gesture only**;
+    /// the interactive default is restored on the frame after the last release.
+    ///
+    /// Injected input needs one frame per button edge, so on a build that ticks
+    /// slowly the default 0.4 s window cannot be met and descent looks broken when
+    /// it is not. The override is scoped because leaving it wide would make later
+    /// ordinary single clicks pair into accidental double-clicks.
+    #[serde(default)]
+    pub pairing_window_seconds: Option<f64>,
 }
 
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
@@ -133,6 +156,17 @@ pub struct UxHarnessSnapshot {
     pub cursor: Option<UxCursorSnapshot>,
     pub active_tool: Option<String>,
     pub selected_element_ids: Vec<u64>,
+    /// Element ids of the group-edit stack, outermost first. Empty at root.
+    ///
+    /// Without this an automated UX test cannot tell "the double-click descended
+    /// one level" from "the double-click did nothing but the click reselected the
+    /// same aggregate" — both leave `selected_element_ids` unchanged. Progressive
+    /// drill-down is only assertable once the active context is observable.
+    pub group_edit_stack: Vec<u64>,
+    /// Element ids of the occurrence-edit stack, outermost first.
+    pub occurrence_edit_stack: Vec<u64>,
+    /// Whether face editing is active (the leaf level of drill-down).
+    pub face_edit_active: bool,
     pub entities: Vec<UxEntityProjection>,
 }
 
@@ -205,6 +239,50 @@ pub fn enqueue_click(world: &mut World, request: UxClickRequest) -> Result<UxInp
             },
         ],
     )
+}
+
+/// Queue N clicks at one position as a single gesture.
+///
+/// `ux_click` cannot express a double-click: each MCP round trip costs far more
+/// wall-clock than `DOUBLE_CLICK_THRESHOLD_SECONDS`, so two separate calls always
+/// read as two unrelated clicks and group descent can never be driven — or
+/// regression-tested — from the live UX surface. Queuing both press/release pairs
+/// in one request puts them on consecutive frames, which is what the gesture
+/// actually requires.
+pub fn enqueue_multi_click(
+    world: &mut World,
+    request: UxMultiClickRequest,
+) -> Result<UxInputResult, String> {
+    let button = parse_mouse_button(request.button.as_deref())?;
+    if let Some(window_seconds) = request.pairing_window_seconds {
+        if !(0.0..=30.0).contains(&window_seconds) {
+            return Err("pairing_window_seconds must be between 0 and 30".to_string());
+        }
+    }
+    let count = request.count.unwrap_or(2).clamp(1, 5);
+    let position = Vec2::new(request.x, request.y);
+    let mut actions = vec![UxStepAction::MovePointer(position)];
+    if let Some(window_seconds) = request.pairing_window_seconds {
+        actions.push(UxStepAction::SetDoubleClickWindow(window_seconds));
+    }
+    for _ in 0..count {
+        actions.push(UxStepAction::MouseButton {
+            position,
+            button,
+            state: ButtonState::Pressed,
+        });
+        actions.push(UxStepAction::MouseButton {
+            position,
+            button,
+            state: ButtonState::Released,
+        });
+    }
+    if request.pairing_window_seconds.is_some() {
+        actions.push(UxStepAction::SetDoubleClickWindow(
+            crate::plugins::selection::DEFAULT_DOUBLE_CLICK_THRESHOLD_SECONDS,
+        ));
+    }
+    enqueue_steps(world, actions)
 }
 
 pub fn enqueue_drag(world: &mut World, request: UxDragRequest) -> Result<UxInputResult, String> {
@@ -304,6 +382,17 @@ pub fn observe_ux(world: &mut World) -> Result<UxHarnessSnapshot, String> {
         cursor,
         active_tool: active_tool(world),
         selected_element_ids,
+        group_edit_stack: world
+            .get_resource::<crate::plugins::modeling::group::GroupEditContext>()
+            .map(|context| context.stack.iter().map(|id| id.0).collect())
+            .unwrap_or_default(),
+        occurrence_edit_stack: world
+            .get_resource::<crate::plugins::selection::OccurrenceEditContext>()
+            .map(|context| context.stack.iter().map(|id| id.0).collect())
+            .unwrap_or_default(),
+        face_edit_active: world
+            .get_resource::<crate::plugins::face_edit::FaceEditContext>()
+            .is_some_and(|context| context.is_active()),
         entities,
     })
 }
@@ -336,6 +425,26 @@ fn process_ux_harness_step(world: &mut World) {
     if let Err(error) = result {
         state.last_error = Some(error);
     }
+    let steps_remaining = !state.steps.is_empty();
+    if steps_remaining {
+        request_harness_wake(world);
+    }
+}
+
+/// Keep the event loop running while synthetic input is still queued.
+///
+/// One step is applied per `Update` because press/release edges are only visible
+/// for the frame they arrive in. The app runs `WinitSettings::desktop_app()`, so
+/// without an explicit wake the loop sleeps between steps and the queue drains at
+/// the rate of unrelated MCP traffic instead of at frame rate. Multi-frame
+/// gestures then fall apart: the two clicks of a double-click landed seconds
+/// apart and never paired inside `DOUBLE_CLICK_THRESHOLD_SECONDS`, so group
+/// descent could not be driven — or regression-tested — from this surface at all.
+fn request_harness_wake(world: &mut World) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(proxy) = world.get_resource::<bevy::winit::EventLoopProxyWrapper>() {
+        let _ = proxy.send_event(bevy::winit::WinitUserEvent::WakeUp);
+    }
 }
 
 fn pop_next_step(world: &mut World) -> Option<UxStep> {
@@ -346,6 +455,12 @@ fn pop_next_step(world: &mut World) -> Option<UxStep> {
 
 fn apply_step(world: &mut World, action: &UxStepAction) -> Result<(), String> {
     match action {
+        UxStepAction::SetDoubleClickWindow(seconds) => {
+            world
+                .resource_mut::<crate::plugins::selection::DoubleClickSettings>()
+                .threshold_seconds = *seconds;
+            Ok(())
+        }
         UxStepAction::MovePointer(position) => move_pointer(world, *position),
         UxStepAction::MouseButton {
             position,
@@ -639,10 +754,11 @@ fn project_world_point(
     camera: &Camera,
     camera_transform: &GlobalTransform,
 ) -> Option<[f32; 2]> {
-    let mut screen = camera.world_to_viewport(camera_transform, point).ok()?;
-    if let Some(rect) = camera.logical_viewport_rect() {
-        screen += rect.min;
-    }
+    // `world_to_viewport` already offsets by `logical_viewport_rect().min`, so the
+    // result is in the same window/render-target space as `cursor_window_position`
+    // and as the coordinates `ux_click` accepts. Adding the origin again shifted
+    // every reported projection away from the pixel that actually picks it.
+    let screen = camera.world_to_viewport(camera_transform, point).ok()?;
     Some(vec2_array(screen))
 }
 

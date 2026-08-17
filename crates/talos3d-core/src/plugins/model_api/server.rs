@@ -1132,6 +1132,14 @@ impl ModelApiServer {
             .await?
     }
 
+    async fn request_ux_double_click(
+        &self,
+        request: crate::plugins::ux_harness::UxMultiClickRequest,
+    ) -> ApiResult<crate::plugins::ux_harness::UxInputResult> {
+        self.round_trip(|response| ModelApiRequest::UxDoubleClick { request, response })
+            .await?
+    }
+
     async fn request_ux_drag(
         &self,
         request: crate::plugins::ux_harness::UxDragRequest,
@@ -7079,6 +7087,21 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .request_ux_click(params)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "ux_double_click",
+        description = "Queue a multi-click gesture (default 2 press/release pairs) at one position as a single request, so the presses land on consecutive frames and register as a double-click. Use this to drive group/occurrence descent; two separate ux_click calls are too far apart in wall-clock time to pair."
+    )]
+    pub(super) async fn ux_double_click_tool(
+        &self,
+        Parameters(params): Parameters<crate::plugins::ux_harness::UxMultiClickRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_ux_double_click(params)
             .await
             .map_err(|error| McpError::invalid_params(error, None))?;
         json_tool_result(result)

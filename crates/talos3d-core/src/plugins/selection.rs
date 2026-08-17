@@ -91,6 +91,7 @@ pub struct SelectionPlugin;
 impl Plugin for SelectionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DoubleClickTracker>()
+            .init_resource::<DoubleClickSettings>()
             .init_resource::<BoxSelectState>()
             .init_resource::<SelectionPressCapture>()
             .init_resource::<PreviousGroupEditContext>()
@@ -123,6 +124,42 @@ impl Plugin for SelectionPlugin {
                 },
                 execute_toggle_group_focus_hide,
             )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.enter_selected_group".to_string(),
+                    label: "Enter Selected Group".to_string(),
+                    description: "Descend one level into the selected group, occurrence or solid — the same context entry the double-click gesture performs.".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Edit the parts inside the selected aggregate".to_string()),
+                    requires_selection: true,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_enter_selected_group,
+            )
+            .register_command(
+                CommandDescriptor {
+                    id: "modeling.exit_edit_context".to_string(),
+                    label: "Exit Group".to_string(),
+                    description: "Leave the innermost active face/occurrence/group edit context, like pressing Escape.".to_string(),
+                    category: CommandCategory::Edit,
+                    parameters: None,
+                    default_shortcut: None,
+                    icon: None,
+                    hint: Some("Return to the parent editing context".to_string()),
+                    requires_selection: false,
+                    show_in_menu: true,
+                    version: 1,
+                    activates_tool: None,
+                    capability_id: None,
+                },
+                execute_exit_edit_context,
+            )
             .add_systems(
                 Update,
                 (
@@ -140,6 +177,7 @@ impl Plugin for SelectionPlugin {
                     handle_delete_shortcut
                         .in_set(InputPhase::ToolInput)
                         .run_if(in_state(ActiveTool::Select)),
+                    include_backfaces_for_selection_picking,
                     update_selection_status,
                     update_group_edit_muting,
                     draw_selected_outlines
@@ -391,11 +429,9 @@ fn handle_selection_click(world: &mut World) {
         let Some((camera, camera_transform)) = camera_query.iter(world).next() else {
             return;
         };
-        let viewport_cursor = match camera.logical_viewport_rect() {
-            Some(rect) => cursor_position - rect.min,
-            None => cursor_position,
-        };
-        let Ok(ray) = camera.viewport_to_world(camera_transform, viewport_cursor) else {
+        let Some(ray) =
+            crate::plugins::scene_ray::pick_ray_at(camera, camera_transform, cursor_position)
+        else {
             return;
         };
         Some(ray)
@@ -662,7 +698,27 @@ struct DoubleClickTracker {
     last_click_entity: Option<Entity>,
 }
 
-const DOUBLE_CLICK_THRESHOLD_SECONDS: f64 = 0.4;
+pub const DEFAULT_DOUBLE_CLICK_THRESHOLD_SECONDS: f64 = 0.4;
+
+/// How close together two clicks must land to count as a double-click.
+///
+/// A resource rather than a constant so automated UX runs can widen the window.
+/// The gesture needs its two releases on separate frames (a press edge is only
+/// visible for the frame it arrives in), so on a slow build three frames can
+/// exceed 400 ms and descent becomes untestable through the live input path even
+/// though it is correct. Interactive defaults are unchanged.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct DoubleClickSettings {
+    pub threshold_seconds: f64,
+}
+
+impl Default for DoubleClickSettings {
+    fn default() -> Self {
+        Self {
+            threshold_seconds: DEFAULT_DOUBLE_CLICK_THRESHOLD_SECONDS,
+        }
+    }
+}
 
 fn handle_completed_double_click(world: &mut World, clicked_entity: Option<Entity>, now: f64) {
     let Some(entity) = clicked_entity else {
@@ -681,10 +737,15 @@ fn handle_completed_double_click(world: &mut World, clicked_entity: Option<Entit
         return;
     }
 
+    let threshold_seconds = world
+        .get_resource::<DoubleClickSettings>()
+        .copied()
+        .unwrap_or_default()
+        .threshold_seconds;
     let is_double_click = {
         let mut tracker = world.resource_mut::<DoubleClickTracker>();
         let is_double_click = tracker.last_click_entity == Some(entity)
-            && (now - tracker.last_click_time) < DOUBLE_CLICK_THRESHOLD_SECONDS;
+            && (now - tracker.last_click_time) < threshold_seconds;
         if is_double_click {
             // A double-click is a consumed pair. Resetting prevents a rapid third
             // click from being interpreted as another hierarchy transition.
@@ -699,19 +760,31 @@ fn handle_completed_double_click(world: &mut World, clicked_entity: Option<Entit
         return;
     }
 
-    let Some(element_id) = world.get::<ElementId>(entity).copied() else {
-        return;
-    };
+    enter_edit_context_for_entity(world, entity);
+}
+
+/// Descend one level into `entity`: group, occurrence, or face editing.
+///
+/// The double-click gesture and the `modeling.enter_selected_group` command both
+/// call this, so a pointer descent and a scripted/keyboard descent cannot drift
+/// apart. Returns which context was entered, or `None` when the entity has no
+/// `ElementId`.
+pub(crate) fn enter_edit_context_for_entity(
+    world: &mut World,
+    entity: Entity,
+) -> Option<&'static str> {
+    let element_id = world.get::<ElementId>(entity).copied()?;
     let is_group = world.get::<GroupMembers>(entity).is_some();
     let is_occurrence = world.get::<OccurrenceIdentity>(entity).is_some();
 
-    if is_group {
+    let entered = if is_group {
         let mut context = world.resource::<GroupEditContext>().clone();
         context.enter(element_id);
         world.insert_resource(context);
         let mut occurrence_context = world.resource::<OccurrenceEditContext>().clone();
         occurrence_context.reset();
         world.insert_resource(occurrence_context);
+        "group"
     } else if is_occurrence {
         let mut occurrence_context = world.resource::<OccurrenceEditContext>().clone();
         occurrence_context.enter(element_id);
@@ -719,14 +792,102 @@ fn handle_completed_double_click(world: &mut World, clicked_entity: Option<Entit
         let mut group_context = world.resource::<GroupEditContext>().clone();
         group_context.reset();
         world.insert_resource(group_context);
+        "occurrence"
     } else {
         // CSG nodes and ordinary solids share the same face-edit entry. CSG face
         // hit testing resolves operand faces after the context is active.
         world
             .resource_mut::<FaceEditContext>()
             .enter(entity, element_id);
-    }
+        "face"
+    };
     world.entity_mut(entity).remove::<Selected>();
+    Some(entered)
+}
+
+/// Pop one level of edit context, mirroring the Escape key.
+pub(crate) fn exit_edit_context(world: &mut World) -> &'static str {
+    let occurrence_active = world
+        .get_resource::<OccurrenceEditContext>()
+        .is_some_and(|context| !context.is_root());
+    let exited = if world
+        .get_resource::<FaceEditContext>()
+        .is_some_and(|context| context.is_active())
+    {
+        world.resource_mut::<FaceEditContext>().exit();
+        "face"
+    } else if occurrence_active {
+        let mut context = world.resource::<OccurrenceEditContext>().clone();
+        context.exit();
+        world.insert_resource(context);
+        "occurrence"
+    } else {
+        let mut context = world.resource::<GroupEditContext>().clone();
+        context.exit();
+        world.insert_resource(context);
+        "group"
+    };
+    let selected: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    for entity in selected {
+        world.entity_mut(entity).remove::<Selected>();
+    }
+    world.resource_mut::<DoubleClickTracker>().last_click_entity = None;
+    exited
+}
+
+fn execute_enter_selected_group(
+    world: &mut World,
+    _parameters: &serde_json::Value,
+) -> Result<CommandResult, String> {
+    let selected: Vec<Entity> = world
+        .query_filtered::<Entity, With<Selected>>()
+        .iter(world)
+        .collect();
+    let [entity] = selected.as_slice() else {
+        return Err(
+            "Select exactly one group, occurrence or solid to enter its edit context".to_string(),
+        );
+    };
+    let entity = *entity;
+    let element_id = world
+        .get::<ElementId>(entity)
+        .copied()
+        .ok_or_else(|| "Selected entity has no element id".to_string())?;
+    let entered = enter_edit_context_for_entity(world, entity)
+        .ok_or_else(|| "Selected entity cannot be entered".to_string())?;
+    Ok(CommandResult {
+        output: Some(serde_json::json!({
+            "entered": entered,
+            "element_id": element_id.0,
+        })),
+        ..Default::default()
+    })
+}
+
+fn execute_exit_edit_context(
+    world: &mut World,
+    _parameters: &serde_json::Value,
+) -> Result<CommandResult, String> {
+    let group_active = world
+        .get_resource::<GroupEditContext>()
+        .is_some_and(|context| !context.is_root());
+    let occurrence_active = world
+        .get_resource::<OccurrenceEditContext>()
+        .is_some_and(|context| !context.is_root());
+    let face_active = world
+        .get_resource::<FaceEditContext>()
+        .is_some_and(|context| context.is_active());
+    if !group_active && !occurrence_active && !face_active {
+        return Err("Already at the root edit context".to_string());
+    }
+    let exited = exit_edit_context(world);
+    Ok(CommandResult {
+        output: Some(serde_json::json!({ "exited": exited })),
+        ..Default::default()
+    })
 }
 
 fn execute_toggle_group_focus_hide(
@@ -768,38 +929,25 @@ fn execute_toggle_group_focus_hide(
     })
 }
 
-fn handle_group_escape(
-    mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
-    edit_context: Res<GroupEditContext>,
-    occurrence_edit_context: Res<OccurrenceEditContext>,
-    face_edit_context: Res<FaceEditContext>,
-    ownership: Res<InputOwnership>,
-    selected_query: Query<Entity, With<Selected>>,
-    mut double_click_tracker: ResMut<DoubleClickTracker>,
-) {
-    if !ownership.is_idle()
-        || (edit_context.is_root() && occurrence_edit_context.is_root())
-        || face_edit_context.is_active()
+/// Escape pops one edit-context level, delegating to the same
+/// [`exit_edit_context`] the `modeling.exit_edit_context` command runs so the
+/// key and the command cannot diverge. Face editing keeps its own Escape owner,
+/// so this stays out of the way while a face context is active.
+fn handle_group_escape(world: &mut World) {
+    let ownership_idle = world.resource::<InputOwnership>().is_idle();
+    let at_root = world.resource::<GroupEditContext>().is_root()
+        && world.resource::<OccurrenceEditContext>().is_root();
+    let face_active = world.resource::<FaceEditContext>().is_active();
+    if !ownership_idle || at_root || face_active {
+        return;
+    }
+    if !world
+        .resource::<ButtonInput<KeyCode>>()
+        .just_pressed(KeyCode::Escape)
     {
         return;
     }
-
-    if keys.just_pressed(KeyCode::Escape) {
-        if !occurrence_edit_context.is_root() {
-            let mut ctx = occurrence_edit_context.clone();
-            ctx.exit();
-            commands.insert_resource(ctx);
-        } else {
-            let mut ctx = edit_context.clone();
-            ctx.exit();
-            commands.insert_resource(ctx);
-        }
-        for entity in &selected_query {
-            commands.entity(entity).remove::<Selected>();
-        }
-        double_click_tracker.last_click_entity = None;
-    }
+    exit_edit_context(world);
 }
 
 fn handle_delete_shortcut(
@@ -1088,6 +1236,41 @@ fn mesh_entity_layer_visible_for_pick(
         .and_then(|(_, assignment)| assignment)
         .map(|assignment| layer_registry.is_visible(&assignment.layer))
         .unwrap_or(true)
+}
+
+/// Make every selectable authored mesh pickable from both faces.
+///
+/// Bevy culls backfaces for 3D mesh ray casts unless the entity carries
+/// [`RayCastBackfaces`]. Culling is a rendering concept, not a selection one: it
+/// makes pickability depend on triangle winding relative to the camera, so the
+/// same visible surface answers a click from one orbit position and ignores it
+/// from another. Single-sided authored plates (cladding courses, flashings,
+/// gable panels, standing-seam ribs) and any inverted-winding mesh are picked
+/// from one side only, and an inverted closed solid reports its *far* face, so a
+/// nearer object loses the distance comparison. Both read to the user as
+/// "selection depends on which way I'm looking".
+///
+/// Including backfaces cannot select through anything: `cast_ray` still returns
+/// hits sorted by distance and callers take the nearest, so a front face still
+/// wins whenever one exists. It only adds the near surface of meshes that
+/// culling dropped entirely.
+///
+/// The `Without<RayCastBackfaces>` filter makes this a no-op once tagged, so
+/// steady-state cost is zero rather than a per-frame sweep.
+fn include_backfaces_for_selection_picking(
+    mut commands: Commands,
+    untagged: Query<
+        Entity,
+        (
+            With<Mesh3d>,
+            Without<RayCastBackfaces>,
+            MeshSelectableQueryFilter,
+        ),
+    >,
+) {
+    for entity in &untagged {
+        commands.entity(entity).insert(RayCastBackfaces);
+    }
 }
 
 fn choose_selection_hit(
@@ -1540,6 +1723,132 @@ mod tests {
             snapshots::PolylineSnapshot,
         },
     };
+
+    /// A single unindexed triangle wound counter-clockwise in the XY plane, so
+    /// its front face points along -Z.
+    fn single_sided_triangle() -> Mesh {
+        Mesh::new(
+            bevy::render::mesh::PrimitiveTopology::TriangleList,
+            bevy::asset::RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+        )
+    }
+
+    /// The mechanism behind [`include_backfaces_for_selection_picking`]: a
+    /// single-sided surface answers a ray from one side only while backfaces are
+    /// culled, which is what made picking depend on the camera's orbit position.
+    /// Including backfaces makes the same surface answer from both sides.
+    #[test]
+    fn culling_makes_single_sided_geometry_pickable_from_one_side_only() {
+        use bevy::math::Affine3A;
+        use bevy::picking::mesh_picking::ray_cast::Backfaces;
+
+        let mesh = single_sided_triangle();
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap() {
+            bevy::render::mesh::VertexAttributeValues::Float32x3(values) => values.clone(),
+            other => panic!("unexpected position attribute: {other:?}"),
+        };
+        let identity = Affine3A::IDENTITY;
+        let from_front = Ray3d::new(Vec3::new(0.0, 0.0, -5.0), Dir3::Z);
+        let from_back = Ray3d::new(Vec3::new(0.0, 0.0, 5.0), Dir3::NEG_Z);
+
+        let cast = |ray, cull| {
+            bevy::picking::mesh_picking::ray_cast::ray_mesh_intersection::<u32>(
+                ray, &identity, &positions, None, None, None, cull,
+            )
+        };
+
+        // Stated without depending on which winding Bevy calls "front": while
+        // culling, exactly one of the two opposing rays finds the surface, so the
+        // answer depends on where the camera is. Including backfaces, both do.
+        let culled_hits = [from_front, from_back]
+            .into_iter()
+            .filter(|ray| cast(*ray, Backfaces::Cull).is_some())
+            .count();
+        let included_hits = [from_front, from_back]
+            .into_iter()
+            .filter(|ray| cast(*ray, Backfaces::Include).is_some())
+            .count();
+
+        assert_eq!(
+            culled_hits, 1,
+            "culling makes a single-sided surface pickable from one side only — \
+             this is the view-orientation dependence"
+        );
+        assert_eq!(
+            included_hits, 2,
+            "including backfaces makes the same surface pickable from either side"
+        );
+    }
+
+    /// Selection must actually opt every selectable authored mesh into
+    /// double-sided picking, and must leave preview/void entities alone.
+    #[test]
+    fn selectable_authored_meshes_are_tagged_for_double_sided_picking() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .add_systems(Update, include_backfaces_for_selection_picking);
+        let mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(single_sided_triangle());
+
+        let authored = app
+            .world_mut()
+            .spawn((ElementId(1), Mesh3d(mesh.clone())))
+            .id();
+        let generated = app
+            .world_mut()
+            .spawn((
+                GeneratedOccurrencePart {
+                    owner: ElementId(1),
+                    slot_path: "slot".to_string(),
+                    definition_id: DefinitionId("test.part".to_string()),
+                },
+                Mesh3d(mesh.clone()),
+            ))
+            .id();
+        let preview = app
+            .world_mut()
+            .spawn((ElementId(2), Mesh3d(mesh.clone()), PreviewOnly))
+            .id();
+        let void = app
+            .world_mut()
+            .spawn((
+                ElementId(3),
+                Mesh3d(mesh.clone()),
+                crate::plugins::modeling::void_declaration::OpeningContext::new(ElementId(1)),
+            ))
+            .id();
+        let meshless = app.world_mut().spawn(ElementId(4)).id();
+
+        app.update();
+
+        assert!(
+            app.world().get::<RayCastBackfaces>(authored).is_some(),
+            "authored selectable meshes must be pickable from both faces"
+        );
+        assert!(
+            app.world().get::<RayCastBackfaces>(generated).is_some(),
+            "generated occurrence parts are selectable too"
+        );
+        assert!(
+            app.world().get::<RayCastBackfaces>(preview).is_none(),
+            "preview-scene geometry is never selectable"
+        );
+        assert!(
+            app.world().get::<RayCastBackfaces>(void).is_none(),
+            "declared voids are not pickable surfaces"
+        );
+        assert!(app.world().get::<RayCastBackfaces>(meshless).is_none());
+    }
 
     fn selection_world_with_group() -> (World, Entity, Entity, ElementId, ElementId) {
         let mut world = World::new();
@@ -2864,9 +3173,13 @@ struct PreviousGroupEditContext {
     hide_outside: bool,
 }
 
+/// Stack of definition Occurrences being edited in place, outermost first.
+///
+/// Public so the UX harness can report drill-down depth; mutation stays inside
+/// this module so group/occurrence/face entry keeps one owner.
 #[derive(Resource, Debug, Clone, Default)]
-struct OccurrenceEditContext {
-    stack: Vec<ElementId>,
+pub struct OccurrenceEditContext {
+    pub stack: Vec<ElementId>,
 }
 
 impl OccurrenceEditContext {
