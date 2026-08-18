@@ -4454,6 +4454,129 @@ fn handle_take_screenshot(
     Ok(path_owned)
 }
 
+/// Toggle the false-colour envelope pass. Presentation only: no authored data
+/// changes, and every entity's real material is restored on disable.
+#[cfg(feature = "model-api")]
+fn handle_set_surface_debug_render(world: &mut World, enabled: bool) -> Result<bool, String> {
+    let mut mode = world
+        .get_resource_mut::<crate::plugins::surface_debug::SurfaceDebugRender>()
+        .ok_or_else(|| "surface debug render is not available in this app".to_string())?;
+    mode.enabled = enabled;
+    Ok(enabled)
+}
+
+/// Derive an orthographic elevation profile from the authored meshes.
+#[cfg(feature = "model-api")]
+fn handle_get_elevation_profile(
+    world: &mut World,
+    direction: &str,
+    resolution: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    use crate::plugins::elevation_profile::{
+        compute_elevation_profile, ElevationDirection, DEFAULT_RESOLUTION,
+    };
+    let direction = ElevationDirection::parse(direction)
+        .ok_or_else(|| format!("unknown elevation direction '{direction}'; use north, south, east or west"))?;
+    let profile = compute_elevation_profile(world, direction, resolution.unwrap_or(DEFAULT_RESOLUTION))
+        .ok_or_else(|| "the model has no renderable geometry to project".to_string())?;
+    serde_json::to_value(profile).map_err(|error| error.to_string())
+}
+
+/// Record what the author says each elevation will look like, before the
+/// geometry exists. Stored on the assembly so it persists with the project and
+/// is diffed against the built result by the `ElevationIntentFidelity`
+/// validator.
+#[cfg(feature = "model-api")]
+fn handle_declare_elevation_intent(
+    world: &mut World,
+    element_id: Option<u64>,
+    label: Option<String>,
+    elevations: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    if !elevations.is_array() {
+        return Err("`elevations` must be an array of per-elevation intent objects".to_string());
+    }
+    let declared = elevations.as_array().map(Vec::len).unwrap_or(0);
+
+    // No target yet: the ordinary case, and the reason this tool takes no
+    // element id. Declaring is meant to be the FIRST thing an author does, when
+    // by definition nothing has been built to attach the description to.
+    let Some(element_id) = element_id else {
+        let intent_id = world
+            .get_resource_or_insert_with(
+                crate::plugins::elevation_intent::PendingElevationIntents::default,
+            )
+            .declare(label.clone(), elevations);
+        return Ok(serde_json::json!({
+            "intent_id": intent_id,
+            "label": label,
+            "declared_elevations": declared,
+            "state": "pending",
+            "next": "Author the building. The intent binds automatically when there is one building assembly to bind it to, or one whose label matches; bind it explicitly with bind_elevation_intent when several are in play. run_validation_v2 then reports every elevation whose built result differs from what you declared, and reports an intent that was never bound at all.",
+        }));
+    };
+
+    bind_elevation_intent_to_assembly(world, element_id, elevations)?;
+    Ok(serde_json::json!({
+        "element_id": element_id,
+        "declared_elevations": declared,
+        "state": "bound",
+        "next": "run_validation_v2 reports every elevation whose built result differs from what you declared here.",
+    }))
+}
+
+/// Write an intent into the assembly's own parameters, where it persists with
+/// the project and travels with the building it describes.
+#[cfg(feature = "model-api")]
+fn bind_elevation_intent_to_assembly(
+    world: &mut World,
+    element_id: u64,
+    elevations: serde_json::Value,
+) -> Result<(), String> {
+    use crate::plugins::modeling::assembly::SemanticAssembly;
+
+    let entity = find_entity_by_element_id(world, ElementId(element_id))
+        .ok_or_else(|| format!("Entity {element_id} not found"))?;
+    let mut assembly = world.get_mut::<SemanticAssembly>(entity).ok_or_else(|| {
+        format!(
+            "Entity {element_id} is not a semantic assembly. `create_assembly` returns both \
+             `assembly_id` and `group_element_id`; elevation intent belongs on the \
+             `assembly_id`. To declare an intent before any building exists, omit `element_id` \
+             entirely - the intent is held until a building is there to bind it to."
+        )
+    })?;
+    if let Some(map) = assembly.parameters.as_object_mut() {
+        map.insert("elevation_intent".to_string(), elevations);
+    } else {
+        assembly.parameters = serde_json::json!({ "elevation_intent": elevations });
+    }
+    Ok(())
+}
+
+/// Attach a previously declared pending intent to a building assembly.
+#[cfg(feature = "model-api")]
+fn handle_bind_elevation_intent(
+    world: &mut World,
+    intent_id: u64,
+    element_id: u64,
+) -> Result<serde_json::Value, String> {
+    let intent = world
+        .get_resource_mut::<crate::plugins::elevation_intent::PendingElevationIntents>()
+        .and_then(|mut pending| pending.take(intent_id))
+        .ok_or_else(|| {
+            format!("No pending elevation intent {intent_id}. It may already be bound, or was declared against an element_id and is already on that assembly.")
+        })?;
+    let declared = intent.elevations.as_array().map(Vec::len).unwrap_or(0);
+    bind_elevation_intent_to_assembly(world, element_id, intent.elevations)?;
+    Ok(serde_json::json!({
+        "intent_id": intent_id,
+        "element_id": element_id,
+        "label": intent.label,
+        "declared_elevations": declared,
+        "state": "bound",
+    }))
+}
+
 #[cfg(feature = "model-api")]
 fn handle_export_drawing(world: &mut World, path: &str) -> Result<String, String> {
     let path_buf = crate::plugins::drawing_export::export_drawing_to_path(

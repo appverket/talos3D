@@ -65,6 +65,16 @@ pub struct ParametricMemberSemantic {
     /// `AuthoringProvenance::rationale`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// Design-concept id this member claims to BE (e.g.
+    /// `"arch.concept.gable_field"`), stored as a `ConceptAssignment`.
+    ///
+    /// Element class says which representation slot a member occupies; the
+    /// concept says what it is in the domain's own vocabulary, and it is the
+    /// concept the admissibility kernel evaluates propositions against. A
+    /// member that never claims one is invisible to the kernel however
+    /// carefully its propositions are authored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concept: Option<String>,
 }
 
 /// One rectangular-extrusion member whose size, translation, and rotation are

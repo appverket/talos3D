@@ -52,7 +52,11 @@ impl Plugin for DrawingExportPlugin {
         app.init_resource::<ViewportExportState>()
             .add_systems(
                 Update,
-                process_pending_viewport_export
+                (
+                    suppress_gizmos_during_viewport_export,
+                    process_pending_viewport_export,
+                )
+                    .chain()
                     .after(crate::plugins::egui_chrome::EguiChromeSystems),
             )
             .register_capability(
@@ -530,6 +534,56 @@ fn queue_screenshot_export(
         scope,
     });
     Ok(())
+}
+
+/// Hide every gizmo overlay while a **viewport** export is in flight.
+///
+/// `take_screenshot` is the harness's evidence channel: agents accept or reject
+/// a model by looking at what it returns. The viewport also carries manipulator
+/// gizmos — the pivot diamond, the rotate ring, selection grips, the compass —
+/// and in a still image those are indistinguishable from the model. A dark
+/// pivot diamond parked on a ridge reads exactly like a hole in the roof, and
+/// deleting roof members to find the cause never changes it, because it was
+/// never geometry. Evidence must not contain the instrument.
+///
+/// App-window captures (`include_ui: true`) deliberately keep them: that scope
+/// means "show me the application", where the overlays are the subject.
+///
+/// The countdown covers the frames between dispatching the capture and the
+/// renderer actually resolving it; restoring immediately would put the gizmos
+/// back before the image is taken.
+fn suppress_gizmos_during_viewport_export(
+    export_state: Res<ViewportExportState>,
+    mut config_store: ResMut<GizmoConfigStore>,
+    mut saved: Local<Vec<(std::any::TypeId, bool)>>,
+    mut grace: Local<u8>,
+) {
+    const GRACE_FRAMES: u8 = 4;
+
+    if export_state.ui_suppressed() {
+        *grace = GRACE_FRAMES;
+        if saved.is_empty() {
+            for (type_id, config, _) in config_store.iter_mut() {
+                saved.push((*type_id, config.enabled));
+                config.enabled = false;
+            }
+        }
+        return;
+    }
+
+    if saved.is_empty() {
+        return;
+    }
+    if *grace > 0 {
+        *grace -= 1;
+        return;
+    }
+    for (type_id, config, _) in config_store.iter_mut() {
+        if let Some((_, was_enabled)) = saved.iter().find(|(id, _)| id == type_id) {
+            config.enabled = *was_enabled;
+        }
+    }
+    saved.clear();
 }
 
 fn process_pending_viewport_export(world: &mut World) {

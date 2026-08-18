@@ -406,6 +406,26 @@ pub(super) enum ModelApiRequest {
     FrameModel {
         response: oneshot::Sender<ApiResult<BoundingBox>>,
     },
+    SetSurfaceDebugRender {
+        enabled: bool,
+        response: oneshot::Sender<ApiResult<bool>>,
+    },
+    GetElevationProfile {
+        direction: String,
+        resolution: Option<usize>,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
+    DeclareElevationIntent {
+        element_id: Option<u64>,
+        label: Option<String>,
+        elevations: serde_json::Value,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
+    BindElevationIntent {
+        intent_id: u64,
+        element_id: u64,
+        response: oneshot::Sender<ApiResult<serde_json::Value>>,
+    },
     FrameEntities {
         element_ids: Vec<u64>,
         response: oneshot::Sender<ApiResult<BoundingBox>>,
@@ -1718,6 +1738,33 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::FrameModel { response } => {
             let _ = response.send(handle_frame_model(world));
+        }
+        ModelApiRequest::SetSurfaceDebugRender { enabled, response } => {
+            let _ = response.send(handle_set_surface_debug_render(world, enabled));
+        }
+        ModelApiRequest::GetElevationProfile {
+            direction,
+            resolution,
+            response,
+        } => {
+            let _ = response.send(handle_get_elevation_profile(world, &direction, resolution));
+        }
+        ModelApiRequest::DeclareElevationIntent {
+            element_id,
+            label,
+            elevations,
+            response,
+        } => {
+            let _ = response.send(handle_declare_elevation_intent(
+                world, element_id, label, elevations,
+            ));
+        }
+        ModelApiRequest::BindElevationIntent {
+            intent_id,
+            element_id,
+            response,
+        } => {
+            let _ = response.send(handle_bind_elevation_intent(world, intent_id, element_id));
         }
         ModelApiRequest::FrameEntities {
             element_ids,

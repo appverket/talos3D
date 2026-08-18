@@ -49,6 +49,9 @@ pub mod layers_panel;
 pub mod lighting;
 pub mod material_browser;
 pub mod materials;
+pub mod elevation_intent;
+pub mod elevation_profile;
+pub mod surface_debug;
 pub mod math;
 pub mod menu_bar;
 #[cfg(any(feature = "model-api", test))]

@@ -348,6 +348,10 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     ("take_screenshot", ToolCategory::Capture),
     ("frame_entities", ToolCategory::Capture),
     ("frame_model", ToolCategory::Capture),
+    ("set_surface_debug_render", ToolCategory::Capture),
+    ("get_elevation_profile", ToolCategory::Inspection),
+    ("declare_elevation_intent", ToolCategory::SessionContract),
+    ("bind_elevation_intent", ToolCategory::SessionContract),
     ("get_camera", ToolCategory::Capture),
     ("set_camera", ToolCategory::Capture),
     // --- Project I/O ---

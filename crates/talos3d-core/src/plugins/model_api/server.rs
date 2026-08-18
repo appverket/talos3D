@@ -1274,6 +1274,52 @@ impl ModelApiServer {
             .await?
     }
 
+    async fn request_get_elevation_profile(
+        &self,
+        direction: String,
+        resolution: Option<usize>,
+    ) -> ApiResult<serde_json::Value> {
+        self.round_trip(|response| ModelApiRequest::GetElevationProfile {
+            direction,
+            resolution,
+            response,
+        })
+        .await?
+    }
+
+    async fn request_declare_elevation_intent(
+        &self,
+        element_id: Option<u64>,
+        label: Option<String>,
+        elevations: serde_json::Value,
+    ) -> ApiResult<serde_json::Value> {
+        self.round_trip(|response| ModelApiRequest::DeclareElevationIntent {
+            element_id,
+            label,
+            elevations,
+            response,
+        })
+        .await?
+    }
+
+    async fn request_bind_elevation_intent(
+        &self,
+        intent_id: u64,
+        element_id: u64,
+    ) -> ApiResult<serde_json::Value> {
+        self.round_trip(|response| ModelApiRequest::BindElevationIntent {
+            intent_id,
+            element_id,
+            response,
+        })
+        .await?
+    }
+
+    async fn request_set_surface_debug_render(&self, enabled: bool) -> ApiResult<bool> {
+        self.round_trip(|response| ModelApiRequest::SetSurfaceDebugRender { enabled, response })
+            .await?
+    }
+
     async fn request_frame_entities(&self, element_ids: Vec<u64>) -> ApiResult<BoundingBox> {
         self.round_trip(|response| ModelApiRequest::FrameEntities {
             element_ids,
@@ -3540,6 +3586,55 @@ pub(super) struct TakeScreenshotRequest {
 #[cfg(feature = "model-api")]
 #[cfg_attr(feature = "model-api", derive(JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct DeclareElevationIntentRequest {
+    /// The building assembly to bind to, when one already exists. OMIT IT to
+    /// declare before building anything — the normal case.
+    #[serde(default)]
+    pub(super) element_id: Option<u64>,
+    /// Optional name for the building this describes. Only needed when more
+    /// than one intent is pending at once; it is matched against the assembly's
+    /// label to decide which description belongs to which building.
+    #[serde(default)]
+    pub(super) label: Option<String>,
+    /// One object per elevation; see the tool description for the fields.
+    pub(super) elevations: serde_json::Value,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct BindElevationIntentRequest {
+    /// The `intent_id` returned by `declare_elevation_intent`.
+    pub(super) intent_id: u64,
+    /// The building assembly's `assembly_id`.
+    pub(super) element_id: u64,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct GetElevationProfileRequest {
+    /// Which face to look square on to: north, south, east or west. At
+    /// `north_axis_deg = 0` Talos3D uses North = +Z, East = -X, South = -Z,
+    /// West = +X.
+    pub(super) direction: String,
+    /// Sample columns across the elevation width. Defaults to 256.
+    #[serde(default)]
+    pub(super) resolution: Option<usize>,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct SetSurfaceDebugRenderRequest {
+    /// True to paint every mesh a flat false colour (magenta = no resolved
+    /// material); false to restore the authored materials.
+    pub(super) enabled: bool,
+}
+
+#[cfg(feature = "model-api")]
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct ExportDrawingRequest {
     /// File path to save the exported drawing. Supports PNG, PDF, SVG, and the `svd` alias.
     #[serde(default = "crate::plugins::drawing_export::default_drawing_export_path")]
@@ -5574,7 +5669,7 @@ impl ModelApiServer {
 
     #[tool(
         name = "delete_entities",
-        description = "Delete one or more entities by element ID through the command pipeline. By default recursive=true, so capability delete expansion applies (for example, deleting a group may delete its members). Use recursive=false to delete only the explicitly listed entity shells. Returns CommandResult."
+        description = "Delete one or more entities by element ID through the command pipeline. By default recursive=true, so capability delete expansion applies (for example, deleting a group may delete its members). Use recursive=false to delete only the explicitly listed entity shells. Returns CommandResult. HAZARD: a recipe's `root_element_id` owns everything that recipe produced, so a recursive delete that merely REFERENCES a root marker destroys the whole recipe output - including geometry that is a member of some other assembly. Deleting an assembly you built from root markers can therefore take real walls and slabs with it. Pass recursive=false when removing an assembly shell you no longer want, and delete recipe output only by deliberately naming its root."
     )]
     pub(super) async fn delete_entities_tool(
         &self,
@@ -7288,6 +7383,70 @@ reports the active frame. Returns the updated editing context. Call exit_group w
     }
 
     #[tool(
+        name = "declare_elevation_intent",
+        description = "Say what each elevation of a building will look like BEFORE authoring its geometry, in the terms a builder would use. Describing a house is something you do well; composing one through an unfamiliar API is not, and this gives the second thing a target to hit. Call it FIRST - omit `element_id` entirely, since nothing has been built yet to attach a description to. It returns an `intent_id` and binds itself once a building exists: automatically when there is one building assembly, or one whose label matches the `label` you passed; otherwise call `bind_elevation_intent`. Pass an array of objects, one per elevation: {\"elevation\": \"south\", \"apex_count\": 1, \"apex_on_centreline\": true, \"finish_changes_at_eave_line\": false, \"roof_projects_past_wall\": true, \"dominant_finish\": \"<material id>\", \"description\": \"free text\"}. Every field is optional except `elevation`; only what you declare is checked, so a partial description is useful. NOTE on `finish_changes_at_eave_line`: normally FALSE on a gable elevation, where the facade runs unbroken from grade to rake, and TRUE on an eave elevation, where the wall stops and the roof begins - it is a per-elevation fact, not a building-wide one. run_validation_v2 then reports every elevation whose built result differs from what you said, and reports an intent you declared and never bound."
+    )]
+    pub(super) async fn declare_elevation_intent_tool(
+        &self,
+        Parameters(params): Parameters<DeclareElevationIntentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_declare_elevation_intent(params.element_id, params.label, params.elevations)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "bind_elevation_intent",
+        description = "Attach a pending elevation intent to a building assembly, when automatic binding cannot tell which is which - that is, when several intents are pending and none carries a label matching the assembly. Pass the `intent_id` from declare_elevation_intent and the assembly's `assembly_id` (not its `group_element_id`). Binding writes the description into the assembly, so it persists with the project from then on."
+    )]
+    pub(super) async fn bind_elevation_intent_tool(
+        &self,
+        Parameters(params): Parameters<BindElevationIntentRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .request_bind_elevation_intent(params.intent_id, params.element_id)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(result)
+    }
+
+    #[tool(
+        name = "get_elevation_profile",
+        description = "Derive one orthographic elevation of the model from the authored geometry: the outline height at every sample column, the apexes standing proud of it, the material bands down the centreline, and each material's share of the visible area. This is the representation a builder reasons in, and the one to check archetypal form against - a gable elevation has exactly one apex on the centreline, the roof outline extends past the wall outline on both rakes, and the facade shows NO material change at the eave line. Unlike take_screenshot this is computed from geometry, not from the viewport, so it contains no gizmos or overlays and is directly comparable between runs. Use it to verify form and finish; use take_screenshot to look."
+    )]
+    pub(super) async fn get_elevation_profile_tool(
+        &self,
+        Parameters(params): Parameters<GetElevationProfileRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let profile = self
+            .request_get_elevation_profile(params.direction, params.resolution)
+            .await
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        json_tool_result(profile)
+    }
+
+    #[tool(
+        name = "set_surface_debug_render",
+        description = "Toggle the false-colour envelope pass, then take_screenshot to inspect it. Every mesh is painted a flat unlit colour derived from the material it actually resolves to, and anything with NO resolved material is painted MAGENTA. Use it whenever you need to know which surfaces are genuinely finished: a shaded render cannot distinguish an unfinished near-white surface from a deliberately pale one, and that is how bare gable fields and unclad panels survive review. NOTE: magenta means 'no resolved material', which is broader than 'defect'. Concealed substrate - sheathing, underlayment, battens, buried slab faces - is legitimately unfinished and will also show magenta, usually as thin slivers at exposed edges. Magenta on a broad outward-facing surface is the signal; read it alongside the domain finish validator, which is what decides whether a given surface is required to carry a finish. Presentation only - no authored data changes. Disable it again before continuing to author."
+    )]
+    pub(super) async fn set_surface_debug_render_tool(
+        &self,
+        Parameters(params): Parameters<SetSurfaceDebugRenderRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let enabled = self
+            .request_set_surface_debug_render(params.enabled)
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        json_tool_result(serde_json::json!({
+            "surface_debug_render": enabled,
+            "legend": "magenta = no resolved material; every other flat colour is one distinct resolved material id",
+            "reading_it": "Magenta on a broad outward-facing surface is a defect. Magenta on thin slivers at exposed edges is usually concealed substrate (sheathing, underlayment, battens, buried slab faces), which is legitimately unfinished. This pass reports resolved materials, not obligations - the domain finish validator decides which surfaces must carry one, so a clean validation run does not imply zero magenta.",
+        }))
+    }
+
+    #[tool(
         name = "frame_model",
         description = "Frame the orbit camera around the authored model and return the fitted bounding box."
     )]
@@ -7420,7 +7579,7 @@ reports the active frame. Returns the updated editing context. Call exit_group w
 
     #[tool(
         name = "create_assembly",
-        description = "Create a semantic assembly with typed members and optionally create relations. Also creates and selects a physical group for the same members so the aggregate can be selected and transformed as one unit. The entire operation is one undoable unit."
+        description = "Create a semantic assembly with typed members and optionally create relations. Also creates and selects a physical group for the same members so the aggregate can be selected and transformed as one unit. The entire operation is one undoable unit. It returns TWO ids and they are not interchangeable: `assembly_id` is the semantic assembly (what validators evaluate and what `declare_elevation_intent` expects), while `group_element_id` is the physical group (what you transform or plant). `assembly_type` must be one of the registered assembly types - call `list_element_classes` / the capability snapshot to see them; element-class names are NOT assembly types. Prefer real leaf geometry as members: a recipe's `created_element_ids`, not its `root_element_id` marker."
     )]
     pub(super) async fn create_assembly_tool(
         &self,
@@ -9465,7 +9624,13 @@ reports the active frame. Returns the updated editing context. Call exit_group w
         description = "Identify elements whose AABB bottom face is more than tolerance_m above \
             any supporting AABB top below them. Ground plane is y=0 when no terrain elevation \
             function is reachable from core (stated in ground_assumption). Returns gap_m and the \
-            nearest supporting element id per floating entry. Default tolerance: 0.01 m."
+            nearest supporting element id per floating entry. Default tolerance: 0.01 m. \
+            AABB-level only - false positives are expected for anything carried on a PERIMETER \
+            rather than on a solid beneath it. A roof seated correctly on four walls reports as \
+            floating, because no single wall's AABB covers the roof footprint while a slab or \
+            terrain further below does, so that becomes the reported nearest support. Read a \
+            floating result as a question, not a verdict: confirm it against the semantic support \
+            chain (run_validation_v2) before moving anything."
     )]
     pub(super) async fn check_floating_tool(
         &self,

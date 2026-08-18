@@ -46,6 +46,7 @@ use talos3d_core::plugins::{
     layers::LayerPlugin,
     lighting::LightingPlugin,
     materials::MaterialPlugin,
+    surface_debug::SurfaceDebugPlugin,
     modeling::ModelingPlugin,
     named_views::NamedViewsPlugin,
     palette::PalettePlugin,
@@ -113,6 +114,7 @@ fn main() {
     .add_plugins(ImportPlugin)
     .add_plugins(LayerPlugin)
     .add_plugins(MaterialPlugin)
+            .add_plugins(SurfaceDebugPlugin)
     .add_plugins(GuideLinePlugin)
     .add_plugins(DimensionLinePlugin)
     .add_plugins(DraftingPlugin)

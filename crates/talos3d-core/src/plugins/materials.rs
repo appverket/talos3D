@@ -1928,7 +1928,18 @@ fn apply_material_assignments(
     primitive_material: Option<Res<crate::plugins::modeling::mesh_generation::PrimitiveMaterial>>,
     changed_query: Query<(Entity, &MaterialAssignment), Changed<MaterialAssignment>>,
     all_query: Query<(Entity, &MaterialAssignment)>,
+    surface_debug: Option<Res<crate::plugins::surface_debug::SurfaceDebugRender>>,
 ) {
+    // The surface-debug pass owns every mesh material while it is active. Without
+    // this guard a later registry change re-applies authored materials over the
+    // debug colours, so finished surfaces silently revert while unfinished ones
+    // stay flagged — the exact half-applied render that makes the debug view
+    // untrustworthy. Leaving debug mode re-marks every assignment, so nothing is
+    // lost by skipping here.
+    if surface_debug.is_some_and(|mode| mode.enabled) {
+        return;
+    }
+
     // Choose the effective iterator: when the registry itself changed we must
     // visit every assigned entity; otherwise only those with a changed component.
     let registry_changed = registry.is_changed()

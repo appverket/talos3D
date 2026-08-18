@@ -383,7 +383,8 @@ fn synthesize_parametric_geometry(
                     let has_content = s.element_class.is_some()
                         || s.refinement_state.is_some()
                         || !s.parameters.is_null()
-                        || s.rationale.is_some();
+                        || s.rationale.is_some()
+                        || s.concept.is_some();
                     has_content.then_some(s)
                 })
                 .collect(),
@@ -459,7 +460,9 @@ fn synthesize_parametric_geometry(
         );
         let claim_grounding = ClaimGrounding { claims };
 
-        world.spawn((
+        // Only the model-api path below consumes this handle.
+        #[cfg_attr(not(feature = "model-api"), allow(unused_variables))]
+        let member_entity = world.spawn((
             eid,
             extrusion,
             ShapeRotation(world_rot),
@@ -481,7 +484,8 @@ fn synthesize_parametric_geometry(
                 )),
             },
             claim_grounding,
-        ));
+        ))
+        .id();
 
         // Apply per-member semantic annotation (element_class, refinement_state,
         // parameters) if the member declared one.  Uses the same
@@ -490,6 +494,29 @@ fn synthesize_parametric_geometry(
         // Gated on `model-api` because the annotation helpers live in that module.
         #[cfg(feature = "model-api")]
         if let Some(sem) = maybe_semantic {
+            // Bind the design concept before the annotation consumes `sem`. An
+            // unknown concept id is an authoring error in the domain pack, not
+            // something to skip quietly: a member that silently fails to claim
+            // its concept looks correct and is unreachable by the kernel.
+            if let Some(concept) = sem.concept.clone() {
+                let concept_id = crate::semantics::ConceptId::new(concept.clone());
+                let known = world
+                    .get_resource::<crate::semantics::SemanticGraph>()
+                    .map(|graph| graph.0.concept(&concept_id).is_some());
+                match known {
+                    Some(false) => {
+                        return Err(format!(
+                            "parametric member declares unknown design concept '{concept}'"
+                        ))
+                    }
+                    _ => {
+                        if let Ok(mut entity_mut) = world.get_entity_mut(member_entity) {
+                            entity_mut
+                                .insert(crate::semantics::ConceptAssignment::new(concept_id));
+                        }
+                    }
+                }
+            }
             let annotation = crate::plugins::model_api::SemanticEntityAnnotationRequest {
                 element_class: sem.element_class,
                 refinement_state: sem.refinement_state,
@@ -1228,7 +1255,8 @@ mod tests {
                 refinement_state: Some("Schematic".into()),
                 parameters: serde_json::json!({ "construction_role": "chord" }),
                 rationale: Some("annotated for test".into()),
-            };
+                    concept: None,
+                };
             {
                 let mut reg = w.resource_mut::<ParametricRegistry>();
                 reg.register(annotated_member_type(sem));
@@ -1367,6 +1395,7 @@ mod tests {
                     refinement_state: Some("Constructible".into()),
                     parameters: serde_json::json!({ "construction_role": "primary" }),
                     rationale: None,
+                    concept: None,
                 }),
             };
             let m1 = ParametricMember {
@@ -1459,7 +1488,8 @@ mod tests {
                 refinement_state: None,
                 parameters: serde_json::Value::Null,
                 rationale: None,
-            };
+                    concept: None,
+                };
             {
                 let mut reg = w.resource_mut::<ParametricRegistry>();
                 reg.register(annotated_member_type(sem));
@@ -1494,6 +1524,7 @@ mod tests {
                     refinement_state: Some("Detailed".into()),
                     parameters: serde_json::json!({ "construction_role": "secondary" }),
                     rationale: Some("round-trip test".into()),
+                    concept: None,
                 }),
             };
 
