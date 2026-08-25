@@ -8545,11 +8545,15 @@ fn element_class_of(world: &World, element_id: ElementId) -> Option<String> {
 /// geometry is authored as a box. That pushed authors toward deleting the
 /// load-path relation instead of recording it. Accept either vocabulary.
 #[cfg(feature = "model-api")]
-fn endpoint_type_allowed(allowed: &[String], entity_type: &str, element_class: Option<&str>) -> bool {
+fn endpoint_type_allowed(
+    allowed: &[String],
+    entity_type: &str,
+    element_class: Option<&str>,
+) -> bool {
     allowed.is_empty()
-        || allowed.iter().any(|candidate| {
-            candidate == entity_type || Some(candidate.as_str()) == element_class
-        })
+        || allowed
+            .iter()
+            .any(|candidate| candidate == entity_type || Some(candidate.as_str()) == element_class)
 }
 
 #[cfg(feature = "model-api")]

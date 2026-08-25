@@ -22,7 +22,11 @@ use crate::plugins::render_pipeline::WireframeSurfaceVisibilityOverride;
 /// double-counts the viewport offset and aims the ray at the wrong pixel. Four
 /// call sites used to hand-roll that subtraction; keeping one helper means the
 /// convention cannot drift back apart.
-pub fn pick_ray_at(camera: &Camera, camera_transform: &GlobalTransform, screen: Vec2) -> Option<Ray3d> {
+pub fn pick_ray_at(
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    screen: Vec2,
+) -> Option<Ray3d> {
     camera.viewport_to_world(camera_transform, screen).ok()
 }
 
