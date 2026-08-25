@@ -16,9 +16,8 @@ use crate::{
         commands::{enqueue_create_boxed_entity, enqueue_create_definition},
         cursor::CursorWorldPos,
         definition_authoring::{
-            apply_patch_to_draft, blank_definition, draft_effective_definition,
-            preview_registry_for_draft, validate_draft, DefinitionDraft, DefinitionDraftId,
-            DefinitionDraftRegistry, DefinitionPatch,
+            apply_patch_to_draft, blank_definition, preview_registry_for_draft, validate_draft,
+            DefinitionDraft, DefinitionDraftId, DefinitionDraftRegistry, DefinitionPatch,
         },
         definition_preview_scene::{
             draw_definition_3d_preview, DefinitionPreviewScene, DefinitionPreviewTarget,
@@ -49,9 +48,13 @@ use crate::{
 const DEFINITIONS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(980.0, 680.0);
 const DEFINITIONS_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(760.0, 520.0);
 const DEFINITIONS_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(1240.0, 860.0);
-const INSPECTOR_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(620.0, 620.0);
-const INSPECTOR_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(460.0, 360.0);
-const INSPECTOR_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(760.0, 760.0);
+// The editor is a genuine three-pane workspace. Its former 620 px default and
+// 460 px minimum left the center property pane narrower than 100 px, causing
+// labels and controls to paint over one another. Keep enough width for all
+// three panes while the shared tool-window scaffold still clamps to viewport.
+const INSPECTOR_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(980.0, 680.0);
+const INSPECTOR_WINDOW_MIN_SIZE: egui::Vec2 = egui::vec2(760.0, 520.0);
+const INSPECTOR_WINDOW_MAX_SIZE: egui::Vec2 = egui::vec2(1240.0, 860.0);
 const DEFINITIONS_BROWSER_LEFT_WIDTH: f32 = 300.0;
 const DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT: f32 = 210.0;
 const DEFINITION_THUMBNAIL_CORNER_RADIUS: f32 = 8.0;
@@ -167,6 +170,76 @@ struct DefinitionListCache {
     entries: Arc<Vec<DefinitionListEntry>>,
     /// Ids of `entries`, for O(1) selected-id validation.
     entry_ids: HashSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PreviewRegistryCacheKey {
+    SelectedSource {
+        definitions: RegistryGeneration,
+        libraries: RegistryGeneration,
+        library_id: Option<String>,
+    },
+    Draft {
+        definitions: RegistryGeneration,
+        libraries: RegistryGeneration,
+        drafts: RegistryGeneration,
+        draft_id: DefinitionDraftId,
+    },
+}
+
+/// Cached derived registry used by the GPU Definition preview and editor.
+///
+/// A selected library or draft is merged into the document registry only when
+/// one of its process-unique change stamps changes. This keeps pointer motion
+/// and ordinary egui repaint frames allocation-free for registry content.
+#[derive(Debug, Clone, Default)]
+struct PreviewRegistryCache {
+    key: Option<PreviewRegistryCacheKey>,
+    registry: Arc<DefinitionRegistry>,
+}
+
+impl PreviewRegistryCache {
+    fn selected_source(
+        &mut self,
+        definitions: &DefinitionRegistry,
+        libraries: &DefinitionLibraryRegistry,
+        library_id: Option<&str>,
+    ) -> Arc<DefinitionRegistry> {
+        let key = PreviewRegistryCacheKey::SelectedSource {
+            definitions: definitions.generation(),
+            libraries: libraries.generation(),
+            library_id: library_id.map(str::to_string),
+        };
+        if self.key.as_ref() != Some(&key) {
+            self.registry = Arc::new(preview_registry_for_selected_source(
+                definitions,
+                libraries,
+                library_id,
+            ));
+            self.key = Some(key);
+        }
+        Arc::clone(&self.registry)
+    }
+
+    fn draft(
+        &mut self,
+        definitions: &DefinitionRegistry,
+        libraries: &DefinitionLibraryRegistry,
+        drafts: &DefinitionDraftRegistry,
+        draft: &DefinitionDraft,
+    ) -> Result<Arc<DefinitionRegistry>, String> {
+        let key = PreviewRegistryCacheKey::Draft {
+            definitions: definitions.generation(),
+            libraries: libraries.generation(),
+            drafts: drafts.generation(),
+            draft_id: draft.draft_id.clone(),
+        };
+        if self.key.as_ref() != Some(&key) {
+            self.registry = Arc::new(preview_registry_for_draft(definitions, libraries, draft)?);
+            self.key = Some(key);
+        }
+        Ok(Arc::clone(&self.registry))
+    }
 }
 
 impl DefinitionListCache {
@@ -355,6 +428,10 @@ pub struct DefinitionsWindowState {
     pub show_internal_definitions: bool,
     /// Cached browser entry list; see [`DefinitionListCache`].
     list_cache: DefinitionListCache,
+    /// Separate caches avoid thrashing while the browser and editor are both
+    /// visible and request different derived registries in one frame.
+    source_preview_cache: PreviewRegistryCache,
+    draft_preview_cache: PreviewRegistryCache,
 }
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -1478,13 +1555,13 @@ pub fn draw_definitions_window(
         }
 
         let selected_definition_id = state.selected_definition_id.as_deref().unwrap_or_default();
-        let selected_preview_registry = preview_registry_for_selected_source(
+        let selected_preview_registry = state.source_preview_cache.selected_source(
             definitions,
             libraries,
             selected_library_id.as_deref(),
         );
         let source_definition_ids = source_definition_ids(
-            &selected_preview_registry,
+            selected_preview_registry.as_ref(),
             definitions,
             libraries,
             selected_library_id.as_deref(),
@@ -1554,33 +1631,42 @@ pub fn draw_definitions_window(
 
             ui.separator();
 
-            ui.vertical(|ui| {
-                ui.set_width(ui.available_width());
-                if let Some(definition) = effective_definition.as_ref() {
-                    preview_target.request_with_overrides(
-                        definition.id.clone(),
-                        selected_preview_registry.clone(),
-                        state.selected_occurrence_overrides.clone(),
-                    );
-                    draw_selected_definition_workspace(
-                        ui,
-                        contexts,
-                        state,
-                        selection,
-                        pending,
-                        cursor_world_pos,
-                        preview_scene,
-                        pending_click,
-                        &selected_preview_registry,
-                        &source_definition_ids,
-                        selected_library_id.as_deref(),
-                        definition,
-                    );
-                } else {
-                    preview_target.clear();
-                    draw_empty_definition_workspace(ui);
-                }
-            });
+            // Explicitly allocate the remaining bounded rectangle. Calling
+            // `set_width(available_width())` inside a horizontal child creates
+            // a self-referential desired-width feedback loop in egui and made
+            // the floating window grow on every pointer-driven repaint.
+            let workspace_size = ui.available_size();
+            ui.allocate_ui_with_layout(
+                workspace_size,
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    if let Some(definition) = effective_definition.as_ref() {
+                        preview_target.request_with_overrides(
+                            definition.id.clone(),
+                            Arc::clone(&selected_preview_registry),
+                            state.selected_occurrence_overrides.clone(),
+                        );
+                        draw_selected_definition_workspace(
+                            ui,
+                            contexts,
+                            state,
+                            selection,
+                            pending,
+                            cursor_world_pos,
+                            preview_scene,
+                            preview_target,
+                            pending_click,
+                            selected_preview_registry.as_ref(),
+                            &source_definition_ids,
+                            selected_library_id.as_deref(),
+                            definition,
+                        );
+                    } else {
+                        preview_target.clear();
+                        draw_empty_definition_workspace(ui);
+                    }
+                },
+            );
         });
     });
     draw_definition_editor(
@@ -1796,20 +1882,35 @@ fn draw_definition_browser_left_panel(
             let response = ui
                 .horizontal(|ui| {
                     draw_definition_list_thumbnail(ui, entry);
-                    ui.vertical(|ui| {
-                        let title = ui.selectable_label(selected, &entry.name);
-                        if title.clicked() {
-                            select_definition_in_browser(state, &entry.id, &entry.name);
-                        }
-                        if title.double_clicked() {
-                            queue_open_definition_draft_from_browser(
-                                pending,
-                                &entry.id,
-                                state.selected_library_id.as_deref(),
-                            );
-                        }
-                        ui.label(egui::RichText::new(entry.meta_label()).small().weak());
-                    });
+                    let details_size = egui::vec2(ui.available_width().max(0.0), 40.0);
+                    ui.allocate_ui_with_layout(
+                        details_size,
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            let title = ui
+                                .add_sized(
+                                    [ui.available_width(), ui.spacing().interact_size.y],
+                                    egui::Button::selectable(selected, &entry.name).truncate(),
+                                )
+                                .on_hover_text(&entry.name);
+                            if title.clicked() {
+                                select_definition_in_browser(state, &entry.id, &entry.name);
+                            }
+                            if title.double_clicked() {
+                                queue_open_definition_draft_from_browser(
+                                    pending,
+                                    &entry.id,
+                                    state.selected_library_id.as_deref(),
+                                );
+                            }
+                            let meta = entry.meta_label();
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&meta).small().weak())
+                                    .truncate(),
+                            )
+                            .on_hover_text(meta);
+                        },
+                    );
                 })
                 .response;
             response.context_menu(|ui| {
@@ -1845,7 +1946,7 @@ fn draw_definition_browser_left_panel(
                 };
                 ui.horizontal(|ui| {
                     if ui.selectable_label(selected, label).clicked() {
-                        drafts.active_draft_id = Some(draft.draft_id.clone());
+                        drafts.set_active(Some(draft.draft_id.clone()));
                         state.inspector_visible = true;
                     }
                     if ui.small_button("Discard").clicked() {
@@ -1876,6 +1977,7 @@ fn draw_selected_definition_workspace(
     pending: &mut PendingCommandInvocations,
     cursor_world_pos: &CursorWorldPos,
     preview_scene: &mut DefinitionPreviewScene,
+    preview_target: &DefinitionPreviewTarget,
     pending_click: &mut PendingPreviewClick,
     registry: &DefinitionRegistry,
     source_definition_ids: &[DefinitionId],
@@ -1966,7 +2068,14 @@ fn draw_selected_definition_workspace(
 
     let preview_height =
         (ui.available_height() - DEFINITIONS_BROWSER_BOTTOM_PANEL_HEIGHT - 18.0).max(240.0);
-    draw_definition_3d_preview(ui, contexts, preview_scene, pending_click, preview_height);
+    draw_definition_3d_preview(
+        ui,
+        contexts,
+        preview_scene,
+        preview_target,
+        pending_click,
+        preview_height,
+    );
     ui.add_space(8.0);
 
     ui.columns(2, |columns| {
@@ -2163,14 +2272,15 @@ fn draw_definition_editor(
     let Some(active_draft) = drafts.get(&active_draft_id).cloned() else {
         return;
     };
-    if let Ok(preview_registry) = preview_registry_for_draft(definitions, libraries, &active_draft)
-    {
-        preview_target.request_with_overrides(
-            active_draft.working_copy.id.clone(),
-            preview_registry,
-            state.selected_occurrence_overrides.clone(),
-        );
-    }
+    let preview_registry = state
+        .draft_preview_cache
+        .draft(definitions, libraries, drafts, &active_draft)
+        .unwrap_or_else(|_| Arc::new(definitions.clone()));
+    preview_target.request_with_overrides(
+        active_draft.working_copy.id.clone(),
+        Arc::clone(&preview_registry),
+        state.selected_occurrence_overrides.clone(),
+    );
     sync_inspector_state(state, &active_draft);
 
     let editor_visible = state.inspector_visible;
@@ -2269,6 +2379,7 @@ fn draw_definition_editor(
                         ui,
                         contexts,
                         preview_scene,
+                        preview_target,
                         pending_click,
                         (ui.available_height() * 0.42).max(220.0),
                     );
@@ -2278,7 +2389,7 @@ fn draw_definition_editor(
                         .id_salt("definition_editor.property_tree")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            draw_property_tree(ui, state, &active_draft, definitions, libraries);
+                            draw_property_tree(ui, state, &active_draft, preview_registry.as_ref());
                         });
                 },
             );
@@ -2316,6 +2427,7 @@ fn draw_definition_editor(
                                     pending,
                                     &active_draft_id,
                                     &active_draft,
+                                    preview_registry.as_ref(),
                                     status,
                                     material_registry,
                                 );
@@ -2368,17 +2480,14 @@ fn draw_property_tree(
     ui: &mut egui::Ui,
     state: &mut DefinitionsWindowState,
     draft: &DefinitionDraft,
-    definitions: &DefinitionRegistry,
-    libraries: &DefinitionLibraryRegistry,
+    preview_registry: &DefinitionRegistry,
 ) {
     let def = &draft.working_copy;
     let compound = def.body.compound.as_ref();
 
     // Helper: resolve a child definition's human-readable name given its id.
-    let preview_reg = preview_registry_for_draft(definitions, libraries, draft)
-        .unwrap_or_else(|_| definitions.clone());
     let child_def_name = |child_id: &crate::plugins::modeling::definition::DefinitionId| -> String {
-        preview_reg
+        preview_registry
             .effective_definition(child_id)
             .map(|d| d.name)
             .unwrap_or_else(|_| child_id.to_string())
@@ -3109,6 +3218,7 @@ fn draw_context_editor(
     pending: &mut PendingCommandInvocations,
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
+    preview_registry: &DefinitionRegistry,
     status: &mut StatusBarData,
     material_registry: &MaterialRegistry,
 ) {
@@ -3124,6 +3234,7 @@ fn draw_context_editor(
                 pending,
                 active_draft_id,
                 active_draft,
+                preview_registry,
                 status,
             );
         }
@@ -3137,6 +3248,7 @@ fn draw_context_editor(
                 active_draft_id,
                 active_draft,
                 name,
+                preview_registry,
                 status,
             );
         }
@@ -3151,6 +3263,7 @@ fn draw_context_editor(
                 active_draft_id,
                 active_draft,
                 slot_id,
+                preview_registry,
                 status,
                 material_registry,
             );
@@ -3287,6 +3400,7 @@ fn draw_context_definition_root(
     pending: &mut PendingCommandInvocations,
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
+    preview_registry: &DefinitionRegistry,
     status: &mut StatusBarData,
 ) {
     let def = &active_draft.working_copy;
@@ -3333,7 +3447,9 @@ fn draw_context_definition_root(
 
     ui.add_space(4.0);
 
-    let validation_result = validate_draft(definitions, libraries, active_draft);
+    let validation_result = preview_registry
+        .validate_definition(&active_draft.working_copy)
+        .and_then(|_| preview_registry.effective_definition(&active_draft.working_copy.id));
     if let Err(ref error) = validation_result {
         ui.colored_label(egui::Color32::from_rgb(220, 90, 90), error);
     } else {
@@ -3343,8 +3459,9 @@ fn draw_context_definition_root(
         );
     }
 
-    if let Ok(preview_reg) = preview_registry_for_draft(definitions, libraries, active_draft) {
-        match preview_reg.resolve_params_checked(&def.id, &state.selected_occurrence_overrides) {
+    {
+        match preview_registry.resolve_params_checked(&def.id, &state.selected_occurrence_overrides)
+        {
             Ok(resolved) => draw_effective_parameter_table(
                 ui,
                 "Effective parameters",
@@ -3485,11 +3602,13 @@ fn draw_context_parameter(
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
     parameter_name: &str,
+    preview_registry: &DefinitionRegistry,
     status: &mut StatusBarData,
 ) {
     // Resolve the parameter from the effective definition (includes inherited).
-    let effective_definition =
-        draft_effective_definition(definitions, libraries, active_draft).ok();
+    let effective_definition = preview_registry
+        .effective_definition(&active_draft.working_copy.id)
+        .ok();
     let Some(effective) = effective_definition.as_ref() else {
         ui.label("Draft is currently invalid; cannot edit parameter.");
         return;
@@ -3530,9 +3649,9 @@ fn draw_context_parameter(
     });
     ui.separator();
 
-    if let Ok(preview_reg) = preview_registry_for_draft(definitions, libraries, active_draft) {
-        if let Ok(resolved) =
-            preview_reg.resolve_params_checked(&effective.id, &state.selected_occurrence_overrides)
+    {
+        if let Ok(resolved) = preview_registry
+            .resolve_params_checked(&effective.id, &state.selected_occurrence_overrides)
         {
             if let Some(resolved_param) = resolved.get(parameter_name) {
                 let is_bound = state.selected_occurrence_overrides.contains(parameter_name);
@@ -3656,6 +3775,7 @@ fn draw_context_slot(
     active_draft_id: &DefinitionDraftId,
     active_draft: &DefinitionDraft,
     slot_id: &str,
+    preview_registry: &DefinitionRegistry,
     status: &mut StatusBarData,
     material_registry: &MaterialRegistry,
 ) {
@@ -3677,9 +3797,9 @@ fn draw_context_slot(
     }
 
     // Resolve child definition name (never show raw id to the user)
-    let preview_reg = preview_registry_for_draft(definitions, libraries, active_draft)
-        .unwrap_or_else(|_| definitions.clone());
-    let child_def = preview_reg.effective_definition(&slot.definition_id).ok();
+    let child_def = preview_registry
+        .effective_definition(&slot.definition_id)
+        .ok();
     let child_def_name = child_def
         .as_ref()
         .map(|d| d.name.clone())
@@ -3689,16 +3809,16 @@ fn draw_context_slot(
     ui.separator();
 
     match resolve_compound_slot_occurrence_context_with_root_overrides(
-        &preview_reg,
+        preview_registry,
         &active_draft.working_copy.id,
         &state.selected_occurrence_overrides,
         slot_id,
     ) {
         Ok(context) => {
             if let Ok(component_definition) =
-                preview_reg.effective_definition(&context.definition_id)
+                preview_registry.effective_definition(&context.definition_id)
             {
-                match preview_reg
+                match preview_registry
                     .resolve_bound_params_checked(&context.definition_id, &context.overrides)
                 {
                     Ok(resolved) => draw_effective_parameter_table(
@@ -3737,7 +3857,7 @@ fn draw_context_slot(
             .selected_text(child_def_name.clone())
             .width(220.0)
             .show_ui(ui, |ui| {
-                let mut choices = preview_reg.list();
+                let mut choices = preview_registry.list();
                 choices.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.0.cmp(&b.id.0)));
                 for definition in choices
                     .into_iter()
@@ -5653,6 +5773,61 @@ mod tests {
         let shown = cache.entries(&registry, &libraries, None, true, "");
         assert_eq!(shown.len(), 2);
         assert!(cache.contains_id("int"));
+    }
+
+    #[test]
+    fn preview_registry_cache_reuses_source_until_a_generation_changes() {
+        let mut definitions = DefinitionRegistry::default();
+        definitions.insert(test_definition("a", "Alpha", Vec::new()));
+        let libraries = DefinitionLibraryRegistry::default();
+        let mut cache = PreviewRegistryCache::default();
+
+        let first = cache.selected_source(&definitions, &libraries, None);
+        let second = cache.selected_source(&definitions, &libraries, None);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "ordinary repaint frames must reuse the derived registry allocation"
+        );
+
+        definitions.insert(test_definition("b", "Beta", Vec::new()));
+        let third = cache.selected_source(&definitions, &libraries, None);
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert!(third.get(&DefinitionId("b".into())).is_some());
+    }
+
+    #[test]
+    fn preview_registry_cache_rebuilds_after_draft_mutation() {
+        let definitions = DefinitionRegistry::default();
+        let libraries = DefinitionLibraryRegistry::default();
+        let mut drafts = DefinitionDraftRegistry::default();
+        let draft_id = drafts.insert(DefinitionDraft {
+            draft_id: DefinitionDraftId::new(),
+            source_definition_id: None,
+            source_library_id: None,
+            working_copy: test_definition("draft", "Draft A", Vec::new()),
+            dirty: false,
+        });
+        let mut cache = PreviewRegistryCache::default();
+
+        let draft = drafts.get(&draft_id).unwrap().clone();
+        let first = cache
+            .draft(&definitions, &libraries, &drafts, &draft)
+            .unwrap();
+        let second = cache
+            .draft(&definitions, &libraries, &drafts, &draft)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        drafts.get_mut(&draft_id).unwrap().working_copy.name = "Draft B".into();
+        let updated = drafts.get(&draft_id).unwrap().clone();
+        let third = cache
+            .draft(&definitions, &libraries, &drafts, &updated)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(
+            third.get(&DefinitionId("draft".into())).unwrap().name,
+            "Draft B"
+        );
     }
 
     #[test]

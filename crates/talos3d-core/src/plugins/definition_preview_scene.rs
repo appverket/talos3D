@@ -49,6 +49,7 @@ use bevy_egui::{egui, EguiContexts, EguiTextureHandle};
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    sync::Arc,
 };
 
 use crate::plugins::{
@@ -62,6 +63,7 @@ use crate::plugins::{
         primitives::ShapeRotation,
         profile::ProfileExtrusion,
     },
+    registry_generation::RegistryGeneration,
 };
 
 // ---------------------------------------------------------------------------
@@ -147,9 +149,10 @@ pub struct DefinitionPreviewScene {
     /// The current occurrence root entity, or `Entity::PLACEHOLDER` when no
     /// occurrence is materialised.
     pub occurrence_root: Entity,
-    /// Signature of the registry snapshot used for the current materialised
-    /// occurrence.
-    pub current_registry_signature: u64,
+    /// Change stamps of the registry and small occurrence-override map used
+    /// for the current materialised occurrence.
+    pub current_registry_generation: Option<RegistryGeneration>,
+    pub current_overrides_signature: u64,
     /// Camera distance multiplier. Lower values zoom in; higher values zoom
     /// out. The camera is re-framed from current preview bounds so selection
     /// and parameter changes update the view without manual refresh.
@@ -171,34 +174,37 @@ pub struct DefinitionPreviewScene {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct DefinitionPreviewTarget {
     pub definition_id: Option<DefinitionId>,
-    pub registry: DefinitionRegistry,
+    pub registry: Arc<DefinitionRegistry>,
     pub overrides: OverrideMap,
-    pub registry_signature: u64,
+    pub registry_generation: Option<RegistryGeneration>,
+    pub overrides_signature: u64,
 }
 
 impl DefinitionPreviewTarget {
-    pub fn request(&mut self, definition_id: DefinitionId, registry: DefinitionRegistry) {
+    pub fn request(&mut self, definition_id: DefinitionId, registry: Arc<DefinitionRegistry>) {
         self.request_with_overrides(definition_id, registry, OverrideMap::default());
     }
 
     pub fn request_with_overrides(
         &mut self,
         definition_id: DefinitionId,
-        registry: DefinitionRegistry,
+        registry: Arc<DefinitionRegistry>,
         overrides: OverrideMap,
     ) {
-        let registry_signature = registry_signature(&registry);
+        let registry_generation = registry.generation();
         self.definition_id = Some(definition_id);
         self.registry = registry;
         self.overrides = overrides;
-        self.registry_signature = preview_target_signature(registry_signature, &self.overrides);
+        self.registry_generation = Some(registry_generation);
+        self.overrides_signature = overrides_signature(&self.overrides);
     }
 
     pub fn clear(&mut self) {
         self.definition_id = None;
-        self.registry = DefinitionRegistry::default();
+        self.registry = Arc::default();
         self.overrides = OverrideMap::default();
-        self.registry_signature = 0;
+        self.registry_generation = None;
+        self.overrides_signature = 0;
     }
 }
 
@@ -352,7 +358,8 @@ fn setup_preview_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>
         camera_entity,
         light_entity,
         occurrence_root: Entity::PLACEHOLDER,
-        current_registry_signature: 0,
+        current_registry_generation: None,
+        current_overrides_signature: 0,
         camera_distance_scale: 1.0,
         current_texture_size: initial_texture_size,
         requested_texture_size: initial_texture_size,
@@ -406,13 +413,20 @@ fn configure_preview_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 /// Despawns all preview entities except the camera and directional light, then
 /// renders a fresh synthetic occurrence against the submitted preview registry.
 pub fn sync_preview_to_target(world: &mut World) {
-    let (target_definition_id, preview_registry, preview_overrides, registry_signature) = {
+    let (
+        target_definition_id,
+        preview_registry,
+        preview_overrides,
+        registry_generation,
+        overrides_signature,
+    ) = {
         let target = world.resource::<DefinitionPreviewTarget>();
         (
             target.definition_id.clone(),
-            target.registry.clone(),
+            Arc::clone(&target.registry),
             target.overrides.clone(),
-            target.registry_signature,
+            target.registry_generation,
+            target.overrides_signature,
         )
     };
 
@@ -420,7 +434,8 @@ pub fn sync_preview_to_target(world: &mut World) {
     let needs_respawn = {
         let scene = world.resource::<DefinitionPreviewScene>();
         scene.current_definition_id != target_definition_id
-            || scene.current_registry_signature != registry_signature
+            || scene.current_registry_generation != registry_generation
+            || scene.current_overrides_signature != overrides_signature
     };
 
     if !needs_respawn {
@@ -466,7 +481,7 @@ pub fn sync_preview_to_target(world: &mut World) {
 
         match render_occurrence(
             world,
-            &preview_registry,
+            preview_registry.as_ref(),
             PREVIEW_ELEMENT_ID_SENTINEL,
             &identity,
             Transform::default(),
@@ -490,7 +505,8 @@ pub fn sync_preview_to_target(world: &mut World) {
         let mut scene = world.resource_mut::<DefinitionPreviewScene>();
         scene.current_definition_id = target_definition_id;
         scene.occurrence_root = new_root;
-        scene.current_registry_signature = registry_signature;
+        scene.current_registry_generation = registry_generation;
+        scene.current_overrides_signature = overrides_signature;
         (scene.camera_entity, scene.camera_distance_scale)
     };
     frame_preview_camera(world, camera_entity, camera_distance_scale);
@@ -720,6 +736,7 @@ pub fn draw_definition_3d_preview(
     ui: &mut egui::Ui,
     contexts: &mut EguiContexts,
     scene: &mut DefinitionPreviewScene,
+    target: &DefinitionPreviewTarget,
     pending_click: &mut PendingPreviewClick,
     available_height: f32,
 ) {
@@ -753,6 +770,25 @@ pub fn draw_definition_3d_preview(
             let image_size = egui::vec2(width, image_height);
             scene.requested_texture_size =
                 preview_texture_size_for_display(image_size.x, image_size.y);
+
+            let target_is_current = scene.current_definition_id == target.definition_id
+                && scene.current_registry_generation == target.registry_generation
+                && scene.current_overrides_signature == target.overrides_signature;
+            if !target_is_current {
+                // The target is requested during the egui pass, before Bevy's
+                // preview sync system runs. Hide the old render texture during
+                // that one-frame transition so opening a numerical property
+                // never flashes unrelated 3D content.
+                ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                    ui.add_space(image_height * 0.35);
+                    ui.label(
+                        egui::RichText::new("Updating preview…")
+                            .small()
+                            .color(egui::Color32::from_rgb(165, 176, 184)),
+                    );
+                });
+                return;
+            }
 
             if scene.current_definition_id.is_none() {
                 // Blank placeholder — same wording as the old `draw_empty_definition_preview`.
@@ -909,23 +945,8 @@ fn selected_slot_id_from_node(node: &DefinitionEditorNode) -> Option<String> {
     }
 }
 
-fn registry_signature(registry: &DefinitionRegistry) -> u64 {
-    let mut entries = registry.list();
-    entries.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+fn overrides_signature(overrides: &OverrideMap) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for definition in entries {
-        definition.id.hash(&mut hasher);
-        definition.definition_version.hash(&mut hasher);
-        if let Ok(serialized) = serde_json::to_string(definition) {
-            serialized.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-fn preview_target_signature(registry_signature: u64, overrides: &OverrideMap) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    registry_signature.hash(&mut hasher);
     if let Ok(serialized) = serde_json::to_string(overrides) {
         serialized.hash(&mut hasher);
     }

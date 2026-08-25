@@ -13,8 +13,7 @@ use crate::{
         camera::OrbitCamera,
         commands::CreateEntityCommand,
         cursor::{
-            cursor_window_position as mapped_cursor_window_position, CursorWorldPos,
-            DrawingPlane,
+            cursor_window_position as mapped_cursor_window_position, CursorWorldPos, DrawingPlane,
         },
         drafting::{
             authoring::resting_draft_plane, draft::DraftNode, workspace::DraftingWorkspaceState,
