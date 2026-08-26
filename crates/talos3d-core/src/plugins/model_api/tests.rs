@@ -1,5 +1,5 @@
 use super::*;
-use crate::capability_registry::CapabilityRegistry;
+use crate::capability_registry::{CapabilityRegistry, GeneratedFaceRef};
 #[cfg(feature = "model-api")]
 use crate::importers::obj::ObjImporter;
 #[cfg(feature = "model-api")]

@@ -17,8 +17,8 @@ use serde_json::Value;
 use crate::authored_entity::AuthoredEntity;
 use crate::authored_entity::{BoxedEntity, PropertyValueKind};
 use crate::capability_registry::{
-    CapabilityRegistry, FaceId, GeneratedEdgeRef, GeneratedFaceRef, SelectableSubobjectInfo,
-    SelectableSubobjectRef, SubobjectDisplayOverrides, SubobjectSelection,
+    CapabilityRegistry, FaceId, GeneratedEdgeRef, SelectableSubobjectInfo, SelectableSubobjectRef,
+    SubobjectDisplayOverrides, SubobjectSelection,
 };
 #[cfg(feature = "model-api")]
 use crate::curation::api::{DraftMaterialSpecRequest, ListMaterialSpecsFilter, MaterialSpecInfo};
@@ -56,11 +56,10 @@ use crate::plugins::modeling::group::{GroupEditContext, GroupMembers};
 use crate::plugins::modeling::occurrence::HostedAnchor;
 use crate::plugins::modeling::semantics::{geometry_semantics_for_snapshot, GeometrySemantics};
 #[cfg(feature = "model-api")]
-use crate::plugins::modeling::{
-    editable_mesh::EditableMesh,
-    primitive_trait::Primitive,
-    primitives::{BoxPrimitive, CylinderPrimitive, PlanePrimitive, ShapeRotation, SpherePrimitive},
-    profile::{ProfileExtrusion, ProfileRevolve, ProfileSweep},
+use crate::plugins::modeling::subobject_topology::{
+    canonical_edge_indices, canonical_half_edge_index, evaluated_subobject_mesh,
+    generated_edge_ref_for_half_edge, generated_face_ref_for_entity, resolve_edge_ref,
+    resolve_face_ref,
 };
 #[cfg(feature = "model-api")]
 use crate::plugins::render_pipeline::{EdgeDisplayMode, RenderSettings, RenderTonemapping};
@@ -3455,13 +3454,8 @@ fn handle_list_subobjects(
         }
     }
 
-    let mut seen_edges = HashSet::new();
     let display_overrides = entity_ref.get::<SubobjectDisplayOverrides>();
-    for half_edge_index in 0..mesh.half_edges.len() as u32 {
-        let canonical = canonical_half_edge_index(&mesh, half_edge_index);
-        if !seen_edges.insert(canonical) {
-            continue;
-        }
+    for canonical in canonical_edge_indices(&mesh) {
         let edge_ref = generated_edge_ref_for_half_edge(&mesh, &entity_ref, canonical);
         let hidden = display_overrides.is_some_and(|overrides| overrides.is_edge_hidden(&edge_ref));
         out.push(SelectableSubobjectInfo {
@@ -3729,161 +3723,6 @@ fn validate_subobject_refs(world: &World, refs: &[SelectableSubobjectRef]) -> Re
         }
     }
     Ok(())
-}
-
-#[cfg(feature = "model-api")]
-fn evaluated_subobject_mesh(entity_ref: &EntityRef) -> Option<EditableMesh> {
-    if let Some(mesh) = entity_ref.get::<EditableMesh>() {
-        return Some(mesh.clone());
-    }
-    let rotation = entity_ref
-        .get::<ShapeRotation>()
-        .copied()
-        .unwrap_or_default()
-        .0;
-    entity_ref
-        .get::<BoxPrimitive>()
-        .and_then(|primitive| primitive.to_editable_mesh(rotation))
-        .or_else(|| {
-            entity_ref
-                .get::<CylinderPrimitive>()
-                .and_then(|primitive| primitive.to_editable_mesh(rotation))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<SpherePrimitive>()
-                .and_then(|primitive| primitive.to_editable_mesh(rotation))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<PlanePrimitive>()
-                .and_then(|primitive| primitive.to_editable_mesh(rotation))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<ProfileExtrusion>()
-                .and_then(|primitive| primitive.to_editable_mesh(rotation))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<ProfileSweep>()
-                .and_then(|primitive| primitive.to_editable_mesh(rotation))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<ProfileRevolve>()
-                .and_then(|primitive| primitive.to_editable_mesh(rotation))
-        })
-}
-
-#[cfg(feature = "model-api")]
-fn generated_face_ref_for_entity(
-    entity_ref: &EntityRef,
-    face_id: FaceId,
-) -> Option<GeneratedFaceRef> {
-    entity_ref
-        .get::<BoxPrimitive>()
-        .and_then(|primitive| primitive.generated_face_ref(face_id))
-        .or_else(|| {
-            entity_ref
-                .get::<CylinderPrimitive>()
-                .and_then(|primitive| primitive.generated_face_ref(face_id))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<PlanePrimitive>()
-                .and_then(|primitive| primitive.generated_face_ref(face_id))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<ProfileExtrusion>()
-                .and_then(|primitive| primitive.generated_face_ref(face_id))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<ProfileSweep>()
-                .and_then(|primitive| primitive.generated_face_ref(face_id))
-        })
-        .or_else(|| {
-            entity_ref
-                .get::<ProfileRevolve>()
-                .and_then(|primitive| primitive.generated_face_ref(face_id))
-        })
-}
-
-#[cfg(feature = "model-api")]
-fn canonical_half_edge_index(mesh: &EditableMesh, half_edge_index: u32) -> u32 {
-    let half_edge = &mesh.half_edges[half_edge_index as usize];
-    if half_edge.twin == u32::MAX {
-        half_edge_index
-    } else {
-        half_edge_index.min(half_edge.twin)
-    }
-}
-
-#[cfg(feature = "model-api")]
-fn generated_edge_ref_for_half_edge(
-    mesh: &EditableMesh,
-    entity_ref: &EntityRef,
-    half_edge_index: u32,
-) -> GeneratedEdgeRef {
-    let canonical = canonical_half_edge_index(mesh, half_edge_index);
-    let (face_a, face_b) = mesh.faces_adjacent_to_edge(canonical);
-    let first = generated_face_ref_for_entity(entity_ref, FaceId(face_a));
-    let second =
-        face_b.and_then(|face_id| generated_face_ref_for_entity(entity_ref, FaceId(face_id)));
-    match (first, second) {
-        (Some(a), Some(b)) => {
-            let (first, second) = if a.label() <= b.label() {
-                (a, b)
-            } else {
-                (b, a)
-            };
-            GeneratedEdgeRef::BetweenFaces {
-                first,
-                second,
-                edge_index: canonical,
-            }
-        }
-        (Some(face), None) | (None, Some(face)) => GeneratedEdgeRef::BoundaryOfFace {
-            face,
-            edge_index: canonical,
-        },
-        (None, None) => GeneratedEdgeRef::EditableMeshEdge(canonical),
-    }
-}
-
-#[cfg(feature = "model-api")]
-fn resolve_face_ref(
-    entity_ref: &EntityRef,
-    mesh: &EditableMesh,
-    target: &GeneratedFaceRef,
-) -> Option<FaceId> {
-    (0..mesh.faces.len() as u32).find_map(|face_index| {
-        (mesh.faces[face_index as usize].half_edge != u32::MAX
-            && generated_face_ref_for_entity(entity_ref, FaceId(face_index)).as_ref()
-                == Some(target))
-        .then_some(FaceId(face_index))
-    })
-}
-
-#[cfg(feature = "model-api")]
-fn resolve_edge_ref(
-    entity_ref: &EntityRef,
-    mesh: &EditableMesh,
-    target: &GeneratedEdgeRef,
-) -> Option<u32> {
-    let mut seen_edges = HashSet::new();
-    for half_edge_index in 0..mesh.half_edges.len() as u32 {
-        let canonical = canonical_half_edge_index(mesh, half_edge_index);
-        if !seen_edges.insert(canonical) {
-            continue;
-        }
-        if &generated_edge_ref_for_half_edge(mesh, entity_ref, canonical) == target {
-            return Some(canonical);
-        }
-    }
-    None
 }
 
 #[cfg(feature = "model-api")]

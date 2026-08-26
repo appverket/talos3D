@@ -30,6 +30,7 @@ pub mod semantics;
 pub mod snapshots;
 pub mod solid_ops;
 pub mod spatial_container;
+pub mod subobject_topology;
 pub mod tools;
 pub mod triangulate;
 pub mod void_declaration;

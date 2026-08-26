@@ -53,7 +53,7 @@ impl Plugin for DrawingExportPlugin {
             .add_systems(
                 Update,
                 (
-                    suppress_gizmos_during_viewport_export,
+                    suppress_overlays_during_viewport_export,
                     process_pending_viewport_export,
                 )
                     .chain()
@@ -244,6 +244,12 @@ struct ViewportExportCleanup {
     camera_entity: Entity,
     render_target: Handle<Image>,
 }
+
+/// Marks a derived overlay entity that must not appear in a clean viewport
+/// export. Use it for interaction feedback that is drawn as real geometry
+/// rather than as a gizmo — the model is the evidence, the highlight is not.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct HiddenDuringViewportExport;
 
 #[derive(Resource, Debug, Default, Clone)]
 pub(crate) struct ViewportExportState {
@@ -536,7 +542,7 @@ fn queue_screenshot_export(
     Ok(())
 }
 
-/// Hide every gizmo overlay while a **viewport** export is in flight.
+/// Hide every viewport overlay while a **viewport** export is in flight.
 ///
 /// `take_screenshot` is the harness's evidence channel: agents accept or reject
 /// a model by looking at what it returns. The viewport also carries manipulator
@@ -549,19 +555,32 @@ fn queue_screenshot_export(
 /// App-window captures (`include_ui: true`) deliberately keep them: that scope
 /// means "show me the application", where the overlays are the subject.
 ///
+/// Not every overlay is a gizmo: highlights that need a shader — the selected
+/// face's stipple raster, for one — are real meshes. They are still instrument
+/// rather than model, so they carry [`HiddenDuringViewportExport`] and are
+/// hidden by the same countdown.
+///
 /// The countdown covers the frames between dispatching the capture and the
-/// renderer actually resolving it; restoring immediately would put the gizmos
+/// renderer actually resolving it; restoring immediately would put the overlays
 /// back before the image is taken.
-fn suppress_gizmos_during_viewport_export(
+fn suppress_overlays_during_viewport_export(
     export_state: Res<ViewportExportState>,
     mut config_store: ResMut<GizmoConfigStore>,
+    mut overlay_query: Query<&mut Visibility, With<HiddenDuringViewportExport>>,
     mut saved: Local<Vec<(std::any::TypeId, bool)>>,
+    mut saved_overlays: Local<bool>,
     mut grace: Local<u8>,
 ) {
     const GRACE_FRAMES: u8 = 4;
 
     if export_state.ui_suppressed() {
         *grace = GRACE_FRAMES;
+        if !*saved_overlays {
+            *saved_overlays = true;
+            for mut visibility in &mut overlay_query {
+                *visibility = Visibility::Hidden;
+            }
+        }
         if saved.is_empty() {
             for (type_id, config, _) in config_store.iter_mut() {
                 saved.push((*type_id, config.enabled));
@@ -571,12 +590,18 @@ fn suppress_gizmos_during_viewport_export(
         return;
     }
 
-    if saved.is_empty() {
+    if saved.is_empty() && !*saved_overlays {
         return;
     }
     if *grace > 0 {
         *grace -= 1;
         return;
+    }
+    if *saved_overlays {
+        *saved_overlays = false;
+        for mut visibility in &mut overlay_query {
+            *visibility = Visibility::Visible;
+        }
     }
     for (type_id, config, _) in config_store.iter_mut() {
         if let Some((_, was_enabled)) = saved.iter().find(|(id, _)| id == type_id) {

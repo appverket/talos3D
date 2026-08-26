@@ -19,6 +19,9 @@ use crate::{
         drafting::{
             authoring::resting_draft_plane, draft::DraftNode, workspace::DraftingWorkspaceState,
         },
+        edge_selection::{
+            selected_edges, EdgePickSystems, EdgePressCapture, EdgeSelectionPlugin, HoveredEdge,
+        },
         egui_chrome::{ChromeInputCapture, EguiWantsInput},
         identity::{ElementId, ElementIdAllocator},
         input_ownership::{InputOwnership, InputPhase},
@@ -37,6 +40,7 @@ use crate::{
         },
         scene_ray,
         selection::Selected,
+        subobject_overlay::SubobjectOverlayPlugin,
         tools::ActiveTool,
         transform::{
             start_transform_mode_with_options, AxisConstraint, TransformMode, TransformShortcuts,
@@ -47,7 +51,6 @@ use crate::{
 };
 const FACE_HIGHLIGHT_EDGE: Color = Color::srgba(0.3, 0.7, 1.0, 0.8);
 const FACE_SELECTED_EDGE: Color = Color::srgb(0.2, 1.0, 0.4);
-const FACE_SELECTED_HATCH: Color = Color::srgba(0.2, 1.0, 0.4, 0.42);
 const FACE_NORMAL_LENGTH: f32 = 0.5;
 const FACE_NORMAL_COLOR: Color = Color::srgb(0.3, 0.9, 1.0);
 const PUSHPULL_EDGE_COLOR: Color = Color::srgb(1.0, 0.7, 0.0);
@@ -62,7 +65,11 @@ pub struct FaceEditPlugin;
 
 impl Plugin for FaceEditPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<FaceEditContext>()
+        // Subobject picking and subobject highlighting are the two halves of
+        // face editing that the mode cannot be used without, so they compose
+        // here rather than needing separate registration in every app binary.
+        app.add_plugins((EdgeSelectionPlugin, SubobjectOverlayPlugin))
+            .init_resource::<FaceEditContext>()
             .init_resource::<HoveredFace>()
             .init_resource::<PressCapture>()
             .init_resource::<FaceClickTracker>()
@@ -78,6 +85,10 @@ impl Plugin for FaceEditPlugin {
                         .run_if(not_drawing),
                     handle_face_click
                         .in_set(InputPhase::ToolInput)
+                        // The edge picker resolves first and flags the pointer
+                        // event it owns, so a click that landed on an edge does
+                        // not also move the face selection.
+                        .after(EdgePickSystems)
                         .run_if(face_edit_active)
                         .run_if(not_drawing),
                     handle_face_escape
@@ -138,7 +149,7 @@ pub struct PushPullFace {
     pub live_csg: Option<ElementId>,
 }
 
-fn face_edit_active(context: Res<FaceEditContext>) -> bool {
+pub fn face_edit_active(context: Res<FaceEditContext>) -> bool {
     context.is_active()
 }
 
@@ -326,8 +337,18 @@ fn handle_face_click(
     mut click_tracker: ResMut<FaceClickTracker>,
     mut subobject_selection: ResMut<SubobjectSelection>,
     ownership: Res<InputOwnership>,
+    edge_press: Res<EdgePressCapture>,
 ) {
     if !ownership.is_idle() {
+        return;
+    }
+
+    // An edge under the cursor takes the click. Faces are the fallback target,
+    // exactly as in SketchUp, where edges win over the surface behind them.
+    if edge_press.consumed_pointer() {
+        press_capture.face_hit = None;
+        press_capture.cursor_screen = None;
+        press_capture.shift_held = false;
         return;
     }
 
@@ -587,7 +608,9 @@ fn draw_face_highlights(world: &World, mut gizmos: Gizmos) {
                 FACE_SELECTED_EDGE,
             );
             if !is_drawing {
-                draw_face_hatch(&mut gizmos, &verts, selected.normal, FACE_SELECTED_HATCH);
+                // The face fill itself is the GPU stipple overlay in
+                // `subobject_overlay`; gizmos only carry the outline and the
+                // push/pull normal.
                 let tip = selected.centroid + selected.normal * FACE_NORMAL_LENGTH;
                 let (tangent, _) = normal_basis(selected.normal);
                 let arrow_size = FACE_NORMAL_LENGTH * 0.2;
@@ -612,42 +635,6 @@ fn draw_face_outline(gizmos: &mut Gizmos, verts: &[Vec3], color: Color) {
     let n = verts.len();
     for i in 0..n {
         gizmos.line(verts[i], verts[(i + 1) % n], color);
-    }
-}
-
-fn draw_face_hatch(gizmos: &mut Gizmos, verts: &[Vec3], normal: Vec3, color: Color) {
-    if verts.len() < 3 {
-        return;
-    }
-    let (mut min, mut max) = (verts[0], verts[0]);
-    for &v in verts.iter().skip(1) {
-        min = min.min(v);
-        max = max.max(v);
-    }
-    let center = verts.iter().copied().sum::<Vec3>() / verts.len() as f32;
-    let (tangent, bitangent) = normal_basis(normal);
-    let tangent_extent = verts
-        .iter()
-        .map(|v| (*v - center).dot(tangent).abs())
-        .fold(0.0_f32, f32::max);
-    let bitangent_extent = verts
-        .iter()
-        .map(|v| (*v - center).dot(bitangent).abs())
-        .fold(0.0_f32, f32::max);
-    if tangent_extent < 0.02 || bitangent_extent < 0.02 {
-        return;
-    }
-
-    let diagonal = (max - min).length().max(0.1);
-    let spacing = (diagonal / 14.0).clamp(0.08, 0.45);
-    let line_count = ((bitangent_extent * 2.0) / spacing).ceil().clamp(3.0, 18.0) as i32;
-    let start = -(line_count as f32 - 1.0) * spacing * 0.5;
-    let offset = normal.normalize_or_zero() * 0.004;
-    for i in 0..line_count {
-        let b = start + i as f32 * spacing;
-        let span = tangent_extent * 0.72;
-        let origin = center + bitangent * b + offset;
-        gizmos.line(origin - tangent * span, origin + tangent * span, color);
     }
 }
 
@@ -1108,6 +1095,12 @@ fn update_face_edit_status(world: &mut World) {
         return;
     }
 
+    let selected_edge_count = face_context
+        .element_id
+        .map(|element_id| selected_edges(world.resource::<SubobjectSelection>(), element_id).count())
+        .unwrap_or(0);
+    let hovered_edge = world.resource::<HoveredEdge>().hit.clone();
+
     let mut parts = Vec::new();
     parts.push("Face editing".to_string());
     if drawing.active {
@@ -1122,6 +1115,16 @@ fn update_face_edit_status(world: &mut World) {
                 "Drawing ({mode}) {n} pts · click to add · A: arc · Esc to cancel"
             ));
         }
+    } else if let Some(hit) = &hovered_edge {
+        parts.push(format!(
+            "Hover: {} · Click to select · Shift-click to add or remove",
+            hit.edge.label()
+        ));
+    } else if selected_edge_count > 0 {
+        let plural = if selected_edge_count == 1 { "" } else { "s" };
+        parts.push(format!(
+            "{selected_edge_count} edge{plural} selected · Shift-click an edge to add or remove"
+        ));
     } else if let Some(selected) = &face_context.selected_face {
         let label = selected
             .generated_face_ref
