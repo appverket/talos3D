@@ -124,13 +124,18 @@ mod tests {
     fn a_single_pending_intent_resolves_for_any_building() {
         let mut store = PendingElevationIntents::default();
         store.declare(None, elevations());
-        assert!(store.resolve_for("Whatever the building is called").is_some());
+        assert!(store
+            .resolve_for("Whatever the building is called")
+            .is_some());
     }
 
     #[test]
     fn a_matching_label_wins_over_position() {
         let mut store = PendingElevationIntents::default();
-        store.declare(Some("Barn".into()), serde_json::json!([{ "elevation": "north" }]));
+        store.declare(
+            Some("Barn".into()),
+            serde_json::json!([{ "elevation": "north" }]),
+        );
         let cottage = store.declare(Some("Cottage".into()), elevations());
         let resolved = store.resolve_for("cottage").expect("label match");
         assert_eq!(resolved.intent_id, cottage);
@@ -149,7 +154,10 @@ mod tests {
     #[test]
     fn redeclaring_a_label_replaces_rather_than_accumulates() {
         let mut store = PendingElevationIntents::default();
-        store.declare(Some("Cottage".into()), serde_json::json!([{ "elevation": "north" }]));
+        store.declare(
+            Some("Cottage".into()),
+            serde_json::json!([{ "elevation": "north" }]),
+        );
         let second = store.declare(Some("Cottage".into()), elevations());
         assert_eq!(store.len(), 1);
         assert_eq!(store.resolve_for("Cottage").unwrap().intent_id, second);

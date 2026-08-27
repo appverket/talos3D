@@ -180,9 +180,13 @@ pub fn compute_elevation_profile_for(
     let mut material_ids: Vec<Option<String>> = vec![None];
     let mut triangles: Vec<([Vec3; 3], u32)> = Vec::new();
 
-    let mut query = world
-        .try_query_filtered::<(Entity, &Mesh3d, &GlobalTransform, Option<&MaterialAssignment>, Option<&Visibility>), ()>(
-        )?;
+    let mut query = world.try_query_filtered::<(
+        Entity,
+        &Mesh3d,
+        &GlobalTransform,
+        Option<&MaterialAssignment>,
+        Option<&Visibility>,
+    ), ()>()?;
     let (view_dir, u_axis) = direction.axes();
 
     for (entity, mesh_handle, transform, assignment, visibility) in query.iter(world) {
@@ -296,7 +300,10 @@ pub fn compute_elevation_profile_for(
         let from = row as f32 * cell_height;
         let to = from + cell_height;
         match centre_bands.last_mut() {
-            Some(last) if last.material_id == id && (from - last.to_height_m).abs() < cell_height * 0.5 => {
+            Some(last)
+                if last.material_id == id
+                    && (from - last.to_height_m).abs() < cell_height * 0.5 =>
+            {
                 last.to_height_m = to;
             }
             _ => centre_bands.push(MaterialBand {
@@ -402,12 +409,14 @@ fn find_apexes(upper: &[Option<f32>], cell_width: f32, columns: usize) -> Vec<Ap
         // on that side and that edge is the apex itself. Taking the lower edge
         // keeps a monopitch detectable without admitting a flat roof, where
         // both edges are level with the "peak".
-        let edge_height = [upper.get(left).copied().flatten(), upper.get(right).copied().flatten()]
-            .into_iter()
-            .flatten()
-            .fold(f32::MAX, f32::min);
-        let stands_proud =
-            edge_height == f32::MAX || height - edge_height >= PROMINENCE_M;
+        let edge_height = [
+            upper.get(left).copied().flatten(),
+            upper.get(right).copied().flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(f32::MAX, f32::min);
+        let stands_proud = edge_height == f32::MAX || height - edge_height >= PROMINENCE_M;
 
         if is_local_max && stands_proud {
             apexes.push(Apex {
@@ -513,7 +522,10 @@ mod tests {
             ElevationDirection::parse("South"),
             Some(ElevationDirection::South)
         );
-        assert_eq!(ElevationDirection::parse("w"), Some(ElevationDirection::West));
+        assert_eq!(
+            ElevationDirection::parse("w"),
+            Some(ElevationDirection::West)
+        );
         assert_eq!(ElevationDirection::parse("up"), None);
     }
 

@@ -462,30 +462,31 @@ fn synthesize_parametric_geometry(
 
         // Only the model-api path below consumes this handle.
         #[cfg_attr(not(feature = "model-api"), allow(unused_variables))]
-        let member_entity = world.spawn((
-            eid,
-            extrusion,
-            ShapeRotation(world_rot),
-            NeedsMesh,
-            Visibility::Visible,
-            GlobalTransform::default(),
-            ParametricInstanceRef {
-                instance_id,
-                member_index: member_index as u32,
-                member_label: m.label.clone(),
-            },
-            RefinementStateComponent {
-                state: default_refinement_state,
-            },
-            AuthoringProvenance {
-                mode: AuthoringMode::Freeform,
-                rationale: Some(format!(
-                    "parametric type '{type_id}' instance {instance_id} member {member_index}"
-                )),
-            },
-            claim_grounding,
-        ))
-        .id();
+        let member_entity = world
+            .spawn((
+                eid,
+                extrusion,
+                ShapeRotation(world_rot),
+                NeedsMesh,
+                Visibility::Visible,
+                GlobalTransform::default(),
+                ParametricInstanceRef {
+                    instance_id,
+                    member_index: member_index as u32,
+                    member_label: m.label.clone(),
+                },
+                RefinementStateComponent {
+                    state: default_refinement_state,
+                },
+                AuthoringProvenance {
+                    mode: AuthoringMode::Freeform,
+                    rationale: Some(format!(
+                        "parametric type '{type_id}' instance {instance_id} member {member_index}"
+                    )),
+                },
+                claim_grounding,
+            ))
+            .id();
 
         // Apply per-member semantic annotation (element_class, refinement_state,
         // parameters) if the member declared one.  Uses the same
@@ -511,8 +512,7 @@ fn synthesize_parametric_geometry(
                     }
                     _ => {
                         if let Ok(mut entity_mut) = world.get_entity_mut(member_entity) {
-                            entity_mut
-                                .insert(crate::semantics::ConceptAssignment::new(concept_id));
+                            entity_mut.insert(crate::semantics::ConceptAssignment::new(concept_id));
                         }
                     }
                 }
@@ -1255,8 +1255,8 @@ mod tests {
                 refinement_state: Some("Schematic".into()),
                 parameters: serde_json::json!({ "construction_role": "chord" }),
                 rationale: Some("annotated for test".into()),
-                    concept: None,
-                };
+                concept: None,
+            };
             {
                 let mut reg = w.resource_mut::<ParametricRegistry>();
                 reg.register(annotated_member_type(sem));
@@ -1488,8 +1488,8 @@ mod tests {
                 refinement_state: None,
                 parameters: serde_json::Value::Null,
                 rationale: None,
-                    concept: None,
-                };
+                concept: None,
+            };
             {
                 let mut reg = w.resource_mut::<ParametricRegistry>();
                 reg.register(annotated_member_type(sem));

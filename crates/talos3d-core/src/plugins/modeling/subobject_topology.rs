@@ -32,37 +32,41 @@ use crate::plugins::modeling::{
 macro_rules! first_primitive {
     ($entity_ref:expr, $access:ident, |$primitive:ident| $body:expr) => {{
         let entity_ref = $entity_ref;
-        None.or_else(|| entity_ref.$access::<BoxPrimitive>().and_then(|$primitive| $body))
-            .or_else(|| {
-                entity_ref
-                    .$access::<CylinderPrimitive>()
-                    .and_then(|$primitive| $body)
-            })
-            .or_else(|| {
-                entity_ref
-                    .$access::<SpherePrimitive>()
-                    .and_then(|$primitive| $body)
-            })
-            .or_else(|| {
-                entity_ref
-                    .$access::<PlanePrimitive>()
-                    .and_then(|$primitive| $body)
-            })
-            .or_else(|| {
-                entity_ref
-                    .$access::<ProfileExtrusion>()
-                    .and_then(|$primitive| $body)
-            })
-            .or_else(|| {
-                entity_ref
-                    .$access::<ProfileSweep>()
-                    .and_then(|$primitive| $body)
-            })
-            .or_else(|| {
-                entity_ref
-                    .$access::<ProfileRevolve>()
-                    .and_then(|$primitive| $body)
-            })
+        None.or_else(|| {
+            entity_ref
+                .$access::<BoxPrimitive>()
+                .and_then(|$primitive| $body)
+        })
+        .or_else(|| {
+            entity_ref
+                .$access::<CylinderPrimitive>()
+                .and_then(|$primitive| $body)
+        })
+        .or_else(|| {
+            entity_ref
+                .$access::<SpherePrimitive>()
+                .and_then(|$primitive| $body)
+        })
+        .or_else(|| {
+            entity_ref
+                .$access::<PlanePrimitive>()
+                .and_then(|$primitive| $body)
+        })
+        .or_else(|| {
+            entity_ref
+                .$access::<ProfileExtrusion>()
+                .and_then(|$primitive| $body)
+        })
+        .or_else(|| {
+            entity_ref
+                .$access::<ProfileSweep>()
+                .and_then(|$primitive| $body)
+        })
+        .or_else(|| {
+            entity_ref
+                .$access::<ProfileRevolve>()
+                .and_then(|$primitive| $body)
+        })
     }};
 }
 
@@ -144,7 +148,11 @@ pub fn generated_edge_ref_for_half_edge(
         face_b.and_then(|face_id| generated_face_ref_for_entity(entity_ref, FaceId(face_id)));
     match (first, second) {
         (Some(a), Some(b)) => {
-            let (first, second) = if a.label() <= b.label() { (a, b) } else { (b, a) };
+            let (first, second) = if a.label() <= b.label() {
+                (a, b)
+            } else {
+                (b, a)
+            };
             GeneratedEdgeRef::BetweenFaces {
                 first,
                 second,

@@ -333,7 +333,11 @@ pub(crate) fn face_stipple_mesh(vertices: &[Vec3], normal: Vec3) -> Option<Mesh>
 }
 
 fn plane_basis(normal: Vec3) -> (Vec3, Vec3) {
-    let reference = if normal.y.abs() > 0.9 { Vec3::X } else { Vec3::Y };
+    let reference = if normal.y.abs() > 0.9 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let tangent = normal.cross(reference).normalize();
     (tangent, tangent.cross(normal).normalize())
 }
@@ -341,12 +345,10 @@ fn plane_basis(normal: Vec3) -> (Vec3, Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        plugins::{
-            face_edit::SelectedFace,
-            identity::ElementId,
-            modeling::primitives::{BoxPrimitive, ShapeRotation},
-        },
+    use crate::plugins::{
+        face_edit::SelectedFace,
+        identity::ElementId,
+        modeling::primitives::{BoxPrimitive, ShapeRotation},
     };
 
     /// The real sync system driving a real face-edit selection — the overlay is
@@ -492,7 +494,10 @@ mod tests {
 
         assert!(overlay_entities(&mut app).is_empty());
         assert!(
-            app.world().resource::<Assets<Mesh>>().get(&mesh_handle).is_none(),
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .get(&mesh_handle)
+                .is_none(),
             "the derived mesh must not outlive the highlight"
         );
     }
@@ -504,9 +509,7 @@ mod tests {
         app.update();
         assert_eq!(overlay_entities(&mut app).len(), 1);
 
-        app.world_mut()
-            .resource_mut::<FaceDrawingContext>()
-            .active = true;
+        app.world_mut().resource_mut::<FaceDrawingContext>().active = true;
         app.update();
 
         assert!(
@@ -582,10 +585,6 @@ mod tests {
     #[test]
     fn degenerate_faces_produce_no_overlay() {
         assert!(face_stipple_mesh(&[Vec3::ZERO, Vec3::X], Vec3::Y).is_none());
-        assert!(face_stipple_mesh(
-            &[Vec3::ZERO, Vec3::X, Vec3::X * 2.0],
-            Vec3::Y
-        )
-        .is_none());
+        assert!(face_stipple_mesh(&[Vec3::ZERO, Vec3::X, Vec3::X * 2.0], Vec3::Y).is_none());
     }
 }

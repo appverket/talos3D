@@ -4314,10 +4314,12 @@ fn handle_get_elevation_profile(
     use crate::plugins::elevation_profile::{
         compute_elevation_profile, ElevationDirection, DEFAULT_RESOLUTION,
     };
-    let direction = ElevationDirection::parse(direction)
-        .ok_or_else(|| format!("unknown elevation direction '{direction}'; use north, south, east or west"))?;
-    let profile = compute_elevation_profile(world, direction, resolution.unwrap_or(DEFAULT_RESOLUTION))
-        .ok_or_else(|| "the model has no renderable geometry to project".to_string())?;
+    let direction = ElevationDirection::parse(direction).ok_or_else(|| {
+        format!("unknown elevation direction '{direction}'; use north, south, east or west")
+    })?;
+    let profile =
+        compute_elevation_profile(world, direction, resolution.unwrap_or(DEFAULT_RESOLUTION))
+            .ok_or_else(|| "the model has no renderable geometry to project".to_string())?;
     serde_json::to_value(profile).map_err(|error| error.to_string())
 }
 

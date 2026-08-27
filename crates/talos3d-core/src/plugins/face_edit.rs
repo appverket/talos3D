@@ -1099,7 +1099,9 @@ fn update_face_edit_status(world: &mut World) {
 
     let selected_edge_count = face_context
         .element_id
-        .map(|element_id| selected_edges(world.resource::<SubobjectSelection>(), element_id).count())
+        .map(|element_id| {
+            selected_edges(world.resource::<SubobjectSelection>(), element_id).count()
+        })
         .unwrap_or(0);
     let hovered_edge = world.resource::<HoveredEdge>().hit.clone();
 

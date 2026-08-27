@@ -18,8 +18,8 @@
 
 use bevy::{platform::collections::HashMap, prelude::*};
 
-use crate::plugins::materials::MaterialAssignment;
 use crate::curation::material_specs::MaterialSpecRegistry;
+use crate::plugins::materials::MaterialAssignment;
 
 /// Colour for geometry that resolves to no material at all. Deliberately a
 /// colour no real building finish would ever be.
@@ -113,8 +113,9 @@ fn exit_surface_debug(
             // mode exists to reveal.
             None => match &primitive_material {
                 Some(default_material) => {
-                    entity_commands
-                        .insert(MeshMaterial3d::<StandardMaterial>(default_material.0.clone()));
+                    entity_commands.insert(MeshMaterial3d::<StandardMaterial>(
+                        default_material.0.clone(),
+                    ));
                 }
                 None => {
                     entity_commands.remove::<MeshMaterial3d<StandardMaterial>>();
@@ -212,10 +213,15 @@ mod tests {
             .world_mut()
             .resource_mut::<Assets<StandardMaterial>>()
             .add(StandardMaterial::default());
-        let mesh = app.world_mut().resource_mut::<Assets<Mesh>>().add(Mesh::from(
-            bevy::math::primitives::Cuboid::new(1.0, 1.0, 1.0),
-        ));
-        let mut entity = app.world_mut().spawn((Mesh3d(mesh), MeshMaterial3d(handle)));
+        let mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(bevy::math::primitives::Cuboid::new(
+                1.0, 1.0, 1.0,
+            )));
+        let mut entity = app
+            .world_mut()
+            .spawn((Mesh3d(mesh), MeshMaterial3d(handle)));
         if let Some(material_id) = material {
             entity.insert(MaterialAssignment::new(material_id));
         }
@@ -229,9 +235,7 @@ mod tests {
     }
 
     fn set_enabled(app: &mut App, enabled: bool) {
-        app.world_mut()
-            .resource_mut::<SurfaceDebugRender>()
-            .enabled = enabled;
+        app.world_mut().resource_mut::<SurfaceDebugRender>().enabled = enabled;
         app.update();
     }
 
@@ -304,7 +308,9 @@ mod tests {
             "restoring must leave a material behind, not strip the component"
         );
         assert!(
-            app.world().get::<SurfaceDebugOriginal>(unfinished).is_none(),
+            app.world()
+                .get::<SurfaceDebugOriginal>(unfinished)
+                .is_none(),
             "the stash must be cleared on exit"
         );
     }
