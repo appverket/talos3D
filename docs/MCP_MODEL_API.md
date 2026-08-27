@@ -140,10 +140,11 @@ stable element ids and editable properties.
 Agents should treat MCP as a semantic model contract, not as a geometry macro
 recorder. The expected loop is:
 
-1. Start with `negotiate_agent_session`. Confirm the returned instance id and
-   follow its required bootstrap steps. The welcome composes the live guidance,
-   active capability profile, bounded capability snapshot, relevant skills or
-   card fallbacks, and refresh triggers for the current task.
+1. Start with `negotiate_agent_session`. Confirm the returned instance id, then
+   call `get_agent_guidance_packet` once to receive the authoritative guidance,
+   all must-read cards, and all must-read agent skills. Follow the returned
+   `guidance_state.next_actions`; `get_agent_guidance_state` restores a compact
+   current phase after compaction, task/profile changes, or a blocked call.
 2. Inspect the loaded capability surface with `list_vocabulary`,
    `list_element_classes`, `list_recipe_families`, `list_constraints`,
    `list_generation_priors`, and `list_catalog_providers` as directed by the
@@ -273,8 +274,8 @@ as authentication or authorization.
 `negotiate_agent_session` is the Talos3D-native connection handshake. It is
 available in every capability profile and accepts an Agent Hello with optional
 client identity, task, requested profile, context budget, delegation mode, and
-support flags for skills, MCP resources/prompts, images, notifications, and
-interactive approval.
+support flags for skills, MCP resources/prompts, images, notifications,
+interactive approval, and optional MCP-backed lifecycle hooks.
 
 The Agent Welcome returns:
 
@@ -283,7 +284,9 @@ The Agent Welcome returns:
 - the security assurance known by this transport, including successful
   instance-bound bearer authentication derived from a single-use local pairing
   handoff, without claiming delegated user identity;
-- a compact live capability snapshot and required guidance-card ids;
+- a compact live capability snapshot, required guidance-card ids, and a
+  server-owned `guidance_state` with the current phase, blocking obligations,
+  and exact next actions;
 - at most a small context-budget-aware set of task-relevant agent-skill
   summaries when the client supports skills;
 - tool/card fallbacks, ordered bootstrap calls, required invariants, and refresh
@@ -297,22 +300,53 @@ The handshake is safe to repeat after reconnect, task/profile change,
 composes the same runtime registries as the normal tools; it is not a second
 knowledge store.
 
+`get_agent_guidance_packet` collapses the old guidance-plus-one-call-per-card
+and must-read-skill bootstrap into one bounded response. Once negotiation
+activates a guidance session, the Model API rejects mutating calls until that
+packet and the task-relevant recipe/parametric/definition/prior probes are
+complete. The
+server observes successful MCP calls directly, invalidates verification
+evidence after later edits, and exposes the resulting trajectory through
+`get_agent_guidance_state`. Legacy clients that never negotiate remain
+compatible, but the generated onboarding path always negotiates.
+
+The packet explicitly reports `authoritative_guidance_available`. A
+domain-neutral or incomplete app composition may legitimately expose the MCP
+transport without installing a capability's canonical authoring prompt; in
+that case the guidance state remains in `Bootstrap` with an
+`authoritative-guidance-unavailable` obligation and all negotiated model
+mutation remains blocked. Onboarding must initialize a capability composition
+with real guidance instead of treating an empty prompt as permission to
+improvise.
+
+Clients that declare `supports.lifecycle_hooks=true` also receive a rule-free
+`codex-hooks/v1` projection. It maps `PreToolUse`, `PostCompact`, and `Stop` to
+`agent_guidance_preflight`, `agent_guidance_after_compact`, and
+`agent_guidance_completion_check`. Hooks improve timing and context continuity;
+they are not the enforcement boundary. Desktop onboarding can copy the exact
+Codex configuration for explicit installation and trust review, while generic
+MCP onboarding remains complete without it.
+
 Desktop apps expose this through **AI → Connect an AI Agent…**. The dialog shows
 the live instance and endpoint and generates a ready-to-paste onboarding prompt
-with one-click copy. The local prompt carries a single-use pairing grant,
-rendezvous facts, and stable instructions; the bearer is returned only after
-redemption. Current Talos3D knowledge still comes from the welcome and its
-follow-up calls. Treat the copied local prompt as a short-lived secret and share
-it only with the intended agent.
+with one-click copy. A separate **Copy Codex hook config** action emits the
+optional lifecycle projection without credentials or domain rules. The local
+prompt carries a single-use pairing grant, rendezvous facts, and stable
+instructions; the bearer is returned only after redemption. Current Talos3D
+knowledge still comes from the welcome and its follow-up calls. Treat the
+copied local prompt as a short-lived secret and share it only with the intended
+agent.
 
 ## Capability Profiles (tool gating)
 
 The full router registers a large tool surface, whose schemas cost a connecting agent
 roughly 196 KB (~35k tokens) of cold-start context. To keep sessions lean, the
 advertised tool surface is gated by a named **capability profile**. The session
-contract — `get_instance_info`, `negotiate_agent_session`, `get_authoring_guidance`,
-`get_capability_snapshot`, `list_guidance_cards` / `get_guidance_card`,
-`discover_curated_paths`, agent-skill discovery, and `set_session_profile`
+contract — `get_instance_info`, `negotiate_agent_session`, the
+`get_agent_guidance_*` and `agent_guidance_*` lifecycle tools,
+`get_authoring_guidance`, `get_capability_snapshot`, `list_guidance_cards` /
+`get_guidance_card`, `discover_curated_paths`, agent-skill discovery, and
+`set_session_profile`
 itself — is present in **every** profile, so a fresh MCP-only agent can always
 discover guidance and curated paths regardless of gating.
 
@@ -391,6 +425,11 @@ describe the full surface. Current tool categories include:
 
 - `get_instance_info`
 - `negotiate_agent_session`
+- `get_agent_guidance_packet`
+- `get_agent_guidance_state`
+- `agent_guidance_preflight`
+- `agent_guidance_after_compact`
+- `agent_guidance_completion_check`
 - `list_entities`
 - `get_entity`
 - `get_entity_details`

@@ -2703,6 +2703,15 @@ async fn negotiate_agent_session_tool_composes_live_world_state() {
             requested_port: Some(24842),
         });
         world.insert_resource(AgentSkillRegistry::default());
+        world.insert_resource(crate::plugins::authoring_guidance::AuthoringGuidance {
+            guidance_id: "test.guidance".to_string(),
+            version: 1,
+            prompt_text: "Use the live guidance harness.".to_string(),
+            component_structure:
+                crate::plugins::authoring_guidance::ComponentStructurePolicy::default(),
+            references: Vec::new(),
+            guidance_chapters: Vec::new(),
+        });
 
         while let Ok(request) = receiver.recv() {
             handle_model_api_request(&mut world, request);
@@ -2717,6 +2726,7 @@ async fn negotiate_agent_session_tool_composes_live_world_state() {
             requested_profile: Some("inspection".to_string()),
             supports: AgentClientCapabilities {
                 images: true,
+                lifecycle_hooks: true,
                 ..Default::default()
             },
             ..Default::default()
@@ -2729,18 +2739,57 @@ async fn negotiate_agent_session_tool_composes_live_world_state() {
     assert_eq!(welcome.instance.instance_id, "welcome-tool-test");
     assert_eq!(welcome.active_profile, "authoring");
     assert!(welcome.profile_change_required);
+    assert_eq!(welcome.contract_version, 2);
     assert!(welcome
-        .required_guidance_card_ids
+        .bootstrap_steps
         .iter()
-        .all(|card_id| welcome.bootstrap_steps.iter().any(|step| {
-            step.action == "get_guidance_card"
-                && step
-                    .arguments
-                    .as_ref()
-                    .and_then(|arguments| arguments.get("card_id"))
-                    .and_then(|id| id.as_str())
-                    == Some(card_id)
-        })));
+        .any(|step| step.action == "get_agent_guidance_packet" && step.required));
+    assert_eq!(
+        welcome.guidance_state.as_ref().map(|state| state.phase),
+        Some(GuidancePhase::Bootstrap)
+    );
+    assert_eq!(
+        welcome
+            .lifecycle_hook_projection
+            .as_ref()
+            .map(|projection| projection.dialect.as_str()),
+        Some("codex-hooks/v1")
+    );
+
+    let packet: AgentGuidancePacket = server
+        .get_agent_guidance_packet_tool()
+        .await
+        .expect("guidance packet should resolve the authoritative guidance and cards")
+        .into_typed()
+        .expect("guidance packet should deserialize");
+    assert_eq!(
+        packet.required_cards.len(),
+        welcome.required_guidance_card_ids.len()
+    );
+    assert_eq!(
+        packet.required_skills.len(),
+        welcome.capability_snapshot.must_read_agent_skill_ids.len()
+    );
+    assert!(packet.authoritative_guidance_available);
+    assert_eq!(packet.state.phase, GuidancePhase::Discover);
+
+    let preflight: serde_json::Value = server
+        .agent_guidance_preflight_tool(Parameters(GuidancePreflightRequest {
+            proposed_tool: "mcp__talos3d__create_box".to_string(),
+            proposed_input: serde_json::json!({}),
+            client_session_id: Some("cold-test".to_string()),
+            turn_id: Some("turn-1".to_string()),
+        }))
+        .await
+        .expect("preflight projection should return hook JSON")
+        .into_typed()
+        .expect("preflight hook JSON should deserialize");
+    assert_eq!(
+        preflight
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(serde_json::Value::as_str),
+        Some("deny")
+    );
 
     drop(server);
     worker_handle.await.expect("worker should stop cleanly");
@@ -13781,6 +13830,11 @@ mod capability_profiles {
         const SESSION_CONTRACT: &[&str] = &[
             "get_instance_info",
             "negotiate_agent_session",
+            "get_agent_guidance_packet",
+            "get_agent_guidance_state",
+            "agent_guidance_preflight",
+            "agent_guidance_after_compact",
+            "agent_guidance_completion_check",
             "set_session_profile",
             "get_authoring_guidance",
             "get_capability_snapshot",
@@ -13897,6 +13951,7 @@ mod capability_profiles {
         );
 
         assert_eq!(welcome.contract, "talos3d.agent-welcome");
+        assert_eq!(welcome.contract_version, 2);
         assert_eq!(welcome.instance.instance_id, "talos3d-test-42");
         assert_eq!(welcome.active_profile, "inspection");
         assert!(welcome.requested_profile_available);
@@ -13925,7 +13980,7 @@ mod capability_profiles {
         assert!(welcome
             .bootstrap_steps
             .iter()
-            .any(|step| step.action == "get_guidance_card" && step.required));
+            .any(|step| step.action == "get_agent_guidance_packet" && step.required));
         assert_eq!(
             welcome
                 .bootstrap_steps
@@ -13949,13 +14004,14 @@ mod capability_profiles {
             ModelApiTransportSecurity::InstanceBearerHttp.session_info(true),
         );
         assert!(fallback.recommended_agent_skills.is_empty());
-        assert!(fallback.bootstrap_steps.iter().any(|step| {
-            step.action == "get_agent_skill"
-                && step.required
-                && step.arguments.as_ref().is_some_and(|arguments| {
-                    arguments.get("skill_id").and_then(|id| id.as_str()) == Some("roof-authoring")
-                })
-        }));
+        assert!(fallback
+            .bootstrap_steps
+            .iter()
+            .any(|step| step.action == "get_agent_guidance_packet" && step.required));
+        assert!(!fallback
+            .bootstrap_steps
+            .iter()
+            .any(|step| step.action == "get_agent_skill" && step.required));
     }
 
     #[test]
@@ -14071,19 +14127,19 @@ mod capability_profiles {
     /// The byte bound was 55% and ordinary growth crossed it by 0.5% — a single
     /// tool's schema, which is exactly the "adding a tool breaks the build" case
     /// this guard says it does not want to be. Measured at the time of writing:
-    /// 139/262 tools (53.1%) after adding explicit demotion preview plus
-    /// stale-branch rebase/regeneration recovery. The bound is set to leave
-    /// room for that kind of drift while still failing loudly on the thing it
-    /// exists to catch: un-gating the surface wholesale would put both ratios
-    /// near 100%.
+    /// 148/272 tools (54.4%) after adding the five guidance-session and
+    /// lifecycle tools that must remain available in every capability profile.
+    /// The bound is set to leave room for that deliberate session-contract
+    /// growth while still failing loudly on the thing it exists to catch:
+    /// un-gating the surface wholesale would put both ratios near 100%.
     #[test]
     fn authoring_profile_is_a_fraction_of_full_surface() {
         let catalog = profile_tool_catalog();
         let authoring = catalog.tools_for(CapabilityProfile::Authoring);
         let full = catalog.tools_for(CapabilityProfile::Full);
         assert!(
-            authoring.len() * 100 <= full.len() * 54,
-            "authoring advertises {} of {} tools; expected at most 54%",
+            authoring.len() * 100 <= full.len() * 55,
+            "authoring advertises {} of {} tools; expected at most 55%",
             authoring.len(),
             full.len()
         );

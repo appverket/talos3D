@@ -578,14 +578,22 @@ fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, pairing_code
          \"protocol\":\"mcp\",\"task\":\"<the user's current task>\",\
          \"requested_profile\":\"authoring\",\"delegation_mode\":\"user_delegated\",\
          \"supports\":{{\"agent_skills\":true,\"mcp_resources_and_prompts\":true,\
-         \"images\":true,\"notifications\":false,\"interactive_approval\":false}}}}\n\n\
+         \"images\":true,\"notifications\":false,\"interactive_approval\":false,\
+         \"lifecycle_hooks\":false}}}}\n\n\
+         Set `lifecycle_hooks` true only when onboarding initialized an MCP-backed lifecycle \
+         adapter for this client. When true, Agent Welcome returns a rule-free hook projection \
+         generated from the live guidance contract. Register this MCP connection under the \
+         stable client name `talos3d` so the projection can address it. Hooks are optional; \
+         the server enforces the same mutation admission without them.\n\n\
          If you are using raw HTTP instead of an MCP client, serialize exactly one JSON-RPC \
          object whose method is `tools/call`, whose params.name is \
          `negotiate_agent_session`, and whose params.arguments is the object above. Use a JSON \
          serializer or a literal single object; never append multiple objects or shell-built \
          fragments.\n\n\
-         Confirm that Agent Welcome returns instance id `{instance_id}` before acting. Follow \
-         its ordered bootstrap steps and required invariants. Treat guidance served by the \
+         Confirm that Agent Welcome returns instance id `{instance_id}` before acting. Call \
+         `get_agent_guidance_packet` to load the authoritative guidance and all must-read cards \
+         in one bounded response, then follow its progressive `guidance_state.next_actions`. \
+         Treat guidance served by the \
          running instance as authoritative, fetch task-specific knowledge progressively, and \
          do not begin model edits until all required bootstrap steps are complete. Verify \
          that its security.authentication_assurance is \
@@ -600,6 +608,59 @@ fn build_agent_onboarding_prompt(instance_id: &str, http_url: &str, pairing_code
          instead of improvising construction knowledge. Validate with structured geometric \
          checks and inspect rendered output before declaring success."
     )
+}
+
+fn build_codex_guidance_hooks_config() -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "description": "Optional Codex lifecycle projection for the Talos3D MCP guidance harness.",
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "^mcp__talos3d__.*$",
+                "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "talos3d",
+                    "tool": "agent_guidance_preflight",
+                    "input": {
+                        "client_session_id": "${session_id}",
+                        "turn_id": "${turn_id}",
+                        "proposed_tool": "${tool_name}",
+                        "proposed_input": "${tool_input}"
+                    },
+                    "timeout": 10,
+                    "statusMessage": "Checking live Talos3D guidance"
+                }]
+            }],
+            "PostCompact": [{
+                "matcher": "manual|auto",
+                "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "talos3d",
+                    "tool": "agent_guidance_after_compact",
+                    "input": {
+                        "client_session_id": "${session_id}",
+                        "reason": "compact"
+                    },
+                    "timeout": 10,
+                    "statusMessage": "Restoring live Talos3D guidance"
+                }]
+            }],
+            "Stop": [{
+                "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "talos3d",
+                    "tool": "agent_guidance_completion_check",
+                    "input": {
+                        "client_session_id": "${session_id}",
+                        "stop_hook_active": "${stop_hook_active}",
+                        "last_assistant_message": "${last_assistant_message}"
+                    },
+                    "timeout": 10,
+                    "statusMessage": "Checking Talos3D completion evidence"
+                }]
+            }]
+        }
+    }))
+    .expect("static Codex hook configuration serializes")
 }
 
 /// Stable input claim published by the chrome pass for viewport consumers.
@@ -691,8 +752,8 @@ fn restrict_egui_context_map_to_primary_window(
 #[cfg(test)]
 mod chrome_input_capture_tests {
     use super::{
-        build_agent_onboarding_prompt, restrict_egui_context_map_to_primary_window,
-        ChromeInputCapture, ChromeInputFrameClaim,
+        build_agent_onboarding_prompt, build_codex_guidance_hooks_config,
+        restrict_egui_context_map_to_primary_window, ChromeInputCapture, ChromeInputFrameClaim,
     };
     use bevy::{prelude::*, window::PrimaryWindow};
     use bevy_egui::{input::WindowToEguiContextMap, PrimaryEguiContext};
@@ -735,8 +796,23 @@ mod chrome_input_capture_tests {
         assert!(prompt.contains("do not reload it"));
         assert!(!prompt.contains("Do not verify"));
         assert!(prompt.contains("CorpusGap"));
+        assert!(prompt.contains("get_agent_guidance_packet"));
+        assert!(prompt.contains("\"lifecycle_hooks\":false"));
         assert!(!prompt.contains("AWS"));
         assert!(!prompt.contains("Cloudflare"));
+    }
+
+    #[test]
+    fn codex_guidance_hooks_are_rule_free_mcp_projections() {
+        let config = build_codex_guidance_hooks_config();
+        let parsed: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert!(config.contains("agent_guidance_preflight"));
+        assert!(config.contains("agent_guidance_after_compact"));
+        assert!(config.contains("agent_guidance_completion_check"));
+        assert!(config.contains("\"server\": \"talos3d\""));
+        assert!(!config.contains("CorpusGap"));
+        assert!(!config.contains("create_box"));
+        assert!(parsed.get("hooks").is_some());
     }
 
     #[test]
@@ -2635,6 +2711,13 @@ fn draw_agent_connection_window(
                     ctx.copy_text(http_url.clone());
                     copy_status = Some("MCP endpoint copied.".to_string());
                 }
+                if ui.button("Copy Codex hook config").clicked() {
+                    ctx.copy_text(build_codex_guidance_hooks_config());
+                    copy_status = Some(
+                        "Codex hook config copied; install it explicitly and review it with /hooks."
+                            .to_string(),
+                    );
+                }
                 if let Some(status) = copy_status.as_deref() {
                     ui.colored_label(egui::Color32::LIGHT_GREEN, status);
                 }
@@ -2642,6 +2725,9 @@ fn draw_agent_connection_window(
             ui.add_space(4.0);
             ui.weak(
                 "The prompt contains a single-use local pairing grant, not the MCP access token. Share it only with the intended agent. Current Talos3D knowledge is fetched during negotiation instead of being frozen into this text.",
+            );
+            ui.weak(
+                "The optional Codex config contains no credentials or domain rules. It requires an MCP server named `talos3d`, explicit hook trust, and a fresh session after installation; generic MCP onboarding remains supported without it.",
             );
         });
 

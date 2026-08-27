@@ -10,6 +10,9 @@ pub(super) struct ModelApiServer {
     /// per-request server instances see profile switches made by earlier
     /// requests on the same endpoint.
     pub(super) profile_state: SessionProfileState,
+    /// Server-owned guidance trajectory shared by the endpoint's stateless
+    /// HTTP request handlers. Hooks are optional views over this state.
+    pub(super) guidance_state: GuidanceSessionStore,
     pub(super) transport_security: ModelApiTransportSecurity,
 }
 
@@ -180,6 +183,7 @@ impl ModelApiServer {
             sender,
             tool_router: profile_tool_catalog().router.clone(),
             profile_state: SessionProfileState::new(default_profile_from_env()),
+            guidance_state: GuidanceSessionStore::default(),
             transport_security: ModelApiTransportSecurity::LocalStdio,
         }
     }
@@ -196,6 +200,7 @@ impl ModelApiServer {
             sender,
             tool_router: profile_tool_catalog().router.clone(),
             profile_state,
+            guidance_state: GuidanceSessionStore::default(),
             transport_security: ModelApiTransportSecurity::LocalStdio,
         }
     }
@@ -203,11 +208,13 @@ impl ModelApiServer {
     pub(super) fn with_authenticated_http_profile_state(
         sender: ModelApiRequestSender,
         profile_state: SessionProfileState,
+        guidance_state: GuidanceSessionStore,
     ) -> Self {
         Self {
             sender,
             tool_router: profile_tool_catalog().router.clone(),
             profile_state,
+            guidance_state,
             transport_security: ModelApiTransportSecurity::InstanceBearerHttp,
         }
     }
@@ -236,6 +243,19 @@ impl ModelApiServer {
                 profile.name()
             ),
             None,
+        ))
+    }
+
+    /// Once an agent negotiates a live guidance session, enforce its required
+    /// bootstrap before model mutation. Legacy non-negotiating clients remain
+    /// compatible; the generated onboarding path always negotiates first.
+    pub(super) fn guidance_call_allowed(&self, tool_name: &str) -> Result<(), McpError> {
+        let Some(block) = self.guidance_state.router_preflight(tool_name) else {
+            return Ok(());
+        };
+        Err(McpError::invalid_params(
+            block.reason.clone(),
+            serde_json::to_value(block).ok(),
         ))
     }
 
@@ -2618,6 +2638,13 @@ fn json_tool_result<T: Serialize>(value: T) -> Result<CallToolResult, McpError> 
 }
 
 #[cfg(feature = "model-api")]
+fn structured_json_tool_result<T: Serialize>(value: T) -> Result<CallToolResult, McpError> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+    Ok(CallToolResult::structured(value))
+}
+
+#[cfg(feature = "model-api")]
 pub(super) fn screenshot_tool_result(path: String) -> Result<CallToolResult, McpError> {
     use base64::Engine as _;
 
@@ -2682,9 +2709,17 @@ impl ServerHandler for ModelApiServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        self.tool_call_allowed(request.name.as_ref())?;
+        let tool_name = request.name.to_string();
+        let arguments = request.arguments.clone();
+        self.tool_call_allowed(&tool_name)?;
+        self.guidance_call_allowed(&tool_name)?;
         let tcc = ToolCallContext::new(self, request, context);
-        self.tool_router.call(tcc).await
+        let result = self.tool_router.call(tcc).await?;
+        if result.is_error != Some(true) {
+            self.guidance_state
+                .observe_success(&tool_name, arguments.as_ref());
+        }
+        Ok(result)
     }
 
     async fn list_tools(
@@ -2740,6 +2775,11 @@ pub struct AgentClientCapabilities {
     /// The client can ask the user for approval during the session.
     #[serde(default)]
     pub interactive_approval: bool,
+    /// The client can install or was initialized with lifecycle hooks that
+    /// invoke MCP tools. This only enables a projection descriptor; the live
+    /// Talos3D server remains authoritative when hooks are unavailable.
+    #[serde(default)]
+    pub lifecycle_hooks: bool,
 }
 
 /// Agent-to-Talos3D half of the welcome/session-negotiation contract.
@@ -2829,6 +2869,29 @@ pub struct AgentWelcome {
     pub required_invariants: Vec<String>,
     pub refresh: AgentWelcomeRefreshInfo,
     pub warnings: Vec<String>,
+    /// Compact live state for progressive disclosure. This is initialized by
+    /// `negotiate_agent_session` and refreshed by
+    /// `get_agent_guidance_state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance_state: Option<AgentGuidanceState>,
+    /// Optional client-specific lifecycle projection generated from the same
+    /// server-owned contract. It contains no domain rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_hook_projection: Option<LifecycleHookProjection>,
+}
+
+#[cfg_attr(feature = "model-api", derive(JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentGuidancePacket {
+    pub contract: String,
+    pub contract_version: u32,
+    /// False means the running app composition did not install canonical
+    /// authoring guidance. The returned state remains blocked from mutation.
+    pub authoritative_guidance_available: bool,
+    pub guidance: AuthoringGuidance,
+    pub required_cards: Vec<GuidanceCardInfo>,
+    pub required_skills: Vec<crate::plugins::agent_skills::AgentSkill>,
+    pub state: AgentGuidanceState,
 }
 
 #[cfg(feature = "model-api")]
@@ -2955,46 +3018,22 @@ pub(super) fn assemble_agent_welcome(
     }
     bootstrap_steps.push(AgentBootstrapStep {
         order: bootstrap_steps.len() as u32 + 1,
-        action: "get_authoring_guidance".to_string(),
+        action: "get_agent_guidance_packet".to_string(),
         required: true,
-        reason: "Load the authoritative authoring contract served by this running instance."
+        reason: "Load the authoritative authoring contract and every must-read guidance card in one bounded call."
             .to_string(),
         arguments: None,
     });
-    for card_id in &required_guidance_card_ids {
-        bootstrap_steps.push(AgentBootstrapStep {
-            order: bootstrap_steps.len() as u32 + 1,
-            action: "get_guidance_card".to_string(),
-            required: true,
-            reason: "Resolve a must-read card named by the live capability snapshot.".to_string(),
-            arguments: Some(serde_json::json!({"card_id": card_id})),
-        });
-    }
     for skill in &recommended_agent_skills {
+        if snapshot.must_read_agent_skill_ids.contains(&skill.id) {
+            continue;
+        }
         bootstrap_steps.push(AgentBootstrapStep {
             order: bootstrap_steps.len() as u32 + 1,
             action: "get_agent_skill".to_string(),
             required: snapshot.must_read_agent_skill_ids.contains(&skill.id),
             reason: "Fetch a bounded operating procedure relevant to this task.".to_string(),
             arguments: Some(serde_json::json!({"skill_id": skill.id})),
-        });
-    }
-    for skill_id in snapshot
-        .must_read_agent_skill_ids
-        .iter()
-        .filter(|skill_id| {
-            !recommended_agent_skills
-                .iter()
-                .any(|skill| &skill.id == *skill_id)
-        })
-    {
-        bootstrap_steps.push(AgentBootstrapStep {
-            order: bootstrap_steps.len() as u32 + 1,
-            action: "get_agent_skill".to_string(),
-            required: true,
-            reason: "Resolve a must-read operating procedure through the MCP tool fallback."
-                .to_string(),
-            arguments: Some(serde_json::json!({"skill_id": skill_id})),
         });
     }
     for path_kind in ["recipe", "parametric", "definition", "prior"] {
@@ -3026,7 +3065,7 @@ pub(super) fn assemble_agent_welcome(
 
     AgentWelcome {
         contract: "talos3d.agent-welcome".to_string(),
-        contract_version: 1,
+        contract_version: 2,
         hello: hello.clone(),
         instance,
         security,
@@ -3075,6 +3114,8 @@ pub(super) fn assemble_agent_welcome(
                 .to_string(),
         },
         warnings,
+        guidance_state: None,
+        lifecycle_hook_projection: None,
     }
 }
 
@@ -5442,14 +5483,190 @@ impl ModelApiServer {
             "127.0.0.1" | "::1" | "localhost"
         );
         let security = self.transport_security.session_info(loopback);
-        json_tool_result(assemble_agent_welcome(
+        let mut welcome = assemble_agent_welcome(
             hello,
             instance,
             self.profile_state.get(),
             snapshot,
             skills,
             security,
-        ))
+        );
+        let guidance_state = self.guidance_state.start(
+            welcome.refresh.revision_anchor.clone(),
+            welcome.hello.task.clone(),
+            welcome.required_guidance_card_ids.clone(),
+            welcome
+                .capability_snapshot
+                .must_read_agent_skill_ids
+                .clone(),
+            welcome.required_invariants.clone(),
+        );
+        welcome.guidance_state = Some(guidance_state);
+        if welcome.hello.supports.lifecycle_hooks {
+            welcome.lifecycle_hook_projection = Some(LifecycleHookProjection::codex());
+        }
+        json_tool_result(welcome)
+    }
+
+    #[tool(
+        name = "get_agent_guidance_packet",
+        description = "Load the authoritative authoring guidance and every must-read card for the active Agent Welcome in ONE bounded call. This satisfies the guidance/card bootstrap obligations and returns the refreshed progressive-disclosure state. Call after negotiate_agent_session instead of manually fetching the guidance and each required card."
+    )]
+    pub(super) async fn get_agent_guidance_packet_tool(&self) -> Result<CallToolResult, McpError> {
+        if self.guidance_state.snapshot().is_none() {
+            return Err(McpError::invalid_params(
+                "no active guidance session; call negotiate_agent_session first",
+                None,
+            ));
+        }
+        let guidance = self
+            .request_get_authoring_guidance()
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?;
+        let mut required_cards = Vec::new();
+        for card_id in self.guidance_state.required_cards() {
+            let card = self
+                .request_get_guidance_card(card_id)
+                .await
+                .map_err(|error| McpError::internal_error(error, None))?;
+            required_cards.push(card);
+        }
+        let mut required_skills = Vec::new();
+        for skill_id in self.guidance_state.required_skills() {
+            let skill = self
+                .request_get_agent_skill(skill_id)
+                .await
+                .map_err(|error| McpError::internal_error(error, None))?;
+            required_skills.push(skill);
+        }
+        let authoritative_guidance_available = !guidance.is_empty();
+        self.guidance_state
+            .mark_guidance_packet_loaded(authoritative_guidance_available);
+        let state = self
+            .guidance_state
+            .snapshot()
+            .expect("guidance session exists after packet load");
+        structured_json_tool_result(AgentGuidancePacket {
+            contract: "talos3d.agent-guidance-packet".to_string(),
+            contract_version: 1,
+            authoritative_guidance_available,
+            guidance,
+            required_cards,
+            required_skills,
+            state,
+        })
+    }
+
+    #[tool(
+        name = "get_agent_guidance_state",
+        description = "Return the compact current phase, satisfied/blocking obligations, and exact next MCP actions for the active guidance session. Use after task/profile changes, a blocked call, reconnect, or context compaction; it does not repeat the full guidance corpus."
+    )]
+    pub(super) async fn get_agent_guidance_state_tool(
+        &self,
+        Parameters(_params): Parameters<GuidanceStateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let state = self.guidance_state.snapshot().ok_or_else(|| {
+            McpError::invalid_params(
+                "no active guidance session; call negotiate_agent_session first",
+                None,
+            )
+        })?;
+        structured_json_tool_result(state)
+    }
+
+    #[tool(
+        name = "agent_guidance_preflight",
+        description = "Codex lifecycle-hook projection for PreToolUse. Pass the proposed Talos3D tool name/input; returns the Codex hook decision shape plus compact live guidance. This is an ergonomic guard only—the Model API repeats admission server-side."
+    )]
+    pub(super) async fn agent_guidance_preflight_tool(
+        &self,
+        Parameters(params): Parameters<GuidancePreflightRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let proposed_tool = hook_tool_name(&params.proposed_tool);
+        let payload = if let Some(block) = self.guidance_state.hook_preflight(proposed_tool) {
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": block.reason,
+                    "additionalContext": block.guidance_state.compact_context,
+                }
+            })
+        } else {
+            let context = self
+                .guidance_state
+                .snapshot()
+                .map(|state| state.compact_context)
+                .unwrap_or_else(|| {
+                    "No guidance session is active; negotiate before any model mutation."
+                        .to_string()
+                });
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": context,
+                }
+            })
+        };
+        structured_json_tool_result(payload)
+    }
+
+    #[tool(
+        name = "agent_guidance_after_compact",
+        description = "Codex lifecycle-hook projection for PostCompact. Returns a bounded additionalContext payload that rehydrates the current Talos3D instance revision, phase, obligations, and exact next action."
+    )]
+    pub(super) async fn agent_guidance_after_compact_tool(
+        &self,
+        Parameters(_params): Parameters<GuidanceStateRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self
+            .guidance_state
+            .snapshot()
+            .map(|state| state.compact_context)
+            .unwrap_or_else(|| {
+                "No Talos3D guidance session is active. Call negotiate_agent_session before model mutation."
+                    .to_string()
+            });
+        structured_json_tool_result(serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PostCompact",
+                "additionalContext": context,
+            }
+        }))
+    }
+
+    #[tool(
+        name = "agent_guidance_completion_check",
+        description = "Codex lifecycle-hook projection for Stop. If the active session authored model state but lacks the required structured checks or rendered evidence, returns a continuation decision with the exact missing work."
+    )]
+    pub(super) async fn agent_guidance_completion_check_tool(
+        &self,
+        Parameters(params): Parameters<GuidanceCompletionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        if !params.stop_hook_active {
+            if let Some(block) = self.guidance_state.completion_block() {
+                return structured_json_tool_result(serde_json::json!({
+                    "decision": "block",
+                    "reason": block.reason,
+                    "hookSpecificOutput": {
+                        "hookEventName": "Stop",
+                        "additionalContext": block.guidance_state.compact_context,
+                    }
+                }));
+            }
+        }
+        let context = self
+            .guidance_state
+            .snapshot()
+            .map(|state| state.compact_context)
+            .unwrap_or_else(|| "No active Talos3D guidance session.".to_string());
+        structured_json_tool_result(serde_json::json!({
+            "continue": true,
+            "hookSpecificOutput": {
+                "hookEventName": "Stop",
+                "additionalContext": context,
+            }
+        }))
     }
 
     #[tool(

@@ -733,6 +733,19 @@ use profiles::{
 };
 
 #[cfg(feature = "model-api")]
+mod guidance_session;
+#[cfg(feature = "model-api")]
+use guidance_session::{
+    hook_tool_name, GuidanceCompletionRequest, GuidancePreflightRequest, GuidanceSessionStore,
+    GuidanceStateRequest,
+};
+#[cfg(feature = "model-api")]
+pub use guidance_session::{
+    AgentGuidanceState, GuidanceNextAction, GuidanceObligation, GuidancePhase, LifecycleHookEvent,
+    LifecycleHookProjection,
+};
+
+#[cfg(feature = "model-api")]
 mod server;
 #[cfg(feature = "model-api")]
 pub use server::*;

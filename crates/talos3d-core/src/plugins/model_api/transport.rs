@@ -146,6 +146,7 @@ pub(super) fn spawn_model_api_server(
                 // endpoint's state for subsequent requests.
                 let profile_service = |profile: CapabilityProfile| {
                     let state = SessionProfileState::new(profile);
+                    let guidance_state = GuidanceSessionStore::default();
                     let sender = sender.clone();
                     let service: StreamableHttpService<ModelApiServer, LocalSessionManager> =
                         StreamableHttpService::new(
@@ -153,6 +154,7 @@ pub(super) fn spawn_model_api_server(
                                 Ok(ModelApiServer::with_authenticated_http_profile_state(
                                     sender.clone(),
                                     state.clone(),
+                                    guidance_state.clone(),
                                 ))
                             },
                             Default::default(),

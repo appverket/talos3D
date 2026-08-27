@@ -207,6 +207,17 @@ pub(super) const TOOL_CATEGORIES: &[(&str, ToolCategory)] = &[
     // --- Session contract (every profile) ---
     ("get_instance_info", ToolCategory::SessionContract),
     ("negotiate_agent_session", ToolCategory::SessionContract),
+    ("get_agent_guidance_packet", ToolCategory::SessionContract),
+    ("get_agent_guidance_state", ToolCategory::SessionContract),
+    ("agent_guidance_preflight", ToolCategory::SessionContract),
+    (
+        "agent_guidance_after_compact",
+        ToolCategory::SessionContract,
+    ),
+    (
+        "agent_guidance_completion_check",
+        ToolCategory::SessionContract,
+    ),
     ("set_session_profile", ToolCategory::SessionContract),
     ("get_authoring_guidance", ToolCategory::SessionContract),
     ("get_capability_snapshot", ToolCategory::SessionContract),

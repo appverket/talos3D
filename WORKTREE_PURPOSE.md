@@ -1,9 +1,9 @@
 # Worktree purpose
 
 - agent: codex
-- created: 2026-08-16T15:11:00+02:00
-- branch: codex/smssfhht-hosted-materialization-reset
-- task-id: TALOS-smssfhht
-- target base: main
-- summary: Purge transient compound-occurrence materializations when replacing a project.
-- status: active
+- created: 2026-08-27T00:00:00Z
+- branch: codex/guidance-session-hooks
+- task-id: user-requested-guidance-hooks
+- target base: origin/main
+- summary: Add server-owned guidance sessions and optional lifecycle-hook adapters to the Talos3D MCP surface.
+- status: awaiting-merge
