@@ -171,7 +171,7 @@ fn sync_selected_face_stipple(world: &mut World) {
         face_id,
         vertices: vertices.iter().map(quantize_vertex).collect(),
     };
-    if world.resource::<FaceStippleOverlay>().key.as_ref() == Some(&key) {
+    if overlay_is_live(world) && world.resource::<FaceStippleOverlay>().key.as_ref() == Some(&key) {
         return;
     }
 
@@ -229,6 +229,31 @@ fn sync_selected_face_stipple(world: &mut World) {
     overlay.key = Some(key);
     overlay.material = Some(material_handle);
     overlay.mesh = Some(mesh_handle);
+}
+
+/// Whether the cached overlay is still on screen.
+///
+/// The cache key describes the *selection*, not the overlay, so an unchanged
+/// key is not evidence that the overlay still exists. Anything may despawn it
+/// or drop its mesh: loading a project clears the transient scene, and this
+/// overlay opts into that clear by carrying [`Preview`]. Trusting the key alone
+/// meant one project load left the raster gone until the user happened to
+/// select a different face — the selection said "showing", the screen said
+/// otherwise, and nothing reconciled them.
+fn overlay_is_live(world: &World) -> bool {
+    let overlay = world.resource::<FaceStippleOverlay>();
+    let Some(entity) = overlay.entity else {
+        return false;
+    };
+    if world.get_entity(entity).is_err() {
+        return false;
+    }
+    // The scene clear removes the overlay's mesh asset along with the entity;
+    // a live entity holding a dropped mesh handle draws nothing.
+    overlay
+        .mesh
+        .as_ref()
+        .is_some_and(|mesh| world.resource::<Assets<Mesh>>().contains(mesh))
 }
 
 /// The face the overlay should currently be showing, if any.
@@ -499,6 +524,53 @@ mod tests {
                 .get(&mesh_handle)
                 .is_none(),
             "the derived mesh must not outlive the highlight"
+        );
+    }
+
+    #[test]
+    fn the_raster_returns_after_the_scene_clear_despawns_it() {
+        let (mut app, _) = overlay_app();
+        select_top_face(&mut app);
+        app.update();
+        let first = overlay_entities(&mut app)[0];
+
+        // Exactly what loading a project does: the overlay carries `Preview`,
+        // so the scene clear despawns it while the selection is untouched. The
+        // cache key describes the selection, which did not change, so trusting
+        // it left the raster gone for good.
+        app.world_mut().entity_mut(first).despawn();
+        app.update();
+
+        assert_eq!(
+            overlay_entities(&mut app).len(),
+            1,
+            "the raster must come back after the scene clear despawns it"
+        );
+    }
+
+    #[test]
+    fn the_raster_returns_after_the_scene_clear_drops_its_mesh() {
+        let (mut app, _) = overlay_app();
+        select_top_face(&mut app);
+        app.update();
+        let mesh = app
+            .world()
+            .resource::<FaceStippleOverlay>()
+            .mesh
+            .clone()
+            .expect("overlay mesh");
+
+        // The scene clear also removes the meshes of everything it despawns. A
+        // live entity holding a dropped handle renders nothing at all.
+        app.world_mut().resource_mut::<Assets<Mesh>>().remove(&mesh);
+        app.update();
+
+        let overlay = app.world().resource::<FaceStippleOverlay>();
+        let rebuilt = overlay.mesh.clone().expect("overlay mesh rebuilt");
+        assert_ne!(rebuilt, mesh);
+        assert!(
+            app.world().resource::<Assets<Mesh>>().contains(&rebuilt),
+            "the rebuilt overlay must own a mesh that actually exists"
         );
     }
 

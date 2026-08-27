@@ -575,9 +575,12 @@ fn suppress_overlays_during_viewport_export(
 
     if export_state.ui_suppressed() {
         *grace = GRACE_FRAMES;
-        if !*saved_overlays {
-            *saved_overlays = true;
-            for mut visibility in &mut overlay_query {
+        // Re-hide every frame rather than latching on the first: an overlay
+        // spawned mid-capture — a face selected while the export is in flight —
+        // would otherwise miss the one-shot hide and land in the image.
+        *saved_overlays = true;
+        for mut visibility in &mut overlay_query {
+            if *visibility != Visibility::Hidden {
                 *visibility = Visibility::Hidden;
             }
         }
