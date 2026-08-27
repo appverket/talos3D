@@ -32,7 +32,7 @@ use crate::{
     },
     plugins::{
         camera::OrbitCamera,
-        cursor::cursor_viewport_position,
+        cursor::cursor_window_position,
         egui_chrome::{ChromeInputCapture, EguiWantsInput},
         face_edit::{face_edit_active, FaceDrawingContext, FaceEditContext},
         identity::ElementId,
@@ -312,10 +312,14 @@ impl EdgeHoverContext<'_, '_> {
         self.chrome.wants_any_pointer_input() || self.egui.wants_any_pointer_input()
     }
 
+    /// Cursor and camera in one space. `world_to_viewport` already maps through
+    /// `logical_viewport_rect()`, so the cursor stays in window space and no
+    /// viewport offset is applied on either side of the comparison — the
+    /// convention `scene_ray::pick_ray_at` records for rays.
     fn cursor_and_camera(&self) -> Option<(Vec2, &Camera, &GlobalTransform)> {
         let window = self.window_query.single().ok()?;
         let (camera, camera_transform) = self.camera_query.iter().next()?;
-        let cursor = cursor_viewport_position(window, camera)?;
+        let cursor = cursor_window_position(window)?;
         Some((cursor, camera, camera_transform))
     }
 }
@@ -379,9 +383,9 @@ fn nearest_edge(
             .lerp(candidate.end, t)
             .distance(camera_position);
         let bucket = (distance / EDGE_DEPTH_TIE_PX).floor();
-        if best.is_none_or(|(best_bucket, best_depth, _)| {
-            (bucket, depth) < (best_bucket, best_depth)
-        }) {
+        if best
+            .is_none_or(|(best_bucket, best_depth, _)| (bucket, depth) < (best_bucket, best_depth))
+        {
             best = Some((bucket, depth, candidate));
         }
     }
@@ -410,7 +414,6 @@ fn handle_edge_click(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     window_query: Query<&Window, With<PrimaryWindow>>,
-    camera_query: Query<&Camera, With<OrbitCamera>>,
     hovered: Res<HoveredEdge>,
     ownership: Res<InputOwnership>,
     mut press: ResMut<EdgePressCapture>,
@@ -422,11 +425,7 @@ fn handle_edge_click(
         return;
     }
 
-    let cursor = window_query
-        .single()
-        .ok()
-        .zip(camera_query.iter().next())
-        .and_then(|(window, camera)| cursor_viewport_position(window, camera));
+    let cursor = window_query.single().ok().and_then(cursor_window_position);
 
     if mouse_buttons.just_pressed(MouseButton::Left) {
         press.hit = hovered.hit.clone();
@@ -490,13 +489,16 @@ pub fn selected_edges(
     selection: &SubobjectSelection,
     element_id: ElementId,
 ) -> impl Iterator<Item = &GeneratedEdgeRef> {
-    selection.refs.iter().filter_map(move |reference| match reference {
-        SelectableSubobjectRef::Edge {
-            element_id: owner,
-            edge,
-        } if *owner == element_id.0 => Some(edge),
-        _ => None,
-    })
+    selection
+        .refs
+        .iter()
+        .filter_map(move |reference| match reference {
+            SelectableSubobjectRef::Edge {
+                element_id: owner,
+                edge,
+            } if *owner == element_id.0 => Some(edge),
+            _ => None,
+        })
 }
 
 fn draw_edge_overlays(
@@ -552,9 +554,7 @@ mod tests {
             ))
             .id();
         app.world_mut().resource_mut::<FaceEditContext>().entity = Some(entity);
-        app.world_mut()
-            .resource_mut::<FaceEditContext>()
-            .element_id = Some(ElementId(11));
+        app.world_mut().resource_mut::<FaceEditContext>().element_id = Some(ElementId(11));
         (app, entity)
     }
 
@@ -583,11 +583,13 @@ mod tests {
         assert!((distance - 3.0).abs() < 1e-5);
         assert!((t - 0.5).abs() < 1e-5);
 
-        let (distance, t) = point_to_segment(Vec2::new(-4.0, 0.0), Vec2::ZERO, Vec2::new(10.0, 0.0));
+        let (distance, t) =
+            point_to_segment(Vec2::new(-4.0, 0.0), Vec2::ZERO, Vec2::new(10.0, 0.0));
         assert!((distance - 4.0).abs() < 1e-5);
         assert_eq!(t, 0.0);
 
-        let (distance, t) = point_to_segment(Vec2::new(14.0, 0.0), Vec2::ZERO, Vec2::new(10.0, 0.0));
+        let (distance, t) =
+            point_to_segment(Vec2::new(14.0, 0.0), Vec2::ZERO, Vec2::new(10.0, 0.0));
         assert!((distance - 4.0).abs() < 1e-5);
         assert_eq!(t, 1.0);
     }
@@ -799,7 +801,9 @@ mod tests {
         app.update();
 
         assert!(
-            app.world().resource::<EdgePressCapture>().consumed_pointer(),
+            app.world()
+                .resource::<EdgePressCapture>()
+                .consumed_pointer(),
             "the face picker must be told this press already belongs to an edge"
         );
         assert!(
@@ -836,7 +840,10 @@ mod tests {
             .press(MouseButton::Left);
         app.update();
 
-        assert!(!app.world().resource::<EdgePressCapture>().consumed_pointer());
+        assert!(!app
+            .world()
+            .resource::<EdgePressCapture>()
+            .consumed_pointer());
     }
 
     #[test]
