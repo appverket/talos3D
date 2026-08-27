@@ -16,6 +16,7 @@ use crate::{
         face_edit::FaceEditContext,
         input_ownership::{InputOwnership, InputPhase},
         modeling::group::{compute_group_bounds_in_frame_from_world, GroupFrame, GroupMembers},
+        scene_ray::PickApertures,
         selection::Selected,
         snap::SnapResult,
         tools::ActiveTool,
@@ -33,7 +34,7 @@ use crate::plugins::perf_stats::{add_gizmo_line_count, PerfStats};
 const HANDLE_SCREEN_DIAMETER_PX: f32 = 8.0;
 const HANDLE_MIN_RADIUS_METRES: f32 = 0.035;
 const HANDLE_MAX_RADIUS_METRES: f32 = 0.18;
-const HANDLE_HIT_TOLERANCE_PX: f32 = 12.0;
+
 const HANDLE_DRAG_THRESHOLD_PX: f32 = 6.0;
 const HANDLE_MOVE_COLOR: Color = Color::srgb(0.95, 0.95, 0.95);
 const HANDLE_SCALE_COLOR: Color = Color::srgb(1.0, 0.82, 0.28);
@@ -70,6 +71,7 @@ impl Plugin for HandlesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HandleContext>()
             .init_resource::<HandleInteractionState>()
+            .init_resource::<PickApertures>()
             .init_gizmo_group::<HandleGizmos>()
             .add_systems(Startup, configure_handle_gizmos)
             .add_systems(
@@ -282,6 +284,7 @@ struct HoverHandleContext<'w, 's> {
     face_edit_context: Res<'w, FaceEditContext>,
     viewport: HandleViewportQuery<'w, 's>,
     handle_state: Res<'w, HandleInteractionState>,
+    apertures: Res<'w, PickApertures>,
 }
 
 impl HandleViewportQuery<'_, '_> {
@@ -380,7 +383,7 @@ fn update_hovered_handle(world: &World, mut commands: Commands, hover_handles: H
         .into_iter()
         .filter_map(|handle| {
             let distance = handle.screen_position.distance(cursor_position);
-            (distance <= HANDLE_HIT_TOLERANCE_PX).then_some((distance, handle))
+            (distance <= hover_handles.apertures.handle_px).then_some((distance, handle))
         })
         .min_by(|left, right| left.0.total_cmp(&right.0))
         .map(|(_, handle)| handle)

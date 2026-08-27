@@ -2,7 +2,9 @@
 //!
 //! Provides `build_camera_ray` and `ray_cast_nearest_face` so that any tool
 //! (face editing, line tool, etc.) can find geometry under the cursor without
-//! duplicating ray-cast boilerplate.
+//! duplicating ray-cast boilerplate. [`PickApertures`] holds how close the
+//! cursor must come to a target for the pointing tools that measure in screen
+//! space rather than by ray-cast.
 
 use bevy::{prelude::*, window::PrimaryWindow};
 
@@ -13,6 +15,38 @@ use crate::plugins::cursor::cursor_window_position;
 use crate::plugins::layers::entity_on_visible_layer;
 use crate::plugins::modeling::occurrence::GeneratedOccurrencePart;
 use crate::plugins::render_pipeline::WireframeSurfaceVisibilityOverride;
+
+/// How close the cursor must come to a target, in logical pixels, for the
+/// tools that pick by screen distance rather than by ray-cast.
+///
+/// A pick aperture belongs in pixels, not in model units: the cursor's
+/// precision is a property of the pointing device and the screen, so the same
+/// aperture must mean the same aiming effort whether the viewport spans a city
+/// block or a mortise. This is what `PICKBOX` and `APERTURE` are in AutoCAD,
+/// and like them these are settings rather than constants, so a user working
+/// at a trackpad and one working at a mouse are not forced onto the same
+/// tolerance.
+///
+/// In model units an aperture is worth `pixels x metres-per-pixel`, so it
+/// tightens as the view zooms in — which is the point.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct PickApertures {
+    /// Manipulator grips. Generous: a grip is a deliberate, isolated target
+    /// and missing one costs a whole drag.
+    pub handle_px: f32,
+    /// Generated edges. Tighter than a grip, because an edge is always
+    /// adjacent to a face that competes with it for the same click.
+    pub edge_px: f32,
+}
+
+impl Default for PickApertures {
+    fn default() -> Self {
+        Self {
+            handle_px: 12.0,
+            edge_px: 6.0,
+        }
+    }
+}
 
 /// Build a pick ray through a window-space screen position.
 ///

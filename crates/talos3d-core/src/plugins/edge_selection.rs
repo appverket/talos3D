@@ -41,13 +41,23 @@ use crate::{
             canonical_edge_indices, edge_endpoints, evaluated_subobject_mesh,
             generated_edge_ref_for_half_edge, subobject_body_changed,
         },
+        scene_ray::PickApertures,
         tools::ActiveTool,
         transform::TransformVisualSystems,
     },
 };
 
-/// How close, in logical pixels, the cursor must come to an edge to pick it.
-const EDGE_HIT_TOLERANCE_PX: f32 = 6.0;
+/// Fraction of a narrow strip's width that each of its two bounding edges may
+/// claim. The remaining third in the middle is left to the face, so a face
+/// never becomes unclickable however thin it is on screen.
+const STRIP_EDGE_SHARE: f32 = 1.0 / 3.0;
+/// How parallel two edges must be before they count as bounding a strip rather
+/// than merely converging, as the two edges at a box corner do.
+const STRIP_PARALLEL_DOT: f32 = 0.9;
+/// How far past the aperture to look for the far side of a strip. Three
+/// apertures is enough to see the partner edge of any strip narrow enough to
+/// matter, and keeps the scan bounded.
+const STRIP_SEARCH_FACTOR: f32 = 3.0;
 /// Screen distances within this many pixels of each other count as a tie, and
 /// the tie is settled by depth so the front edge of a solid wins over the back.
 const EDGE_DEPTH_TIE_PX: f32 = 2.0;
@@ -175,6 +185,7 @@ impl Plugin for EdgeSelectionPlugin {
         app.init_resource::<EdgeCage>()
             .init_resource::<HoveredEdge>()
             .init_resource::<EdgePressCapture>()
+            .init_resource::<PickApertures>()
             .init_gizmo_group::<EdgeCageGizmos>()
             .init_gizmo_group::<EdgeSelectionGizmos>()
             .add_systems(Startup, configure_edge_gizmos)
@@ -305,6 +316,7 @@ struct EdgeHoverContext<'w, 's> {
     ownership: Res<'w, InputOwnership>,
     chrome: Res<'w, ChromeInputCapture>,
     egui: Res<'w, EguiWantsInput>,
+    apertures: Res<'w, PickApertures>,
 }
 
 impl EdgeHoverContext<'_, '_> {
@@ -343,6 +355,7 @@ fn update_hovered_edge(
             element_id,
             cursor,
             camera_transform.translation(),
+            context.apertures.edge_px,
             |point| camera.world_to_viewport(camera_transform, point).ok(),
         )
     } else {
@@ -352,6 +365,19 @@ fn update_hovered_edge(
     if hovered.hit.is_some() || hit.is_some() {
         hovered.hit = hit;
     }
+}
+
+/// One projected edge, with everything the arbitration needs about it.
+struct ProjectedEdge<'a> {
+    edge: &'a PickableEdge,
+    /// Screen distance from the cursor to the segment, in logical pixels.
+    distance: f32,
+    /// Which side of the edge's line the cursor falls on.
+    side: f32,
+    /// Screen-space direction of the edge, normalised.
+    direction: Vec2,
+    /// Distance from the camera to the closest point along the edge.
+    depth: f32,
 }
 
 /// Nearest pickable edge to the cursor in screen space.
@@ -364,38 +390,78 @@ fn nearest_edge(
     element_id: ElementId,
     cursor: Vec2,
     camera_position: Vec3,
+    aperture: f32,
     project: impl Fn(Vec3) -> Option<Vec2>,
 ) -> Option<EdgeHit> {
-    let mut best: Option<(f32, f32, &PickableEdge)> = None;
-    for candidate in edges {
-        let Some(start) = project(candidate.start) else {
-            continue;
-        };
-        let Some(end) = project(candidate.end) else {
+    // Reach past the aperture far enough to find the edge on the other side of
+    // a narrow strip, which is what tells us the strip is narrow.
+    let search = aperture * STRIP_SEARCH_FACTOR;
+    let mut candidates: Vec<ProjectedEdge> = Vec::new();
+    for edge in edges {
+        let (Some(start), Some(end)) = (project(edge.start), project(edge.end)) else {
             continue;
         };
         let (distance, t) = point_to_segment(cursor, start, end);
-        if distance > EDGE_HIT_TOLERANCE_PX {
+        if distance > search {
             continue;
         }
-        let depth = candidate
-            .start
-            .lerp(candidate.end, t)
-            .distance(camera_position);
-        let bucket = (distance / EDGE_DEPTH_TIE_PX).floor();
-        if best
-            .is_none_or(|(best_bucket, best_depth, _)| (bucket, depth) < (best_bucket, best_depth))
-        {
-            best = Some((bucket, depth, candidate));
-        }
+        let span = end - start;
+        candidates.push(ProjectedEdge {
+            edge,
+            distance,
+            side: span.perp_dot(cursor - start),
+            direction: span.normalize_or_zero(),
+            depth: edge.start.lerp(edge.end, t).distance(camera_position),
+        });
     }
 
-    best.map(|(_, _, candidate)| EdgeHit {
+    let best = candidates
+        .iter()
+        .filter(|candidate| candidate.distance <= aperture)
+        .min_by(|left, right| {
+            let bucket =
+                |candidate: &ProjectedEdge| (candidate.distance / EDGE_DEPTH_TIE_PX).floor();
+            bucket(left)
+                .total_cmp(&bucket(right))
+                .then(left.depth.total_cmp(&right.depth))
+        })?;
+
+    if best.distance > yielding_aperture(best, &candidates, aperture) {
+        return None;
+    }
+
+    Some(EdgeHit {
         element_id,
-        edge: candidate.edge.clone(),
-        start: candidate.start,
-        end: candidate.end,
+        edge: best.edge.edge.clone(),
+        start: best.edge.start,
+        end: best.edge.end,
     })
+}
+
+/// The aperture, narrowed so it can never swallow a thin face whole.
+///
+/// A fixed aperture is right in principle but wrong at the point where a face
+/// is narrower on screen than the bands its own edges project. A 20 mm seam rib
+/// a few pixels across has no interior left: every pixel of it is within reach
+/// of an edge, so the face cannot be clicked at all, at any zoom, and the user
+/// sees selection simply stop working.
+///
+/// So when two roughly parallel edges bracket the cursor, they bound a strip
+/// that is the face between them, and the aperture may claim at most
+/// [`STRIP_EDGE_SHARE`] of it from each side — the middle always belongs to the
+/// face. Edges that merely converge nearby, such as the two meeting at a box
+/// corner, do not bound a strip and do not narrow anything.
+fn yielding_aperture(best: &ProjectedEdge, candidates: &[ProjectedEdge], aperture: f32) -> f32 {
+    candidates
+        .iter()
+        .filter(|other| {
+            // Parallel, and on the far side of the cursor: together with `best`
+            // they enclose it.
+            best.direction.dot(other.direction).abs() >= STRIP_PARALLEL_DOT
+                && best.side * other.side < 0.0
+        })
+        .map(|other| (best.distance + other.distance) * STRIP_EDGE_SHARE)
+        .fold(aperture, f32::min)
 }
 
 /// Distance from `point` to segment `a`–`b`, with the parameter of the closest
@@ -743,6 +809,7 @@ mod tests {
             ElementId(11),
             Vec2::new(5.0, 1.0),
             camera_position,
+            6.0,
             project,
         )
         .expect("cursor is within tolerance of an edge");
@@ -758,11 +825,142 @@ mod tests {
                 ElementId(11),
                 Vec2::new(5.0, 20.0),
                 camera_position,
+                6.0,
                 project
             )
             .is_none(),
             "edges further than the tolerance are not picked"
         );
+    }
+
+    /// Two parallel edges `width` px apart, seen straight on so screen pixels
+    /// and model units coincide — a strip of face between two edges.
+    fn strip(width: f32) -> Vec<PickableEdge> {
+        vec![
+            PickableEdge {
+                edge: edge_ref(1),
+                start: Vec3::new(0.0, 0.0, 0.0),
+                end: Vec3::new(100.0, 0.0, 0.0),
+            },
+            PickableEdge {
+                edge: edge_ref(2),
+                start: Vec3::new(0.0, width, 0.0),
+                end: Vec3::new(100.0, width, 0.0),
+            },
+        ]
+    }
+
+    fn pick(edges: &[PickableEdge], cursor: Vec2, aperture: f32) -> Option<GeneratedEdgeRef> {
+        nearest_edge(
+            edges,
+            ElementId(11),
+            cursor,
+            Vec3::Z * 1000.0,
+            aperture,
+            |point| Some(Vec2::new(point.x, point.y)),
+        )
+        .map(|hit| hit.edge)
+    }
+
+    #[test]
+    fn a_face_too_thin_for_the_aperture_keeps_a_clickable_middle() {
+        // 9 px across: both 6 px bands cover every pixel of it, so a fixed
+        // aperture leaves the face unreachable at any zoom.
+        let edges = strip(9.0);
+
+        assert_eq!(
+            pick(&edges, Vec2::new(50.0, 4.5), 6.0),
+            None,
+            "the middle of a thin strip must fall through to the face"
+        );
+        assert_eq!(
+            pick(&edges, Vec2::new(50.0, 0.5), 6.0),
+            Some(edge_ref(1)),
+            "aiming at an edge of the strip must still pick that edge"
+        );
+        assert_eq!(
+            pick(&edges, Vec2::new(50.0, 8.5), 6.0),
+            Some(edge_ref(2)),
+            "and the same on the strip's other side"
+        );
+    }
+
+    #[test]
+    fn a_wide_face_gives_the_edge_its_whole_aperture() {
+        let edges = strip(400.0);
+        assert_eq!(
+            pick(&edges, Vec2::new(50.0, 5.5), 6.0),
+            Some(edge_ref(1)),
+            "with room to spare the aperture is not narrowed at all"
+        );
+        assert_eq!(
+            pick(&edges, Vec2::new(50.0, 6.5), 6.0),
+            None,
+            "and it still ends where the aperture ends"
+        );
+    }
+
+    #[test]
+    fn converging_edges_do_not_narrow_the_aperture() {
+        // The two edges meeting at a box corner are not a strip: they enclose
+        // no face between them, so neither may narrow the other.
+        let edges = vec![
+            PickableEdge {
+                edge: edge_ref(1),
+                start: Vec3::new(0.0, 0.0, 0.0),
+                end: Vec3::new(100.0, 0.0, 0.0),
+            },
+            PickableEdge {
+                edge: edge_ref(2),
+                start: Vec3::new(0.0, -50.0, 0.0),
+                end: Vec3::new(0.0, 50.0, 0.0),
+            },
+        ];
+        // Equidistant from both at 5 px. They do fall on opposite sides of
+        // each other, so without the parallel test they would be mistaken for
+        // a 10 px strip, which would narrow the aperture to 3.3 px and reject
+        // this pick. Which of the two wins does not matter; that one does.
+        assert!(
+            pick(&edges, Vec2::new(5.0, 5.0), 6.0).is_some(),
+            "a corner must stay as pickable as a lone edge"
+        );
+    }
+
+    #[test]
+    fn the_aperture_is_a_setting() {
+        let edges = strip(400.0);
+        assert_eq!(pick(&edges, Vec2::new(50.0, 9.0), 6.0), None);
+        assert_eq!(
+            pick(&edges, Vec2::new(50.0, 9.0), 12.0),
+            Some(edge_ref(1)),
+            "a wider aperture must reach further, so the setting has an effect"
+        );
+    }
+
+    #[test]
+    fn the_aperture_is_worth_less_in_model_units_as_the_view_zooms_in() {
+        // Same 6 px aperture, two zoom levels: 10 px per metre, then 100.
+        let edges = vec![PickableEdge {
+            edge: edge_ref(1),
+            start: Vec3::ZERO,
+            end: Vec3::new(10.0, 0.0, 0.0),
+        }];
+        let cursor_at = |metres_off: f32, px_per_m: f32| {
+            nearest_edge(
+                &edges,
+                ElementId(11),
+                Vec2::new(5.0 * px_per_m, metres_off * px_per_m),
+                Vec3::Z * 1000.0,
+                6.0,
+                move |point: Vec3| Some(Vec2::new(point.x, point.y) * px_per_m),
+            )
+            .is_some()
+        };
+
+        // 0.4 m off the edge: within 6 px when a metre is 10 px, outside it
+        // when the same metre is 100 px.
+        assert!(cursor_at(0.4, 10.0), "0.4 m is 4 px zoomed out — picked");
+        assert!(!cursor_at(0.4, 100.0), "0.4 m is 40 px zoomed in — missed");
     }
 
     #[test]
@@ -777,6 +975,7 @@ mod tests {
             ElementId(11),
             Vec2::new(5.0, 0.0),
             Vec3::Z * 100.0,
+            6.0,
             |_| None,
         );
         assert!(hit.is_none());
