@@ -345,6 +345,10 @@ pub(super) enum ModelApiRequest {
         request: crate::plugins::ux_harness::UxClickRequest,
         response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxInputResult>>,
     },
+    UxDoubleClick {
+        request: crate::plugins::ux_harness::UxMultiClickRequest,
+        response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxInputResult>>,
+    },
     UxDrag {
         request: crate::plugins::ux_harness::UxDragRequest,
         response: oneshot::Sender<ApiResult<crate::plugins::ux_harness::UxInputResult>>,
@@ -1670,6 +1674,11 @@ pub(super) fn handle_model_api_request(world: &mut World, request: ModelApiReque
         }
         ModelApiRequest::UxClick { request, response } => {
             let _ = response.send(crate::plugins::ux_harness::enqueue_click(world, request));
+        }
+        ModelApiRequest::UxDoubleClick { request, response } => {
+            let _ = response.send(crate::plugins::ux_harness::enqueue_multi_click(
+                world, request,
+            ));
         }
         ModelApiRequest::UxDrag { request, response } => {
             let _ = response.send(crate::plugins::ux_harness::enqueue_drag(world, request));

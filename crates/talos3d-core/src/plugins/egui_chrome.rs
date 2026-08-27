@@ -330,6 +330,23 @@ mod menu_presentation_tests {
     }
 
     #[test]
+    fn menu_shortcut_column_keeps_one_right_edge() {
+        let short_label_row =
+            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(MENU_ROW_WIDTH, 24.0));
+        let long_label_row =
+            egui::Rect::from_min_size(egui::pos2(10.0, 60.0), egui::vec2(MENU_ROW_WIDTH, 24.0));
+        let short = menu_row_text_columns(short_label_row, 6.0, 18.0, true);
+        let long = menu_row_text_columns(long_label_row, 6.0, 52.0, true);
+
+        assert_eq!(short.shortcut_pos.x, long.shortcut_pos.x);
+        assert_eq!(short.shortcut_pos.x, short_label_row.right() - 6.0);
+        assert!(
+            long.label_clip_right < short.label_clip_right,
+            "a wider shortcut must clip the label column, never shift the shortcut"
+        );
+    }
+
+    #[test]
     fn contributed_groups_are_scoped_to_their_category() {
         let mut registry = MenuGroupRegistry::default();
         registry.register(CommandCategory::Create, "Terrain", ["terrain.generate"]);
@@ -931,17 +948,18 @@ fn draw_command_menu_button(
     toggle_states: &CommandToggleStates,
 ) {
     let enabled = !descriptor.requires_selection || selection_count > 0;
-    let label = if let Some(shortcut) = &descriptor.default_shortcut {
-        format!(
-            "{}    {}",
-            descriptor.label,
-            format_shortcut_for_platform(shortcut)
-        )
-    } else {
-        descriptor.label.clone()
-    };
-    let response = menu_row_button_state(ui, enabled, toggle_states.get(&descriptor.id), label)
-        .on_hover_text(command_tooltip_text(descriptor));
+    let shortcut = descriptor
+        .default_shortcut
+        .as_deref()
+        .map(format_shortcut_for_platform);
+    let response = menu_row_button_state(
+        ui,
+        enabled,
+        toggle_states.get(&descriptor.id),
+        &descriptor.label,
+        shortcut.as_deref(),
+    )
+    .on_hover_text(command_tooltip_text(descriptor));
     if enabled && response.contains_pointer() {
         *hovered_menu_hint = descriptor.hint.clone();
     }
@@ -959,6 +977,38 @@ fn draw_command_menu_button(
 /// every row in a menu that contains any toggle, so labels stay aligned whether
 /// or not their own row is checked.
 const MENU_CHECK_GUTTER: f32 = 16.0;
+/// Stable row width gives every shortcut column the same right edge. Long
+/// labels are clipped before the shortcut gutter instead of moving the hint.
+const MENU_ROW_WIDTH: f32 = 320.0;
+const MENU_SHORTCUT_GAP: f32 = 24.0;
+
+#[derive(Debug, Clone, Copy)]
+struct MenuRowTextColumns {
+    label_pos: egui::Pos2,
+    label_clip_right: f32,
+    shortcut_pos: egui::Pos2,
+}
+
+fn menu_row_text_columns(
+    rect: egui::Rect,
+    horizontal_padding: f32,
+    shortcut_width: f32,
+    has_shortcut: bool,
+) -> MenuRowTextColumns {
+    let label_pos = egui::pos2(
+        rect.left() + horizontal_padding + MENU_CHECK_GUTTER,
+        rect.center().y,
+    );
+    let label_clip_right = rect.right()
+        - horizontal_padding
+        - shortcut_width
+        - if has_shortcut { MENU_SHORTCUT_GAP } else { 0.0 };
+    MenuRowTextColumns {
+        label_pos,
+        label_clip_right: label_clip_right.max(label_pos.x),
+        shortcut_pos: egui::pos2(rect.right() - horizontal_padding, rect.center().y),
+    }
+}
 
 fn menu_row_button(ui: &mut egui::Ui, label: impl Into<String>) -> egui::Response {
     menu_row_button_enabled(ui, true, label)
@@ -969,7 +1019,17 @@ fn menu_row_button_enabled(
     enabled: bool,
     label: impl Into<String>,
 ) -> egui::Response {
-    menu_row_button_state(ui, enabled, None, label)
+    let label = label.into();
+    menu_row_button_state(ui, enabled, None, &label, None)
+}
+
+fn menu_row_button_with_shortcut(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    shortcut: Option<&str>,
+) -> egui::Response {
+    menu_row_button_state(ui, enabled, None, label, shortcut)
 }
 
 /// Draw one menu row. `toggle_state` is `Some` only for commands that flip a
@@ -978,23 +1038,12 @@ fn menu_row_button_state(
     ui: &mut egui::Ui,
     enabled: bool,
     toggle_state: Option<bool>,
-    label: impl Into<String>,
+    label: &str,
+    shortcut: Option<&str>,
 ) -> egui::Response {
-    let label = label.into();
     let row_height = ui.spacing().interact_size.y;
     let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let text_width = ui
-        .painter()
-        .layout_no_wrap(label.clone(), font_id.clone(), egui::Color32::WHITE)
-        .size()
-        .x;
-    let gutter = if toggle_state.is_some() {
-        MENU_CHECK_GUTTER
-    } else {
-        0.0
-    };
-    let row_width = (text_width + gutter + ui.spacing().button_padding.x * 2.0).clamp(160.0, 320.0);
-    let desired_size = egui::vec2(row_width, row_height);
+    let desired_size = egui::vec2(MENU_ROW_WIDTH, row_height);
     let sense = if enabled {
         egui::Sense::click()
     } else {
@@ -1017,17 +1066,40 @@ fn menu_row_button_state(
                 ui.visuals().strong_text_color(),
             );
         }
-        let text_pos = egui::pos2(
-            rect.left() + ui.spacing().button_padding.x + gutter,
-            rect.center().y,
+        let shortcut_width = shortcut
+            .map(|text| {
+                ui.painter()
+                    .layout_no_wrap(text.to_string(), font_id.clone(), text_color)
+                    .size()
+                    .x
+            })
+            .unwrap_or(0.0);
+        let columns = menu_row_text_columns(
+            rect,
+            ui.spacing().button_padding.x,
+            shortcut_width,
+            shortcut.is_some(),
         );
-        ui.painter().text(
-            text_pos,
+        let label_clip = egui::Rect::from_min_max(
+            rect.left_top(),
+            egui::pos2(columns.label_clip_right, rect.bottom()),
+        );
+        ui.painter().with_clip_rect(label_clip).text(
+            columns.label_pos,
             egui::Align2::LEFT_CENTER,
             label,
-            font_id,
+            font_id.clone(),
             text_color,
         );
+        if let Some(shortcut) = shortcut {
+            ui.painter().text(
+                columns.shortcut_pos,
+                egui::Align2::RIGHT_CENTER,
+                shortcut,
+                font_id,
+                text_color,
+            );
+        }
     }
 
     response
@@ -3889,15 +3961,29 @@ fn draw_viewport_context_menu(
                         item!($label, $id, serde_json::json!({}));
                     }};
                     ($label:expr, $id:expr, $params:expr) => {{
-                        let full = append_command_shortcut(registry, $label, $id);
-                        if menu_row_button(ui, full).clicked() {
+                        let shortcut = command_shortcut_for_platform(registry, $id);
+                        if menu_row_button_with_shortcut(
+                            ui,
+                            true,
+                            $label,
+                            shortcut.as_deref(),
+                        )
+                        .clicked()
+                        {
                             queue_command_invocation_resource(pending, $id.to_string(), $params);
                             menu.open = false;
                         }
                     }};
                     (enabled: $enabled:expr, $label:expr, $id:expr) => {{
-                        let full = append_command_shortcut(registry, $label, $id);
-                        if menu_row_button_enabled(ui, $enabled, full).clicked() {
+                        let shortcut = command_shortcut_for_platform(registry, $id);
+                        if menu_row_button_with_shortcut(
+                            ui,
+                            $enabled,
+                            $label,
+                            shortcut.as_deref(),
+                        )
+                        .clicked()
+                        {
                             queue_command_invocation_resource(
                                 pending,
                                 $id.to_string(),
@@ -3917,12 +4003,16 @@ fn draw_viewport_context_menu(
                     if !contributed.is_empty() {
                         ui.separator();
                         for descriptor in contributed {
-                            let label = append_command_shortcut(
-                                registry,
+                            let shortcut =
+                                command_shortcut_for_platform(registry, &descriptor.id);
+                            if menu_row_button_with_shortcut(
+                                ui,
+                                true,
                                 &descriptor.label,
-                                &descriptor.id,
-                            );
-                            if menu_row_button(ui, label).clicked() {
+                                shortcut.as_deref(),
+                            )
+                            .clicked()
+                            {
                                 queue_command_invocation_resource(
                                     pending,
                                     descriptor.id.clone(),
@@ -4960,13 +5050,14 @@ fn toolbar_button_fallback_text(descriptor: &CommandDescriptor) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// Append a command's registered shortcut to a menu label so the displayed
-/// chord is always sourced from the command descriptor.
-fn append_command_shortcut(registry: &CommandRegistry, label: &str, id: &str) -> String {
-    match registry.get(id).and_then(|d| d.default_shortcut.as_deref()) {
-        Some(shortcut) => format!("{label}    {shortcut}"),
-        None => label.to_string(),
-    }
+/// Resolve the displayed shortcut from the same command descriptor used by
+/// keyboard dispatch. Keeping it separate from the label lets the painter
+/// align every hint to the shared right-hand column.
+fn command_shortcut_for_platform(registry: &CommandRegistry, id: &str) -> Option<String> {
+    registry
+        .get(id)
+        .and_then(|descriptor| descriptor.default_shortcut.as_deref())
+        .map(format_shortcut_for_platform)
 }
 
 fn command_tooltip_text(descriptor: &CommandDescriptor) -> String {

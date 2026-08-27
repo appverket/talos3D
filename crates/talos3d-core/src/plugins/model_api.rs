@@ -8461,7 +8461,9 @@ fn validate_relation_endpoints(
             world,
             relation_type,
             source_snapshot.type_name(),
+            element_class_of(world, source).as_deref(),
             target_snapshot,
+            element_class_of(world, target).as_deref(),
         )?;
     }
 
@@ -8486,12 +8488,44 @@ fn validate_relation_endpoints(
     }
 }
 
+/// The semantic element class an authored entity claims, if any.
+#[cfg(feature = "model-api")]
+fn element_class_of(world: &World, element_id: ElementId) -> Option<String> {
+    let entity = crate::plugins::commands::find_entity_by_element_id_readonly(world, element_id)?;
+    world
+        .get::<crate::capability_registry::ElementClassAssignment>(entity)
+        .map(|assignment| assignment.element_class.0.clone())
+}
+
+/// Validate one endpoint against a descriptor's allowed-type list.
+///
+/// `valid_source_types` / `valid_target_types` mix two vocabularies: coarse
+/// entity type names (`wall`, `occurrence`) and semantic element classes
+/// (`wall_assembly`, `foundation_system`, `roof_system`). Matching only the
+/// entity type made every element-class entry unreachable, so a slab annotated
+/// `foundation_system` was rejected as a `bears_on` target purely because its
+/// geometry is authored as a box. That pushed authors toward deleting the
+/// load-path relation instead of recording it. Accept either vocabulary.
+#[cfg(feature = "model-api")]
+fn endpoint_type_allowed(
+    allowed: &[String],
+    entity_type: &str,
+    element_class: Option<&str>,
+) -> bool {
+    allowed.is_empty()
+        || allowed
+            .iter()
+            .any(|candidate| candidate == entity_type || Some(candidate.as_str()) == element_class)
+}
+
 #[cfg(feature = "model-api")]
 fn validate_relation_descriptor(
     world: &World,
     relation_type: &str,
     source_type: &str,
+    source_class: Option<&str>,
     target_snapshot: &BoxedEntity,
+    target_class: Option<&str>,
 ) -> ApiResult<()> {
     let descriptor = world
         .resource::<CapabilityRegistry>()
@@ -8500,27 +8534,28 @@ fn validate_relation_descriptor(
         .find(|descriptor| descriptor.relation_type == relation_type)
         .ok_or_else(|| format!("Unknown relation type '{relation_type}'"))?;
 
-    if !descriptor.valid_source_types.is_empty()
-        && !descriptor
-            .valid_source_types
-            .iter()
-            .any(|allowed| allowed == source_type)
-    {
+    if !endpoint_type_allowed(&descriptor.valid_source_types, source_type, source_class) {
         return Err(format!(
-            "Relation '{}' does not allow source type '{}'",
-            relation_type, source_type
+            "Relation '{}' does not allow source type '{}'{}",
+            relation_type,
+            source_type,
+            source_class
+                .map(|class| format!(" (element class '{class}')"))
+                .unwrap_or_default()
         ));
     }
-    if !descriptor.valid_target_types.is_empty()
-        && !descriptor
-            .valid_target_types
-            .iter()
-            .any(|allowed| allowed == target_snapshot.type_name())
-    {
+    if !endpoint_type_allowed(
+        &descriptor.valid_target_types,
+        target_snapshot.type_name(),
+        target_class,
+    ) {
         return Err(format!(
-            "Relation '{}' does not allow target type '{}'",
+            "Relation '{}' does not allow target type '{}'{}",
             relation_type,
-            target_snapshot.type_name()
+            target_snapshot.type_name(),
+            target_class
+                .map(|class| format!(" (element class '{class}')"))
+                .unwrap_or_default()
         ));
     }
 
@@ -8757,7 +8792,16 @@ fn prepare_hosted_occurrence_request(
                         .or_insert(Value::from(position_along_wall));
                 }
             }
-            validate_relation_descriptor(world, relation_type, "occurrence", &host_snapshot)?;
+            validate_relation_descriptor(
+                world,
+                relation_type,
+                "occurrence",
+                None,
+                &host_snapshot,
+                host_element_id
+                    .and_then(|id| element_class_of(world, id))
+                    .as_deref(),
+            )?;
         }
     }
 

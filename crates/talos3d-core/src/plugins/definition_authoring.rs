@@ -20,6 +20,7 @@ use crate::plugins::{
         ParameterMetadata, ParameterSchema, RepresentationDecl, SlotCount, SlotLayout,
         SlotMultiplicity, TransformBinding,
     },
+    registry_generation::RegistryGeneration,
 };
 
 static DRAFT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -71,9 +72,18 @@ pub struct DefinitionDraftRegistry {
     drafts: HashMap<DefinitionDraftId, DefinitionDraft>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_draft_id: Option<DefinitionDraftId>,
+    /// Process-unique change stamp used by the Definition editor's derived
+    /// preview cache. It is deliberately not serialized: a loaded registry is
+    /// a new state and therefore receives a fresh generation.
+    #[serde(skip)]
+    generation: RegistryGeneration,
 }
 
 impl DefinitionDraftRegistry {
+    pub fn generation(&self) -> RegistryGeneration {
+        self.generation
+    }
+
     pub fn list(&self) -> Vec<&DefinitionDraft> {
         self.drafts.values().collect()
     }
@@ -83,13 +93,22 @@ impl DefinitionDraftRegistry {
     }
 
     pub fn get_mut(&mut self, draft_id: &DefinitionDraftId) -> Option<&mut DefinitionDraft> {
+        self.generation.bump();
         self.drafts.get_mut(draft_id)
+    }
+
+    pub fn set_active(&mut self, draft_id: Option<DefinitionDraftId>) {
+        if self.active_draft_id != draft_id {
+            self.active_draft_id = draft_id;
+            self.generation.bump();
+        }
     }
 
     pub fn insert(&mut self, draft: DefinitionDraft) -> DefinitionDraftId {
         let draft_id = draft.draft_id.clone();
         self.drafts.insert(draft_id.clone(), draft);
         self.active_draft_id = Some(draft_id.clone());
+        self.generation.bump();
         draft_id
     }
 
@@ -97,6 +116,9 @@ impl DefinitionDraftRegistry {
         let removed = self.drafts.remove(draft_id);
         if self.active_draft_id.as_ref() == Some(draft_id) {
             self.active_draft_id = self.drafts.keys().next().cloned();
+        }
+        if removed.is_some() {
+            self.generation.bump();
         }
         removed
     }
